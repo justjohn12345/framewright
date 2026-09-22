@@ -5,7 +5,7 @@ import VidEditEngine
 ///
 /// The view renders on its own thread; SwiftUI only owns its lifetime and the paused state.
 /// `configure` runs once when the view is created, so the caller can attach a frame source
-/// (today only the temporary placeholder; the engine facade supplies the real one in phase 5).
+/// (the engine's program frame source via `VEEngine.attachProgramView`).
 struct PreviewViewRepresentable: NSViewRepresentable {
     /// Whether the display-link render loop runs (false while playback is stopped).
     var isPlaying: Bool = false

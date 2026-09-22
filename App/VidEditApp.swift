@@ -1,12 +1,134 @@
 import SwiftUI
+import VidEditEngine
 
 @main
 struct VidEditApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @StateObject private var store: ProjectStore
+    @StateObject private var documents: DocumentController
+    private let keyboard: KeyboardController
+
+    init() {
+        let store = ProjectStore()
+        Preferences.apply(to: store.engine)
+        _store = StateObject(wrappedValue: store)
+        _documents = StateObject(wrappedValue: DocumentController(store: store))
+        keyboard = KeyboardController(store: store)
+    }
 
     var body: some Scene {
-        WindowGroup("VidEdit") {
-            ContentView()
+        Window("VidEdit", id: "main") {
+            ContentView(store: store, documents: documents)
+                .onAppear {
+                    appDelegate.documents = documents
+                    keyboard.install()
+                }
         }
+        .commands {
+            AppCommands(store: store, documents: documents)
+        }
+        Settings {
+            PreferencesView(engine: store.engine)
+        }
+    }
+}
+
+/// Menu bar commands. Bare-key shortcuts (Space, J/K/L, arrows, Delete, I/O) are handled by
+/// `KeyboardController` so they never steal keys from text fields; the menu items below show
+/// them for discoverability.
+struct AppCommands: Commands {
+    @ObservedObject var store: ProjectStore
+    @ObservedObject var documents: DocumentController
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Project") { documents.newProject() }
+                .keyboardShortcut("n")
+            Button("Open…") { documents.openWithPanel() }
+                .keyboardShortcut("o")
+            Menu("Open Recent") {
+                ForEach(documents.recentURLs, id: \.self) { url in
+                    Button(url.deletingPathExtension().lastPathComponent) { documents.openRecent(url) }
+                }
+                Divider()
+                Button("Clear Menu") { documents.clearRecents() }
+                    .disabled(documents.recentURLs.isEmpty)
+            }
+            Divider()
+            Button("Import Media…") { presentImportPanel(store: store) }
+                .keyboardShortcut("i")
+        }
+        CommandGroup(replacing: .saveItem) {
+            Button("Save") { documents.save() }
+                .keyboardShortcut("s")
+            Button("Save As…") { documents.saveAs() }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+        }
+        CommandGroup(replacing: .undoRedo) {
+            Button(store.undoActionName.isEmpty ? "Undo" : "Undo \(store.undoActionName)") {
+                if !Self.forwardToTextField(undo: true) { store.undo() }
+            }
+            .keyboardShortcut("z")
+            .disabled(!store.canUndo && !Self.textFieldCan(undo: true))
+            Button(store.redoActionName.isEmpty ? "Redo" : "Redo \(store.redoActionName)") {
+                if !Self.forwardToTextField(undo: false) { store.redo() }
+            }
+            .keyboardShortcut("z", modifiers: [.command, .shift])
+            .disabled(!store.canRedo && !Self.textFieldCan(undo: false))
+        }
+        CommandMenu("Clip") {
+            Button("Split at Playhead") { store.splitAtPlayhead() }
+                .keyboardShortcut("k")
+            Button("Delete  ⌫") { store.deleteSelection(ripple: false) }
+                .disabled(store.selection.isEmpty && store.selectedTransitionID == nil)
+            Button("Ripple Delete  ⇧⌫") { store.deleteSelection(ripple: true) }
+                .disabled(store.selection.isEmpty)
+            Divider()
+            Button("Link / Unlink") { store.linkOrUnlinkSelection() }
+                .keyboardShortcut("l")
+            Button("Add Cross Dissolve") { store.addCrossDissolveAtPlayhead() }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+            Divider()
+            Button("Select All Clips  ⌘A") { store.selectAll() }
+            Button("Insert from Source") { store.placeSource(overwrite: false) }
+            Button("Overwrite from Source") { store.placeSource(overwrite: true) }
+        }
+        CommandMenu("Playback") {
+            Button("Play / Pause  Space") { store.playbackActions.togglePlay() }
+            Button("Previous Frame  ←") { store.stepFrames(-1) }
+            Button("Next Frame  →") { store.stepFrames(1) }
+            Button("Go to Start") { store.playheadTime = .zero }
+            Button("Go to End") { store.playheadTime = store.sequence.duration }
+        }
+        CommandGroup(after: .toolbar) {
+            Button("Zoom In") { store.zoomIn() }
+                .keyboardShortcut("=")
+            Button("Zoom Out") { store.zoomOut() }
+                .keyboardShortcut("-")
+            Button("Zoom to Fit Sequence") { store.zoomToFit(width: store.timelineViewportWidth) }
+                .keyboardShortcut("0")
+            Divider()
+        }
+    }
+
+    /// While a text field is being edited, Undo/Redo go to its own undo manager.
+    @MainActor
+    private static func forwardToTextField(undo: Bool) -> Bool {
+        guard let text = NSApp.keyWindow?.firstResponder as? NSTextView, let manager = text.undoManager else { return false }
+        if undo, manager.canUndo {
+            manager.undo()
+            return true
+        }
+        if !undo, manager.canRedo {
+            manager.redo()
+            return true
+        }
+        return false
+    }
+
+    @MainActor
+    private static func textFieldCan(undo: Bool) -> Bool {
+        guard let text = NSApp.keyWindow?.firstResponder as? NSTextView, let manager = text.undoManager else { return false }
+        return undo ? manager.canUndo : manager.canRedo
     }
 }

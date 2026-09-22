@@ -171,6 +171,11 @@ targets:
                 - videdit
               public.mime-type:
                 - application/x-videdit+json
+          # In-app drag payload: a reference to an asset of the open project (media bin -> timeline).
+          - UTTypeIdentifier: com.justjohn12345.videdit.asset-reference
+            UTTypeDescription: VidEdit Media Reference
+            UTTypeConformsTo:
+              - public.data
     entitlements:
       path: App/Resources/VidEdit.entitlements
       properties:

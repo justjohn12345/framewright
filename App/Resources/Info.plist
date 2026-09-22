@@ -64,6 +64,16 @@
 				</array>
 			</dict>
 		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>VidEdit Media Reference</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.videdit.asset-reference</string>
+		</dict>
 	</array>
 </dict>
 </plist>
