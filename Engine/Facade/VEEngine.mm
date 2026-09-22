@@ -172,6 +172,9 @@ struct ProbedFile {
     bool _metadataDirty;       // relinked paths not saved yet
     uint64_t _projectGeneration; // drops async results that belong to a replaced project
     NSString *_coalescingKey;
+    // Active sequence as it was when the open coalescing group began: relative edits (moveClips)
+    // are computed against it because each step of the group replaces the previous one.
+    std::optional<Sequence> _coalescingBase;
 
     std::map<AssetId, AssetDetails> _details;
     std::set<AssetId> _missing;
@@ -377,6 +380,7 @@ struct ProbedFile {
     _metadataDirty = false;
     _undo = std::make_unique<UndoStack>();
     _coalescingKey = nil;
+    _coalescingBase.reset();
     _project = std::move(project);
     _projectURL = url;
     _programTime = kCMTimeZero;
@@ -1024,6 +1028,7 @@ struct ProbedFile {
         _undo->endCoalescing();
         _coalescingKey = nil;
     }
+    _coalescingBase.reset();
 }
 
 - (std::vector<ClipPlacement>)placementsForAsset:(const MediaAsset &)asset
@@ -1138,7 +1143,7 @@ struct ProbedFile {
     if (!CMTIME_IS_NUMERIC(delta)) {
         return [VEEditResult failureWithMessage:@"Invalid time."];
     }
-    const Sequence &sequence = [self activeSequence];
+    const Sequence &sequence = _coalescingBase ? *_coalescingBase : [self activeSequence];
     std::vector<ClipId> ids = toClipIds(clipIDs);
     // A linked partner is carried along by MoveClip; moving it again would double the move.
     std::set<ClipId> chosen;
@@ -1401,6 +1406,7 @@ struct ProbedFile {
     VE_ASSERT_MAIN();
     [self closeCoalescingIfOpen];
     _coalescingKey = [key copy];
+    _coalescingBase = [self activeSequence];
     _undo->beginCoalescing(toStd(_coalescingKey));
 }
 
@@ -1415,6 +1421,7 @@ struct ProbedFile {
         return;
     }
     _coalescingKey = nil;
+    _coalescingBase.reset();
     const bool reverted = _undo->cancelCoalescing(_project);
     if (reverted) {
         [self notifyAssetsChanged];
@@ -1430,6 +1437,7 @@ struct ProbedFile {
 - (BOOL)undo {
     VE_ASSERT_MAIN();
     _coalescingKey = nil;
+    _coalescingBase.reset();
     if (!_undo->undo(_project)) {
         return NO;
     }
@@ -1441,6 +1449,7 @@ struct ProbedFile {
 - (BOOL)redo {
     VE_ASSERT_MAIN();
     _coalescingKey = nil;
+    _coalescingBase.reset();
     if (!_undo->redo(_project)) {
         return NO;
     }

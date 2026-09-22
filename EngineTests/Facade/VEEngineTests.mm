@@ -407,6 +407,18 @@ NSURL *scratchURL() {
                                1e-9);
     XCTAssertEqualObjects(engine.undoActionName, @"Move Clips");
 
+    // A coalesced drag passes the total offset on every step.
+    NSString *beforeDrag = engine.projectJSON;
+    [engine beginCoalescingWithKey:@"drag"];
+    for (int step = 1; step <= 4; ++step) {
+        XCTAssertTrue([engine moveClips:all byTime:seconds(0.5 * step) trackOffset:0].ok);
+    }
+    [engine endCoalescing];
+    XCTAssertEqualWithAccuracy(CMTimeGetSeconds([engine clipInfo:first.createdIDs[0].longLongValue].timelineStart), 3,
+                               1e-9);
+    XCTAssertTrue([engine undo]);
+    XCTAssertEqualObjects(engine.projectJSON, beforeDrag);
+
     // Up one video track.
     r = [engine moveClips:@[ first.createdIDs[0] ] byTime:kCMTimeZero trackOffset:1];
     XCTAssertTrue(r.ok, @"%@", r.message);

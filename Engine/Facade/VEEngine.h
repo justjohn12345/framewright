@@ -188,7 +188,8 @@ typedef NS_ERROR_ENUM(VEEngineErrorDomain, VEEngineErrorCode) {
 /// Moves one clip (its linked partner follows in time) with overwrite semantics.
 - (VEEditResult *)moveClip:(VEClipID)clipID toTrack:(VETrackID)trackID start:(CMTime)start;
 /// Moves several clips by `delta` and `trackOffset` tracks within their kind (linked partners
-/// follow in time). One undo step.
+/// follow in time). One undo step. Inside a coalescing group the offsets are relative to the
+/// positions when the group began, so a drag passes its total offset on every step.
 - (VEEditResult *)moveClips:(NSArray<NSNumber *> *)clipIDs byTime:(CMTime)delta trackOffset:(NSInteger)trackOffset;
 /// Moves the clip's start (end fixed). `clamp` limits the time to what is possible instead of refusing.
 - (VEEditResult *)trimClipHead:(VEClipID)clipID toTime:(CMTime)time clamp:(BOOL)clamp;
@@ -240,7 +241,7 @@ typedef NS_ERROR_ENUM(VEEngineErrorDomain, VEEngineErrorCode) {
 /// keeps its previous picture until the new one is ready). Replaces the view's frame source;
 /// pass nil to detach. PLAYBACK INTEGRATION POINT: the playback controller installs its own
 /// frame source on the view instead while it runs.
-- (void)attachProgramView:(nullable VEPreviewView *)view;
+- (void)attachProgramView:(nullable VEPreviewView *)view NS_SWIFT_NAME(attachProgramView(_:));
 /// Renders the frame at `time` into the attached program view (no-op without one).
 - (void)showProgramFrameAtTime:(CMTime)time;
 
