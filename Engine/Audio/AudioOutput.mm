@@ -144,6 +144,7 @@ struct AudioOutput::Impl {
 };
 
 media::Result<std::unique_ptr<AudioOutput>> AudioOutput::create(AudioMixer &mixer, Clock *latencyClock) {
+    (void)HostClock::machToNanos(mach_absolute_time()); // timebase static: never first touched on the render thread
     auto impl = std::make_unique<Impl>();
     impl->mixer = &mixer;
     impl->latencyClock = latencyClock;

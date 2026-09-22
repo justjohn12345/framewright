@@ -32,6 +32,9 @@ const char *nameOf(ClockMode mode) {
 
 Clock::Clock(std::shared_ptr<HostClock> hostClock, double sampleRate)
     : host_(hostClock ? std::move(hostClock) : HostClock::system()) {
+    // Initialise the mach timebase static here, not lazily on the audio render thread (static
+    // initialisation takes a lock).
+    (void)HostClock::machToNanos(mach_absolute_time());
     control_.sampleRate = sampleRate > 0 ? sampleRate : 48000.0;
     control_.epoch = 1;
     anchor_.store(control_);
