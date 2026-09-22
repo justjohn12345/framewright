@@ -1,0 +1,44 @@
+// Resolves a sequence at a time (or over a time range) into render/audio graphs.
+//
+// Visibility rules: a muted video track is hidden and a muted audio track is silent. If any
+// track of a kind is solo, only the solo tracks of that kind play (mute still applies).
+// Times outside [0, sequence duration) resolve to empty graphs.
+//
+// Stateless and thread-compatible: safe to call concurrently on an immutable snapshot.
+
+#pragma once
+
+#include "../Model/Project.h"
+#include "RenderGraph.h"
+
+#include <CoreMedia/CMTimeRange.h>
+
+#include <optional>
+#include <vector>
+
+namespace ve {
+
+class Scheduler {
+  public:
+    // The layers visible at `time` (snapped down to the sequence frame containing it).
+    static RenderGraph renderGraphAt(const Sequence &sequence, const Project &project, CMTime time);
+
+    // Audio contributions over `range` (sequence time).
+    static AudioGraph audioGraphFor(const Sequence &sequence, const Project &project, CMTimeRange range);
+    static AudioGraph audioGraphFor(const Sequence &sequence, const Project &project, const TimeRange &range);
+
+    // Whether a track currently contributes output, given mute and solo on its kind.
+    static bool isTrackActive(const Sequence &sequence, const Track &track);
+
+    // Clip covering `time` on `trackId` (transition handles not included).
+    static std::optional<ClipId> clipAt(const Sequence &sequence, TrackId trackId, CMTime time);
+
+    // Clips covering `time` on every track, video tracks bottom to top then audio tracks.
+    static std::vector<ClipId> clipsAt(const Sequence &sequence, CMTime time);
+
+    // Source frame time for `clip` at sequence time `time`: speed mapping, then snapping to the
+    // asset's frame grid (skipped for VFR or unknown frame rate), clamped to the media.
+    static CMTime sourceFrameTime(const Clip &clip, const MediaAsset &asset, CMTime time);
+};
+
+} // namespace ve
