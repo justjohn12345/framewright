@@ -14,15 +14,10 @@ struct ContentView: View {
             Text(Self.versionText)
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            // Temporary: shows the placeholder test pattern until the editor layout lands.
             ProgramMonitorView()
                 .frame(minHeight: 240)
         }
         .padding(24)
         .frame(minWidth: 640, minHeight: 480)
     }
-}
-
-#Preview {
-    ContentView()
 }

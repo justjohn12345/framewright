@@ -11,5 +11,6 @@ FOUNDATION_EXPORT double VidEditEngineVersionNumber;
 //! Project version string for VidEditEngine.
 FOUNDATION_EXPORT const unsigned char VidEditEngineVersionString[];
 
+#import <VidEditEngine/VETypes.h>
 #import <VidEditEngine/VEEngine.h>
 #import <VidEditEngine/VEPreviewView.h>

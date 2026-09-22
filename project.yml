@@ -51,6 +51,9 @@ targets:
         headerVisibility: project
       - path: Engine/Facade
         headerVisibility: public
+        # Obj-C++ helpers of the facade implementation; included by path, never public.
+        excludes:
+          - "**/*+Internal.h"
       # Stage the FFmpeg dylibs next to the framework in the build products
       # directory so the framework's @loader_path/../../.. rpath resolves them when
       # running from DerivedData (EngineTests). The directory must exist when

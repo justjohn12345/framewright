@@ -149,38 +149,6 @@ PreviewFrameSource makeSource(std::shared_ptr<CountingSource> state) {
     [window close];
 }
 
-// The temporary placeholder source (what the app shows today) renders the expected blend.
-- (void)testPlaceholderTestSourceRenders {
-    NSError *error = nil;
-    VEPreviewView *view = [[VEPreviewView alloc] initWithFrame:NSMakeRect(0, 0, 960, 540) device:device() error:&error];
-    XCTAssertNotNil(view, @"%@", error);
-    [view installPlaceholderTestSource];
-    XCTAssertNil(view.lastError);
-    [self renderOnce:view];
-    CGImageRef image = [view snapshot];
-    XCTAssertTrue(image != NULL);
-    if (image == NULL) {
-        return;
-    }
-    const size_t w = CGImageGetWidth(image);
-    const size_t h = CGImageGetHeight(image);
-    const PixelRect fitted = fitRect(1920, 1080, int32_t(w), int32_t(h));
-    auto at = [&](double sx, double sy) {
-        return imagePixel(image, size_t(fitted.x + sx / 1920.0 * fitted.width),
-                          size_t(fitted.y + sy / 1080.0 * fitted.height));
-    };
-    auto near3 = [](Pixel p, double r, double g, double b) {
-        return std::fabs(p.r - r) <= 4 && std::fabs(p.g - g) <= 4 && std::fabs(p.b - b) <= 4;
-    };
-    // Bottom '420v' layer {60,150,60} at 50 %; top BGRA layer {60,60,200} at 50 % over it,
-    // centred at (1080, 600) whatever its rotation.
-    const Pixel both = at(1080, 600);
-    const Pixel bottomOnly = at(100, 1000);
-    XCTAssertTrue(near3(both, 0.5 * 60 + 0.25 * 60, 0.5 * 60 + 0.25 * 150, 0.5 * 200 + 0.25 * 60), @"%d %d %d",
-                  both.r, both.g, both.b);
-    XCTAssertTrue(near3(bottomOnly, 30, 75, 30), @"%d %d %d", bottomOnly.r, bottomOnly.g, bottomOnly.b);
-}
-
 // Unpaused and on screen, the display link drives renders; pausing stops them.
 - (void)testDisplayLinkRendersWhileRunning {
     if (NSScreen.screens.count == 0 || CGDisplayIsAsleep(CGMainDisplayID())) {

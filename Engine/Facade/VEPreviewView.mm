@@ -1,7 +1,6 @@
 #import "VEPreviewView.h"
 
 #include "../Render/Compositor.h"
-#include "../Render/PlaceholderTestSource.h"
 #import "../Render/VEPreviewView+Internal.h"
 
 #import <QuartzCore/QuartzCore.h>
@@ -484,16 +483,6 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
         return NULL;
     }
     return (CGImageRef)CFAutorelease(image);
-}
-
-- (void)installPlaceholderTestSource {
-    auto source = makePlaceholderTestSource();
-    if (!source.ok()) {
-        _state->setError(makeNSError(source.error()));
-        return;
-    }
-    [self setFrameSource:std::move(source).value()];
-    [self renderOnce];
 }
 
 @end

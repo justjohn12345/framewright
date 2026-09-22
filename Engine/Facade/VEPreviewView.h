@@ -15,8 +15,9 @@ NS_ASSUME_NONNULL_BEGIN
 ///   -renderOnce is called (after a seek, an edit or a parameter change) or the view is resized.
 ///   A paused view does no GPU work.
 ///
-/// The frame source is C++ and set by the engine (see Engine/Render/VEPreviewView+Internal.h);
-/// without one the view shows black.
+/// The frame source is C++ and set by the engine (see Engine/Render/VEPreviewView+Internal.h):
+/// VEEngine -attachProgramView: installs a still-frame source for the frame at the playhead;
+/// the playback controller installs its own while playing. Without one the view shows black.
 ///
 /// Threading: all methods must be called on the main thread except -snapshot, which may be
 /// called from any thread other than the view's render thread.
@@ -63,11 +64,6 @@ NS_ASSUME_NONNULL_BEGIN
 /// the GPU finished (a few milliseconds).
 - (nullable CGImageRef)snapshot CF_RETURNS_NOT_RETAINED;
 
-/// TEMPORARY placeholder until the engine facade lands (phase 5): installs a synthetic frame
-/// source showing two generated burn-in frames at 50 % opacity (the top one slowly rotating
-/// while the view is not paused), so the Metal pipeline is visibly working end to end. It is
-/// test content, not project media.
-- (void)installPlaceholderTestSource;
 
 @end
 

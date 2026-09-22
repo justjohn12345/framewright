@@ -1,0 +1,49 @@
+// Obj-C++ constructors of the facade's snapshot types (VETypes.h) from model values.
+// Private to the facade implementation: excluded from the framework's headers (project.yml).
+
+#pragma once
+
+#import "VETypes.h"
+
+#include "../Model/Project.h"
+#include "../Thumbs/WaveformService.h"
+
+#include <memory>
+#include <string>
+
+namespace ve::facade {
+
+/// Probe details kept by the facade per asset (not stored in the project file).
+struct AssetDetails {
+    std::string codecName;
+    std::string audioCodecName;
+    std::string container;
+    std::string routingReason;
+};
+
+VEVideoParams toVE(const VideoParams &params);
+VideoParams fromVE(const VEVideoParams &params);
+VEAudioParams toVE(const AudioParams &params);
+AudioParams fromVE(const VEAudioParams &params);
+
+VEAssetInfo *makeAssetInfo(const MediaAsset &asset, const AssetDetails *details, bool missing, NSInteger useCount);
+VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project);
+VETrackInfo *makeTrackInfo(const Track &track, NSInteger index);
+VETransitionInfo *makeTransitionInfo(const Transition &transition, const Sequence &sequence);
+VESequenceInfo *makeSequenceInfo(const Sequence &sequence);
+VEHardwareCaps *makeHardwareCaps();
+VEWaveform *makeWaveform(AssetId asset, const std::shared_ptr<const thumbs::WaveformPeaks> &peaks);
+
+/// "29.97", "25", "23.976" for a frame duration; "" when not positive.
+NSString *fpsString(CMTime frameDuration);
+
+inline NSString *toNS(const std::string &s) {
+    NSString *string = [[NSString alloc] initWithBytes:s.data() length:s.size() encoding:NSUTF8StringEncoding];
+    return string ?: @"";
+}
+inline std::string toStd(NSString *s) {
+    const char *utf8 = s.UTF8String;
+    return utf8 != nullptr ? std::string(utf8) : std::string();
+}
+
+} // namespace ve::facade
