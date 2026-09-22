@@ -12,10 +12,6 @@
 #include <cmath>
 #include <memory>
 
-// EngineTests does not list AppKit/CoreGraphics in project.yml and Objective-C++ does not auto-link it.
-__asm__(".linker_option \"-framework\", \"AppKit\"");
-__asm__(".linker_option \"-framework\", \"CoreGraphics\"");
-
 using namespace ve;
 using namespace ve::render;
 using namespace ve::rtest;

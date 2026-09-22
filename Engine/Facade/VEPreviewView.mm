@@ -11,13 +11,6 @@
 #include <mutex>
 #include <string>
 
-// The framework target does not list AppKit/QuartzCore in project.yml, and Objective-C++ files
-// do not auto-link frameworks (no C++ modules), so request them from the linker here.
-// Equivalent to adding `- sdk: AppKit.framework` and `- sdk: QuartzCore.framework` to the
-// VidEditEngine dependencies; remove these once project.yml lists them.
-__asm__(".linker_option \"-framework\", \"AppKit\"");
-__asm__(".linker_option \"-framework\", \"QuartzCore\"");
-
 using namespace ve;
 using namespace ve::render;
 

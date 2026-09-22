@@ -100,6 +100,8 @@ targets:
       - sdk: ImageIO.framework
       - sdk: CoreGraphics.framework
       - sdk: UniformTypeIdentifiers.framework
+      - sdk: AppKit.framework
+      - sdk: QuartzCore.framework
 
   EngineTests:
     type: bundle.unit-test
@@ -114,6 +116,8 @@ targets:
       - sdk: CoreMedia.framework
       - sdk: CoreVideo.framework
       - sdk: VideoToolbox.framework
+      - sdk: AppKit.framework
+      - sdk: CoreGraphics.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.justjohn12345.videdit.EngineTests
