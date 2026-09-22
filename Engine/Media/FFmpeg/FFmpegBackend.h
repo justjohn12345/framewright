@@ -1,0 +1,55 @@
+// The FFmpeg media backend: libavformat demux/mux, libavcodec decode/encode (with the
+// VideoToolbox hwaccel and encoders), libswresample, libswscale. FFmpeg 7.1, LGPL build.
+//
+// What it handles (canHandle):
+// - Containers: everything the demuxer whitelist in FFmpegSupport.mm opens: QuickTime/MP4/M4A,
+//   Matroska/WebM, AVI, MPEG-TS, FLV, Ogg, WAV/W64, AIFF, CAF, MP3, FLAC, ADTS AAC, MXF, and the
+//   PNG/JPEG/BMP/TIFF/WebP/GIF image pipes (stills).
+// - Video codecs with a decoder in this build: H.264, HEVC, ProRes, VP9, VP8, MPEG-4 Part 2,
+//   MPEG-2, DNxHD, Theora, MJPEG. Not AV1: the LGPL build has no software AV1 decoder (no
+//   libdav1d) and FFmpeg 7.1 has no VideoToolbox AV1 hwaccel, so AV1 goes to the Apple backend
+//   (hardware AV1 on M3 and later) or is unsupported.
+// - Audio: AAC (incl. HE-AAC), MP3, Opus, Vorbis, FLAC, ALAC, AC-3, E-AC-3, linear PCM, u-law,
+//   a-law.
+// - Not HEIF/HEIC/AVIF stills: libavformat exposes their tiles as separate streams and the
+//   build has no libheif; the prober reports UnsupportedFormat and canHandle() is false, so the
+//   router uses the Apple backend (ImageIO).
+// - Variable frame rate is fine (flagged by the prober; timestamps are exact).
+// canWrite: MOV/MP4 with H.264/HEVC (VideoToolbox) or ProRes 422 (MOV only; VideoToolbox, else
+// prores_ks), AAC (aac_at, else FFmpeg aac) or linear PCM audio; M4A with AAC/PCM; WAV with PCM.
+// Matroska output is available through FFMuxer::openFormat (ContainerFormat has no MKV case).
+//
+// Threading: FFmpegBackend and FFProber are thread-safe; decoders, encoders, muxers and
+// writers are single-threaded per instance (Interfaces.h). No global FFmpeg state is touched
+// except the log level (initializeFFmpegOnce, once per process).
+#pragma once
+
+#include "../Interfaces.h"
+
+#include <memory>
+
+namespace ve::media::ffmpeg {
+
+class FFmpegBackend final : public IMediaBackend {
+  public:
+    FFmpegBackend();
+
+    std::string name() const override;
+    std::unique_ptr<IMediaProber> makeProber() override;
+    std::unique_ptr<IVideoDecoder> makeVideoDecoder() override;
+    std::unique_ptr<IAudioDecoder> makeAudioDecoder() override;
+    /// ComposedMediaWriter over FFVideoEncoder + FFAudioEncoder + FFMuxer.
+    std::unique_ptr<IMediaWriter> makeWriter() override;
+    std::unique_ptr<IVideoEncoder> makeVideoEncoder() override;
+    std::unique_ptr<IAudioEncoder> makeAudioEncoder() override;
+    std::unique_ptr<IMuxer> makeMuxer() override;
+    bool canHandle(const MediaInfo &info) const override;
+    bool canWrite(const EncodeSettings &settings) const override;
+
+    /// Validation behind canWrite(), with the reason.
+    static Status validate(const EncodeSettings &settings);
+};
+
+std::shared_ptr<IMediaBackend> makeFFmpegBackend();
+
+} // namespace ve::media::ffmpeg
