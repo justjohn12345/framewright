@@ -42,6 +42,9 @@ struct VideoLayer {
     // frame of the asset's frame grid (unsnapped for VFR sources; zero for stills).
     CMTime sourceTime = kCMTimeZero;
     bool isStill = false;
+    // The asset's container rotation (MediaAsset::rotationDegrees): degrees clockwise to rotate
+    // the decoded storage-orientation frame before the clip transform is applied.
+    std::int32_t sourceRotationDegrees = 0;
     VideoParams transform;
     double opacity = 1.0; // the clip's opacity (transition weight is separate)
     std::optional<LayerTransition> transition;

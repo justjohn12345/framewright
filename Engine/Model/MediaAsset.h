@@ -34,6 +34,10 @@ struct MediaAsset {
     std::int32_t height = 0;
     CMTime frameDuration = kCMTimeInvalid; // nominal; invalid for stills
     bool isVFR = false;
+    // Display rotation from the container (MP4 preferredTransform, MKV display matrix), in
+    // degrees clockwise: 0, 90, 180 or 270. `width`/`height` are the DISPLAYED size after this
+    // rotation; decoders return frames in storage orientation, so the renderer must apply it.
+    std::int32_t rotationDegrees = 0;
 
     // Audio (Audio, AudioVideo).
     std::int32_t audioSampleRate = 0;
