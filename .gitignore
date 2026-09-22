@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Xcode / XcodeGen (the project is generated from project.yml)
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+build/
+*.xcresult
+
+# FFmpeg build output and sources (Scripts/build-ffmpeg.sh)
+ThirdParty/ffmpeg/
+ThirdParty/ffmpeg-src/

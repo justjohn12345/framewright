@@ -1,0 +1,17 @@
+# SwiftFormat configuration for App/ and AppTests/.
+--swiftversion 5.9
+--indent 4
+--tabwidth 4
+--smarttabs enabled
+--maxwidth 120
+--wraparguments before-first
+--wrapparameters before-first
+--wrapcollections before-first
+--closingparen balanced
+--commas always
+--semicolons never
+--self remove
+--stripunusedargs closure-only
+--importgrouping testable-last
+--header ignore
+--exclude ThirdParty,build,DerivedData,*.xcodeproj
