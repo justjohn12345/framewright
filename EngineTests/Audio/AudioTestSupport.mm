@@ -38,9 +38,9 @@ class ToneDecoder final : public IAudioDecoder {
         return okStatus();
     }
     Result<int> read(float *interleaved, int frames) override {
-        if (b_->readAllowed) {
+        {
             std::unique_lock<std::mutex> lock(b_->mutex);
-            b_->gateCv.wait(lock, [&] { return b_->readAllowed(); });
+            b_->gateCv.wait(lock, [&] { return !b_->readsBlocked; });
         }
         const int64_t left = std::max<int64_t>(0, b_->lengthFrames - position_);
         const int n = static_cast<int>(std::min<int64_t>(frames, left));

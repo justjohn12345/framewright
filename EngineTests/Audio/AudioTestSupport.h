@@ -23,8 +23,6 @@ struct ToneBehavior {
     std::mutex mutex;
     std::map<std::string, ToneSignal> signals; ///< By path; unknown paths fail to probe.
     int64_t lengthFrames = 48000 * 20;
-    /// When set, read() blocks while it returns false (starving the producer).
-    std::function<bool()> readAllowed;
     std::condition_variable gateCv;
     std::atomic<int> opens{0};
     std::atomic<int> seeks{0};
@@ -34,8 +32,15 @@ struct ToneBehavior {
         std::lock_guard<std::mutex> lock(mutex);
         signals[path] = std::move(signal);
     }
-    /// Re-evaluates readAllowed in blocked readers.
-    void notifyGate() { gateCv.notify_all(); }
+    /// Blocks (true) or releases (false) every decoder read(), starving the producers.
+    void setReadsBlocked(bool blocked) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            readsBlocked = blocked;
+        }
+        gateCv.notify_all();
+    }
+    bool readsBlocked = false; ///< Guarded by `mutex`.
 };
 
 /// A router whose only backend ("tone") serves the paths registered in `behavior`.

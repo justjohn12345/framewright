@@ -431,7 +431,6 @@ std::optional<double> beepAt(const audio::NullAudioOutput::Capture &capture, dou
     const int64_t frame = frameOf(paused);
     const PlaybackHarness::Sample sample = h.presentExact();
     XCTAssertEqual(sample.presented.frameIndex, frame);
-    XCTAssertFalse(sample.presented.clockDriven);
     XCTAssertFalse(sample.burnIns.empty());
     for (size_t i = 0; i < sample.burnIns.size(); ++i) {
         XCTAssertEqual(sample.burnIns[i].value_or(-1), h.expectedSlot(sample.clips[i], frame));

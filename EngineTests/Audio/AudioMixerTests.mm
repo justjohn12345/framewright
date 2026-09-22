@@ -39,8 +39,7 @@ struct MixFixture {
         a2 = sequence().audioTracks[1].id;
     }
     ~MixFixture() {
-        tones->readAllowed = nullptr;
-        tones->notifyGate();
+        tones->setReadsBlocked(false);
         mixer.reset();
     }
     Sequence &sequence() { return *project.findSequence(seq); }
@@ -96,10 +95,13 @@ struct MixFixture {
         return epoch;
     }
 
-    /// Renders `frames` output frames in blocks of `block`.
+    /// Renders `frames` output frames in blocks of `block`. The test renders faster than real
+    /// time, so before each block it waits for the producers to be ahead (as they are in real
+    /// time), which keeps the sample checks independent of machine speed and sanitizers.
     std::vector<float> render(int64_t frames, int block = 512) {
         std::vector<float> out(static_cast<size_t>(frames) * 2);
         for (int64_t done = 0; done < frames; done += block) {
+            [[maybe_unused]] const bool ready = mixer->waitForBuffered(std::chrono::seconds(5));
             const int n = static_cast<int>(std::min<int64_t>(block, frames - done));
             mixer->render(out.data() + done * 2, n, 2);
         }
@@ -257,14 +259,12 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
 
 - (void)testUnderrunsAreCountedWhenTheProducerStarvesAndRenderNeverBlocks {
     MixFixture fx;
-    std::atomic<bool> allowed{true};
-    fx.tones->readAllowed = [&] { return allowed.load(); };
     const AssetId a = fx.addTone("tone://slow", constantSignal(0.5f, 0.5f));
     fx.addClip(fx.a1, a, kCMTimeZero, CMTimeMake(600, 30), kCMTimeZero);
     fx.plan(kCMTimeZero, CMTimeMake(20, 1));
     fx.start(kCMTimeZero);
     XCTAssertTrue(fx.mixer->waitForBuffered(std::chrono::seconds(5)));
-    allowed = false; // the decoder blocks from now on
+    fx.tones->setReadsBlocked(true); // the decoder blocks from now on
 
     std::vector<float> block(512 * 2);
     double worstMs = 0;
@@ -283,8 +283,7 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
           starved.underruns, starved.underrunFrames, worstMs);
 
     // Recovery: the producer catches up and the output is whole again.
-    allowed = true;
-    fx.tones->notifyGate();
+    fx.tones->setReadsBlocked(false);
     bool recovered = false;
     for (int i = 0; i < 500 && !recovered; ++i) {
         fx.mixer->render(block.data(), 512, 2); // the consumer skips ahead while the producer catches up
@@ -338,6 +337,7 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
         if (done % 4800 == 0) {
             fx.plan(CMTimeMake(done, 48000), CMTimeMake(done + 96000, 48000)); // re-plan every 100 ms
         }
+        [[maybe_unused]] const bool ready = fx.mixer->waitForBuffered(std::chrono::seconds(5));
         fx.mixer->render(out.data() + done * 2, 480, 2);
     }
     double worst = 0;
@@ -365,6 +365,11 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
 }
 
 - (void)testRenderPathDoesNotAllocate {
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
+    XCTSkip(@"the sanitizer runtime replaces malloc, so the malloc_logger hook sees nothing");
+#endif
+#endif
     MixFixture fx;
     const AssetId left = fx.addTone("tone://left", sineSignal(300, 0.4));
     const AssetId right = fx.addTone("tone://right", sineSignal(500, 0.4));
