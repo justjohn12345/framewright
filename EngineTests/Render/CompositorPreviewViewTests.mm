@@ -123,6 +123,51 @@ PreviewFrameSource makeSource(std::shared_ptr<CountingSource> state) {
     XCTAssertEqual(aboveFirstRow.r, 0);
 }
 
+// Collapsing the view to zero height (split-view collapse, a SwiftUI zero-size layout pass) and
+// restoring it must keep rendering: the drawable size comes back and frames render again.
+- (void)testCollapseToZeroAndRestoreKeepsRendering {
+    auto source = std::make_shared<CountingSource>();
+    source->picture = makeBuffer(kCVPixelFormatType_32BGRA, 1920, 1080);
+    fillBGRA(source->picture, {30, 160, 90, 255});
+    VEPreviewView *view = [self makeViewWithSize:NSMakeSize(320, 180) source:source];
+    [self renderOnce:view];
+    const CGSize original = view.drawableSize;
+    XCTAssertGreaterThanOrEqual(original.width, 320);
+    XCTAssertEqual(view.renderCount, 1u);
+
+    [view setFrameSize:NSMakeSize(320, 0)];
+    XCTAssertEqual(view.drawableSize.height, 0);
+    [self renderOnce:view]; // nothing visible: completes without drawing
+    XCTAssertTrue((__bridge id)[view snapshot] == nil, @"a collapsed view has nothing to snapshot");
+
+    [view setFrameSize:NSMakeSize(320, 180)];
+    XCTAssertTrue(CGSizeEqualToSize(view.drawableSize, original), @"%@", NSStringFromSize(view.drawableSize));
+    const NSUInteger before = view.renderCount;
+    [self renderOnce:view];
+    XCTAssertGreaterThan(view.renderCount, before, @"restored view must render again");
+    CGImageRef image = [view snapshot];
+    XCTAssertTrue(image != NULL);
+    if (image != NULL) {
+        XCTAssertEqual(CGImageGetWidth(image), size_t(original.width));
+        XCTAssertEqual(CGImageGetHeight(image), size_t(original.height));
+        const Pixel centre = imagePixel(image, CGImageGetWidth(image) / 2, CGImageGetHeight(image) / 2);
+        XCTAssertEqual(centre.g, 160);
+    }
+
+    // Zero width, then a different size: renders at the new size.
+    [view setFrameSize:NSMakeSize(0, 180)];
+    XCTAssertEqual(view.drawableSize.width, 0);
+    [view setFrameSize:NSMakeSize(200, 200)];
+    XCTAssertGreaterThan(view.drawableSize.width, 0);
+    [self renderOnce:view];
+    image = [view snapshot];
+    XCTAssertTrue(image != NULL);
+    if (image != NULL) {
+        XCTAssertEqual(CGImageGetWidth(image), size_t(view.drawableSize.width));
+        XCTAssertEqual(CGImageGetHeight(image), size_t(view.drawableSize.height));
+    }
+}
+
 // (j) A paused view performs no renders (and does not poll its frame source).
 - (void)testPausedViewDoesNotRender {
     auto source = std::make_shared<CountingSource>();

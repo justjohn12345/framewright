@@ -358,11 +358,15 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
     _metalLayer.contentsScale = scale;
     const NSSize bounds = self.bounds.size;
     const CGSize size = CGSizeMake(std::floor(bounds.width * scale), std::floor(bounds.height * scale));
-    if (CGSizeEqualToSize(size, _metalLayer.drawableSize)) {
-        return;
-    }
-    if (size.width >= 1 && size.height >= 1) {
+    // Compare against the stored size, not the layer's: a collapse to zero is recorded in the
+    // state but leaves the layer's drawable size alone (it cannot be zero), so restoring the
+    // previous size must still be seen as a change.
+    const bool changed = size.width != _state->drawableWidth.load() || size.height != _state->drawableHeight.load();
+    if (size.width >= 1 && size.height >= 1 && !CGSizeEqualToSize(size, _metalLayer.drawableSize)) {
         _metalLayer.drawableSize = size;
+    }
+    if (!changed) {
+        return;
     }
     _state->drawableWidth.store(size.width);
     _state->drawableHeight.store(size.height);
