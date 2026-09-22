@@ -1,0 +1,1002 @@
+#include "EditOps.h"
+
+#include "../Model/Validation.h"
+#include "EditPrimitives.h"
+
+#include <algorithm>
+#include <cmath>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+
+namespace ve {
+
+namespace {
+
+std::string idString(std::uint64_t value) {
+    return std::to_string(value);
+}
+
+EditResult requireNumeric(CMTime t, const char *what) {
+    if (!isNumeric(t)) {
+        return EditResult::failure(EditError::InvalidTime, std::string(what) + " is not a numeric time");
+    }
+    return EditResult::success();
+}
+
+EditResult checkSpeed(double speed) {
+    if (!std::isfinite(speed) || speed < kMinSpeed || speed > kMaxSpeed) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   "speed " + std::to_string(speed) + " is outside [0.01, 100]");
+    }
+    return EditResult::success();
+}
+
+EditResult checkVideoParams(const VideoParams &v) {
+    if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.scale) || !std::isfinite(v.rotationDegrees) ||
+        !std::isfinite(v.opacity)) {
+        return EditResult::failure(EditError::InvalidArgument, "video parameters must be finite");
+    }
+    if (v.scale < 0.0) {
+        return EditResult::failure(EditError::InvalidArgument, "scale must be >= 0");
+    }
+    if (v.opacity < 0.0 || v.opacity > 1.0) {
+        return EditResult::failure(EditError::InvalidArgument, "opacity must be within [0, 1]");
+    }
+    return EditResult::success();
+}
+
+EditResult checkAudioParams(const AudioParams &a, CMTime clipDuration) {
+    if (!std::isfinite(a.gainDb)) {
+        return EditResult::failure(EditError::InvalidArgument, "gain must be finite");
+    }
+    for (const CMTime fade : {a.fadeInDuration, a.fadeOutDuration}) {
+        if (!isNumeric(fade) || fade < kCMTimeZero) {
+            return EditResult::failure(EditError::InvalidTime, "fade durations must be numeric and >= 0");
+        }
+        if (fade > clipDuration) {
+            return EditResult::failure(EditError::InvalidTime, "fade " + describe(fade) + " is longer than the clip (" +
+                                                                   describe(clipDuration) + ")");
+        }
+    }
+    return EditResult::success();
+}
+
+// Builds the clip described by a placement (without id or start).
+EditResult buildClip(const Project &project, const Sequence &sequence, const Track &track,
+                     const ClipPlacement &placement, Clip &out) {
+    const MediaAsset *asset = project.findAsset(placement.assetId);
+    if (!asset) {
+        return EditResult::failure(EditError::AssetNotFound,
+                                   "asset " + idString(placement.assetId.value()) + " does not exist");
+    }
+    if (!assetFitsTrack(*asset, track.kind)) {
+        return EditResult::failure(EditError::TrackKindMismatch, std::string("a ") + nameOf(asset->kind) +
+                                                                     " asset cannot go on " + nameOf(track.kind) +
+                                                                     " track \"" + track.name + "\"");
+    }
+    if (EditResult r = checkVideoParams(placement.video); !r) {
+        return r;
+    }
+    const CMTime frame = sequence.frameDuration;
+    Clip clip;
+    clip.assetId = asset->id;
+    clip.trackId = track.id;
+    clip.video = placement.video;
+    clip.audio = placement.audio;
+
+    if (asset->isStill()) {
+        CMTime length = defaultStillDuration();
+        if (isNumeric(placement.sourceIn) && isNumeric(placement.sourceOut) &&
+            placement.sourceIn < placement.sourceOut) {
+            length = placement.sourceOut - placement.sourceIn;
+        }
+        length = maxTime(snapToSequence(sequence, length), frame);
+        clip.isStill = true;
+        clip.speed = 1.0;
+        clip.sourceIn = kCMTimeZero;
+        clip.sourceOut = length;
+    } else {
+        if (EditResult r = checkSpeed(placement.speed); !r) {
+            return r;
+        }
+        if (EditResult r = requireNumeric(placement.sourceIn, "source in point"); !r) {
+            return r;
+        }
+        const CMTime sourceOut = isNumeric(placement.sourceOut) ? placement.sourceOut : asset->duration;
+        if (placement.sourceIn < kCMTimeZero || sourceOut > asset->duration) {
+            return EditResult::failure(EditError::OutOfSourceRange,
+                                       "source range " + describe(placement.sourceIn) + " - " + describe(sourceOut) +
+                                           " is outside the media (0 - " + describe(asset->duration) + ")");
+        }
+        if (!(placement.sourceIn < sourceOut)) {
+            return EditResult::failure(EditError::InvalidArgument, "source range is empty");
+        }
+        clip.speed = placement.speed;
+        const Ratio ratio = clip.speedRatio();
+        const CMTime length =
+            snapToSequence(sequence, scaleTime(sourceOut - placement.sourceIn, ratio.inverse()), SnapMode::Floor);
+        if (length < frame) {
+            return EditResult::failure(EditError::InvalidArgument, "source range is shorter than one frame");
+        }
+        clip.sourceIn = placement.sourceIn;
+        clip.sourceOut = placement.sourceIn + scaleTime(length, ratio);
+    }
+    if (EditResult r = checkAudioParams(clip.audio, clip.duration()); !r) {
+        return r;
+    }
+    out = std::move(clip);
+    return EditResult::success();
+}
+
+struct PlannedClip {
+    Track *track = nullptr;
+    Clip clip;
+};
+
+// Validates placements shared by InsertClip and OverwriteClip; resolves the start time.
+EditResult planPlacements(const Project &project, Sequence &sequence, CMTime requestedAt,
+                          const std::vector<ClipPlacement> &placements, CMTime &at, std::vector<PlannedClip> &plan) {
+    if (placements.empty()) {
+        return EditResult::failure(EditError::InvalidArgument, "nothing to place");
+    }
+    if (EditResult r = requireNumeric(requestedAt, "placement time"); !r) {
+        return r;
+    }
+    at = snapToSequence(sequence, requestedAt);
+    if (at < kCMTimeZero) {
+        return EditResult::failure(EditError::InvalidTime, "cannot place clips before time zero");
+    }
+    std::unordered_set<TrackId> used;
+    for (const ClipPlacement &placement : placements) {
+        Track *track = sequence.findTrack(placement.trackId);
+        if (EditResult r = requireEditableTrack(track, placement.trackId); !r) {
+            return r;
+        }
+        if (!used.insert(track->id).second) {
+            return EditResult::failure(EditError::InvalidArgument,
+                                       "two placements target track \"" + track->name + "\"");
+        }
+        PlannedClip planned;
+        planned.track = track;
+        if (EditResult r = buildClip(project, sequence, *track, placement, planned.clip); !r) {
+            return r;
+        }
+        planned.clip.timelineStart = at;
+        plan.push_back(std::move(planned));
+    }
+    return EditResult::success();
+}
+
+void linkPair(Sequence &sequence, ClipId a, ClipId b) {
+    sequence.findClip(a)->linkedClipId = b;
+    sequence.findClip(b)->linkedClipId = a;
+}
+
+// Resolves `clipIds` (plus linked partners when requested) to a de-duplicated list of clips on
+// editable tracks.
+EditResult collectClips(Sequence &sequence, const std::vector<ClipId> &clipIds, bool includeLinked,
+                        std::vector<ClipId> &out) {
+    if (clipIds.empty()) {
+        return EditResult::failure(EditError::InvalidArgument, "no clips given");
+    }
+    std::unordered_set<ClipId> seen;
+    for (const ClipId clipId : clipIds) {
+        Track *track = nullptr;
+        Clip *clip = nullptr;
+        if (EditResult r = findEditableClip(sequence, clipId, track, clip); !r) {
+            return r;
+        }
+        if (seen.insert(clipId).second) {
+            out.push_back(clipId);
+        }
+        if (includeLinked && clip->linkedClipId && seen.insert(*clip->linkedClipId).second) {
+            Track *partnerTrack = nullptr;
+            Clip *partner = nullptr;
+            if (EditResult r = findEditableClip(sequence, *clip->linkedClipId, partnerTrack, partner); !r) {
+                return r;
+            }
+            out.push_back(partner->id);
+        }
+    }
+    return EditResult::success();
+}
+
+// The clip plus its linked partner (when requested), both on editable tracks.
+EditResult clipAndPartner(Sequence &sequence, ClipId clipId, bool includeLinked, std::vector<ClipId> &out) {
+    Track *track = nullptr;
+    Clip *clip = nullptr;
+    if (EditResult r = findEditableClip(sequence, clipId, track, clip); !r) {
+        return r;
+    }
+    out.push_back(clipId);
+    if (includeLinked && clip->linkedClipId) {
+        Track *partnerTrack = nullptr;
+        Clip *partner = nullptr;
+        if (EditResult r = findEditableClip(sequence, *clip->linkedClipId, partnerTrack, partner); !r) {
+            return r;
+        }
+        out.push_back(partner->id);
+    }
+    return EditResult::success();
+}
+
+// Sorted union of ranges.
+std::vector<TimeRange> mergeRanges(std::vector<TimeRange> ranges) {
+    std::sort(ranges.begin(), ranges.end(), [](const TimeRange &a, const TimeRange &b) { return a.start < b.start; });
+    std::vector<TimeRange> merged;
+    for (const TimeRange &range : ranges) {
+        if (!merged.empty() && range.start <= merged.back().end) {
+            merged.back().end = maxTime(merged.back().end, range.end);
+        } else {
+            merged.push_back(range);
+        }
+    }
+    return merged;
+}
+
+// Total length of the (merged) ranges that end at or before `t`.
+CMTime removedTimeBefore(const std::vector<TimeRange> &merged, CMTime t) {
+    CMTime total = kCMTimeZero;
+    for (const TimeRange &range : merged) {
+        if (range.end <= t) {
+            total = total + range.duration();
+        }
+    }
+    return total;
+}
+
+// Allowed trim delta, with the reason each bound exists.
+struct DeltaLimits {
+    CMTime lo = kCMTimeNegativeInfinity;
+    CMTime hi = kCMTimePositiveInfinity;
+    EditError loError = EditError::None;
+    EditError hiError = EditError::None;
+    std::string loReason;
+    std::string hiReason;
+
+    void raiseLo(CMTime value, EditError error, std::string reason) {
+        if (value > lo) {
+            lo = value;
+            loError = error;
+            loReason = std::move(reason);
+        }
+    }
+    void lowerHi(CMTime value, EditError error, std::string reason) {
+        if (value < hi) {
+            hi = value;
+            hiError = error;
+            hiReason = std::move(reason);
+        }
+    }
+
+    // Resolves the requested delta (clamping or refusing).
+    EditResult resolve(CMTime &delta, bool clamp) const {
+        if (lo > hi) {
+            return EditResult::failure(loError, "cannot trim: limited by " + loReason + " and " + hiReason);
+        }
+        if (clamp) {
+            delta = clampTime(delta, lo, hi);
+            return EditResult::success();
+        }
+        if (delta < lo) {
+            return EditResult::failure(loError, "trim would pass " + loReason);
+        }
+        if (delta > hi) {
+            return EditResult::failure(hiError, "trim would pass " + hiReason);
+        }
+        return EditResult::success();
+    }
+};
+
+EditResult transitionIssueToResult(const TransitionIssue &issue) {
+    switch (issue.kind) {
+    case TransitionIssueKind::NotAdjacent:
+        return EditResult::failure(EditError::NotAdjacent, issue.message);
+    case TransitionIssueKind::InsufficientHandles:
+        return EditResult::failure(EditError::InsufficientHandles, issue.message);
+    case TransitionIssueKind::TooLong:
+    case TransitionIssueKind::BadDuration:
+    case TransitionIssueKind::Structure:
+        break;
+    }
+    return EditResult::failure(EditError::InvalidArgument, issue.message);
+}
+
+// Full placement check for a new or resized transition (ignoring `ignore` when looking for
+// neighbouring transitions).
+EditResult checkTransitionPlacement(const Sequence &sequence, const Project &project, const Transition &transition,
+                                    TransitionId ignore) {
+    if (auto issue = checkTransition(sequence, project, transition)) {
+        return transitionIssueToResult(*issue);
+    }
+    const TimeRange range = *sequence.transitionRange(transition);
+    for (const Transition &other : sequence.transitions) {
+        if (other.id == ignore || other.id == transition.id) {
+            continue;
+        }
+        const auto otherRange = sequence.transitionRange(other);
+        if (!otherRange) {
+            continue;
+        }
+        if (other.toClipId == transition.fromClipId && otherRange->end > range.start) {
+            return EditResult::failure(EditError::Overlap, "overlaps the transition at the start of clip " +
+                                                               idString(transition.fromClipId.value()));
+        }
+        if (other.fromClipId == transition.toClipId && range.end > otherRange->start) {
+            return EditResult::failure(EditError::Overlap, "overlaps the transition at the end of clip " +
+                                                               idString(transition.toClipId.value()));
+        }
+    }
+    return EditResult::success();
+}
+
+EditResult snapDuration(const Sequence &sequence, CMTime requested, CMTime &out) {
+    if (EditResult r = requireNumeric(requested, "duration"); !r) {
+        return r;
+    }
+    out = snapToSequence(sequence, requested);
+    if (out < sequence.frameDuration) {
+        return EditResult::failure(EditError::InvalidArgument, "duration must be at least one frame");
+    }
+    return EditResult::success();
+}
+
+} // namespace
+
+ClipPlacement placementForAsset(const MediaAsset &asset, TrackId trackId) {
+    ClipPlacement placement;
+    placement.trackId = trackId;
+    placement.assetId = asset.id;
+    if (asset.isStill()) {
+        placement.sourceIn = kCMTimeZero;
+        placement.sourceOut = defaultStillDuration();
+    } else {
+        placement.sourceIn = kCMTimeZero;
+        placement.sourceOut = asset.duration;
+    }
+    return placement;
+}
+
+// ----- InsertClip -----
+
+InsertClip::InsertClip(SequenceId sequenceId, CMTime at, std::vector<ClipPlacement> placements, bool linkPair)
+    : SequenceCommand(sequenceId), at_(at), placements_(std::move(placements)), linkPair_(linkPair) {}
+
+EditResult InsertClip::perform(const Project &project, Sequence &sequence, IdGenerator &ids) {
+    CMTime at;
+    std::vector<PlannedClip> plan;
+    if (EditResult r = planPlacements(project, sequence, at_, placements_, at, plan); !r) {
+        return r;
+    }
+    created_.clear();
+    SplitList splits;
+    for (PlannedClip &planned : plan) {
+        Track &track = *planned.track;
+        if (const auto index = track.clipIndexAt(at); index && track.clips[*index].timelineStart < at) {
+            const ClipId original = track.clips[*index].id;
+            splits.emplace_back(original, splitClipAt(sequence, track, *index, at, ids));
+        }
+        shiftClips(track, at, planned.clip.duration());
+        planned.clip.id = ids.make<ClipId>();
+        created_.push_back(planned.clip.id);
+        insertClipSorted(track, planned.clip);
+    }
+    relinkSplitPieces(sequence, splits);
+    if (linkPair_ && created_.size() == 2) {
+        linkPair(sequence, created_[0], created_[1]);
+    }
+    return EditResult::success();
+}
+
+// ----- OverwriteClip -----
+
+OverwriteClip::OverwriteClip(SequenceId sequenceId, CMTime at, std::vector<ClipPlacement> placements, bool linkPair)
+    : SequenceCommand(sequenceId), at_(at), placements_(std::move(placements)), linkPair_(linkPair) {}
+
+EditResult OverwriteClip::perform(const Project &project, Sequence &sequence, IdGenerator &ids) {
+    CMTime at;
+    std::vector<PlannedClip> plan;
+    if (EditResult r = planPlacements(project, sequence, at_, placements_, at, plan); !r) {
+        return r;
+    }
+    created_.clear();
+    SplitList splits;
+    for (PlannedClip &planned : plan) {
+        clearRange(sequence, *planned.track, planned.clip.timelineRange(), ids, splits);
+        planned.clip.id = ids.make<ClipId>();
+        created_.push_back(planned.clip.id);
+        insertClipSorted(*planned.track, planned.clip);
+    }
+    relinkSplitPieces(sequence, splits);
+    if (linkPair_ && created_.size() == 2) {
+        linkPair(sequence, created_[0], created_[1]);
+    }
+    return EditResult::success();
+}
+
+// ----- MoveClip -----
+
+MoveClip::MoveClip(SequenceId sequenceId, ClipId clipId, TrackId destinationTrackId, CMTime newStart,
+                   bool includeLinked)
+    : SequenceCommand(sequenceId), clipId_(clipId), destinationTrackId_(destinationTrackId), newStart_(newStart),
+      includeLinked_(includeLinked) {
+    setCoalescingKey("move:" + idString(clipId.value()));
+}
+
+EditResult MoveClip::perform(const Project &, Sequence &sequence, IdGenerator &ids) {
+    Track *track = nullptr;
+    Clip *clip = nullptr;
+    if (EditResult r = findEditableClip(sequence, clipId_, track, clip); !r) {
+        return r;
+    }
+    Track *destination = sequence.findTrack(destinationTrackId_);
+    if (EditResult r = requireEditableTrack(destination, destinationTrackId_); !r) {
+        return r;
+    }
+    if (destination->kind != track->kind) {
+        return EditResult::failure(EditError::TrackKindMismatch, std::string("cannot move a ") + nameOf(track->kind) +
+                                                                     " clip to " + nameOf(destination->kind) +
+                                                                     " track \"" + destination->name + "\"");
+    }
+    if (EditResult r = requireNumeric(newStart_, "new start"); !r) {
+        return r;
+    }
+    const CMTime newStart = snapToSequence(sequence, newStart_);
+    if (newStart < kCMTimeZero) {
+        return EditResult::failure(EditError::InvalidTime, "cannot move a clip before time zero");
+    }
+    const CMTime delta = newStart - clip->timelineStart;
+
+    struct Move {
+        ClipId clipId;
+        TrackId from;
+        TrackId to;
+    };
+    std::vector<Move> moves{{clip->id, track->id, destination->id}};
+    if (includeLinked_ && clip->linkedClipId) {
+        Track *partnerTrack = nullptr;
+        Clip *partner = nullptr;
+        if (EditResult r = findEditableClip(sequence, *clip->linkedClipId, partnerTrack, partner); !r) {
+            return r;
+        }
+        if (partner->timelineStart + delta < kCMTimeZero) {
+            return EditResult::failure(EditError::InvalidTime, "the linked clip would start before time zero");
+        }
+        moves.push_back({partner->id, partnerTrack->id, partnerTrack->id});
+    }
+    if (delta == kCMTimeZero && destination->id == track->id) {
+        return EditResult::success();
+    }
+
+    std::vector<Clip> lifted;
+    for (const Move &move : moves) {
+        Clip moved = removeClip(*sequence.findTrack(move.from), move.clipId);
+        moved.timelineStart = moved.timelineStart + delta;
+        moved.trackId = move.to;
+        lifted.push_back(std::move(moved));
+    }
+    if (lifted.size() == 2 && lifted[0].trackId == lifted[1].trackId &&
+        lifted[0].timelineRange().intersects(lifted[1].timelineRange())) {
+        return EditResult::failure(EditError::Overlap, "the clip and its linked clip would overlap");
+    }
+    SplitList splits;
+    for (Clip &moved : lifted) {
+        Track &target = *sequence.findTrack(moved.trackId);
+        clearRange(sequence, target, moved.timelineRange(), ids, splits);
+        insertClipSorted(target, std::move(moved));
+    }
+    relinkSplitPieces(sequence, splits);
+    return EditResult::success();
+}
+
+// ----- TrimClipHead / TrimClipTail -----
+
+TrimClipHead::TrimClipHead(SequenceId sequenceId, ClipId clipId, CMTime newStart, TrimOptions options)
+    : SequenceCommand(sequenceId), clipId_(clipId), newStart_(newStart), options_(options) {
+    setCoalescingKey("trimHead:" + idString(clipId.value()));
+}
+
+EditResult TrimClipHead::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    std::vector<ClipId> targets;
+    if (EditResult r = clipAndPartner(sequence, clipId_, options_.includeLinked, targets); !r) {
+        return r;
+    }
+    if (EditResult r = requireNumeric(newStart_, "new start"); !r) {
+        return r;
+    }
+    const Clip &primary = *sequence.findClip(clipId_);
+    CMTime delta = snapToSequence(sequence, newStart_) - primary.timelineStart;
+
+    DeltaLimits limits;
+    for (const ClipId clipId : targets) {
+        const Track &track = *sequence.trackOfClip(clipId);
+        const std::size_t index = *track.indexOf(clipId);
+        const Clip &clip = track.clips[index];
+        const std::string which = clipId == clipId_ ? "" : " of the linked clip";
+        limits.raiseLo(-clip.timelineStart, EditError::InvalidTime, "time zero" + which);
+        if (index > 0) {
+            limits.raiseLo(track.clips[index - 1].timelineEnd() - clip.timelineStart, EditError::Overlap,
+                           "the previous clip" + which);
+        }
+        if (!clip.isStill) {
+            const CMTime mediaStart = snapToSequence(sequence, clip.timelineTimeAt(kCMTimeZero), SnapMode::Ceil);
+            limits.raiseLo(mediaStart - clip.timelineStart, EditError::OutOfSourceRange,
+                           "the start of the source media" + which);
+        }
+        limits.lowerHi(clip.timelineEnd() - sequence.frameDuration - clip.timelineStart, EditError::InvalidTime,
+                       "the minimum length of one frame" + which);
+    }
+    if (EditResult r = limits.resolve(delta, options_.clampToLimits); !r) {
+        return r;
+    }
+    if (delta == kCMTimeZero) {
+        return EditResult::success();
+    }
+    for (const ClipId clipId : targets) {
+        Clip &clip = *sequence.findClip(clipId);
+        clip.setTimelineStartKeepingEnd(clip.timelineStart + delta);
+    }
+    return EditResult::success();
+}
+
+TrimClipTail::TrimClipTail(SequenceId sequenceId, ClipId clipId, CMTime newEnd, TrimOptions options)
+    : SequenceCommand(sequenceId), clipId_(clipId), newEnd_(newEnd), options_(options) {
+    setCoalescingKey("trimTail:" + idString(clipId.value()));
+}
+
+EditResult TrimClipTail::perform(const Project &project, Sequence &sequence, IdGenerator &) {
+    std::vector<ClipId> targets;
+    if (EditResult r = clipAndPartner(sequence, clipId_, options_.includeLinked, targets); !r) {
+        return r;
+    }
+    if (EditResult r = requireNumeric(newEnd_, "new end"); !r) {
+        return r;
+    }
+    const Clip &primary = *sequence.findClip(clipId_);
+    CMTime delta = snapToSequence(sequence, newEnd_) - primary.timelineEnd();
+
+    DeltaLimits limits;
+    for (const ClipId clipId : targets) {
+        const Track &track = *sequence.trackOfClip(clipId);
+        const std::size_t index = *track.indexOf(clipId);
+        const Clip &clip = track.clips[index];
+        const CMTime end = clip.timelineEnd();
+        const std::string which = clipId == clipId_ ? "" : " of the linked clip";
+        if (index + 1 < track.clips.size()) {
+            limits.lowerHi(track.clips[index + 1].timelineStart - end, EditError::Overlap, "the next clip" + which);
+        }
+        if (!clip.isStill) {
+            const MediaAsset *asset = project.findAsset(clip.assetId);
+            if (!asset) {
+                return EditResult::failure(EditError::AssetNotFound, "the clip's asset is missing");
+            }
+            const CMTime mediaEnd = snapToSequence(sequence, clip.timelineTimeAt(asset->duration), SnapMode::Floor);
+            limits.lowerHi(mediaEnd - end, EditError::OutOfSourceRange, "the end of the source media" + which);
+        }
+        limits.raiseLo(clip.timelineStart + sequence.frameDuration - end, EditError::InvalidTime,
+                       "the minimum length of one frame" + which);
+    }
+    if (EditResult r = limits.resolve(delta, options_.clampToLimits); !r) {
+        return r;
+    }
+    if (delta == kCMTimeZero) {
+        return EditResult::success();
+    }
+    for (const ClipId clipId : targets) {
+        Clip &clip = *sequence.findClip(clipId);
+        clip.setTimelineEnd(clip.timelineEnd() + delta);
+    }
+    return EditResult::success();
+}
+
+// ----- SplitClip -----
+
+SplitClip::SplitClip(SequenceId sequenceId, ClipId clipId, CMTime at, bool includeLinked)
+    : SequenceCommand(sequenceId), clipId_(clipId), at_(at), includeLinked_(includeLinked) {}
+
+EditResult SplitClip::perform(const Project &, Sequence &sequence, IdGenerator &ids) {
+    std::vector<ClipId> targets;
+    if (EditResult r = clipAndPartner(sequence, clipId_, includeLinked_, targets); !r) {
+        return r;
+    }
+    if (EditResult r = requireNumeric(at_, "split time"); !r) {
+        return r;
+    }
+    const CMTime at = snapToSequence(sequence, at_);
+    const Clip &primary = *sequence.findClip(clipId_);
+    if (!(primary.timelineStart < at && at < primary.timelineEnd())) {
+        return EditResult::failure(EditError::InvalidTime,
+                                   "split time " + describe(at) + " is not inside clip " + idString(clipId_.value()));
+    }
+    created_.clear();
+    SplitList splits;
+    for (const ClipId clipId : targets) {
+        Track &track = *sequence.trackOfClip(clipId);
+        const std::size_t index = *track.indexOf(clipId);
+        const Clip &clip = track.clips[index];
+        if (!(clip.timelineStart < at && at < clip.timelineEnd())) {
+            continue; // a linked clip that does not span the split time stays whole
+        }
+        const ClipId right = splitClipAt(sequence, track, index, at, ids);
+        splits.emplace_back(clipId, right);
+        created_.push_back(right);
+    }
+    relinkSplitPieces(sequence, splits);
+    return EditResult::success();
+}
+
+// ----- RemoveClips / RippleDelete -----
+
+RemoveClips::RemoveClips(SequenceId sequenceId, std::vector<ClipId> clipIds, bool includeLinked)
+    : SequenceCommand(sequenceId), clipIds_(std::move(clipIds)), includeLinked_(includeLinked) {}
+
+EditResult RemoveClips::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    std::vector<ClipId> all;
+    if (EditResult r = collectClips(sequence, clipIds_, includeLinked_, all); !r) {
+        return r;
+    }
+    for (const ClipId clipId : all) {
+        removeClip(*sequence.trackOfClip(clipId), clipId);
+    }
+    return EditResult::success();
+}
+
+RippleDelete::RippleDelete(SequenceId sequenceId, std::vector<ClipId> clipIds, RippleOptions options)
+    : SequenceCommand(sequenceId), clipIds_(std::move(clipIds)), options_(options) {}
+
+EditResult RippleDelete::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    std::vector<ClipId> all;
+    if (EditResult r = collectClips(sequence, clipIds_, options_.includeLinked, all); !r) {
+        return r;
+    }
+    std::unordered_map<TrackId, std::vector<TimeRange>> removed;
+    std::vector<TimeRange> everything;
+    for (const ClipId clipId : all) {
+        Track &track = *sequence.trackOfClip(clipId);
+        const Clip clip = removeClip(track, clipId);
+        removed[track.id].push_back(clip.timelineRange());
+        everything.push_back(clip.timelineRange());
+    }
+
+    if (!options_.allTracks) {
+        for (auto &[trackId, ranges] : removed) {
+            const std::vector<TimeRange> merged = mergeRanges(ranges);
+            for (Clip &clip : sequence.findTrack(trackId)->clips) {
+                clip.timelineStart = clip.timelineStart - removedTimeBefore(merged, clip.timelineStart);
+            }
+        }
+        return EditResult::success();
+    }
+
+    const std::vector<TimeRange> merged = mergeRanges(everything);
+    for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (Track &track : *list) {
+            if (track.locked) {
+                continue;
+            }
+            for (const Clip &clip : track.clips) {
+                for (const TimeRange &range : merged) {
+                    if (clip.timelineRange().intersects(range)) {
+                        return EditResult::failure(EditError::Overlap,
+                                                   "clip " + idString(clip.id.value()) + " on track \"" + track.name +
+                                                       "\" overlaps the deleted time; cannot ripple all tracks");
+                    }
+                }
+            }
+            for (Clip &clip : track.clips) {
+                clip.timelineStart = clip.timelineStart - removedTimeBefore(merged, clip.timelineStart);
+            }
+        }
+    }
+    return EditResult::success();
+}
+
+// ----- Clip parameters -----
+
+SetVideoParams::SetVideoParams(SequenceId sequenceId, ClipId clipId, VideoParams params)
+    : SequenceCommand(sequenceId), clipId_(clipId), params_(params) {
+    setCoalescingKey("videoParams:" + idString(clipId.value()));
+}
+
+EditResult SetVideoParams::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Track *track = nullptr;
+    Clip *clip = nullptr;
+    if (EditResult r = findEditableClip(sequence, clipId_, track, clip); !r) {
+        return r;
+    }
+    if (EditResult r = checkVideoParams(params_); !r) {
+        return r;
+    }
+    clip->video = params_;
+    return EditResult::success();
+}
+
+SetAudioParams::SetAudioParams(SequenceId sequenceId, ClipId clipId, AudioParams params)
+    : SequenceCommand(sequenceId), clipId_(clipId), params_(params) {
+    setCoalescingKey("audioParams:" + idString(clipId.value()));
+}
+
+EditResult SetAudioParams::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Track *track = nullptr;
+    Clip *clip = nullptr;
+    if (EditResult r = findEditableClip(sequence, clipId_, track, clip); !r) {
+        return r;
+    }
+    if (EditResult r = checkAudioParams(params_, clip->duration()); !r) {
+        return r;
+    }
+    clip->audio = params_;
+    return EditResult::success();
+}
+
+SetClipSpeed::SetClipSpeed(SequenceId sequenceId, ClipId clipId, double speed, SpeedOptions options)
+    : SequenceCommand(sequenceId), clipId_(clipId), speed_(speed), options_(options) {
+    setCoalescingKey("speed:" + idString(clipId.value()));
+}
+
+EditResult SetClipSpeed::perform(const Project &project, Sequence &sequence, IdGenerator &) {
+    std::vector<ClipId> targets;
+    if (EditResult r = clipAndPartner(sequence, clipId_, options_.includeLinked, targets); !r) {
+        return r;
+    }
+    if (EditResult r = checkSpeed(speed_); !r) {
+        return r;
+    }
+    const Ratio ratio = approximateRatio(speed_, kMaxSpeedDenominator);
+    const CMTime frame = sequence.frameDuration;
+
+    struct Change {
+        ClipId clipId;
+        CMTime newSourceOut;
+        CMTime oldEnd;
+        CMTime newEnd;
+    };
+    std::vector<Change> changes;
+    for (const ClipId clipId : targets) {
+        const Track &track = *sequence.trackOfClip(clipId);
+        const std::size_t index = *track.indexOf(clipId);
+        const Clip &clip = track.clips[index];
+        if (clip.isStill) {
+            return EditResult::failure(EditError::InvalidArgument, "still images have no speed");
+        }
+        const MediaAsset *asset = project.findAsset(clip.assetId);
+        if (!asset) {
+            return EditResult::failure(EditError::AssetNotFound, "the clip's asset is missing");
+        }
+        CMTime length = maxTime(snapToSequence(sequence, scaleTime(clip.sourceDuration(), ratio.inverse())), frame);
+        CMTime sourceOut = clip.sourceIn + scaleTime(length, ratio);
+        if (sourceOut > asset->duration) {
+            length =
+                snapToSequence(sequence, scaleTime(asset->duration - clip.sourceIn, ratio.inverse()), SnapMode::Floor);
+            if (length < frame) {
+                return EditResult::failure(EditError::OutOfSourceRange,
+                                           "not enough source media for one frame at this speed");
+            }
+            sourceOut = clip.sourceIn + scaleTime(length, ratio);
+        }
+        const CMTime newEnd = clip.timelineStart + length;
+        if (!options_.ripple && index + 1 < track.clips.size() && newEnd > track.clips[index + 1].timelineStart) {
+            return EditResult::failure(EditError::Overlap,
+                                       "the clip would overlap the next clip; use ripple to push it along");
+        }
+        changes.push_back({clipId, sourceOut, clip.timelineEnd(), newEnd});
+    }
+    for (const Change &change : changes) {
+        Track &track = *sequence.trackOfClip(change.clipId);
+        Clip &clip = *track.find(change.clipId);
+        clip.speed = speed_;
+        clip.sourceOut = change.newSourceOut;
+        if (options_.ripple && change.newEnd != change.oldEnd) {
+            shiftClips(track, change.oldEnd, change.newEnd - change.oldEnd);
+        }
+    }
+    return EditResult::success();
+}
+
+// ----- Transitions -----
+
+AddTransition::AddTransition(SequenceId sequenceId, ClipId fromClipId, ClipId toClipId, CMTime duration,
+                             TransitionKind kind)
+    : SequenceCommand(sequenceId), fromClipId_(fromClipId), toClipId_(toClipId), duration_(duration), kind_(kind) {}
+
+EditResult AddTransition::perform(const Project &project, Sequence &sequence, IdGenerator &ids) {
+    Track *track = nullptr;
+    Clip *from = nullptr;
+    if (EditResult r = findEditableClip(sequence, fromClipId_, track, from); !r) {
+        return r;
+    }
+    const Clip *to = track->find(toClipId_);
+    if (!to) {
+        if (!sequence.findClip(toClipId_)) {
+            return EditResult::failure(EditError::ClipNotFound,
+                                       "clip " + idString(toClipId_.value()) + " does not exist");
+        }
+        return EditResult::failure(EditError::InvalidArgument, "transition clips must be on the same track");
+    }
+    CMTime duration;
+    if (EditResult r = snapDuration(sequence, duration_, duration); !r) {
+        return r;
+    }
+    if (from->timelineEnd() != to->timelineStart) {
+        return EditResult::failure(EditError::NotAdjacent, "clip " + idString(fromClipId_.value()) +
+                                                               " does not end where clip " +
+                                                               idString(toClipId_.value()) + " starts");
+    }
+    if (sequence.transitionFrom(fromClipId_) || sequence.transitionTo(toClipId_)) {
+        return EditResult::failure(EditError::AlreadyExists, "there is already a transition on this cut");
+    }
+    Transition transition;
+    transition.id = ids.make<TransitionId>();
+    transition.trackId = track->id;
+    transition.kind = kind_;
+    transition.fromClipId = fromClipId_;
+    transition.toClipId = toClipId_;
+    transition.duration = duration;
+    if (EditResult r = checkTransitionPlacement(sequence, project, transition, TransitionId{}); !r) {
+        return r;
+    }
+    sequence.transitions.push_back(transition);
+    created_ = transition.id;
+    return EditResult::success();
+}
+
+RemoveTransition::RemoveTransition(SequenceId sequenceId, TransitionId transitionId)
+    : SequenceCommand(sequenceId), transitionId_(transitionId) {}
+
+EditResult RemoveTransition::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    const Transition *transition = sequence.findTransition(transitionId_);
+    if (!transition) {
+        return EditResult::failure(EditError::TransitionNotFound,
+                                   "transition " + idString(transitionId_.value()) + " does not exist");
+    }
+    if (EditResult r = requireEditableTrack(sequence.findTrack(transition->trackId), transition->trackId); !r) {
+        return r;
+    }
+    std::erase_if(sequence.transitions, [this](const Transition &t) { return t.id == transitionId_; });
+    return EditResult::success();
+}
+
+SetTransitionDuration::SetTransitionDuration(SequenceId sequenceId, TransitionId transitionId, CMTime duration)
+    : SequenceCommand(sequenceId), transitionId_(transitionId), duration_(duration) {
+    setCoalescingKey("transitionDuration:" + idString(transitionId.value()));
+}
+
+EditResult SetTransitionDuration::perform(const Project &project, Sequence &sequence, IdGenerator &) {
+    const Transition *existing = sequence.findTransition(transitionId_);
+    if (!existing) {
+        return EditResult::failure(EditError::TransitionNotFound,
+                                   "transition " + idString(transitionId_.value()) + " does not exist");
+    }
+    if (EditResult r = requireEditableTrack(sequence.findTrack(existing->trackId), existing->trackId); !r) {
+        return r;
+    }
+    Transition updated = *existing;
+    if (EditResult r = snapDuration(sequence, duration_, updated.duration); !r) {
+        return r;
+    }
+    if (EditResult r = checkTransitionPlacement(sequence, project, updated, transitionId_); !r) {
+        return r;
+    }
+    for (Transition &transition : sequence.transitions) {
+        if (transition.id == transitionId_) {
+            transition = updated;
+        }
+    }
+    return EditResult::success();
+}
+
+// ----- Links -----
+
+LinkClips::LinkClips(SequenceId sequenceId, ClipId first, ClipId second)
+    : SequenceCommand(sequenceId), first_(first), second_(second) {}
+
+EditResult LinkClips::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    if (first_ == second_) {
+        return EditResult::failure(EditError::InvalidArgument, "cannot link a clip to itself");
+    }
+    Track *firstTrack = nullptr;
+    Track *secondTrack = nullptr;
+    Clip *first = nullptr;
+    Clip *second = nullptr;
+    if (EditResult r = findEditableClip(sequence, first_, firstTrack, first); !r) {
+        return r;
+    }
+    if (EditResult r = findEditableClip(sequence, second_, secondTrack, second); !r) {
+        return r;
+    }
+    if (firstTrack == secondTrack) {
+        return EditResult::failure(EditError::InvalidArgument, "linked clips must be on different tracks");
+    }
+    if (first->linkedClipId || second->linkedClipId) {
+        return EditResult::failure(EditError::AlreadyLinked, "a clip is already linked; unlink it first");
+    }
+    first->linkedClipId = second_;
+    second->linkedClipId = first_;
+    return EditResult::success();
+}
+
+UnlinkClip::UnlinkClip(SequenceId sequenceId, ClipId clipId) : SequenceCommand(sequenceId), clipId_(clipId) {}
+
+EditResult UnlinkClip::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Track *track = nullptr;
+    Clip *clip = nullptr;
+    if (EditResult r = findEditableClip(sequence, clipId_, track, clip); !r) {
+        return r;
+    }
+    if (!clip->linkedClipId) {
+        return EditResult::failure(EditError::NotLinked, "clip " + idString(clipId_.value()) + " is not linked");
+    }
+    Track *partnerTrack = nullptr;
+    Clip *partner = nullptr;
+    if (EditResult r = findEditableClip(sequence, *clip->linkedClipId, partnerTrack, partner); !r) {
+        return r;
+    }
+    clip->linkedClipId.reset();
+    partner->linkedClipId.reset();
+    return EditResult::success();
+}
+
+// ----- Tracks -----
+
+AddTrack::AddTrack(SequenceId sequenceId, TrackKind kind, std::string trackName, std::optional<std::size_t> index)
+    : SequenceCommand(sequenceId), kind_(kind), trackName_(std::move(trackName)), index_(index) {}
+
+EditResult AddTrack::perform(const Project &, Sequence &sequence, IdGenerator &ids) {
+    std::vector<Track> &list = sequence.tracks(kind_);
+    const std::size_t index = index_.value_or(list.size());
+    if (index > list.size()) {
+        return EditResult::failure(EditError::InvalidArgument, "track index " + std::to_string(index) +
+                                                                   " is past the end (" + std::to_string(list.size()) +
+                                                                   " tracks)");
+    }
+    Track track;
+    track.id = ids.make<TrackId>();
+    track.kind = kind_;
+    track.name = !trackName_.empty()
+                     ? trackName_
+                     : std::string(kind_ == TrackKind::Video ? "V" : "A") + std::to_string(list.size() + 1);
+    created_ = track.id;
+    list.insert(list.begin() + static_cast<std::ptrdiff_t>(index), std::move(track));
+    return EditResult::success();
+}
+
+RemoveTrack::RemoveTrack(SequenceId sequenceId, TrackId trackId) : SequenceCommand(sequenceId), trackId_(trackId) {}
+
+EditResult RemoveTrack::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    const Track *track = sequence.findTrack(trackId_);
+    if (EditResult r = requireEditableTrack(track, trackId_); !r) {
+        return r;
+    }
+    std::vector<Track> &list = sequence.tracks(track->kind);
+    std::erase_if(list, [this](const Track &t) { return t.id == trackId_; });
+    std::erase_if(sequence.transitions, [this](const Transition &t) { return t.trackId == trackId_; });
+    return EditResult::success();
+}
+
+SetTrackFlags::SetTrackFlags(SequenceId sequenceId, TrackId trackId, TrackFlagsUpdate update)
+    : SequenceCommand(sequenceId), trackId_(trackId), update_(std::move(update)) {
+    setCoalescingKey("trackFlags:" + idString(trackId.value()));
+}
+
+EditResult SetTrackFlags::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Track *track = sequence.findTrack(trackId_);
+    if (!track) {
+        return EditResult::failure(EditError::TrackNotFound, "track " + idString(trackId_.value()) + " does not exist");
+    }
+    if (update_.muted) {
+        track->muted = *update_.muted;
+    }
+    if (update_.solo) {
+        track->solo = *update_.solo;
+    }
+    if (update_.locked) {
+        track->locked = *update_.locked;
+    }
+    if (update_.name) {
+        track->name = *update_.name;
+    }
+    return EditResult::success();
+}
+
+} // namespace ve
