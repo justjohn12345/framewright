@@ -41,38 +41,12 @@ int indexAt(const TestClip &clip, double t) {
     return static_cast<int>(std::floor(t / seconds(clip.frameDuration) + 1e-9));
 }
 
-std::vector<const TestClip *> clipsWhere(bool (^predicate)(const TestClip &)) {
-    std::vector<const TestClip *> out;
-    for (const TestClip &c : testClips()) {
-        if (predicate(c)) {
-            out.push_back(&c);
-        }
-    }
-    return out;
-}
-
-std::vector<const TestClip *> videoClips() {
-    return clipsWhere(^bool(const TestClip &c) {
-        return c.hasVideo();
-    });
-}
-
-std::vector<const TestClip *> audioClips() {
-    return clipsWhere(^bool(const TestClip &c) {
-        return c.hasAudio();
-    });
-}
-
-std::vector<const TestClip *> stillClips() {
-    return clipsWhere(^bool(const TestClip &c) {
-        return c.isStill();
-    });
-}
-
 } // namespace
 
 @implementation MediaBackendConformanceTests {
     std::shared_ptr<IMediaBackend> _backend;
+    std::vector<TestClip> _clips;
+    BOOL _clipsLoaded;
 }
 
 + (std::shared_ptr<IMediaBackend>)backend {
@@ -113,6 +87,63 @@ std::vector<const TestClip *> stillClips() {
         XCTFail(@"test media unavailable: %s", error.c_str());
     }
     return path;
+}
+
+- (std::vector<TestClip>)clips {
+    return testClips();
+}
+
+/// -clips, evaluated once per test.
+- (const std::vector<TestClip> &)suiteClips {
+    if (!_clipsLoaded) {
+        _clips = [self clips];
+        _clipsLoaded = YES;
+    }
+    return _clips;
+}
+
+- (const TestClip *)clipNamed:(const std::string &)file {
+    const std::vector<TestClip> &clips = [self suiteClips];
+    for (const TestClip &c : clips) {
+        if (c.file == file) {
+            return &c;
+        }
+    }
+    const auto stem = [](const std::string &name) { return name.substr(0, name.rfind('.')); };
+    for (const TestClip &c : clips) {
+        if (stem(c.file) == stem(file)) {
+            return &c;
+        }
+    }
+    return nullptr;
+}
+
+- (std::vector<const TestClip *>)clipsWhere:(bool (^)(const TestClip &))predicate {
+    std::vector<const TestClip *> out;
+    for (const TestClip &c : [self suiteClips]) {
+        if (predicate(c)) {
+            out.push_back(&c);
+        }
+    }
+    return out;
+}
+
+- (std::vector<const TestClip *>)videoClips {
+    return [self clipsWhere:^bool(const TestClip &c) {
+        return c.hasVideo();
+    }];
+}
+
+- (std::vector<const TestClip *>)audioClips {
+    return [self clipsWhere:^bool(const TestClip &c) {
+        return c.hasAudio();
+    }];
+}
+
+- (std::vector<const TestClip *>)stillClips {
+    return [self clipsWhere:^bool(const TestClip &c) {
+        return c.isStill();
+    }];
 }
 
 // MARK: - Helpers
@@ -220,7 +251,7 @@ std::vector<const TestClip *> stillClips() {
 
 - (void)testProbeMetadata {
     auto prober = self.backendUnderTest->makeProber();
-    for (const TestClip &clip : testClips()) {
+    for (const TestClip &clip : [self suiteClips]) {
         const std::string path = [self pathForFile:clip.file];
         if (path.empty()) {
             return;
@@ -334,8 +365,13 @@ std::vector<const TestClip *> stillClips() {
 
     // A movie whose header survives but whose media data is cut off (the H.264 file has its
     // moov at the front) and one whose header is lost (the HEVC .mov has moov at the end).
-    for (const char *name : {"h264_1080p30.mp4", "hevc_720p2997.mov"}) {
-        const std::string source = [self pathForFile:name];
+    for (const char *original : {"h264_1080p30.mp4", "hevc_720p2997.mov"}) {
+        const TestClip *clip = [self clipNamed:original];
+        if (clip == nullptr) {
+            continue;
+        }
+        const char *name = clip->file.c_str();
+        const std::string source = [self pathForFile:clip->file];
         if (source.empty()) {
             return;
         }
@@ -384,7 +420,7 @@ std::vector<const TestClip *> stillClips() {
 // MARK: - Video decode
 
 - (void)testSequentialDecodeReturnsEveryFrameWithExactPts {
-    for (const TestClip *clip : videoClips()) {
+    for (const TestClip *clip : [self videoClips]) {
         auto decoder = [self openVideo:*clip options:{}];
         if (!decoder) {
             continue;
@@ -404,7 +440,7 @@ std::vector<const TestClip *> stillClips() {
 }
 
 - (void)testSeekLandsOnTheFrameContainingTheTime {
-    for (const TestClip *clip : videoClips()) {
+    for (const TestClip *clip : [self videoClips]) {
         auto decoder = [self openVideo:*clip options:{}];
         if (!decoder) {
             continue;
@@ -463,7 +499,7 @@ std::vector<const TestClip *> stillClips() {
 }
 
 - (void)testDecodingContinuesInOrderAfterRandomSeek {
-    for (const TestClip *clip : videoClips()) {
+    for (const TestClip *clip : [self videoClips]) {
         auto decoder = [self openVideo:*clip options:{}];
         if (!decoder) {
             continue;
@@ -497,7 +533,7 @@ std::vector<const TestClip *> stillClips() {
 - (void)testSeekAroundEveryKeyframeBoundary {
     // Targets on both sides of every GOP boundary, visited backwards so every seek is a
     // random-access seek. Catches open-GOP leading pictures (HEVC RASL) and B-frame reordering.
-    for (const TestClip *clip : videoClips()) {
+    for (const TestClip *clip : [self videoClips]) {
         if (clip->gopFrames <= 0) {
             continue;
         }
@@ -526,7 +562,7 @@ std::vector<const TestClip *> stillClips() {
 }
 
 - (void)testStillsReturnOneFramePerSeek {
-    for (const TestClip *clip : stillClips()) {
+    for (const TestClip *clip : [self stillClips]) {
         auto decoder = [self openVideo:*clip options:{}];
         if (!decoder) {
             continue;
@@ -556,7 +592,7 @@ std::vector<const TestClip *> stillClips() {
 }
 
 - (void)testThumbnailDecodeScalesAndKeepsBurnIn {
-    for (const TestClip &clip : testClips()) {
+    for (const TestClip &clip : [self suiteClips]) {
         if (!clip.hasVideo() && !clip.isStill()) {
             continue;
         }
@@ -596,7 +632,11 @@ std::vector<const TestClip *> stillClips() {
                              Case{"hevc_720p2997.mov", kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange},
                              Case{"prores_540p25.mov", kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange},
                              Case{"still.png", kCVPixelFormatType_32BGRA}}) {
-        const TestClip &clip = testClip(test.file);
+        const TestClip *found = [self clipNamed:test.file];
+        if (found == nullptr) {
+            continue;
+        }
+        const TestClip &clip = *found;
         auto decoder = [self openVideo:clip options:{}];
         if (!decoder) {
             continue;
@@ -627,7 +667,11 @@ std::vector<const TestClip *> stillClips() {
 
 - (void)testHardwareDecodeIsReported {
     for (const char *file : {"h264_1080p30.mp4", "hevc_720p2997.mov", "prores_540p25.mov"}) {
-        const TestClip &clip = testClip(file);
+        const TestClip *found = [self clipNamed:file];
+        if (found == nullptr) {
+            continue;
+        }
+        const TestClip &clip = *found;
         auto decoder = [self openVideo:clip options:{}];
         if (!decoder) {
             continue;
@@ -652,7 +696,11 @@ std::vector<const TestClip *> stillClips() {
 }
 
 - (void)testDecodedFramesOutliveTheDecoder {
-    const TestClip &clip = testClip("hevc_720p2997.mov");
+    const TestClip *found = [self clipNamed:"hevc_720p2997.mov"];
+    if (found == nullptr) {
+        return;
+    }
+    const TestClip &clip = *found;
     PixelBuffer kept;
     {
         auto decoder = [self openVideo:clip options:{}];
@@ -670,7 +718,11 @@ std::vector<const TestClip *> stillClips() {
 }
 
 - (void)testDecodeMemoryIsBounded {
-    const TestClip &clip = testClip("h264_1080p30.mp4");
+    const TestClip *found = [self clipNamed:"h264_1080p30.mp4"];
+    if (found == nullptr) {
+        return;
+    }
+    const TestClip &clip = *found;
     auto decoder = [self openVideo:clip options:{}];
     if (!decoder) {
         return;
@@ -701,7 +753,10 @@ std::vector<const TestClip *> stillClips() {
 }
 
 - (void)testIndependentDecodersRunConcurrently {
-    const TestClip *clips[] = {&testClip("h264_1080p30.mp4"), &testClip("hevc_720p2997.mov")};
+    const TestClip *clips[] = {[self clipNamed:"h264_1080p30.mp4"], [self clipNamed:"hevc_720p2997.mov"]};
+    if (clips[0] == nullptr || clips[1] == nullptr) {
+        return;
+    }
     std::string paths[2];
     for (int i = 0; i < 2; ++i) {
         paths[i] = [self pathForFile:clips[i]->file];
@@ -745,7 +800,7 @@ std::vector<const TestClip *> stillClips() {
 // MARK: - Audio
 
 - (void)testAudioBeepIsAtTwoSecondsAndToneIsRight {
-    for (const TestClip *clip : audioClips()) {
+    for (const TestClip *clip : [self audioClips]) {
         auto decoder = [self openAudio:*clip options:{}];
         if (!decoder) {
             continue;
@@ -778,7 +833,7 @@ std::vector<const TestClip *> stillClips() {
 }
 
 - (void)testAudioSeekIsSampleAccurate {
-    for (const TestClip *clip : audioClips()) {
+    for (const TestClip *clip : [self audioClips]) {
         auto reference = [self openAudio:*clip options:{}];
         auto decoder = [self openAudio:*clip options:{}];
         if (!reference || !decoder) {
@@ -821,7 +876,7 @@ std::vector<const TestClip *> stillClips() {
 }
 
 - (void)testAudioConvertsRateAndChannels {
-    for (const TestClip *clip : audioClips()) {
+    for (const TestClip *clip : [self audioClips]) {
         AudioOptions options;
         options.sampleRate = 44100;
         options.channels = 1;

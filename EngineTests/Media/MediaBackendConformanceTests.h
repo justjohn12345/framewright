@@ -21,6 +21,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 @interface MediaBackendConformanceTests : XCTestCase
 
@@ -35,6 +36,16 @@
 
 /// Expected MediaInfo::container for a generated clip. Default: clip.container.
 - (std::string)expectedContainerForClip:(const ve::test::TestClip &)clip;
+
+/// The clips the suite runs over. Default: testClips(). Override to leave out clips the backend
+/// legitimately does not handle (the router sends them to another backend) or to substitute
+/// copies re-muxed into another container (then also override -pathForFile: and set
+/// TestClip::container).
+- (std::vector<ve::test::TestClip>)clips;
+
+/// The clip of -clips named `file`, else the one whose name matches without the extension (so
+/// the tests that name specific files follow re-muxed substitutes); nullptr if there is none.
+- (const ve::test::TestClip *)clipNamed:(const std::string &)file;
 
 /// Absolute path of a generated test file; records a failure and returns "" if the media
 /// could not be generated.
