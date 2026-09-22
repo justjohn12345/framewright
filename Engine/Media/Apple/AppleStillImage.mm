@@ -11,13 +11,6 @@
 
 #include <algorithm>
 
-// project.yml links the engine's frameworks explicitly and Objective-C++ gets no module
-// autolinking, so this file (the only user of ImageIO, CoreGraphics and UTType) requests its
-// frameworks itself through Mach-O LC_LINKER_OPTION load commands.
-asm(".linker_option \"-framework\", \"ImageIO\"");
-asm(".linker_option \"-framework\", \"CoreGraphics\"");
-asm(".linker_option \"-framework\", \"UniformTypeIdentifiers\"");
-
 namespace ve::media::apple {
 
 namespace {

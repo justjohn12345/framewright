@@ -11,9 +11,6 @@
 
 #include <vector>
 
-// The test target links only the engine framework; these tests call VideoToolbox directly.
-asm(".linker_option \"-framework\", \"VideoToolbox\"");
-
 using namespace ve::media;
 using namespace ve::test;
 
