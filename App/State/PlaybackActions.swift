@@ -95,8 +95,21 @@ final class EnginePlaybackActions: PlaybackActions {
         return sourceFocused ? store.sourcePlayhead.isRunning : store.playhead.isRunning
     }
 
+    /// What the status line says when playback is asked to start during an export (the export has
+    /// the decoders and the GPU, and the engine refuses to play meanwhile). Pausing, stepping and
+    /// scrubbing stay possible.
+    static let exportingMessage = "Playback is paused while the export runs."
+
+    /// True (and says why in the status line) when playback may not start.
+    private func refusesToStart(_ store: ProjectStore) -> Bool {
+        guard store.isExporting else { return false }
+        store.statusMessage = Self.exportingMessage
+        return true
+    }
+
     func togglePlay() {
         guard let store else { return }
+        if !isPlaying, refusesToStart(store) { return }
         if sourceFocused {
             store.engine.sourceMonitorTogglePlay()
         } else {
@@ -106,6 +119,7 @@ final class EnginePlaybackActions: PlaybackActions {
 
     func shuttleReverse() {
         guard let store else { return }
+        if refusesToStart(store) { return }
         if sourceFocused {
             store.engine.sourceMonitorShuttleReverse()
         } else {
@@ -124,6 +138,7 @@ final class EnginePlaybackActions: PlaybackActions {
 
     func shuttleForward() {
         guard let store else { return }
+        if refusesToStart(store) { return }
         if sourceFocused {
             store.engine.sourceMonitorShuttleForward()
         } else {

@@ -130,10 +130,14 @@ struct AppCommands: Commands {
             Button("Overwrite from Source") { store.placeSource(overwrite: true) }
         }
         CommandMenu("Playback") {
+            // Playback does not start while an export runs (the engine refuses it too).
             Button("Play / Pause  Space") { store.playbackActions.togglePlay() }
+                .disabled(store.isExporting)
             Button("Play Backwards  J") { store.playbackActions.shuttleReverse() }
+                .disabled(store.isExporting)
             Button("Stop  K") { store.playbackActions.shuttleStop() }
             Button("Play Forwards  L") { store.playbackActions.shuttleForward() }
+                .disabled(store.isExporting)
             Divider()
             Button("Previous Frame  ←") { store.playbackActions.stepFrames(-1) }
             Button("Next Frame  →") { store.playbackActions.stepFrames(1) }

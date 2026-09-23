@@ -125,9 +125,27 @@ final class ExportModelTests: XCTestCase {
         model.chooseOutput()
         XCTAssertEqual(offered?.standardizedFileURL.path, folder.standardizedFileURL.path)
         XCTAssertEqual(model.outputURL?.lastPathComponent, "Untitled.mp4")
-        // Changing the container changes the chosen file's extension.
+        // Changing the container clears the choice (the sandbox granted exactly that file): the
+        // file must be chosen again, and the panel offers the same name and folder as a .mov.
         model.container = .mov
-        XCTAssertEqual(model.outputURL?.pathExtension, "mov")
+        XCTAssertNil(model.outputURL)
+        XCTAssertTrue(model.outputNotice?.contains("choose the file again") ?? false, model.outputNotice ?? "")
+        XCTAssertFalse(model.canExport)
+        var offeredName: String?
+        model.chooseOutputURL = { name, start, type in
+            offeredName = name
+            offered = start
+            XCTAssertEqual(type, .quickTimeMovie)
+            return folder.appendingPathComponent(name)
+        }
+        model.chooseOutput()
+        XCTAssertEqual(offeredName, "Untitled.mov")
+        XCTAssertEqual(offered?.standardizedFileURL.path, folder.standardizedFileURL.path)
+        XCTAssertEqual(model.outputURL?.lastPathComponent, "Untitled.mov")
+        XCTAssertNil(model.outputNotice)
+        // A container whose extension the chosen file already has keeps it.
+        model.preset = .proRes422 // MOV only
+        XCTAssertEqual(model.outputURL?.lastPathComponent, "Untitled.mov")
 
         // A folder that no longer exists is not offered (the bookmark cannot resolve it).
         try FileManager.default.removeItem(at: folder)
@@ -186,6 +204,12 @@ final class ExportModelTests: XCTestCase {
         XCTAssertTrue(store.isExporting)
         XCTAssertFalse(model.canExport)
         XCTAssertEqual(model.exportDisabledReason, "An export is running.")
+        // Playback does not start meanwhile (the transport says why).
+        store.playbackActions.togglePlay()
+        XCTAssertEqual(store.statusMessage, EnginePlaybackActions.exportingMessage)
+        store.playbackActions.shuttleForward()
+        XCTAssertFalse(store.playhead.isRunning)
+        XCTAssertNotEqual(store.engine.playbackState, .playing)
         store.exportModel = model
         model.close()
         XCTAssertTrue(store.exportModel === model, "the sheet cannot close while exporting")

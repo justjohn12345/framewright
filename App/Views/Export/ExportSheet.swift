@@ -99,7 +99,7 @@ final class ExportModel: ObservableObject {
     @Published var container: VEExportContainer {
         didSet {
             if !audioCodecs.contains(audioCodec) { audioCodec = .aac }
-            updateOutputExtension()
+            outputContainerChanged()
         }
     }
 
@@ -112,6 +112,8 @@ final class ExportModel: ObservableObject {
     @Published var audioCodec: VEExportAudioCodec
     @Published var audioBitRate: Int
     @Published private(set) var outputURL: URL?
+    /// Why the chosen file was cleared (the container changed): shown until a file is chosen again.
+    @Published private(set) var outputNotice: String?
     /// Availability of every preset at the current output size.
     @Published private(set) var formats: [VEExportFormat] = []
     @Published private(set) var progress: Progress?
@@ -124,6 +126,8 @@ final class ExportModel: ObservableObject {
     private(set) var publishedProgressCount = 0
     private var throttle = ProgressThrottle()
     private var handle: VEExportHandle?
+    /// The name (without extension) of the last file chosen, offered again after a container change.
+    private var lastChosenName: String?
     private var preferencesForwarding: AnyCancellable?
 
     /// The clock the progress throttle uses (tests inject their own).
@@ -266,7 +270,7 @@ final class ExportModel: ObservableObject {
         if isExporting { return "An export is running." }
         if store.isGestureActive { return "Finish the current drag first." }
         if let validationMessage { return validationMessage }
-        if outputURL == nil { return "Choose where to save the file." }
+        if outputURL == nil { return outputNotice ?? "Choose where to save the file." }
         return nil
     }
 
@@ -313,25 +317,31 @@ final class ExportModel: ObservableObject {
     /// The save panel, starting in the last export's folder.
     func chooseOutput() {
         let start = outputURL?.deletingLastPathComponent() ?? folderMemory.load()
-        let name = outputURL?.deletingPathExtension().lastPathComponent
-            .appending("." + VEExportSettings.fileExtension(for: container)) ?? suggestedFileName
+        let name = (outputURL?.deletingPathExtension().lastPathComponent ?? lastChosenName)
+            .map { $0 + "." + VEExportSettings.fileExtension(for: container) } ?? suggestedFileName
         guard let url = chooseOutputURL(name, start, contentType) else { return }
         setOutputURL(url)
     }
 
     func setOutputURL(_ url: URL) {
         outputURL = url
+        outputNotice = nil
+        lastChosenName = url.deletingPathExtension().lastPathComponent
         refusal = nil
         folderMemory.save(folder: url.deletingLastPathComponent())
     }
 
-    /// The chosen file with the container's extension.
-    private func updateOutputExtension() {
+    /// A container change after a file was chosen: the save panel granted access to exactly that
+    /// file (the sandbox would refuse the same name with another extension, and outside it a
+    /// renamed file could replace another one without the Replace question), and its extension
+    /// names the container. So the choice is cleared and the file has to be chosen again (the
+    /// panel then offers the same name and folder with the new extension).
+    private func outputContainerChanged() {
         guard let url = outputURL else { return }
         let ext = VEExportSettings.fileExtension(for: container)
-        if url.pathExtension.lowercased() != ext {
-            outputURL = url.deletingPathExtension().appendingPathExtension(ext)
-        }
+        guard url.pathExtension.lowercased() != ext else { return }
+        outputURL = nil
+        outputNotice = "The container is now \(Self.name(of: container)): choose the file again (.\(ext))."
     }
 
     /// Starts the export. Returns false (with `refusal` set) when the engine refused it.
@@ -475,7 +485,7 @@ struct ExportSheet: View {
                 LabeledContent("Duration", value: model.durationText)
                 LabeledContent("Estimated size", value: model.estimatedSizeText)
                 HStack {
-                    Text(model.outputURL?.path ?? "No file chosen")
+                    Text(model.outputURL?.path ?? model.outputNotice ?? "No file chosen")
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .foregroundStyle(model.outputURL == nil ? .secondary : .primary)

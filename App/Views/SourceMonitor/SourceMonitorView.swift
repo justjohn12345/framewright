@@ -121,8 +121,10 @@ struct SourceMonitorView: View {
                     Image(systemName: playhead.isRunning ? "pause.fill" : "play.fill")
                 }
                 .buttonStyle(.borderless)
-                .disabled(currentAsset == nil || currentAsset?.isStill == true)
-                .help("Play/Pause the source (Space while the source monitor has focus)")
+                .disabled(currentAsset == nil || currentAsset?.isStill == true
+                    || (store.isExporting && !playhead.isRunning))
+                .help(store.isExporting ? EnginePlaybackActions.exportingMessage
+                                        : "Play/Pause the source (Space while the source monitor has focus)")
                 Spacer(minLength: 4)
                 Text("Marked \(markedDuration(frameDuration: frameDuration))")
                     .font(.caption.monospacedDigit())

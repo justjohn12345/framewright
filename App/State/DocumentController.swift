@@ -151,19 +151,26 @@ final class DocumentController: ObservableObject {
         return confirmDiscardingChanges()
     }
 
-    /// An export is running: asks whether to stop it. Stop Export cancels it and waits (up to 2 s)
-    /// until its unfinished file is deleted. Returns true when no export runs or it was stopped.
+    /// Longest wait for a stopped export to end. A cancel ends an export within about 100 ms, also
+    /// while its file is being finished; the bound only guards against a writer that hangs (the
+    /// export's temporary file then stays in the system's temporary items, never at the output).
+    static let exportStopTimeout: TimeInterval = 10
+
+    /// An export is running: asks whether to stop it. Stop Export cancels it and waits (up to
+    /// `exportStopTimeout`) until it has ended and its temporary file is deleted; a file that was
+    /// at the output location before the export is kept either way. Returns true when no export
+    /// runs or it was stopped.
     func confirmStoppingExport(because action: String) -> Bool {
         guard let export = store.engine.activeExport, !export.isFinished else { return true }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "An export is in progress."
         alert.informativeText = "\(action) stops the export of “\(export.outputURL.lastPathComponent)” "
-            + "and deletes the unfinished file."
+            + "and discards what it has written so far. A file already at that location is kept."
         alert.addButton(withTitle: "Stop Export")
         alert.addButton(withTitle: "Keep Exporting")
         guard runAlert(alert) == .alertFirstButtonReturn else { return false }
-        _ = export.cancelAndWait(withTimeout: 2)
+        _ = export.cancelAndWait(withTimeout: Self.exportStopTimeout)
         return true
     }
 

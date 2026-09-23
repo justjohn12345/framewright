@@ -63,15 +63,20 @@ private struct TransportButtons: View {
             Button { actions.stepFrames(-1) } label: { Image(systemName: "backward.frame.fill") }
                 .help("Back one frame (←)")
             Button { actions.shuttleReverse() } label: { Image(systemName: "backward.fill") }
-                .help("Play backwards; repeat to go faster (J)")
+                .help(store.isExporting ? EnginePlaybackActions.exportingMessage
+                                        : "Play backwards; repeat to go faster (J)")
+                .disabled(store.isExporting)
             Button { actions.togglePlay() } label: {
                 Image(systemName: actions.isPlaying ? "pause.fill" : "play.fill")
                     .frame(width: 16)
             }
-            .help("Play/Pause (Space)")
+            .help(store.isExporting ? EnginePlaybackActions.exportingMessage : "Play/Pause (Space)")
+            .disabled(store.isExporting && !actions.isPlaying)
             .accessibilityIdentifier("PlayPause")
             Button { actions.shuttleForward() } label: { Image(systemName: "forward.fill") }
-                .help("Play forwards; repeat to go faster (L)")
+                .help(store.isExporting ? EnginePlaybackActions.exportingMessage
+                                        : "Play forwards; repeat to go faster (L)")
+                .disabled(store.isExporting)
             Button { actions.stepFrames(1) } label: { Image(systemName: "forward.frame.fill") }
                 .help("Forward one frame (→)")
             Button { actions.goToEnd() } label: { Image(systemName: "forward.end.fill") }
