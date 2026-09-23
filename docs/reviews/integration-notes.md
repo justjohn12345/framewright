@@ -383,6 +383,33 @@ in the history table of `README.md`.
   `Hit.keyframe`, a click seeks, a drag moves the clip). New edit commands that reach keyframes from
   keys or menus must keep the `isGestureActive` guard.
 
+### Ken Burns range and neighbour matching
+- Range: `applyKenBurns(clip:start:end:interpolation:from:duration:)` (timeline start, duration rounded to
+  whole frames; the old call is the whole clip). Keyframes on the range's first and last frames; refused
+  (InvalidTime) when the range starts outside the clip or runs past its end, (InvalidArgument) under two
+  frames. The plan is plain C++ (`planMotionMove` in EditOps, applied with `SetMotionTracks`, one
+  SequenceCommand, "Ken Burns"): x/y/scale keyframes the range's frames show are replaced, the rest kept;
+  keyframes a trim hid are kept unless the range reaches that end of the clip (so Whole clip replaces
+  everything, as before). A kept keyframe whose value differs from the move's adjacent framing
+  (`motionValuesMatch`, 1e-6 relative) makes the picture move instead of hold between it and the move:
+  the note names the parameters and the keyframe's timecode. The end keyframe is Linear.
+  `SetMotionTracks` now accepts a keyframe outside the clip's source range only if the clip already has
+  that exact keyframe (hidden ones kept); new ones there are still refused.
+- App: `KenBurnsModel.range` (`MoveRange`: whole clip, from playhead, from clip start), `durationText` /
+  `commitDuration()` (`DurationFormat.parseFrames`, 2 frames to what is left, `durationNote`),
+  `rangeStart`, `rangeDuration`, `rangeTimecodes`, `rangeCaption` ("Holds the end framing until the clip
+  ends", or `rangeProblem`). `store.applyKenBurns()` commits a duration being typed first (Return also
+  presses Apply). Rectangles the user moved keep their place when the range changes; the others show the
+  clip's framing at the range's ends (or the push in). `store.refreshModel()` passes clip changes to the
+  open helper (`update(clip:)`).
+- Picture: follows the playhead, as in FCP (this replaced "the picture at the range start" from the
+  brief): the clip's unanimated frame under the playhead, clamped to its first/last frame
+  (`pictureFrame`, `pictureSeconds`, through the clip's speed; 0 for a still). `KenBurnsPictureLoader`
+  (`model.picture`, made by the store over `store.thumbnails`) keeps one fetch of its own in flight and
+  fetches the latest wanted time when it lands; the last picture stays up meanwhile. `ThumbnailCache`
+  gained `cachedImage` and `isFetching` (no fetch). The overlay observes the model, the playhead model and
+  the loader (`.onChange(of: playhead.time)` feeds the model).
+
 ## Photos drops (feature request 9)
 - Drop types: `MediaDrop.types` = public.file-url plus `UTType.filePromiseTypes` (every
   `NSFilePromiseReceiver.readableDraggedTypes` entry and kPasteboardTypeFileURLPromise; the named ones

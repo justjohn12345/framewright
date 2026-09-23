@@ -37,7 +37,8 @@ audited the code line by line.
   toggle per parameter at the playhead, previous/next, hold, linear and ease interpolation),
   shown as markers on the clip in the timeline; keyframes stay on their pictures through trims,
   speed changes and splits. A Ken Burns helper (as in Final Cut Pro) draws a start and an end
-  rectangle on the program monitor and turns them into an eased pan and zoom.
+  rectangle over the picture at the playhead and turns them into an eased pan and zoom over the
+  whole clip or a set duration from the playhead or the clip's start (the end framing then holds).
 - Inspector for position, scale, rotation, opacity, gain, fades and exact speed; cross
   dissolves and constant-power crossfades with duration handles, kept together with their linked
   partner (Delete removes both, Option-Delete one; a duration change also changes the linked one
