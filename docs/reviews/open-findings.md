@@ -4,17 +4,6 @@ Only what is still open. Fixed findings are in the history table of `README.md` 
 the full reports are in git history at the commits the table names.
 
 ## Feature requests (from hands-on testing, 2026-09-23)
-8. MEDIUM (new capability): animated zoom/pan over time ("as if the cameraman zoomed in"). This is keyframed Motion, not a
-   transition: Premiere = Effect Controls > Motion > Position/Scale keyframes with linear/ease interpolation; FCP = the
-   Transform keyframes, plus the "Ken Burns" crop mode that sets a start rect and an end rect and animates between them.
-   Design: add keyframe tracks to `VideoParams` (position, scale, rotation, opacity; time relative to the clip's source
-   in point so trims keep them attached to the picture), interpolation per keyframe (hold, linear, ease-in/out), evaluated
-   per frame by the Scheduler into the layer transform; inspector: a keyframe toggle per parameter at the playhead,
-   next/previous keyframe, and an FCP-style "Ken Burns" helper (start/end rectangles drawn on the program monitor);
-   timeline: keyframe markers on the clip; JSON schema v4 with migration (v3 added MediaAsset::videoDuration); undo per
-   keyframe edit; export renders the same evaluation. Implementer should read the FCP and Premiere docs on Ken Burns /
-   Motion keyframes for behaviour details. See `integration-notes.md` for where the pieces go.
-
 9. MEDIUM (new capability): drag and drop clips from Photos.app (iPhoto's successor) into the media bin and the
    timeline. Photos drags deliver file promises, not file URLs: the drop targets must accept `NSFilePromiseReceiver`
    (`com.apple.NSFilePromiseItemMetaData` / `kPasteboardTypeFileURLPromise`) alongside file URLs, receive each promised
@@ -41,6 +30,11 @@ server's drag session, so these are covered at the model level only:
   that the picture reaches the display, covers it, follows a hot-unplug and a real Cmd-Tab needs a person.
 - The timeline's right-click menu is built and tested as items (`contextMenuItems(at:)`); the NSMenu pop-up from a real
   right-click, and the look of the resize cursor over a real divider (`DividerCursor.apply` is observed in tests), are by hand.
+- Keyframed Motion (feature request 8): the inspector's keyframe logic (`InspectorModel`), the Ken Burns rectangles
+  (`KenBurnsModel`: geometry, limits, swap, apply, lifetime) and the timeline markers (positions, hit testing, a click
+  through `TimelineGestureController`) are tested at the model level; dragging the rectangles' bodies and corners on the
+  real program monitor (`KenBurnsOverlay`'s SwiftUI gestures), the look of the keyframe controls and the markers, and
+  watching an animated clip play are by hand.
 
 ## Test gaps that need media or a performance scheme (phase 7)
 - Gap 8, size estimate against a real export in quality mode: the estimate is a bits-per-pixel heuristic (labelled "≈");

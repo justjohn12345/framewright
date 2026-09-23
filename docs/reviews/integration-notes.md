@@ -131,8 +131,8 @@ in the history table of `README.md`.
 - Audio: `Engine/Audio/OfflineAudioRenderer.{h,mm}` is the render thread of a private AudioMixer
   (same plans, envelopes, crossfade law, speed resampling and clipping as playback); it waits with
   `AudioMixer::isRangeReady` before each block, turns a failed source into an error
-  (`failedSourceIn`) and treats any underrun as an error. Keyframed Motion (open finding 8) must be
-  evaluated in the Scheduler / RenderGraph so export and playback keep sharing one path.
+  (`failedSourceIn`) and treats any underrun as an error. Keyframed Motion is evaluated in the
+  Scheduler (`Scheduler::motionAt`), so export and playback share one path (see "Keyframed Motion").
 - Media: `VideoCodec::AV1` (FFmpeg writer only: libsvtav1 preset 8, CRF from quality, VBR from a bit
   rate; 8-bit input to yuv420p, 10-bit to yuv420p10le) and `ContainerFormat::MKV` (FFmpeg only);
   `BackendRouter::writerBackendFor/makeWriter` ("apple" first); `IMediaWriter::videoEncoderName()`;
@@ -196,8 +196,8 @@ in the history table of `README.md`.
   (`checkTransition`, so `transitionLimit` too), `Scheduler::sourceFrameTime` and the source
   monitor's project all use it. Linked A/V pairs placed over the whole media therefore get a video
   clip shorter than the audio; the facade adds a note (`VEEditResult.note`) when a placement is cut.
-  Schema 2 files are migrated with `videoDuration = duration`. The next schema (keyframes, open
-  finding 8) is 4.
+  Schema 2 files are migrated with `videoDuration = duration`. Schema 4 added Motion keyframes (see
+  "Keyframed Motion").
 - End-of-video hold (`DecodePool.h`): at the end of a stream the last frame is put again with an
   infinite duration (`FrameCache::put` extends an entry re-put with a later end, pinned or not), so
   playback and export show the last picture past the end of the video instead of a missing layer; a
@@ -280,9 +280,6 @@ in the history table of `README.md`.
 - App: `OutputDisplayController` (`store.outputDisplay`, View > Program Monitor on Second Display) over
   `ScreenProviding` (`SystemScreens`, or a test double); the output window is an `OutputWindow`
   (borderless, can become key, Escape closes); `KeyboardController` takes transport keys from it too.
-- For keyframed Motion (finding 8): its controls belong in the Inspector tab (per clip, with the
-  playhead), presets in the Effects tab; evaluate it in the Scheduler so both frame sources, the
-  mirror and export share it; keyframe markers on collapsed rows need no room (only empty rows collapse).
 - For Photos drops (finding 9): accept file promises in `TimelineDropDelegate.types` and the media
   bin's drop, test them with a `TimelineDropInfo` double whose providers carry the promise types;
   slow-motion and iPhone VFR media rely on `pictureTimeFor` (see "UX round fixes").
@@ -334,3 +331,57 @@ in the history table of `README.md`.
 - Layout arithmetic (gap 4). `ContentView.sideWidths(windowWidth:binWidth:inspectorWidth:)` and
   `WindowLayoutModel.dragSourceMonitorDivider(from:by:areaWidth:)` are what the view uses; test layout
   changes there.
+
+## Keyframed Motion (feature request 8)
+- Model (`Engine/Model/Keyframes.{h,cpp}`, `Clip.h`): `VideoParams` has `MotionKeyframes keyframes`
+  (tracks `x`, `y`, `scale`, `rotation`, `opacity`; `MotionParameter`). A keyframe's time is a source
+  time of its clip (`Clip::exactSourceTimeAt`; for a still, the time into the clip), so trims leave
+  keyframes alone (cut-off ones stay, hidden, and return when the clip is extended), speed changes move
+  them with their pictures, and `splitClipAt` divides each track (`splitTrack`: a keyframe on the cut
+  for both pieces, an eased segment's curve divided exactly into `Bezier` curves, a piece with nothing
+  on its side made static): a split changes no frame. `Clip::setTimelineStartKeepingEnd` shifts a
+  still's keyframes so they keep their timeline positions (head trims, the right piece of a split,
+  overwrites). A parameter without keyframes shows its static value; with keyframes the static value
+  is unused and the ends hold the first/last keyframe's value (Premiere). Interpolation belongs to the
+  segment after the keyframe: `Hold`, `Linear` (the default for new keyframes), `EaseOut` (leaves
+  slowly), `EaseIn` (arrives slowly), `EaseInOut` (both; the Ken Burns default), with Core
+  Animation's curves; the names follow Premiere/FCP, not CSS. `Bezier` only comes from a split.
+  `VideoParams` gained constructors (`VideoParams()` and the five static values), `staticValue`,
+  `setStaticValue`, `valueAt`, `valuesAt` (values only, no keyframes) and `staticValues()`.
+- Frames and keyframes (`Clip.h`): `frameShowingSourceTime`, `keyframeIndexForFrame` (the frame whose
+  source span contains the keyframe; the clip's last frame also owns a keyframe on the out point, where
+  a split leaves one) and `keyframeTimeForFrame` (the exact source time, or the next kPreciseTimescale
+  tick when it has no CMTime form). Use these for "the keyframe under the playhead".
+- Evaluation: `Scheduler::motionAt(clip, time)` evaluates at the frame's exact source time (not the
+  source frame grid) into `VideoLayer::transform` / `opacity`; the program monitor, the output view and
+  export all get it from `renderGraphAt`. `ExportParityTests.testAnAnimatedClipExportsTheMonitorsPictures`
+  proves the export matches the monitor over moving pictures.
+- Edits (`EditOps.h`, all single `SequenceCommand`s, so Accumulate groups merge them): `AddKeyframe`,
+  `SetMotionValue` (keyframe upsert at a time, or the static value), `RemoveKeyframe` (the last one
+  leaves its value static), `MoveKeyframe`, `SetKeyframeInterpolation` (not `Bezier`), `SetMotionTracks`
+  (whole tracks; Ken Burns, "Remove Animation"). New `EditError::KeyframeNotFound`. `SetVideoParams`
+  and `SetClipsParams` set keyframes too; the facade keeps a clip's keyframes when it sets static values.
+  Keyframes only on clips of video tracks (validation).
+- Facade: `VEMotionParameter`, `VEKeyframeInterpolation` (`Custom` = `Bezier`, read only),
+  `VEMotionFraming`, `VEKeyframe` (sourceTime, timelineTime, frameTime, isInsideClip, value,
+  interpolation); `VEClipInfo` `hasKeyframes`, `allKeyframes`, `isAnimated:`, `keyframesForParameter:`,
+  `motion(at:)` (`videoParamsAtTime:`) and `keyframeForParameter:atTime:`; `VEEngine`
+  `addKeyframe(clip:parameter:at:)`, `removeKeyframe`, `setMotionValue(_:parameter:clip:at:)` (static,
+  or the keyframe under the playhead, or a new one when animated: Premiere's stopwatch behaviour),
+  `setKeyframeInterpolation`, `moveKeyframe(clip:parameter:from:to:)`, `removeAnimation` and
+  `applyKenBurns(clip:start:end:interpolation:)`, all taking timeline times (the playhead) and refusing
+  with reasons (`VEEditErrorKeyframeNotFound` is new, at the end of the enum).
+  `VEClipParamsBatch setVideoParams:clearingKeyframesForClip:` is the Video reset.
+  `VEClipInfo.videoParams` stays the static values: read `motion(at:)` for what a frame shows.
+- JSON schema 4: `"keyframes"` inside a clip's `"video"` object (only when animated; per parameter a
+  list of `{time, value, interpolation, curve (bezier only)}`); v3 -> v4 changes nothing but the
+  version (golden `project-v4.json`; `project-v3.json` loads unchanged). Unknown interpolations load
+  as linear with a warning.
+- App: `InspectorModel` (single video clip = `motionTarget`: values at the playhead, keyframe toggle,
+  previous/next, interpolation, remove animation; several clips cannot change a parameter one of them
+  animates), `KeyframeControls` in the Video rows (the rows observe the playhead only while the clip is
+  animated), `KenBurnsModel` (`App/State/KenBurns.swift`: rect <-> framing, limits, swap) with
+  `KenBurnsOverlay` on the program monitor (`store.beginKenBurns/applyKenBurns/cancelKenBurns`; closes on
+  selection change, clip removal, New/Open), timeline markers (`TimelineViewModel.Clip.keyframes`,
+  `Hit.keyframe`, a click seeks, a drag moves the clip). New edit commands that reach keyframes from
+  keys or menus must keep the `isGestureActive` guard.

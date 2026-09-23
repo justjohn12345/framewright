@@ -33,6 +33,11 @@ audited the code line by line.
   Effects tab with the transitions (drag onto a cut, or "+" at the playhead). View > Program
   Monitor on Second Display shows the program full screen on another display, mirrored and in
   sync with the in-window monitor.
+- Keyframed Motion: position, scale, rotation and opacity animate with keyframes (a keyframe
+  toggle per parameter at the playhead, previous/next, hold, linear and ease interpolation),
+  shown as markers on the clip in the timeline; keyframes stay on their pictures through trims,
+  speed changes and splits. A Ken Burns helper (as in Final Cut Pro) draws a start and an end
+  rectangle on the program monitor and turns them into an eased pan and zoom.
 - Inspector for position, scale, rotation, opacity, gain, fades and exact speed; cross
   dissolves and constant-power crossfades with duration handles, kept together with their linked
   partner (Delete removes both, Option-Delete one; a duration change also changes the linked one
