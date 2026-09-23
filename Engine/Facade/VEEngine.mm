@@ -1823,7 +1823,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 
 - (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID duration:(CMTime)duration {
     VE_ASSERT_MAIN();
-    return [self addTransitionFromClip:fromClipID toClip:toClipID duration:duration options:VETransitionOptionsNone];
+    return [self addTransitionFromClip:fromClipID toClip:toClipID duration:duration options:VETransitionOptionNone];
 }
 
 - (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID

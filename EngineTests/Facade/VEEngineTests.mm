@@ -867,6 +867,14 @@ NSURL *scratchURL() {
             XCTAssertTrue(shown <= expectedFrame, @"showed frame %d past the requested %d", shown, expectedFrame);
         }
         XCTAssertEqual(shown, expectedFrame, @"at %.1f s", atSeconds);
+        // -snapshot re-composites the current frame, so it can show the picture that landed
+        // after the last completed render drew the layer without it (missingLayerCount counts
+        // that render). Render once more: now nothing may be missing.
+        XCTestExpectation *settled = [self expectationWithDescription:@"settled"];
+        [view renderOnceWithCompletion:^(NSError *) {
+            [settled fulfill];
+        }];
+        [self waitForExpectations:@[ settled ] timeout:5];
         XCTAssertNil(view.lastError);
         XCTAssertEqual(view.missingLayerCount, 0u);
     }

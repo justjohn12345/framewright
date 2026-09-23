@@ -111,7 +111,7 @@ typedef NS_ENUM(NSInteger, VECoalescingMode) {
 
 /// Options of -addTransitionFromClip:toClip:duration:options:.
 typedef NS_OPTIONS(NSUInteger, VETransitionOptions) {
-    VETransitionOptionsNone = 0,
+    VETransitionOptionNone = 0,
     /// Shorten the transition to what the cut allows (at least one frame) instead of refusing;
     /// the result's note says so. Still refused when not even one frame fits.
     VETransitionOptionFitToCut = 1 << 0,
