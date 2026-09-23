@@ -1,5 +1,5 @@
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 final class TimelineViewModelTests: XCTestCase {
     /// V2 above V1, then A1: two clips on V1, one on V2, one on A1.

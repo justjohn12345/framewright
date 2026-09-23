@@ -2,9 +2,9 @@ import AppKit
 import Combine
 import CoreMedia
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// Editing preferences (Settings > Editing) reach open views at once (review 2026-09-23,
 /// phase 6, finding 3): changing "Show durations as" re-formats the inspector's fields and the

@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// `NumericField`'s AppKit behaviour in a hosted window (review 2026-09-23, phase 6, test gap 2):
 /// typed text commits on Return and when the field loses focus, Escape reverts, Up/Down and

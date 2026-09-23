@@ -6,7 +6,7 @@
 
 #import <XCTest/XCTest.h>
 
-#import <VidEditEngine/VidEditEngine.h>
+#import <FramewrightEngine/FramewrightEngine.h>
 
 #import "../../Engine/Render/VEPreviewView+Internal.h"
 #include "../Media/RouterTestSupport.h"

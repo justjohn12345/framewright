@@ -332,7 +332,7 @@ struct Compositor::Impl {
             return makeError(MediaErrorCode::Internal, "Compositor: cannot allocate a " + std::to_string(width) + "x" +
                                                            std::to_string(height) + " pre-scale texture");
         }
-        texture.label = @"VidEdit pre-scaled plane";
+        texture.label = @"Framewright pre-scaled plane";
         scratch.push_back({texture, format, width, height, buildCounter});
         return texture;
     }
@@ -405,7 +405,7 @@ struct Compositor::Impl {
             id<MTLTexture> source = job.source;
             if (job.premultiplied != nil) {
                 id<MTLComputeCommandEncoder> compute = [commandBuffer computeCommandEncoder];
-                compute.label = @"VidEdit premultiply";
+                compute.label = @"Framewright premultiply";
                 [compute setComputePipelineState:premultiply];
                 [compute setTexture:job.source atIndex:0];
                 [compute setTexture:job.premultiplied atIndex:1];
@@ -440,7 +440,7 @@ struct Compositor::Impl {
             return makeError(MediaErrorCode::Internal, "Compositor: cannot specialise ve_layer_fragment: " + nsErrorText(error));
         }
         MTLRenderPipelineDescriptor *desc = [MTLRenderPipelineDescriptor new];
-        desc.label = @"VidEdit layer";
+        desc.label = @"Framewright layer";
         desc.vertexFunction = vertexFunction;
         desc.fragmentFunction = fragment;
         MTLRenderPipelineColorAttachmentDescriptor *color = desc.colorAttachments[0];
@@ -476,7 +476,7 @@ struct Compositor::Impl {
         if (intermediate == nil) {
             return makeError(MediaErrorCode::Internal, "Compositor: cannot allocate the intermediate texture");
         }
-        intermediate.label = @"VidEdit composite";
+        intermediate.label = @"Framewright composite";
         return media::okStatus();
     }
 
@@ -490,7 +490,7 @@ struct Compositor::Impl {
         if (slot.uniforms == nil) {
             return makeError(MediaErrorCode::Internal, "Compositor: cannot allocate the uniform buffer");
         }
-        slot.uniforms.label = @"VidEdit uniforms";
+        slot.uniforms.label = @"Framewright uniforms";
         slot.drawCapacity = capacity;
         return media::okStatus();
     }
@@ -650,7 +650,7 @@ Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device,
     if (impl->queue == nil) {
         return makeError(MediaErrorCode::Internal, "Compositor: cannot create a command queue");
     }
-    impl->queue.label = @"VidEdit compositor";
+    impl->queue.label = @"Framewright compositor";
     NSError *error = nil;
     impl->library = [device newDefaultLibraryWithBundle:[NSBundle bundleForClass:VECompositorBundleAnchor.class]
                                                   error:&error];
@@ -678,7 +678,7 @@ Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device,
     }
     if (MPSSupportsMTLDevice(device)) {
         impl->lanczos = [[MPSImageLanczosScale alloc] initWithDevice:device];
-        impl->lanczos.label = @"VidEdit minification";
+        impl->lanczos.label = @"Framewright minification";
         // Repeat the border texels (the default, zero, would darken the picture's edges).
         impl->lanczos.edgeMode = MPSImageEdgeModeClamp;
     }
@@ -808,7 +808,7 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
     if (commandBuffer == nil) {
         return abandon(makeError(MediaErrorCode::Internal, "Compositor: cannot create a command buffer"));
     }
-    commandBuffer.label = @"VidEdit frame";
+    commandBuffer.label = @"Framewright frame";
 
     slot.retained.clear();
     auto *uniformBytes = static_cast<std::uint8_t *>(slot.uniforms.contents);
@@ -825,7 +825,7 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         // Nothing was committed: the command buffer is simply dropped.
         return abandon(makeError(MediaErrorCode::Internal, "Compositor: cannot create a render command encoder"));
     }
-    encoder.label = @"VidEdit layers";
+    encoder.label = @"Framewright layers";
     // The viewport may reach outside the texture (a caller's viewport); the scissor rectangle
     // must not, so it is the part of the viewport inside the texture.
     const PixelRect scissor = clipRect(viewport, static_cast<std::int32_t>(colorTexture.width),
@@ -894,7 +894,7 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         const std::size_t offset = slot.drawCapacity * kDrawStride;
         std::memcpy(uniformBytes + offset, &convert, sizeof(convert));
         id<MTLComputeCommandEncoder> compute = [commandBuffer computeCommandEncoder];
-        compute.label = @"VidEdit output conversion";
+        compute.label = @"Framewright output conversion";
         id<MTLComputePipelineState> state = biplanar ? im.convert420 : im.convertBGRA;
         [compute setComputePipelineState:state];
         [compute setBuffer:slot.uniforms offset:offset atIndex:VEBufferIndexConvert];

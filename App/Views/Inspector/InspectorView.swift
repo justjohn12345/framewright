@@ -1,6 +1,6 @@
 import CoreMedia
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 
 /// Properties of the selection: the selected clips' video and audio parameters (multi-selection
 /// edits apply to every selected clip of the matching kind), a single clip's speed, the selected

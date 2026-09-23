@@ -2,7 +2,7 @@ import AppKit
 import CoreMedia
 import SwiftUI
 import UniformTypeIdentifiers
-import VidEditEngine
+import FramewrightEngine
 
 /// The timeline: ruler, track headers and the track area drawn in a `Canvas`.
 ///
@@ -354,7 +354,7 @@ struct PlayheadMarker: View {
 /// cut is highlighted while dragging, in red with the reason when it cannot take one).
 @MainActor
 struct TimelineDropDelegate: DropDelegate {
-    static let types: [UTType] = [.videditAssetReference, .videditCrossDissolve, .videditAudioCrossfade]
+    static let types: [UTType] = [.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade]
 
     let gestures: TimelineGestureController
     @Binding var isAssetTargeted: Bool
@@ -387,11 +387,11 @@ struct TimelineDropDelegate: DropDelegate {
         if let kind = transitionKind(info) {
             return gestures.dropTransition(kind: kind, at: info.location)
         }
-        guard let provider = info.itemProviders(for: [.videditAssetReference]).first else { return false }
+        guard let provider = info.itemProviders(for: [.framewrightAssetReference]).first else { return false }
         let location = info.location
         let insert = NSEvent.modifierFlags.contains(.command)
         let controller = gestures
-        provider.loadDataRepresentation(forTypeIdentifier: UTType.videditAssetReference.identifier) { data, _ in
+        provider.loadDataRepresentation(forTypeIdentifier: UTType.framewrightAssetReference.identifier) { data, _ in
             guard let data, let reference = try? JSONDecoder().decode(AssetReference.self, from: data) else { return }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {

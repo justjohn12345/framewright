@@ -1,5 +1,5 @@
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 
 /// The editor window: media bin (left), source and program monitors with the transport bar
 /// (top centre), inspector (right) and the timeline (bottom).

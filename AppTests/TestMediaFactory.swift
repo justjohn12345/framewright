@@ -7,7 +7,7 @@ import XCTest
 enum TestMediaFactory {
     static func scratchDirectory() throws -> URL {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("VidEditAppTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("FramewrightAppTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }

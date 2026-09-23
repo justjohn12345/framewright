@@ -1,8 +1,8 @@
 import AppKit
 import CoreMedia
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// Keyboard focus rules (review 2026-09-23, finding 6): only the editor window's keys are taken,
 /// a click in the editor takes focus back from a text field, auto-repeat of the transport keys

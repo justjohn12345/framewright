@@ -1,8 +1,8 @@
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 
 @main
-struct VidEditApp: App {
+struct FramewrightApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store: ProjectStore
     @StateObject private var documents: DocumentController

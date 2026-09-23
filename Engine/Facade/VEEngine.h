@@ -44,8 +44,8 @@
 #import <CoreMedia/CoreMedia.h>
 #import <Foundation/Foundation.h>
 
-#import <VidEditEngine/VEExport.h>
-#import <VidEditEngine/VETypes.h>
+#import <FramewrightEngine/VEExport.h>
+#import <FramewrightEngine/VETypes.h>
 
 @class VEEngine;
 @class VEPreviewView;
@@ -189,7 +189,7 @@ NS_SWIFT_UI_ACTOR
 
 // MARK: Lifetime
 
-/// Caches (thumbnails, waveforms) under Application Support/VidEdit/Caches.
+/// Caches (thumbnails, waveforms) under Application Support/Framewright/Caches.
 - (instancetype)init;
 /// Caches under `cacheDirectory` (nil: no disk caches). Starts with a new untitled project.
 - (instancetype)initWithCacheDirectory:(nullable NSURL *)cacheDirectory NS_DESIGNATED_INITIALIZER;
@@ -202,7 +202,7 @@ NS_SWIFT_UI_ACTOR
 
 /// Replaces the project with an empty one (one 1080p30 sequence, tracks V1 V2 / A1 A2).
 - (void)newProjectWithName:(NSString *)name;
-/// Loads a .videdit file. Asset paths are resolved through their stored security-scoped
+/// Loads a .framewright file. Asset paths are resolved through their stored security-scoped
 /// bookmarks (a moved file is followed; resolution runs off the main thread, never mounts a
 /// volume and is given at most a few seconds, after which the stored path is used); files that
 /// cannot be found are listed in `missingAssetIDs`. On failure the current project is kept.

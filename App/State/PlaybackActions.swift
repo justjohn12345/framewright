@@ -1,6 +1,6 @@
 import CoreMedia
 import Foundation
-import VidEditEngine
+import FramewrightEngine
 
 /// Position and transport state of one monitor (program or source), published separately from
 /// `ProjectStore` so a playhead moving at the display rate only redraws the views that show it

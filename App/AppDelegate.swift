@@ -22,7 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Project files opened from the Finder.
     @MainActor
     func application(_: NSApplication, open urls: [URL]) {
-        guard let url = urls.first(where: { $0.pathExtension == "videdit" }) else { return }
+        guard let url = urls.first(where: { $0.pathExtension == "framewright" }) else { return }
         if let documents {
             documents.openRecent(url)
         } else {

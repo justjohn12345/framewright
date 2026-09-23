@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The third-party notices shipped in the application bundle (`Acknowledgements.md`: FFmpeg with
 /// the LGPL source offer, dav1d, SVT-AV1 and the AOM patent licence, nlohmann/json, doctest; and
-/// `COPYING.LGPLv2.1`, the full GNU LGPL 2.1). Shown from VidEdit > Acknowledgements….
+/// `COPYING.LGPLv2.1`, the full GNU LGPL 2.1). Shown from Framewright > Acknowledgements….
 struct AcknowledgementsView: View {
     static let windowID = "acknowledgements"
     /// Bundle resources shown, in order.

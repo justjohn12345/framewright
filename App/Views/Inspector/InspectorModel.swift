@@ -1,6 +1,6 @@
 import CoreMedia
 import Foundation
-import VidEditEngine
+import FramewrightEngine
 
 /// A section of the inspector.
 enum InspectorSection: String, CaseIterable {

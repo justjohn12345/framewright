@@ -3,7 +3,7 @@
 // undo step, transition duration bounds and multi-clip speed changes. Uses h264_1080p30.mp4
 // (10 s, 30 fps, with audio).
 
-#import <VidEditEngine/VidEditEngine.h>
+#import <FramewrightEngine/FramewrightEngine.h>
 #import <XCTest/XCTest.h>
 
 #include "../Media/TestMedia.h"

@@ -35,7 +35,7 @@ audited the code line by line.
 
 ## Architecture
 
-- `Engine/` is an Objective-C++ framework (`VidEditEngine`, the code name): a plain C++ model
+- `Engine/` is an Objective-C++ framework (`FramewrightEngine`, the code name): a plain C++ model
   and edit engine (`Model`, `Edit`, `Serialize`), media backends behind one interface
   (`Media/Apple`, `Media/FFmpeg`, a router, a frame cache and a decode pool), a Metal compositor
   and preview view (`Render`), a lock-free audio mixer and playback controller (`Audio`,
@@ -45,6 +45,8 @@ audited the code line by line.
 - `docs/reviews/` holds the review process: every phase gets an adversarial read-only review,
   the findings are fixed in a follow-up round, and the open list is kept current.
 - See [PLAN.md](PLAN.md) for the original design and roadmap.
+- Framewright was developed under the code name VidEdit; the `VE` class prefix and the `ve`
+  C++ namespace in the engine come from that and are kept as internal names.
 
 Requirements: macOS 14+ on Apple silicon, Xcode 26 (with its Metal Toolchain
 component), Homebrew.
@@ -63,14 +65,14 @@ Scripts/build-ffmpeg.sh            # add --force to rebuild from scratch
 #    then report XCTSkip); ENABLE_SVTAV1=1 (default) links the SVT-AV1 encoder into libavcodec
 #    (ENABLE_SVTAV1=0 builds without AV1 encoding; AV1 decoding through dav1d is unaffected).
 
-# 3. Generate VidEdit.xcodeproj from project.yml (FFmpeg must be built first)
+# 3. Generate Framewright.xcodeproj from project.yml (FFmpeg must be built first)
 xcodegen generate
 
 # 4. Build the app
-xcodebuild -scheme VidEdit -configuration Debug -destination 'platform=macOS' build
+xcodebuild -scheme Framewright -configuration Debug -destination 'platform=macOS' build
 
 # 5. Run all tests (EngineTests + AppTests)
-xcodebuild -scheme VidEdit -destination 'platform=macOS' test
+xcodebuild -scheme Framewright -destination 'platform=macOS' test
 
 # Engine tests only
 xcodebuild -scheme EngineTests -destination 'platform=macOS' test
@@ -94,21 +96,21 @@ The build treats warnings as errors (`-Wall -Wextra` for C/Objective-C/C++,
   `Config/Signing.local.xcconfig` (gitignored; read by `Config/Distribution.xcconfig`):
 
   ```
-  VIDEDIT_CODE_SIGN_IDENTITY = Developer ID Application
-  VIDEDIT_DEVELOPMENT_TEAM = ABCDE12345
+  FRAMEWRIGHT_CODE_SIGN_IDENTITY = Developer ID Application
+  FRAMEWRIGHT_DEVELOPMENT_TEAM = ABCDE12345
   ```
 
   or pass them on the command line:
 
   ```sh
-  xcodebuild -scheme VidEdit -configuration Distribution -destination 'platform=macOS' \
-      VIDEDIT_DEVELOPMENT_TEAM=ABCDE12345 build
-  xcodebuild -scheme VidEdit -archivePath build/VidEdit.xcarchive \
-      VIDEDIT_DEVELOPMENT_TEAM=ABCDE12345 archive
+  xcodebuild -scheme Framewright -configuration Distribution -destination 'platform=macOS' \
+      FRAMEWRIGHT_DEVELOPMENT_TEAM=ABCDE12345 build
+  xcodebuild -scheme Framewright -archivePath build/Framewright.xcarchive \
+      FRAMEWRIGHT_DEVELOPMENT_TEAM=ABCDE12345 archive
   ```
 
   The hardened runtime enables library validation, which loads only embedded code signed with
-  the app's Team ID: the build re-signs VidEditEngine.framework and the FFmpeg dylibs with the
+  the app's Team ID: the build re-signs FramewrightEngine.framework and the FFmpeg dylibs with the
   app's identity when it copies them into `Contents/Frameworks` (CodeSignOnCopy), so they load,
   and the archive can be exported with Developer ID from the Organizer (which adds the secure
   timestamp) and notarized. An ad hoc build with the hardened runtime would abort at launch
@@ -119,15 +121,15 @@ The app runs with the App Sandbox enabled in every configuration.
 ## Open in Xcode
 
 ```sh
-xcodegen generate && open VidEdit.xcodeproj
+xcodegen generate && open Framewright.xcodeproj
 ```
 
-Pick the **VidEdit** scheme and press Run (Cmd+R) or Test (Cmd+U).
+Pick the **Framewright** scheme and press Run (Cmd+R) or Test (Cmd+U).
 
 ## Layout
 
-- `Engine/`: `VidEditEngine.framework`, Objective-C++ (C++20, ARC). Public API lives
-  in `Engine/Facade/` (umbrella header `VidEditEngine.h`); everything else is
+- `Engine/`: `FramewrightEngine.framework`, Objective-C++ (C++20, ARC). Public API lives
+  in `Engine/Facade/` (umbrella header `FramewrightEngine.h`); everything else is
   project-private. Metal shaders compile into the framework's `default.metallib`.
 - `EngineTests/`: XCTest bundle (Objective-C++). Plain C++ tests use doctest
   `TEST_CASE`s in any `.cpp`/`.mm` file in this folder; they all run inside the
@@ -150,22 +152,22 @@ Scripts/format.sh --check   # lint only
 
 ## FFmpeg and licensing
 
-FFmpeg 7.1.5 is licensed under the GNU LGPL 2.1 or later. VidEdit builds it with
+FFmpeg 7.1.5 is licensed under the GNU LGPL 2.1 or later. Framewright builds it with
 `--disable-gpl --disable-nonfree` (the build script fails if `config.h` says otherwise) and
-ships it as separate, unmodified dylibs in `VidEdit.app/Contents/Frameworks`, loaded through
+ships it as separate, unmodified dylibs in `Framewright.app/Contents/Frameworks`, loaded through
 `@rpath`, so users can replace them with their own build as the LGPL requires (re-sign the
 bundle afterwards). dav1d (BSD-2-Clause) and SVT-AV1 (BSD-3-Clause-Clear plus the AOMedia
 patent licence) are linked statically into libavcodec.
 
 - The complete licence texts and notices ship in the app (`Contents/Resources/Acknowledgements.md`
-  and `COPYING.LGPLv2.1`) and are shown by **VidEdit > Acknowledgements…**; their sources are
+  and `COPYING.LGPLv2.1`) and are shown by **Framewright > Acknowledgements…**; their sources are
   `App/Resources/`.
 - Source offer: the FFmpeg libraries are built from the unmodified release tarball
   https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz (SHA-256 in `ThirdParty/VERSIONS.md`) by
   `Scripts/build-ffmpeg.sh`, which pins every version and checksum and records the exact
   configure flags; running it reproduces the shipped libraries. The author provides the
   complete corresponding source (tarballs and build script) of the FFmpeg libraries shipped with
-  any VidEdit release on request, for at least three years after that release.
+  any Framewright release on request, for at least three years after that release.
 - nlohmann/json and doctest are MIT-licensed (doctest is used only to build the tests).
 
 ## License

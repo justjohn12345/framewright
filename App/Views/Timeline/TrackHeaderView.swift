@@ -1,5 +1,5 @@
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 
 /// Header of one track row: name, target indicator, mute/solo/lock toggles.
 struct TrackHeaderView: View {

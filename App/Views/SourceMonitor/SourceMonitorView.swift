@@ -1,6 +1,6 @@
 import CoreMedia
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 
 /// Source monitor: the asset opened from the media bin in the engine's own Metal preview
 /// (decoded on the source monitor's lanes, nothing written to disk while scrubbing). Scrub with

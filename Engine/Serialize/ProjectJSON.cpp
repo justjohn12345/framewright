@@ -657,13 +657,13 @@ Project parseProjectNode(const Node &root, Warnings &warnings) {
 int schemaVersionOf(const Node &root) {
     root.requireObject();
     if (!root.value().contains("schemaVersion")) {
-        root.fail("missing \"schemaVersion\"; this is not a VidEdit project");
+        root.fail("missing \"schemaVersion\"; this is not a Framewright project");
     }
     const Node versionNode = root.field("schemaVersion");
     const std::int64_t version = versionNode.asInt64();
     if (version > kProjectSchemaVersion) {
         versionNode.fail("project uses schema version " + std::to_string(version) +
-                         ", newer than this version of VidEdit supports (" + std::to_string(kProjectSchemaVersion) +
+                         ", newer than this version of Framewright supports (" + std::to_string(kProjectSchemaVersion) +
                          ")");
     }
     if (version < 1) {

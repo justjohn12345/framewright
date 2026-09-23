@@ -1,9 +1,9 @@
 import AppKit
 import CoreMedia
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// The redraw budget of the editor window while the playhead moves at the display rate, and
 /// that the timeline actually paints its clips.

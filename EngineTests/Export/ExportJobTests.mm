@@ -80,7 +80,7 @@ class ExportRig {
         v1 = sequence().videoTracks[0].id;
         v2 = sequence().videoTracks[1].id;
         a1 = sequence().audioTracks[0].id;
-        queue = dispatch_queue_create("com.justjohn12345.videdit.tests.export-callbacks", DISPATCH_QUEUE_SERIAL);
+        queue = dispatch_queue_create("com.justjohn12345.framewright.tests.export-callbacks", DISPATCH_QUEUE_SERIAL);
     }
 
     Sequence &sequence() { return *project.findSequence(sequenceId); }

@@ -1,9 +1,9 @@
 import AppKit
 import CoreMedia
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// The timeline's gesture state machine driven with synthetic pointer locations. Geometry at the
 /// default zoom (50 pt/s, no scroll): rows V2 y 0...64, V1 66...130, A1 132...180, A2 182...230.

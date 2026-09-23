@@ -8,7 +8,7 @@
 # Outputs
 #   ThirdParty/ffmpeg/{include,lib}        shared libraries the engine links and the app embeds.
 #       Every dylib's install name is @rpath/<name>.dylib and all inter-library references go
-#       through @rpath, so they work from DerivedData and from VidEdit.app/Contents/Frameworks.
+#       through @rpath, so they work from DerivedData and from Framewright.app/Contents/Frameworks.
 #       dav1d (AV1 decode) and SVT-AV1 (AV1 encode) are linked statically INTO libavcodec, so the
 #       set of dylibs to bundle does not change.
 #   ThirdParty/ffmpeg/tools/bin/{ffmpeg,ffprobe}
@@ -121,7 +121,7 @@ ARCH_FLAGS="-arch arm64 -mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}"
 # Scratch space for signatures and requirement files, and the staging directory for the install
 # (on the same volume as the destination, so swapping it in is a rename). Both are removed on
 # exit whatever happens.
-SCRATCH="$(mktemp -d "${TMPDIR:-/private/var/tmp}/videdit-ffmpeg.XXXXXX")"
+SCRATCH="$(mktemp -d "${TMPDIR:-/private/var/tmp}/framewright-ffmpeg.XXXXXX")"
 STAGE_ROOT="${SRC_ROOT}/stage.$$"
 cleanup() { rm -rf "$SCRATCH" "$STAGE_ROOT"; }
 trap cleanup EXIT

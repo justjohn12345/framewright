@@ -656,7 +656,7 @@ NullAudioOutput::Capture NullAudioOutput::capture() const {
 /// draining its queue guarantees no call is running or pending afterwards.
 struct AutomaticAudioOutput::DeviceListener {
     explicit DeviceListener(AutomaticAudioOutput &output)
-        : queue_(dispatch_queue_create("com.justjohn12345.videdit.audio.device-listener", DISPATCH_QUEUE_SERIAL)) {
+        : queue_(dispatch_queue_create("com.justjohn12345.framewright.audio.device-listener", DISPATCH_QUEUE_SERIAL)) {
         AutomaticAudioOutput *target = &output;
         block_ = ^(UInt32, const AudioObjectPropertyAddress *) {
             if (DeviceListener::hasDefaultOutputDevice()) {

@@ -1,4 +1,4 @@
-name: VidEdit
+name: Framewright
 
 options:
   bundleIdPrefix: com.justjohn12345
@@ -62,12 +62,12 @@ settings:
     # A real identity and team (Config/Distribution.xcconfig) and the hardened runtime: what
     # notarized distribution requires.
     Distribution:
-      CODE_SIGN_IDENTITY: $(VIDEDIT_CODE_SIGN_IDENTITY)
-      DEVELOPMENT_TEAM: $(VIDEDIT_DEVELOPMENT_TEAM)
+      CODE_SIGN_IDENTITY: $(FRAMEWRIGHT_CODE_SIGN_IDENTITY)
+      DEVELOPMENT_TEAM: $(FRAMEWRIGHT_DEVELOPMENT_TEAM)
       ENABLE_HARDENED_RUNTIME: YES
 
 targets:
-  VidEditEngine:
+  FramewrightEngine:
     type: framework
     platform: macOS
     sources:
@@ -93,8 +93,8 @@ targets:
             destination: productsDirectory
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.justjohn12345.videdit.engine
-        PRODUCT_NAME: VidEditEngine
+        PRODUCT_BUNDLE_IDENTIFIER: com.justjohn12345.framewright.engine
+        PRODUCT_NAME: FramewrightEngine
         GENERATE_INFOPLIST_FILE: YES
         DEFINES_MODULE: YES
         SKIP_INSTALL: YES
@@ -103,11 +103,11 @@ targets:
         VERSIONING_SYSTEM: apple-generic
         LIBRARY_SEARCH_PATHS: $(inherited) $(FFMPEG_ROOT)/lib
         OTHER_LDFLAGS: $(inherited) -lavformat -lavcodec -lswscale -lswresample -lavutil
-        # @loader_path is VidEditEngine.framework/Versions/A, so ../../.. is the directory
-        # that contains the framework: Contents/Frameworks inside VidEdit.app, or the
+        # @loader_path is FramewrightEngine.framework/Versions/A, so ../../.. is the directory
+        # that contains the framework: Contents/Frameworks inside Framewright.app, or the
         # build products directory in DerivedData. The FFmpeg dylibs are placed next to
         # the framework in both (see the copy-files phases for ThirdParty/ffmpeg/lib in
-        # this target and in VidEdit).
+        # this target and in Framewright).
         LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/../Frameworks @loader_path/Frameworks @loader_path/../../..
         MTL_LANGUAGE_REVISION: Metal30
         MTL_ENABLE_DEBUG_INFO: INCLUDE_SOURCE
@@ -144,7 +144,7 @@ targets:
         excludes:
           - "**/.gitkeep"
     dependencies:
-      - target: VidEditEngine
+      - target: FramewrightEngine
       - sdk: Metal.framework
       - sdk: CoreMedia.framework
       - sdk: CoreVideo.framework
@@ -153,12 +153,12 @@ targets:
       - sdk: CoreGraphics.framework
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.justjohn12345.videdit.EngineTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.justjohn12345.framewright.EngineTests
         GENERATE_INFOPLIST_FILE: YES
         # EngineTests.xctest/Contents/MacOS/../../.. is the build products directory.
         LD_RUNPATH_SEARCH_PATHS: $(inherited) @loader_path/../Frameworks @loader_path/../../..
 
-  VidEdit:
+  Framewright:
     type: application
     platform: macOS
     sources:
@@ -167,12 +167,12 @@ targets:
           - "**/.gitkeep"
           - "Resources/Acknowledgements.md"
           - "Resources/COPYING.LGPLv2.1"
-      # Third-party notices and the LGPL text, shown by VidEdit > Acknowledgements.
+      # Third-party notices and the LGPL text, shown by Framewright > Acknowledgements.
       - path: App/Resources/Acknowledgements.md
         buildPhase: resources
       - path: App/Resources/COPYING.LGPLv2.1
         buildPhase: resources
-      # Embed the FFmpeg dylibs in VidEdit.app/Contents/Frameworks and sign them on
+      # Embed the FFmpeg dylibs in Framewright.app/Contents/Frameworks and sign them on
       # copy (LGPL: the libraries stay dynamically linked and replaceable).
       - path: ThirdParty/ffmpeg/lib
         includes:
@@ -193,50 +193,50 @@ targets:
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         NSHumanReadableCopyright: ""
         CFBundleDocumentTypes:
-          - CFBundleTypeName: VidEdit Project
+          - CFBundleTypeName: Framewright Project
             CFBundleTypeRole: Editor
             LSHandlerRank: Owner
             LSItemContentTypes:
-              - com.justjohn12345.videdit.project
+              - com.justjohn12345.framewright.project
         UTExportedTypeDeclarations:
-          - UTTypeIdentifier: com.justjohn12345.videdit.project
-            UTTypeDescription: VidEdit Project
+          - UTTypeIdentifier: com.justjohn12345.framewright.project
+            UTTypeDescription: Framewright Project
             UTTypeConformsTo:
               - public.json
             UTTypeTagSpecification:
               public.filename-extension:
-                - videdit
+                - framewright
               public.mime-type:
-                - application/x-videdit+json
+                - application/x-framewright+json
           # In-app drag payload: a reference to an asset of the open project (media bin -> timeline).
-          - UTTypeIdentifier: com.justjohn12345.videdit.asset-reference
-            UTTypeDescription: VidEdit Media Reference
+          - UTTypeIdentifier: com.justjohn12345.framewright.asset-reference
+            UTTypeDescription: Framewright Media Reference
             UTTypeConformsTo:
               - public.data
           # In-app drag payloads of the Transitions panel (one type per kind, so the timeline
           # knows what is dragged before the drop).
-          - UTTypeIdentifier: com.justjohn12345.videdit.transition.cross-dissolve
-            UTTypeDescription: VidEdit Cross Dissolve
+          - UTTypeIdentifier: com.justjohn12345.framewright.transition.cross-dissolve
+            UTTypeDescription: Framewright Cross Dissolve
             UTTypeConformsTo:
               - public.data
-          - UTTypeIdentifier: com.justjohn12345.videdit.transition.audio-crossfade
-            UTTypeDescription: VidEdit Audio Crossfade
+          - UTTypeIdentifier: com.justjohn12345.framewright.transition.audio-crossfade
+            UTTypeDescription: Framewright Audio Crossfade
             UTTypeConformsTo:
               - public.data
     entitlements:
-      path: App/Resources/VidEdit.entitlements
+      path: App/Resources/Framewright.entitlements
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.files.user-selected.read-write: true
         com.apple.security.files.bookmarks.app-scope: true
     dependencies:
-      - target: VidEditEngine
+      - target: FramewrightEngine
         embed: true
         codeSign: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.justjohn12345.videdit
-        PRODUCT_NAME: VidEdit
+        PRODUCT_BUNDLE_IDENTIFIER: com.justjohn12345.framewright
+        PRODUCT_NAME: Framewright
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/../Frameworks
@@ -251,22 +251,22 @@ targets:
         excludes:
           - "**/.gitkeep"
     dependencies:
-      - target: VidEdit
-      - target: VidEditEngine
+      - target: Framewright
+      - target: FramewrightEngine
         embed: false
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.justjohn12345.videdit.AppTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.justjohn12345.framewright.AppTests
         GENERATE_INFOPLIST_FILE: YES
-        TEST_HOST: $(BUILT_PRODUCTS_DIR)/VidEdit.app/Contents/MacOS/VidEdit
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Framewright.app/Contents/MacOS/Framewright
         BUNDLE_LOADER: $(TEST_HOST)
 
 schemes:
-  VidEdit:
+  Framewright:
     build:
       targets:
-        VidEdit: all
-        VidEditEngine: all
+        Framewright: all
+        FramewrightEngine: all
         EngineTests: [test]
         AppTests: [test]
     run:
@@ -275,8 +275,8 @@ schemes:
       config: Debug
       gatherCoverageData: true
       coverageTargets:
-        - VidEdit
-        - VidEditEngine
+        - Framewright
+        - FramewrightEngine
       targets:
         - EngineTests
         - AppTests
@@ -290,7 +290,7 @@ schemes:
   EngineTests:
     build:
       targets:
-        VidEditEngine: all
+        FramewrightEngine: all
         EngineTests: [test]
     test:
       config: Debug
@@ -300,7 +300,7 @@ schemes:
   AppTests:
     build:
       targets:
-        VidEdit: all
+        Framewright: all
         AppTests: [test]
     test:
       config: Debug

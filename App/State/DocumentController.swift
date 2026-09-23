@@ -29,7 +29,7 @@ final class DocumentController: ObservableObject {
     /// Asks where to save (the suggested file name is given); nil when cancelled.
     var chooseSaveURL: (String) -> URL? = { suggestedName in
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.videditProject]
+        panel.allowedContentTypes = [.framewrightProject]
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = suggestedName
         return panel.runModal() == .OK ? panel.url : nil
@@ -52,7 +52,7 @@ final class DocumentController: ObservableObject {
     func openWithPanel() {
         guard confirmStoppingExport(because: "Opening another project"), confirmDiscardingChanges() else { return }
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.videditProject]
+        panel.allowedContentTypes = [.framewrightProject]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -98,7 +98,7 @@ final class DocumentController: ObservableObject {
 
     @discardableResult
     func saveAs() -> Bool {
-        guard let url = chooseSaveURL(store.projectName + ".videdit") else { return false }
+        guard let url = chooseSaveURL(store.projectName + ".framewright") else { return false }
         return save(to: url)
     }
 

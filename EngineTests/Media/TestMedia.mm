@@ -198,7 +198,7 @@ std::string fnv1a64Hex(const std::string &data) {
 }
 
 std::string generate(std::string &error) {
-    if (const char *overrideDir = getenv("VIDEDIT_TEST_MEDIA_DIR")) {
+    if (const char *overrideDir = getenv("FRAMEWRIGHT_TEST_MEDIA_DIR")) {
         return overrideDir;
     }
     const fs::path script = scriptPath();
@@ -209,10 +209,10 @@ std::string generate(std::string &error) {
     }
     std::stringstream contents;
     contents << in.rdbuf();
-    // <build>/Products/Debug/EngineTests.xctest -> <build>/VidEditTestMedia/<hash>
+    // <build>/Products/Debug/EngineTests.xctest -> <build>/FramewrightTestMedia/<hash>
     NSURL *bundle = [NSBundle bundleForClass:VETestMediaAnchor.class].bundleURL;
     const fs::path buildDir = fs::path(bundle.path.UTF8String).parent_path().parent_path().parent_path();
-    const fs::path dir = buildDir / "VidEditTestMedia" / fnv1a64Hex(contents.str());
+    const fs::path dir = buildDir / "FramewrightTestMedia" / fnv1a64Hex(contents.str());
     std::error_code ec;
     if (fs::exists(dir / "manifest.json", ec)) {
         return dir.string();
@@ -273,7 +273,7 @@ std::string testMediaPath(const std::string &file, std::string &error) {
 }
 
 std::string scratchDirectory() {
-    NSString *base = [NSTemporaryDirectory() stringByAppendingPathComponent:@"VidEditEngineTests"];
+    NSString *base = [NSTemporaryDirectory() stringByAppendingPathComponent:@"FramewrightEngineTests"];
     NSString *dir = [base stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     return dir.UTF8String;

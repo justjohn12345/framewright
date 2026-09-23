@@ -1,7 +1,7 @@
 import Combine
 import CoreMedia
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 
 /// Which tracks follow a speed change.
 enum SpeedRipple: String, CaseIterable, Identifiable {

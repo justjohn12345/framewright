@@ -1,6 +1,6 @@
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 @MainActor
 final class ContentViewTests: XCTestCase {
@@ -12,7 +12,7 @@ final class ContentViewTests: XCTestCase {
     }
 
     func testRunsInsideSandboxedHostApp() {
-        XCTAssertEqual(Bundle.main.bundleIdentifier, "com.justjohn12345.videdit")
+        XCTAssertEqual(Bundle.main.bundleIdentifier, "com.justjohn12345.framewright")
         XCTAssertNotNil(
             ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"],
             "host app should run with the App Sandbox enabled"

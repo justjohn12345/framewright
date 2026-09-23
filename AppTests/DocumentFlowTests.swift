@@ -1,7 +1,7 @@
 import AppKit
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// Close, quit, save-failure and Finder-open flows of the document controller and app delegate,
 /// with the alerts and the save panel replaced by scripted answers.
@@ -86,7 +86,7 @@ final class DocumentFlowTests: XCTestCase {
     func testSaveFailureIsReportedAndKeepsTheDocumentOpen() async throws {
         try await makeDirty()
         let log = AlertLog()
-        let unwritable = URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)/Project.videdit")
+        let unwritable = URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)/Project.framewright")
         let documents = makeDocuments(answers: [.alertFirstButtonReturn], saveURL: unwritable, log: log) // Save
         XCTAssertFalse(documents.confirmClosingWindow(), "a failed save does not close the window")
         XCTAssertEqual(log.titles, ["Do you want to save the changes made to “Untitled”?",
@@ -95,7 +95,7 @@ final class DocumentFlowTests: XCTestCase {
         XCTAssertNil(fixture.store.projectURL)
 
         // A successful Save As.
-        let url = fixture.directory.appendingPathComponent("Saved.videdit")
+        let url = fixture.directory.appendingPathComponent("Saved.framewright")
         documents.chooseSaveURL = { _ in url }
         XCTAssertTrue(documents.save())
         XCTAssertFalse(fixture.store.isDirty)
@@ -105,7 +105,7 @@ final class DocumentFlowTests: XCTestCase {
 
     func testFinderOpenAtColdLaunchWaitsForTheWindow() async throws {
         try await makeDirty()
-        let url = fixture.directory.appendingPathComponent("Launch.videdit")
+        let url = fixture.directory.appendingPathComponent("Launch.framewright")
         try fixture.store.save(to: url)
         let other = StoreFixtureStore.make(in: fixture.directory)
         let log = AlertLog()

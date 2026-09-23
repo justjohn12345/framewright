@@ -1,5 +1,5 @@
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 
 /// Preference keys (UserDefaults) and applying them to the engine.
 enum Preferences {

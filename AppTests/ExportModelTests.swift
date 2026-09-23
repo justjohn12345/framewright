@@ -1,8 +1,8 @@
 import AppKit
 import CoreMedia
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// The Export sheet's model: preset -> settings mapping, validation and disabled states, the size
 /// estimate, the remembered folder (bookmark round trip), progress pacing, a real export through

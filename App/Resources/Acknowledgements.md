@@ -1,15 +1,15 @@
-# VidEdit: third-party software
+# Framewright: third-party software
 
-VidEdit includes the following open source software. Their licences are reproduced below; the
+Framewright includes the following open source software. Their licences are reproduced below; the
 complete text of the GNU Lesser General Public License version 2.1 is in the file
-COPYING.LGPLv2.1 shipped next to this one (VidEdit.app/Contents/Resources).
+COPYING.LGPLv2.1 shipped next to this one (Framewright.app/Contents/Resources).
 
 ## FFmpeg 7.1.5 (libavformat, libavcodec, libavutil, libswresample, libswscale)
 
 FFmpeg is licensed under the GNU Lesser General Public License version 2.1 or later
-(LGPL-2.1-or-later). VidEdit uses FFmpeg built with `--disable-gpl --disable-nonfree`, so no
+(LGPL-2.1-or-later). Framewright uses FFmpeg built with `--disable-gpl --disable-nonfree`, so no
 GPL or non-free component is included. The FFmpeg libraries are dynamically linked and shipped
-as separate, unmodified shared libraries in VidEdit.app/Contents/Frameworks (libavformat.61.dylib,
+as separate, unmodified shared libraries in Framewright.app/Contents/Frameworks (libavformat.61.dylib,
 libavcodec.61.dylib, libavutil.59.dylib, libswresample.5.dylib, libswscale.8.dylib), loaded
 through @rpath: you may replace them with your own build of the same FFmpeg major versions
 (re-sign the application bundle afterwards, for example with `codesign --force --deep --sign -`).
@@ -17,9 +17,9 @@ through @rpath: you may replace them with your own build of the same FFmpeg majo
 Source code: the libraries are built from the unmodified release tarball
 https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz (SHA-256
 de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f) by the script
-Scripts/build-ffmpeg.sh in the VidEdit source repository, which records the exact configure
+Scripts/build-ffmpeg.sh in the Framewright source repository, which records the exact configure
 options. On request, the author will provide the complete corresponding source code of the
-FFmpeg libraries shipped with any VidEdit release (including the build script), for at least
+FFmpeg libraries shipped with any Framewright release (including the build script), for at least
 three years after that release, at no charge beyond the cost of distribution.
 
 FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.
@@ -218,7 +218,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## doctest 2.4.12 (unit tests; used to build VidEdit's tests, not shipped in the application)
+## doctest 2.4.12 (unit tests; used to build Framewright's tests, not shipped in the application)
 
 MIT License
 

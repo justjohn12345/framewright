@@ -643,7 +643,7 @@ Status AppleWriter::runPull(const VideoPullFn &video, const AudioPullFn &audio) 
     dispatch_queue_t videoQueue = nil;
     dispatch_queue_t audioQueue = nil;
     if (d.videoInput != nil) {
-        videoQueue = dispatch_queue_create("videdit.writer.video", DISPATCH_QUEUE_SERIAL);
+        videoQueue = dispatch_queue_create("framewright.writer.video", DISPATCH_QUEUE_SERIAL);
         dispatch_group_enter(state->group);
         AVAssetWriterInput *input = d.videoInput;
         [input requestMediaDataWhenReadyOnQueue:videoQueue
@@ -682,7 +682,7 @@ Status AppleWriter::runPull(const VideoPullFn &video, const AudioPullFn &audio) 
                                      }];
     }
     if (d.audioInput != nil) {
-        audioQueue = dispatch_queue_create("videdit.writer.audio", DISPATCH_QUEUE_SERIAL);
+        audioQueue = dispatch_queue_create("framewright.writer.audio", DISPATCH_QUEUE_SERIAL);
         dispatch_group_enter(state->group);
         AVAssetWriterInput *input = d.audioInput;
         const int channels = d.settings.audio->channels;

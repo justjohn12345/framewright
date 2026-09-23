@@ -5,7 +5,7 @@
 // exact speeds, load warnings, memory pressure, use counts).
 
 #import <Metal/Metal.h>
-#import <VidEditEngine/VidEditEngine.h>
+#import <FramewrightEngine/FramewrightEngine.h>
 #import <XCTest/XCTest.h>
 
 #include "../Media/BurnIn.h"
@@ -616,7 +616,7 @@ static bool showsFrame(int shown, int64_t f) {
     VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
     [self buildSequence:engine asset:asset];
     NSURL *scratch = [NSURL fileURLWithPath:@(ve::test::scratchDirectory().c_str())];
-    NSURL *url = [scratch URLByAppendingPathComponent:@"w.videdit"];
+    NSURL *url = [scratch URLByAppendingPathComponent:@"w.framewright"];
     NSError *error = nil;
     XCTAssertTrue([engine saveProjectToURL:url error:&error], @"%@", error);
     NSString *text = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];

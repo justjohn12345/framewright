@@ -1,8 +1,8 @@
 import AppKit
 import CoreMedia
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// Regression tests for the app findings of the 2026-09-23 review (docs/reviews): Delete with the
 /// media bin focused (P1), edit keys during a gesture (E2), thumbnail and waveform caches across an
@@ -99,7 +99,7 @@ final class ReviewRegressionTests: XCTestCase {
     func testAThumbnailRequestedBeforeAnOpenLoadsInTheReopenedProject() async throws {
         let (movie, _) = try await fixture.importMedia()
         try fixture.placeMovie(movie, at: 0)
-        let url = fixture.directory.appendingPathComponent("P2.videdit")
+        let url = fixture.directory.appendingPathComponent("P2.framewright")
         try store.save(to: url)
         let cache = store.thumbnails
         XCTAssertNil(cache.image(asset: movie.assetID, seconds: 0.5, maxDimension: 111)) // starts a fetch
@@ -114,7 +114,7 @@ final class ReviewRegressionTests: XCTestCase {
     func testAWaveformRequestedBeforeAnOpenLoadsInTheReopenedProject() async throws {
         let (movie, tone) = try await fixture.importMedia()
         try fixture.placeMovie(movie, at: 0)
-        let url = fixture.directory.appendingPathComponent("P2w.videdit")
+        let url = fixture.directory.appendingPathComponent("P2w.framewright")
         try store.save(to: url)
         let cache = store.waveforms
         // Let the import's own waveform job finish, then drop the peaks from memory so the next

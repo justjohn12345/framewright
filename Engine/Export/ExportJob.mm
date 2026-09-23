@@ -555,7 +555,7 @@ Result<std::shared_ptr<ExportJob>> ExportJob::start(ExportRequest request, Expor
 ExportJob::ExportJob(ExportRequest request, ExportServices services, ExportOptions options,
                      dispatch_queue_t callbackQueue, ProgressHandler progress, CompletionHandler completion)
     : request_(std::move(request)), services_(std::move(services)), options_(options), callbackQueue_(callbackQueue),
-      queue_(dispatch_queue_create("com.justjohn12345.videdit.export",
+      queue_(dispatch_queue_create("com.justjohn12345.framewright.export",
                                    dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
                                                                            QOS_CLASS_USER_INITIATED, 0))),
       progressHandler_(std::move(progress)), completion_(std::move(completion)) {}

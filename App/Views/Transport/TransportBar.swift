@@ -1,6 +1,6 @@
 import CoreMedia
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 
 /// Transport controls under the monitors: program timecode, go to start/end, frame steps,
 /// J/K/L shuttle and play/pause (for the focused monitor, see `PlaybackActions`), mute, zoom and

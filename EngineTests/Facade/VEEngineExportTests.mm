@@ -5,7 +5,7 @@
 // another export, invalid settings, empty sequence, missing media, unwritable output), cancel
 // through the handle, and playback pausing when an export starts.
 
-#import <VidEditEngine/VidEditEngine.h>
+#import <FramewrightEngine/FramewrightEngine.h>
 #import <XCTest/XCTest.h>
 
 #include "../../Engine/Media/BackendRouter.h"

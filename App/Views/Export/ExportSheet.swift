@@ -3,7 +3,7 @@ import Combine
 import CoreMedia
 import SwiftUI
 import UniformTypeIdentifiers
-import VidEditEngine
+import FramewrightEngine
 
 /// Remembers the folder of the last export for the save panel, as a bookmark (security scoped
 /// when the app has access to the folder, else a plain one; the save panel runs outside the

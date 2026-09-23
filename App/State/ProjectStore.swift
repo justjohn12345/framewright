@@ -2,7 +2,7 @@ import AppKit
 import Combine
 import CoreMedia
 import Foundation
-import VidEditEngine
+import FramewrightEngine
 
 /// Source monitor state: the asset shown and the in/out marks (on the asset's frame grid). The
 /// position lives in `ProjectStore.sourcePlayhead`.

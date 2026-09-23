@@ -1,5 +1,5 @@
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 
 /// SwiftUI host for the engine's Metal preview surface (`VEPreviewView`).
 ///

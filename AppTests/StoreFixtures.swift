@@ -1,7 +1,7 @@
 import Foundation
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// A store over a fresh engine with test media written to a scratch directory.
 @MainActor

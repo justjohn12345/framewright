@@ -59,8 +59,8 @@ CMTime vfrFrameTime(int index);
 int vfrFrameAt(CMTime t);
 
 /// Directory holding the generated files. Generates them on first use by running
-/// `xcrun swift Scripts/make_test_media.swift` into <build dir>/VidEditTestMedia/<script hash>
-/// (so a changed script regenerates), or uses $VIDEDIT_TEST_MEDIA_DIR when set. Thread-safe.
+/// `xcrun swift Scripts/make_test_media.swift` into <build dir>/FramewrightTestMedia/<script hash>
+/// (so a changed script regenerates), or uses $FRAMEWRIGHT_TEST_MEDIA_DIR when set. Thread-safe.
 /// Returns an empty string and sets `error` if generation fails.
 std::string testMediaDirectory(std::string &error);
 

@@ -1,7 +1,7 @@
 import CoreMedia
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// Small pieces of app state: speed formatting and parsing, cache failure expiry, the HUD text.
 @MainActor

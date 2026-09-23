@@ -10,14 +10,14 @@
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
-			<string>VidEdit Project</string>
+			<string>Framewright Project</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>LSHandlerRank</key>
 			<string>Owner</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>com.justjohn12345.videdit.project</string>
+				<string>com.justjohn12345.framewright.project</string>
 			</array>
 		</dict>
 	</array>
@@ -49,18 +49,18 @@
 				<string>public.json</string>
 			</array>
 			<key>UTTypeDescription</key>
-			<string>VidEdit Project</string>
+			<string>Framewright Project</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.justjohn12345.videdit.project</string>
+			<string>com.justjohn12345.framewright.project</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
 				<array>
-					<string>videdit</string>
+					<string>framewright</string>
 				</array>
 				<key>public.mime-type</key>
 				<array>
-					<string>application/x-videdit+json</string>
+					<string>application/x-framewright+json</string>
 				</array>
 			</dict>
 		</dict>
@@ -70,9 +70,9 @@
 				<string>public.data</string>
 			</array>
 			<key>UTTypeDescription</key>
-			<string>VidEdit Media Reference</string>
+			<string>Framewright Media Reference</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.justjohn12345.videdit.asset-reference</string>
+			<string>com.justjohn12345.framewright.asset-reference</string>
 		</dict>
 		<dict>
 			<key>UTTypeConformsTo</key>
@@ -80,9 +80,9 @@
 				<string>public.data</string>
 			</array>
 			<key>UTTypeDescription</key>
-			<string>VidEdit Cross Dissolve</string>
+			<string>Framewright Cross Dissolve</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.justjohn12345.videdit.transition.cross-dissolve</string>
+			<string>com.justjohn12345.framewright.transition.cross-dissolve</string>
 		</dict>
 		<dict>
 			<key>UTTypeConformsTo</key>
@@ -90,9 +90,9 @@
 				<string>public.data</string>
 			</array>
 			<key>UTTypeDescription</key>
-			<string>VidEdit Audio Crossfade</string>
+			<string>Framewright Audio Crossfade</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.justjohn12345.videdit.transition.audio-crossfade</string>
+			<string>com.justjohn12345.framewright.transition.audio-crossfade</string>
 		</dict>
 	</array>
 </dict>

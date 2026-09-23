@@ -1,5 +1,5 @@
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 
 /// Program monitor: the sequence frame at the playhead, letterboxed in black.
 ///

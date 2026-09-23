@@ -1,7 +1,7 @@
 import AppKit
 import CoreMedia
 import Foundation
-import VidEditEngine
+import FramewrightEngine
 
 /// The timeline's pointer gestures as a state machine, separate from SwiftUI so it can be
 /// driven and tested with synthetic locations.

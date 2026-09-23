@@ -228,7 +228,7 @@ TEST_CASE("ProjectJSON: schema version checks") {
     CHECK(contains(loadError(j), "schemaVersion: expected an integer"));
 
     j.erase("schemaVersion");
-    CHECK(contains(loadError(j), "not a VidEdit project"));
+    CHECK(contains(loadError(j), "not a Framewright project"));
 
     std::vector<std::string> warnings;
     json doc = projectToJson(fx.project);

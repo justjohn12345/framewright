@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
-import VidEditEngine
+import FramewrightEngine
 
 /// The project's media: a grid of assets with thumbnails, name, duration and a codec/backend/
 /// hardware badge. Import with the button, File > Import Media… or by dropping files from the

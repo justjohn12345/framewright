@@ -1,6 +1,6 @@
 import CoreMedia
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 
 /// Debug HUD over the program monitor (View > Show Playback HUD): the playback controller's
 /// counters (`VEPlaybackStats`), the presented frame against the (audio) clock, and the preview

@@ -1,4 +1,4 @@
-// Engine Metal shaders. Compiled into VidEditEngine.framework/Resources/default.metallib;
+// Engine Metal shaders. Compiled into FramewrightEngine.framework/Resources/default.metallib;
 // load with [device newDefaultLibraryWithBundle:[NSBundle bundleForClass:VEEngine.class] error:].
 //
 // Compositing model (see Compositor.h): every layer is drawn as a quad covering its footprint

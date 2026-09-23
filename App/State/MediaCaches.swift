@@ -1,7 +1,7 @@
 import CoreGraphics
 import CoreMedia
 import Foundation
-import VidEditEngine
+import FramewrightEngine
 
 /// Main-thread cache of thumbnails fetched from the engine, for views that draw many of them
 /// (media bin tiles, timeline thumbnail strips, source monitor).

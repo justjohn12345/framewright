@@ -16,7 +16,7 @@ using namespace ve::render;
 
 namespace {
 
-NSString *const kVEPreviewErrorDomain = @"VidEditEngine.PreviewView";
+NSString *const kVEPreviewErrorDomain = @"FramewrightEngine.PreviewView";
 
 // The drawable format (see the header): 10 bits per channel, same size as BGRA8.
 constexpr MTLPixelFormat kDrawableFormat = MTLPixelFormatBGR10A2Unorm;
@@ -368,7 +368,7 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
             }
         }
     }];
-    _renderThread.name = @"VidEdit preview render";
+    _renderThread.name = @"Framewright preview render";
     _renderThread.qualityOfService = NSQualityOfServiceUserInteractive;
     [_renderThread start];
 

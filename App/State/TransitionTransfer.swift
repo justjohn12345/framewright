@@ -1,15 +1,15 @@
 import CoreTransferable
 import Foundation
 import UniformTypeIdentifiers
-import VidEditEngine
+import FramewrightEngine
 
 extension UTType {
     /// A Cross Dissolve dragged from the Transitions panel (declared in Info.plist). Each kind
     /// has its own type so the timeline can tell what is dragged before the drop (the payload
     /// itself is only readable after it).
-    static let videditCrossDissolve = UTType(exportedAs: "com.justjohn12345.videdit.transition.cross-dissolve")
+    static let framewrightCrossDissolve = UTType(exportedAs: "com.justjohn12345.framewright.transition.cross-dissolve")
     /// A Constant Power crossfade dragged from the Transitions panel (declared in Info.plist).
-    static let videditAudioCrossfade = UTType(exportedAs: "com.justjohn12345.videdit.transition.audio-crossfade")
+    static let framewrightAudioCrossfade = UTType(exportedAs: "com.justjohn12345.framewright.transition.audio-crossfade")
 }
 
 /// The transitions of the MVP: one per track kind.
@@ -51,8 +51,8 @@ enum TransitionKind: String, CaseIterable, Identifiable, Codable {
 
     var contentType: UTType {
         switch self {
-        case .crossDissolve: return .videditCrossDissolve
-        case .audioCrossfade: return .videditAudioCrossfade
+        case .crossDissolve: return .framewrightCrossDissolve
+        case .audioCrossfade: return .framewrightAudioCrossfade
         }
     }
 
@@ -67,9 +67,9 @@ struct TransitionReference: Codable, Transferable, Hashable {
     let kind: TransitionKind
 
     static var transferRepresentation: some TransferRepresentation {
-        CodableRepresentation(contentType: .videditCrossDissolve)
+        CodableRepresentation(contentType: .framewrightCrossDissolve)
             .exportingCondition { $0.kind == .crossDissolve }
-        CodableRepresentation(contentType: .videditAudioCrossfade)
+        CodableRepresentation(contentType: .framewrightAudioCrossfade)
             .exportingCondition { $0.kind == .audioCrossfade }
     }
 }

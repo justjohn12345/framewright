@@ -1,7 +1,7 @@
 // Regression tests for facade bugs found in review (open findings 1, 2 and 3). They use only
 // API that existed before the fixes, so they also build against the unfixed engine.
 
-#import <VidEditEngine/VidEditEngine.h>
+#import <FramewrightEngine/FramewrightEngine.h>
 #import <XCTest/XCTest.h>
 
 #include "../Media/TestMedia.h"

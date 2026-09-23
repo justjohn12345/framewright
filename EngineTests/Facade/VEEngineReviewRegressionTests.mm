@@ -5,7 +5,7 @@
 // transition (E4).
 
 #import <Metal/Metal.h>
-#import <VidEditEngine/VidEditEngine.h>
+#import <FramewrightEngine/FramewrightEngine.h>
 #import <XCTest/XCTest.h>
 
 #include "../Media/BurnIn.h"
@@ -170,9 +170,9 @@ int shownIndex(VEPreviewView *view) {
                       .ok);
     // Project B: the same project with asset 1's file missing.
     NSString *json = [engine.projectJSON stringByReplacingOccurrencesOfString:asset.path
-                                                                   withString:@"/nonexistent/videdit/missing.mp4"];
+                                                                   withString:@"/nonexistent/framewright/missing.mp4"];
     XCTAssertNotEqualObjects(json, engine.projectJSON);
-    NSURL *projectB = [_projectDir URLByAppendingPathComponent:@"missing.videdit"];
+    NSURL *projectB = [_projectDir URLByAppendingPathComponent:@"missing.framewright"];
     XCTAssertTrue([json writeToURL:projectB atomically:YES encoding:NSUTF8StringEncoding error:nil]);
 
     // Both monitors decode project A's asset 1.
@@ -233,7 +233,7 @@ int shownIndex(VEPreviewView *view) {
                                 sourceIn:kCMTimeZero
                                sourceOut:seconds(2)]
                       .ok);
-    NSURL *projectB = [self saveProjectOf:engine named:@"prores.videdit"];
+    NSURL *projectB = [self saveProjectOf:engine named:@"prores.framewright"];
 
     [engine newProjectWithName:@"A"];
     VEAssetInfo *h264 = [self importOne:"h264_1080p30.mp4" into:engine];
@@ -504,7 +504,7 @@ int shownIndex(VEPreviewView *view) {
                        [done fulfill];
                    }];
     [self waitForExpectations:@[ done ] timeout:60];
-    NSURL *project = [self saveProjectOf:engine named:@"moved.videdit"];
+    NSURL *project = [self saveProjectOf:engine named:@"moved.framewright"];
     XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:[moved URLByDeletingLastPathComponent]
                                          withIntermediateDirectories:YES
                                                           attributes:nil

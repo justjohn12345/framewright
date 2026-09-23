@@ -1,8 +1,8 @@
 import AppKit
 import CoreMedia
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// Transitions, fades and gain in the timeline: hit testing of transition bands, fade handles
 /// and the gain line; the gesture controller's transition-edge, fade-handle and gain drags

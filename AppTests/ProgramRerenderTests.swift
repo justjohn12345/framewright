@@ -1,8 +1,8 @@
 import AppKit
 import CoreMedia
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// An inspector change re-renders the program monitor's current frame by itself (the engine
 /// hands the playback controller the new model, which asks the view to render), both while

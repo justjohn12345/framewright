@@ -1,4 +1,4 @@
-# VidEdit: a simple Premiere-style video editor for macOS
+# Framewright: a simple Premiere-style video editor for macOS
 
 ## Context
 
@@ -63,7 +63,7 @@ Both backends must pass the same conformance test suite (`MediaBackendTests`) on
 | Working pixel format | Decoder-native biplanar YUV in IOSurface-backed `CVPixelBuffer`s. RGB only exists inside the Metal pipeline and at export in the encoder's preferred format. |
 | Color | BT.709 SDR. Primaries/transfer are carried through as metadata and tagged on export. HDR tone mapping out of scope. |
 | Sequence settings | Fixed fps and size per sequence (default 1080p30, matched to first clip added). Sources are conformed (nearest frame, letterbox). |
-| Project file | JSON, single `.videdit` file, media referenced by path + security-scoped bookmark. |
+| Project file | JSON, single `.framewright` file, media referenced by path + security-scoped bookmark. |
 | FFmpeg licensing | LGPL 2.1+ build only: `--disable-gpl --disable-nonfree`, `--enable-videotoolbox --enable-audiotoolbox`. Dynamic libs bundled in the app for LGPL compliance. |
 
 ## Open source dependencies
@@ -97,11 +97,11 @@ Explicitly deferred: titles/text, keyframed effects, color correction, nested se
 ## Repo layout
 
 ```
-videdit/
+framewright/
   project.yml                      # XcodeGen
   Scripts/  build-ffmpeg.sh  make_test_media.swift  format.sh
   ThirdParty/  ffmpeg/ (built output, gitignored)  json.hpp  doctest.h
-  Engine/                          # framework "VidEditEngine", Objective-C++
+  Engine/                          # framework "FramewrightEngine", Objective-C++
     Model/     Project, Sequence, Track, Clip, MediaAsset, Transition, EffectParams   (plain C++ classes, CMTime)
     Edit/      Command, UndoStack, EditOps (trim/move/split/ripple/link as reversible commands)
     Serialize/ ProjectJSON (nlohmann)
@@ -119,12 +119,12 @@ videdit/
     Facade/    VEEngine.h/.mm (@objc API for Swift), VETypes.h (@objc snapshots: VEAssetInfo, VEClipInfo, VETrackInfo)
     Thumbs/    ThumbnailService.mm, WaveformService.mm
   EngineTests/                     # XCTest target in Obj-C++: model/edit tests (doctest wrapped), MediaBackendTests (both backends), compositor pixel tests, export round trip
-  App/                             # Swift app target "VidEdit"
-    VidEditApp.swift, AppDelegate.swift
+  App/                             # Swift app target "Framewright"
+    FramewrightApp.swift, AppDelegate.swift
     State/   ProjectStore.swift (ObservableObject over VEEngine), Selection.swift, TimelineViewModel.swift
     Views/   MediaBin/, SourceMonitor/, ProgramMonitor/, Timeline/, Inspector/, Export/, Transport/, Preferences/
     Bridging/ PreviewViewRepresentable.swift
-    Resources/ Assets.xcassets, Info.plist, VidEdit.entitlements
+    Resources/ Assets.xcassets, Info.plist, Framewright.entitlements
   AppTests/                        # Swift view-model tests
   .clang-format, .swiftformat, .gitignore
 ```
@@ -166,10 +166,10 @@ Same `Scheduler` + `Compositor`, rendering into a `CVPixelBufferPool` in the enc
 Each phase ends with something runnable and its tests green. Playback and A/V sync, the riskiest part, land in phase 4 before UI polish.
 
 ### Phase 0: Scaffold
-- `brew install xcodegen`; `project.yml` with targets `VidEditEngine` (framework, Obj-C++17/C++20), `EngineTests` (XCTest, Obj-C++), `VidEdit` (macOS app, Swift/SwiftUI), `AppTests` (XCTest, Swift).
+- `brew install xcodegen`; `project.yml` with targets `FramewrightEngine` (framework, Obj-C++17/C++20), `EngineTests` (XCTest, Obj-C++), `Framewright` (macOS app, Swift/SwiftUI), `AppTests` (XCTest, Swift).
 - Vendor `json.hpp` and `doctest.h`. Write `Scripts/build-ffmpeg.sh` (pinned FFmpeg tag, LGPL flags, `--enable-videotoolbox --enable-audiotoolbox`, arm64, install to `ThirdParty/ffmpeg/`); the engine links it and a copy-files phase bundles the dylibs into the app.
 - Entitlements: app sandbox on, user-selected read/write, bookmarks. `.clang-format`, `.swiftformat`, `.gitignore`, `git init`.
-- Verify: `xcodebuild -scheme VidEdit build` and `xcodebuild -scheme EngineTests test` succeed; empty window launches.
+- Verify: `xcodebuild -scheme Framewright build` and `xcodebuild -scheme EngineTests test` succeed; empty window launches.
 
 ### Phase 1: Core model (plain C++ inside the engine)
 - Model structs with `CMTime`; `EditOps` as `Command`s; `UndoStack`; `ProjectJSON` round trip with schema version.
@@ -230,7 +230,7 @@ Each phase ends with something runnable and its tests green. Playback and A/V sy
 - `EngineTests`: model/edit/scheduler tests (no media), `MediaBackendTests` conformance on synthesized files for both backends, compositor pixel tests, export round trip.
 - `AppTests`: Swift view-model tests.
 - Manual: sync test project with the debug HUD; Instruments passes for playback and export.
-- CLI: `xcodegen generate && xcodebuild -scheme VidEdit -configuration Debug build && xcodebuild -scheme EngineTests test && xcodebuild -scheme AppTests test`.
+- CLI: `xcodegen generate && xcodebuild -scheme Framewright -configuration Debug build && xcodebuild -scheme EngineTests test && xcodebuild -scheme AppTests test`.
 
 ## First implementation step after approval
 Phase 0: install XcodeGen, write `project.yml`, vendor the two headers, write and run `build-ffmpeg.sh`, create the targets with placeholder sources, confirm the app launches and both test targets run from the command line.

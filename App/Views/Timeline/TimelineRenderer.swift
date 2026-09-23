@@ -1,5 +1,5 @@
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 
 /// Counters of timeline drawing (diagnostics and the redraw-count tests).
 @MainActor

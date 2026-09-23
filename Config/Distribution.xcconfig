@@ -6,19 +6,19 @@
 // Why a separate configuration: the hardened runtime turns on library validation, which only
 // loads embedded code signed by Apple or with the same Team ID as the app. Ad hoc signatures
 // have no Team ID, so an ad hoc build with the hardened runtime aborts at launch (dyld cannot
-// load VidEditEngine.framework or the FFmpeg dylibs). With a real identity every embedded
+// load FramewrightEngine.framework or the FFmpeg dylibs). With a real identity every embedded
 // library is re-signed with the app's identity when it is copied (CodeSignOnCopy), so they share
 // its Team ID and load.
 //
 // Set the identity and team without editing tracked files, either
 //   - in Config/Signing.local.xcconfig (gitignored), for example:
-//         VIDEDIT_CODE_SIGN_IDENTITY = Developer ID Application
-//         VIDEDIT_DEVELOPMENT_TEAM = ABCDE12345
-//   - or on the xcodebuild command line: VIDEDIT_DEVELOPMENT_TEAM=ABCDE12345
+//         FRAMEWRIGHT_CODE_SIGN_IDENTITY = Developer ID Application
+//         FRAMEWRIGHT_DEVELOPMENT_TEAM = ABCDE12345
+//   - or on the xcodebuild command line: FRAMEWRIGHT_DEVELOPMENT_TEAM=ABCDE12345
 // project.yml maps them onto CODE_SIGN_IDENTITY and DEVELOPMENT_TEAM for Distribution. Without
 // a team the build stops with Xcode's "requires selecting a development team" error.
 
-VIDEDIT_CODE_SIGN_IDENTITY = Developer ID Application
-VIDEDIT_DEVELOPMENT_TEAM =
+FRAMEWRIGHT_CODE_SIGN_IDENTITY = Developer ID Application
+FRAMEWRIGHT_DEVELOPMENT_TEAM =
 
 #include? "Signing.local.xcconfig"

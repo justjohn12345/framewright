@@ -1,6 +1,6 @@
 # Integration notes for the next round (from the 2026-09-23 fix round)
 
-State after the fix round for `2026-09-23-full-review.md`: full VidEdit scheme green with
+State after the fix round for `2026-09-23-full-review.md`: full Framewright scheme green with
 `-Wall -Wextra` and warnings as errors (C/ObjC/C++ and Swift); Audio, Playback, Facade, DecodePool
 and FrameCache suites clean under ThreadSanitizer. Unfixed items are in `open-findings.md`; this
 file lists what later phases (6: transitions/effects UI, 7: export, 8: persistence) must adopt.
@@ -65,7 +65,7 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   field (`-Wmissing-field-initializers`); give new struct fields defaults.
 - Configurations: Debug and Release are ad hoc without the hardened runtime (launch headless);
   Distribution (the Archive action) has the hardened runtime and the identity/team from
-  `Config/Distribution.xcconfig` (`VIDEDIT_CODE_SIGN_IDENTITY`, `VIDEDIT_DEVELOPMENT_TEAM`,
+  `Config/Distribution.xcconfig` (`FRAMEWRIGHT_CODE_SIGN_IDENTITY`, `FRAMEWRIGHT_DEVELOPMENT_TEAM`,
   optional gitignored `Config/Signing.local.xcconfig`). Anything new embedded in the app must
   be signed on copy (CodeSignOnCopy) or library validation rejects it under Distribution.
 - `App/Resources/Acknowledgements.md` and `COPYING.LGPLv2.1` ship in the app; update the notice
@@ -97,7 +97,7 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   linked crossfade (always/never/ask), duration display (timecode/frames/seconds; also what
   `DurationFormat.parseFrames` assumes for a bare number). Export (phase 7) should show
   durations through `ProjectStore.durationString` for consistency.
-- In-app drag types: `com.justjohn12345.videdit.transition.cross-dissolve` and
+- In-app drag types: `com.justjohn12345.framewright.transition.cross-dissolve` and
   `...audio-crossfade` (declared in project.yml / Info.plist, like the asset reference). The
   timeline's drops go through `TimelineDropDelegate` (assets and transitions).
 

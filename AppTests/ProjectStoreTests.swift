@@ -1,9 +1,9 @@
 import AppKit
 import AVFoundation
 import Combine
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 @MainActor
 final class ProjectStoreTests: XCTestCase {
@@ -120,7 +120,7 @@ final class ProjectStoreTests: XCTestCase {
         let movie = try XCTUnwrap(store.assets.first { $0.hasVideo })
         XCTAssertTrue(store.place(asset: movie.assetID, at: .zero, videoTrack: store.targetVideoTrackID,
                                   audioTrack: 0, overwrite: true))
-        let url = directory.appendingPathComponent("Store Test.videdit")
+        let url = directory.appendingPathComponent("Store Test.framewright")
         try store.save(to: url)
         XCTAssertFalse(store.isDirty)
         XCTAssertEqual(store.projectName, "Store Test")
@@ -137,7 +137,7 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertFalse(store.isDirty)
         XCTAssertNil(store.statusMessage, "no missing media")
 
-        XCTAssertThrowsError(try store.open(url: directory.appendingPathComponent("nope.videdit")))
+        XCTAssertThrowsError(try store.open(url: directory.appendingPathComponent("nope.framewright")))
         XCTAssertEqual(store.clips.count, 1, "a failed open keeps the project")
     }
 

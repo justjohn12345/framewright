@@ -3,7 +3,7 @@
 // waveforms, notifications, hardware caps and the program monitor frame source.
 
 #import <Metal/Metal.h>
-#import <VidEditEngine/VidEditEngine.h>
+#import <FramewrightEngine/FramewrightEngine.h>
 #import <XCTest/XCTest.h>
 
 #include "../Media/BurnIn.h"
@@ -639,7 +639,7 @@ int shownBurnIn(VEPreviewView *view) {
                                     sourceOut:kCMTimeInvalid];
         XCTAssertTrue(r.ok, @"%@: %@", asset.name, r.message);
     }
-    NSURL *url = [scratchURL() URLByAppendingPathComponent:@"Round Trip.videdit"];
+    NSURL *url = [scratchURL() URLByAppendingPathComponent:@"Round Trip.framewright"];
     NSError *error = nil;
     XCTAssertTrue([engine saveProjectToURL:url error:&error], @"%@", error);
     XCTAssertFalse(engine.isDirty);
@@ -672,12 +672,12 @@ int shownBurnIn(VEPreviewView *view) {
     XCTAssertEqualObjects([reopened assetInfo:assets[0].assetID].codecName, assets[0].codecName);
 
     // Re-saving an unchanged project reproduces the file byte for byte.
-    NSURL *copy = [scratchURL() URLByAppendingPathComponent:@"Copy.videdit"];
+    NSURL *copy = [scratchURL() URLByAppendingPathComponent:@"Copy.framewright"];
     XCTAssertTrue([reopened saveProjectToURL:copy error:&error], @"%@", error);
     XCTAssertEqualObjects([NSData dataWithContentsOfURL:copy], data);
 
     // A broken file is refused and the open project is kept.
-    NSURL *broken = [scratchURL() URLByAppendingPathComponent:@"Broken.videdit"];
+    NSURL *broken = [scratchURL() URLByAppendingPathComponent:@"Broken.framewright"];
     [[@"{\"schemaVersion\": 1" dataUsingEncoding:NSUTF8StringEncoding] writeToURL:broken atomically:YES];
     XCTAssertFalse([reopened openProjectAtURL:broken error:&error]);
     XCTAssertEqual(error.code, VEEngineErrorInvalidProject);
@@ -694,7 +694,7 @@ int shownBurnIn(VEPreviewView *view) {
     VEAssetInfo *wav = [self importOne:"audio_only.wav" into:engine];
     VEAssetInfo *vanishing = [self import:@[ copy ] into:engine].firstObject;
     XCTAssertNotNil(vanishing);
-    NSURL *url = [dir URLByAppendingPathComponent:@"Missing.videdit"];
+    NSURL *url = [dir URLByAppendingPathComponent:@"Missing.framewright"];
     XCTAssertTrue([engine saveProjectToURL:url error:&error], @"%@", error);
     XCTAssertTrue([NSFileManager.defaultManager removeItemAtURL:copy error:&error], @"%@", error);
 

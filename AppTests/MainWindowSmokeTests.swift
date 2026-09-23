@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 @MainActor
 final class MainWindowSmokeTests: XCTestCase {
@@ -66,7 +66,7 @@ final class MainWindowSmokeTests: XCTestCase {
 
         if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
             host.cacheDisplay(in: host.bounds, to: rep)
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent("VidEditMainWindow.png")
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("FramewrightMainWindow.png")
             try rep.representation(using: .png, properties: [:])?.write(to: url)
             print("Main window snapshot: \(url.path)")
         }

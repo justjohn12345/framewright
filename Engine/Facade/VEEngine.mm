@@ -65,7 +65,7 @@ NSString *const VEEngineChangeCountKey = @"changeCount";
 NSString *const VEEngineAssetIDKey = @"assetID";
 NSString *const VEEnginePlaybackStatusKey = @"playbackStatus";
 NSString *const VEEngineCriticalKey = @"critical";
-NSErrorDomain const VEEngineErrorDomain = @"VidEditEngine.VEEngine";
+NSErrorDomain const VEEngineErrorDomain = @"FramewrightEngine.VEEngine";
 
 /// Raises NSInternalInconsistencyException: a VEEngine method was called off the main thread.
 [[noreturn]] static void veMainThreadViolation(const char *function) {
@@ -434,7 +434,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 + (NSString *)engineVersion {
     NSBundle *bundle = [NSBundle bundleForClass:self];
     NSString *version = [bundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
-    NSAssert(version.length > 0, @"VidEditEngine.framework Info.plist has no CFBundleShortVersionString");
+    NSAssert(version.length > 0, @"FramewrightEngine.framework Info.plist has no CFBundleShortVersionString");
     return version ?: @"";
 }
 
@@ -454,7 +454,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
                                                  appropriateForURL:nil
                                                             create:YES
                                                              error:nil];
-    return [[support URLByAppendingPathComponent:@"VidEdit" isDirectory:YES] URLByAppendingPathComponent:@"Caches"
+    return [[support URLByAppendingPathComponent:@"Framewright" isDirectory:YES] URLByAppendingPathComponent:@"Caches"
                                                                                                isDirectory:YES];
 }
 
@@ -465,7 +465,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 - (instancetype)initWithCacheDirectory:(nullable NSURL *)cacheDirectory {
     VE_ASSERT_MAIN();
     if ((self = [super init])) {
-        _log = os_log_create("com.justjohn12345.videdit.engine", "Facade");
+        _log = os_log_create("com.justjohn12345.framewright.engine", "Facade");
         _router = media::BackendRouter::makeDefault();
         (void)_router->registerBackend(media::ffmpeg::makeFFmpegBackend());
         _frameCache = std::make_shared<media::FrameCache>();
@@ -507,7 +507,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
         _bookmarks = [NSMutableDictionary dictionary];
         _accessedURLs = [NSMutableArray array];
         _observers = [NSHashTable weakObjectsHashTable];
-        _probeQueue = dispatch_queue_create("com.justjohn12345.videdit.engine.probe",
+        _probeQueue = dispatch_queue_create("com.justjohn12345.framewright.engine.probe",
                                             dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT,
                                                                                     QOS_CLASS_USER_INITIATED, 0));
         // Probe VideoToolbox once off the main thread so the Preferences pane never waits.
@@ -724,7 +724,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     if (!loaded.ok()) {
         if (error != nullptr) {
             *error = makeError(VEEngineErrorInvalidProject,
-                               [NSString stringWithFormat:@"%@ is not a valid VidEdit project: %@",
+                               [NSString stringWithFormat:@"%@ is not a valid Framewright project: %@",
                                                           url.lastPathComponent, toNS(loaded.error)]);
         }
         return NO;

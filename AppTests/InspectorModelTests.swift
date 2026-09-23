@@ -1,7 +1,7 @@
 import CoreMedia
-import VidEditEngine
+import FramewrightEngine
 import XCTest
-@testable import VidEdit
+@testable import Framewright
 
 /// The inspector's editing logic: nudge bursts as one undo step, typed values with units
 /// (parsed and clamped), sliders, resets, multi-selection batches and refusal messages.
