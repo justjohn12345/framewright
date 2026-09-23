@@ -1,6 +1,7 @@
 #include "ModelFixtures.h"
 
 #include <cmath>
+#include <limits>
 
 using namespace ve;
 
@@ -33,6 +34,8 @@ TEST_CASE("TimeUtil: numeric operators compare values across timescales; identic
     CHECK(half + half == CMTimeMake(1, 1));
     CHECK(half - CMTimeMake(1, 1) == CMTimeMake(-1, 2));
     CHECK(-half == CMTimeMake(-1, 2));
+    CHECK(identical(-kCMTimePositiveInfinity, kCMTimeNegativeInfinity));
+    CHECK(identical(-kCMTimeInvalid, kCMTimeInvalid));
     CHECK(minTime(half, CMTimeMake(1, 3)) == CMTimeMake(1, 3));
     CHECK(maxTime(half, CMTimeMake(1, 3)) == half);
     CHECK(clampTime(CMTimeMake(5, 1), kCMTimeZero, half) == half);
@@ -206,4 +209,161 @@ TEST_CASE("TimeUtil: describe") {
     CHECK(describe(kCMTimeInvalid) == "invalid");
     CHECK(describe(kCMTimePositiveInfinity) == "+infinity");
     CHECK(describe(CMTimeMake(1, 2)) == "1/2 (0.500000 s)");
+}
+
+TEST_CASE("TimeUtil: exact addition keeps a shared timescale and never rounds") {
+    // Same timescale: stays on it.
+    CHECK(identical(*checkedAdd(CMTimeMake(1001, 30000), CMTimeMake(2002, 30000)), CMTimeMake(3003, 30000)));
+    // Different timescales: their least common multiple.
+    CHECK(identical(*checkedAdd(CMTimeMake(1, 30), CMTimeMake(1, 600)), CMTimeMake(21, 600)));
+    CHECK(identical(*checkedSubtract(CMTimeMake(1, 30), CMTimeMake(1, 600)), CMTimeMake(19, 600)));
+    // 44.1 kHz + 29.97 fps * 999/1000: the common timescale 4.41e9 does not fit an int32, but the
+    // reduced sum may. 44100/44100 + 30000000/30000000 reduces to 2/1.
+    CHECK(identical(*checkedAdd(CMTimeMake(44100, 44100), CMTimeMake(30000000, 30000000)), CMTimeMake(2, 1)));
+    // ... and when even the reduced sum does not fit, the result is refused, not rounded.
+    const CMTime in44 = CMTimeMake(44101, 44100);
+    const CMTime scaled = *checkedScale(CMTimeMake(1001, 30000), Ratio{999, 1000}); // 999999/30000000
+    CHECK_FALSE(checkedAdd(in44, scaled).has_value());
+    CHECK_FALSE(checkedSubtract(in44, scaled).has_value());
+    // The operators fall back to CoreMedia's rounded (and flagged) result only then.
+    const CMTime rounded = in44 + scaled;
+    CHECK(isRounded(rounded));
+    CHECK(std::fabs(CMTimeGetSeconds(rounded) - (44101.0 / 44100.0 + 999999.0 / 30000000.0)) < 1e-9);
+    CHECK_FALSE(isRounded(CMTimeMake(1, 30) + CMTimeMake(1, 44100)));
+
+    // Flags and epochs.
+    CMTime flagged = CMTimeMake(1, 30);
+    flagged.flags |= kCMTimeFlags_HasBeenRounded;
+    CHECK(isRounded(*checkedAdd(flagged, CMTimeMake(1, 30))));
+    CMTime otherEpoch = CMTimeMake(1, 30);
+    otherEpoch.epoch = 2;
+    CHECK_FALSE(checkedAdd(otherEpoch, CMTimeMake(1, 30)).has_value());
+    CHECK(checkedAdd(otherEpoch, otherEpoch)->epoch == 2);
+    CHECK_FALSE(checkedAdd(kCMTimeInvalid, CMTimeMake(1, 30)).has_value());
+    CHECK_FALSE(checkedAdd(kCMTimePositiveInfinity, CMTimeMake(1, 30)).has_value());
+    CHECK(CMTIME_IS_POSITIVE_INFINITY(kCMTimePositiveInfinity + CMTimeMake(1, 30)));
+
+    // Range edges: INT64_MAX values and the largest timescale.
+    const std::int64_t big = std::numeric_limits<std::int64_t>::max();
+    CHECK_FALSE(checkedAdd(CMTimeMake(big, 1), CMTimeMake(1, 1)).has_value());
+    CHECK(identical(*checkedAdd(CMTimeMake(big - 1, 1), CMTimeMake(1, 1)), CMTimeMake(big, 1)));
+    CHECK(identical(*checkedAdd(CMTimeMake(big, 2), CMTimeMake(-big, 2)), CMTimeMake(0, 2)));
+    const CMTime tick = CMTimeMake(1, kCMTimeMaxTimescale);
+    CHECK(identical(*checkedAdd(tick, tick), CMTimeMake(2, kCMTimeMaxTimescale)));
+    CHECK_FALSE(checkedAdd(tick, CMTimeMake(1, kCMTimeMaxTimescale - 1)).has_value());
+}
+
+TEST_CASE("TimeUtil: unary minus keeps flags and epoch and is defined at INT64_MIN") {
+    CMTime t = CMTimeMake(5, 30);
+    t.flags |= kCMTimeFlags_HasBeenRounded;
+    t.epoch = 3;
+    const CMTime negated = -t;
+    CHECK(negated.value == -5);
+    CHECK(negated.timescale == 30);
+    CHECK(negated.flags == t.flags);
+    CHECK(negated.epoch == 3);
+
+    const std::int64_t min = std::numeric_limits<std::int64_t>::min();
+    // -(INT64_MIN / 2) = 2^62 / 1 exactly.
+    const auto even = checkedNegate(CMTimeMake(min, 2));
+    REQUIRE(even.has_value());
+    CHECK(identical(*even, CMTimeMake(std::int64_t(1) << 62, 1)));
+    // Over an odd timescale there is no exact negation.
+    CHECK_FALSE(checkedNegate(CMTimeMake(min, 3)).has_value());
+    CHECK(-CMTimeMake(min, 3) > kCMTimeZero); // CoreMedia's saturated result, still positive
+}
+
+TEST_CASE("TimeUtil: scaling and frame math at the extremes") {
+    const std::int64_t max = std::numeric_limits<std::int64_t>::max();
+    // Exact scaling refuses what does not fit; the rendering variant rounds or saturates.
+    CHECK_FALSE(checkedScale(CMTimeMake(max, 1), Ratio{2, 1}).has_value());
+    CHECK(CMTIME_IS_POSITIVE_INFINITY(scaleTime(CMTimeMake(max, 1), Ratio{2, 1})));
+    CHECK(CMTIME_IS_NEGATIVE_INFINITY(scaleTime(CMTimeMake(-max, 1), Ratio{3, 1})));
+    CHECK(identical(*checkedScale(CMTimeMake(max, 1), Ratio{1, 1}), CMTimeMake(max, 1)));
+    CHECK(identical(*checkedScale(CMTimeMake(max - 1, 2), Ratio{1, 1}), CMTimeMake(max - 1, 2)));
+    const CMTime tiny = scaleTime(CMTimeMake(1, kCMTimeMaxTimescale), Ratio{1, 1000});
+    CHECK(isRounded(tiny));
+    CHECK(tiny.value == 0); // below the precise timescale's resolution
+    CHECK_FALSE(checkedScale(kCMTimeInvalid, Ratio{1, 2}).has_value());
+    CHECK_FALSE(checkedScale(CMTimeMake(1, 2), Ratio{1, 0}).has_value());
+
+    // Frame indices that do not fit int64 are refused (checked) or saturate (documented).
+    CHECK_FALSE(checkedFrameIndexAt(CMTimeMake(max, 1), CMTimeMake(1, kCMTimeMaxTimescale), SnapMode::Floor)
+                    .has_value());
+    CHECK(frameIndexAt(CMTimeMake(max, 1), CMTimeMake(1, kCMTimeMaxTimescale), SnapMode::Floor) == max);
+    CHECK(frameIndexAt(CMTimeMake(-max, 1), CMTimeMake(1, kCMTimeMaxTimescale), SnapMode::Ceil) ==
+          std::numeric_limits<std::int64_t>::min());
+    CHECK(*checkedFrameIndexAt(CMTimeMake(max, 1), CMTimeMake(1, 1), SnapMode::Round) == max);
+    CHECK_FALSE(checkedTimeForFrame(max, CMTimeMake(2, 30)).has_value());
+    CHECK(CMTIME_IS_POSITIVE_INFINITY(timeForFrame(max, CMTimeMake(2, 30))));
+    CHECK(CMTIME_IS_NEGATIVE_INFINITY(timeForFrame(-max, CMTimeMake(2, 30))));
+    CHECK(CMTIME_IS_POSITIVE_INFINITY(snapToFrame(CMTimeMake(max, 1), CMTimeMake(1, 30), SnapMode::Floor)));
+    CHECK(CMTIME_IS_INVALID(timeForFrame(3, kCMTimeZero)));
+
+    // approximateRatio never overflows or returns a zero denominator.
+    CHECK(approximateRatio(1e300, 1000) == Ratio{0, 1});
+    CHECK(approximateRatio(9.0e18, 1000) == Ratio{0, 1});
+    CHECK(approximateRatio(123456789.5, 1000) == Ratio{246913579, 2});
+    CHECK(approximateRatio(1e-300, 1000) == Ratio{1, 1000});
+}
+
+TEST_CASE("TimeUtil: ExactTime arithmetic, comparison and snapping") {
+    const ExactTime third = *ExactTime::fraction(1, 3);
+    const ExactTime sixth = *ExactTime::fraction(-2, -12);
+    CHECK(sixth == *ExactTime::fraction(1, 6));
+    CHECK(*third.plus(sixth) == *ExactTime::fraction(1, 2));
+    CHECK(*third.minus(sixth) == sixth);
+    CHECK(*third.times(Ratio{3, 5}) == *ExactTime::fraction(1, 5));
+    CHECK(*third.dividedBy(Ratio{2, 3}) == *ExactTime::fraction(1, 2));
+    CHECK_FALSE(third.dividedBy(Ratio{0, 1}).has_value());
+    CHECK(third.negated().compare(ExactTime()) < 0);
+    CHECK(third.compare(sixth) > 0);
+    CHECK(third.compare(CMTimeMake(1, 3)) == 0);
+    CHECK(third.compare(CMTimeMake(333333, 1000000)) > 0);
+    CHECK_FALSE(ExactTime::fraction(1, 0).has_value());
+    CHECK(identical(*ExactTime::fraction(10, 20)->toTime(), CMTimeMake(1, 2)));
+    CHECK_FALSE(ExactTime::fraction(1, static_cast<Int128>(kCMTimeMaxTimescale) + 2)->toTime().has_value());
+
+    // Comparison is exact where cross products would overflow 128 bits.
+    const Int128 huge = static_cast<Int128>(1) << 100;
+    const ExactTime a = *ExactTime::fraction(huge + 1, huge);
+    const ExactTime b = *ExactTime::fraction(huge + 2, huge + 1);
+    CHECK(a.compare(b) > 0); // 1 + 1/huge > 1 + 1/(huge + 1)
+    CHECK(b.compare(a) < 0);
+    CHECK(a.compare(a) == 0);
+    CHECK(a.negated().compare(b.negated()) < 0);
+    // Products that overflow are refused, not wrapped.
+    CHECK_FALSE(a.times(Ratio{std::numeric_limits<std::int64_t>::max(), 1}).has_value());
+
+    // Snapping an exact value to a frame grid.
+    const ExactTime t = *ExactTime::from(CMTimeMake(1, 1)); // 23.976 frames at 1001/24000
+    CHECK(*t.frameIndex(k23976, SnapMode::Floor) == 23);
+    CHECK(*t.frameIndex(k23976, SnapMode::Ceil) == 24);
+    CHECK(*t.frameIndex(k23976, SnapMode::Round) == 24);
+    CHECK(*t.negated().frameIndex(k23976, SnapMode::Floor) == -24);
+    CHECK(*ExactTime::fraction(1, 60)->frameIndex(k30, SnapMode::Round) == 1); // halves go up
+    CHECK_FALSE(t.frameIndex(kCMTimeZero, SnapMode::Floor).has_value());
+
+    // Rounded CMTime form.
+    const CMTime r = ExactTime::fraction(1, static_cast<Int128>(3) * kCMTimeMaxTimescale)->toTimeRounded();
+    CHECK(isRounded(r));
+    CHECK(r.timescale == kPreciseTimescale);
+}
+
+TEST_CASE("TimeUtil: fractionThrough is exact at frame boundaries") {
+    const TimeRange range{CMTimeMake(1001 * 50, 30000), CMTimeMake(1001 * 70, 30000)};
+    for (int k = 0; k <= 20; ++k) {
+        CHECK(fractionThrough(range, CMTimeMake(1001 * (50 + k), 30000)) == static_cast<double>(k) / 20.0);
+    }
+    CHECK(fractionThrough(range, CMTimeMake(0, 1)) == 0.0);
+    CHECK(fractionThrough(range, CMTimeMake(1000, 1)) == 1.0);
+}
+
+TEST_CASE("TimeUtil: Ratio helpers") {
+    CHECK(*Ratio::reduced(6, -4) == Ratio{-3, 2});
+    CHECK_FALSE(Ratio::reduced(1, 0).has_value());
+    CHECK(Ratio{2, 4}.isReduced() == false);
+    CHECK(Ratio{1, 2} < Ratio{2, 3});
+    CHECK_FALSE(Ratio{2, 4} < Ratio{1, 2});
+    CHECK(Ratio{3, 3}.isUnity());
 }
