@@ -107,6 +107,16 @@ final class WindowLayoutModel: ObservableObject {
         defaults?.set(clamped, forKey: Self.sourceFractionKey)
     }
 
+    /// The divider between the source and program monitors was dragged `translation` points
+    /// (positive: right) in a monitor area `areaWidth` points wide, from where the source monitor
+    /// took `startFraction` of it: the fraction follows the pointer, clamped to `sourceFractions`
+    /// (dragging past a bound and back returns to where the pointer is, since it is relative to the
+    /// start).
+    func dragSourceMonitorDivider(from startFraction: Double, by translation: CGFloat, areaWidth: CGFloat) {
+        guard areaWidth > 0, translation.isFinite else { return }
+        setSourceMonitorFraction(startFraction + Double(translation / areaWidth))
+    }
+
     /// The divider above the timeline was dragged to give it `height` in a window content of
     /// `windowHeight` points.
     func setTimelineHeight(_ height: CGFloat, windowHeight: CGFloat) {

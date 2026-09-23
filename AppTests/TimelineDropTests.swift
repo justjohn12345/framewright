@@ -106,6 +106,36 @@ final class TimelineDropTests: XCTestCase {
         XCTAssertNil(gestures.transitionDrop)
     }
 
+    /// UX round review test gap 5: a dissolve dropped from the Effects tab on a plain split (both
+    /// sides play the same media contiguously) is added and the status line says why it shows
+    /// nothing, as for the "+" button.
+    func testADissolveDroppedOnAThroughEditSaysSoInTheStatusLine() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let v1 = try XCTUnwrap(store.videoTracks.first).trackID
+        let clip = try fixture.placeMovie(movie, at: 0, track: v1)
+        store.selection = [clip]
+        store.playheadTime = store.frameTime(1)
+        store.splitAtPlayhead()
+        XCTAssertEqual(store.clips.count, 2, "split into a through edit")
+        store.statusMessage = nil
+        let gestures = TimelineGestureController(store: store)
+        var targeted = false
+        let delegate = TimelineDropDelegate(gestures: gestures,
+                                            isAssetTargeted: Binding(get: { targeted }, set: { targeted = $0 }))
+        let model = store.timelineModel
+        let row = try XCTUnwrap(model.layout(forTrack: v1))
+        let atCut = CGPoint(x: model.x(forTime: 1) + 4, y: row.y + 30)
+        let dissolve = FakeDropInfo(location: atCut, providers: [transitionProvider(.crossDissolve)])
+        XCTAssertTrue(delegate.handleValidate(dissolve))
+        delegate.handleEntered(dissolve)
+        XCTAssertEqual(delegate.handleUpdated(dissolve)?.operation, .copy)
+        XCTAssertEqual(gestures.transitionDrop?.cut ?? -1, 1, accuracy: 1e-9)
+        XCTAssertTrue(delegate.handlePerform(dissolve))
+        XCTAssertEqual(store.sequence.transitions.count, 1, "added anyway (the user may trim a side next)")
+        let note = "Both sides show the same frames here; trim or move one side to see the dissolve"
+        XCTAssertTrue(store.statusMessage?.contains(note) == true, store.statusMessage ?? "")
+    }
+
     func testMediaDroppedFromTheBinIsPlaced() async throws {
         let (movie, _) = try await fixture.importMedia()
         let v1 = try XCTUnwrap(store.videoTracks.first).trackID

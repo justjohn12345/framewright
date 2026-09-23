@@ -35,7 +35,8 @@ struct ContentView: View {
         GeometryReader { window in
             let timelineHeight = layout.timelineHeight(contentHeight: store.timelineContentHeight,
                                                        windowHeight: window.size.height)
-            let sides = sideWidths(windowWidth: window.size.width)
+            let sides = Self.sideWidths(windowWidth: window.size.width, binWidth: layout.mediaBinWidth,
+                                        inspectorWidth: layout.inspectorWidth)
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
                     mediaColumn
@@ -104,12 +105,14 @@ struct ContentView: View {
         )
     }
 
-    /// The bin and inspector widths, narrowed (inspector first, then the bin) when the window is
-    /// too narrow to leave the monitors `minimumCentreWidth`.
-    private func sideWidths(windowWidth: CGFloat) -> (bin: CGFloat, inspector: CGFloat) {
+    /// The bin and inspector widths (the layout's `binWidth` and `inspectorWidth`), narrowed when
+    /// the window is too narrow to leave the monitors `minimumCentreWidth`: the inspector first, down
+    /// to its minimum, then the bin, down to its minimum (then the window's minimum size decides).
+    static func sideWidths(windowWidth: CGFloat, binWidth: CGFloat,
+                           inspectorWidth: CGFloat) -> (bin: CGFloat, inspector: CGFloat) {
         let dividers = 2 * WindowLayoutModel.dividerThickness
-        var bin = layout.mediaBinWidth
-        var inspector = layout.inspectorWidth
+        var bin = binWidth
+        var inspector = inspectorWidth
         var excess = bin + inspector + dividers + Self.minimumCentreWidth - windowWidth
         if excess > 0 {
             let cut = min(excess, inspector - WindowLayoutModel.inspectorWidths.lowerBound)
@@ -144,8 +147,8 @@ struct ContentView: View {
                         PaneDivider(orientation: .vertical,
                                     onBegin: { dragStartSourceFraction = layout.sourceMonitorFraction },
                                     onDrag: { dx in
-                                        guard area.size.width > 0 else { return }
-                                        layout.setSourceMonitorFraction(dragStartSourceFraction + Double(dx / area.size.width))
+                                        layout.dragSourceMonitorDivider(from: dragStartSourceFraction, by: dx,
+                                                                        areaWidth: area.size.width)
                                     })
                     }
                     programMonitor

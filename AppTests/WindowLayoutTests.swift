@@ -29,9 +29,11 @@ final class WindowLayoutTests: XCTestCase {
     func testTheSourceMonitorIsHiddenUntilMediaIsOpenedInIt() async throws {
         let store = fixture.store
         XCTAssertFalse(store.layout.showsSourceMonitor, "hidden by default: the program monitor takes the centre")
+        XCTAssertFalse(store.engine.sourceMonitorVisible, "the engine knows it is hidden")
         let (movie, _) = try await fixture.importMedia()
         store.showInSourceMonitor(movie.assetID)
         XCTAssertTrue(store.layout.showsSourceMonitor, "a double-click in the bin shows it")
+        XCTAssertTrue(store.engine.sourceMonitorVisible)
         XCTAssertEqual(store.focusArea, .sourceMonitor)
 
         // Hiding it while it plays pauses it and gives the transport keys back to the program.
@@ -44,8 +46,22 @@ final class WindowLayoutTests: XCTestCase {
         XCTAssertEqual(store.engine.sourceMonitorPlaybackState, .stopped, "hiding pauses the source")
         XCTAssertEqual(store.focusArea, .timeline)
         XCTAssertEqual(store.source.assetID, movie.assetID, "the asset and its marks stay for next time")
+        // UX round review finding 4: hidden, its controller keeps no lookahead (no decode streams).
+        XCTAssertFalse(store.engine.sourceMonitorVisible)
+        let dropped = await StoreFixture.wait(until: { store.engine.sourceMonitorPlaybackStats.decodeStreams == 0 },
+                                              timeout: 5)
+        XCTAssertTrue(dropped, "hidden: the source monitor's pool holds no streams")
         store.setSourceMonitorVisible(true)
         XCTAssertTrue(store.layout.showsSourceMonitor)
+        XCTAssertTrue(store.engine.sourceMonitorVisible)
+        let resumed = await StoreFixture.wait(until: { store.engine.sourceMonitorPlaybackStats.decodeStreams > 0 },
+                                              timeout: 5)
+        XCTAssertTrue(resumed, "shown: the lookahead resumes at the paused frame")
+        // Reset Window Layout hides it through the same path.
+        store.setSourceMonitorVisible(false)
+        store.layout.resetToDefaults()
+        XCTAssertFalse(store.engine.sourceMonitorVisible)
+        store.setSourceMonitorVisible(true)
 
         // Focusing a field of the inspector brings its tab to the front.
         store.layout.inspectorTab = .effects
@@ -104,6 +120,75 @@ final class WindowLayoutTests: XCTestCase {
         XCTAssertFalse(reset.showsSourceMonitor)
         XCTAssertEqual(reset.mediaBinWidth, WindowLayoutModel.defaultMediaBinWidth)
         XCTAssertEqual(reset.inspectorTab, .inspector)
+    }
+
+    // MARK: Side panels and the source monitor divider (UX round review, test gap 4)
+
+    /// At the window's minimum width (1100 pt) the monitors keep `minimumCentreWidth`: the inspector
+    /// gives up width first, down to its minimum, and only then the bin.
+    func testTheSidePanelsNarrowInspectorFirstAtTheMinimumWindowWidth() {
+        let window: CGFloat = 1100
+        let dividers = 2 * WindowLayoutModel.dividerThickness
+        let centre = ContentView.minimumCentreWidth
+        func centreWidth(_ sides: (bin: CGFloat, inspector: CGFloat)) -> CGFloat {
+            window - sides.bin - sides.inspector - dividers
+        }
+
+        // The defaults fit: nothing narrows.
+        let defaults = ContentView.sideWidths(windowWidth: window, binWidth: WindowLayoutModel.defaultMediaBinWidth,
+                                              inspectorWidth: WindowLayoutModel.defaultInspectorWidth)
+        XCTAssertEqual(defaults.bin, WindowLayoutModel.defaultMediaBinWidth)
+        XCTAssertEqual(defaults.inspector, WindowLayoutModel.defaultInspectorWidth)
+        XCTAssertGreaterThan(centreWidth(defaults), centre)
+
+        // 130 pt too wide: only the inspector narrows (it has 160 pt above its minimum).
+        let some = ContentView.sideWidths(windowWidth: window, binWidth: 400, inspectorWidth: 400)
+        XCTAssertEqual(some.bin, 400, "the bin keeps its width while the inspector can give")
+        XCTAssertEqual(some.inspector, 270)
+        XCTAssertEqual(centreWidth(some), centre, accuracy: 1e-9)
+
+        // Both at their maximum (270 pt too wide): the inspector goes to its minimum (220 pt), then
+        // the bin gives the remaining 50 pt.
+        let widest = ContentView.sideWidths(windowWidth: window, binWidth: WindowLayoutModel.mediaBinWidths.upperBound,
+                                            inspectorWidth: WindowLayoutModel.inspectorWidths.upperBound)
+        XCTAssertEqual(widest.inspector, WindowLayoutModel.inspectorWidths.lowerBound)
+        XCTAssertEqual(widest.bin, WindowLayoutModel.mediaBinWidths.upperBound - 50)
+        XCTAssertEqual(centreWidth(widest), centre, accuracy: 1e-9)
+
+        // A window narrower than both minimums allow: both at their minimum (the window's minimum
+        // size keeps this from happening; the panels never go below their own minimums).
+        let narrow = ContentView.sideWidths(windowWidth: 700, binWidth: 300, inspectorWidth: 300)
+        XCTAssertEqual(narrow.inspector, WindowLayoutModel.inspectorWidths.lowerBound)
+        XCTAssertEqual(narrow.bin, WindowLayoutModel.mediaBinWidths.lowerBound)
+    }
+
+    /// Dragging the divider between the monitors past either bound clamps the source monitor's share
+    /// (and what is saved); dragging back follows the pointer again, relative to the drag's start.
+    func testDraggingTheSourceMonitorDividerPastItsBoundsClamps() throws {
+        let defaults = try suite()
+        let layout = WindowLayoutModel(defaults: defaults)
+        let start = layout.sourceMonitorFraction
+        XCTAssertEqual(start, WindowLayoutModel.defaultSourceFraction)
+        let area: CGFloat = 800
+
+        layout.dragSourceMonitorDivider(from: start, by: 40, areaWidth: area)
+        XCTAssertEqual(layout.sourceMonitorFraction, start + 0.05, accuracy: 1e-9, "follows the pointer")
+        let bounds = WindowLayoutModel.sourceFractions
+        let saved = { defaults.double(forKey: WindowLayoutModel.sourceFractionKey) }
+        layout.dragSourceMonitorDivider(from: start, by: 600, areaWidth: area)
+        XCTAssertEqual(layout.sourceMonitorFraction, bounds.upperBound, "clamped at the top")
+        XCTAssertEqual(saved(), bounds.upperBound)
+        layout.dragSourceMonitorDivider(from: start, by: -600, areaWidth: area)
+        XCTAssertEqual(layout.sourceMonitorFraction, bounds.lowerBound, "clamped at the bottom")
+        XCTAssertEqual(saved(), bounds.lowerBound)
+        layout.dragSourceMonitorDivider(from: start, by: -8, areaWidth: area)
+        XCTAssertEqual(layout.sourceMonitorFraction, start - 0.01, accuracy: 1e-9,
+                       "back inside: under the pointer again")
+        // A zero-width area (not laid out yet) or a non-finite translation changes nothing.
+        let before = layout.sourceMonitorFraction
+        layout.dragSourceMonitorDivider(from: start, by: 100, areaWidth: 0)
+        layout.dragSourceMonitorDivider(from: start, by: .infinity, areaWidth: area)
+        XCTAssertEqual(layout.sourceMonitorFraction, before)
     }
 
     // MARK: Timeline height

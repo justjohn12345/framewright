@@ -44,10 +44,12 @@ struct SystemScreens: ScreenProviding {
 /// view with the program's transport, so it plays, pauses and refuses to play during an export
 /// exactly like the in-window monitor.
 ///
-/// The window closes on Escape (it becomes key when clicked; the transport keys work in it as
-/// in the editor), from the menu again, when its display goes away (the status line says so) and
-/// when the editor window closes. Available only while there is a display other than the editor
-/// window's.
+/// The window closes on Escape (it becomes key when clicked; only the transport keys work in it,
+/// see `KeyboardController`), from the menu again, when its display goes away (the status line
+/// says so) and when the editor window closes. Like Premiere's transmit output it goes away while
+/// the app is in the background (it sits above the menu bar on every Space, so it would cover
+/// other apps on that display) and comes back when the app is active again. Available only while
+/// the editor window's display is known and there is another one.
 @MainActor
 final class OutputDisplayController: ObservableObject {
     /// The output window is up.
@@ -68,6 +70,8 @@ final class OutputDisplayController: ObservableObject {
     private weak var store: ProjectStore?
     private let center: NotificationCenter
     private var observers: [NSObjectProtocol] = []
+    /// The output was hidden because the app went to the background: show it again on activation.
+    private(set) var resumesOnActivation = false
 
     init(store: ProjectStore, screens: ScreenProviding, center: NotificationCenter = .default) {
         self.store = store
@@ -91,6 +95,8 @@ final class OutputDisplayController: ObservableObject {
                 controller.hide()
             }
         }
+        observe(NSApplication.didResignActiveNotification) { controller, _ in controller.appDidResignActive() }
+        observe(NSApplication.didBecomeActiveNotification) { controller, _ in controller.appDidBecomeActive() }
         refreshAvailability()
     }
 
@@ -100,11 +106,12 @@ final class OutputDisplayController: ObservableObject {
         }
     }
 
-    /// The display the output would use: the first one the editor window is not on.
+    /// The display the output would use: the first one the editor window is not on. None while the
+    /// editor window's display is unknown (no editor window yet, or off screen): any display could
+    /// then be the editor's own, and the output would cover the editor.
     var targetScreen: DisplayScreen? {
         let screens = screenProvider.screens
-        guard screens.count > 1 else { return nil }
-        let editor = screenProvider.screenID(of: store?.editorWindow)
+        guard screens.count > 1, let editor = screenProvider.screenID(of: store?.editorWindow) else { return nil }
         return screens.first { $0.id != editor }
     }
 
@@ -113,7 +120,7 @@ final class OutputDisplayController: ObservableObject {
     }
 
     /// Opens the output window on the other display and attaches it to the engine. Does nothing
-    /// without a second display.
+    /// without a second display or while the editor window's display is unknown (`targetScreen`).
     func show() {
         guard !isShowing, let store, let screen = targetScreen else { return }
         let output = OutputWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -138,6 +145,7 @@ final class OutputDisplayController: ObservableObject {
 
     /// Closes the output window (the engine stops driving its view).
     func hide() {
+        resumesOnActivation = false
         guard isShowing || window != nil else { return }
         if let view = window?.contentView as? VEPreviewView, store?.engine.outputView === view {
             store?.engine.detachOutputView()
@@ -163,6 +171,24 @@ final class OutputDisplayController: ObservableObject {
             }
         }
         refreshAvailability()
+    }
+
+    /// The app went to the background: the output goes away with it (see the class comment).
+    func appDidResignActive() {
+        guard isShowing else { return }
+        hide()
+        resumesOnActivation = true
+    }
+
+    /// The app is active again: the output comes back if it went away with the app, on the display
+    /// the editor is not on now (the status line says so when there is none any more).
+    func appDidBecomeActive() {
+        guard resumesOnActivation else { return }
+        resumesOnActivation = false
+        show()
+        if !isShowing {
+            store?.statusMessage = Self.screenGoneMessage
+        }
     }
 
     private func refreshAvailability() {

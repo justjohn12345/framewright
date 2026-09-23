@@ -5,9 +5,12 @@ import Foundation
 /// the store through an application-local key-down monitor.
 ///
 /// Only key presses in the editor window (`ProjectStore.editorWindow`) and the program output
-/// window on a second display (`OutputDisplayController.window`, so the transport works while it
-/// is focused) are handled; the Settings window, panels and alerts keep their keys. Keys go to the focused control instead when one
-/// takes keyboard input: a text field being edited, or a focused control that uses the keys
+/// window on a second display (`OutputDisplayController.window`) are handled; the Settings window,
+/// panels and alerts keep their keys. The output window takes only the transport keys (Space, J/K/L,
+/// ←/→, Home/End) and Escape (`isTransportOrCancel`): the user is looking at the picture there, not
+/// at the timeline, so Delete, I/O, zoom, gain and Command-A do nothing (the output window closes on
+/// Escape unless a drag is in progress). Keys go to the focused control instead when one takes
+/// keyboard input: a text field being edited, or a focused control that uses the keys
 /// itself (a slider, button, table, pop-up; see `shouldHandleKeys(firstResponder:)`); a click
 /// in the timeline, a monitor or the bin takes that focus back (`ProjectStore.reclaimKeyboardFocus`).
 /// Handled: Space (play/pause), J/K/L (shuttle), ←/→ (one frame), Home/End (start/end), Delete /
@@ -33,6 +36,18 @@ final class KeyboardController {
         case selectAll
         /// `]` / `[`: gain of the selected audio clips ±1 dB (with Shift, `}` / `{`: ±10 dB).
         case gainUp(big: Bool), gainDown(big: Bool)
+
+        /// The keys the program output window takes: the transport (play, shuttle, step, start/end)
+        /// and Escape. Everything else edits or navigates the timeline.
+        var isTransportOrCancel: Bool {
+            switch self {
+            case .togglePlay, .shuttleReverse, .shuttleStop, .shuttleForward, .stepBackward, .stepForward,
+                 .goToStart, .goToEnd, .cancel:
+                return true
+            default:
+                return false
+            }
+        }
 
         /// Keys whose auto-repeat is ignored (each press is a discrete transport command).
         var ignoresRepeat: Bool {
@@ -129,13 +144,15 @@ final class KeyboardController {
     /// Handles a key-down event sent to `window` (the event's window; tests pass one). Returns
     /// whether it was consumed.
     func handle(_ event: NSEvent, window: NSWindow?) -> Bool {
-        guard let store, let window, window.attachedSheet == nil,
-              window === store.editorWindow || window === store.outputDisplay.window else {
-            return false
-        }
+        guard let store, let window, window.attachedSheet == nil else { return false }
+        let fromOutput = window === store.outputDisplay.window
+        guard window === store.editorWindow || fromOutput else { return false }
         let action = Self.action(keyCode: event.keyCode, characters: event.charactersIgnoringModifiers ?? "",
                                  modifiers: event.modifierFlags)
         guard let action else { return false }
+        // The output window shows the picture only: no editing from it (the key is not ours, so
+        // it goes on to the window, which ignores it).
+        if fromOutput, !action.isTransportOrCancel { return false }
         if action == .cancel {
             // Escape cancels a drag in progress (whatever has focus); otherwise it is not ours.
             guard let cancel = store.cancelActiveGesture else { return false }

@@ -114,8 +114,13 @@ final class ProjectStore: ObservableObject {
     var cancelActiveGesture: (() -> Void)?
 
     /// The editor window (set by `ContentView`). Keyboard shortcuts are taken only from it, and
-    /// clicks in the timeline, monitors and bin take keyboard focus back from its text fields.
-    weak var editorWindow: NSWindow?
+    /// clicks in the timeline, monitors and bin take keyboard focus back from its text fields. The
+    /// program output is available once its display is known (`OutputDisplayController`).
+    weak var editorWindow: NSWindow? {
+        didSet {
+            if editorWindow !== oldValue { outputDisplay.screensChanged() }
+        }
+    }
 
     /// A gesture is in progress: a timeline drag (move, trim, marquee, playhead, transition or
     /// fade handle, gain line) or an edit group such as an inspector slider drag. Edit commands
@@ -135,6 +140,9 @@ final class ProjectStore: ObservableObject {
     private var cachedTimeline: (changeCount: UInt64, collapsed: Set<VETrackID>, model: TimelineViewModel)?
     private var observers: [NSObjectProtocol] = []
     private var preferencesForwarding: AnyCancellable?
+    /// Tells the engine whether the source monitor is on screen (it drops the source controller's
+    /// stopped lookahead while hidden).
+    private var sourceVisibilityForwarding: AnyCancellable?
 
     /// The app's store: a new engine with the default cache directory, the layout persisted in the
     /// standard defaults.
@@ -181,6 +189,11 @@ final class ProjectStore: ObservableObject {
         }
         preferencesForwarding = preferences.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
+        }
+        // Every path that shows or hides the monitor (the menu, a double-click in the bin, Reset
+        // Window Layout, the saved layout at launch) goes through `layout.showsSourceMonitor`.
+        sourceVisibilityForwarding = layout.$showsSourceMonitor.removeDuplicates().sink { [weak engine] visible in
+            MainActor.assumeIsolated { engine?.sourceMonitorVisible = visible }
         }
         refreshAssets()
         refreshModel()

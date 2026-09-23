@@ -39,7 +39,15 @@ struct ContextMenuCatcher: NSViewRepresentable {
 
     final class CatcherView: NSView {
         var itemsAt: (@MainActor (CGPoint) -> [ContextMenuItem])?
+        /// Shows the menu for the event (tests replace it: the real one tracks the menu modally).
+        var popUp: @MainActor (NSMenu, NSEvent, NSView) -> Void = { menu, event, view in
+            NSMenu.popUpContextMenu(menu, with: event, for: view)
+        }
+
         private var monitor: Any?
+
+        /// The application-local event monitor is installed: exactly while the view is in a window.
+        var isMonitoring: Bool { monitor != nil }
 
         override var isFlipped: Bool { true }
 
@@ -47,18 +55,24 @@ struct ContextMenuCatcher: NSViewRepresentable {
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            removeMonitor()
-            guard window != nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
-                guard let self, let window = self.window, event.window === window else { return event }
-                let controlClick = event.type == .leftMouseDown && event.modifierFlags.contains(.control)
-                guard event.type == .rightMouseDown || controlClick else { return event }
-                let point = self.convert(event.locationInWindow, from: nil)
-                guard self.bounds.contains(point) else { return event }
-                let items = MainActor.assumeIsolated { self.itemsAt?(point) ?? [] }
-                guard !items.isEmpty else { return event }
-                NSMenu.popUpContextMenu(Self.menu(items), with: event, for: self)
-                return nil
+            if window == nil {
+                removeMonitor()
+            } else {
+                installMonitor()
+            }
+        }
+
+        private func installMonitor() {
+            guard monitor == nil else { return }
+            let presses: NSEvent.EventTypeMask = [.rightMouseDown, .leftMouseDown]
+            monitor = NSEvent.addLocalMonitorForEvents(matching: presses) { [weak self] event in
+                // Local monitors run on the main thread.
+                nonisolated(unsafe) let pressed = event
+                let passOn = MainActor.assumeIsolated { () -> Bool in
+                    guard let self else { return true }
+                    return self.handle(pressed, window: pressed.window) != nil
+                }
+                return passOn ? event : nil
             }
         }
 
@@ -70,7 +84,29 @@ struct ContextMenuCatcher: NSViewRepresentable {
         }
 
         deinit {
-            removeMonitor()
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
+
+        /// A press that asks for a context menu: the right button, or Control with the left one.
+        static func isContextClick(type: NSEvent.EventType, modifierFlags: NSEvent.ModifierFlags) -> Bool {
+            type == .rightMouseDown || (type == .leftMouseDown && modifierFlags.contains(.control))
+        }
+
+        /// Handles a press sent to `window` (the event's window; tests pass one): shows the menu
+        /// for a context click inside this view and consumes the event (nil); passes anything else
+        /// on. Every left click in the app goes through here, so it is filtered on the button and
+        /// the Control key before any coordinate conversion or hit testing.
+        func handle(_ event: NSEvent, window eventWindow: NSWindow?) -> NSEvent? {
+            guard Self.isContextClick(type: event.type, modifierFlags: event.modifierFlags) else { return event }
+            guard let window, eventWindow === window else { return event }
+            let point = convert(event.locationInWindow, from: nil)
+            guard bounds.contains(point) else { return event }
+            let items = itemsAt?(point) ?? []
+            guard !items.isEmpty else { return event }
+            popUp(Self.menu(items), event, self)
+            return nil
         }
 
         static func menu(_ items: [ContextMenuItem]) -> NSMenu {

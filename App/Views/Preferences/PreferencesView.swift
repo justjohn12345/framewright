@@ -77,6 +77,10 @@ struct PreferencesView: View {
                 }
             }
             .onChange(of: frameCacheMegabytes) { _, _ in Preferences.apply(to: engine) }
+            Text("The audio output stays on for 5 minutes after the last playback, step or scrub (1 minute on "
+                + "battery), so Space starts at once.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }
