@@ -12,11 +12,14 @@
 //   3. Pixel-buffer targets: the frame is composited into an RGBA16Float intermediate, then a
 //      compute pass writes the target's planes (BGRA, or 4:2:0 BT.709 YCbCr for 420v/420f).
 //
-// Geometry (all in sequence pixels, origin top left, +y down): the source is first fitted into
-// the sequence frame preserving its aspect ratio (letterbox/pillarbox, square pixels), then
-// scaled by VideoParams::scale about its centre, rotated by rotationDegrees (positive =
-// clockwise on screen) about its centre, and its centre is offset by (x, y) from the frame
-// centre. The sequence frame itself is fitted into the target the same way (black bars).
+// Geometry (all in sequence pixels, origin top left, +y down): the decoded picture (storage
+// orientation) is first turned clockwise by VideoLayer::sourceRotationDegrees (the container's
+// display rotation, a quarter turn; iPhone portrait video is stored landscape with 90), the
+// turned picture is fitted into the sequence frame preserving its aspect ratio
+// (letterbox/pillarbox, square pixels), then scaled by VideoParams::scale about its centre,
+// rotated by rotationDegrees (positive = clockwise on screen) about its centre, and its centre
+// is offset by (x, y) from the frame centre. The sequence frame itself is fitted into the
+// target the same way (black bars).
 //
 // Colour: blending happens on gamma-encoded BT.709 R'G'B' values (display-referred, like
 // Premiere's default non-linear compositing), not in linear light. Opacity and dissolves are

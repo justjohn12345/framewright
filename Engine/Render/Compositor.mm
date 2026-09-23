@@ -73,12 +73,28 @@ struct Placement {
     simd_float4 uvFromFrameX;
     simd_float4 uvFromFrameY;
     double x0, y0, x1, y1; // bounding box in sequence pixels, 1 px margin for the AA edge, clipped
+    double scale = 0;      // sequence pixels per source (storage) pixel
     bool visible = false;
 };
 
-Placement placeSource(const VideoParams &params, double sourceWidth, double sourceHeight, double frameWidth,
-                      double frameHeight) {
+// Container rotation normalised to 0, 90, 180 or 270 (clockwise); other angles are rounded to
+// the nearest quarter turn (containers only store quarter turns).
+int quarterTurnsClockwise(std::int32_t degrees) {
+    const long turns = std::lround(static_cast<double>(degrees) / 90.0);
+    return static_cast<int>(((turns % 4) + 4) % 4);
+}
+
+// Geometry, in order: the decoded (storage-orientation) picture is rotated by the container
+// rotation, the rotated picture is fitted into the sequence frame, then the clip transform
+// (scale about the centre, rotation, offset) is applied. The returned rows map a sequence
+// position to storage uv.
+Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegrees, double storageWidth,
+                      double storageHeight, double frameWidth, double frameHeight) {
     Placement p{};
+    const int quarterTurns = quarterTurnsClockwise(sourceRotationDegrees);
+    const bool swapped = (quarterTurns & 1) != 0;
+    const double sourceWidth = swapped ? storageHeight : storageWidth; // displayed orientation
+    const double sourceHeight = swapped ? storageWidth : storageHeight;
     const double fit = std::min(frameWidth / sourceWidth, frameHeight / sourceHeight);
     const double sx = sourceWidth * fit * params.scale;
     const double sy = sourceHeight * fit * params.scale;
@@ -90,10 +106,32 @@ Placement placeSource(const VideoParams &params, double sourceWidth, double sour
     const double s = std::sin(theta);
     const double cx = frameWidth / 2.0 + params.x;
     const double cy = frameHeight / 2.0 + params.y;
-    // Forward: p = centre + R (uv - 0.5) * size, R = [c -s; s c] (clockwise with +y down).
-    // Inverse: uv = 0.5 + R^T (p - centre) / size.
-    p.uvFromFrameX = simd_make_float4(float(c / sx), float(s / sx), float(0.5 - (c * cx + s * cy) / sx), 0.0f);
-    p.uvFromFrameY = simd_make_float4(float(-s / sy), float(c / sy), float(0.5 - (-s * cx + c * cy) / sy), 0.0f);
+    // Displayed uv' of a sequence position. Forward: p = centre + R (uv' - 0.5) * size,
+    // R = [c -s; s c] (clockwise with +y down). Inverse: uv' = 0.5 + R^T (p - centre) / size.
+    const simd_float4 ux = simd_make_float4(float(c / sx), float(s / sx), float(0.5 - (c * cx + s * cy) / sx), 0.0f);
+    const simd_float4 uy = simd_make_float4(float(-s / sy), float(c / sy), float(0.5 - (-s * cx + c * cy) / sy), 0.0f);
+    // Storage uv from displayed uv' (the storage picture turned clockwise by quarterTurns):
+    //   90: u = v', v = 1 - u'   180: u = 1 - u', v = 1 - v'   270: u = 1 - v', v = u'
+    const simd_float4 one = simd_make_float4(0.0f, 0.0f, 1.0f, 0.0f);
+    switch (quarterTurns) {
+    case 1:
+        p.uvFromFrameX = uy;
+        p.uvFromFrameY = one - ux;
+        break;
+    case 2:
+        p.uvFromFrameX = one - ux;
+        p.uvFromFrameY = one - uy;
+        break;
+    case 3:
+        p.uvFromFrameX = one - uy;
+        p.uvFromFrameY = ux;
+        break;
+    default:
+        p.uvFromFrameX = ux;
+        p.uvFromFrameY = uy;
+        break;
+    }
+    p.scale = fit * params.scale;
     // Bounding box of the rotated rectangle.
     const double hx = std::fabs(c) * sx / 2.0 + std::fabs(s) * sy / 2.0;
     const double hy = std::fabs(s) * sx / 2.0 + std::fabs(c) * sy / 2.0;
@@ -317,7 +355,8 @@ struct Compositor::Impl {
                     weight *= layer.transition->weight();
                 }
                 const TextureSet &t = resolved[i];
-                const Placement pl = placeSource(layer.transform, double(t.width()), double(t.height()), frameW, frameH);
+                const Placement pl = placeSource(layer.transform, layer.sourceRotationDegrees, double(t.width()),
+                                                 double(t.height()), frameW, frameH);
                 drawn[i] = 1;
                 ++drawnLayers;
                 if (!pl.visible || weight <= 0.0) {
@@ -339,10 +378,10 @@ struct Compositor::Impl {
                 const VideoLayer &inLayer = graph.layers[in];
                 const TextureSet &ta = resolved[out];
                 const TextureSet &tb = resolved[in];
-                const Placement pa =
-                    placeSource(outLayer.transform, double(ta.width()), double(ta.height()), frameW, frameH);
-                const Placement pb =
-                    placeSource(inLayer.transform, double(tb.width()), double(tb.height()), frameW, frameH);
+                const Placement pa = placeSource(outLayer.transform, outLayer.sourceRotationDegrees,
+                                                 double(ta.width()), double(ta.height()), frameW, frameH);
+                const Placement pb = placeSource(inLayer.transform, inLayer.sourceRotationDegrees, double(tb.width()),
+                                                 double(tb.height()), frameW, frameH);
                 drawn[i] = drawn[partner] = 1;
                 drawnLayers += 2;
                 if (!pa.visible && !pb.visible) {

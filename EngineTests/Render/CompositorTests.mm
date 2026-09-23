@@ -249,6 +249,67 @@ struct FrameLog {
     }
 }
 
+// Container rotation: the storage-orientation picture is turned clockwise by
+// sourceRotationDegrees, fitted using the turned size, then the clip transform is applied. A red
+// marker in the storage top-left corner and a green one in the storage top-right corner show
+// where each corner lands (two markers also tell a rotation from a mirror).
+- (void)testContainerRotationTurnsFitsThenTransforms {
+    const RGBA8 white{255, 255, 255, 255};
+    const RGBA8 red{255, 0, 0, 255};
+    const RGBA8 green{0, 255, 0, 255};
+    media::PixelBuffer source = makeBuffer(kCVPixelFormatType_32BGRA, 1280, 720);
+    fillBGRA(source, white);
+    fillBGRARect(source, 0, 0, 100, 100, red);
+    fillBGRARect(source, 1180, 0, 1280, 100, green);
+    const TextureSet bgra = texturesFor(*_compositor, source);
+    const TextureSet yuv = texturesFor(*_compositor, convertBGRATo420v(source));
+
+    struct Probe {
+        size_t x, y;
+        RGBA8 color;
+    };
+    auto check = [&](const TextureSet &set, int32_t rotation, double clipRotation, std::vector<Probe> probes,
+                     double tolerance) {
+        media::PixelBuffer out = makeBuffer(kCVPixelFormatType_32BGRA, 1920, 1080);
+        RenderGraph g = makeGraph(1920, 1080);
+        VideoLayer layer = makeLayer(1);
+        layer.sourceRotationDegrees = rotation;
+        layer.transform.rotationDegrees = clipRotation;
+        g.layers.push_back(layer);
+        [self render:g textures:{set} target:PixelBufferTarget{out}];
+        for (const Probe &p : probes) {
+            const RGBA8 got = pixelAt(out, p.x, p.y);
+            XCTAssertTrue(near(got, p.color.r, p.color.g, p.color.b, tolerance),
+                          @"rotation %d + clip %.0f, %s source, pixel (%zu, %zu): got %d %d %d expected %d %d %d",
+                          rotation, clipRotation, fourCCString(set.pixelFormat()).c_str(), p.x, p.y, got.r, got.g,
+                          got.b, p.color.r, p.color.g, p.color.b);
+        }
+    };
+    const RGBA8 black{0, 0, 0, 255};
+    // 0: 1280x720 fills the 1920x1080 frame (x1.5); markers stay in the top corners.
+    check(bgra, 0, 0, {{20, 20, red}, {1900, 20, green}, {20, 1060, white}, {1900, 1060, white}}, 1);
+    // 90: the picture is 720x1280 on screen, fitted to 607.5x1080 at x in [656.25, 1263.75):
+    // pillarboxed; top-left -> top-right, top-right -> bottom-right.
+    const std::vector<Probe> quarter{{1250, 40, red},    {1250, 1040, green}, {670, 40, white},
+                                     {670, 1040, white}, {640, 540, black},   {1280, 540, black}};
+    check(bgra, 90, 0, quarter, 1);
+    check(bgra, 450, 0, quarter, 1);
+    // 180: top-left -> bottom-right, top-right -> bottom-left.
+    check(bgra, 180, 0, {{1900, 1060, red}, {20, 1060, green}, {20, 20, white}, {1900, 20, white}}, 1);
+    // 270 (= -90): top-left -> bottom-left, top-right -> top-left.
+    const std::vector<Probe> threeQuarters{{670, 1040, red},    {670, 40, green},   {1250, 40, white},
+                                           {1250, 1040, white}, {640, 540, black}, {1280, 540, black}};
+    check(bgra, 270, 0, threeQuarters, 1);
+    check(bgra, -90, 0, threeQuarters, 1);
+    // Container 90 then the clip's own 90 clockwise: the fitted 607.5x1080 portrait picture is
+    // turned back to landscape (1080 x 607.5 at x in [420, 1500), y in [236.25, 843.75)), 180
+    // in total: top-left -> bottom-right, top-right -> bottom-left.
+    check(bgra, 90, 90, {{1490, 834, red}, {430, 834, green}, {430, 246, white}, {1490, 246, white},
+                          {960, 230, black}, {960, 850, black}}, 1);
+    // A YCbCr source turns the same way (both planes are sampled at the turned uv).
+    check(yuv, 90, 0, quarter, 4);
+}
+
 - (void)addDissolvePairTo:(RenderGraph &)g mix:(double)mix {
     VideoLayer outgoing = makeLayer(1);
     VideoLayer incoming = makeLayer(2);
