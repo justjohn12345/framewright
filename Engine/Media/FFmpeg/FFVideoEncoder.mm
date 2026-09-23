@@ -10,6 +10,8 @@ extern "C" {
 
 #include <CoreFoundation/CoreFoundation.h>
 
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -25,8 +27,22 @@ const char *videoToolboxEncoderName(VideoCodec codec) {
         return "hevc_videotoolbox";
     case VideoCodec::ProRes422:
         return "prores_videotoolbox";
+    case VideoCodec::AV1:
+        break; // No VideoToolbox AV1 encoder; SVT-AV1 instead.
     }
     return "";
+}
+
+constexpr const char *kAV1EncoderName = "libsvtav1";
+
+/// SVT-AV1 preset (0 = slowest/best ... 13 = fastest). 8 keeps 1080p export well above real time
+/// on Apple silicon with quality close to the slower presets at export bit rates.
+constexpr const char *kAV1Preset = "8";
+
+/// SVT-AV1 CRF (0...63, lower is better) for VideoEncodeSettings::quality in [0, 1]: 0.5 maps to
+/// SVT's default of 35, 1.0 to 10, 0.0 to 60.
+int av1Crf(double quality) {
+    return std::clamp(static_cast<int>(std::lround(60.0 - 50.0 * std::clamp(quality, 0.0, 1.0))), 10, 63);
 }
 
 /// av_buffer free callback releasing the CVPixelBuffer an AVFrame wraps.
@@ -69,6 +85,7 @@ struct FFVideoEncoder::Impl {
             return makeError(MediaErrorCode::Internal, "avcodec_alloc_context3 failed");
         }
         const bool vt = std::string(encoderName).find("videotoolbox") != std::string::npos;
+        const bool av1 = settings.codec == VideoCodec::AV1;
         ctx->width = settings.width;
         ctx->height = settings.height;
         ctx->time_base = timeBase;
@@ -82,7 +99,17 @@ struct FFVideoEncoder::Impl {
         if (settings.maxKeyFrameInterval > 0) {
             ctx->gop_size = settings.maxKeyFrameInterval;
         }
-        if (settings.codec != VideoCodec::ProRes422) {
+        AVDictionary *options = nullptr;
+        if (av1) {
+            // SVT-AV1: its own GOP structure (no B-frames in the FFmpeg sense), VBR at the target
+            // bit rate or constant rate factor.
+            if (settings.averageBitRate > 0) {
+                ctx->bit_rate = settings.averageBitRate;
+            } else {
+                av_dict_set_int(&options, "crf", av1Crf(settings.quality >= 0 ? settings.quality : 0.5), 0);
+            }
+            av_dict_set(&options, "preset", kAV1Preset, 0);
+        } else if (settings.codec != VideoCodec::ProRes422) {
             ctx->max_b_frames = settings.allowFrameReordering ? 2 : 0;
             if (settings.averageBitRate > 0) {
                 ctx->bit_rate = settings.averageBitRate;
@@ -91,7 +118,6 @@ struct FFVideoEncoder::Impl {
                 ctx->global_quality = static_cast<int>(std::min(settings.quality, 1.0) * 100.0 * FF_QP2LAMBDA);
             }
         }
-        AVDictionary *options = nullptr;
         if (vt) {
             ctx->pix_fmt = AV_PIX_FMT_VIDEOTOOLBOX;
             ctx->sw_pix_fmt = inputFormat;
@@ -102,6 +128,8 @@ struct FFVideoEncoder::Impl {
             if (settings.codec == VideoCodec::ProRes422) {
                 av_dict_set(&options, "profile", "standard", 0);
             }
+        } else if (av1) {
+            ctx->pix_fmt = isTenBitPixelFormat(settings.inputPixelFormat) ? AV_PIX_FMT_YUV420P10LE : AV_PIX_FMT_YUV420P;
         } else {
             ctx->pix_fmt = AV_PIX_FMT_YUV422P10LE;
             av_dict_set(&options, "profile", "standard", 0);
@@ -280,6 +308,16 @@ Status FFVideoEncoder::validate(const VideoEncodeSettings &v) {
         return makeError(MediaErrorCode::UnsupportedFormat,
                          "unsupported input pixel format " + fourCCToString(v.inputPixelFormat));
     }
+    if (v.codec == VideoCodec::AV1) {
+        if (v.requireHardware) {
+            return makeError(MediaErrorCode::UnsupportedCodec, "AV1 is encoded in software (SVT-AV1) only");
+        }
+        if (!isAvailable(VideoCodec::AV1)) {
+            return makeError(MediaErrorCode::UnsupportedCodec,
+                             "this FFmpeg build has no AV1 encoder (built with ENABLE_SVTAV1=0)");
+        }
+        return okStatus();
+    }
     if (v.requireHardware && !HardwareCaps::get().hardwareEncode(codecType(v.codec))) {
         return makeError(MediaErrorCode::UnsupportedCodec,
                          std::string("no hardware ") + toString(v.codec) + " encoder on this machine");
@@ -301,10 +339,12 @@ Status FFVideoEncoder::open(const VideoEncodeSettings &settings) {
     const bool hardwareAvailable = HardwareCaps::get().hardwareEncode(codecType(settings.codec));
     const char *vt = videoToolboxEncoderName(settings.codec);
     Status s = makeError(MediaErrorCode::UnsupportedCodec, "no encoder attempted");
-    if (hardwareAvailable) {
+    if (settings.codec == VideoCodec::AV1) {
+        s = d.tryOpen(kAV1EncoderName, true);
+    } else if (hardwareAvailable) {
         s = d.tryOpen(vt, false);
     }
-    if (!s.ok() && !settings.requireHardware) {
+    if (!s.ok() && !settings.requireHardware && settings.codec != VideoCodec::AV1) {
         s = d.tryOpen(vt, true);
         if (!s.ok() && settings.codec == VideoCodec::ProRes422) {
             s = d.tryOpen("prores_ks", true);
@@ -388,6 +428,18 @@ bool FFVideoEncoder::usesHardware() const {
 
 std::string FFVideoEncoder::encoderName() const {
     return impl_->name;
+}
+
+std::string FFVideoEncoder::name() const {
+    return impl_->name;
+}
+
+bool FFVideoEncoder::isAvailable(VideoCodec codec) {
+    initializeFFmpegOnce();
+    if (codec == VideoCodec::AV1) {
+        return avcodec_find_encoder_by_name(kAV1EncoderName) != nullptr;
+    }
+    return avcodec_find_encoder_by_name(videoToolboxEncoderName(codec)) != nullptr;
 }
 
 } // namespace ve::media::ffmpeg

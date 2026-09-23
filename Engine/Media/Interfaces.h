@@ -192,6 +192,11 @@ struct EncodedPacket {
     CMTime dts = kCMTimeInvalid;
     CMTime duration = kCMTimeInvalid;
     bool isKeyframe = false;
+    /// Audio: samples at the end of this packet's decoded output that are encoder padding, not
+    /// stream content (the last packet of a stream whose length is not a whole number of codec
+    /// frames). Muxers that can say so store it (Matroska DiscardPadding); ISO-BMFF ends the edit
+    /// list at the shortened `duration` instead.
+    int64_t trailingDiscard = 0;
     std::vector<uint8_t> data;
 };
 
@@ -227,6 +232,9 @@ class IVideoEncoder {
     /// Drains delayed frames to `sink`. No encode() afterwards.
     virtual Status flush(const PacketSink &sink) = 0;
     virtual bool usesHardware() const = 0;
+    /// Name of the encoder in use after open() ("hevc_videotoolbox", "libsvtav1", ...); empty
+    /// before.
+    virtual std::string name() const { return {}; }
 };
 
 class IAudioEncoder {
@@ -277,7 +285,10 @@ using AudioPullFn = std::function<Result<int>(float *dst, int maxFrames)>;
 ///
 /// Two ways to feed it, pick one per writer:
 /// - Pull (recommended with audio + video): runPull() drives both callbacks until they report
-///   done, pulling from whichever stream the muxer needs next. It blocks the calling thread.
+///   done, pulling from whichever stream the muxer needs next. It blocks the calling thread. A
+///   stream whose callback reports done is ended at once (as endStream() would), so the other
+///   stream may run on alone. A callback that returns an error (e.g. Cancelled) aborts the write:
+///   runPull() returns that error and the partial output is deleted.
 ///   The video and audio callbacks are invoked on writer-internal threads, each one serially,
 ///   but the two may run concurrently with each other.
 /// - Push: appendVideo()/appendAudio() block while that stream's encoder is not ready. A
@@ -309,6 +320,9 @@ class IMediaWriter {
     virtual void cancel() = 0;
     /// Whether the video encoder runs in hardware. See the backend for how this is determined.
     virtual bool usesHardwareVideoEncoder() const = 0;
+    /// Human-readable name of the video encoder in use after open() (e.g. "VideoToolbox HEVC
+    /// (hardware)", "libsvtav1"); empty before open() or without video.
+    virtual std::string videoEncoderName() const { return {}; }
 };
 
 // MARK: - Backend factory

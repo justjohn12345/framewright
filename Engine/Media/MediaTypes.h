@@ -204,13 +204,18 @@ struct AudioOptions {
 
 // MARK: - Encode settings
 
-enum class VideoCodec { H264, HEVC, ProRes422 };
+/// AV1 is written only by the FFmpeg backend (SVT-AV1, software; see FFVideoEncoder.h).
+enum class VideoCodec { H264, HEVC, ProRes422, AV1 };
 enum class AudioCodec { AAC, LinearPCM };
-enum class ContainerFormat { MOV, MP4, M4A, WAV };
+/// MKV (Matroska) is written only by the FFmpeg backend.
+enum class ContainerFormat { MOV, MP4, M4A, WAV, MKV };
 const char *toString(VideoCodec);
 const char *toString(AudioCodec);
 const char *toString(ContainerFormat);
 uint32_t codecType(VideoCodec);
+/// Whether a CoreVideo pixel format stores 10 (or more) bits per component ('x420', 'xf20',
+/// 'x422', ...).
+bool isTenBitPixelFormat(OSType pixelFormat);
 
 struct VideoEncodeSettings {
     VideoCodec codec = VideoCodec::H264;
@@ -226,7 +231,9 @@ struct VideoEncodeSettings {
     int maxKeyFrameInterval = 0;
     bool allowFrameReordering = true; ///< B-frames for H.264/HEVC.
     ColorInfo color = ColorInfo::bt709(); ///< Tagged on the output track.
-    /// Format of the pixel buffers passed to append (and produced by makePixelBuffer()).
+    /// Format of the pixel buffers passed to append (and produced by makePixelBuffer()). It also
+    /// selects the bit depth: a 10-bit format ('x420') makes HEVC encode Main10 (8-bit formats:
+    /// Main) and AV1 encode 10-bit.
     OSType inputPixelFormat = kCVPixelFormatType_32BGRA;
     /// Fail instead of silently falling back to a software encoder.
     bool requireHardware = false;

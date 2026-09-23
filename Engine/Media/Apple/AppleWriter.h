@@ -10,7 +10,7 @@ namespace ve::media::apple {
 /// which AVFoundation does not expose separately).
 ///
 /// - Video: AVAssetWriterInput + AVAssetWriterInputPixelBufferAdaptor, H.264 (High, auto
-///   level), HEVC (Main, auto level) or ProRes 422, expectsMediaDataInRealTime = NO, colour
+///   level), HEVC (Main, or Main10 from 10-bit input such as 'x420'; auto level) or ProRes 422, expectsMediaDataInRealTime = NO, colour
 ///   tags from VideoEncodeSettings::color (AVVideoColorPropertiesKey). Media timescale: the
 ///   frame duration's timescale scaled up to at least 600.
 /// - Audio: float32 interleaved input converted by the writer to AAC or linear PCM.
@@ -49,6 +49,8 @@ class AppleWriter final : public IMediaWriter {
     Status finish() override;
     void cancel() override;
     bool usesHardwareVideoEncoder() const override;
+    /// "VideoToolbox HEVC Main10 (hardware)" etc.
+    std::string videoEncoderName() const override;
 
     /// Static validation shared with AppleBackend::canWrite.
     static Status validate(const EncodeSettings &settings);

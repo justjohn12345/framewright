@@ -207,6 +207,17 @@ class DecodePool {
     /// For tests, export pre-roll and diagnostics.
     bool waitUntilIdle(std::chrono::milliseconds timeout);
 
+    /// Blocks until a decode step or scrub request finishes (or streams are retired), or until
+    /// `timeout`. Returns false on timeout. For consumers that wait for particular frames (export)
+    /// without polling: check the cache, and if the frame is missing, wait for progress.
+    bool waitForProgress(std::chrono::milliseconds timeout);
+
+    /// Makes every stream that is not permanently failed step again at its current target, even
+    /// one that had settled: a frame under a target that was evicted after its stream went idle
+    /// (memory pressure) is decoded again, and a decode that failed is retried. Streams whose
+    /// window is covered settle again at once.
+    void refresh();
+
     Stats stats() const;
 
   private:

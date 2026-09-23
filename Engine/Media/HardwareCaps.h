@@ -20,6 +20,15 @@ struct CodecCapabilities {
     std::vector<std::string> hardwareEncoderIDs; ///< kVTVideoEncoderList_EncoderID of the hardware encoders.
 };
 
+/// What VideoToolbox offers for encoding one codec at one frame size (see
+/// HardwareCaps::encoderAvailability).
+struct EncoderAvailability {
+    bool hardware = false;          ///< A hardware encoder accepts the size (and profile).
+    bool software = false;          ///< A software encoder accepts it.
+    std::string hardwareEncoderID;  ///< kVTVideoEncoderList_EncoderID of that hardware encoder.
+    std::string reason;             ///< Why neither is available ("" when one is).
+};
+
 /// Plain snapshot of the machine's VideoToolbox capabilities.
 ///
 /// Thread-safety: get() is thread-safe (the probe runs exactly once under std::call_once) and
@@ -45,6 +54,14 @@ struct HardwareCaps {
 
     /// Human-readable multi-line table, e.g. "h264    decode HW  encode HW (...)".
     std::string description() const;
+
+    /// Asks VideoToolbox whether `codecType` can be encoded at `width` x `height`
+    /// (VTCopySupportedPropertyDictionaryForEncoder with the hardware encoder required, then with
+    /// it disabled). Hardware encoders are size dependent (H.264 has none at 8192x4320), which the
+    /// per-codec flags above cannot say. With `tenBit` (HEVC) the encoder must also offer the
+    /// Main10 profile. Answers are cached per argument tuple (the first query of a tuple takes a
+    /// few milliseconds). Thread-safe.
+    static EncoderAvailability encoderAvailability(uint32_t codecType, int width, int height, bool tenBit);
 };
 
 } // namespace ve::media

@@ -3,6 +3,7 @@
 #include "FFmpegSupport.h"
 
 extern "C" {
+#include <libavutil/intreadwrite.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/mem.h>
 }
@@ -134,6 +135,19 @@ struct FFMuxer::Impl {
         if (p.isKeyframe) {
             pkt->flags |= AV_PKT_FLAG_KEY;
         }
+        if (p.trailingDiscard > 0 && isMatroska() && p.trailingDiscard <= UINT32_MAX) {
+            // Matroska DiscardPadding: the demuxer hands it back as skip samples, and the decoder
+            // drops the padding at the end of the stream.
+            uint8_t *skip = av_packet_new_side_data(pkt, AV_PKT_DATA_SKIP_SAMPLES, 10);
+            if (skip == nullptr) {
+                av_packet_unref(pkt);
+                return makeError(MediaErrorCode::Internal, "av_packet_new_side_data failed");
+            }
+            AV_WL32(skip, 0);
+            AV_WL32(skip + 4, static_cast<uint32_t>(p.trailingDiscard));
+            skip[8] = 0;
+            skip[9] = 0;
+        }
         rc = av_interleaved_write_frame(ctx.get(), pkt); // Takes the packet's reference.
         av_packet_unref(pkt);
         if (rc < 0) {
@@ -161,6 +175,8 @@ const char *FFMuxer::formatName(ContainerFormat container) {
         return "ipod";
     case ContainerFormat::WAV:
         return "wav";
+    case ContainerFormat::MKV:
+        return "matroska";
     }
     return "mov";
 }

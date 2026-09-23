@@ -70,6 +70,9 @@ struct FFAudioEncoder::Impl {
     AVChannelLayout layout{};
     int frameSize = kPcmFrameSize;
     int64_t samplesSent = 0;
+    /// Real input samples (samplesSent also counts the silence that pads a last partial frame for
+    /// encoders without AV_CODEC_CAP_SMALL_LAST_FRAME, e.g. aac_at).
+    int64_t samplesIn = 0;
     std::vector<uint8_t> convertBuffer;
 
     ~Impl() { av_channel_layout_uninit(&layout); }
@@ -154,10 +157,23 @@ struct FFAudioEncoder::Impl {
             if (rc < 0) {
                 return ffError(rc, MediaErrorCode::EncodeFailed, "avcodec_receive_packet");
             }
+            // The stream ends at the last real sample: a packet that only covers the silence that
+            // padded the last frame is dropped, one that reaches into it is shortened (the
+            // muxer's track duration, and so the edit list, then ends exactly there).
+            int64_t duration = pkt->duration > 0 ? pkt->duration : frameSize;
+            if (pkt->pts != AV_NOPTS_VALUE && tb.num == 1 && tb.den == codec->sample_rate) {
+                if (pkt->pts >= samplesIn) {
+                    av_packet_unref(pkt);
+                    continue;
+                }
+                duration = std::min(duration, samplesIn - pkt->pts);
+            }
+            const int64_t codedDuration = pkt->duration > 0 ? pkt->duration : frameSize;
             EncodedPacket out;
+            out.trailingDiscard = codedDuration - duration;
             out.pts = toCMTime(pkt->pts, tb);
             out.dts = toCMTime(pkt->dts != AV_NOPTS_VALUE ? pkt->dts : pkt->pts, tb);
-            out.duration = toCMTime(pkt->duration > 0 ? pkt->duration : frameSize, tb);
+            out.duration = toCMTime(duration, tb);
             out.isKeyframe = true;
             out.data.assign(pkt->data, pkt->data + pkt->size);
             av_packet_unref(pkt);
@@ -281,6 +297,7 @@ Status FFAudioEncoder::encode(const float *interleaved, int frames, const Packet
     if (av_audio_fifo_write(d.fifo.get(), reinterpret_cast<void **>(planes.data()), converted) != converted) {
         return makeError(MediaErrorCode::Internal, "av_audio_fifo_write failed");
     }
+    d.samplesIn += converted;
     while (av_audio_fifo_size(d.fifo.get()) >= d.frameSize) {
         VE_MEDIA_TRY(d.sendFrame(d.frameSize, sink));
     }

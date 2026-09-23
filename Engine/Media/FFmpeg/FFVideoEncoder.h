@@ -17,6 +17,11 @@ namespace ve::media::ffmpeg {
 ///   requireHardware without a hardware encoder fails with UnsupportedCodec.
 /// - ProRes falls back to FFmpeg's prores_ks (software, LGPL) if no VideoToolbox ProRes encoder
 ///   can be opened. The LGPL build has no software H.264/HEVC encoder.
+/// - AV1: libsvtav1 (SVT-AV1, BSD, linked into libavcodec when built with ENABLE_SVTAV1=1),
+///   always software (usesHardware() false; requireHardware fails). Preset 8; averageBitRate
+///   gives VBR at that rate, otherwise quality maps to a CRF (0.5 -> 35, 1.0 -> 10). 8-bit input
+///   is converted to yuv420p, 10-bit input ('x420') to yuv420p10le (10-bit AV1), with
+///   libswscale on the CPU.
 ///
 /// Input: the PixelBuffer's CVPixelBuffer is handed to VideoToolbox as an AV_PIX_FMT_VIDEOTOOLBOX
 /// frame (no copy; the frame keeps the buffer retained until the encoder releases it), with
@@ -48,6 +53,11 @@ class FFVideoEncoder final : public IVideoEncoder {
 
     /// FFmpeg encoder name in use ("hevc_videotoolbox", "prores_ks", ...), empty before open().
     std::string encoderName() const;
+    std::string name() const override;
+
+    /// Whether this FFmpeg build has the encoder for `codec` (libsvtav1 for AV1, the
+    /// VideoToolbox wrapper otherwise). Thread-safe.
+    static bool isAvailable(VideoCodec codec);
 
     /// Validates settings without opening anything (shared with FFmpegBackend::canWrite).
     static Status validate(const VideoEncodeSettings &settings);

@@ -5,8 +5,10 @@
 
 #include <VideoToolbox/VideoToolbox.h>
 
+#include <map>
 #include <mutex>
 #include <sstream>
+#include <tuple>
 
 namespace ve::media {
 
@@ -93,7 +95,77 @@ void probeEncoders(HardwareCaps &caps) {
     }
 }
 
+/// Whether an encoder matching `requireHardware` accepts the size; fills its id and, for
+/// `tenBit`, requires the HEVC Main10 profile among its supported profile levels.
+bool encoderAccepts(uint32_t codecType, int width, int height, bool requireHardware, bool tenBit,
+                    std::string &encoderID) {
+    const void *keys[] = {kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
+                          kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder};
+    const void *values[] = {requireHardware ? kCFBooleanTrue : kCFBooleanFalse,
+                            requireHardware ? kCFBooleanTrue : kCFBooleanFalse};
+    CFRef<CFDictionaryRef> spec = CFRef<CFDictionaryRef>::adopt(CFDictionaryCreate(
+        kCFAllocatorDefault, keys, values, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+    CFStringRef rawID = nullptr;
+    CFDictionaryRef rawProperties = nullptr;
+    const OSStatus status = VTCopySupportedPropertyDictionaryForEncoder(
+        width, height, static_cast<CMVideoCodecType>(codecType), spec.get(), &rawID, &rawProperties);
+    CFRef<CFStringRef> idRef = CFRef<CFStringRef>::adopt(rawID);
+    CFRef<CFDictionaryRef> properties = CFRef<CFDictionaryRef>::adopt(rawProperties);
+    if (status != noErr) {
+        return false;
+    }
+    encoderID = cfString(idRef.get());
+    if (!tenBit) {
+        return true;
+    }
+    if (!properties) {
+        return false;
+    }
+    CFTypeRef profile = CFDictionaryGetValue(properties.get(), kVTCompressionPropertyKey_ProfileLevel);
+    if (profile == nullptr || CFGetTypeID(profile) != CFDictionaryGetTypeID()) {
+        return false;
+    }
+    CFTypeRef list = CFDictionaryGetValue(static_cast<CFDictionaryRef>(profile), kVTPropertySupportedValueListKey);
+    if (list == nullptr || CFGetTypeID(list) != CFArrayGetTypeID()) {
+        return false;
+    }
+    CFArrayRef array = static_cast<CFArrayRef>(list);
+    return CFArrayContainsValue(array, CFRangeMake(0, CFArrayGetCount(array)), kVTProfileLevel_HEVC_Main10_AutoLevel);
+}
+
 } // namespace
+
+EncoderAvailability HardwareCaps::encoderAvailability(uint32_t codecType, int width, int height, bool tenBit) {
+    using Key = std::tuple<uint32_t, int, int, bool>;
+    static std::mutex mutex;
+    static auto *cache = new std::map<Key, EncoderAvailability>(); // Leaked like the caps singleton.
+    const Key key{codecType, width, height, tenBit};
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (auto it = cache->find(key); it != cache->end()) {
+            return it->second;
+        }
+    }
+    EncoderAvailability a;
+    if (width <= 0 || height <= 0) {
+        a.reason = "invalid frame size";
+    } else {
+        std::string id;
+        a.hardware = encoderAccepts(codecType, width, height, true, tenBit, id);
+        if (a.hardware) {
+            a.hardwareEncoderID = id;
+        }
+        std::string softwareID;
+        a.software = encoderAccepts(codecType, width, height, false, tenBit, softwareID);
+        if (!a.hardware && !a.software) {
+            a.reason = std::string("VideoToolbox has no ") + fourCCToString(codecType) + " encoder for " +
+                       std::to_string(width) + "x" + std::to_string(height) + (tenBit ? " at 10 bits" : "");
+        }
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    cache->emplace(key, a);
+    return a;
+}
 
 HardwareCaps HardwareCaps::probe() {
     HardwareCaps caps;

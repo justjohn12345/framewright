@@ -12,7 +12,8 @@ namespace ve::media {
 /// Packets from each encoder are routed to the muxer as they come out, tagged with the stream
 /// index the muxer assigned in open(). In pull mode the two sources are interleaved by media
 /// time (whichever stream is behind is pulled next) on the calling thread, so the callbacks
-/// run on the thread that called runPull(). Push mode never blocks beyond the encode itself.
+/// run on the thread that called runPull(); a stream whose callback reports done is ended
+/// (its encoder flushed) at once. Push mode never blocks beyond the encode itself.
 /// Not thread-safe (see Interfaces.h).
 class ComposedMediaWriter final : public IMediaWriter {
   public:
@@ -32,6 +33,8 @@ class ComposedMediaWriter final : public IMediaWriter {
     Status finish() override;
     void cancel() override;
     bool usesHardwareVideoEncoder() const override;
+    /// The video encoder's name() ("hevc_videotoolbox", "libsvtav1", ...).
+    std::string videoEncoderName() const override;
 
   private:
     enum class State { Idle, Writing, Finished, Failed };

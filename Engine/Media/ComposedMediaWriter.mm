@@ -175,7 +175,10 @@ Status ComposedMediaWriter::runPull(const VideoPullFn &video, const AudioPullFn 
                 return fail(std::move(frame).error());
             }
             if (!frame.value()) {
+                // Flush the encoder now: the muxer interleaves by time and would otherwise hold
+                // every later audio packet back waiting for video that never comes.
                 videoDone = true;
+                VE_MEDIA_TRY(endStream(TrackKind::Video));
                 continue;
             }
             VE_MEDIA_TRY(appendVideo(frame.value()->image, frame.value()->pts));
@@ -187,6 +190,7 @@ Status ComposedMediaWriter::runPull(const VideoPullFn &video, const AudioPullFn 
             }
             if (n.value() <= 0) {
                 audioDone = true;
+                VE_MEDIA_TRY(endStream(TrackKind::Audio));
                 continue;
             }
             if (n.value() > kPullAudioChunkFrames) {
@@ -225,6 +229,13 @@ void ComposedMediaWriter::cancel() {
 
 bool ComposedMediaWriter::usesHardwareVideoEncoder() const {
     return videoEncoder_ && videoEncoder_->usesHardware();
+}
+
+std::string ComposedMediaWriter::videoEncoderName() const {
+    if (!videoEncoder_ || !settings_.video || state_ == State::Idle) {
+        return {};
+    }
+    return videoEncoder_->name();
 }
 
 } // namespace ve::media

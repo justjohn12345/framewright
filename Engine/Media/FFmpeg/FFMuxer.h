@@ -8,8 +8,8 @@ namespace ve::media::ffmpeg {
 
 /// IMuxer over libavformat. Not thread-safe (see Interfaces.h).
 ///
-/// Containers: ContainerFormat::MOV / MP4 / M4A / WAV map to FFmpeg's "mov" / "mp4" (with
-/// +faststart, like AVAssetWriter's shouldOptimizeForNetworkUse) / "ipod" / "wav" muxers;
+/// Containers: ContainerFormat::MOV / MP4 / M4A / WAV / MKV map to FFmpeg's "mov" / "mp4" (with
+/// +faststart, like AVAssetWriter's shouldOptimizeForNetworkUse) / "ipod" / "wav" / "matroska" muxers;
 /// openFormat() accepts any libavformat muxer name (e.g. "matroska", "webm").
 ///
 /// Streams: EncodedStreamFormat::codec (a CoreMedia four-cc) is mapped back to an AVCodecID;

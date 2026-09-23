@@ -99,6 +99,12 @@ template <class Decoder> struct RoutedDecoder {
 using RoutedVideoDecoder = RoutedDecoder<IVideoDecoder>;
 using RoutedAudioDecoder = RoutedDecoder<IAudioDecoder>;
 
+/// A writer made through the router and the backend it came from.
+struct RoutedWriter {
+    std::unique_ptr<IMediaWriter> writer;
+    std::string backend;
+};
+
 class BackendRouter {
   public:
     BackendRouter() = default;
@@ -145,6 +151,14 @@ class BackendRouter {
     /// position read() had reached.
     Result<RoutedAudioDecoder> makeAudioDecoder(const RoutedMediaInfo &routed, int trackIndex,
                                                 const AudioOptions &options) const;
+
+    /// Name of the backend that writes `settings`: "apple" (AVAssetWriter, whose encoders run on
+    /// VideoToolbox) when it can, otherwise the first registered backend (registration order)
+    /// whose canWrite() accepts them (FFmpeg for AV1 and Matroska). Empty when none can.
+    std::string writerBackendFor(const EncodeSettings &settings) const;
+    /// A new, unopened writer of writerBackendFor(settings). UnsupportedCodec (naming the codec
+    /// and container) when no registered backend can write them.
+    Result<RoutedWriter> makeWriter(const EncodeSettings &settings) const;
 
   private:
     std::vector<std::shared_ptr<IMediaBackend>> snapshot() const;

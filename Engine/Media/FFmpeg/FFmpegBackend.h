@@ -16,9 +16,9 @@
 //   build has no libheif; the prober reports UnsupportedFormat and canHandle() is false, so the
 //   router uses the Apple backend (ImageIO).
 // - Variable frame rate is fine (flagged by the prober; timestamps are exact).
-// canWrite: MOV/MP4 with H.264/HEVC (VideoToolbox) or ProRes 422 (MOV only; VideoToolbox, else
-// prores_ks), AAC (aac_at, else FFmpeg aac) or linear PCM audio; M4A with AAC/PCM; WAV with PCM.
-// Matroska output is available through FFMuxer::openFormat (ContainerFormat has no MKV case).
+// canWrite: MOV/MP4/MKV with H.264/HEVC (VideoToolbox) or ProRes 422 (MOV or MKV; VideoToolbox, else
+// prores_ks); AV1 (SVT-AV1, software) in MP4 or MKV; AAC (aac_at, else FFmpeg aac) or linear
+// PCM audio (not in MP4); M4A with AAC/PCM; WAV with PCM.
 //
 // Threading: FFmpegBackend and FFProber are thread-safe; decoders, encoders, muxers and
 // writers are single-threaded per instance (Interfaces.h). No global FFmpeg state is touched

@@ -60,6 +60,8 @@ AVFileType fileType(ContainerFormat c) {
         return AVFileTypeAppleM4A;
     case ContainerFormat::WAV:
         return AVFileTypeWAVE;
+    case ContainerFormat::MKV:
+        break; // Refused by validate(): AVAssetWriter has no Matroska muxer.
     }
     return AVFileTypeQuickTimeMovie;
 }
@@ -78,6 +80,8 @@ NSDictionary *videoOutputSettings(const VideoEncodeSettings &v, bool hardware) {
     case VideoCodec::ProRes422:
         s[AVVideoCodecKey] = AVVideoCodecTypeAppleProRes422;
         break;
+    case VideoCodec::AV1:
+        break; // Refused by validate(): VideoToolbox has no AV1 encoder.
     }
     s[AVVideoWidthKey] = @(v.width);
     s[AVVideoHeightKey] = @(v.height);
@@ -108,8 +112,10 @@ NSDictionary *videoOutputSettings(const VideoEncodeSettings &v, bool hardware) {
         const double fps = 1.0 / CMTimeGetSeconds(v.frameDuration);
         c[AVVideoExpectedSourceFrameRateKey] = @(std::lround(fps));
         c[AVVideoAllowFrameReorderingKey] = @(v.allowFrameReordering);
-        c[AVVideoProfileLevelKey] = v.codec == VideoCodec::H264
-                                        ? AVVideoProfileLevelH264HighAutoLevel
+        // HEVC from 10-bit input ('x420') is Main10, else Main.
+        c[AVVideoProfileLevelKey] = v.codec == VideoCodec::H264 ? AVVideoProfileLevelH264HighAutoLevel
+                                    : isTenBitPixelFormat(v.inputPixelFormat)
+                                        ? (__bridge NSString *)kVTProfileLevel_HEVC_Main10_AutoLevel
                                         : (__bridge NSString *)kVTProfileLevel_HEVC_Main_AutoLevel;
         s[AVVideoCompressionPropertiesKey] = c;
     }
@@ -460,6 +466,15 @@ Status AppleWriter::validate(const EncodeSettings &s) {
         if (s.container == ContainerFormat::MP4 && v.codec == VideoCodec::ProRes422) {
             return makeError(MediaErrorCode::UnsupportedCodec, "ProRes requires a QuickTime (.mov) container");
         }
+        if (v.codec == VideoCodec::AV1) {
+            return makeError(MediaErrorCode::UnsupportedCodec, "AVAssetWriter cannot encode AV1");
+        }
+        if (isTenBitPixelFormat(v.inputPixelFormat) && v.codec == VideoCodec::H264) {
+            return makeError(MediaErrorCode::UnsupportedFormat, "H.264 is encoded from 8-bit input only");
+        }
+    }
+    if (s.container == ContainerFormat::MKV) {
+        return makeError(MediaErrorCode::UnsupportedFormat, "AVAssetWriter cannot write Matroska");
     }
     if (s.audio) {
         const AudioEncodeSettings &a = *s.audio;
@@ -796,6 +811,28 @@ void AppleWriter::cancel() {
 
 bool AppleWriter::usesHardwareVideoEncoder() const {
     return impl_->hardwareEncoder;
+}
+
+std::string AppleWriter::videoEncoderName() const {
+    const Impl &d = *impl_;
+    if (d.state == Impl::State::Idle || !d.settings.video) {
+        return {};
+    }
+    const char *codec = "H.264";
+    switch (d.settings.video->codec) {
+    case VideoCodec::H264:
+        break;
+    case VideoCodec::HEVC:
+        codec = isTenBitPixelFormat(d.settings.video->inputPixelFormat) ? "HEVC Main10" : "HEVC";
+        break;
+    case VideoCodec::ProRes422:
+        codec = "ProRes 422";
+        break;
+    case VideoCodec::AV1:
+        codec = "AV1";
+        break;
+    }
+    return std::string("VideoToolbox ") + codec + (d.hardwareEncoder ? " (hardware)" : " (software)");
 }
 
 } // namespace ve::media::apple

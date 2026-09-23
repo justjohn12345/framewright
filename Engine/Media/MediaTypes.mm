@@ -201,6 +201,8 @@ const char *toString(VideoCodec codec) {
         return "hevc";
     case VideoCodec::ProRes422:
         return "prores422";
+    case VideoCodec::AV1:
+        return "av1";
     }
     return "unknown";
 }
@@ -225,6 +227,8 @@ const char *toString(ContainerFormat container) {
         return "m4a";
     case ContainerFormat::WAV:
         return "wav";
+    case ContainerFormat::MKV:
+        return "mkv";
     }
     return "unknown";
 }
@@ -237,8 +241,25 @@ uint32_t codecType(VideoCodec codec) {
         return fourcc::HEVC;
     case VideoCodec::ProRes422:
         return fourcc::ProRes422;
+    case VideoCodec::AV1:
+        return fourcc::AV1;
     }
     return 0;
+}
+
+bool isTenBitPixelFormat(OSType pixelFormat) {
+    switch (pixelFormat) {
+    case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange:
+    case kCVPixelFormatType_420YpCbCr10BiPlanarFullRange:
+    case kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange:
+    case kCVPixelFormatType_422YpCbCr10BiPlanarFullRange:
+    case kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange:
+    case kCVPixelFormatType_444YpCbCr10BiPlanarFullRange:
+    case kCVPixelFormatType_422YpCbCr10:
+        return true;
+    default:
+        return false;
+    }
 }
 
 const TrackInfo *MediaInfo::firstTrack(TrackKind kind) const {

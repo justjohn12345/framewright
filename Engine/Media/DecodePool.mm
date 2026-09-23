@@ -1004,6 +1004,27 @@ bool DecodePool::waitUntilIdle(std::chrono::milliseconds timeout) {
     });
 }
 
+bool DecodePool::waitForProgress(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return progressCv_.wait_for(lock, timeout) == std::cv_status::no_timeout;
+}
+
+void DecodePool::refresh() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto &[key, stream] : streams_) {
+            if (stream->failed && !stream->failedTransient) {
+                continue;
+            }
+            ++stream->generation;
+            stream->idle = false;
+            stream->failed = false;
+            stream->repairedAt = kCMTimeInvalid; // re-arm the repair of an evicted playhead frame
+        }
+    }
+    workCv_.notify_all();
+}
+
 DecodePool::Stats DecodePool::stats() const {
     std::lock_guard<std::mutex> lock(mutex_);
     Stats st;

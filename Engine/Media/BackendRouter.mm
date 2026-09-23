@@ -267,6 +267,36 @@ std::shared_ptr<IMediaBackend> BackendRouter::find(const std::vector<std::shared
     return nullptr;
 }
 
+// MARK: - Writers
+
+std::string BackendRouter::writerBackendFor(const EncodeSettings &settings) const {
+    const auto backends = snapshot();
+    if (auto apple = find(backends, "apple"); apple && apple->canWrite(settings)) {
+        return apple->name();
+    }
+    for (const auto &b : backends) {
+        if (b->canWrite(settings)) {
+            return b->name();
+        }
+    }
+    return {};
+}
+
+Result<RoutedWriter> BackendRouter::makeWriter(const EncodeSettings &settings) const {
+    const std::string name = writerBackendFor(settings);
+    std::shared_ptr<IMediaBackend> backend = name.empty() ? nullptr : find(snapshot(), name);
+    std::unique_ptr<IMediaWriter> writer = backend ? backend->makeWriter() : nullptr;
+    if (!writer) {
+        std::string what = settings.video ? toString(settings.video->codec) : "";
+        if (settings.audio) {
+            what += (what.empty() ? "" : " + ") + std::string(toString(settings.audio->codec));
+        }
+        return makeError(MediaErrorCode::UnsupportedCodec, "no registered backend can write " + what + " in " +
+                                                               toString(settings.container));
+    }
+    return RoutedWriter{std::move(writer), name};
+}
+
 // MARK: - Probe and route
 
 Result<RoutedMediaInfo> BackendRouter::probe(const std::string &path) const {

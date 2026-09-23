@@ -116,6 +116,10 @@ Status FFmpegBackend::validate(const EncodeSettings &s) {
         if (s.container == ContainerFormat::MP4 && s.video->codec == VideoCodec::ProRes422) {
             return makeError(MediaErrorCode::UnsupportedCodec, "ProRes requires a QuickTime (.mov) container");
         }
+        if (s.video->codec == VideoCodec::AV1 && s.container != ContainerFormat::MP4 &&
+            s.container != ContainerFormat::MKV) {
+            return makeError(MediaErrorCode::UnsupportedCodec, "AV1 is written to MP4 or Matroska (.mkv) only");
+        }
     }
     if (s.audio) {
         VE_MEDIA_TRY(FFAudioEncoder::validate(*s.audio));
