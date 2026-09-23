@@ -1,6 +1,6 @@
 # Open findings
 
-## Phase 7 export (2026-09-23 review, `2026-09-23-phase7-review.md`)
+## Phase 7 export (2026-09-23 review; report in git history at 2dde40e)
 All ten findings are fixed (regression tests: `EngineTests/Export/ExportRegressionTests.mm` for P1/P2/P3, plus
 `ExportJobTests`, `ExportParityTests`, `VEEngineExportTests`, `VideoDurationEditTests.cpp`, `DecodePoolTests`,
 `FrameCacheTests`, `ClipAudioSourceTests`, `ExportModelTests`). Test gaps 1-6, 10 and 11 are covered. Still open:
