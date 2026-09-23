@@ -2,7 +2,8 @@ import CoreMedia
 import SwiftUI
 import FramewrightEngine
 
-/// Source monitor: the asset opened from the media bin in the engine's own Metal preview
+/// Source monitor (shown beside the program monitor when View > Show Source Monitor is on, and
+/// opened automatically by a double-click on media): the asset opened from the media bin in the engine's own Metal preview
 /// (decoded on the source monitor's lanes, nothing written to disk while scrubbing). Scrub with
 /// the slider, play with Space/J/K/L while the monitor has focus (click it), mark in/out
 /// (I/O keys or the buttons; snapped to the asset's frames) and place the marked range at the
@@ -33,6 +34,15 @@ struct SourceMonitorView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                Button {
+                    store.setSourceMonitorVisible(false)
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("Hide the source monitor (⇧⌘2); the program monitor takes its place")
+                .accessibilityIdentifier("HideSourceMonitor")
             }
             ZStack {
                 PreviewViewRepresentable(isPlaying: playhead.isRunning,

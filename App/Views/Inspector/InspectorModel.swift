@@ -159,6 +159,20 @@ final class InspectorModel: ObservableObject {
         return TransitionKind.forTrack(track.kind)
     }
 
+    /// The selected transition's linked transition (the crossfade under a dissolve), if any.
+    var linkedTransition: VETransitionID? {
+        transition.flatMap { store.linkedTransition(of: $0.transitionID) }
+    }
+
+    /// Where the selected transition sits on its cut (the cut is the outgoing clip's end).
+    var transitionTiming: TransitionTiming? {
+        guard let transition else { return nil }
+        let cut = store.clips[transition.fromClipID]?.timelineEnd
+            ?? CMTimeMultiplyByRatio(CMTimeAdd(transition.start, transition.end), multiplier: 1, divisor: 2)
+        return TransitionTiming(start: transition.start, end: transition.end, cut: cut,
+                                frameDuration: store.frameDuration)
+    }
+
     func isAvailable(_ parameter: InspectorParameter) -> Bool {
         switch parameter.section {
         case .video: return !videoTargets.isEmpty
@@ -424,12 +438,13 @@ final class InspectorModel: ObservableObject {
         message = nil
     }
 
-    /// The Transition section's Delete Transition button: removes the selected transition
-    /// whichever panel has the focus (Delete in the media bin removes an asset instead).
-    func deleteTransition() {
+    /// The Transition section's Delete buttons: remove the selected transition (with its linked
+    /// transition unless `includingLinked` is false) whichever panel has the focus (Delete in the
+    /// media bin removes an asset instead).
+    func deleteTransition(includingLinked: Bool = true) {
         guard let transition else { return }
         endNudgeBurst()
-        if !store.removeTransition(transition.transitionID) {
+        if !store.removeTransition(transition.transitionID, includingLinked: includingLinked) {
             message = store.statusMessage
         }
     }
@@ -555,7 +570,10 @@ final class InspectorModel: ObservableObject {
         }
         let length = store.time(frames: frames)
         let id = transition.transitionID
-        handle(perform(mode) { self.engine.setDuration(length, forTransition: id) }, mode: mode, clampNote: note)
+        // "Also change the linked transition" (remembered; on by default).
+        let includingLinked = store.resizesLinkedTransitions
+        handle(perform(mode) { self.engine.setDuration(length, forTransition: id, includingLinked: includingLinked) },
+               mode: mode, clampNote: note)
     }
 
     private func perform(_ mode: Mode, _ edit: @escaping () -> VEEditResult) -> VEEditResult {

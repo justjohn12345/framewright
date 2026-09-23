@@ -44,8 +44,17 @@ struct FramewrightApp: App {
 struct AppCommands: Commands {
     @ObservedObject var store: ProjectStore
     @ObservedObject var documents: DocumentController
+    @ObservedObject var layout: WindowLayoutModel
+    @ObservedObject var output: OutputDisplayController
     @AppStorage(PlaybackHUD.defaultsKey) private var showPlaybackHUD = false
     @Environment(\.openWindow) private var openWindow
+
+    init(store: ProjectStore, documents: DocumentController) {
+        self.store = store
+        self.documents = documents
+        layout = store.layout
+        output = store.outputDisplay
+    }
 
     var body: some Commands {
         CommandGroup(after: .appInfo) {
@@ -104,6 +113,8 @@ struct AppCommands: Commands {
                 .keyboardShortcut("k", modifiers: [.command, .option])
             Button("Delete  ⌫") { store.deleteSelection(ripple: false) }
                 .disabled(!store.canDelete)
+            Button("Delete Transition Only  ⌥⌫") { store.deleteSelectedTransitionOnly() }
+                .disabled(store.focusArea != .timeline || !store.selection.isEmpty || store.selectedTransitionID == nil)
             Button("Ripple Delete  ⇧⌫") { store.deleteSelection(ripple: true) }
                 .disabled(store.focusArea != .timeline || store.selection.isEmpty)
             Divider()
@@ -148,6 +159,22 @@ struct AppCommands: Commands {
                 .keyboardShortcut("m", modifiers: [.command, .option])
         }
         CommandGroup(after: .toolbar) {
+            Toggle("Show Source Monitor", isOn: Binding(get: { layout.showsSourceMonitor },
+                                                        set: { store.setSourceMonitorVisible($0) }))
+                .keyboardShortcut("2", modifiers: [.command, .shift])
+            Toggle("Program Monitor on Second Display", isOn: Binding(get: { output.isShowing },
+                                                                      set: { _ in output.toggle() }))
+                .disabled(!output.isAvailable && !output.isShowing)
+            Picker("Right Panel", selection: $layout.inspectorTab) {
+                ForEach(InspectorTab.allCases) { tab in
+                    Text(tab.title).tag(tab)
+                }
+            }
+            Button("Reset Window Layout") {
+                store.setSourceMonitorVisible(false)
+                layout.resetToDefaults()
+            }
+            Divider()
             Toggle("Show Playback HUD", isOn: $showPlaybackHUD)
                 .keyboardShortcut("h", modifiers: [.command, .option])
             Divider()

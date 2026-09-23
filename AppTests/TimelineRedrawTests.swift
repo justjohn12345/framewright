@@ -87,6 +87,17 @@ final class TimelineRedrawTests: XCTestCase {
         XCTAssertLessThanOrEqual(redrawn, 2, "the clips are not redrawn while only the playhead moves")
         XCTAssertGreaterThanOrEqual(moved, 120, "the playhead overlays follow the playhead")
 
+        // Layout changes that do not touch the tracks (the source monitor, the right panel's tab)
+        // do not rebuild the timeline model either.
+        store.layout.showsSourceMonitor = true
+        await Self.display(host)
+        store.layout.inspectorTab = .effects
+        await Self.display(host)
+        store.layout.showsSourceMonitor = false
+        store.layout.inspectorTab = .inspector
+        await Self.display(host)
+        XCTAssertEqual(store.timelineBuildCount - builds, 0, "the layout does not rebuild the timeline model")
+
         // And the control again afterwards: the counter still sees redraws.
         let afterDraws = TimelineDiagnostics.canvasDraws
         store.selection = []

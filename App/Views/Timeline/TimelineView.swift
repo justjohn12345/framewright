@@ -20,10 +20,12 @@ import FramewrightEngine
 /// Option/Command-scroll to zoom.
 ///
 /// Transitions are bands across their cut at the top of the row, labelled with their duration:
-/// click selects (Delete removes, double-click edits the duration in the inspector), dragging an
+/// click selects (Delete removes it with its linked transition, Option-Delete only it; a right-click
+/// offers both), double-click edits the duration in the inspector), dragging an
 /// edge resizes symmetrically about the cut (whole frames, bounded by the media beyond the cut,
-/// which the status line names when the drag reaches it). Transitions dragged from the
-/// Transitions panel highlight the cut they would land on (red, with the reason, when it cannot
+/// which the status line names when the drag reaches it; the linked transition follows unless the
+/// Transition inspector's "Also change the linked transition" is off). Transitions dragged from
+/// the Effects tab highlight the cut they would land on (red, with the reason, when it cannot
 /// take one). Audio clips show their volume envelope over the waveform: a fade handle in each top
 /// corner (drag to set the fade, never overlapping the other) and the gain line (drag vertically;
 /// Option for fine steps; the value shows next to the pointer). Every such drag is one undo step.
@@ -238,6 +240,7 @@ struct TimelineView: View {
         }
         .onDrop(of: TimelineDropDelegate.types,
                 delegate: TimelineDropDelegate(gestures: gestures, isAssetTargeted: $isDropTargeted))
+        .background(ContextMenuCatcher { [gestures] point in gestures.contextMenuItems(at: point) })
         .clipped()
     }
 
@@ -349,47 +352,70 @@ struct PlayheadMarker: View {
     }
 }
 
+/// What a drop on the timeline offers: SwiftUI's `DropInfo`, or a test double (DropInfo cannot be
+/// made outside SwiftUI; the drop logic below only needs these three).
+@MainActor
+protocol TimelineDropInfo {
+    var location: CGPoint { get }
+    func hasItemsConforming(to contentTypes: [UTType]) -> Bool
+    func itemProviders(for contentTypes: [UTType]) -> [NSItemProvider]
+}
+
+extension DropInfo: TimelineDropInfo {}
+
 /// Drops on the track area: media from the bin (placed at the drop point, overwrite; hold
-/// Command to insert) and transitions from the Transitions panel (added on the nearest cut; the
-/// cut is highlighted while dragging, in red with the reason when it cannot take one).
+/// Command to insert) and transitions from the Effects tab (added on the nearest cut; the cut is
+/// highlighted while dragging, in red with the reason when it cannot take one). A transition is
+/// recognised by its exported content type (`TransitionKind.contentType`, declared in
+/// Info.plist), which the Effects tab's drag source (`TransitionReference`) provides; the payload
+/// itself is not read. The `handle...` methods take any `TimelineDropInfo`, so the drop logic is
+/// tested without a real drag (which only a person or a UI test can perform).
 @MainActor
 struct TimelineDropDelegate: DropDelegate {
     static let types: [UTType] = [.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade]
 
     let gestures: TimelineGestureController
     @Binding var isAssetTargeted: Bool
+    /// Whether Command is held (insert instead of overwrite); injectable for tests.
+    var commandHeld: () -> Bool = { NSEvent.modifierFlags.contains(.command) }
 
-    private func transitionKind(_ info: DropInfo) -> TransitionKind? {
+    static func transitionKind(_ info: some TimelineDropInfo) -> TransitionKind? {
         TransitionKind.allCases.first { info.hasItemsConforming(to: [$0.contentType]) }
     }
 
-    func validateDrop(info: DropInfo) -> Bool {
+    func validateDrop(info: DropInfo) -> Bool { handleValidate(info) }
+    func dropEntered(info: DropInfo) { handleEntered(info) }
+    func dropUpdated(info: DropInfo) -> DropProposal? { handleUpdated(info) }
+    func dropExited(info: DropInfo) { handleExited(info) }
+    func performDrop(info: DropInfo) -> Bool { handlePerform(info) }
+
+    func handleValidate(_ info: some TimelineDropInfo) -> Bool {
         info.hasItemsConforming(to: Self.types)
     }
 
-    func dropEntered(info: DropInfo) {
-        if transitionKind(info) == nil { isAssetTargeted = true }
+    func handleEntered(_ info: some TimelineDropInfo) {
+        if Self.transitionKind(info) == nil { isAssetTargeted = true }
     }
 
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        guard let kind = transitionKind(info) else { return DropProposal(operation: .copy) }
+    func handleUpdated(_ info: some TimelineDropInfo) -> DropProposal? {
+        guard let kind = Self.transitionKind(info) else { return DropProposal(operation: .copy) }
         let target = gestures.transitionDragUpdated(kind: kind, at: info.location)
         return DropProposal(operation: target?.allowed == true ? .copy : .forbidden)
     }
 
-    func dropExited(info: DropInfo) {
+    func handleExited(_ info: some TimelineDropInfo) {
         isAssetTargeted = false
         gestures.transitionDragExited()
     }
 
-    func performDrop(info: DropInfo) -> Bool {
+    func handlePerform(_ info: some TimelineDropInfo) -> Bool {
         isAssetTargeted = false
-        if let kind = transitionKind(info) {
+        if let kind = Self.transitionKind(info) {
             return gestures.dropTransition(kind: kind, at: info.location)
         }
         guard let provider = info.itemProviders(for: [.framewrightAssetReference]).first else { return false }
         let location = info.location
-        let insert = NSEvent.modifierFlags.contains(.command)
+        let insert = commandHeld()
         let controller = gestures
         provider.loadDataRepresentation(forTypeIdentifier: UTType.framewrightAssetReference.identifier) { data, _ in
             guard let data, let reference = try? JSONDecoder().decode(AssetReference.self, from: data) else { return }

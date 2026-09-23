@@ -43,12 +43,16 @@ struct EditingPreferences: Equatable {
     static let defaultTransitionSecondsKey = "defaultTransitionSeconds"
     static let linkedCrossfadeKey = "linkedCrossfade"
     static let durationDisplayKey = "durationDisplay"
+    static let resizeLinkedTransitionsKey = "resizeLinkedTransitions"
     static let defaultTransitionSeconds = 1.0
 
     /// Default length of new transitions in seconds (the Transitions panel, Add Cross Dissolve).
     var transitionSeconds = Self.defaultTransitionSeconds
     var linkedCrossfade = LinkedCrossfadeMode.always
     var durationDisplay = DurationDisplay.timecode
+    /// A duration change of a transition (inspector, handle drag) also changes its linked
+    /// transition (the crossfade under a dissolve); the Transition inspector's checkbox.
+    var resizeLinkedTransitions = true
 
     init() {}
 
@@ -60,6 +64,7 @@ struct EditingPreferences: Equatable {
             ?? .always
         durationDisplay = defaults.string(forKey: Self.durationDisplayKey).flatMap(DurationDisplay.init(rawValue:))
             ?? .timecode
+        resizeLinkedTransitions = defaults.object(forKey: Self.resizeLinkedTransitionsKey) as? Bool ?? true
     }
 
     /// The default transition length in whole frames of `frameDuration` (at least one).
@@ -72,7 +77,7 @@ struct EditingPreferences: Equatable {
 
 /// The Editing preferences as observable state, so open views re-format when they change.
 ///
-/// Mirrors the three keys of `defaults` in `current`, re-read whenever any user default changes
+/// Mirrors the keys of `defaults` in `current`, re-read whenever any user default changes
 /// in this process (`UserDefaults.didChangeNotification`: the Settings window's `@AppStorage`
 /// writes, or a test writing its own suite); a change posted on the main thread is applied before
 /// the write returns. `revision` changes with every change of `current` (a redraw token for

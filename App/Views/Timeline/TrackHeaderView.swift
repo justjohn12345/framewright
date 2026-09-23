@@ -1,7 +1,8 @@
 import SwiftUI
 import FramewrightEngine
 
-/// Header of one track row: name, target indicator, mute/solo/lock toggles.
+/// Header of one track row: collapse toggle (empty tracks only), name, target indicator,
+/// mute/solo/lock toggles.
 struct TrackHeaderView: View {
     @ObservedObject var store: ProjectStore
     let track: TimelineViewModel.Track
@@ -13,6 +14,19 @@ struct TrackHeaderView: View {
 
     var body: some View {
         HStack(spacing: 4) {
+            Button {
+                store.setTrack(track.id, collapsed: !track.collapsed)
+            } label: {
+                Image(systemName: track.collapsed ? "chevron.right" : "chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(track.isEmpty ? Color.secondary : Color.secondary.opacity(0.35))
+                    .frame(width: 12, height: 18)
+            }
+            .buttonStyle(.plain)
+            .disabled(!track.isEmpty && !track.collapsed)
+            .help(track.collapsed ? "Expand track \(track.name)"
+                : track.isEmpty ? "Collapse the empty track \(track.name)" : "Only empty tracks collapse")
+            .accessibilityIdentifier("TrackCollapse.\(track.name)")
             Button {
                 if track.kind == .video {
                     store.targetVideoTrackID = track.id

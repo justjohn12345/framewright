@@ -23,8 +23,6 @@ struct InspectorView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Inspector")
-                    .font(.headline)
                 if let message = inspector.message {
                     InspectorMessage(text: message) { inspector.clearMessage() }
                 }
@@ -259,7 +257,9 @@ private struct ParameterRow: View {
     }
 }
 
-/// The selected transition: kind, alignment and duration (bounded by the cut's media).
+/// The selected transition: kind, alignment, where it sits on its cut, its duration (bounded by
+/// the cut's media) and, for a dissolve with its linked crossfade (or the other way round),
+/// whether a duration change also changes the linked one and which of them Delete removes.
 private struct TransitionInspector: View {
     @ObservedObject var store: ProjectStore
     let inspector: InspectorModel
@@ -276,20 +276,53 @@ private struct TransitionInspector: View {
             }
             row("Kind", inspector.transitionKind?.title ?? "Cross Dissolve")
             row("Alignment", "Centred on cut")
-            row("Starts", Timecode.string(transition.start, frameDuration: store.frameDuration))
+            if let timing = inspector.transitionTiming {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(timing.cutText(frameDuration: store.frameDuration))
+                        .accessibilityIdentifier("TransitionCut")
+                    Spacer()
+                    Text(timing.offsetsText(frameDuration: store.frameDuration,
+                                            display: store.editingPreferences.durationDisplay))
+                        .foregroundStyle(.secondary)
+                        .help("How far the transition reaches before and after the cut")
+                        .accessibilityIdentifier("TransitionOffsets")
+                }
+                .font(.caption.monospacedDigit())
+            }
             ParameterRow(store: store, inspector: inspector, parameter: .transitionDuration,
                          focusSerial: focusSerial)
+            let linked = inspector.linkedTransition
+            if linked != nil {
+                Toggle("Also change the linked transition",
+                       isOn: Binding(get: { store.resizesLinkedTransitions },
+                                     set: { store.resizesLinkedTransitions = $0 }))
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .help("A duration change here or by dragging a handle also changes the "
+                        + (inspector.transitionKind == .crossDissolve ? "linked audio crossfade" : "linked video dissolve"))
+                    .accessibilityIdentifier("ResizeLinkedTransition")
+            }
             if let limit = inspector.transitionLimit {
                 Text("At most \(store.durationString(frames: limit.maximumFrames)): \(limit.reason)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Button("Delete Transition") {
-                inspector.deleteTransition()
+            HStack {
+                Button(linked != nil ? "Delete Both" : "Delete Transition") {
+                    inspector.deleteTransition()
+                }
+                .help(linked != nil ? "Delete this transition and its linked one (⌫)" : "Delete the transition (⌫)")
+                .accessibilityIdentifier("DeleteTransition")
+                if linked != nil {
+                    Button("Delete This One") {
+                        inspector.deleteTransition(includingLinked: false)
+                    }
+                    .help("Delete only this transition, keeping the linked one (⌥⌫)")
+                    .accessibilityIdentifier("DeleteTransitionOnly")
+                }
             }
             .controlSize(.small)
-            .accessibilityIdentifier("DeleteTransition")
         }
         Divider()
     }

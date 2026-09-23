@@ -4,13 +4,15 @@ import Foundation
 /// Editing keys that SwiftUI handles unreliably (bare keys without modifiers, arrows), routed to
 /// the store through an application-local key-down monitor.
 ///
-/// Only key presses in the editor window (`ProjectStore.editorWindow`) are handled; the Settings
-/// window, panels and alerts keep their keys. Keys go to the focused control instead when one
+/// Only key presses in the editor window (`ProjectStore.editorWindow`) and the program output
+/// window on a second display (`OutputDisplayController.window`, so the transport works while it
+/// is focused) are handled; the Settings window, panels and alerts keep their keys. Keys go to the focused control instead when one
 /// takes keyboard input: a text field being edited, or a focused control that uses the keys
 /// itself (a slider, button, table, pop-up; see `shouldHandleKeys(firstResponder:)`); a click
 /// in the timeline, a monitor or the bin takes that focus back (`ProjectStore.reclaimKeyboardFocus`).
 /// Handled: Space (play/pause), J/K/L (shuttle), ←/→ (one frame), Home/End (start/end), Delete /
-/// Forward Delete (delete in the focused panel), Shift+Delete (ripple delete), I/O (source
+/// Forward Delete (delete in the focused panel; a transition goes with its linked one),
+/// Option+Delete (only the selected transition), Shift+Delete (ripple delete), I/O (source
 /// in/out), = or + / - (zoom the timeline, like Command-= / Command--), ] / [ (gain of the selected
 /// audio clips ±1 dB, with Shift ±10 dB; a burst is one undo step), Escape (cancel the drag in
 /// progress; passed on when there is none), Command-A (select all clips). Auto-repeat of Space and
@@ -23,6 +25,8 @@ final class KeyboardController {
         case stepBackward, stepForward
         case goToStart, goToEnd
         case delete, rippleDelete
+        /// Option-Delete: the selected transition without its linked one.
+        case deleteTransitionOnly
         case markIn, markOut
         case zoomIn, zoomOut
         case cancel
@@ -78,6 +82,7 @@ final class KeyboardController {
         case 51, 117:
             if flags.isEmpty { return .delete }
             if flags == .shift { return .rippleDelete }
+            if flags == .option { return .deleteTransitionOnly }
             return nil
         default:
             break
@@ -124,7 +129,8 @@ final class KeyboardController {
     /// Handles a key-down event sent to `window` (the event's window; tests pass one). Returns
     /// whether it was consumed.
     func handle(_ event: NSEvent, window: NSWindow?) -> Bool {
-        guard let store, let window, window === store.editorWindow, window.attachedSheet == nil else {
+        guard let store, let window, window.attachedSheet == nil,
+              window === store.editorWindow || window === store.outputDisplay.window else {
             return false
         }
         let action = Self.action(keyCode: event.keyCode, characters: event.charactersIgnoringModifiers ?? "",
@@ -160,6 +166,7 @@ final class KeyboardController {
         case .goToEnd: store.playbackActions.goToEnd()
         case .delete: store.deleteSelection(ripple: false)
         case .rippleDelete: store.deleteSelection(ripple: true)
+        case .deleteTransitionOnly: store.deleteSelectedTransitionOnly()
         case .markIn: store.markSourceIn()
         case .markOut: store.markSourceOut()
         case .zoomIn: store.zoomIn()

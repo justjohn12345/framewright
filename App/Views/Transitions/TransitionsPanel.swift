@@ -1,7 +1,8 @@
 import SwiftUI
 import FramewrightEngine
 
-/// The transitions of the MVP, to drag onto a cut between two adjacent clips in the timeline:
+/// The transitions of the MVP (shown in the right panel's Effects tab, `EffectsPanel`), to drag
+/// onto a cut between two adjacent clips in the timeline:
 /// Cross Dissolve (video tracks) and Constant Power (audio crossfade). The "+" button next to a
 /// transition (or its context menu) adds it at the cut nearest the playhead, like Shift+Cmd+D
 /// and Option+Shift+Cmd+D; so does a double-click on the row outside its label. New transitions

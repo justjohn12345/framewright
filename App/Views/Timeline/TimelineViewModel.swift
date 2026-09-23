@@ -23,6 +23,10 @@ struct TimelineViewModel: Equatable {
         var muted = false
         var solo = false
         var locked = false
+        /// The track has no clips (only empty tracks can be collapsed).
+        var isEmpty = false
+        /// Shown as a short strip (`collapsedTrackHeight`): the user collapsed it and it is empty.
+        var collapsed = false
     }
 
     struct Clip: Equatable, Identifiable {
@@ -99,6 +103,8 @@ struct TimelineViewModel: Equatable {
 
     static let videoTrackHeight: CGFloat = 64
     static let audioTrackHeight: CGFloat = 48
+    /// Height of a collapsed (empty) track's row: room for its header's name and toggles.
+    static let collapsedTrackHeight: CGFloat = 22
     static let trackSpacing: CGFloat = 2
     static let edgeZone: CGFloat = 8
     static let snapThreshold: CGFloat = 8
@@ -168,7 +174,8 @@ struct TimelineViewModel: Equatable {
         var y: CGFloat = 0
         var layouts: [TrackLayout] = []
         for track in video + audio {
-            let height = track.kind == .video ? Self.videoTrackHeight : Self.audioTrackHeight
+            let height = track.collapsed ? Self.collapsedTrackHeight
+                : track.kind == .video ? Self.videoTrackHeight : Self.audioTrackHeight
             layouts.append(TrackLayout(track: track, y: y, height: height))
             y += height + Self.trackSpacing
         }

@@ -416,16 +416,20 @@ final class TimelineGestureController: ObservableObject {
         let requested = Int64((Double(frames) + (tail ? 2 : -2) * dx / max(model.frameSeconds, 1e-9)).rounded())
         let length = min(maxFrames, max(1, requested))
         let duration = store.time(frames: length)
+        // The linked transition follows unless the Transition inspector's "Also change the linked
+        // transition" is off.
+        let includingLinked = store.resizesLinkedTransitions
         let result = store.engine.performInCoalescingGroup(Self.transitionGroup) {
-            store.engine.setDuration(duration, forTransition: id)
+            store.engine.setDuration(duration, forTransition: id, includingLinked: includingLinked)
         }
         guard handleStep(result) else { return }
+        let linkedNote = result.note.isEmpty ? "" : " " + result.note
         if requested > maxFrames {
-            store.statusMessage = "Limited to \(store.durationString(frames: maxFrames)): \(limit)"
+            store.statusMessage = "Limited to \(store.durationString(frames: maxFrames)): \(limit)" + linkedNote
         } else if requested < 1 {
             store.statusMessage = "A transition is at least one frame long."
         } else {
-            store.statusMessage = "Transition: \(store.durationString(frames: length))"
+            store.statusMessage = "Transition: \(store.durationString(frames: length))" + linkedNote
         }
     }
 
@@ -550,6 +554,57 @@ final class TimelineGestureController: ObservableObject {
         cursor = wanted
         cursorChanges += 1
         applyCursor(wanted)
+    }
+
+    // MARK: Context menu
+
+    /// The right-click menu at `location` in the track area. What is under the pointer is
+    /// selected first (as in Premiere): a transition offers Delete (with its linked transition),
+    /// Delete This Transition Only and Transition Duration…; a clip offers Delete, Ripple Delete,
+    /// Link/Unlink and Speed/Duration…. Nothing during a drag or over empty space.
+    func contextMenuItems(at location: CGPoint) -> [ContextMenuItem] {
+        guard drag == .idle, !store.isGestureActive else { return [] }
+        let store = self.store
+        store.focusArea = .timeline
+        store.reclaimKeyboardFocus()
+        switch store.timelineModel.hitTest(location) {
+        case let .transition(id), let .transitionHead(id), let .transitionTail(id):
+            store.selection = []
+            store.selectedTransitionID = id
+            let linked = store.linkedTransition(of: id) != nil
+            var items = [ContextMenuItem(title: linked ? "Delete Transitions" : "Delete Transition") {
+                store.removeTransition(id, includingLinked: true)
+            }]
+            if linked {
+                items.append(ContextMenuItem(title: "Delete This Transition Only") {
+                    store.removeTransition(id, includingLinked: false)
+                })
+            }
+            items.append(.separator)
+            items.append(ContextMenuItem(title: "Transition Duration…") { store.editTransitionDuration() })
+            return items
+        case let .clipBody(id), let .clipHead(id), let .clipTail(id), let .fadeIn(id), let .fadeOut(id),
+             let .gainLine(id):
+            if !store.selection.contains(id) {
+                store.select(clip: id, extend: false)
+            }
+            store.selectedTransitionID = nil
+            let selected = store.selectedClips
+            let canUnlink = !selected.isEmpty && selected.allSatisfy { $0.linkedClipID != 0 }
+            return [
+                ContextMenuItem(title: "Delete") { store.deleteSelection(ripple: false) },
+                ContextMenuItem(title: "Ripple Delete") { store.deleteSelection(ripple: true) },
+                .separator,
+                ContextMenuItem(title: canUnlink ? "Unlink" : "Link", isEnabled: canUnlink || selected.count == 2) {
+                    store.linkOrUnlinkSelection()
+                },
+                ContextMenuItem(title: "Speed/Duration…", isEnabled: selected.contains { !$0.isStill }) {
+                    store.showSpeedSheet()
+                },
+            ]
+        case .track, .none:
+            return []
+        }
     }
 
     // MARK: Transition drops

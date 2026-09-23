@@ -50,6 +50,12 @@ final class ProjectStore: ObservableObject {
     }
 
     var editingPreferences: EditingPreferences { preferences.current }
+    /// The window layout (panels, the inspector's tab, split positions). Persisted in the app's
+    /// defaults for the app's store; a store made for tests keeps it in memory.
+    let layout: WindowLayoutModel
+    /// The program monitor on a second display (View > Program Monitor on Second Display), over
+    /// the system's screens (tests replace it with one over their own screen list).
+    lazy var outputDisplay = OutputDisplayController(store: self, screens: SystemScreens())
 
     // Engine snapshots.
     @Published private(set) var sequence: VESequenceInfo
@@ -80,6 +86,8 @@ final class ProjectStore: ObservableObject {
     @Published var targetVideoTrackID: VETrackID = 0
     @Published var targetAudioTrackID: VETrackID = 0
     @Published var focusArea: FocusArea = .timeline
+    /// Empty tracks whose rows the user collapsed (a track with clips always shows full height).
+    @Published private(set) var collapsedTrackIDs: Set<VETrackID> = []
     /// Last refused edit, edit note or import problem, shown in the transport bar.
     @Published var statusMessage: String?
     /// The snap line shown while dragging (seconds), or nil.
@@ -124,17 +132,22 @@ final class ProjectStore: ObservableObject {
     /// Number of times the timeline's content model was rebuilt (once per model change;
     /// diagnostics and tests).
     private(set) var timelineBuildCount = 0
-    private var cachedTimeline: (changeCount: UInt64, model: TimelineViewModel)?
+    private var cachedTimeline: (changeCount: UInt64, collapsed: Set<VETrackID>, model: TimelineViewModel)?
     private var observers: [NSObjectProtocol] = []
     private var preferencesForwarding: AnyCancellable?
 
-    /// A store over a new engine with the default cache directory.
+    /// The app's store: a new engine with the default cache directory, the layout persisted in the
+    /// standard defaults.
     convenience init() {
-        self.init(engine: VEEngine())
+        self.init(engine: VEEngine(), persistentLayout: true)
     }
 
-    init(engine: VEEngine) {
+    /// `persistentLayout`: keep the window layout in the standard defaults (the app); otherwise it
+    /// lives in memory only (tests, which run inside the app's process, must not change the app's
+    /// saved layout).
+    init(engine: VEEngine, persistentLayout: Bool = false) {
         self.engine = engine
+        layout = WindowLayoutModel(defaults: persistentLayout ? .standard : nil)
         thumbnails = ThumbnailCache(engine: engine)
         waveforms = WaveformCache(engine: engine)
         sequence = engine.sequence
@@ -250,16 +263,24 @@ final class ProjectStore: ObservableObject {
         return model
     }
 
+    /// Height of the timeline's rows (for sizing the timeline pane to its content).
+    var timelineContentHeight: CGFloat {
+        timelineContent.contentHeight
+    }
+
     private var timelineContent: TimelineViewModel {
-        if let cached = cachedTimeline, cached.changeCount == changeCount {
+        if let cached = cachedTimeline, cached.changeCount == changeCount, cached.collapsed == collapsedTrackIDs {
             return cached.model
         }
         timelineBuildCount += 1
         var model = TimelineViewModel()
         model.frameSeconds = frameDuration.secondsOrZero
+        let occupied = Set(clips.values.map(\.trackID))
         model.tracks = tracks.map {
             TimelineViewModel.Track(id: $0.trackID, kind: $0.kind == .video ? .video : .audio, index: $0.index,
-                                    name: $0.name, muted: $0.muted, solo: $0.solo, locked: $0.locked)
+                                    name: $0.name, muted: $0.muted, solo: $0.solo, locked: $0.locked,
+                                    isEmpty: !occupied.contains($0.trackID),
+                                    collapsed: collapsedTrackIDs.contains($0.trackID) && !occupied.contains($0.trackID))
         }
         model.clips = clips.values.map {
             let audio = $0.audioParams
@@ -275,7 +296,7 @@ final class ProjectStore: ObservableObject {
             TimelineViewModel.Transition(id: $0.transitionID, trackID: $0.trackID, start: $0.start.secondsOrZero,
                                          end: $0.end.secondsOrZero, fromClipID: $0.fromClipID, toClipID: $0.toClipID)
         }
-        cachedTimeline = (changeCount, model)
+        cachedTimeline = (changeCount, collapsedTrackIDs, model)
         return model
     }
 
@@ -323,6 +344,7 @@ final class ProjectStore: ObservableObject {
 
     /// Asks the inspector to focus `field`.
     func requestInspectorFocus(_ field: InspectorFocusRequest.Field) {
+        layout.inspectorTab = .inspector
         inspectorFocusRequest = InspectorFocusRequest(field: field, serial: (inspectorFocusRequest?.serial ?? 0) + 1)
     }
 
@@ -439,6 +461,29 @@ final class ProjectStore: ObservableObject {
         scrollX = 0
     }
 
+    // MARK: Track rows
+
+    /// Whether the track has no clips (only empty tracks collapse).
+    func isTrackEmpty(_ id: VETrackID) -> Bool {
+        !clips.values.contains { $0.trackID == id }
+    }
+
+    /// Collapses an empty track's row to a short strip, or expands it again. A track that gets a
+    /// clip shows at full height whatever its collapse state.
+    func setTrack(_ id: VETrackID, collapsed: Bool) {
+        if collapsed {
+            guard isTrackEmpty(id), track(id) != nil else { return }
+            collapsedTrackIDs.insert(id)
+        } else {
+            collapsedTrackIDs.remove(id)
+        }
+    }
+
+    /// Whether the track's row is shown collapsed (collapsed and still empty).
+    func isTrackCollapsed(_ id: VETrackID) -> Bool {
+        collapsedTrackIDs.contains(id) && isTrackEmpty(id)
+    }
+
     // MARK: Selection
 
     func select(clip id: VEClipID, extend: Bool) {
@@ -506,7 +551,8 @@ final class ProjectStore: ObservableObject {
             break
         }
         if selection.isEmpty, let transition = selectedTransitionID {
-            removeTransition(transition)
+            // A dissolve goes with its linked crossfade (they were added as one step).
+            removeTransition(transition, includingLinked: true)
             return
         }
         guard !selection.isEmpty else { return }
@@ -516,14 +562,36 @@ final class ProjectStore: ObservableObject {
         }
     }
 
-    /// Removes a transition (Delete in the timeline, the inspector's Delete Transition button,
-    /// whatever panel has the focus). Ignored during a gesture; a refusal is reported.
+    /// Removes a transition (Delete in the timeline, the inspector's Delete button, whatever panel
+    /// has the focus) and, with `includingLinked`, its linked transition (the crossfade under a
+    /// dissolve, or the other way round) in the same undo step; Option-Delete and "Delete This
+    /// Transition Only" pass false. Ignored during a gesture; a refusal is reported.
     @discardableResult
-    func removeTransition(_ id: VETransitionID) -> Bool {
+    func removeTransition(_ id: VETransitionID, includingLinked: Bool) -> Bool {
         guard !isGestureActive else { return false }
-        guard report(engine.removeTransition(id)) else { return false }
-        if selectedTransitionID == id { selectedTransitionID = nil }
+        guard report(engine.removeTransition(id, includingLinked: includingLinked)) else { return false }
+        if let selected = selectedTransitionID, engine.transitionInfo(selected) == nil { selectedTransitionID = nil }
         return true
+    }
+
+    /// Option-Delete (Clip > Delete Transition Only): removes the selected transition without its
+    /// linked one. Ignored during a gesture.
+    func deleteSelectedTransitionOnly() {
+        guard !isGestureActive, selection.isEmpty, let transition = selectedTransitionID else { return }
+        removeTransition(transition, includingLinked: false)
+    }
+
+    /// The transition linked to `id` (see `VEEngine.linkedTransition(forTransition:)`), or nil.
+    func linkedTransition(of id: VETransitionID) -> VETransitionID? {
+        let linked = engine.linkedTransition(forTransition: id)
+        return linked == 0 ? nil : linked
+    }
+
+    /// Whether a duration change of a transition also changes its linked transition (the
+    /// Transition inspector's checkbox; remembered in the Editing preferences, on by default).
+    var resizesLinkedTransitions: Bool {
+        get { editingPreferences.resizeLinkedTransitions }
+        set { defaults.set(newValue, forKey: EditingPreferences.resizeLinkedTransitionsKey) }
     }
 
     /// Adds a transition of `kind` (Shift+Cmd+D: cross dissolve; Option+Shift+Cmd+D: audio
@@ -754,8 +822,11 @@ final class ProjectStore: ObservableObject {
 
     // MARK: Source monitor
 
+    /// Opens an asset in the source monitor (a double-click in the bin), showing the monitor if it
+    /// was hidden.
     func showInSourceMonitor(_ id: VEAssetID) {
         guard asset(id) != nil else { return }
+        layout.showsSourceMonitor = true
         if source.assetID != id {
             source = SourceMonitorState(assetID: id)
             sourcePlayhead.reset()
@@ -763,6 +834,17 @@ final class ProjectStore: ObservableObject {
         }
         selectedAssetID = id
         focusArea = .sourceMonitor
+    }
+
+    /// View > Show Source Monitor. Hiding it pauses the source playback and gives the transport
+    /// keys back to the program; the asset and its marks stay (showing it again shows them).
+    func setSourceMonitorVisible(_ visible: Bool) {
+        guard visible != layout.showsSourceMonitor else { return }
+        if !visible {
+            engine.sourceMonitorPause()
+            if focusArea == .sourceMonitor { focusArea = .timeline }
+        }
+        layout.showsSourceMonitor = visible
     }
 
     /// The source monitor's frame duration: the asset's nominal one (the sequence's for stills
@@ -881,6 +963,7 @@ final class ProjectStore: ObservableObject {
         waveforms.removeAll()
         selection = []
         selectedAssetID = nil
+        collapsedTrackIDs = [] // track ids restart per project
         source = SourceMonitorState()
         sourcePlayhead.reset()
         playhead.apply(engine.playbackStatus)
