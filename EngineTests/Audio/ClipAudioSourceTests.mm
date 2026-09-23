@@ -1,12 +1,13 @@
 // ClipAudioSource on the generated media: sample-accurate seek + read against the known wav
-// signal, clip offsets, speed resampling (the beep moves to beepTime / speed), and the
-// consumer's non-blocking repositioning.
+// signal, clip offsets, speed resampling (the beep moves to beepTime / speed), the consumer's
+// non-blocking repositioning, and the producer's wake-ups (none while idle, one per refill).
 
 #import <XCTest/XCTest.h>
 
 #include "../../Engine/Audio/ClipAudioSource.h"
 #include "../Media/BurnIn.h"
 #include "../Media/TestMedia.h"
+#include "AudioTestSupport.h"
 
 #include <chrono>
 #include <cmath>
@@ -191,6 +192,67 @@ std::vector<float> readRange(ClipAudioSource &source, int64_t at, int64_t frames
     XCTAssertTrue(std::all_of(got.begin(), got.end(), [](float v) { return v == 0.0f; }));
     XCTAssertTrue(source.stats().failed);
     XCTAssertFalse(source.stats().error.empty());
+}
+
+- (void)testIdleProducerSleepsUntilTheConsumerDrainsOrARequestArrives {
+    auto tones = std::make_shared<ToneBehavior>();
+    tones->setSignal("tone://a", sineSignal(440, 0.5));
+    AudioSourceMapping m;
+    m.asset = AssetId(1);
+    m.path = "tone://a";
+    ClipAudioSource source(makeToneRouter(tones), m);
+    const ClipAudioSourceConfig &config = source.config();
+    const int64_t lookahead = static_cast<int64_t>(config.lookaheadSeconds * kSr);
+    const int64_t refill = static_cast<int64_t>(config.refillSeconds * kSr);
+    // No request: the producer sleeps.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    XCTAssertLessThanOrEqual(source.stats().wakeups, 1u);
+    // A request: it fills to the lookahead, then sleeps with no consumer.
+    source.seekTo(1000);
+    XCTAssertTrue(waitReady(source, 1000, lookahead, std::chrono::seconds(10)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const uint64_t full = source.stats().wakeups;
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    XCTAssertEqual(source.stats().wakeups, full, @"no polling while full");
+    XCTAssertEqual(source.stats().framesProduced, static_cast<uint64_t>(lookahead));
+    // The consumer reads, staying above the refill level: still no wake-up.
+    std::vector<float> buffer(4096 * 2);
+    int64_t pos = 1000;
+    while (lookahead - (pos - 1000) > refill + 4096) {
+        pos += source.read(pos, buffer.data(), 4096);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    XCTAssertEqual(source.stats().wakeups, full, @"above the refill level the producer is not woken");
+    // Crossing the refill level wakes it once; it tops up to the lookahead again.
+    while (source.stats().framesProduced == static_cast<uint64_t>(lookahead)) {
+        pos += source.read(pos, buffer.data(), 4096);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    XCTAssertTrue(waitReady(source, pos, lookahead, std::chrono::seconds(10)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const uint64_t woken = source.stats().wakeups - full;
+    XCTAssertGreaterThanOrEqual(woken, 1u);
+    XCTAssertLessThanOrEqual(woken, 3u, @"one wake-up per refill, not a poll");
+    NSLog(@"producer wake-ups: %llu to fill, 0 while full or above the refill level, %llu per refill", full, woken);
+}
+
+- (void)testPositionedAtTellsWhetherAReseekWouldHelp {
+    auto tones = std::make_shared<ToneBehavior>();
+    tones->setSignal("tone://a", constantSignal(0.25f, 0.25f));
+    AudioSourceMapping m;
+    m.asset = AssetId(1);
+    m.path = "tone://a";
+    ClipAudioSource source(makeToneRouter(tones), m);
+    XCTAssertEqual(source.requestedPosition(), -1);
+    XCTAssertFalse(source.isPositionedAt(0));
+    source.seekTo(48000);
+    XCTAssertEqual(source.requestedPosition(), 48000);
+    XCTAssertTrue(source.isPositionedAt(48000));
+    XCTAssertFalse(source.isPositionedAt(48001));
+    XCTAssertTrue(waitReady(source, 48000, 4800, std::chrono::seconds(10)));
+    std::vector<float> buffer(512 * 2);
+    XCTAssertEqual(source.read(48000, buffer.data(), 512), 512);
+    XCTAssertFalse(source.isPositionedAt(48000), @"consumed past its position: a reseek is needed");
 }
 
 @end

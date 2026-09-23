@@ -27,6 +27,7 @@ struct ToneBehavior {
     std::atomic<int> opens{0};
     std::atomic<int> seeks{0};
     std::atomic<int64_t> framesRead{0};
+    std::atomic<int> blockedReads{0}; ///< Reads currently waiting at the gate.
 
     void setSignal(const std::string &path, ToneSignal signal) {
         std::lock_guard<std::mutex> lock(mutex);

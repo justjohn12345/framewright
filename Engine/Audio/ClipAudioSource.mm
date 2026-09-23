@@ -39,18 +39,20 @@ ClipAudioSource::ClipAudioSource(std::shared_ptr<media::BackendRouter> router, A
       step_(mapping_.speed.toDouble()) {
     ring_.assign(static_cast<size_t>(capacity_ * channels_), 0.0f);
     scratch_.assign(static_cast<size_t>(std::max(1, config_.chunkFrames) * channels_), 0.0f);
+    if (semaphore_create(mach_task_self(), &wakeSemaphore_, SYNC_POLICY_FIFO, 0) != KERN_SUCCESS) {
+        wakeSemaphore_ = MACH_PORT_NULL; // the producer then falls back to short sleeps (see waitForWork)
+    }
     thread_ = std::thread([this] { producerMain(); });
 }
 
 ClipAudioSource::~ClipAudioSource() {
     stop_.store(true, std::memory_order_release);
-    {
-        std::lock_guard<std::mutex> lock(waitMutex_);
-        wake_ = true;
-    }
-    waitCv_.notify_all();
+    wake();
     if (thread_.joinable()) {
         thread_.join();
+    }
+    if (wakeSemaphore_ != MACH_PORT_NULL) {
+        semaphore_destroy(mach_task_self(), wakeSemaphore_);
     }
 }
 
@@ -65,19 +67,32 @@ void ClipAudioSource::reposition(int64_t sequenceSample) noexcept {
             serial = 1;
         }
         const uint64_t desired = (position << 16) | serial;
-        if (request_.compare_exchange_weak(current, desired, std::memory_order_release, std::memory_order_relaxed)) {
-            return;
+        if (request_.compare_exchange_weak(current, desired, std::memory_order_seq_cst, std::memory_order_relaxed)) {
+            break;
         }
+    }
+    wake();
+}
+
+void ClipAudioSource::wake() noexcept {
+    if (wakeSemaphore_ != MACH_PORT_NULL) {
+        semaphore_signal(wakeSemaphore_);
     }
 }
 
-void ClipAudioSource::seekTo(int64_t sequenceSample) {
-    reposition(sequenceSample);
-    {
-        std::lock_guard<std::mutex> lock(waitMutex_);
-        wake_ = true;
+int64_t ClipAudioSource::requestedPosition() const noexcept {
+    const uint64_t request = request_.load(std::memory_order_acquire);
+    return (request & kSerialMask) == 0 ? -1 : static_cast<int64_t>(request >> 16);
+}
+
+bool ClipAudioSource::isPositionedAt(int64_t sequenceSample) const noexcept {
+    const uint64_t request = request_.load(std::memory_order_acquire);
+    const uint32_t serial = static_cast<uint32_t>(request & kSerialMask);
+    if (serial == 0 || static_cast<int64_t>(request >> 16) != std::max<int64_t>(0, sequenceSample)) {
+        return false;
     }
-    waitCv_.notify_one();
+    return consumerAdopted_.load(std::memory_order_acquire) != serial ||
+           consumerPos_.load(std::memory_order_acquire) == std::max<int64_t>(0, sequenceSample);
 }
 
 bool ClipAudioSource::isReady(int64_t sequenceSample, int64_t frames) const noexcept {
@@ -105,6 +120,7 @@ ClipAudioSource::Stats ClipAudioSource::stats() const {
     const uint64_t w = writeIndex_.load(std::memory_order_acquire);
     const uint64_t r = readIndex_.load(std::memory_order_acquire);
     s.bufferedFrames = static_cast<int64_t>(w >= r ? w - r : 0);
+    s.wakeups = wakeups_.load(std::memory_order_relaxed);
     return s;
 }
 
@@ -124,8 +140,8 @@ int ClipAudioSource::read(int64_t pos, float *dst, int frames) noexcept {
         consumerIndex_ = segment.start;
         consumerExpected_ = segment.position;
         consumerSegmentPos_ = segment.position;
-        readIndex_.store(consumerIndex_, std::memory_order_release);
-        consumerPos_.store(consumerExpected_, std::memory_order_release);
+        consumerAdopted_.store(segment.serial, std::memory_order_release);
+        publishConsumer();
     }
 
     // A request the producer has not answered yet: wait for it unless it is useless for `pos`.
@@ -166,8 +182,7 @@ int ClipAudioSource::read(int64_t pos, float *dst, int frames) noexcept {
         } else {
             consumerIndex_ = written;
             consumerExpected_ += available;
-            readIndex_.store(consumerIndex_, std::memory_order_release);
-            consumerPos_.store(consumerExpected_, std::memory_order_release);
+            publishConsumer();
         }
         return 0;
     }
@@ -187,17 +202,34 @@ int ClipAudioSource::read(int64_t pos, float *dst, int frames) noexcept {
     }
     consumerIndex_ += static_cast<uint64_t>(n);
     consumerExpected_ += n;
-    readIndex_.store(consumerIndex_, std::memory_order_release);
-    consumerPos_.store(consumerExpected_, std::memory_order_release);
+    publishConsumer();
     return n;
+}
+
+void ClipAudioSource::publishConsumer() noexcept {
+    // seq_cst store/load pair against the producer's flag store/readIndex load (see
+    // producerMain): either the producer sees the drained level or this sees its flag.
+    readIndex_.store(consumerIndex_, std::memory_order_seq_cst);
+    consumerPos_.store(consumerExpected_, std::memory_order_release);
+    if (waitingForSpace_.load(std::memory_order_seq_cst)) {
+        const uint64_t written = writeIndex_.load(std::memory_order_acquire);
+        const int64_t buffered = static_cast<int64_t>(written - std::min(written, consumerIndex_));
+        if (buffered < refill_ && waitingForSpace_.exchange(false, std::memory_order_acq_rel)) {
+            wake();
+        }
+    }
 }
 
 // MARK: - Producer
 
-void ClipAudioSource::waitForWork(std::chrono::milliseconds timeout) {
-    std::unique_lock<std::mutex> lock(waitMutex_);
-    waitCv_.wait_for(lock, timeout, [&] { return wake_ || stop_.load(std::memory_order_acquire); });
-    wake_ = false;
+void ClipAudioSource::waitForWork() {
+    if (wakeSemaphore_ != MACH_PORT_NULL) {
+        // Spurious returns (KERN_ABORTED) just re-run the producer loop.
+        (void)semaphore_wait(wakeSemaphore_);
+    } else {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5)); // no semaphore: degrade to polling
+    }
+    wakeups_.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool ClipAudioSource::openDecoder() {
@@ -350,28 +382,45 @@ void ClipAudioSource::producerMain() {
             refilling = true;
         }
         if (!haveSegment) {
-            waitForWork(config_.idlePoll);
+            waitForWork(); // until the first request
             continue;
         }
 
         const uint64_t w = writeIndex_.load(std::memory_order_relaxed);
-        const uint64_t r = readIndex_.load(std::memory_order_acquire);
-        const int64_t used = static_cast<int64_t>(w - std::min(r, w));
-        const int64_t free = capacity_ - used;
-        const int64_t buffered = static_cast<int64_t>(w - std::max(r, segmentStart));
-        if (!refilling && buffered < refill_) {
+        struct Level {
+            int64_t free = 0;
+            int64_t buffered = 0;
+        };
+        // Stale frames of an older segment the consumer has not skipped yet still occupy the
+        // ring (`free`) but do not count as buffered audio.
+        auto levelAt = [&](uint64_t r) {
+            return Level{capacity_ - static_cast<int64_t>(w - std::min(r, w)),
+                         static_cast<int64_t>(w - std::min(w, std::max(r, segmentStart)))};
+        };
+        const Level level = levelAt(readIndex_.load(std::memory_order_acquire));
+        if (!refilling && level.buffered < refill_) {
             refilling = true;
         }
-        if (buffered >= lookahead_ || free <= 0) {
+        if (level.buffered >= lookahead_) {
             refilling = false;
         }
-        if (!refilling) {
-            waitForWork(config_.idlePoll);
-            continue;
-        }
-        const int n = static_cast<int>(std::min<int64_t>({chunk, free, lookahead_ - buffered}));
+        const int n = refilling && level.free > 0
+                          ? static_cast<int>(std::min<int64_t>({chunk, level.free, lookahead_ - level.buffered}))
+                          : 0;
         if (n <= 0) {
-            waitForWork(config_.idlePoll);
+            // Nothing to do until the consumer drains below the refill level (or frees stale
+            // frames by adopting the segment) or a request arrives. Publish the flag, then
+            // re-check: the seq_cst pair with publishConsumer guarantees that either this sees
+            // the consumer's progress or the consumer sees the flag and signals.
+            waitingForSpace_.store(true, std::memory_order_seq_cst);
+            const Level again = levelAt(readIndex_.load(std::memory_order_seq_cst));
+            const bool canWork =
+                again.free > 0 && (refilling ? again.buffered < lookahead_ : again.buffered < refill_);
+            const bool requested = (request_.load(std::memory_order_acquire) & kSerialMask) != handled;
+            if (!canWork && !requested) {
+                waitForWork();
+            }
+            waitingForSpace_.store(false, std::memory_order_relaxed);
             continue;
         }
         produce(position, n, scratch_.data());

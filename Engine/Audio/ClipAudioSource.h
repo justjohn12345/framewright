@@ -28,18 +28,25 @@
 // - read(pos) is sample-accurate: frames before pos are skipped; when pos is not covered yet the
 //   consumer outputs nothing (the caller mixes silence and counts an underrun) and, when pos is
 //   out of reach, posts a reposition itself. It never waits.
-// - The producer keeps up to `lookahead` seconds decoded past the consumer and, once full, waits
-//   until the level drops below `refill` seconds (polling every `idlePoll`; non-realtime
-//   callers of seekTo() also wake it immediately).
+// - The producer keeps up to `lookahead` seconds decoded past the consumer. Once full it blocks
+//   (no timeout, no polling) until the consumer has drained the buffer below `refill` seconds
+//   (the consumer signals once when it crosses that level while the producer waits) or a new
+//   reposition request arrives. Without a request it blocks until one arrives. So a paused
+//   source, or one parked ahead of the playhead, costs no CPU wake-ups at all.
+// - Wake-ups use a Mach semaphore: semaphore_signal is a bounded Mach trap that neither
+//   allocates nor takes a lock, so the audio render thread may signal it (it does so only when
+//   it posts a reposition or crosses the refill level, not per callback).
 //
 // Threading contract
 // - Constructor/destructor: a non-realtime thread. The destructor stops and joins the producer
-//   (the decoder is destroyed on the producer thread).
+//   (the decoder is destroyed on the producer thread); it waits for a decoder call in progress,
+//   so owners destroy sources off latency-sensitive threads (AudioMixer uses a reaper queue).
 // - read(): the audio render thread only (one consumer). Realtime-safe: no locks, no
-//   allocation, no Objective-C, no system calls.
-// - reposition(): any thread, lock-free, realtime-safe (does not wake the producer; it notices
-//   within idlePoll). seekTo(): non-realtime threads (reposition + wake).
-// - isReady(), consumerPosition(), producedEnd(), stats(): any non-realtime thread.
+//   allocation, no Objective-C; its only system call is the occasional semaphore_signal.
+// - reposition(), seekTo(): any thread (reposition() is realtime-safe as above; seekTo() is the
+//   same call, kept for readability on the control side).
+// - isReady(), isPositionedAt(), requestedPosition(), consumerPosition(), producedEnd(),
+//   stats(): any non-realtime thread.
 
 #pragma once
 
@@ -48,9 +55,9 @@
 #include "../Model/TimeUtil.h"
 #include "Realtime.h"
 
+#include <mach/mach.h>
+
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -83,7 +90,6 @@ struct ClipAudioSourceConfig {
     double refillSeconds = 1.5;    ///< Resume decoding when the buffered audio drops below this.
     double capacitySeconds = 3.0;  ///< Ring size (> lookahead, leaves room after a reposition).
     int chunkFrames = 1024;        ///< Frames produced per decode step.
-    std::chrono::milliseconds idlePoll{5};
 };
 
 class ClipAudioSource {
@@ -96,6 +102,7 @@ class ClipAudioSource {
         uint64_t framesProduced = 0;
         uint64_t repositions = 0;   ///< Segments started by the producer.
         int64_t bufferedFrames = 0; ///< Decoded and not yet consumed.
+        uint64_t wakeups = 0;       ///< Times the producer returned from a blocking wait.
     };
 
     ClipAudioSource(std::shared_ptr<media::BackendRouter> router, AudioSourceMapping mapping,
@@ -107,15 +114,22 @@ class ClipAudioSource {
     const AudioSourceMapping &mapping() const { return mapping_; }
     const ClipAudioSourceConfig &config() const { return config_; }
 
-    /// Asks the producer to continue from `sequenceSample` (>= 0). Any thread, realtime-safe.
+    /// Asks the producer to continue from `sequenceSample` (>= 0) and wakes it. Any thread,
+    /// realtime-safe.
     void reposition(int64_t sequenceSample) noexcept;
-    /// reposition() and wake the producer now. Non-realtime threads.
-    void seekTo(int64_t sequenceSample);
+    /// Same as reposition() (control-side spelling).
+    void seekTo(int64_t sequenceSample) { reposition(sequenceSample); }
 
     /// The producer has answered the newest reposition request and has decoded
     /// [sequenceSample, sequenceSample + frames) (or reached a state where it only produces
     /// silence: end of media, open failure).
     bool isReady(int64_t sequenceSample, int64_t frames) const noexcept;
+    /// The newest request asks for `sequenceSample` and the consumer has not moved away from it
+    /// (it has not adopted that segment yet, or adopted it without consuming). Repositioning
+    /// such a source again would only throw decoded audio away.
+    bool isPositionedAt(int64_t sequenceSample) const noexcept;
+    /// Sequence sample of the newest request (-1 if none).
+    int64_t requestedPosition() const noexcept;
     /// Next sequence sample the consumer expects (-1 before its first adopted segment).
     int64_t consumerPosition() const noexcept { return consumerPos_.load(std::memory_order_acquire); }
     /// Sequence sample after the last frame the producer wrote in its current segment.
@@ -138,7 +152,12 @@ class ClipAudioSource {
     /// Source samples [start, start + frames) at the output rate, silence outside the media.
     void readSource(int64_t start, int64_t frames, float *out);
     void ensureSourceWindow(int64_t first, int64_t lastInclusive);
-    void waitForWork(std::chrono::milliseconds timeout);
+    /// Blocks until signalled (producer thread).
+    void waitForWork();
+    void wake() noexcept;
+    /// Publishes the consumer's position and wakes a producer waiting for space once the
+    /// buffered level falls below `refill` (render thread).
+    void publishConsumer() noexcept;
 
     const std::shared_ptr<media::BackendRouter> router_;
     const AudioSourceMapping mapping_;
@@ -168,6 +187,9 @@ class ClipAudioSource {
     SeqLock<Segment> segment_; // written by the producer, read by anyone
     std::atomic<int64_t> producedEnd_{-1};
     std::atomic<int64_t> consumerPos_{-1};
+    std::atomic<uint32_t> consumerAdopted_{0}; // serial of the segment the consumer adopted
+    std::atomic<bool> waitingForSpace_{false};
+    std::atomic<uint64_t> wakeups_{0};
     std::atomic<uint64_t> framesProduced_{0};
     std::atomic<uint64_t> repositions_{0};
     std::atomic<bool> opened_{false};
@@ -191,9 +213,7 @@ class ClipAudioSource {
     std::string backend_;
     std::string error_;
 
-    std::mutex waitMutex_;
-    std::condition_variable waitCv_;
-    bool wake_ = false;
+    semaphore_t wakeSemaphore_ = MACH_PORT_NULL;
     std::atomic<bool> stop_{false};
     std::thread thread_;
 };
