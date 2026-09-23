@@ -231,6 +231,11 @@ NS_SWIFT_UI_ACTOR
 @property (nonatomic, readonly, copy) NSArray<NSString *> *loadWarnings;
 /// The project's JSON as it would be saved, without the bookmarks (diagnostics and tests).
 @property (nonatomic, readonly, copy) NSString *projectJSON;
+/// A bookmark (security-scoped where possible) of the folder the app keeps media received from
+/// Photos in, stored with the project (saved next to the asset bookmarks, read back on open) so
+/// the app need not ask again; nil when none was chosen. New and Open reset it; setting a
+/// different value is an unsaved change of the project (not an undo step).
+@property (nonatomic, copy, nullable) NSData *mediaFolderBookmark;
 
 // MARK: Snapshots
 

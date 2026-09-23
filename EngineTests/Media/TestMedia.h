@@ -46,6 +46,8 @@ const TestClip &testClip(const std::string &file);
 //   leading_gap_h264.mov    640x360 H.264, 60 frames at 30 fps, the first presented at 0.5 s.
 //   prores4444_alpha.mov    576x324 ProRes 4444, 10 frames at 25 fps; the left half has alpha 128
 //                           with straight colour.
+//   slowmo_hevc_portrait.mov 640x360 HEVC stored, displayed rotated 90 degrees clockwise; 180 frames:
+//                           30 of 1/30 s, 120 of 1/240 s, 30 of 1/30 s (an iPhone slow-motion clip).
 //   audio_44k.m4a / .wav    44.1 kHz stereo AAC (880 Hz) / PCM (990 Hz), 6 s, beep at 2 s.
 //   audio_mono.m4a          48 kHz mono AAC, 660 Hz, 4 s.   audio_51.m4a  48 kHz 5.1 AAC, 520 Hz, 4 s.
 
@@ -57,6 +59,12 @@ inline constexpr int kVfrFrames = 150;
 CMTime vfrFrameTime(int index);
 /// Index of the vfr_h264.mp4 frame containing `t` (the frame with time(i) <= t < time(i + 1)).
 int vfrFrameAt(CMTime t);
+
+/// slowmo_hevc_portrait.mov: frame count, presentation time of frame `index` (index ==
+/// kSlowmoFrames gives the end) and the frame containing `t`.
+inline constexpr int kSlowmoFrames = 180;
+CMTime slowmoFrameTime(int index);
+int slowmoFrameAt(CMTime t);
 
 /// Directory holding the generated files. Generates them on first use by running
 /// `xcrun swift Scripts/make_test_media.swift` into <build dir>/FramewrightTestMedia/<script hash>

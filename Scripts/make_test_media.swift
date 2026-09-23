@@ -446,6 +446,24 @@ writeVideo(outDir.appendingPathComponent("rotated90_h264.mp4"), type: .mp4,
            audio: nil, fastStart: true)
 record("rotated90_h264.mp4", ["codec": "avc1", "width": 640, "height": 360, "frames": 30, "rotation": 90])
 
+// Slow motion as Photos hands over an iPhone clip: HEVC, portrait (stored landscape, shown rotated
+// 90 degrees clockwise), 30 fps around a 240 fps section: 30 frames of 1/30 s, 120 of 1/240 s,
+// 30 of 1/30 s (variable frame rate). Keep in sync with EngineTests/Media/TestMedia.mm.
+var slowmoTimes: [CMTime] = []
+var slowmoTick: Int64 = 0 // 1/960 s
+for i in 0..<180 {
+    slowmoTimes.append(CMTime(value: slowmoTick, timescale: 960))
+    slowmoTick += (i >= 30 && i < 150) ? 4 : 32
+}
+writeVideo(outDir.appendingPathComponent("slowmo_hevc_portrait.mov"), type: .mov,
+           video: VideoSpec(codec: .hevc, width: 640, height: 360, frameDuration: CMTime(value: 1, timescale: 240),
+                            frames: 180, bitRate: 2_000_000, keyFrameInterval: 30, times: slowmoTimes,
+                            end: CMTime(value: slowmoTick, timescale: 960),
+                            transform: CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 360, ty: 0)),
+           audio: nil, fastStart: false)
+record("slowmo_hevc_portrait.mov", ["codec": "hvc1", "width": 640, "height": 360, "frames": 180, "rotation": 90,
+                                    "slowmo": "30x1/30, 120x1/240, 30x1/30"])
+
 // Long GOP: one keyframe every 5 s (150 frames), for seeks deep into a GOP.
 writeVideo(outDir.appendingPathComponent("gop5s_h264_1080p30.mp4"), type: .mp4,
            video: VideoSpec(codec: .h264, width: 1920, height: 1080, frameDuration: CMTime(value: 1, timescale: 30),

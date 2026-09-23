@@ -89,6 +89,8 @@ namespace {
 constexpr int kPosterMaxDimension = 320;
 /// Key under which the project file stores security-scoped bookmarks (asset id -> base64).
 constexpr const char *kBookmarksKey = "assetBookmarks";
+/// Key under which the project file stores the media folder's bookmark (base64).
+constexpr const char *kMediaFolderBookmarkKey = "mediaFolderBookmark";
 
 NSError *makeError(VEEngineErrorCode code, NSString *message) {
     return [NSError errorWithDomain:VEEngineErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey : message}];
@@ -436,6 +438,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     std::map<AssetId, AssetDetails> _details;
     std::set<AssetId> _missing;
     NSMutableDictionary<NSNumber *, NSData *> *_bookmarks;
+    NSData *_mediaFolderBookmark; // see -mediaFolderBookmark
     NSMutableArray<NSURL *> *_accessedURLs;
     NSURL *_projectURL;
 
@@ -705,6 +708,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     _changeBase += _undo->changeCount() + _extraChanges + 1;
     _extraChanges = 0;
     _metadataDirty = false;
+    _mediaFolderBookmark = nil;
     _undo = std::make_unique<UndoStack>();
     _coalescingKey = nil;
     _project = std::move(project);
@@ -782,8 +786,17 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
         }
     }
 
+    NSData *mediaFolderBookmark = nil;
+    if (json.is_object()) {
+        auto it = json.find(kMediaFolderBookmarkKey);
+        if (it != json.end() && it->is_string()) {
+            mediaFolderBookmark = [[NSData alloc] initWithBase64EncodedString:toNS(it->get<std::string>()) options:0];
+        }
+    }
+
     std::vector<std::string> warnings = std::move(loaded.warnings);
     [self installProject:std::move(project) url:url];
+    _mediaFolderBookmark = mediaFolderBookmark;
     NSMutableArray<NSString *> *warningStrings = [NSMutableArray arrayWithCapacity:warnings.size()];
     for (const std::string &warning : warnings) {
         [warningStrings addObject:toNS(warning)];
@@ -901,6 +914,9 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
         }
     }
     json[kBookmarksKey] = std::move(bookmarks);
+    if (_mediaFolderBookmark != nil) {
+        json[kMediaFolderBookmarkKey] = toStd([_mediaFolderBookmark base64EncodedStringWithOptions:0]);
+    }
     // Invalid UTF-8 in names or paths is written as U+FFFD rather than throwing.
     const std::string text = json.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
     NSData *data = [NSData dataWithBytes:text.data() length:text.size()];
@@ -960,6 +976,23 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 - (NSString *)projectJSON {
     VE_ASSERT_MAIN();
     return toNS(serializeProject(_project));
+}
+
+- (nullable NSData *)mediaFolderBookmark {
+    VE_ASSERT_MAIN();
+    return _mediaFolderBookmark;
+}
+
+- (void)setMediaFolderBookmark:(nullable NSData *)mediaFolderBookmark {
+    VE_ASSERT_MAIN();
+    if (mediaFolderBookmark == _mediaFolderBookmark || [mediaFolderBookmark isEqualToData:_mediaFolderBookmark]) {
+        return;
+    }
+    _mediaFolderBookmark = [mediaFolderBookmark copy];
+    // Saved with the project: an unsaved change, outside the undo history.
+    _metadataDirty = true;
+    ++_extraChanges;
+    [self notifyModelChanged];
 }
 
 // MARK: - Snapshots

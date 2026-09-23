@@ -126,6 +126,7 @@ const std::vector<TestClip> &specialClips() {
         // frameDuration of the VFR clip: its shortest frame (10/600 s), as TrackInfo reports it.
         video("vfr_h264.mp4", "mp4", make("avc1"), 640, 360, CMTimeMake(10, 600), kVfrFrames, 30);
         video("rotated90_h264.mp4", "mp4", make("avc1"), 640, 360, CMTimeMake(1, 30), 30, 30);
+        video("slowmo_hevc_portrait.mov", "mov", make("hvc1"), 640, 360, CMTimeMake(1, 240), kSlowmoFrames, 30);
         video("gop5s_h264_1080p30.mp4", "mp4", make("avc1"), 1920, 1080, CMTimeMake(1, 30), 300, 150);
         video("leading_gap_h264.mov", "mov", make("avc1"), 640, 360, CMTimeMake(1, 30), 60, 30);
         video("prores4444_alpha.mov", "mov", make("ap4h"), 576, 324, CMTimeMake(1, 25), 10, 0);
@@ -177,6 +178,23 @@ int vfrFrameAt(CMTime t) {
         }
     }
     return kVfrFrames; // At or past the end.
+}
+
+CMTime slowmoFrameTime(int index) {
+    int64_t ticks = 0; // 1/960 s
+    for (int i = 0; i < index; ++i) {
+        ticks += (i >= 30 && i < 150) ? 4 : 32;
+    }
+    return CMTimeMake(ticks, 960);
+}
+
+int slowmoFrameAt(CMTime t) {
+    for (int i = 0; i < kSlowmoFrames; ++i) {
+        if (CMTimeCompare(t, slowmoFrameTime(i + 1)) < 0) {
+            return i;
+        }
+    }
+    return kSlowmoFrames;
 }
 
 namespace {
