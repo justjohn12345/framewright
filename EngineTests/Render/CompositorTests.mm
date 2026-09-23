@@ -14,10 +14,12 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 using namespace ve;
@@ -333,10 +335,12 @@ struct FrameLog {
         g.layers.push_back(layer);
         [self render:g textures:{texturesFor(*_compositor, source)} target:PixelBufferTarget{out}];
         // Centre (1160, 640), size 960x540: x in [680, 1640), y in [370, 910); marker [680,730)x[370,420).
+        // At half size the picture is Lanczos-filtered (minification), so probes near the marker
+        // stay 3+ pixels (the filter's reach) away from its edges.
         XCTAssertTrue(near(pixelAt(out, 681, 371), 255, 0, 0, 1));
-        XCTAssertTrue(near(pixelAt(out, 728, 418), 255, 0, 0, 1));
-        XCTAssertTrue(near(pixelAt(out, 732, 390), 255, 255, 255, 1));
-        XCTAssertTrue(near(pixelAt(out, 700, 422), 255, 255, 255, 1));
+        XCTAssertTrue(near(pixelAt(out, 726, 416), 255, 0, 0, 1));
+        XCTAssertTrue(near(pixelAt(out, 734, 390), 255, 255, 255, 1));
+        XCTAssertTrue(near(pixelAt(out, 700, 424), 255, 255, 255, 1));
         XCTAssertTrue(near(pixelAt(out, 679, 400), 0, 0, 0, 0));
         XCTAssertTrue(near(pixelAt(out, 700, 369), 0, 0, 0, 0));
         XCTAssertTrue(near(pixelAt(out, 1639, 909), 255, 255, 255, 1));
@@ -730,6 +734,134 @@ struct FrameLog {
     XCTAssertTrue(near(pixelAt(out, 5, 5), 10, 200, 30, 1));
 }
 
+// Minification: a picture drawn smaller than ~3/4 of its size is filtered (Lanczos pre-scale)
+// instead of point-sampled by bilinear taps. One-pixel stripes shrunk to 700 and 533 pixels
+// wide must come out as flat mid-grey (they alias to near 0/255 with plain bilinear sampling),
+// vertically and horizontally, for RGBA and YCbCr sources, for a scaled-down clip (picture in
+// picture) and for straight alpha (transparent texels carry green that must not show).
+- (void)testMinifiedSourcesAreFilteredNotAliased {
+    struct Range {
+        int min = 255, max = 0;
+    };
+    auto stripes = [](OSType format, bool vertical, bool straightGreen) {
+        media::PixelBuffer b = makeBuffer(format, 1920, 1080);
+        if (format == kCVPixelFormatType_32BGRA) {
+            fillBGRA(b, {0, 0, 0, 255});
+            for (size_t i = 1; i < (vertical ? 1920u : 1080u); i += 2) {
+                if (vertical) {
+                    fillBGRARect(b, i, 0, i + 1, 1080, {255, 255, 255, 255});
+                } else {
+                    fillBGRARect(b, 0, i, 1920, i + 1, {255, 255, 255, 255});
+                }
+            }
+            if (straightGreen) {
+                for (size_t i = 0; i < 1920; i += 2) {
+                    fillBGRARect(b, i, 0, i + 1, 1080, {0, 255, 0, 0}); // transparent, colour green
+                }
+                tagAlpha(b, AlphaMode::Straight);
+            }
+        } else {
+            fillYCbCrPattern(
+                b, [vertical](size_t x, size_t y) { return ((vertical ? x : y) & 1) ? 235.0 : 16.0; },
+                [](size_t, size_t) { return std::pair<double, double>{128.0, 128.0}; });
+            tagYCbCr(b, YCbCrMatrix::BT709, ChromaSiting::Left);
+        }
+        return b;
+    };
+    // Range of the R and G channels over the interior of the middle row (vertical stripes) or
+    // column (horizontal stripes) of the picture area.
+    auto measure = [](id<MTLTexture> t, bool vertical, PixelRect area, Range &red, Range &green) {
+        const size_t n = vertical ? size_t(area.width) : size_t(area.height);
+        for (size_t k = 3; k + 3 < n; ++k) {
+            const size_t x = vertical ? size_t(area.x) + k : size_t(area.x + area.width / 2);
+            const size_t y = vertical ? size_t(area.y + area.height / 2) : size_t(area.y) + k;
+            const RGBA8 p = texturePixel(t, x, y);
+            red.min = std::min(red.min, int(p.r));
+            red.max = std::max(red.max, int(p.r));
+            green.min = std::min(green.min, int(p.g));
+            green.max = std::max(green.max, int(p.g));
+        }
+    };
+    struct Case {
+        const char *name;
+        OSType format;
+        bool vertical;
+        bool straightGreen;
+        size_t targetWidth;
+        double clipScale;
+    };
+    const Case cases[] = {
+        {"BGRA vertical stripes -> 700", kCVPixelFormatType_32BGRA, true, false, 700, 1.0},
+        {"BGRA vertical stripes -> 533", kCVPixelFormatType_32BGRA, true, false, 533, 1.0},
+        {"BGRA horizontal stripes -> 700", kCVPixelFormatType_32BGRA, false, false, 700, 1.0},
+        {"420v vertical stripes -> 700", kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, true, false, 700, 1.0},
+        {"420v horizontal stripes -> 533", kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, false, false, 533, 1.0},
+        {"x420 vertical stripes -> 533", kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, true, false, 533, 1.0},
+        {"BGRA stripes, clip scale 0.3 at 1920", kCVPixelFormatType_32BGRA, true, false, 1920, 0.3},
+        {"straight alpha stripes -> 700", kCVPixelFormatType_32BGRA, true, true, 700, 1.0},
+    };
+    for (const Case &c : cases) {
+        media::PixelBuffer source = stripes(c.format, c.vertical, c.straightGreen);
+        if (c.format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange) {
+            fillYCbCrPattern(
+                source, [](size_t x, size_t) { return (x & 1) ? 940.0 : 64.0; },
+                [](size_t, size_t) { return std::pair<double, double>{512.0, 512.0}; });
+        }
+        const size_t targetHeight = size_t(std::lround(c.targetWidth * 1080.0 / 1920.0));
+        id<MTLTexture> target = makeTargetTexture(c.targetWidth, targetHeight);
+        RenderGraph g = makeGraph(1920, 1080);
+        VideoLayer layer = makeLayer(1);
+        layer.transform.scale = c.clipScale;
+        g.layers.push_back(layer);
+        const RenderResult r = [self render:g
+                                   textures:{texturesFor(*_compositor, source)}
+                                     target:TextureTarget{target, {}, nil}];
+        XCTAssertGreaterThanOrEqual(r.prescaledPlanes, 1u, @"%s", c.name);
+        const PixelRect frame = fitRect(1920, 1080, int32_t(c.targetWidth), int32_t(targetHeight));
+        PixelRect area = frame;
+        if (c.clipScale != 1.0) {
+            area.width = int32_t(frame.width * c.clipScale);
+            area.height = int32_t(frame.height * c.clipScale);
+            area.x = frame.x + (frame.width - area.width) / 2;
+            area.y = frame.y + (frame.height - area.height) / 2;
+        }
+        Range red, green;
+        measure(target, c.vertical, area, red, green);
+        // Ideal: 127.5 (white and black stripes averaged; 50 % coverage of white for straight alpha).
+        XCTAssertGreaterThanOrEqual(red.min, 118, @"%s: R range %d...%d", c.name, red.min, red.max);
+        XCTAssertLessThanOrEqual(red.max, 138, @"%s: R range %d...%d", c.name, red.min, red.max);
+        if (c.straightGreen) {
+            XCTAssertLessThanOrEqual(green.max - red.max, 0, @"%s: transparent green bled (G %d...%d)", c.name,
+                                     green.min, green.max);
+        }
+        NSLog(@"Minification %s: R %d...%d, G %d...%d", c.name, red.min, red.max, green.min, green.max);
+    }
+
+    // Only minified planes are pre-scaled: 1:1 and magnified pictures take no extra pass, and a
+    // 4:2:0 picture at 1/2 size only needs its luma plane (the chroma plane is drawn at 1:1).
+    media::PixelBuffer small = makeBuffer(kCVPixelFormatType_32BGRA, 640, 360);
+    fillBGRA(small, {90, 90, 90, 255});
+    media::PixelBuffer hd = makeBurnIn420v(3, 1920, 1080);
+    RenderGraph g = makeGraph(1920, 1080);
+    g.layers.push_back(makeLayer(1));
+    for (const auto &[buffer, targetWidth, expected] :
+         {std::tuple<media::PixelBuffer, size_t, size_t>{small, 1920, 0}, {hd, 1920, 0}, {hd, 1440, 0}, {hd, 960, 1},
+          {hd, 480, 2}}) {
+        id<MTLTexture> target = makeTargetTexture(targetWidth, targetWidth * 9 / 16);
+        const RenderResult r = [self render:g textures:{texturesFor(*_compositor, buffer)} target:TextureTarget{target, {}, nil}];
+        XCTAssertEqual(r.prescaledPlanes, expected, @"%s -> %zu", fourCCString(buffer.pixelFormat()).c_str(), targetWidth);
+    }
+    // The pool keeps one texture per plane size in use, not one per frame.
+    const size_t pooled = _compositor->stats().scratchTextures;
+    for (int i = 0; i < 20; ++i) {
+        id<MTLTexture> target = makeTargetTexture(480, 270);
+        [self render:g textures:{texturesFor(*_compositor, hd)} target:TextureTarget{target, {}, nil}];
+    }
+    XCTAssertEqual(_compositor->stats().scratchTextures, pooled);
+    _compositor->releaseScratchMemory();
+    XCTAssertEqual(_compositor->stats().scratchTextures, 0u);
+}
+
 // (h) Layers without a picture are skipped and reported; the rest still renders.
 - (void)testMissingTexturesAreSkippedAndReported {
     media::PixelBuffer green = makeBuffer(kCVPixelFormatType_32BGRA, 64, 36);
@@ -827,7 +959,84 @@ struct FrameLog {
     }
 }
 
-// (i) 600 renders at 1080p: memory stays flat and the average frame time is under 4 ms.
+// GPU intervals of completed frames; busy() is their union (frames in flight overlap).
+struct GPUTimeline {
+    std::mutex mutex;
+    std::vector<std::pair<double, double>> intervals;
+    std::atomic<int> completed{0};
+
+    void add(const RenderResult &r) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            intervals.emplace_back(r.gpuStartTime, r.gpuEndTime);
+        }
+        completed.fetch_add(1);
+    }
+    void reset() {
+        std::lock_guard<std::mutex> lock(mutex);
+        intervals.clear();
+        completed.store(0);
+    }
+    double busySeconds() {
+        std::lock_guard<std::mutex> lock(mutex);
+        std::sort(intervals.begin(), intervals.end());
+        double total = 0, curStart = 0, curEnd = -1;
+        for (const auto &[a, b] : intervals) {
+            if (a > curEnd) {
+                total += std::max(0.0, curEnd - curStart);
+                curStart = a;
+                curEnd = b;
+            } else {
+                curEnd = std::max(curEnd, b);
+            }
+        }
+        return total + std::max(0.0, curEnd - curStart);
+    }
+    bool waitFor(int count) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (completed.load() < count && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return completed.load() >= count;
+    }
+};
+
+struct Throughput {
+    double wallMs = 0; // per frame, pipelined
+    double gpuMs = 0;  // GPU busy time per frame (union of intervals)
+};
+
+// Submits `frames` renders back to back (pipelined, up to kFramesInFlight on the GPU), mapping
+// the sources each frame like playback does, and waits for all of them.
+static Throughput runPipelined(Compositor &compositor, const RenderGraph &graph,
+                               const std::vector<media::PixelBuffer> &sources,
+                               const std::function<RenderTarget()> &makeTarget, int frames) {
+    auto timeline = std::make_shared<GPUTimeline>();
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < frames; ++i) {
+        @autoreleasepool {
+            std::vector<TextureSet> textures;
+            for (const media::PixelBuffer &b : sources) {
+                textures.push_back(texturesFor(compositor, b));
+            }
+            auto lookup = [&textures](const VideoLayer &, std::size_t index, TextureSet &out) {
+                out = textures[index];
+                return true;
+            };
+            auto submitted = compositor.render(graph, lookup, makeTarget(),
+                                               [timeline](const RenderResult &r) { timeline->add(r); });
+            if (!submitted.ok() || submitted.value() != Submission::Submitted) {
+                return {};
+            }
+        }
+    }
+    timeline->waitFor(frames);
+    const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    return {wall / frames * 1000.0, timeline->busySeconds() / frames * 1000.0};
+}
+
+// (i) Steady state at 1080p, export and preview paths: frame time, GPU load, and no growth of
+// memory or pooled objects over 3000 frames.
 - (void)testSteadyStatePerformanceAndMemory {
     const size_t w = 1920, h = 1080;
     media::PixelBuffer a = makeBurnIn420v(1, w, h);
@@ -840,78 +1049,102 @@ struct FrameLog {
     RenderGraph g = makeGraph(int32_t(w), int32_t(h));
     g.layers.push_back(makeLayer(1));
     g.layers.push_back(makeLayer(2, 0.5));
-    g.layers[1].transform.scale = 0.7;
+    g.layers[1].transform.scale = 0.8;
     g.layers[1].transform.rotationDegrees = 10;
-
-    std::atomic<int> completed{0};
-    std::atomic<double> gpuSeconds{0};
-    std::atomic<int> *completedPtr = &completed;
-    std::atomic<double> *gpuPtr = &gpuSeconds;
-    auto runFrames = [&](int count) {
-        for (int i = 0; i < count; ++i) {
-            @autoreleasepool {
-                // Map the sources every frame, like the playback path does for new frames.
-                std::vector<TextureSet> textures{texturesFor(*_compositor, a), texturesFor(*_compositor, b)};
-                auto target = pool->makeBuffer();
-                XCTAssertTrue(target.ok());
-                auto lookup = [&textures](const VideoLayer &, std::size_t index, TextureSet &out) {
-                    out = textures[index];
-                    return true;
-                };
-                auto submitted = _compositor->render(g, lookup, PixelBufferTarget{target.value()},
-                                                     [completedPtr, gpuPtr](const RenderResult &r) {
-                                                         double current = gpuPtr->load();
-                                                         while (!gpuPtr->compare_exchange_weak(current, current + r.gpuSeconds)) {
-                                                         }
-                                                         completedPtr->fetch_add(1);
-                                                     });
-                XCTAssertTrue(submitted.ok() && submitted.value() == Submission::Submitted);
-            }
-        }
-    };
-    auto waitForCompleted = [&](int expected) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-        while (completed.load() < expected && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+    auto exportTarget = [&pool]() -> RenderTarget { return PixelBufferTarget{pool->makeBuffer().value()}; };
+    // The preview path: a BGRA8 render-target texture like the CAMetalLayer drawable (three
+    // of them in rotation, as the layer has).
+    std::vector<id<MTLTexture>> drawables{makeTargetTexture(w, h), makeTargetTexture(w, h), makeTargetTexture(w, h)};
+    size_t nextDrawable = 0;
+    auto previewTarget = [&]() -> RenderTarget {
+        return TextureTarget{drawables[nextDrawable++ % drawables.size()], {}, nil};
     };
 
-    runFrames(60); // warm up pools, caches and pipelines
-    waitForCompleted(60);
-    const uint64_t before = test::physicalFootprint();
-    gpuSeconds.store(0);
-    const int frames = 600;
-    const auto start = std::chrono::steady_clock::now();
-    runFrames(frames);
-    waitForCompleted(60 + frames);
-    const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    const uint64_t after = test::physicalFootprint();
-    XCTAssertEqual(completed.load(), 60 + frames);
-
-    const double avgMs = wall / frames * 1000.0;
-    const double gpuMs = gpuSeconds.load() / frames * 1000.0;
-    const double growthMB = (double(after) - double(before)) / (1024.0 * 1024.0);
-    NSLog(@"Compositor 1080p (2 x 420v layers -> 420v export target): %.3f ms/frame wall, %.3f ms/frame GPU, "
-          @"footprint %.1f MB -> %.1f MB (%+.2f MB) over %d frames",
-          avgMs, gpuMs, before / 1048576.0, after / 1048576.0, growthMB, frames);
-    XCTAssertLessThan(avgMs, 4.0);
-    XCTAssertLessThan(growthMB, 8.0);
+    runPipelined(*_compositor, g, {a, b}, exportTarget, 60); // warm up pools, caches and pipelines
+    runPipelined(*_compositor, g, {a, b}, previewTarget, 60);
+    const Throughput exportRun = runPipelined(*_compositor, g, {a, b}, exportTarget, 600);
+    const Throughput previewRun = runPipelined(*_compositor, g, {a, b}, previewTarget, 600);
+    NSLog(@"Compositor 1080p, 2 x 420v layers (one scaled and rotated): export -> 420v %.3f ms/frame wall, "
+          @"%.3f ms/frame GPU busy; preview -> BGRA8 texture %.3f ms/frame wall, %.3f ms/frame GPU busy",
+          exportRun.wallMs, exportRun.gpuMs, previewRun.wallMs, previewRun.gpuMs);
+    XCTAssertGreaterThan(exportRun.wallMs, 0.0);
+    XCTAssertGreaterThan(previewRun.wallMs, 0.0);
+    XCTAssertLessThan(exportRun.wallMs, 1.5);
+    XCTAssertLessThan(previewRun.wallMs, 1.5);
+    XCTAssertLessThan(exportRun.gpuMs, 1.5);
+    XCTAssertLessThan(previewRun.gpuMs, 1.5);
 
     // Latency of one frame end to end (encode + GPU + completion), no pipelining.
     std::vector<TextureSet> textures{texturesFor(*_compositor, a), texturesFor(*_compositor, b)};
-    media::PixelBuffer target = pool->makeBuffer().value();
     const int syncFrames = 100;
     const auto syncStart = std::chrono::steady_clock::now();
     for (int i = 0; i < syncFrames; ++i) {
         @autoreleasepool {
-            auto r = renderLayers(*_compositor, g, textures, PixelBufferTarget{target});
+            auto r = renderLayers(*_compositor, g, textures, previewTarget());
             XCTAssertTrue(r.ok() && r->status.ok());
         }
     }
     const double syncMs =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - syncStart).count() / syncFrames * 1000.0;
-    NSLog(@"Compositor 1080p synchronous latency: %.3f ms/frame", syncMs);
-    XCTAssertLessThan(syncMs, 4.0);
+    NSLog(@"Compositor 1080p preview synchronous latency: %.3f ms/frame", syncMs);
+    XCTAssertLessThan(syncMs, 2.0);
+
+    // Memory: 3000 more frames through both paths leave the footprint and the compositor's
+    // pools where they were.
+    const uint64_t before = test::physicalFootprint();
+    const Compositor::Stats statsBefore = _compositor->stats();
+    for (int round = 0; round < 5; ++round) {
+        runPipelined(*_compositor, g, {a, b}, exportTarget, 300);
+        runPipelined(*_compositor, g, {a, b}, previewTarget, 300);
+    }
+    const uint64_t after = test::physicalFootprint();
+    const Compositor::Stats statsAfter = _compositor->stats();
+    const double growthMB = (double(after) - double(before)) / (1024.0 * 1024.0);
+    NSLog(@"Compositor footprint over 3000 frames: %.1f MB -> %.1f MB (%+.2f MB); pooled textures %zu -> %zu",
+          before / 1048576.0, after / 1048576.0, growthMB, statsBefore.scratchTextures, statsAfter.scratchTextures);
+    XCTAssertLessThan(growthMB, 2.0);
+    XCTAssertEqual(statsAfter.scratchTextures, statsBefore.scratchTextures);
+    XCTAssertEqual(statsAfter.freeSlots, Compositor::kFramesInFlight, @"every frame's slot came back");
+}
+
+// A 3840x2160 4:2:0 source shown in a 1920x1080 preview (the luma plane is Lanczos pre-scaled,
+// the chroma plane is drawn at 1:1): frame time and GPU load, pipelined and one at a time.
+- (void)testPreviewOf4KSourceTiming {
+    media::PixelBuffer source = makeBurnIn420v(7, 3840, 2160);
+    RenderGraph g = makeGraph(3840, 2160);
+    g.layers.push_back(makeLayer(1));
+    std::vector<id<MTLTexture>> drawables{makeTargetTexture(1920, 1080), makeTargetTexture(1920, 1080),
+                                          makeTargetTexture(1920, 1080)};
+    size_t next = 0;
+    auto previewTarget = [&]() -> RenderTarget { return TextureTarget{drawables[next++ % drawables.size()], {}, nil}; };
+    const TextureSet set = texturesFor(*_compositor, source);
+    auto first = renderLayers(*_compositor, g, {set}, previewTarget());
+    XCTAssertTrue(first.ok() && first->status.ok());
+    if (first.ok()) {
+        XCTAssertEqual(first->prescaledPlanes, 1u);
+    }
+    runPipelined(*_compositor, g, {source}, previewTarget, 30); // warm up
+    const Throughput run = runPipelined(*_compositor, g, {source}, previewTarget, 300);
+
+    double gpuSum = 0;
+    const int syncFrames = 60;
+    const auto syncStart = std::chrono::steady_clock::now();
+    for (int i = 0; i < syncFrames; ++i) {
+        auto r = renderLayers(*_compositor, g, {set}, previewTarget());
+        XCTAssertTrue(r.ok() && r->status.ok());
+        if (r.ok()) {
+            gpuSum += r->gpuSeconds;
+        }
+    }
+    const double syncMs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - syncStart).count() / syncFrames * 1000.0;
+    NSLog(@"Compositor 4K 420v -> 1080p preview: %.3f ms/frame wall pipelined, %.3f ms/frame GPU busy; "
+          @"one at a time %.3f ms/frame latency, %.3f ms GPU",
+          run.wallMs, run.gpuMs, syncMs, gpuSum / syncFrames * 1000.0);
+    // Real time needs < 16.7 ms per frame at 60 fps; this leaves most of it for decode and UI.
+    XCTAssertLessThan(run.gpuMs, 4.0);
+    XCTAssertLessThan(run.wallMs, 5.0);
+    XCTAssertLessThan(syncMs, 6.0);
 }
 
 @end

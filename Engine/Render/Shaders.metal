@@ -142,6 +142,20 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     return mix(colorA, colorB, uniforms.mix.x);
 }
 
+// MARK: - Minification
+
+// Straight-alpha RGBA -> premultiplied RGBA8, before a straight-alpha picture is resampled for
+// minification (see Compositor.h).
+kernel void ve_premultiply(texture2d<float, access::read> source [[texture(0)]],
+                           texture2d<float, access::write> destination [[texture(1)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= source.get_width() || gid.y >= source.get_height()) {
+        return;
+    }
+    const float4 c = source.read(gid);
+    destination.write(float4(c.rgb * c.a, c.a), gid);
+}
+
 // MARK: - Export conversion (RGBA16Float composite -> target pixel buffer planes)
 
 kernel void ve_convert_to_bgra(texture2d<float, access::read> composite [[texture(VETextureIndexComposite)]],

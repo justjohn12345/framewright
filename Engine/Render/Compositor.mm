@@ -4,6 +4,8 @@
 #include "ColorMath.h"
 #include "ShaderTypes.h"
 
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -49,6 +51,15 @@ namespace {
 constexpr std::size_t kUniformAlignment = 256; // constant-buffer offset alignment (macOS)
 constexpr std::size_t kInitialDrawCapacity = 64;
 constexpr MTLPixelFormat kIntermediateFormat = MTLPixelFormatRGBA16Float;
+
+// Minification (see Compositor.h): a plane drawn at fewer than kMinifyThreshold output pixels
+// per texel (along either axis) is first resampled with a Lanczos filter to about its drawn
+// size, then sampled bilinearly at ~1:1 as usual.
+constexpr double kMinifyThreshold = 0.75;
+// Pre-scaled planes are pooled by (format, size); a pooled texture unused for this many frames
+// is released.
+constexpr std::uint64_t kScratchIdleFrames = 120;
+constexpr std::size_t kMaxScratchTextures = 24;
 
 constexpr std::size_t alignUp(std::size_t v, std::size_t a) {
     return (v + a - 1) / a * a;
@@ -143,15 +154,19 @@ Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegr
     return p;
 }
 
-void fillSource(VESourceUniforms &u, const VideoLayer &layer, const TextureSet &textures, const Placement &placement,
-                double weight) {
+// The textures a draw samples for one source: its own planes, or pre-scaled copies.
+struct SourceBinding {
+    id<MTLTexture> planes[2] = {nil, nil};
+    bool straightAlpha = false; // RGBA colour not premultiplied (the shader premultiplies per texel)
+};
+
+void fillSource(VESourceUniforms &u, const TextureSet &textures, const SourceBinding &binding,
+                const Placement &placement, double weight) {
     u.colorMatrix = textures.colorMatrix();
     u.uvFromFrameX = placement.uvFromFrameX;
     u.uvFromFrameY = placement.uvFromFrameY;
     u.chromaTransform = textures.chromaTransform();
-    const bool straight =
-        textures.sourceClass() == SourceClass::RGBA && !textures.alphaIsPremultiplied(layer.isStill);
-    u.params = simd_make_float4(float(std::clamp(weight, 0.0, 1.0)), straight ? 1.0f : 0.0f, 0.0f, 0.0f);
+    u.params = simd_make_float4(float(std::clamp(weight, 0.0, 1.0)), binding.straightAlpha ? 1.0f : 0.0f, 0.0f, 0.0f);
 }
 
 struct DrawItem {
@@ -159,7 +174,38 @@ struct DrawItem {
     id<MTLRenderPipelineState> pipeline;
     std::size_t layerA;
     std::size_t layerB; // == layerA when drawn alone
+    SourceBinding a;
+    SourceBinding b;
 };
+
+// One pre-scale pass: optionally premultiply `source` into `premultiplied` (straight-alpha RGBA),
+// then Lanczos-resample into `destination`.
+struct PrescaleJob {
+    id<MTLTexture> source;
+    id<MTLTexture> premultiplied; // nil unless the source has straight alpha
+    id<MTLTexture> destination;
+};
+
+// Pooled textures for pre-scaled planes.
+struct ScratchTexture {
+    id<MTLTexture> texture;
+    MTLPixelFormat format;
+    std::size_t width;
+    std::size_t height;
+    std::uint64_t lastUsedFrame; // render() call that last used it
+};
+
+// Rounds a pre-scaled size up so small changes (a live resize) reuse pooled textures: to a
+// multiple of about 1/16 to 1/32 of the size, never more than `full`. The final bilinear pass
+// then samples at >= ~94 % of 1:1, well inside the unfiltered-OK range.
+std::size_t quantizeScratchSize(double exact, std::size_t full) {
+    const auto n = static_cast<std::size_t>(std::max(1.0, std::ceil(exact)));
+    std::size_t step = 1;
+    while (step * 32 <= n) {
+        step *= 2;
+    }
+    return std::min(full, (n + step - 1) / step * step);
+}
 
 std::string nsErrorText(NSError *error) {
     return error ? std::string(error.localizedDescription.UTF8String ?: "") : std::string("unknown error");
@@ -187,6 +233,8 @@ struct Compositor::Impl {
     id<MTLFunction> vertexFunction = nil;
     id<MTLComputePipelineState> convertBGRA = nil;
     id<MTLComputePipelineState> convert420 = nil;
+    id<MTLComputePipelineState> premultiply = nil;
+    MPSImageLanczosScale *lanczos = nil; // nil when MPS does not support the device (no pre-scaling)
     std::vector<std::pair<std::uint64_t, id<MTLRenderPipelineState>>> pipelines;
     TextureCache textureCache;
 
@@ -222,11 +270,14 @@ struct Compositor::Impl {
         dispatch_semaphore_signal(freeSlots);
     }
 
-    // Drops the per-frame references to source pictures (they live on in a slot if submitted).
+    // Drops the per-frame references to source pictures and pre-scaled planes (they live on in
+    // a slot and the command buffer if submitted).
     void dropScratchReferences() {
         for (TextureSet &t : resolved) {
             t.reset();
         }
+        items.clear();
+        jobs.clear();
     }
 
     bool consumeFault(Fault fault) {
@@ -242,6 +293,118 @@ struct Compositor::Impl {
     std::vector<char> drawn;
     std::vector<DrawItem> items;
     std::vector<SkippedLayer> skipped;
+    std::vector<PrescaleJob> jobs;
+
+    std::vector<ScratchTexture> scratch; // pre-scale pool
+    std::uint64_t buildCounter = 0;      // render() calls, for the pool's per-frame bookkeeping
+
+    // A pooled texture of this format and size not yet used by the frame being built.
+    Result<id<MTLTexture>> acquireScratch(MTLPixelFormat format, std::size_t width, std::size_t height) {
+        for (ScratchTexture &entry : scratch) {
+            if (entry.format == format && entry.width == width && entry.height == height &&
+                entry.lastUsedFrame != buildCounter) {
+                entry.lastUsedFrame = buildCounter;
+                return entry.texture;
+            }
+        }
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                                        width:width
+                                                                                       height:height
+                                                                                    mipmapped:NO];
+        desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        desc.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+        if (texture == nil) {
+            return makeError(MediaErrorCode::Internal, "Compositor: cannot allocate a " + std::to_string(width) + "x" +
+                                                           std::to_string(height) + " pre-scale texture");
+        }
+        texture.label = @"VidEdit pre-scaled plane";
+        scratch.push_back({texture, format, width, height, buildCounter});
+        return texture;
+    }
+
+    // Releases pooled textures idle for kScratchIdleFrames, and the least recently used ones
+    // beyond kMaxScratchTextures. In-flight command buffers keep their own references.
+    void trimScratch() {
+        std::erase_if(scratch, [this](const ScratchTexture &e) { return e.lastUsedFrame + kScratchIdleFrames < buildCounter; });
+        while (scratch.size() > kMaxScratchTextures) {
+            auto oldest = std::min_element(scratch.begin(), scratch.end(), [](const ScratchTexture &a, const ScratchTexture &b) {
+                return a.lastUsedFrame < b.lastUsedFrame;
+            });
+            scratch.erase(oldest);
+        }
+    }
+
+    // The textures to sample for `t` drawn at `outputScale` target pixels per source pixel:
+    // planes minified below kMinifyThreshold get a Lanczos pre-scale job (straight-alpha RGBA is
+    // premultiplied first).
+    Result<SourceBinding> bindSource(const TextureSet &t, const VideoLayer &layer, double outputScale) {
+        SourceBinding binding;
+        binding.planes[0] = t.plane(0);
+        binding.planes[1] = t.plane(1);
+        const bool rgba = t.sourceClass() == SourceClass::RGBA;
+        binding.straightAlpha = rgba && !t.alphaIsPremultiplied(layer.isStill);
+        if (lanczos == nil || !(outputScale < kMinifyThreshold) || !(outputScale > 0)) {
+            return binding;
+        }
+        for (std::size_t p = 0; p < t.planeCount(); ++p) {
+            id<MTLTexture> plane = t.plane(p);
+            const double planeW = double(plane.width);
+            const double planeH = double(plane.height);
+            // Output pixels per texel of this plane along each axis (chroma planes are smaller).
+            const double sx = outputScale * double(t.width()) / planeW;
+            const double sy = outputScale * double(t.height()) / planeH;
+            if (sx >= kMinifyThreshold && sy >= kMinifyThreshold) {
+                continue;
+            }
+            const std::size_t w = sx < kMinifyThreshold ? quantizeScratchSize(planeW * sx, plane.width) : plane.width;
+            const std::size_t h = sy < kMinifyThreshold ? quantizeScratchSize(planeH * sy, plane.height) : plane.height;
+            PrescaleJob job;
+            job.source = plane;
+            MTLPixelFormat format = plane.pixelFormat;
+            if (rgba) {
+                // Pre-scaled RGBA is always premultiplied (filtering straight colour would bleed
+                // the colour of transparent texels); RGBA8 keeps compute writes portable.
+                format = MTLPixelFormatRGBA8Unorm;
+                if (binding.straightAlpha) {
+                    auto premultiplied = acquireScratch(format, plane.width, plane.height);
+                    if (!premultiplied.ok()) {
+                        return std::move(premultiplied).error();
+                    }
+                    job.premultiplied = premultiplied.value();
+                    binding.straightAlpha = false;
+                }
+            }
+            auto destination = acquireScratch(format, w, h);
+            if (!destination.ok()) {
+                return std::move(destination).error();
+            }
+            job.destination = destination.value();
+            binding.planes[p] = job.destination;
+            jobs.push_back(job);
+        }
+        return binding;
+    }
+
+    void encodePrescaleJobs(id<MTLCommandBuffer> commandBuffer) {
+        for (const PrescaleJob &job : jobs) {
+            id<MTLTexture> source = job.source;
+            if (job.premultiplied != nil) {
+                id<MTLComputeCommandEncoder> compute = [commandBuffer computeCommandEncoder];
+                compute.label = @"VidEdit premultiply";
+                [compute setComputePipelineState:premultiply];
+                [compute setTexture:job.source atIndex:0];
+                [compute setTexture:job.premultiplied atIndex:1];
+                const NSUInteger tw = premultiply.threadExecutionWidth;
+                const NSUInteger th = std::max<NSUInteger>(1, premultiply.maxTotalThreadsPerThreadgroup / tw);
+                [compute dispatchThreads:MTLSizeMake(job.source.width, job.source.height, 1)
+                    threadsPerThreadgroup:MTLSizeMake(tw, std::min<NSUInteger>(th, 16), 1)];
+                [compute endEncoding];
+                source = job.premultiplied;
+            }
+            [lanczos encodeToCommandBuffer:commandBuffer sourceTexture:source destinationTexture:job.destination];
+        }
+    }
 
     Result<id<MTLRenderPipelineState>> pipeline(const PipelineKey &key) {
         const std::uint64_t packed = key.packed();
@@ -318,10 +481,14 @@ struct Compositor::Impl {
         return media::okStatus();
     }
 
-    // Builds `items` for the graph; fills `skipped` and `resolved`.
-    Status buildItems(const RenderGraph &graph, TextureLookup lookup, MTLPixelFormat format, std::size_t &drawnLayers) {
+    // Builds `items` and `jobs` for the graph; fills `skipped` and `resolved`. `targetScale`:
+    // target pixels per sequence pixel.
+    Status buildItems(const RenderGraph &graph, TextureLookup lookup, MTLPixelFormat format, double targetScale,
+                      std::size_t &drawnLayers) {
         const std::size_t n = graph.layers.size();
+        ++buildCounter;
         items.clear();
+        jobs.clear();
         skipped.clear();
         drawnLayers = 0;
         if (resolved.size() < n) {
@@ -366,7 +533,12 @@ struct Compositor::Impl {
                 if (!pl.visible || weight <= 0.0) {
                     continue;
                 }
-                fillSource(item.uniforms.a, layer, t, pl, weight);
+                auto binding = bindSource(t, layer, pl.scale * targetScale);
+                if (!binding.ok()) {
+                    return std::move(binding).error();
+                }
+                item.a = binding.value();
+                fillSource(item.uniforms.a, t, item.a, pl, weight);
                 item.uniforms.quadRect = simd_make_float4(float(pl.x0), float(pl.y0), float(pl.x1), float(pl.y1));
                 item.layerA = item.layerB = i;
                 auto state = pipeline({t.sourceClass() == SourceClass::YCbCrBiPlanar, false, false, format});
@@ -391,8 +563,18 @@ struct Compositor::Impl {
                 if (!pa.visible && !pb.visible) {
                     continue;
                 }
-                fillSource(item.uniforms.a, outLayer, ta, pa, pa.visible ? outLayer.opacity : 0.0);
-                fillSource(item.uniforms.b, inLayer, tb, pb, pb.visible ? inLayer.opacity : 0.0);
+                auto bindingA = bindSource(ta, outLayer, pa.visible ? pa.scale * targetScale : 1.0);
+                if (!bindingA.ok()) {
+                    return std::move(bindingA).error();
+                }
+                auto bindingB = bindSource(tb, inLayer, pb.visible ? pb.scale * targetScale : 1.0);
+                if (!bindingB.ok()) {
+                    return std::move(bindingB).error();
+                }
+                item.a = bindingA.value();
+                item.b = bindingB.value();
+                fillSource(item.uniforms.a, ta, item.a, pa, pa.visible ? outLayer.opacity : 0.0);
+                fillSource(item.uniforms.b, tb, item.b, pb, pb.visible ? inLayer.opacity : 0.0);
                 double x0 = pa.visible ? pa.x0 : pb.x0, y0 = pa.visible ? pa.y0 : pb.y0;
                 double x1 = pa.visible ? pa.x1 : pb.x1, y1 = pa.visible ? pa.y1 : pb.y1;
                 if (pa.visible && pb.visible) {
@@ -463,7 +645,8 @@ Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device) {
     impl->vertexFunction = [impl->library newFunctionWithName:@"ve_layer_vertex"];
     id<MTLFunction> bgra = [impl->library newFunctionWithName:@"ve_convert_to_bgra"];
     id<MTLFunction> yuv = [impl->library newFunctionWithName:@"ve_convert_to_420"];
-    if (impl->vertexFunction == nil || bgra == nil || yuv == nil) {
+    id<MTLFunction> premultiply = [impl->library newFunctionWithName:@"ve_premultiply"];
+    if (impl->vertexFunction == nil || bgra == nil || yuv == nil || premultiply == nil) {
         return makeError(MediaErrorCode::Internal, "Compositor: shader functions missing from default.metallib");
     }
     impl->convertBGRA = [device newComputePipelineStateWithFunction:bgra error:&error];
@@ -473,6 +656,16 @@ Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device) {
     impl->convert420 = [device newComputePipelineStateWithFunction:yuv error:&error];
     if (impl->convert420 == nil) {
         return makeError(MediaErrorCode::Internal, "Compositor: 4:2:0 conversion pipeline: " + nsErrorText(error));
+    }
+    impl->premultiply = [device newComputePipelineStateWithFunction:premultiply error:&error];
+    if (impl->premultiply == nil) {
+        return makeError(MediaErrorCode::Internal, "Compositor: premultiply pipeline: " + nsErrorText(error));
+    }
+    if (MPSSupportsMTLDevice(device)) {
+        impl->lanczos = [[MPSImageLanczosScale alloc] initWithDevice:device];
+        impl->lanczos.label = @"VidEdit minification";
+        // Repeat the border texels (the default, zero, would darken the picture's edges).
+        impl->lanczos.edgeMode = MPSImageEdgeModeClamp;
     }
     auto cache = TextureCache::create(device);
     if (!cache.ok()) {
@@ -505,6 +698,8 @@ Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device) {
     impl->drawn.reserve(kInitialDrawCapacity);
     impl->items.reserve(kInitialDrawCapacity);
     impl->skipped.reserve(kInitialDrawCapacity);
+    impl->jobs.reserve(2 * kInitialDrawCapacity);
+    impl->scratch.reserve(kMaxScratchTextures + 1);
     impl->freeSlots = dispatch_semaphore_create(static_cast<long>(kFramesInFlight));
     return std::unique_ptr<Compositor>(new Compositor(std::move(impl)));
 }
@@ -549,14 +744,22 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
                            static_cast<std::int32_t>(targetBuffer->height()));
     }
 
+    // Target pixels per sequence pixel (the viewport keeps the sequence aspect up to rounding).
+    const double targetScale = viewport.isEmpty() || graph.width <= 0 || graph.height <= 0
+                                   ? 1.0
+                                   : std::min(double(viewport.width) / graph.width, double(viewport.height) / graph.height);
     std::size_t drawnLayers = 0;
-    VE_MEDIA_TRY(im.buildItems(graph, lookup, colorTexture.pixelFormat, drawnLayers));
+    if (Status built = im.buildItems(graph, lookup, colorTexture.pixelFormat, targetScale, drawnLayers); !built.ok()) {
+        im.dropScratchReferences();
+        return std::move(built).error();
+    }
 
     // Target planes for pixel-buffer output (mapped before taking a slot so errors need no cleanup).
     TextureSet outputPlanes;
     if (targetBuffer != nullptr) {
         auto planes = im.textureCache.textures(*targetBuffer, TextureAccess::ReadWrite);
         if (!planes.ok()) {
+            im.dropScratchReferences();
             return std::move(planes).error();
         }
         outputPlanes = std::move(planes).value();
@@ -594,6 +797,8 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
 
     slot.retained.clear();
     auto *uniformBytes = static_cast<std::uint8_t *>(slot.uniforms.contents);
+    im.encodePrescaleJobs(commandBuffer);
+    const std::size_t prescaledPlanes = im.jobs.size();
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = colorTexture;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -622,15 +827,13 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
             }
             [encoder setVertexBuffer:slot.uniforms offset:offset atIndex:VEBufferIndexDraw];
             [encoder setFragmentBuffer:slot.uniforms offset:offset atIndex:VEBufferIndexDraw];
-            const TextureSet &a = im.resolved[item.layerA];
-            [encoder setFragmentTexture:a.plane(0) atIndex:VETextureIndexA0];
-            [encoder setFragmentTexture:a.plane(1) atIndex:VETextureIndexA1];
-            slot.retained.push_back(a);
+            [encoder setFragmentTexture:item.a.planes[0] atIndex:VETextureIndexA0];
+            [encoder setFragmentTexture:item.a.planes[1] atIndex:VETextureIndexA1];
+            slot.retained.push_back(im.resolved[item.layerA]);
             if (item.layerB != item.layerA) {
-                const TextureSet &b = im.resolved[item.layerB];
-                [encoder setFragmentTexture:b.plane(0) atIndex:VETextureIndexB0];
-                [encoder setFragmentTexture:b.plane(1) atIndex:VETextureIndexB1];
-                slot.retained.push_back(b);
+                [encoder setFragmentTexture:item.b.planes[0] atIndex:VETextureIndexB0];
+                [encoder setFragmentTexture:item.b.planes[1] atIndex:VETextureIndexB1];
+                slot.retained.push_back(im.resolved[item.layerB]);
             }
             [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         }
@@ -696,7 +899,10 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
     slot.result.status = media::okStatus();
     slot.result.skippedLayers.assign(im.skipped.begin(), im.skipped.end());
     slot.result.drawnLayers = drawnLayers;
+    slot.result.prescaledPlanes = prescaledPlanes;
     slot.result.gpuSeconds = 0;
+    slot.result.gpuStartTime = 0;
+    slot.result.gpuEndTime = 0;
     slot.completion = std::move(completion);
 
     Impl *implPtr = impl_.get();
@@ -708,6 +914,8 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
                                            "MTLCommandBufferError", finished.error.code);
         }
         done.result.gpuSeconds = std::max(0.0, finished.GPUEndTime - finished.GPUStartTime);
+        done.result.gpuStartTime = finished.GPUStartTime;
+        done.result.gpuEndTime = finished.GPUEndTime;
         if (done.completion) {
             done.completion(done.result);
         }
@@ -716,8 +924,9 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         implPtr->returnSlot(slotIndex);
     }];
     [commandBuffer commit];
-    // The slot now holds what the GPU needs; drop the scratch references.
+    // The slot and the command buffer now hold what the GPU needs; drop the scratch references.
     im.dropScratchReferences();
+    im.trimScratch();
     return Submission::Submitted;
 }
 
@@ -734,6 +943,24 @@ bool Compositor::waitForFreeSlot(double timeoutSeconds) const {
     }
     dispatch_semaphore_signal(impl_->freeSlots);
     return true;
+}
+
+void Compositor::releaseScratchMemory() {
+    Impl &im = *impl_;
+    im.scratch.clear();
+    im.intermediate = nil;
+    im.textureCache.flush();
+}
+
+Compositor::Stats Compositor::stats() const {
+    const Impl &im = *impl_;
+    Stats st;
+    st.freeSlots = freeSlotCount();
+    st.scratchTextures = im.scratch.size();
+    for (const ScratchTexture &e : im.scratch) {
+        st.scratchBytes += e.texture.allocatedSize;
+    }
+    return st;
 }
 
 void Compositor::injectFaultForTesting(Fault fault) {

@@ -37,6 +37,28 @@
 // Missing pictures: when the TextureLookup has no texture for a layer it is left out, the rest
 // of the frame still renders, and the layer is listed in RenderResult::skippedLayers.
 //
+// Minification: bilinear sampling reads 2x2 texels, so a picture drawn smaller than about 3/4 of
+// its size aliases (1-pixel detail turns into moire and flicker). A source plane drawn at fewer
+// than 0.75 target pixels per texel (along either axis, counting the viewport scale; chroma
+// planes of subsampled formats have their own ratio) is first resampled with
+// MPSImageLanczosScale into a pooled texture of about its drawn size, then sampled bilinearly at
+// ~1:1. Straight-alpha RGBA is premultiplied into a pooled RGBA8 texture before resampling.
+// Pooled textures are keyed by (format, size), with sizes rounded up to 1/16-1/32 steps so a
+// live resize reuses them, and released after 120 frames unused (or releaseScratchMemory()).
+// Why this and not the alternatives (measured on this Apple-silicon Mac; standalone numbers are
+// GPU time per plane of a 3840x2160 4:2:0 frame resampled to 1920x1080):
+//   - MPSImageBilinearScale: 0.13 ms for the luma plane, but it does not widen its kernel when
+//     shrinking, so 1-pixel stripes still alias (row min/max 4/251 at 1920 -> 700).
+//   - MPSImageLanczosScale (chosen): 0.77 ms luma (r8), 0.22 ms chroma (rg8) standalone; flat
+//     grey (126-128) on the stripe test at 700, 533, 960 and 1280 px. In the pipeline a whole
+//     4K 4:2:0 frame shown at 1080p (luma pre-scaled, chroma at 1:1 needs none) costs 0.60 ms
+//     of GPU time and 0.8 ms end-to-end latency (CompositorTests testPreviewOf4KSourceTiming),
+//     against 0.07 ms for a 1080p layer at 1:1.
+//   - Mipmaps of an RGB intermediate: the source would first be converted at full size into a
+//     mipmapped RGBA16F texture every frame (66 MB + 22 MB of mips for 4K, about three times
+//     the bytes the Lanczos pass moves), and a box-filtered mip chain blurs more than Lanczos.
+// Pictures drawn at >= 0.75 of their size (including all magnification) take no extra pass.
+//
 // Resources: one render pipeline per (source A class, has partner, source B class, target
 // format), created lazily and cached (BGRA8 and RGBA16Float variants are created up front).
 // Per-draw uniforms live in a triple-buffered ring of MTLBuffers (kFramesInFlight slots);
@@ -116,7 +138,12 @@ struct RenderResult {
     media::Status status;                   ///< GPU execution failure, if any.
     std::vector<SkippedLayer> skippedLayers; ///< Layers left out because their picture was missing.
     std::size_t drawnLayers = 0;            ///< Layers that had a picture (a dissolve pair counts 2).
+    std::size_t prescaledPlanes = 0;        ///< Source planes Lanczos pre-scaled for minification.
     double gpuSeconds = 0;                  ///< GPU execution time of the frame's command buffer.
+    /// Host times (seconds, CACurrentMediaTime base) the GPU started and finished the frame.
+    /// Frames in flight overlap, so GPU load is the union of these intervals, not a sum.
+    double gpuStartTime = 0;
+    double gpuEndTime = 0;
 };
 
 /// Called once per submitted frame on a Metal completion thread after the GPU finished. The
@@ -165,6 +192,19 @@ class Compositor {
     /// true result means that thread's next render() will not be Busy (unless slots are held
     /// for testing). Thread-safe.
     bool waitForFreeSlot(double timeoutSeconds) const;
+
+    /// Releases memory that is only a cache: pooled pre-scale textures, the export intermediate
+    /// and the texture cache's unused entries (frames on the GPU keep what they use). For memory
+    /// pressure; the next frames re-create what they need. Same thread as render().
+    void releaseScratchMemory();
+
+    struct Stats {
+        std::size_t freeSlots = 0;       ///< See freeSlotCount().
+        std::size_t scratchTextures = 0; ///< Pooled pre-scale textures.
+        std::size_t scratchBytes = 0;    ///< Their allocated size.
+    };
+    /// Same thread as render().
+    Stats stats() const;
 
     id<MTLDevice> device() const;
     id<MTLCommandQueue> commandQueue() const;
