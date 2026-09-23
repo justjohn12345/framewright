@@ -112,6 +112,8 @@ ToneRig::ToneRig(int clipCount, const std::function<void(PlaybackConfig &)> &adj
     tones->lengthFrames = static_cast<int64_t>(20 * sr);
     PlaybackConfig config;
     config.hostClock = host;
+    // On AC, whatever the machine runs on (the idle timeouts the tests expect).
+    config.powerSource = std::make_shared<audio::ManualPowerSource>(false);
     config.makeOutput = [this, sr](audio::AudioMixer &mixer) {
         auto o = std::make_unique<ScriptedAudioOutput>(mixer, 512, static_cast<size_t>(10 * sr));
         out = o.get();
@@ -213,6 +215,8 @@ PlaybackHarness::PlaybackHarness(Mode mode, double captureSeconds,
 
     PlaybackConfig config;
     config.hostClock = host;
+    // On AC, whatever the machine runs on (the idle timeouts the tests expect).
+    config.powerSource = std::make_shared<audio::ManualPowerSource>(false);
     config.makeOutput = [this, mode, captureSeconds](audio::AudioMixer &mixer) -> std::unique_ptr<audio::IAudioOutput> {
         const size_t captureFrames = static_cast<size_t>(captureSeconds * mixer.sampleRate());
         if (mode == Mode::Scripted) {

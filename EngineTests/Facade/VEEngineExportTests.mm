@@ -4,7 +4,8 @@
 // the Apple decoders, paced progress notifications, refusals before any file exists (gesture,
 // another export, invalid settings, empty sequence, missing or unreadable media, unwritable output,
 // an output that is the project's media), cancel through the handle (an existing file at the
-// output is kept), and playback pausing when an export starts and not starting while it runs.
+// output is kept), playback pausing when an export starts and not starting while it runs, and the
+// source monitor keeping no stopped lookahead while it is hidden or an export runs.
 
 #import <FramewrightEngine/FramewrightEngine.h>
 #import <XCTest/XCTest.h>
@@ -481,6 +482,71 @@ CMTime seconds(double s) {
     } timeout:5],
                   @"playback starts again after the export");
     [engine pause];
+}
+
+/// UX round review finding 4 (test gap 3): the source monitor's controller keeps a stopped
+/// lookahead (decode streams in its pool) only while the monitor is on screen and no export runs:
+/// none while hidden, none during an export (hidden or shown meanwhile), and it resumes once both
+/// conditions hold again.
+- (void)testTheSourceMonitorKeepsNoLookaheadWhileHiddenOrExporting {
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importURL:[self mediaURL:"h264_1080p30.mp4"] into:engine];
+    [self buildSequence:engine asset:asset];
+    XCTAssertTrue(engine.sourceMonitorVisible, @"shown by default");
+    XCTAssertEqual(engine.sourceMonitorPlaybackStats.decodeStreams, 0, @"no source controller yet");
+    // Play and pause the source monitor: its controller now keeps a lookahead at the paused frame.
+    [engine sourceMonitorShowAsset:asset.assetID atTime:seconds(1)];
+    [engine sourceMonitorTogglePlay];
+    XCTAssertTrue([self spinUntil:^BOOL { return engine.sourceMonitorPlaybackState == VEPlaybackStatePlaying; }
+                          timeout:10]);
+    [engine sourceMonitorPause];
+    auto streams = ^NSInteger {
+        return engine.sourceMonitorPlaybackStats.decodeStreams;
+    };
+    XCTAssertTrue([self spinUntil:^BOOL { return streams() > 0; } timeout:5],
+                  @"the stopped lookahead of a shown monitor");
+
+    // Hidden: the lookahead is dropped and stays dropped.
+    engine.sourceMonitorVisible = NO;
+    XCTAssertFalse(engine.sourceMonitorVisible);
+    XCTAssertTrue([self spinUntil:^BOOL { return streams() == 0; } timeout:5], @"hidden: no decode streams");
+    [self spinUntil:^BOOL { return NO; } timeout:0.3];
+    XCTAssertEqual(streams(), 0, @"hidden: the lookahead does not come back");
+
+    // Shown again: it resumes at the paused frame.
+    engine.sourceMonitorVisible = YES;
+    XCTAssertTrue([self spinUntil:^BOOL { return streams() > 0; } timeout:5], @"shown: the lookahead resumes");
+
+    // An export: no lookahead while it runs, even when the monitor is hidden and shown meanwhile.
+    __block BOOL completed = NO;
+    NSError *error = nil;
+    VEExportSettings *hevc = [VEExportSettings defaultSettingsForPreset:VEExportPresetHEVC];
+    VEExportHandle *handle = [engine beginExportWithSettings:hevc
+                                                   outputURL:[_scratch URLByAppendingPathComponent:@"lookahead.mov"]
+                                                    progress:nil
+                                                  completion:^(VEExportSummary *, NSError *) {
+                                                      completed = YES;
+                                                  }
+                                                       error:&error];
+    XCTAssertNotNil(handle, @"%@", error);
+    XCTAssertTrue([self spinUntil:^BOOL { return streams() == 0; } timeout:5], @"exporting: no source decode streams");
+    engine.sourceMonitorVisible = NO;
+    engine.sourceMonitorVisible = YES;
+    [self spinUntil:^BOOL { return NO; } timeout:0.3];
+    XCTAssertTrue(engine.isExporting, @"still exporting (the test needs the export to outlast the checks)");
+    XCTAssertEqual(streams(), 0, @"showing the monitor during an export does not bring the lookahead back");
+    XCTAssertEqual(engine.playbackStats.decodeStreams, 0, @"nor the program's");
+
+    // Hidden when the export ends: still none; shown afterwards: it resumes.
+    engine.sourceMonitorVisible = NO;
+    XCTAssertTrue([handle cancelAndWaitWithTimeout:5]);
+    XCTAssertTrue([self spinUntil:^BOOL { return completed; } timeout:10]);
+    XCTAssertFalse(engine.isExporting);
+    [self spinUntil:^BOOL { return NO; } timeout:0.3];
+    XCTAssertEqual(streams(), 0, @"the export ended while hidden: no lookahead");
+    engine.sourceMonitorVisible = YES;
+    XCTAssertTrue([self spinUntil:^BOOL { return streams() > 0; } timeout:5],
+                  @"shown with no export running: the lookahead resumes");
 }
 
 @end

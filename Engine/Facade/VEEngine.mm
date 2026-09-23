@@ -401,6 +401,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     std::optional<Project> _sourceProject;   // for _sourceAsset
     AssetId _sourcePlaybackAsset;            // asset of the source controller's sequence
     bool _sourceUsesController;              // the source view shows the controller's picture
+    BOOL _sourceMonitorVisible;              // see -setSourceMonitorVisible:
     std::map<AssetId, media::RoutedMediaInfo> _routing;
 
     Project _project;
@@ -495,6 +496,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
         _sourceProvider = std::make_shared<ProgramFrameProvider>(_sourcePool, kSourceScrubLaneBase);
         _sourceTime = kCMTimeZero;
         _sourceUsesController = false;
+        _sourceMonitorVisible = YES;
         _playbackGeneration = 0;
         _playbackPublished = false;
         _idFloor = 0;
@@ -2716,6 +2718,7 @@ static bool isRunning(playback::PlaybackState state) {
             _sourcePlayback->setAssetRouting(asset, routed);
         }
         [self observeController:*_sourcePlayback source:YES];
+        [self updateSourceIdleLookahead];
     }
     if (_sourcePlaybackAsset != _sourceAsset) {
         _sourcePlaybackAsset = _sourceAsset;
@@ -2751,6 +2754,31 @@ static bool isRunning(playback::PlaybackState state) {
     if (_sourceUsesController && _sourcePlayback) {
         _sourcePlayback->pause();
     }
+}
+
+- (BOOL)sourceMonitorVisible {
+    VE_ASSERT_MAIN();
+    return _sourceMonitorVisible;
+}
+
+- (void)setSourceMonitorVisible:(BOOL)visible {
+    VE_ASSERT_MAIN();
+    _sourceMonitorVisible = visible;
+    [self updateSourceIdleLookahead];
+}
+
+/// The source controller keeps its stopped lookahead only while the monitor is on screen and no
+/// export runs (the export gets the decoders; a hidden monitor needs no frames ahead).
+- (void)updateSourceIdleLookahead {
+    if (_sourcePlayback) {
+        _sourcePlayback->setIdleLookahead(_sourceMonitorVisible && _activeExport == nil);
+    }
+}
+
+- (VEPlaybackStats *)sourceMonitorPlaybackStats {
+    VE_ASSERT_MAIN();
+    return _sourcePlayback ? makePlaybackStats(_sourcePlayback->stats(), _sourcePlayback->lastPresented())
+                           : makePlaybackStats(playback::PlaybackStats{}, playback::PresentedFrame{});
 }
 
 - (void)sourceMonitorShuttleForward {
@@ -2920,8 +2948,10 @@ static bool isRunning(playback::PlaybackState state) {
             if (strongSelf->_activeExport == weakHandle) {
                 strongSelf->_activeExport = nil;
                 [strongSelf stopAccessingExportURL];
-                // The program monitor's stopped lookahead resumes at the paused frame.
+                // The monitors' stopped lookahead resumes at their paused frames (the source
+                // monitor's only while it is on screen).
                 strongSelf->_playback->setIdleLookahead(true);
+                [strongSelf updateSourceIdleLookahead];
             }
             [NSNotificationCenter.defaultCenter
                 postNotificationName:VEEngineExportDidFinishNotification
@@ -2949,13 +2979,14 @@ static bool isRunning(playback::PlaybackState state) {
     _activeExport = handle;
     _exportAccessedURL = accessing ? outputURL : nil;
     // The monitors pause (the export gets the decoders and the GPU); they keep their own pools,
-    // and the program's stops decoding its stopped lookahead (its decoders are released) until
-    // the export ends. The paused pictures still come through the scrub path.
+    // and both stop decoding their stopped lookahead (their decoders are released) until the
+    // export ends. The paused pictures still come through the scrub path.
     _playback->pause();
     _playback->setIdleLookahead(false);
     if (_sourcePlayback) {
         _sourcePlayback->pause();
     }
+    [self updateSourceIdleLookahead];
     return handle;
 }
 

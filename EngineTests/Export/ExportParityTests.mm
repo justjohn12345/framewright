@@ -10,6 +10,8 @@
 // - Sound: the playback mixer's output (captured from a real-time NullAudioOutput) and the offline
 //   renderer's mix are compared sample by sample over a sequence with speed 3/2, a fade in, a
 //   constant-power crossfade, two tracks summed and a +12 dB clip that drives the sum into clipping.
+// - Variable frame rate (UX round review, test gap 1): a VFR clip through each backend exports the
+//   same source frames the monitor shows, and both are the frames containing the exact source time.
 
 #import <XCTest/XCTest.h>
 
@@ -18,6 +20,7 @@
 #include "../../Engine/Media/AssetImport.h"
 #include "../../Engine/Render/Compositor.h"
 #include "../Media/BurnIn.h"
+#include "../Media/FFmpegTestMedia.h"
 #include "../Media/TestMedia.h"
 #include "../Playback/PlaybackTestSupport.h"
 
@@ -309,6 +312,112 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
         }
     }
     NSLog(@"PARITY worst block difference %.2f over %zu frames", worst, monitor.size());
+}
+
+/// V1: vfr_h264.mp4 (the Apple backend) for sequence frames [0, 45) from 67/600 s, then its Matroska
+/// remux vfr_h264_blockdur.mkv (FFmpeg) for [45, 90) from 1407/600 s (in points off the nominal frame
+/// grid, so some source times lie just after a frame boundary their nominal slot starts before).
+/// Every frame of the export (ProRes 422, so the burn-in reads back exactly) shows the source frame
+/// the program monitor shows for it, and that is the frame containing the layer's exact source time
+/// (within a millisecond of a frame boundary for Matroska's millisecond timestamps), not the frame
+/// under its nominal slot's start.
+- (void)testAVariableFrameRateSourceExportsTheMonitorsPictures {
+    std::string derivedError;
+    const std::string mkv = derivedMediaPath("vfr_h264_blockdur.mkv", derivedError);
+    XCTAssertFalse(mkv.empty(), @"%s", derivedError.c_str());
+    if (mkv.empty()) {
+        return;
+    }
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    h.sequence().width = 640;
+    h.sequence().height = 360;
+    const AssetId mp4 = h.importAsset("vfr_h264.mp4");
+    const AssetId remux = h.importAssetAtPath(mkv);
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    XCTAssertTrue(h.project.findAsset(mp4)->isVFR && h.project.findAsset(remux)->isVFR);
+    constexpr int64_t kSplit = 45, kFrames = 90;
+    const CMTime firstIn = CMTimeMake(67, 600);
+    const CMTime secondIn = CMTimeMake(1407, 600);
+    h.addClip(h.v1, mp4, 0, kSplit, firstIn);
+    h.addClip(h.v1, remux, kSplit, kFrames - kSplit, secondIn);
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+
+    ex::ExportRequest request;
+    request.project = std::make_shared<const Project>(h.project);
+    request.sequenceId = h.sequenceId;
+    request.encode.container = media::ContainerFormat::MOV;
+    media::VideoEncodeSettings v;
+    v.codec = media::VideoCodec::ProRes422;
+    v.width = 640;
+    v.height = 360;
+    request.encode.video = v;
+    request.outputPath = _dir + "/vfr-parity.mov";
+    ex::ExportServices services;
+    services.router = h.router;
+    services.cache = std::make_shared<media::FrameCache>();
+    services.routing = routingOf(h.project, *h.router);
+    std::string error;
+    auto result = runExport(request, services, error);
+    XCTAssertTrue(result.has_value(), @"%s", error.c_str());
+    if (!result || !result->ok()) {
+        XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
+        return;
+    }
+    XCTAssertEqual(result->value().frames, kFrames);
+    auto routed = h.router->probe(request.outputPath);
+    XCTAssertTrue(routed.ok());
+    if (!routed.ok()) {
+        return;
+    }
+    media::DecodeOptions bgra;
+    bgra.pixelFormat = kCVPixelFormatType_32BGRA;
+    auto decoder = h.router->makeVideoDecoder(*routed, -1, bgra);
+    XCTAssertTrue(decoder.ok());
+    if (!decoder.ok()) {
+        return;
+    }
+
+    int slotBiased[2] = {0, 0}; // per clip
+    for (int64_t f = 0; f < kFrames; ++f) {
+        const bool first = f < kSplit;
+        const CMTime source = first ? firstIn + frames30(f) : secondIn + frames30(f - kSplit);
+        const int64_t toleranceMs = first ? 0 : 1;
+        const int early = vfrFrameAt(source - CMTimeMake(toleranceMs, 1000));
+        const int late = vfrFrameAt(source + CMTimeMake(toleranceMs, 1000));
+
+        h.controller->seek(frames30(f));
+        const PlaybackHarness::Sample sample = h.presentExact();
+        XCTAssertEqual(sample.presented.frameIndex, f);
+        XCTAssertTrue(sample.presented.layers.size() == 1 && sample.presented.layers[0].exact, @"frame %lld", f);
+        const int monitor = sample.burnIns.empty() ? -1 : sample.burnIns[0].value_or(-1);
+
+        XCTAssertTrue(decoder->decoder->seek(frames30(f)).ok());
+        auto decoded = decoder->decoder->next();
+        XCTAssertTrue(decoded.ok() && decoded.value(), @"exported frame %lld", f);
+        const int exported =
+            decoded.ok() && decoded.value() ? readBurnIn(decoded.value()->image.get()).value_or(-1) : -1;
+
+        XCTAssertEqual(exported, monitor, @"frame %lld: the export shows what the monitor shows", f);
+        XCTAssertTrue(monitor == early || monitor == late,
+                      @"frame %lld (source %.4f s): shows %d, the frame containing the source time is %d", f,
+                      CMTimeGetSeconds(source), monitor, early);
+        const MediaAsset &asset = *h.project.findAsset(first ? mp4 : remux);
+        const CMTime slotStart = timeForFrame(media::FrameCache::frameIndex(source, asset.frameDuration),
+                                              asset.frameDuration);
+        const int underSlot = vfrFrameAt(slotStart - CMTimeMake(toleranceMs, 1000));
+        if (early == late && underSlot == vfrFrameAt(slotStart + CMTimeMake(toleranceMs, 1000)) && underSlot != early) {
+            ++slotBiased[first ? 0 : 1];
+        }
+    }
+    NSLog(@"PARITY VFR: %lld frames compared; the nominal slot's start is an earlier frame for %d (apple) and %d "
+          @"(ffmpeg) of them",
+          kFrames, slotBiased[0], slotBiased[1]);
+    XCTAssertGreaterThanOrEqual(slotBiased[0], 5, @"the Apple clip exercises the frames the slot lookup got wrong");
+    XCTAssertGreaterThanOrEqual(slotBiased[1], 5, @"the FFmpeg clip exercises the frames the slot lookup got wrong");
 }
 
 - (void)testExportedAudioMatchesThePlaybackMixSampleForSample {

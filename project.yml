@@ -135,6 +135,7 @@ targets:
       - sdk: UniformTypeIdentifiers.framework
       - sdk: AppKit.framework
       - sdk: QuartzCore.framework
+      - sdk: IOKit.framework
 
   EngineTests:
     type: bundle.unit-test
@@ -151,6 +152,7 @@ targets:
       - sdk: VideoToolbox.framework
       - sdk: AppKit.framework
       - sdk: CoreGraphics.framework
+      - sdk: IOKit.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.justjohn12345.framewright.EngineTests

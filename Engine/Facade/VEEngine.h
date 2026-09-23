@@ -551,6 +551,15 @@ NS_SWIFT_UI_ACTOR
 - (void)sourceMonitorShuttleForward;
 - (void)sourceMonitorShuttleReverse;
 - (void)sourceMonitorStepFrames:(NSInteger)frames;
+/// Whether the source monitor is on screen (default YES; the app mirrors its View > Show Source
+/// Monitor setting here). While it is hidden, and while an export runs, the source monitor's
+/// playback controller keeps no stopped lookahead: its decode pool holds no streams (decoders or
+/// lookahead frames). Once it is shown and no export runs, the lookahead resumes at its paused
+/// frame. Hiding does not pause it; the app pauses it first (-sourceMonitorPause).
+@property (nonatomic) BOOL sourceMonitorVisible;
+/// The source monitor's playback counters (all zero until it first plays), e.g. its pool's
+/// decodeStreams.
+@property (nonatomic, readonly) VEPlaybackStats *sourceMonitorPlaybackStats;
 
 @end
 

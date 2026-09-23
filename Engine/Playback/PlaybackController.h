@@ -102,6 +102,7 @@
 #include "../Audio/AudioMixer.h"
 #include "../Audio/AudioOutput.h"
 #include "../Audio/Clock.h"
+#include "../Audio/PowerSource.h"
 #include "../Media/BackendRouter.h"
 #include "../Media/DecodePool.h"
 #include "../Media/FrameCache.h"
@@ -124,18 +125,16 @@
 
 namespace ve::playback {
 
-/// FrameCache slot of the picture `layer` shows: the asset's frame grid slot containing the
-/// layer's source time, 0 for stills. The program monitor looks pictures up by it, and export
-/// renders the same pictures.
-int64_t frameSlotFor(const VideoLayer &layer, const MediaAsset &asset);
-
-/// Source time whose picture that slot shows: the start of the slot (FrameCache answers a slot
-/// with the frame containing its start), or the layer's source time for stills and assets without
-/// a frame duration. Decode requests and targets for a layer use this time, not the layer's own
-/// source time: on a variable-frame-rate source the slot's start can lie in the frame before the
-/// one containing the source time (a short frame after a long one), and decoding the latter would
-/// never fill the slot.
-CMTime frameSlotTimeFor(const VideoLayer &layer, const MediaAsset &asset);
+/// Source time of the picture `layer` shows: the layer's source time, 0 for stills. The Scheduler
+/// puts it on the asset's frame grid for constant-frame-rate media (the start of the frame on
+/// screen) and leaves it exact for variable-frame-rate media. The program monitor looks the picture
+/// up by this time with FrameCache's containment lookup (the decoded frame whose display interval
+/// contains it: the frame a decoder's seek() to it returns) and asks the decode pool for it (pool
+/// targets and the paused picture's request); export does the same, so both show the frame under the
+/// exact source time, never a neighbour. On a variable-frame-rate source a lookup by nominal frame
+/// slot would be biased early by up to one nominal frame (the slot's start can lie in the frame
+/// before the one containing the source time), so there is no slot lookup for pictures.
+CMTime pictureTimeFor(const VideoLayer &layer, const MediaAsset &asset);
 
 /// Absolute POSIX path of a model media URL (the model may hold "file://" URLs or plain paths).
 std::string mediaPathForURL(const std::string &url);
@@ -207,6 +206,8 @@ struct PlaybackStats {
     uint64_t monotonicHolds = 0; ///< Presentations whose clock read was held against going backwards.
     double cacheHitRate = 0.0;
     int decodeQueueDepth = 0; ///< Busy decode streams + pending scrub requests.
+    /// Decode streams the pool keeps (busy or idle; each holds a decoder and its lookahead frames).
+    int decodeStreams = 0;
     uint64_t audioUnderruns = 0;
     uint64_t audioUnderrunFrames = 0;
     bool audioActive = false;
@@ -224,8 +225,12 @@ struct PlaybackStats {
 struct PresentedLayer {
     ClipId clip;
     AssetId asset;
-    int64_t wantedIndex = 0; ///< FrameCache slot of the exact frame.
-    int64_t shownIndex = -1; ///< Slot actually shown (-1: nothing).
+    /// Slot (FrameCache::frameIndex on the asset's nominal frame grid) containing the layer's picture
+    /// time (pictureTimeFor), for diagnostics.
+    int64_t wantedIndex = 0;
+    /// Slot containing the start of the frame actually shown (-1: nothing). For a variable-frame-rate
+    /// source the exact picture can start in an earlier slot than wantedIndex.
+    int64_t shownIndex = -1;
     bool exact = false;
 };
 struct PresentedFrame {
@@ -267,10 +272,16 @@ struct PlaybackConfig {
     /// repositioned (it takes one output callback; this only matters if the device stalls).
     std::chrono::milliseconds stopFadeTimeout{50};
     /// The output is stopped after this long without transport activity (playback, a seek, a
-    /// step, a scrub, an edit while stopped) or a new sequence. Long enough that editing between
-    /// playbacks never finds the device asleep; restarting it costs a play() tens to hundreds of
-    /// milliseconds (Bluetooth outputs the most).
+    /// step, a scrub, an edit while stopped) or a new sequence, on AC power. Long enough that
+    /// editing between playbacks never finds the device asleep; restarting it costs a play() tens
+    /// to hundreds of milliseconds (Bluetooth outputs the most).
     std::chrono::milliseconds outputIdleTimeout{300'000};
+    /// The same on battery: a running AVAudioEngine keeps the output device (and its power) on,
+    /// so an idle session on battery lets it stop sooner.
+    std::chrono::milliseconds outputIdleTimeoutOnBattery{60'000};
+    /// Whether the Mac runs on battery (default: audio::systemPowerSource()). A change is applied
+    /// at once: the timeout that now applies is measured from the last transport activity.
+    std::shared_ptr<audio::PowerSource> powerSource;
     double audioHorizonSeconds = 5.0; ///< Audio plan window ahead of the playhead.
     double audioReplanSeconds = 1.0;  ///< Re-plan when the playhead moved this far.
     double retargetSeconds = 0.1;     ///< DecodePool retarget interval (sequence time).
@@ -337,6 +348,10 @@ class PlaybackController {
     /// usual either way.
     void setIdleLookahead(bool enabled);
     bool idleLookahead() const;
+    /// How long the audio output keeps running after the last transport activity, for the power
+    /// source's current answer: PlaybackConfig::outputIdleTimeoutOnBattery on battery, else
+    /// outputIdleTimeout.
+    std::chrono::milliseconds outputIdleTimeout() const;
 
     // MARK: State
 
@@ -430,6 +445,9 @@ class PlaybackController {
     void postStatusLocked();
     void postNeedsDisplay();
     void touchIdleLocked();
+    /// When the idle output is stopped: the last transport activity plus outputIdleTimeout()
+    /// (time_point::min() before any activity).
+    std::chrono::steady_clock::time_point idleDeadlineLocked() const;
     double audioLatencyLocked(double rate) const;
     void handleOutputEventsLocked();
     /// Starts/stops the output as needed; unlocks around the call. True if it did something.
@@ -442,6 +460,7 @@ class PlaybackController {
     const std::shared_ptr<media::FrameCache> cache_;
     const std::shared_ptr<media::DecodePool> pool_;
     const PlaybackConfig config_;
+    const std::shared_ptr<audio::PowerSource> powerSource_;
 
     // Declaration order matters: the output is destroyed before the mixer, the mixer before the
     // core (whose clock it advances).
@@ -475,13 +494,16 @@ class PlaybackController {
     // Output lifecycle (decided by the tick thread).
     bool outputStarted_ = false;
     bool outputFailed_ = false; // the last start failed or the device was lost: no audio until the next pre-roll
-    std::chrono::steady_clock::time_point idleDeadline_{};
+    std::optional<std::chrono::steady_clock::time_point> lastActivity_; // see touchIdleLocked()
     std::vector<audio::AudioOutputEvent> outputEvents_;
     std::optional<PlaybackError> lastError_;
     std::map<AssetId, std::string> registeredPaths_;
     std::map<AssetId, media::RoutedMediaInfo> routing_;
     bool stopTick_ = false;
     std::thread tickThread_;
+    // Wakes the tick thread when the power source changes (the idle deadline moves). Destroyed
+    // first in the destructor.
+    std::unique_ptr<audio::PowerSource::Observation> powerObservation_;
 };
 
 } // namespace ve::playback

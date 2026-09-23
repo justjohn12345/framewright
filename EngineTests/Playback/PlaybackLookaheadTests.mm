@@ -334,10 +334,12 @@ double secondsOf(CMTime t) {
     XCTAssertEqual(primary.burnIns.front().value_or(-1), 43);
 }
 
-/// The iPhone case of open finding 3: a variable-frame-rate clip. The monitor looks a layer's
-/// picture up by its nominal frame slot, whose start can lie in the frame before the one under
-/// the layer's source time (a short frame after a long one); the pool and the paused picture's
-/// request must decode that frame, or play() waits for it until the pre-roll timeout (a second).
+/// The iPhone case of open finding 3: a variable-frame-rate clip. The starts are sequence frames
+/// whose nominal source frame slot starts in the frame before the one containing the layer's
+/// source time (a short frame after a long one): the picture shown (paused, then playing) is the
+/// frame containing the exact source time (UX round review finding 1: not the slot start's frame),
+/// and the pool, the paused picture's request and the frame source all agree on it, so play() never
+/// waits for a picture nobody decodes until the pre-roll timeout (a second).
 - (void)testPlayStartsPromptlyOnAVariableFrameRateSource {
     std::string error;
     const std::string path = derivedMediaPath("vfr_h264_blockdur.mkv", error);
@@ -378,8 +380,10 @@ double secondsOf(CMTime t) {
         h.controller->seek(source);
         const PlaybackHarness::Sample paused = h.presentExact();
         XCTAssertEqual(paused.presented.frameIndex, frame);
-        XCTAssertEqual(paused.burnIns.front().value_or(-1), vfrFrameAt(slotStart), @"frame %lld shows its slot's picture",
-                       frame);
+        XCTAssertEqual(paused.burnIns.front().value_or(-1), frameAt(source, 0),
+                       @"frame %lld shows the frame containing its source time", frame);
+        XCTAssertNotEqual(paused.burnIns.front().value_or(-1), frameAt(slotStart, 0),
+                          @"frame %lld: not the frame under its nominal slot's start", frame);
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
         const PlayStart start = measurePlayStart(h, frame);
         XCTAssertGreaterThanOrEqual(start.rawMs, 0.0);

@@ -297,9 +297,9 @@ struct ExportJob::Run {
                 seen.push_back(layer.clipId);
                 media::DecodeTarget target;
                 target.asset = layer.assetId;
-                // The start of the slot the picture is looked up by (see frameSlotTimeFor).
+                // The time the picture is looked up by (see playback::pictureTimeFor).
                 const MediaAsset *asset = project.findAsset(layer.assetId);
-                target.sourceTime = asset ? playback::frameSlotTimeFor(layer, *asset) : layer.sourceTime;
+                target.sourceTime = asset ? playback::pictureTimeFor(layer, *asset) : layer.sourceTime;
                 target.priority = static_cast<int>(10000 - static_cast<int64_t>(k) * 10 + static_cast<int64_t>(i));
                 target.lane = layer.clipId.value();
                 targets.push_back(std::move(target));
@@ -316,7 +316,7 @@ struct ExportJob::Run {
         if (asset == nullptr) {
             return makeError(MediaErrorCode::InvalidState, "a clip refers to an asset that is not in the project");
         }
-        const int64_t slot = playback::frameSlotFor(layer, *asset);
+        const CMTime pictureTime = playback::pictureTimeFor(layer, *asset);
         const auto deadline = std::chrono::steady_clock::now() + job.options_.frameTimeout;
         // Refreshes that found the stream exactly where the previous one left it (no frame
         // decoded, no seek in between): only such refreshes in a row count towards giving up, so
@@ -329,7 +329,7 @@ struct ExportJob::Run {
                    ") cannot be exported: “" + displayName(*asset) + "” " + what;
         };
         for (;;) {
-            pin = cache.acquire(layer.assetId, slot);
+            pin = cache.acquire(layer.assetId, pictureTime);
             if (pin) {
                 auto mapped = compositor->textureCache().textures(pin.image());
                 if (!mapped.ok()) {
@@ -352,7 +352,7 @@ struct ExportJob::Run {
             if (stream && (stream->idle || stream->failed)) {
                 // The step that settled the stream may have published the picture after the
                 // lookup above.
-                if (cache.contains(layer.assetId, slot)) {
+                if (cache.contains(layer.assetId, pictureTime)) {
                     continue;
                 }
                 if (stream->failed || stream->error) {

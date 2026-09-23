@@ -147,6 +147,7 @@ VEAudioParams VEAudioParamsDefault(void) {
 @property (nonatomic, readwrite) uint64_t cacheMisses;
 @property (nonatomic, readwrite) double cacheHitRate;
 @property (nonatomic, readwrite) NSInteger decodeQueueDepth;
+@property (nonatomic, readwrite) NSInteger decodeStreams;
 @property (nonatomic, readwrite) uint64_t audioUnderruns;
 @property (nonatomic, readwrite) uint64_t audioUnderrunFrames;
 @property (nonatomic, readwrite) uint64_t mapFailures;
@@ -668,6 +669,7 @@ VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats, const p
     info.cacheMisses = stats.cacheMisses;
     info.cacheHitRate = stats.cacheHitRate;
     info.decodeQueueDepth = stats.decodeQueueDepth;
+    info.decodeStreams = stats.decodeStreams;
     info.audioUnderruns = stats.audioUnderruns;
     info.audioUnderrunFrames = stats.audioUnderrunFrames;
     info.mapFailures = stats.mapFailures;

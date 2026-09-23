@@ -15,6 +15,9 @@
 #include "../Media/BurnIn.h"
 #include "PlaybackTestSupport.h"
 
+#include <IOKit/ps/IOPSKeys.h>
+#include <IOKit/ps/IOPowerSources.h>
+
 #include <chrono>
 #include <cmath>
 #include <thread>
@@ -521,6 +524,83 @@ double rmsOver(const audio::NullAudioOutput::Capture &capture, int64_t from, int
     XCTAssertEqual(h.controller->clock().mode(), audio::ClockMode::AudioSamples);
     h.controller->pause();
     NSLog(@"idle output stopped %.0f ms after pause (timeout 300 ms)", idleMs);
+}
+
+/// UX round review finding 5: the output keeps running 5 minutes after the last transport activity
+/// on AC power and 1 minute on battery (the power source is injectable; the system's is IOKit's).
+- (void)testTheIdleTimeoutIsFiveMinutesOnACAndOneMinuteOnBattery {
+    const PlaybackConfig defaults;
+    XCTAssertEqual(defaults.outputIdleTimeout.count(), 300'000);
+    XCTAssertEqual(defaults.outputIdleTimeoutOnBattery.count(), 60'000);
+    XCTAssertFalse(defaults.powerSource, @"unset: the controller uses the system's power source");
+    auto power = std::make_shared<audio::ManualPowerSource>(false);
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 0.5, [&](PlaybackConfig &config) {
+        config.outputIdleTimeout = defaults.outputIdleTimeout;
+        config.outputIdleTimeoutOnBattery = defaults.outputIdleTimeoutOnBattery;
+        config.powerSource = power;
+    });
+    XCTAssertEqual(h.controller->outputIdleTimeout(), std::chrono::minutes(5), @"on AC");
+    power->setOnBattery(true);
+    XCTAssertEqual(h.controller->outputIdleTimeout(), std::chrono::minutes(1), @"on battery");
+    power->setOnBattery(false);
+    XCTAssertEqual(h.controller->outputIdleTimeout(), std::chrono::minutes(5), @"back on AC");
+}
+
+/// On battery the idle output stops after the battery timeout; unplugging the charger while the
+/// output idles (within the AC timeout) stops it at once when the battery timeout has passed, and
+/// plugging it back in keeps a restarted output running.
+- (void)testTheIdleOutputFollowsThePowerSource {
+    auto power = std::make_shared<audio::ManualPowerSource>(true);
+    PlaybackHarness h(PlaybackHarness::Mode::Realtime, 1.0, [&](PlaybackConfig &config) {
+        config.outputIdleTimeout = std::chrono::milliseconds(20'000);
+        config.outputIdleTimeoutOnBattery = std::chrono::milliseconds(300);
+        config.powerSource = power;
+    });
+    buildStandard(h);
+    if (!h.ok()) {
+        XCTFail(@"%s", h.error().c_str());
+        return;
+    }
+    // On battery: stopped after the battery timeout, not before.
+    const auto loadedAt = SteadyClock::now();
+    h.load();
+    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return h.output->isRunning(); }), @"opening a sequence warms it");
+    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return !h.output->isRunning(); }), @"stopped on battery");
+    const double batteryMs = std::chrono::duration<double, std::milli>(SteadyClock::now() - loadedAt).count();
+    XCTAssertGreaterThanOrEqual(batteryMs, 250.0, @"not before the battery timeout");
+    XCTAssertLessThan(batteryMs, 5000.0, @"not the AC timeout");
+
+    // On AC: an idle output keeps running past the battery timeout...
+    power->setOnBattery(false);
+    h.controller->stepFrames(1); // transport activity: the output starts again
+    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return h.output->isRunning(); }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    XCTAssertTrue(h.output->isRunning(), @"on AC the output idles for the AC timeout");
+    // ...until the charger is unplugged: the battery timeout has passed, so it stops at once.
+    const auto unpluggedAt = SteadyClock::now();
+    power->setOnBattery(true);
+    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return !h.output->isRunning(); }, std::chrono::milliseconds(2000)),
+                  @"unplugged: stopped without waiting for the AC deadline");
+    const double unpluggedMs = std::chrono::duration<double, std::milli>(SteadyClock::now() - unpluggedAt).count();
+    XCTAssertLessThan(unpluggedMs, 1000.0);
+    NSLog(@"idle output: stopped %.0f ms after load on battery (timeout 300 ms), %.0f ms after unplugging", batteryMs,
+          unpluggedMs);
+}
+
+/// The system power source answers what IOKit answers.
+- (void)testTheSystemPowerSourceIsIOKits {
+    CFTypeRef info = IOPSCopyPowerSourcesInfo();
+    bool battery = false;
+    if (info != nullptr) {
+        CFStringRef type = IOPSGetProvidingPowerSourceType(info);
+        battery = type != nullptr && CFEqual(type, CFSTR(kIOPSBatteryPowerValue));
+        CFRelease(info);
+    }
+    const std::shared_ptr<audio::PowerSource> system = audio::systemPowerSource();
+    XCTAssertTrue(system);
+    XCTAssertEqual(system.get(), audio::systemPowerSource().get(), @"one per process");
+    XCTAssertEqual(system->onBattery(), battery);
+    NSLog(@"system power source: %s", battery ? "battery" : "AC (or no battery)");
 }
 
 - (void)testPlaybackStopsAtTheLastFrame {

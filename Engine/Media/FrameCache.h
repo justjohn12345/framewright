@@ -9,16 +9,17 @@
 // before it (`coverFrom`): the decoder returns the first frame after t when t lies before the
 // first frame, and the decode pool records that so the cache agrees.
 //
-// Slot lookups. The playback frame source addresses frames by grid slot: slot n of an asset is
-// [n * frameDuration, (n + 1) * frameDuration) with frameDuration = the asset's nominal
-// MediaAsset::frameDuration, and frameIndex(t) = floor(t / frameDuration) is the slot containing
-// t. get/acquire/contains(asset, n) answer with the entry containing the slot's start time
-// n * frameDuration: exact for sources on the grid, and on any source the frame a decoder
-// returns for seek(n * frameDuration). The frame duration used is the one the asset's frames
-// were put with. Stills use slot 0 (frameIndex() returns 0 for an invalid frame duration), and
-// their entry (pts 0, infinite duration) answers every time. Frame::index / Frame::span are the
-// slots an entry starts in and covers (frameIndex(pts + duration) - frameIndex(pts)), for
-// diagnostics.
+// Slot lookups. Slot n of an asset is [n * frameDuration, (n + 1) * frameDuration) with
+// frameDuration = the asset's nominal MediaAsset::frameDuration, and frameIndex(t) =
+// floor(t / frameDuration) is the slot containing t. get/acquire/contains(asset, n) answer with
+// the entry containing the slot's start time n * frameDuration: exact for sources on the grid,
+// and on any source the frame a decoder returns for seek(n * frameDuration). The frame duration
+// used is the one the asset's frames were put with. Stills use slot 0 (frameIndex() returns 0 for
+// an invalid frame duration), and their entry (pts 0, infinite duration) answers every time.
+// Frame::index / Frame::span are the slots an entry starts in and covers (frameIndex(pts +
+// duration) - frameIndex(pts)), for diagnostics. Pictures are not looked up by slot: playback and
+// export use the time lookup at playback::pictureTimeFor (on a variable-frame-rate source a slot's
+// start can lie in the frame before the one under the source time).
 //
 // Budget. bytes = the frame's real allocation (IOSurfaceGetAllocSize for IOSurface-backed
 // buffers, else CVPixelBufferGetDataSize, else the sum of plane sizes). Inserting evicts until

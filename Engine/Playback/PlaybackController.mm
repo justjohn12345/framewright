@@ -40,15 +40,8 @@ std::string mediaPathForURL(const std::string &url) {
     return url;
 }
 
-int64_t frameSlotFor(const VideoLayer &layer, const MediaAsset &asset) {
-    return asset.isStill() ? 0 : FrameCache::frameIndex(layer.sourceTime, asset.frameDuration);
-}
-
-CMTime frameSlotTimeFor(const VideoLayer &layer, const MediaAsset &asset) {
-    if (asset.isStill() || !isPositive(asset.frameDuration) || !isNumeric(layer.sourceTime)) {
-        return layer.sourceTime;
-    }
-    return timeForFrame(frameSlotFor(layer, asset), asset.frameDuration);
+CMTime pictureTimeFor(const VideoLayer &layer, const MediaAsset &asset) {
+    return asset.isStill() || layer.isStill ? kCMTimeZero : layer.sourceTime;
 }
 
 namespace {
@@ -65,10 +58,6 @@ CMTime lastFrameStartOf(const Sequence &sequence) {
     }
     const int64_t frames = frameIndexAt(duration, sequence.frameDuration, SnapMode::Ceil);
     return timeForFrame(std::max<int64_t>(0, frames - 1), sequence.frameDuration);
-}
-
-int64_t slotFor(const VideoLayer &layer, const MediaAsset &asset) {
-    return frameSlotFor(layer, asset);
 }
 
 double absRate(double rate) {
@@ -305,9 +294,9 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
         FrameCache::PinnedFrame pin;
         int64_t shownIndex = -1;
         if (const MediaAsset *asset = rs.project->findAsset(layer.assetId)) {
-            const int64_t slot = slotFor(layer, *asset);
-            shown.wantedIndex = slot;
-            pin = cache->acquire(layer.assetId, slot);
+            const CMTime pictureTime = pictureTimeFor(layer, *asset);
+            shown.wantedIndex = asset->isStill() ? 0 : FrameCache::frameIndex(pictureTime, asset->frameDuration);
+            pin = cache->acquire(layer.assetId, pictureTime);
             bool usable = static_cast<bool>(pin);
             if (usable && request.textureCache) {
                 auto mapped = request.textureCache->textures(pin.image());
@@ -488,7 +477,8 @@ struct PlaybackController::ObserverHub : std::enable_shared_from_this<ObserverHu
 PlaybackController::PlaybackController(std::shared_ptr<media::BackendRouter> router,
                                        std::shared_ptr<FrameCache> cache, std::shared_ptr<media::DecodePool> pool,
                                        PlaybackConfig config)
-    : router_(std::move(router)), cache_(std::move(cache)), pool_(std::move(pool)), config_(std::move(config)) {
+    : router_(std::move(router)), cache_(std::move(cache)), pool_(std::move(pool)), config_(std::move(config)),
+      powerSource_(config_.powerSource ? config_.powerSource : audio::systemPowerSource()) {
     core_ = std::make_shared<Core>(config_.hostClock ? config_.hostClock : audio::HostClock::system(),
                                    config_.mixer.sampleRate, cache_);
     hub_ = std::make_shared<ObserverHub>();
@@ -510,9 +500,17 @@ PlaybackController::PlaybackController(std::shared_ptr<media::BackendRouter> rou
     });
     publishDisplayLocked();
     tickThread_ = std::thread([this] { tickMain(); });
+    // On battery the idle output stops sooner: re-evaluate the deadline when the answer changes.
+    // (Notified under mutex_, so the wake-up cannot fall between the tick thread computing its
+    // deadline and starting to wait.)
+    powerObservation_ = powerSource_->observe([this] {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tickCv_.notify_all();
+    });
 }
 
 PlaybackController::~PlaybackController() {
+    powerObservation_.reset();    // waits for a power change handler in flight (it takes mutex_)
     output_->setEventHandler({}); // waits for an event handler in flight (it takes mutex_)
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -595,7 +593,18 @@ void PlaybackController::postNeedsDisplay() {
 }
 
 void PlaybackController::touchIdleLocked() {
-    idleDeadline_ = std::chrono::steady_clock::now() + config_.outputIdleTimeout;
+    lastActivity_ = std::chrono::steady_clock::now();
+}
+
+std::chrono::milliseconds PlaybackController::outputIdleTimeout() const {
+    return powerSource_->onBattery() ? config_.outputIdleTimeoutOnBattery : config_.outputIdleTimeout;
+}
+
+std::chrono::steady_clock::time_point PlaybackController::idleDeadlineLocked() const {
+    if (!lastActivity_) {
+        return std::chrono::steady_clock::time_point::min();
+    }
+    return *lastActivity_ + outputIdleTimeout();
 }
 
 double PlaybackController::audioLatencyLocked(double rate) const {
@@ -666,7 +675,7 @@ void PlaybackController::retargetLocked(CMTime at, double rate, CMTime window, d
             target.asset = layer.assetId;
             target.trackIndex = -1;
             const MediaAsset *asset = project_->findAsset(layer.assetId);
-            target.sourceTime = asset ? frameSlotTimeFor(layer, *asset) : layer.sourceTime;
+            target.sourceTime = asset ? pictureTimeFor(layer, *asset) : layer.sourceTime;
             target.direction = backward ? media::DecodeDirection::Backward : media::DecodeDirection::Forward;
             // Visible now first (upper layers first), then by proximity.
             target.priority = static_cast<int>(10000 - k * 10 + static_cast<int64_t>(i));
@@ -711,13 +720,13 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
     for (size_t i = 0; i < graph.layers.size(); ++i) {
         const VideoLayer &layer = graph.layers[i];
         const MediaAsset *asset = project_->findAsset(layer.assetId);
-        if (!asset || cache_->contains(layer.assetId, slotFor(layer, *asset))) {
+        if (!asset || cache_->contains(layer.assetId, pictureTimeFor(layer, *asset))) {
             continue;
         }
         const uint64_t lane = config_.scrubLaneBase + i;
         core_->displayRequestIssued(generation);
-        // The picture of the slot the frame source looks up (see frameSlotTimeFor).
-        pool_->requestFrame(layer.assetId, frameSlotTimeFor(layer, *asset),
+        // The picture the frame source looks up (see pictureTimeFor).
+        pool_->requestFrame(layer.assetId, pictureTimeFor(layer, *asset),
                             [weakCore, weakHub, generation](media::Result<media::ScrubFrame> r) {
                                 auto core = weakCore.lock();
                                 if (!core) {
@@ -748,7 +757,7 @@ bool PlaybackController::firstFramesReadyLocked(CMTime at) const {
     const RenderGraph graph = Scheduler::renderGraphAt(*sequence, *project_, at);
     return std::all_of(graph.layers.begin(), graph.layers.end(), [&](const VideoLayer &layer) {
         const MediaAsset *asset = project_->findAsset(layer.assetId);
-        return !asset || cache_->contains(layer.assetId, slotFor(layer, *asset));
+        return !asset || cache_->contains(layer.assetId, pictureTimeFor(layer, *asset));
     });
 }
 
@@ -1047,7 +1056,7 @@ void PlaybackController::handleOutputEventsLocked() {
 bool PlaybackController::manageOutput(std::unique_lock<std::mutex> &lock) {
     const auto now = std::chrono::steady_clock::now();
     const bool transport = state_ == PlaybackState::Playing || state_ == PlaybackState::Prerolling;
-    const bool wanted = sequenceLocked() != nullptr && (transport || now < idleDeadline_);
+    const bool wanted = sequenceLocked() != nullptr && (transport || now < idleDeadlineLocked());
     // The output could do better (AutomaticAudioOutput on its fallback with a retry due, or after
     // the device was lost): let it switch when audio is about to start or is missing, never
     // under a running audio clock.
@@ -1433,6 +1442,7 @@ PlaybackStats PlaybackController::stats() const {
         }
         const uint64_t settled = poolStats.scrubServiced + poolStats.scrubCancelled + poolStats.scrubFailed;
         s.decodeQueueDepth = busy + static_cast<int>(poolStats.scrubRequests > settled ? poolStats.scrubRequests - settled : 0);
+        s.decodeStreams = static_cast<int>(poolStats.streams.size());
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1538,7 +1548,7 @@ void PlaybackController::tickMain() {
             wake = std::min(wake, std::max(stoppedLookaheadDueLocked(), now));
         }
         if (outputStarted_) {
-            wake = std::min(wake, idleDeadline_);
+            wake = std::min(wake, std::max(idleDeadlineLocked(), now));
         }
         if (wake == std::chrono::steady_clock::time_point::max()) {
             tickCv_.wait(lock);

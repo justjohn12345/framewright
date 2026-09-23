@@ -1135,7 +1135,7 @@ static int expectedBurnIn(int64_t f) {
 
 /// A variable-frame-rate source (vfr_h264.mp4: frame durations cycle through kVfrPattern600, and
 /// B-frames) exported at 30 fps: every sampled frame shows the source frame the program monitor
-/// picks for it (the frame showing at the start of the layer's source slot), read from the burn-in.
+/// picks for it (the frame containing the layer's exact source time), read from the burn-in.
 - (void)testVariableFrameRateSourceExportsTheMonitorsFrames {
     ExportRig rig;
     rig.sequence().width = 640;
@@ -1165,16 +1165,14 @@ static int expectedBurnIn(int64_t f) {
         if (graph.layers.size() != 1) {
             continue;
         }
-        const int64_t slot = playback::frameSlotFor(graph.layers[0], asset);
-        const CMTime slotStart = isPositive(asset.frameDuration) ? timeForFrame(slot, asset.frameDuration)
-                                                                 : graph.layers[0].sourceTime;
-        const int expected = test::vfrFrameAt(slotStart);
+        const CMTime source = playback::pictureTimeFor(graph.layers[0], asset);
+        XCTAssertEqual(CMTimeCompare(source, CMTimeMake(f, 30)), 0, @"speed 1 from 0: the exact source time");
+        const int expected = test::vfrFrameAt(source);
         auto frame = reader.frameAt(CMTimeMake(f, 30));
         XCTAssertTrue(frame.has_value(), @"frame %lld", f);
         if (frame) {
             XCTAssertEqual(test::readBurnIn(frame->image.get()).value_or(-1), expected,
-                           @"sequence frame %lld (source %.4f s, slot %lld)", f,
-                           CMTimeGetSeconds(graph.layers[0].sourceTime), slot);
+                           @"sequence frame %lld (source %.4f s)", f, CMTimeGetSeconds(source));
             ++checked;
         }
     }

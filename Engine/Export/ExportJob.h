@@ -6,10 +6,10 @@
 //      grid and frame-centre dissolve mix as the program monitor;
 //   2. waits until every layer's picture is decoded: a private DecodePool (its own lanes, one
 //      sequential decoder per clip, never the scrub path) decodes a bounded lookahead into the
-//      FrameCache; the job looks pictures up by the slot the program monitor uses
-//      (playback::frameSlotFor) and pins them. A frame is never written with a layer missing:
-//      a picture that cannot be decoded fails the export (with the decoder's error), it does not
-//      become a black or stale layer;
+//      FrameCache; the job looks pictures up the way the program monitor does (the frame
+//      containing playback::pictureTimeFor, the layer's exact source time) and pins them. A
+//      frame is never written with a layer missing: a picture that cannot be decoded fails the
+//      export (with the decoder's error), it does not become a black or stale layer;
 //   3. composites with its own Compositor (RGBA16Float intermediate) into a buffer from the
 //      writer's pool in the encoder's input format (pixelFormatFor: '420v' for H.264, HEVC and
 //      8-bit AV1, 'x420' for 10-bit HEVC (Main10) and AV1, '32BGRA' for ProRes) with

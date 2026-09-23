@@ -299,6 +299,8 @@ typedef NS_ENUM(NSInteger, VEClockMode) {
 @property (nonatomic, readonly) uint64_t cacheMisses;
 @property (nonatomic, readonly) double cacheHitRate;
 @property (nonatomic, readonly) NSInteger decodeQueueDepth;
+/// Decode streams the monitor's pool keeps (busy or idle: each holds a decoder and its lookahead).
+@property (nonatomic, readonly) NSInteger decodeStreams;
 @property (nonatomic, readonly) uint64_t audioUnderruns;
 @property (nonatomic, readonly) uint64_t audioUnderrunFrames;
 /// Decoded frames that could not be mapped to Metal textures.
