@@ -53,7 +53,7 @@
 // controller pauses there. play() at the last frame restarts from the beginning.
 //
 // Threading contract
-// - Public control methods (setSequence, modelChanged, setAssetRouting, play, pause, togglePlay,
+// - Public control methods (setSequence, modelChanged, setAssetRouting, forgetMedia, play, pause, togglePlay,
 //   seek, setRate, shuttle*, stepFrames, scrubTo, endScrub, setMuted, setObserver): any thread
 //   (normally main), serialised by an internal mutex. None of them waits: no pre-roll, no device
 //   start/stop, no decoder or render-thread wait, no source destruction happens on the caller's
@@ -254,10 +254,18 @@ class PlaybackController {
 
     /// Selects the sequence to play (stops playback, moves to frame 0).
     void setSequence(std::shared_ptr<const Project> project, SequenceId sequenceId);
-    /// The model changed (same sequence id): re-plan without stopping playback.
+    /// The model changed (same sequence id): re-plan without stopping playback. While stopped or
+    /// scrubbing, a position the edit left beyond the sequence end is clamped to its last frame and
+    /// reported to the observer (statusChanged), so a UI playhead never stays past the end.
     void modelChanged(std::shared_ptr<const Project> project);
     /// Routing computed at import (saves a probe per decoder).
     void setAssetRouting(AssetId asset, media::RoutedMediaInfo routed);
+    /// The owner started a new media epoch (DecodePool::beginEpoch, FrameCache::beginEpoch):
+    /// asset ids may now name other files. Forgets every path and routing handed to the pool and
+    /// the mixer, so the next setSequence()/modelChanged() registers every asset again with its
+    /// current path. Call it after setSequence() with an empty project (so nothing plays an old
+    /// asset meanwhile) and before handing over the new project.
+    void forgetMedia();
 
     // MARK: Transport
 

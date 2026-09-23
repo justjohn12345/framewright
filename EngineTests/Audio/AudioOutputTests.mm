@@ -302,4 +302,41 @@ class FakeEngine final : public IAudioOutput {
     XCTAssertFalse(output.isRunning());
 }
 
+/// A default output device appearing while the output runs on its fallback makes the engine
+/// retry due at once (CoreAudio listener), not only after the retry interval.
+- (void)testAutomaticOutputRetriesAtOnceWhenAnOutputDeviceAppears {
+    OutputFixture fx;
+    auto available = std::make_shared<std::atomic<bool>>(false);
+    AutomaticAudioOutput output(
+        *fx.mixer,
+        [available](AudioMixer &) -> media::Result<std::unique_ptr<IAudioOutput>> {
+            return std::unique_ptr<IAudioOutput>(std::make_unique<FakeEngine>(available));
+        },
+        std::chrono::hours(1), /*watchDefaultDevice*/ false);
+    output.setMuted(true);
+    XCTAssertTrue(output.start().ok());
+    XCTAssertEqual(output.kind(), "null");
+    XCTAssertFalse(output.wantsRestart(), @"an hour-long retry interval");
+    available->store(true);
+    output.defaultOutputDeviceDidChange(); // what the CoreAudio listener reports
+    XCTAssertTrue(output.wantsRestart(), @"the new device makes a retry due now");
+    XCTAssertTrue(output.start().ok());
+    XCTAssertEqual(output.engineAttempts(), 2);
+    XCTAssertEqual(output.kind(), "avaudioengine");
+    XCTAssertFalse(output.wantsRestart());
+    output.stop();
+}
+
+/// The real listener installs and uninstalls cleanly (it cannot be triggered headless).
+- (void)testAutomaticOutputInstallsTheDeviceListener {
+    OutputFixture fx;
+    for (int i = 0; i < 3; ++i) {
+        auto output = std::make_unique<AutomaticAudioOutput>(*fx.mixer);
+        output->setMuted(true);
+        XCTAssertTrue(output->start().ok());
+        output->defaultOutputDeviceDidChange();
+        output.reset();
+    }
+}
+
 @end

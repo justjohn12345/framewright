@@ -80,6 +80,7 @@ struct PlaybackController::Core {
         std::shared_ptr<const Project> project;
         SequenceId sequenceId;
         uint64_t snapshotVersion = 0;
+        uint64_t sequenceGeneration = 0; // of the pictures held below
 
         bool hasFrame = false;
         int64_t lastFrame = -1;
@@ -109,6 +110,7 @@ struct PlaybackController::Core {
     std::mutex snapshotMutex; // held only to copy/replace the pointer
     std::shared_ptr<const Project> project;
     SequenceId sequenceId;
+    uint64_t sequenceGeneration = 0; // snapshotMutex; bumped by setSequence (another sequence)
     std::atomic<uint64_t> snapshotVersion{1};
 
     audio::SeqLock<Display> display;
@@ -127,11 +129,17 @@ struct PlaybackController::Core {
     mutable std::mutex presentedMutex;
     PresentedFrame presentedInfo;
 
-    void setSnapshot(std::shared_ptr<const Project> p, SequenceId id) {
+    /// `newSequence`: another sequence (or project) replaces the old one, whose clip ids may be
+    /// reused: the frame sources drop the pictures they hold instead of showing them for clips
+    /// of the new sequence with the same id.
+    void setSnapshot(std::shared_ptr<const Project> p, SequenceId id, bool newSequence) {
         {
             std::lock_guard<std::mutex> lock(snapshotMutex);
             project = std::move(p);
             sequenceId = id;
+            if (newSequence) {
+                ++sequenceGeneration;
+            }
         }
         snapshotVersion.fetch_add(1, std::memory_order_acq_rel);
     }
@@ -149,13 +157,24 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
     const uint64_t version = snapshotVersion.load(std::memory_order_acquire);
     if (version != rs.snapshotVersion) {
         std::shared_ptr<const Project> previous;
+        uint64_t generation = 0;
         {
             std::lock_guard<std::mutex> lock(snapshotMutex);
             previous = std::move(rs.project);
             rs.project = project;
             rs.sequenceId = sequenceId;
+            generation = sequenceGeneration;
         }
         rs.snapshotVersion = version;
+        if (generation != rs.sequenceGeneration) {
+            // Another sequence: nothing held belongs to it (clip ids restart per project).
+            rs.sequenceGeneration = generation;
+            rs.pins.clear();
+            rs.lastClips.clear();
+            rs.lastTextures.clear();
+            rs.lastShown.clear();
+            rs.hasFrame = false;
+        }
     }
     const Sequence *sequence = rs.project ? rs.project->findSequence(rs.sequenceId) : nullptr;
     if (!sequence || !isPositive(sequence->frameDuration)) {
@@ -933,7 +952,7 @@ void PlaybackController::setSequence(std::shared_ptr<const Project> project, Seq
     pauseLocked();
     project_ = std::move(project);
     sequenceId_ = sequenceId;
-    core_->setSnapshot(project_, sequenceId_);
+    core_->setSnapshot(project_, sequenceId_, /*newSequence*/ true);
     registerAssetsLocked();
     state_ = PlaybackState::Stopped;
     displayTime_ = kCMTimeZero;
@@ -951,7 +970,7 @@ void PlaybackController::setSequence(std::shared_ptr<const Project> project, Seq
 void PlaybackController::modelChanged(std::shared_ptr<const Project> project) {
     std::lock_guard<std::mutex> lock(mutex_);
     project_ = std::move(project);
-    core_->setSnapshot(project_, sequenceId_);
+    core_->setSnapshot(project_, sequenceId_, /*newSequence*/ false);
     registerAssetsLocked();
     if (!sequenceLocked()) {
         pauseLocked();
@@ -984,17 +1003,29 @@ void PlaybackController::modelChanged(std::shared_ptr<const Project> project) {
         preroll_.planned = false;
         break;
     case PlaybackState::Stopped:
-    case PlaybackState::Scrubbing:
-        displayTime_ = clampLocked(displayTime_);
+    case PlaybackState::Scrubbing: {
+        const CMTime clamped = clampLocked(displayTime_);
+        const bool moved = CMTimeCompare(clamped, displayTime_) != 0;
+        displayTime_ = clamped;
         noteDisplayChangedLocked(); // the audio at the paused frame may have changed
         publishDisplayLocked();
         if (state_ != PlaybackState::Scrubbing) {
             pendingRetarget_ = std::make_pair(displayTime_, 1.0);
         }
         requestDisplayFramesLocked(displayTime_);
+        if (moved) {
+            postStatusLocked(); // the edit moved the playhead (the sequence got shorter)
+        }
         break;
     }
+    }
     tickCv_.notify_all();
+}
+
+void PlaybackController::forgetMedia() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    registeredPaths_.clear();
+    routing_.clear();
 }
 
 void PlaybackController::setAssetRouting(AssetId asset, media::RoutedMediaInfo routed) {

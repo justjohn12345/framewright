@@ -2,6 +2,7 @@
 
 #import <AVFAudio/AVFAudio.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <CoreAudio/CoreAudio.h>
 #import <Foundation/Foundation.h>
 
 #include <pthread/qos.h>
@@ -650,12 +651,65 @@ NullAudioOutput::Capture NullAudioOutput::capture() const {
 
 // MARK: - AutomaticAudioOutput
 
+/// Listens for kAudioHardwarePropertyDefaultOutputDevice on the system object and reports a
+/// usable new default device to its output. Removing the listener in the destructor and then
+/// draining its queue guarantees no call is running or pending afterwards.
+struct AutomaticAudioOutput::DeviceListener {
+    explicit DeviceListener(AutomaticAudioOutput &output)
+        : queue_(dispatch_queue_create("com.justjohn12345.videdit.audio.device-listener", DISPATCH_QUEUE_SERIAL)) {
+        AutomaticAudioOutput *target = &output;
+        block_ = ^(UInt32, const AudioObjectPropertyAddress *) {
+            if (DeviceListener::hasDefaultOutputDevice()) {
+                target->defaultOutputDeviceDidChange();
+            }
+        };
+        const AudioObjectPropertyAddress address = defaultOutputAddress();
+        installed_ = AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &address, queue_, block_) == noErr;
+    }
+    ~DeviceListener() {
+        if (installed_) {
+            const AudioObjectPropertyAddress address = defaultOutputAddress();
+            (void)AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &address, queue_, block_);
+        }
+        dispatch_sync(queue_, ^{
+                      }); // a callback that was already dispatched finishes first
+    }
+    DeviceListener(const DeviceListener &) = delete;
+    DeviceListener &operator=(const DeviceListener &) = delete;
+
+    static AudioObjectPropertyAddress defaultOutputAddress() {
+        return AudioObjectPropertyAddress{kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
+                                          kAudioObjectPropertyElementMain};
+    }
+    static bool hasDefaultOutputDevice() {
+        const AudioObjectPropertyAddress address = defaultOutputAddress();
+        AudioObjectID device = kAudioObjectUnknown;
+        UInt32 size = sizeof(device);
+        return AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, 0, nullptr, &size, &device) == noErr &&
+               device != kAudioObjectUnknown;
+    }
+
+  private:
+    dispatch_queue_t queue_;
+    AudioObjectPropertyListenerBlock block_;
+    bool installed_ = false;
+};
+
 AutomaticAudioOutput::AutomaticAudioOutput(AudioMixer &mixer, EngineFactory engineFactory,
-                                           std::chrono::milliseconds retryInterval)
+                                           std::chrono::milliseconds retryInterval, bool watchDefaultDevice)
     : mixer_(mixer), engineFactory_(engineFactory ? std::move(engineFactory) : EngineFactory(&createEngine)),
-      retryInterval_(retryInterval) {}
+      retryInterval_(retryInterval) {
+    if (watchDefaultDevice) {
+        deviceListener_ = std::make_unique<DeviceListener>(*this);
+    }
+}
+
+void AutomaticAudioOutput::defaultOutputDeviceDidChange() {
+    deviceAppeared_.store(true, std::memory_order_release);
+}
 
 AutomaticAudioOutput::~AutomaticAudioOutput() {
+    deviceListener_.reset(); // no listener call can reach this object from here on
     std::lock_guard<std::mutex> lock(mutex_);
     if (engine_) {
         engine_->setEventHandler({}); // waits for an event in flight
@@ -676,7 +730,8 @@ bool AutomaticAudioOutput::wantsRestart() const {
     const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count();
-    return engineFailed_.load(std::memory_order_acquire) || now >= nextAttemptNanos_.load(std::memory_order_acquire);
+    return engineFailed_.load(std::memory_order_acquire) || deviceAppeared_.load(std::memory_order_acquire) ||
+           now >= nextAttemptNanos_.load(std::memory_order_acquire);
 }
 
 void AutomaticAudioOutput::emit(const AudioOutputEvent &event) {
@@ -722,8 +777,10 @@ Status AutomaticAudioOutput::start() {
             }
         }
         const auto now = std::chrono::steady_clock::now();
-        const bool retryDue =
-            !attempted_ || engineFailed_.load(std::memory_order_acquire) || now - lastAttempt_ >= retryInterval_;
+        // A device that appeared since the last attempt makes the retry due at once.
+        const bool appeared = deviceAppeared_.exchange(false, std::memory_order_acq_rel);
+        const bool retryDue = !attempted_ || engineFailed_.load(std::memory_order_acquire) || appeared ||
+                              now - lastAttempt_ >= retryInterval_;
         if (!done && retryDue) {
             attempted_ = true;
             lastAttempt_ = now;

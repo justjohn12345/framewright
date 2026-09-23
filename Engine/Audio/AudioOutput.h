@@ -38,7 +38,10 @@
 //   engine cannot be created or started (no output device, headless CI). While on the fallback
 //   it retries the engine on start() at most once per retry interval (wantsRestart() tells the
 //   owner a retry is due, so the playback controller retries at the next play), and after the
-//   engine failed to restart. kind() tells which one runs.
+//   engine failed to restart. It also listens for the system's default output device changing
+//   (CoreAudio kAudioHardwarePropertyDefaultOutputDevice): when a device appears while it runs
+//   on the fallback, a retry is due at once instead of after the interval. kind() tells which
+//   one runs.
 //
 // Threading contract: start/stop may block (AVAudioEngine start/stop are synchronous: tens to
 // hundreds of milliseconds on Bluetooth devices), so owners call them off latency-sensitive
@@ -248,9 +251,16 @@ class AutomaticAudioOutput final : public IAudioOutput {
     /// Creates the preferred output (default: AudioOutput::create).
     using EngineFactory = std::function<media::Result<std::unique_ptr<IAudioOutput>>(AudioMixer &)>;
 
+    /// `watchDefaultDevice`: install the CoreAudio default-output-device listener (tests of the
+    /// retry logic pass false and call defaultOutputDeviceDidChange() themselves).
     explicit AutomaticAudioOutput(AudioMixer &mixer, EngineFactory engineFactory = {},
-                                  std::chrono::milliseconds retryInterval = std::chrono::seconds(5));
+                                  std::chrono::milliseconds retryInterval = std::chrono::seconds(5),
+                                  bool watchDefaultDevice = true);
     ~AutomaticAudioOutput() override;
+
+    /// The system's default output device changed to a usable one (called by the CoreAudio
+    /// listener on a private queue; any thread). While on the fallback, makes a retry due now.
+    void defaultOutputDeviceDidChange();
 
     /// Uses the engine when it can be created and started; otherwise a realtime NullAudioOutput.
     /// While on the fallback, a start() retries the engine once the retry interval has passed
@@ -286,6 +296,9 @@ class AutomaticAudioOutput final : public IAudioOutput {
     std::chrono::steady_clock::time_point lastAttempt_{};
     bool attempted_ = false;
     std::atomic<int64_t> nextAttemptNanos_{0}; // steady-clock nanoseconds; wantsRestart() reads it
+    std::atomic<bool> deviceAppeared_{false};  // a default output device appeared since the last attempt
+    struct DeviceListener;
+    std::unique_ptr<DeviceListener> deviceListener_; // removed first in the destructor
     std::atomic<int> engineAttempts_{0};
     std::atomic<bool> muted_{false};
     std::atomic<bool> muteDirty_{false};
