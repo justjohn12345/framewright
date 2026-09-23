@@ -50,6 +50,19 @@ struct ContentView: View {
                 SpeedDurationSheet(model: SpeedDurationModel(store: store, clipIDs: ids))
             }
         }
+        .sheet(isPresented: Binding(get: { store.exportModel != nil },
+                                    set: { presented in
+                                        // The sheet only goes away when its model allows it (not
+                                        // while exporting).
+                                        if !presented, store.exportModel?.isExporting == false {
+                                            store.exportModel = nil
+                                        }
+                                    })) {
+            if let model = store.exportModel {
+                ExportSheet(model: model)
+                    .interactiveDismissDisabled(model.isExporting)
+            }
+        }
         .confirmationDialog("Also add a crossfade to the linked audio?",
                             isPresented: Binding(get: { store.pendingLinkedTransition != nil },
                                                  set: { presented in

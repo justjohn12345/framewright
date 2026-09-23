@@ -89,6 +89,10 @@ final class ProjectStore: ObservableObject {
     @Published var pendingLinkedTransition: PendingTransition?
     /// Clips the Speed/Duration sheet edits (nil: the sheet is closed).
     @Published var speedSheetClipIDs: [VEClipID]?
+    /// The Export sheet's model while the sheet is open (File > Export…).
+    @Published var exportModel: ExportModel?
+    /// An export is running (the engine's `isExporting`, republished).
+    @Published private(set) var isExporting = false
     /// Asks the inspector to focus a field (double-clicking a transition focuses its duration).
     @Published private(set) var inspectorFocusRequest: InspectorFocusRequest?
     /// The coalescing group of the inspector's keyboard-nudge burst, while one is open. Unlike a
@@ -156,6 +160,7 @@ final class ProjectStore: ObservableObject {
                 store.sourcePlayhead.apply(status)
             }
         }
+        observe(.VEEngineExportDidFinish) { store, _ in store.exportStateChanged() }
         observe(.VEEngineMemoryPressure) { store, note in
             let critical = (note.userInfo?[VEEngineCriticalKey] as? NSNumber)?.boolValue ?? false
             store.thumbnails.handleMemoryPressure(critical: critical)
@@ -678,6 +683,22 @@ final class ProjectStore: ObservableObject {
             return
         }
         speedSheetClipIDs = chosen.map(\.clipID)
+    }
+
+    /// File > Export…: opens the Export sheet (not during a gesture).
+    func showExportSheet() {
+        guard !isGestureActive else {
+            statusMessage = "Finish the current drag first."
+            return
+        }
+        if exportModel == nil {
+            exportModel = ExportModel(store: self)
+        }
+    }
+
+    /// Re-reads whether an export runs (after one starts or ends).
+    func exportStateChanged() {
+        isExporting = engine.isExporting
     }
 
     func linkOrUnlinkSelection() {

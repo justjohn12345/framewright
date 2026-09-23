@@ -44,13 +44,13 @@ final class DocumentController: ObservableObject {
     // MARK: Actions
 
     func newProject() {
-        guard confirmDiscardingChanges() else { return }
+        guard confirmStoppingExport(because: "Starting a new project"), confirmDiscardingChanges() else { return }
         store.newProject()
         stopAccessingProject()
     }
 
     func openWithPanel() {
-        guard confirmDiscardingChanges() else { return }
+        guard confirmStoppingExport(because: "Opening another project"), confirmDiscardingChanges() else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.videditProject]
         panel.allowsMultipleSelection = false
@@ -60,7 +60,7 @@ final class DocumentController: ObservableObject {
     }
 
     func openRecent(_ url: URL) {
-        guard confirmDiscardingChanges() else { return }
+        guard confirmStoppingExport(because: "Opening another project"), confirmDiscardingChanges() else { return }
         open(url)
     }
 
@@ -136,7 +136,7 @@ final class DocumentController: ObservableObject {
     /// The window is closing: asks about unsaved changes; the answer also covers the app
     /// quitting right after (the last window closed).
     func confirmClosingWindow() -> Bool {
-        guard confirmDiscardingChanges() else { return false }
+        guard confirmStoppingExport(because: "Closing the window"), confirmDiscardingChanges() else { return false }
         closeConfirmedAtChange = store.changeCount
         return true
     }
@@ -144,10 +144,27 @@ final class DocumentController: ObservableObject {
     /// The app is quitting: asks about unsaved changes unless the user just answered for this
     /// exact state when closing the window.
     func shouldTerminate() -> Bool {
+        guard confirmStoppingExport(because: "Quitting") else { return false }
         if let confirmed = closeConfirmedAtChange, confirmed == store.changeCount {
             return true
         }
         return confirmDiscardingChanges()
+    }
+
+    /// An export is running: asks whether to stop it. Stop Export cancels it and waits (up to 2 s)
+    /// until its unfinished file is deleted. Returns true when no export runs or it was stopped.
+    func confirmStoppingExport(because action: String) -> Bool {
+        guard let export = store.engine.activeExport, !export.isFinished else { return true }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "An export is in progress."
+        alert.informativeText = "\(action) stops the export of “\(export.outputURL.lastPathComponent)” "
+            + "and deletes the unfinished file."
+        alert.addButton(withTitle: "Stop Export")
+        alert.addButton(withTitle: "Keep Exporting")
+        guard runAlert(alert) == .alertFirstButtonReturn else { return false }
+        _ = export.cancelAndWait(withTimeout: 2)
+        return true
     }
 
     // MARK: Recents

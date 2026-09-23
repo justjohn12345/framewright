@@ -73,6 +73,10 @@ struct AppCommands: Commands {
                 .keyboardShortcut("s")
             Button("Save As…") { documents.saveAs() }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
+            Divider()
+            Button("Export…") { store.showExportSheet() }
+                .keyboardShortcut("e")
+                .disabled(store.isGestureActive || store.isExporting || store.exportModel != nil)
         }
         CommandGroup(replacing: .undoRedo) {
             Button(store.undoActionName.isEmpty ? "Undo" : "Undo \(store.undoActionName)") {
