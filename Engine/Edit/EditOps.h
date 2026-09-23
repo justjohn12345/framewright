@@ -423,9 +423,11 @@ struct MotionTrackChange {
 };
 
 // Replaces whole keyframe tracks (and static values) of one clip as one edit: the Ken Burns
-// helper (position and scale from a start and an end framing), and turning a parameter's
-// animation off. Each track is validated like the model (keyframeTrackProblem); keyframes of a
-// non-empty track must lie within the clip's used source range.
+// helper (position and scale from a start and an end framing, planned by planMotionMove) and
+// turning a parameter's animation off. Each track is validated like the model
+// (keyframeTrackProblem); a keyframe of a non-empty track must lie within the clip's used source
+// range unless the clip's track already has that very keyframe (one a trim hid, which a partial
+// Ken Burns move keeps).
 class SetMotionTracks final : public SequenceCommand {
   public:
     SetMotionTracks(SequenceId sequenceId, ClipId clipId, std::vector<MotionTrackChange> changes,
@@ -442,6 +444,71 @@ class SetMotionTracks final : public SequenceCommand {
     std::vector<MotionTrackChange> changes_;
     std::string name_;
 };
+
+// ----- Ken Burns moves over part of a clip (plans for SetMotionTracks) -----
+
+// Position and scale of a framing (VEMotionFraming in the facade).
+struct MotionFraming {
+    double x = 0.0;
+    double y = 0.0;
+    double scale = 1.0;
+};
+
+// A Ken Burns move over part of a clip: position and scale go from `start` on the sequence frame
+// starting at `firstFrame` to `end` on the frame starting at `lastFrame` (two frames of the clip,
+// `firstFrame` before `lastFrame`; the move covers the frames between them, both included).
+struct MotionMoveRequest {
+    CMTime firstFrame = kCMTimeInvalid;
+    CMTime lastFrame = kCMTimeInvalid;
+    MotionFraming start;
+    MotionFraming end;
+    // The segment from the start keyframe to the end keyframe (not Bezier).
+    KeyframeInterpolation interpolation = KeyframeInterpolation::EaseInOut;
+};
+
+// Kept keyframes that lead into the move (before it) or on from it (after it) with a framing other
+// than the move's start (end) framing: the frames between them and the move then change instead of
+// holding that framing.
+struct MotionMoveDrift {
+    // The parameters concerned, in MotionParameter order (empty: the framing holds).
+    std::vector<MotionParameter> parameters;
+    // The source time of the concerned keyframe farthest from the move (the earliest before it, the
+    // latest after it): the drift spans from there to the move. Invalid when `parameters` is empty.
+    CMTime keyframeTime = kCMTimeInvalid;
+};
+
+struct MotionMovePlan {
+    // Position X, Position Y and Scale, for SetMotionTracks (named "Ken Burns" by the facade).
+    std::vector<MotionTrackChange> changes;
+    MotionMoveDrift before;
+    MotionMoveDrift after;
+};
+
+// Plans the Ken Burns move `request` on `clip` (on a sequence with `frameDuration` frames):
+// - The start keyframe goes on `firstFrame` and the end keyframe on `lastFrame`
+//   (keyframeTimeForFrame), with the request's interpolation on the start keyframe and Linear on
+//   the end keyframe (it matters only when a kept keyframe follows the move).
+// - Position and scale keyframes that the move's frames show (keyframeIndexForFrame's rule: a
+//   keyframe belongs to the frame whose source span contains it) are replaced. Keyframes the
+//   clip shows outside the move are kept, so a second move can be added elsewhere in the clip.
+//   Keyframes a trim hid (outside the clip's used source range) are kept too, except on a side
+//   the move reaches: a move from the clip's first frame replaces those before the clip, one to
+//   its last frame those after it (the move then owns that end of the clip, and its framing holds
+//   there if the clip is extended again). A move over the whole clip therefore replaces every
+//   position and scale keyframe, as the helper always did.
+// - Without kept keyframes the start framing holds before the move and the end framing after it
+//   (the evaluation's hold before the first and after the last keyframe). A kept keyframe with a
+//   different value leads into (out of) the move instead; `plan.before` / `plan.after` report it
+//   (compared with motionValuesMatch).
+// The static values of position and scale become the start framing (unused while animated).
+// Refused with InvalidTime (frames not on the grid, not frames of the clip, not in order),
+// InvalidArgument (Bezier interpolation, an invalid value) or NotRepresentable.
+EditResult planMotionMove(const Clip &clip, CMTime frameDuration, const MotionMoveRequest &request,
+                          MotionMovePlan &plan);
+
+// Whether two values of `parameter` are the same for the picture: equal within a millionth of the
+// larger magnitude (at least 1, so within a millionth of a pixel near the centre).
+bool motionValuesMatch(MotionParameter parameter, double a, double b);
 
 struct SpeedOptions {
     bool includeLinked = true;

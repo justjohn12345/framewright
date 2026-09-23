@@ -238,6 +238,121 @@ CMTime frames30(int64_t n) {
     XCTAssertTrue([r.message containsString:@"two frames"], @"%@", r.message);
 }
 
+- (void)testKenBurnsOverARangeHoldsTheEndFramingAndKeepsKeyframesOutsideIt {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    // The whole 10 s movie at timeline frame 30: frames [30, 330).
+    const auto clip = [self place:engine asset:asset at:30 from:0 to:300];
+    const VEClipID video = clip.first;
+    const VEMotionFraming whole{0, 0, 1};
+    const VEMotionFraming pushed{-120, 60, 1.5};
+
+    // 5 s from a time inside frame 30: keyframes on frames 30 and 179, then the end framing holds.
+    VEEditResult *r = [engine applyKenBurnsToClip:video
+                                            start:whole
+                                              end:pushed
+                                    interpolation:VEKeyframeInterpolationEaseInOut
+                                       rangeStart:CMTimeMake(61, 60)
+                                         duration:CMTimeMake(5, 1)];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(r.note, @"");
+    XCTAssertEqualObjects(engine.undoActionName, @"Ken Burns");
+    VEClipInfo *info = [engine clipInfo:video];
+    for (VEMotionParameter p : {VEMotionParameterPositionX, VEMotionParameterPositionY, VEMotionParameterScale}) {
+        NSArray<VEKeyframe *> *keys = [info keyframesForParameter:p];
+        XCTAssertEqual(keys.count, 2u);
+        XCTAssertEqual(CMTimeCompare(keys[0].frameTime, frames30(30)), 0);
+        XCTAssertEqual(CMTimeCompare(keys[1].frameTime, frames30(179)), 0);
+        XCTAssertEqual(keys[0].interpolation, VEKeyframeInterpolationEaseInOut);
+    }
+    XCTAssertEqual([info videoParamsAtTime:frames30(30)].x, 0);
+    XCTAssertLessThan([info videoParamsAtTime:frames30(100)].x, 0);
+    XCTAssertGreaterThan([info videoParamsAtTime:frames30(100)].x, -120);
+    for (int64_t f : {179, 180, 250, 329}) {
+        const VEVideoParams shown = [info videoParamsAtTime:frames30(f)];
+        XCTAssertEqual(shown.x, -120, @"frame %lld holds the end framing", f);
+        XCTAssertEqual(shown.y, 60, @"frame %lld", f);
+        XCTAssertEqual(shown.scale, 1.5, @"frame %lld", f);
+    }
+
+    // A second move later in the clip from the framing held there keeps the first move.
+    const VEMotionFraming closer{80, -20, 2};
+    r = [engine applyKenBurnsToClip:video
+                              start:pushed
+                                end:closer
+                      interpolation:VEKeyframeInterpolationLinear
+                         rangeStart:frames30(260)
+                           duration:frames30(60)];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(r.note, @"", @"the framing holds between the moves");
+    info = [engine clipInfo:video];
+    NSArray<VEKeyframe *> *scale = [info keyframesForParameter:VEMotionParameterScale];
+    XCTAssertEqual(scale.count, 4u);
+    XCTAssertEqual(CMTimeCompare(scale[2].frameTime, frames30(260)), 0);
+    XCTAssertEqual(CMTimeCompare(scale[3].frameTime, frames30(319)), 0);
+    XCTAssertEqual([info videoParamsAtTime:frames30(220)].scale, 1.5);
+    XCTAssertEqual([info videoParamsAtTime:frames30(325)].scale, 2);
+    // Undo takes back the second move only (one step).
+    XCTAssertTrue([engine undo]);
+    XCTAssertEqual([[engine clipInfo:video] keyframesForParameter:VEMotionParameterScale].count, 2u);
+    XCTAssertTrue([engine redo]);
+
+    // A move between them from another framing: the note says where the framing no longer holds.
+    const VEMotionFraming other{0, 0, 1.25};
+    r = [engine applyKenBurnsToClip:video
+                              start:other
+                                end:other
+                      interpolation:VEKeyframeInterpolationEaseInOut
+                         rangeStart:frames30(200)
+                           duration:frames30(30)];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertTrue([r.note containsString:@"does not hold before the move"], @"%@", r.note);
+    XCTAssertTrue([r.note containsString:@"Position X, Position Y and Scale keyframes at 00:00:05:29 lead into"], @"%@", r.note);
+    XCTAssertTrue([r.note containsString:@"does not hold after the move"], @"%@", r.note);
+    XCTAssertTrue([r.note containsString:@"at 00:00:08:20"], @"%@", r.note);
+    XCTAssertTrue([engine undo]);
+
+    // Refusals: outside the clip, too short, past the end.
+    r = [engine applyKenBurnsToClip:video start:whole end:pushed interpolation:VEKeyframeInterpolationEaseInOut
+                         rangeStart:frames30(10)
+                           duration:frames30(30)];
+    XCTAssertEqual(r.errorCode, VEEditErrorInvalidTime);
+    XCTAssertTrue([r.message containsString:@"start on a frame of the clip"], @"%@", r.message);
+    r = [engine applyKenBurnsToClip:video start:whole end:pushed interpolation:VEKeyframeInterpolationEaseInOut
+                         rangeStart:frames30(330)
+                           duration:frames30(30)];
+    XCTAssertEqual(r.errorCode, VEEditErrorInvalidTime);
+    r = [engine applyKenBurnsToClip:video start:whole end:pushed interpolation:VEKeyframeInterpolationEaseInOut
+                         rangeStart:frames30(100)
+                           duration:frames30(1)];
+    XCTAssertEqual(r.errorCode, VEEditErrorInvalidArgument);
+    XCTAssertTrue([r.message containsString:@"two frames"], @"%@", r.message);
+    r = [engine applyKenBurnsToClip:video start:whole end:pushed interpolation:VEKeyframeInterpolationEaseInOut
+                         rangeStart:frames30(100)
+                           duration:kCMTimeInvalid];
+    XCTAssertEqual(r.errorCode, VEEditErrorInvalidArgument);
+    r = [engine applyKenBurnsToClip:video start:whole end:pushed interpolation:VEKeyframeInterpolationEaseInOut
+                         rangeStart:frames30(100)
+                           duration:frames30(231)];
+    XCTAssertEqual(r.errorCode, VEEditErrorInvalidTime);
+    XCTAssertTrue([r.message containsString:@"230 frames left"], @"%@", r.message);
+    r = [engine applyKenBurnsToClip:clip.second start:whole end:pushed interpolation:VEKeyframeInterpolationEaseInOut
+                         rangeStart:frames30(100)
+                           duration:frames30(30)];
+    XCTAssertEqual(r.errorCode, VEEditErrorTrackKindMismatch);
+    XCTAssertEqual([[engine clipInfo:video] keyframesForParameter:VEMotionParameterScale].count, 4u,
+                   @"refusals change nothing");
+
+    // A duration off the frame grid rounds to whole frames (4.99 s = 149.7 frames: 150), and a
+    // range reaching the clip's end is allowed.
+    r = [engine applyKenBurnsToClip:video start:whole end:pushed interpolation:VEKeyframeInterpolationEaseInOut
+                         rangeStart:frames30(180)
+                           duration:CMTimeMake(499, 100)];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    NSArray<VEKeyframe *> *x = [[engine clipInfo:video] keyframesForParameter:VEMotionParameterPositionX];
+    XCTAssertEqual(CMTimeCompare(x.lastObject.frameTime, frames30(329)), 0);
+}
+
 - (void)testStaticSettersKeepKeyframesAndAVideoResetClearsThem {
     VEAssetInfo *asset = nil;
     VEEngine *engine = [self engineWithAsset:&asset];

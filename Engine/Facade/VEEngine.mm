@@ -2047,11 +2047,6 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
                                   end:(VEMotionFraming)end
                         interpolation:(VEKeyframeInterpolation)interpolation {
     VE_ASSERT_MAIN();
-    const std::optional<KeyframeInterpolation> engineInterpolation = fromVE(interpolation);
-    if (!engineInterpolation || *engineInterpolation == KeyframeInterpolation::Bezier) {
-        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
-                                     message:@"Choose Linear or an ease for the Ken Burns move."];
-    }
     const Clip *clip = nullptr;
     CMTime frame = kCMTimeInvalid;
     if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
@@ -2067,35 +2062,122 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
                                      message:@"The clip is one frame long: a Ken Burns move needs at least two frames."];
     }
-    // Keyframes on the clip's first and last frames (FCP: the start framing at the clip's start,
-    // the end framing at its end).
-    const std::optional<CMTime> first = keyframeTimeForFrame(*clip, clip->timelineStart);
-    const std::optional<CMTime> last = keyframeTimeForFrame(*clip, *lastFrame);
-    if (!first || !last) {
-        return [self keyframeTimeRefusal:*clip];
+    // FCP: the start framing on the clip's first frame, the end framing on its last.
+    return [self applyKenBurnsToClip:clipID
+                               start:start
+                                 end:end
+                       interpolation:interpolation
+                          rangeStart:clip->timelineStart
+                            duration:clip->timelineDuration];
+}
+
+/// "HH:MM:SS:FF" of timeline time `time` (non-drop-frame, as the app shows timecode).
+static NSString *timecodeOf(CMTime time, CMTime frameDuration) {
+    const std::int64_t frames = std::max<std::int64_t>(0, frameIndexAt(time, frameDuration, SnapMode::Floor));
+    const std::int64_t fps = std::max<std::int64_t>(1, std::llround(1.0 / toSeconds(frameDuration)));
+    const std::int64_t seconds = frames / fps;
+    return [NSString stringWithFormat:@"%02lld:%02lld:%02lld:%02lld", static_cast<long long>(seconds / 3600),
+                                      static_cast<long long>((seconds / 60) % 60), static_cast<long long>(seconds % 60),
+                                      static_cast<long long>(frames % fps)];
+}
+
+/// "Position X", "Position X and Scale", "Position X, Position Y and Scale".
+static NSString *parameterList(const std::vector<MotionParameter> &parameters) {
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (MotionParameter parameter : parameters) {
+        [names addObject:@(displayNameOf(parameter))];
     }
-    std::vector<MotionTrackChange> changes;
-    const std::pair<MotionParameter, std::pair<double, double>> values[] = {
-        {MotionParameter::X, {start.x, end.x}},
-        {MotionParameter::Y, {start.y, end.y}},
-        {MotionParameter::Scale, {start.scale, end.scale}},
-    };
-    for (const auto &[parameter, pair] : values) {
-        MotionTrackChange change;
-        change.parameter = parameter;
-        change.staticValue = pair.first;
-        Keyframe from;
-        from.time = *first;
-        from.value = pair.first;
-        from.interpolation = *engineInterpolation;
-        Keyframe to;
-        to.time = *last;
-        to.value = pair.second;
-        change.keyframes = {from, to};
-        changes.push_back(std::move(change));
+    if (names.count <= 1) {
+        return names.firstObject ?: @"";
     }
-    return [self push:std::make_unique<SetMotionTracks>([self sequenceId], clip->id, std::move(changes), "Ken Burns")
-              created:nil];
+    NSString *head = [[names subarrayWithRange:NSMakeRange(0, names.count - 1)] componentsJoinedByString:@", "];
+    return [NSString stringWithFormat:@"%@ and %@", head, names.lastObject];
+}
+
+/// Where a kept keyframe (source time `time`) plays, for a note.
+static NSString *keyframePlace(const Clip &clip, CMTime time, CMTime frameDuration) {
+    if (const auto frame = frameShowingSourceTime(clip, time, frameDuration)) {
+        return [NSString stringWithFormat:@"at %@", timecodeOf(*frame, frameDuration)];
+    }
+    const auto at = clip.exactTimelineTimeAt(time);
+    const auto start = ExactTime::from(clip.timelineStart);
+    const bool before = at && start && at->compare(*start) < 0;
+    return before ? @"before the clip's start (hidden by a trim)" : @"after the clip's end (hidden by a trim)";
+}
+
+- (VEEditResult *)applyKenBurnsToClip:(VEClipID)clipID
+                                start:(VEMotionFraming)start
+                                  end:(VEMotionFraming)end
+                        interpolation:(VEKeyframeInterpolation)interpolation
+                           rangeStart:(CMTime)rangeStart
+                             duration:(CMTime)duration {
+    VE_ASSERT_MAIN();
+    const std::optional<KeyframeInterpolation> engineInterpolation = fromVE(interpolation);
+    if (!engineInterpolation || *engineInterpolation == KeyframeInterpolation::Bezier) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"Choose Linear or an ease for the Ken Burns move."];
+    }
+    const Clip *clip = nullptr;
+    CMTime first = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
+                                                      atTime:rangeStart
+                                                  needsFrame:NO
+                                                        clip:&clip
+                                                       frame:&first]) {
+        return refusal;
+    }
+    const CMTime fd = [self activeSequence].frameDuration;
+    if (!CMTIME_IS_NUMERIC(first) || first < clip->timelineStart || first >= clip->timelineEnd()) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidTime
+                                     message:[NSString stringWithFormat:@"The move must start on a frame of the clip "
+                                                                        @"(%@ to %@).",
+                                                                        timecodeOf(clip->timelineStart, fd),
+                                                                        timecodeOf(clip->timelineEnd() - fd, fd)]];
+    }
+    const std::optional<std::int64_t> frames =
+        CMTIME_IS_NUMERIC(duration) ? checkedFrameIndexAt(duration, fd, SnapMode::Round) : std::nullopt;
+    if (!frames || *frames < 2) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"A Ken Burns move needs at least two frames."];
+    }
+    const std::int64_t available = frameIndexAt(clip->timelineEnd() - first, fd, SnapMode::Round);
+    if (*frames > available) {
+        return [VEEditResult
+            failureWithCode:VEEditErrorInvalidTime
+                    message:[NSString stringWithFormat:@"The move runs past the end of the clip: from %@ there are %lld "
+                                                       @"frames left, not %lld.",
+                                                       timecodeOf(first, fd), static_cast<long long>(available),
+                                                       static_cast<long long>(*frames)]];
+    }
+    MotionMoveRequest request;
+    request.firstFrame = first;
+    request.lastFrame = first + timeForFrame(*frames - 1, fd);
+    request.start = MotionFraming{start.x, start.y, start.scale};
+    request.end = MotionFraming{end.x, end.y, end.scale};
+    request.interpolation = *engineInterpolation;
+    MotionMovePlan plan;
+    if (EditResult planned = planMotionMove(*clip, fd, request, plan); !planned) {
+        return toVE(planned);
+    }
+    NSMutableArray<NSString *> *notes = [NSMutableArray array];
+    if (!plan.before.parameters.empty()) {
+        const bool several = plan.before.parameters.size() > 1;
+        [notes addObject:[NSString stringWithFormat:@"The framing does not hold before the move: the %@ keyframe%@ "
+                                                    @"%@ lead%@ into its start from a different framing.",
+                                                    parameterList(plan.before.parameters), several ? @"s" : @"",
+                                                    keyframePlace(*clip, plan.before.keyframeTime, fd),
+                                                    several ? @"" : @"s"]];
+    }
+    if (!plan.after.parameters.empty()) {
+        [notes addObject:[NSString stringWithFormat:@"The end framing does not hold after the move: it changes on "
+                                                    @"to the %@ keyframe%@ %@.",
+                                                    parameterList(plan.after.parameters),
+                                                    plan.after.parameters.size() > 1 ? @"s" : @"",
+                                                    keyframePlace(*clip, plan.after.keyframeTime, fd)]];
+    }
+    return [self push:std::make_unique<SetMotionTracks>([self sequenceId], clip->id, std::move(plan.changes), "Ken Burns")
+              created:nil
+                 note:notes.count > 0 ? [notes componentsJoinedByString:@" "] : nil];
 }
 
 - (VEEditResult *)setSpeed:(double)speed forClip:(VEClipID)clipID {

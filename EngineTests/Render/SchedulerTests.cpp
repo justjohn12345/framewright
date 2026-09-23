@@ -1,3 +1,4 @@
+#include "../../Engine/Edit/EditOps.h"
 #include "../../Engine/Render/Scheduler.h"
 #include "../Model/ModelFixtures.h"
 
@@ -559,4 +560,49 @@ TEST_CASE("Scheduler: layers carry the Motion keyframes evaluate to at each fram
     const RenderGraph withStill = graphAt(fx, 40);
     REQUIRE(withStill.layers.size() == 2);
     CHECK(withStill.layers[1].transform.rotationDegrees == doctest::Approx(100).epsilon(1e-12));
+}
+
+TEST_CASE("Scheduler: a Ken Burns move over the first 5 s of a 30 s clip holds its end framing to the clip's end") {
+    Fixture fx;
+    // V1: a 30 s clip (900 frames) of av30, and after it a second clip that must stay unanimated.
+    const ClipId clip = fx.addClip(fx.v1, fx.av30, 0, 900);
+    const ClipId next = fx.addClip(fx.v1, fx.av30, 900, 60, 900);
+    fx.sequence().findClip(clip)->video.rotationDegrees = 12; // kept by the move
+    MotionMoveRequest request;
+    request.firstFrame = f30(0);
+    request.lastFrame = f30(149);
+    request.start = MotionFraming{0, 0, 1};
+    request.end = MotionFraming{-240, 90, 1.6};
+    request.interpolation = KeyframeInterpolation::EaseInOut;
+    MotionMovePlan plan;
+    REQUIRE(planMotionMove(fx.clip(clip), f30(1), request, plan).ok());
+    for (const MotionTrackChange &change : plan.changes) {
+        fx.sequence().findClip(clip)->video.keyframes.track(change.parameter) = change.keyframes;
+        fx.sequence().findClip(clip)->video.setStaticValue(change.parameter, change.staticValue);
+    }
+    fx.requireValid();
+
+    const TimingCurve ease = timingCurveFor(KeyframeInterpolation::EaseInOut);
+    for (std::int64_t frame = 0; frame < 960; ++frame) {
+        CAPTURE(frame);
+        const RenderGraph graph = graphAt(fx, frame);
+        REQUIRE(graph.layers.size() == 1);
+        const VideoParams &shown = graph.layers[0].transform;
+        if (frame >= 900) {
+            CHECK(graph.layers[0].clipId == next);
+            CHECK(shown == VideoParams{});
+            continue;
+        }
+        CHECK(shown.rotationDegrees == 12);
+        if (frame >= 149) {
+            // The end framing, exactly, on every frame from the move's last to the clip's end.
+            CHECK(shown.x == -240);
+            CHECK(shown.y == 90);
+            CHECK(shown.scale == 1.6);
+        } else {
+            const double u = ease.valueAt(double(frame) / 149.0);
+            CHECK(shown.x == doctest::Approx(-240.0 * u).epsilon(1e-9));
+            CHECK(shown.scale == doctest::Approx(1.0 + 0.6 * u).epsilon(1e-9));
+        }
+    }
 }

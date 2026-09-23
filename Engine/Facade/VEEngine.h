@@ -459,15 +459,36 @@ NS_SWIFT_UI_ACTOR
 /// frame when `time` is outside it) as its static value.
 - (VEEditResult *)removeAnimationFromClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time
     NS_SWIFT_NAME(removeAnimation(clip:parameter:at:));
-/// The Ken Burns move (Final Cut Pro): position and scale keyframes on the clip's first frame
-/// (`start`) and last frame (`end`), the segment between them with `interpolation` (Ease In and Out
-/// is FCP's default). Replaces the clip's position and scale keyframes; rotation and opacity are
-/// kept. Refused for a one-frame clip.
+/// The Ken Burns move (Final Cut Pro) over the whole clip: position and scale keyframes on the
+/// clip's first frame (`start`) and last frame (`end`), the segment between them with
+/// `interpolation` (Ease In and Out is FCP's default). Replaces the clip's position and scale
+/// keyframes; rotation and opacity are kept. Refused for a one-frame clip. The same as the ranged
+/// call below from the clip's start for its whole duration.
 - (VEEditResult *)applyKenBurnsToClip:(VEClipID)clipID
                                 start:(VEMotionFraming)start
                                   end:(VEMotionFraming)end
                         interpolation:(VEKeyframeInterpolation)interpolation
     NS_SWIFT_NAME(applyKenBurns(clip:start:end:interpolation:));
+/// The Ken Burns move over part of the clip: it covers `duration` of timeline (rounded to whole
+/// sequence frames) from the sequence frame containing `rangeStart` (a timeline time, like the
+/// other keyframe calls), with the `start` keyframes on the range's first frame and the `end`
+/// keyframes on its last frame. Before the move the picture holds the start framing and after it
+/// the end framing (the evaluation holds the first and last keyframes), so a 5 s move at the head
+/// of a 30 s clip holds its end framing for the other 25 s. Position and scale keyframes on the
+/// range's frames are replaced; ones outside it are kept, so a second move can follow later in the
+/// clip (keyframes a trim hid are replaced only beyond an end of the clip the range reaches). When
+/// a kept keyframe leads into or out of the move from another framing, the picture changes
+/// between it and the move instead of holding, and the note says where. Rotation and opacity are
+/// kept. One undo step ("Ken Burns"). Refused: VEEditErrorInvalidTime when the range starts outside
+/// the clip or runs past its end, VEEditErrorInvalidArgument when it is shorter than two frames
+/// (or the interpolation is Custom), and the other Motion refusals.
+- (VEEditResult *)applyKenBurnsToClip:(VEClipID)clipID
+                                start:(VEMotionFraming)start
+                                  end:(VEMotionFraming)end
+                        interpolation:(VEKeyframeInterpolation)interpolation
+                           rangeStart:(CMTime)rangeStart
+                             duration:(CMTime)duration
+    NS_SWIFT_NAME(applyKenBurns(clip:start:end:interpolation:from:duration:));
 
 - (VEEditResult *)linkClip:(VEClipID)clipID withClip:(VEClipID)otherClipID;
 - (VEEditResult *)unlinkClip:(VEClipID)clipID;

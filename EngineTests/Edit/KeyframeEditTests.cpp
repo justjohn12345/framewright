@@ -386,3 +386,170 @@ TEST_CASE("isThroughEdit: a split of an animated clip is not a through edit (the
     applyReversible(plain.project, plainSplit);
     CHECK(isThroughEdit(plain.sequence(), clip, plainSplit.createdClipIds().front()));
 }
+
+// ----- Ken Burns moves over part of a clip, matching a neighbour's framing -----
+
+namespace {
+
+MotionMoveRequest moveRequest(std::int64_t firstFrame, std::int64_t lastFrame, MotionFraming start, MotionFraming end,
+                              KeyframeInterpolation interpolation = KeyframeInterpolation::EaseInOut) {
+    MotionMoveRequest request;
+    request.firstFrame = f30(firstFrame);
+    request.lastFrame = f30(lastFrame);
+    request.start = start;
+    request.end = end;
+    request.interpolation = interpolation;
+    return request;
+}
+
+void checkFraming(const VideoParams &shown, MotionFraming framing) {
+    CHECK(shown.x == doctest::Approx(framing.x).epsilon(1e-12));
+    CHECK(shown.y == doctest::Approx(framing.y).epsilon(1e-12));
+    CHECK(shown.scale == doctest::Approx(framing.scale).epsilon(1e-12));
+}
+
+// Plans `request` on `clipId` (which must succeed) and applies it with SetMotionTracks.
+MotionMovePlan applyMove(Fixture &fx, ClipId clipId, const MotionMoveRequest &request) {
+    MotionMovePlan plan;
+    const EditResult planned = planMotionMove(fx.clip(clipId), f30(1), request, plan);
+    REQUIRE_MESSAGE(planned.ok(), doctest::String(planned.message.c_str()));
+    REQUIRE(plan.changes.size() == 3);
+    SetMotionTracks set(fx.seq, clipId, plan.changes, "Ken Burns");
+    applyReversible(fx.project, set);
+    return plan;
+}
+
+std::vector<CMTime> timesOf(const KeyframeTrack &track) {
+    std::vector<CMTime> times;
+    for (const Keyframe &keyframe : track) {
+        times.push_back(keyframe.time);
+    }
+    return times;
+}
+
+} // namespace
+
+TEST_CASE("planMotionMove: a move over part of a clip, then a second one later, keeps the first") {
+    Fixture fx;
+    // A 30 s clip (900 frames) from source frame 0 at timeline 0, unanimated.
+    const ClipId clip = fx.addClip(fx.v1, fx.av30, 0, 900);
+    fx.requireValid();
+    const MotionFraming whole{0, 0, 1};
+    const MotionFraming pushed{-100, 50, 1.5};
+
+    // The first 5 s: keyframes on frames 0 and 149, the end framing held to the clip's end.
+    const MotionMovePlan first = applyMove(fx, clip, moveRequest(0, 149, whole, pushed));
+    CHECK(first.before.parameters.empty());
+    CHECK(first.after.parameters.empty());
+    CHECK_FALSE(isNumeric(first.before.keyframeTime));
+    for (MotionParameter parameter : {MotionParameter::X, MotionParameter::Y, MotionParameter::Scale}) {
+        const KeyframeTrack &track = fx.clip(clip).video.keyframes.track(parameter);
+        CHECK(timesOf(track) == std::vector<CMTime>{f30(0), f30(149)});
+        CHECK(track[0].interpolation == KeyframeInterpolation::EaseInOut);
+        CHECK(track[1].interpolation == KeyframeInterpolation::Linear);
+    }
+    CHECK(fx.clip(clip).video.keyframes.rotation.empty());
+    CHECK(fx.clip(clip).video.x == 0); // the static value is the start framing
+    checkFraming(Scheduler::motionAt(fx.clip(clip), f30(0)), whole);
+    for (std::int64_t frame : {149, 150, 400, 899}) {
+        CAPTURE(frame);
+        checkFraming(Scheduler::motionAt(fx.clip(clip), f30(frame)), pushed);
+    }
+
+    // A second move from 20 s, starting on the framing held there: the first move's keyframes stay
+    // (before the range) and the framing holds between the two moves.
+    const MotionFraming closer{200, -40, 2.5};
+    const MotionMovePlan second = applyMove(fx, clip, moveRequest(600, 749, pushed, closer));
+    CHECK(second.before.parameters.empty()); // the kept keyframes on frame 149 have the start framing
+    CHECK(second.after.parameters.empty());
+    CHECK(timesOf(fx.clip(clip).video.keyframes.x) == std::vector<CMTime>{f30(0), f30(149), f30(600), f30(749)});
+    for (std::int64_t frame : {149, 300, 600}) {
+        CAPTURE(frame);
+        checkFraming(Scheduler::motionAt(fx.clip(clip), f30(frame)), pushed);
+    }
+    for (std::int64_t frame : {749, 800, 899}) {
+        CAPTURE(frame);
+        checkFraming(Scheduler::motionAt(fx.clip(clip), f30(frame)), closer);
+    }
+
+    // A move between them from another framing: the kept keyframes on either side lead into and
+    // out of it, which the plan reports (the earliest before, the latest after).
+    const MotionFraming other{0, 50, 1.5}; // only X differs from the framing on frame 149
+    MotionMovePlan between;
+    REQUIRE(planMotionMove(fx.clip(clip), f30(1), moveRequest(300, 449, other, closer), between).ok());
+    CHECK(between.before.parameters == std::vector<MotionParameter>{MotionParameter::X});
+    CHECK(between.before.keyframeTime == f30(149));
+    // After it the keyframes on frame 600 have the framing `pushed`, not `closer`.
+    CHECK(between.after.parameters ==
+          std::vector<MotionParameter>{MotionParameter::X, MotionParameter::Y, MotionParameter::Scale});
+    CHECK(between.after.keyframeTime == f30(600));
+
+    // A move over [100, 700] replaces the keyframes on frames 149 and 600 and keeps 0 and 749.
+    applyMove(fx, clip, moveRequest(100, 700, other, pushed));
+    CHECK(timesOf(fx.clip(clip).video.keyframes.scale) == std::vector<CMTime>{f30(0), f30(100), f30(700), f30(749)});
+
+    // The whole clip replaces everything, as the helper always did.
+    applyMove(fx, clip, moveRequest(0, 899, whole, pushed));
+    CHECK(timesOf(fx.clip(clip).video.keyframes.y) == std::vector<CMTime>{f30(0), f30(899)});
+}
+
+TEST_CASE("planMotionMove: keyframes a trim hid are kept unless the move reaches that end of the clip") {
+    Animated a;
+    Fixture &fx = a.fx;
+    // The clip plays source [60, 150) at timeline [30, 120). X gets hidden keyframes at source 30
+    // (before the in point) and 200 (after the out point).
+    Clip &c = *fx.sequence().findClip(a.clip);
+    c.video.keyframes.x = {key(f30(30), -50), key(f30(60), 0, KeyframeInterpolation::EaseInOut), key(f30(150), 300),
+                           key(f30(200), 400)};
+    fx.requireValid();
+    const MotionFraming start{0, 0, 1};
+    const MotionFraming end{10, 10, 1.2};
+
+    SUBCASE("a move inside the clip keeps both hidden keyframes (SetMotionTracks accepts them)") {
+        const MotionMovePlan plan = applyMove(fx, a.clip, moveRequest(40, 59, start, end));
+        // Source 60 (frame 30) and 150 (the out point, the last frame) are outside the move.
+        CHECK(timesOf(fx.clip(a.clip).video.keyframes.x) ==
+              std::vector<CMTime>{f30(30), f30(60), f30(70), f30(89), f30(150), f30(200)});
+        // Before the move the kept keyframes on frame 30 have its start framing (x 0, scale 1): it
+        // holds. After it X's keyframe on the out point (300) and Scale's on frame 70 (2) lead on.
+        CHECK(plan.before.parameters.empty());
+        CHECK(plan.after.parameters == std::vector<MotionParameter>{MotionParameter::X, MotionParameter::Scale});
+        CHECK(plan.after.keyframeTime == f30(150));
+    }
+    SUBCASE("a move from the clip's first frame replaces the hidden keyframe before it") {
+        applyMove(fx, a.clip, moveRequest(30, 59, start, end));
+        CHECK(timesOf(fx.clip(a.clip).video.keyframes.x) == std::vector<CMTime>{f30(60), f30(89), f30(150), f30(200)});
+    }
+    SUBCASE("a move to the clip's last frame replaces the out point's and the hidden one after it") {
+        applyMove(fx, a.clip, moveRequest(100, 119, start, end));
+        CHECK(timesOf(fx.clip(a.clip).video.keyframes.x) == std::vector<CMTime>{f30(30), f30(60), f30(130), f30(149)});
+    }
+    SUBCASE("the whole clip replaces every keyframe") {
+        applyMove(fx, a.clip, moveRequest(30, 119, start, end));
+        CHECK(timesOf(fx.clip(a.clip).video.keyframes.x) == std::vector<CMTime>{f30(60), f30(149)});
+        CHECK(timesOf(fx.clip(a.clip).video.keyframes.scale) == std::vector<CMTime>{f30(60), f30(149)});
+    }
+    // A new keyframe outside the clip is still refused.
+    SetMotionTracks outside(fx.seq, a.clip, {MotionTrackChange{MotionParameter::X, {key(f30(31), -50)}, 0}});
+    applyRefused(fx.project, outside, EditError::InvalidTime);
+}
+
+TEST_CASE("planMotionMove refuses frames outside the clip, fewer than two frames and bad values") {
+    Animated a;
+    const Clip &clip = a.fx.clip(a.clip); // timeline [30, 120)
+    MotionMovePlan plan;
+    const MotionFraming framing{0, 0, 1};
+    CHECK(planMotionMove(clip, f30(1), moveRequest(29, 60, framing, framing), plan).error == EditError::InvalidTime);
+    CHECK(planMotionMove(clip, f30(1), moveRequest(30, 120, framing, framing), plan).error == EditError::InvalidTime);
+    CHECK(planMotionMove(clip, f30(1), moveRequest(60, 60, framing, framing), plan).error == EditError::InvalidTime);
+    CHECK(planMotionMove(clip, f30(1), moveRequest(61, 60, framing, framing), plan).error == EditError::InvalidTime);
+    MotionMoveRequest offGrid = moveRequest(40, 60, framing, framing);
+    offGrid.firstFrame = CMTimeMake(81, 60);
+    CHECK(planMotionMove(clip, f30(1), offGrid, plan).error == EditError::InvalidTime);
+    CHECK(planMotionMove(clip, f30(1), moveRequest(40, 60, framing, framing, KeyframeInterpolation::Bezier), plan).error ==
+          EditError::InvalidArgument);
+    CHECK(planMotionMove(clip, f30(1), moveRequest(40, 60, framing, MotionFraming{0, 0, -1}), plan).error ==
+          EditError::InvalidArgument);
+    CHECK(planMotionMove(clip, f30(1), moveRequest(30, 31, framing, framing), plan).ok()); // two frames
+    CHECK(plan.changes.size() == 3);
+}

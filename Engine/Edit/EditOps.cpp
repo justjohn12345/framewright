@@ -1248,13 +1248,148 @@ EditResult SetMotionTracks::perform(const Project &, Sequence &sequence, IdGener
         if (auto problem = keyframeTrackProblem(change.keyframes, change.parameter)) {
             return EditResult::failure(EditError::InvalidArgument, *problem);
         }
+        const KeyframeTrack &current = clip->video.keyframes.track(change.parameter);
         for (const Keyframe &keyframe : change.keyframes) {
             if (EditResult r = requireInsideClip(*clip, keyframe.time); !r) {
-                return r;
+                // A keyframe a trim hid may stay where it is (a partial Ken Burns move keeps it).
+                if (std::find(current.begin(), current.end(), keyframe) == current.end()) {
+                    return r;
+                }
             }
         }
         clip->video.keyframes.track(change.parameter) = change.keyframes;
         clip->video.setStaticValue(change.parameter, change.staticValue);
+    }
+    return EditResult::success();
+}
+
+// ----- Ken Burns moves and matching a neighbour's framing -----
+
+bool motionValuesMatch(MotionParameter, double a, double b) {
+    if (!std::isfinite(a) || !std::isfinite(b)) {
+        return a == b;
+    }
+    const double magnitude = std::max({1.0, std::abs(a), std::abs(b)});
+    return std::abs(a - b) <= 1e-6 * magnitude;
+}
+
+namespace {
+
+// Refusal unless `frame` is the start of one of the clip's sequence frames.
+EditResult requireClipFrame(const Clip &clip, CMTime frameDuration, CMTime frame, const char *what) {
+    if (!isPositive(frameDuration) || !isNumeric(frame) || !isOnFrameGrid(frame, frameDuration)) {
+        return EditResult::failure(EditError::InvalidTime, std::string(what) + " " + describe(frame) +
+                                                               " is not the start of a sequence frame");
+    }
+    if (frame < clip.timelineStart || frame >= clip.timelineEnd()) {
+        return EditResult::failure(EditError::InvalidTime, std::string(what) + " " + describe(frame) +
+                                                               " is not a frame of clip " +
+                                                               idString(clip.id.value()));
+    }
+    return EditResult::success();
+}
+
+// Whether `time` (a keyframe's source time) plays before the clip's start on the timeline.
+bool isBeforeClip(const Clip &clip, CMTime time) {
+    const auto at = clip.exactTimelineTimeAt(time);
+    const auto start = ExactTime::from(clip.timelineStart);
+    return at && start && at->compare(*start) < 0;
+}
+
+void noteDrift(MotionMoveDrift &drift, MotionParameter parameter, CMTime time, bool earliest) {
+    drift.parameters.push_back(parameter);
+    if (!isNumeric(drift.keyframeTime) || (earliest ? time < drift.keyframeTime : time > drift.keyframeTime)) {
+        drift.keyframeTime = time;
+    }
+}
+
+} // namespace
+
+EditResult planMotionMove(const Clip &clip, CMTime frameDuration, const MotionMoveRequest &request,
+                          MotionMovePlan &plan) {
+    plan = MotionMovePlan{};
+    if (EditResult r = requireClipFrame(clip, frameDuration, request.firstFrame, "the move's first frame"); !r) {
+        return r;
+    }
+    if (EditResult r = requireClipFrame(clip, frameDuration, request.lastFrame, "the move's last frame"); !r) {
+        return r;
+    }
+    if (!(request.firstFrame < request.lastFrame)) {
+        return EditResult::failure(EditError::InvalidTime, "a Ken Burns move needs at least two frames");
+    }
+    if (EditResult r = checkInterpolation(request.interpolation); !r) {
+        return r;
+    }
+    const std::optional<CMTime> startTime = keyframeTimeForFrame(clip, request.firstFrame);
+    const std::optional<CMTime> endTime = keyframeTimeForFrame(clip, request.lastFrame);
+    if (!startTime || !endTime) {
+        return notRepresentable(clip.id, clip.timelineStart);
+    }
+    const std::optional<CMTime> clipLastFrame = checkedSubtract(clip.timelineEnd(), frameDuration);
+    const bool fromClipStart = request.firstFrame == clip.timelineStart;
+    const bool toClipEnd = clipLastFrame && request.lastFrame == *clipLastFrame;
+
+    const std::pair<MotionParameter, std::pair<double, double>> values[] = {
+        {MotionParameter::X, {request.start.x, request.end.x}},
+        {MotionParameter::Y, {request.start.y, request.end.y}},
+        {MotionParameter::Scale, {request.start.scale, request.end.scale}},
+    };
+    for (const auto &[parameter, pair] : values) {
+        if (EditResult r = checkMotionValue(parameter, pair.first); !r) {
+            return r;
+        }
+        if (EditResult r = checkMotionValue(parameter, pair.second); !r) {
+            return r;
+        }
+        MotionTrackChange change;
+        change.parameter = parameter;
+        change.staticValue = pair.first;
+        std::optional<Keyframe> keptBefore; // the kept keyframe nearest before the move
+        std::optional<Keyframe> keptAfter;  // the kept keyframe nearest after it
+        for (const Keyframe &keyframe : clip.video.keyframes.track(parameter)) {
+            const std::optional<CMTime> frame = frameShowingSourceTime(clip, keyframe.time, frameDuration);
+            bool before = false;
+            if (frame) {
+                if (*frame >= request.firstFrame && *frame <= request.lastFrame) {
+                    continue; // shown by the move's frames: replaced
+                }
+                before = *frame < request.firstFrame;
+            } else {
+                // Hidden by a trim: replaced when the move reaches that end of the clip.
+                before = isBeforeClip(clip, keyframe.time);
+                if (before ? fromClipStart : toClipEnd) {
+                    continue;
+                }
+            }
+            change.keyframes.push_back(keyframe);
+            if (before) {
+                keptBefore = keyframe; // the track is in time order: the last one is the nearest
+            } else if (!keptAfter) {
+                keptAfter = keyframe;
+            }
+        }
+        Keyframe from;
+        from.time = *startTime;
+        from.value = pair.first;
+        from.interpolation = request.interpolation;
+        Keyframe to;
+        to.time = *endTime;
+        to.value = pair.second;
+        to.interpolation = KeyframeInterpolation::Linear;
+        upsertKeyframe(change.keyframes, from);
+        upsertKeyframe(change.keyframes, to);
+        if (auto problem = keyframeTrackProblem(change.keyframes, parameter)) {
+            return EditResult::failure(EditError::InvariantViolation, "the Ken Burns move's " +
+                                                                          std::string(displayNameOf(parameter)) +
+                                                                          " keyframes are invalid: " + *problem);
+        }
+        if (keptBefore && !motionValuesMatch(parameter, keptBefore->value, pair.first)) {
+            noteDrift(plan.before, parameter, keptBefore->time, true);
+        }
+        if (keptAfter && !motionValuesMatch(parameter, keptAfter->value, pair.second)) {
+            noteDrift(plan.after, parameter, keptAfter->time, false);
+        }
+        plan.changes.push_back(std::move(change));
     }
     return EditResult::success();
 }
