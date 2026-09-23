@@ -44,7 +44,8 @@ struct ContentView: View {
         .frame(minWidth: 1100, minHeight: 640)
         .background(
             WindowAccessor(title: store.projectName, representedURL: store.projectURL, isEdited: store.isDirty,
-                           shouldClose: { documents.confirmClosingWindow() })
+                           shouldClose: { documents.confirmClosingWindow() },
+                           onWindow: { [weak store] window in store?.editorWindow = window })
         )
     }
 

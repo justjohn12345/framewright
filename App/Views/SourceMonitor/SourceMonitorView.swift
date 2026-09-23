@@ -46,7 +46,10 @@ struct SourceMonitorView: View {
             .overlay(RoundedRectangle(cornerRadius: 3)
                 .stroke(store.focusArea == .sourceMonitor ? Color.accentColor : .clear, lineWidth: 1.5))
             .contentShape(Rectangle())
-            .onTapGesture { store.focusArea = .sourceMonitor }
+            .onTapGesture {
+                store.focusArea = .sourceMonitor
+                store.reclaimKeyboardFocus()
+            }
             scrubber
             controls
         }

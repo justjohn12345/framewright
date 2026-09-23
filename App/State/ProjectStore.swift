@@ -54,7 +54,11 @@ final class ProjectStore: ObservableObject {
     @Published private(set) var isDirty = false
     @Published private(set) var projectURL: URL?
     @Published private(set) var projectName = "Untitled"
+    /// True while at least one import is probing its files.
     @Published private(set) var isImporting = false
+    private var importsInFlight = 0 {
+        didSet { isImporting = importsInFlight > 0 }
+    }
 
     // UI state.
     @Published var selection: Set<VEClipID> = []
@@ -75,13 +79,30 @@ final class ProjectStore: ObservableObject {
     /// Cancels the timeline gesture in progress (set by the timeline while dragging).
     var cancelActiveGesture: (() -> Void)?
 
+    /// The editor window (set by `ContentView`). Keyboard shortcuts are taken only from it, and
+    /// clicks in the timeline, monitors and bin take keyboard focus back from its text fields.
+    weak var editorWindow: NSWindow?
+
+    /// A gesture is in progress: a timeline drag (move, trim, marquee, playhead) or an edit
+    /// group such as an inspector slider drag. Edit commands (Delete, Split, Link, Insert...)
+    /// from keys and menus are ignored meanwhile, so they never interleave with the gesture's
+    /// own coalesced edits (the engine would commit the gesture first; see VEEngine.h).
+    var isGestureActive: Bool {
+        cancelActiveGesture != nil || engine.isCoalescing
+    }
+
     /// Number of times the timeline's content model was rebuilt (once per model change;
     /// diagnostics and tests).
     private(set) var timelineBuildCount = 0
     private var cachedTimeline: (changeCount: UInt64, model: TimelineViewModel)?
     private var observers: [NSObjectProtocol] = []
 
-    init(engine: VEEngine = VEEngine()) {
+    /// A store over a new engine with the default cache directory.
+    convenience init() {
+        self.init(engine: VEEngine())
+    }
+
+    init(engine: VEEngine) {
         self.engine = engine
         thumbnails = ThumbnailCache(engine: engine)
         waveforms = WaveformCache(engine: engine)
@@ -255,6 +276,17 @@ final class ProjectStore: ObservableObject {
         _ = engine.redo()
     }
 
+    // MARK: Keyboard focus
+
+    /// A click in the timeline, a monitor or the bin: a text field or other control of the
+    /// editor window that holds keyboard focus gives it up (ending its editing), so Space,
+    /// Delete and the other editing keys reach the editor again.
+    func reclaimKeyboardFocus() {
+        guard let window = editorWindow,
+              !KeyboardController.shouldHandleKeys(firstResponder: window.firstResponder) else { return }
+        window.makeFirstResponder(nil)
+    }
+
     // MARK: Monitors
 
     func attachProgramView(_ view: VEPreviewView) {
@@ -290,8 +322,12 @@ final class ProjectStore: ObservableObject {
         playheadTime = frameTime(seconds)
     }
 
-    /// Ruler drag: shows frames as fast as they decode, silently; `endScrub()` on release.
+    /// Ruler drag (or dragging the playhead in the track area): shows frames as fast as they
+    /// decode, silently; `endScrub()` on release. The timeline takes the focus (the transport
+    /// keys then drive the program monitor).
     func scrub(toSeconds seconds: Double) {
+        if focusArea != .timeline { focusArea = .timeline }
+        reclaimKeyboardFocus()
         let time = frameTime(seconds)
         playhead.setTime(time)
         engine.scrub(to: time)
@@ -362,6 +398,7 @@ final class ProjectStore: ObservableObject {
     /// tracks when nothing selected spans the playhead. `breakingTransitions` removes a
     /// transition around the playhead instead of refusing.
     func splitAtPlayhead(breakingTransitions: Bool = false) {
+        guard !isGestureActive else { return }
         let t = playheadTime
         let spanning = selectedClips.filter { $0.timelineStart < t && t < $0.timelineEnd }
         let ids = spanning.map { NSNumber(value: $0.clipID) }
@@ -374,10 +411,31 @@ final class ProjectStore: ObservableObject {
         report(result)
     }
 
+    /// Whether Delete has something to remove in the focused panel.
+    var canDelete: Bool {
+        switch focusArea {
+        case .mediaBin: return selectedAssetID != nil
+        case .timeline: return !selection.isEmpty || selectedTransitionID != nil
+        case .sourceMonitor: return false
+        }
+    }
+
+    /// Delete / Shift+Delete, for the focused panel: in the media bin they remove the selected
+    /// asset (refused while clips use it), in the timeline they remove (or ripple delete) the
+    /// selected clips or transition; with the source monitor focused they do nothing. Ignored
+    /// during a gesture.
     func deleteSelection(ripple: Bool) {
-        if focusArea == .mediaBin, selection.isEmpty, let asset = selectedAssetID {
-            removeAsset(asset)
+        guard !isGestureActive else { return }
+        switch focusArea {
+        case .mediaBin:
+            if let asset = selectedAssetID {
+                removeAsset(asset)
+            }
             return
+        case .sourceMonitor:
+            return
+        case .timeline:
+            break
         }
         if selection.isEmpty, let transition = selectedTransitionID {
             if report(engine.removeTransition(transition)) {
@@ -395,6 +453,7 @@ final class ProjectStore: ObservableObject {
     /// Adds a one-second cross dissolve on the cut nearest the playhead on the target video
     /// track (or the selected clip's track).
     func addCrossDissolveAtPlayhead() {
+        guard !isGestureActive else { return }
         let trackID = selectedClips.first?.trackID ?? targetVideoTrackID
         let onTrack = clips.values.filter { $0.trackID == trackID }.sorted { $0.timelineStart < $1.timelineStart }
         let playheadSeconds = playheadTime.secondsOrZero
@@ -420,6 +479,7 @@ final class ProjectStore: ObservableObject {
     }
 
     func linkOrUnlinkSelection() {
+        guard !isGestureActive else { return }
         let chosen = selectedClips
         if let clip = chosen.first, chosen.allSatisfy({ $0.linkedClipID != 0 }) {
             report(engine.unlinkClip(clip.clipID))
@@ -526,6 +586,7 @@ final class ProjectStore: ObservableObject {
 
     /// Insert / Overwrite from the source monitor at the playhead on the target tracks.
     func placeSource(overwrite: Bool) {
+        guard !isGestureActive else { return }
         guard let id = source.assetID, let info = asset(id) else {
             statusMessage = "Open a clip in the source monitor first (double-click it in the media bin)."
             return
@@ -542,11 +603,11 @@ final class ProjectStore: ObservableObject {
     /// Imports files (probing happens off the main thread).
     func importMedia(_ urls: [URL], completion: (([VEAssetInfo]) -> Void)? = nil) {
         guard !urls.isEmpty else { return }
-        isImporting = true
+        importsInFlight += 1
         engine.importMedia(at: urls) { [weak self] imported, errors in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.isImporting = false
+                self.importsInFlight -= 1
                 if !errors.isEmpty {
                     self.statusMessage = errors.map(\.localizedDescription).joined(separator: "\n")
                 }

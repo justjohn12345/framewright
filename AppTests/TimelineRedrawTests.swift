@@ -34,7 +34,12 @@ final class TimelineRedrawTests: XCTestCase {
         XCTAssertEqual(store.clips.count, 21)
     }
 
-    func testPlayheadAtSixtyHertzDoesNotRebuildTheTimeline() async throws {
+    /// Moves the playhead 120 times (as the engine's 60 Hz playback notifications do) and forces
+    /// the window to display after each move: the timeline model is not rebuilt and the canvas
+    /// is not redrawn, while the playhead overlays follow. A positive control first proves the
+    /// canvas does draw in this host when the model changes (else the test is skipped: its
+    /// counts would mean nothing).
+    func testPlayheadMovesDoNotRedrawTheTimeline() async throws {
         try await makeTwentyClipSequence()
         let store = fixture.store
         let defaults = UserDefaults(suiteName: "redraw-\(UUID())") ?? .standard
@@ -49,38 +54,57 @@ final class TimelineRedrawTests: XCTestCase {
             window.orderOut(nil)
             window.close()
         }
-        host.layoutSubtreeIfNeeded()
-        await StoreFixture.wait(until: { false }, timeout: 1.0) // settle: thumbnails, waveforms, first frames
+        // Thumbnails, waveforms and the first frames settle: wait until the canvas stops redrawing.
+        var lastDraws = -1
+        for _ in 0 ..< 50 where lastDraws != TimelineDiagnostics.canvasDraws {
+            lastDraws = TimelineDiagnostics.canvasDraws
+            await Self.display(host)
+            await StoreFixture.wait(until: { false }, timeout: 0.1)
+        }
+
+        // Positive control: a change the canvas shows (the selection) redraws it.
+        let controlDraws = TimelineDiagnostics.canvasDraws
+        store.selection = [try XCTUnwrap(store.clips.keys.min())]
+        await Self.display(host)
+        let controlRedrawn = TimelineDiagnostics.canvasDraws - controlDraws
+        guard controlRedrawn > 0 else {
+            throw XCTSkip("the timeline canvas does not draw in this test host (control redrew \(controlRedrawn) times)")
+        }
 
         let builds = store.timelineBuildCount
         let canvasDraws = TimelineDiagnostics.canvasDraws
         let playheadUpdates = TimelineDiagnostics.playheadUpdates
-        // Publish the playhead at 60 Hz for 2 s, as the engine's playback notifications do.
-        let frame = await Self.publishPlayhead(store.playhead, hertz: 60, seconds: 2)
+        for frame in 1 ... 120 {
+            store.playhead.setTime(CMTime(value: CMTimeValue(frame), timescale: 60))
+            await Self.display(host)
+        }
         let rebuilt = store.timelineBuildCount - builds
         let redrawn = TimelineDiagnostics.canvasDraws - canvasDraws
         let moved = TimelineDiagnostics.playheadUpdates - playheadUpdates
-        print("60 Hz playhead for 2 s (\(frame) updates): timeline model builds \(rebuilt), canvas draws \(redrawn), "
-            + "playhead overlay updates \(moved)")
-        XCTAssertLessThanOrEqual(rebuilt, 1, "the timeline model is built once per model change, not per playhead move")
+        print("120 playhead moves: timeline model builds \(rebuilt), canvas draws \(redrawn), "
+            + "playhead overlay updates \(moved) (control: \(controlRedrawn) draws)")
+        XCTAssertEqual(rebuilt, 0, "the timeline model is built once per model change, not per playhead move")
         XCTAssertLessThanOrEqual(redrawn, 2, "the clips are not redrawn while only the playhead moves")
-        XCTAssertGreaterThan(moved, 30, "the playhead overlay follows the playhead")
+        XCTAssertGreaterThanOrEqual(moved, 120, "the playhead overlays follow the playhead")
+
+        // And the control again afterwards: the counter still sees redraws.
+        let afterDraws = TimelineDiagnostics.canvasDraws
+        store.selection = []
+        await Self.display(host)
+        XCTAssertGreaterThan(TimelineDiagnostics.canvasDraws, afterDraws)
     }
 
-    /// Sets the playhead `hertz` times a second for `seconds`, suspending in between (so the main
-    /// queue and run loop, and SwiftUI's updates, run as in the app); returns the number of updates.
-    private static func publishPlayhead(_ playhead: PlayheadModel, hertz: Double, seconds: Double) async -> Int {
-        let start = Date()
-        var frame = 0
-        while Date().timeIntervalSince(start) < seconds {
-            frame += 1
-            playhead.setTime(CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(hertz)))
-            let next = start.addingTimeInterval(Double(frame) / hertz).timeIntervalSinceNow
-            if next > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(next * 1e9))
-            }
+    /// Lets SwiftUI process the pending updates (one main-queue turn), then makes the window
+    /// lay out and display now, and renders the hosting view into a bitmap (which draws the
+    /// SwiftUI content even while the window server does not composite the window).
+    private static func display(_ host: NSView) async {
+        await Task.yield()
+        try? await Task.sleep(nanoseconds: 2_000_000)
+        host.layoutSubtreeIfNeeded()
+        host.window?.displayIfNeeded()
+        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
         }
-        return frame
     }
 
     func testTimelinePaintsItsClips() async throws {

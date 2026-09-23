@@ -153,7 +153,9 @@ final class ProjectStoreTests: XCTestCase {
         store.engine.beginCoalescing(withKey: "test.drag")
         for step in 1 ... 5 {
             let delta = CMTime(value: CMTimeValue(step * 3), timescale: 30)
-            XCTAssertTrue(store.engine.moveClips([NSNumber(value: clipID)], by: delta, trackOffset: 0).ok)
+            XCTAssertTrue(store.engine.performInCoalescingGroup("test.drag") {
+                store.engine.moveClips([NSNumber(value: clipID)], by: delta, trackOffset: 0)
+            }.ok)
         }
         store.engine.endCoalescing()
         XCTAssertEqual(try XCTUnwrap(store.clips[clipID]).timelineStart.seconds, 0.5, accuracy: 1e-9)
@@ -162,7 +164,9 @@ final class ProjectStoreTests: XCTestCase {
 
         // Escape during a trim reverts it.
         store.engine.beginCoalescing(withKey: "test.trim")
-        XCTAssertTrue(store.engine.trimClipTail(clipID, to: CMTime(value: 1, timescale: 1), clamp: true).ok)
+        XCTAssertTrue(store.engine.performInCoalescingGroup("test.trim") {
+            store.engine.trimClipTail(clipID, to: CMTime(value: 1, timescale: 1), clamp: true)
+        }.ok)
         store.engine.cancelCoalescing()
         XCTAssertEqual(store.engine.projectJSON, before)
 
@@ -190,6 +194,11 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(KeyboardController.action(keyCode: 31, characters: "o", modifiers: []), .markOut)
         XCTAssertEqual(KeyboardController.action(keyCode: 53, characters: "", modifiers: []), .cancel)
         XCTAssertEqual(KeyboardController.action(keyCode: 0, characters: "a", modifiers: .command), .selectAll)
+        XCTAssertEqual(KeyboardController.action(keyCode: 24, characters: "=", modifiers: []), .zoomIn)
+        XCTAssertEqual(KeyboardController.action(keyCode: 24, characters: "+", modifiers: .shift), .zoomIn)
+        XCTAssertEqual(KeyboardController.action(keyCode: 69, characters: "+", modifiers: []), .zoomIn, "keypad +")
+        XCTAssertEqual(KeyboardController.action(keyCode: 27, characters: "-", modifiers: []), .zoomOut)
+        XCTAssertNil(KeyboardController.action(keyCode: 24, characters: "=", modifiers: .command), "Cmd+= is the menu's")
         XCTAssertNil(KeyboardController.action(keyCode: 40, characters: "k", modifiers: .command), "Cmd+K is the menu's")
         XCTAssertNil(KeyboardController.action(keyCode: 6, characters: "z", modifiers: .command))
     }

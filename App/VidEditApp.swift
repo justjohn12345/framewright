@@ -30,18 +30,27 @@ struct VidEditApp: App {
         Settings {
             PreferencesView(engine: store.engine)
         }
+        Window("Acknowledgements", id: AcknowledgementsView.windowID) {
+            AcknowledgementsView()
+        }
+        .windowResizability(.contentMinSize)
     }
 }
 
-/// Menu bar commands. Bare-key shortcuts (Space, J/K/L, arrows, Home/End, Delete, I/O) are
+/// Menu bar commands. Bare-key shortcuts (Space, J/K/L, arrows, Home/End, Delete, I/O, =/-) are
 /// handled by `KeyboardController` so they never steal keys from text fields; the menu items
-/// below show them for discoverability.
+/// below show them for discoverability. Edit commands are ignored while a gesture is in progress
+/// (`ProjectStore.isGestureActive`).
 struct AppCommands: Commands {
     @ObservedObject var store: ProjectStore
     @ObservedObject var documents: DocumentController
     @AppStorage(PlaybackHUD.defaultsKey) private var showPlaybackHUD = false
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Acknowledgements…") { openWindow(id: AcknowledgementsView.windowID) }
+        }
         CommandGroup(replacing: .newItem) {
             Button("New Project") { documents.newProject() }
                 .keyboardShortcut("n")
@@ -83,9 +92,9 @@ struct AppCommands: Commands {
             Button("Split at Playhead, Removing Transitions") { store.splitAtPlayhead(breakingTransitions: true) }
                 .keyboardShortcut("k", modifiers: [.command, .option])
             Button("Delete  ⌫") { store.deleteSelection(ripple: false) }
-                .disabled(store.selection.isEmpty && store.selectedTransitionID == nil)
+                .disabled(!store.canDelete)
             Button("Ripple Delete  ⇧⌫") { store.deleteSelection(ripple: true) }
-                .disabled(store.selection.isEmpty)
+                .disabled(store.focusArea != .timeline || store.selection.isEmpty)
             Divider()
             Button("Link / Unlink") { store.linkOrUnlinkSelection() }
                 .keyboardShortcut("l")
@@ -114,6 +123,7 @@ struct AppCommands: Commands {
             Toggle("Show Playback HUD", isOn: $showPlaybackHUD)
                 .keyboardShortcut("h", modifiers: [.command, .option])
             Divider()
+            // Also bare = / + and - (KeyboardController).
             Button("Zoom In") { store.zoomIn() }
                 .keyboardShortcut("=")
             Button("Zoom Out") { store.zoomOut() }

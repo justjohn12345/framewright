@@ -8,10 +8,16 @@ import VidEditEngine
 ///
 /// A press selects what it hits; moving past `dragThreshold` turns it into a move (clip body),
 /// a trim (within `edgeZone` of a clip edge) or a marquee (empty space). Moves and trims are
-/// one coalesced engine edit each, committed on release (`ended`), reverted by Escape or Cmd+Z
-/// (`cancel`) and by a gesture the system abandons without an end (`abandon`). Snapping uses
-/// the timeline as it was when the drag started, so the drag's own previewed edits (clips the
-/// moved clip overwrote, edges it split) never become snap targets.
+/// one coalesced engine edit each (every step inside `VEEngine.performInCoalescingGroup`),
+/// committed on release (`ended`), reverted by Escape or Cmd+Z (`cancel`) and by a gesture the
+/// system abandons without an end (`abandon`). Snapping uses the timeline as it was when the
+/// drag started, so the drag's own previewed edits (clips the moved clip overwrote, edges it
+/// split) never become snap targets.
+///
+/// The playhead can be dragged in the track area too, not only in the ruler: press on empty
+/// space within `playheadGrabZone` points of the playhead line, or press anywhere with Option
+/// held; the drag then scrubs like the ruler (clip edges and bodies keep their own gestures
+/// without Option). Every press also takes keyboard focus back from a text field.
 @MainActor
 final class TimelineGestureController: ObservableObject {
     enum DragState: Equatable {
@@ -23,12 +29,19 @@ final class TimelineGestureController: ObservableObject {
         case trimmingHead(clip: Int64, origin: CGPoint, edge: Double, excluded: Set<Int64>)
         case trimmingTail(clip: Int64, origin: CGPoint, edge: Double, excluded: Set<Int64>)
         case marquee(origin: CGPoint, base: Set<Int64>)
+        /// Dragging the playhead (see the type's comment).
+        case scrubbing
         /// Escape pressed: the rest of the gesture is ignored.
         case cancelled
     }
 
     /// Distance the pointer must travel before a press becomes a drag.
     static let dragThreshold: CGFloat = 3
+    /// A press on empty space this close to the playhead line (points) grabs the playhead.
+    static let playheadGrabZone: CGFloat = 4
+    /// Coalescing group keys of the drags.
+    static let moveGroup = "timeline.move"
+    static let trimGroup = "timeline.trim"
 
     @Published private(set) var drag: DragState = .idle
     @Published private(set) var marquee: CGRect?
@@ -59,7 +72,8 @@ final class TimelineGestureController: ObservableObject {
         let model = store.timelineModel
         switch drag {
         case .idle:
-            begin(at: startLocation, extend: modifiers.contains(.shift), model: model)
+            begin(at: startLocation, extend: modifiers.contains(.shift), grabPlayhead: modifiers.contains(.option),
+                  model: model)
             if drag != .idle {
                 changed(location: location, startLocation: startLocation, modifiers: modifiers)
             }
@@ -73,11 +87,19 @@ final class TimelineGestureController: ObservableObject {
             move(ids: ids, origin: origin, location: location, start: start, end: end, excluded: excluded,
                  originKind: originKind, originIndex: originIndex, model: model)
         case let .trimmingHead(clip, origin, edge, excluded):
-            let time = trimTime(edge: edge, origin: origin, location: location, excluded: excluded, model: model)
-            store.report(store.engine.trimClipHead(clip, to: store.frameTime(time), clamp: true))
+            let time = store.frameTime(trimTime(edge: edge, origin: origin, location: location, excluded: excluded,
+                                                model: model))
+            store.report(store.engine.performInCoalescingGroup(Self.trimGroup) {
+                store.engine.trimClipHead(clip, to: time, clamp: true)
+            })
         case let .trimmingTail(clip, origin, edge, excluded):
-            let time = trimTime(edge: edge, origin: origin, location: location, excluded: excluded, model: model)
-            store.report(store.engine.trimClipTail(clip, to: store.frameTime(time), clamp: true))
+            let time = store.frameTime(trimTime(edge: edge, origin: origin, location: location, excluded: excluded,
+                                                model: model))
+            store.report(store.engine.performInCoalescingGroup(Self.trimGroup) {
+                store.engine.trimClipTail(clip, to: time, clamp: true)
+            })
+        case .scrubbing:
+            scrub(to: location, model: model)
         case let .marquee(origin, base):
             let rect = CGRect(x: origin.x, y: origin.y, width: location.x - origin.x,
                               height: location.y - origin.y).standardized
@@ -99,6 +121,8 @@ final class TimelineGestureController: ObservableObject {
             }
         case .moving, .trimmingHead, .trimmingTail:
             store.engine.endCoalescing()
+        case .scrubbing:
+            store.endScrub()
         default:
             break
         }
@@ -112,6 +136,9 @@ final class TimelineGestureController: ObservableObject {
             store.engine.cancelCoalescing()
             drag = .cancelled
         case .pending, .marquee:
+            drag = .cancelled
+        case .scrubbing:
+            store.endScrub()
             drag = .cancelled
         case .idle, .cancelled:
             break
@@ -151,11 +178,23 @@ final class TimelineGestureController: ObservableObject {
         drag = .idle
     }
 
-    /// Press: select according to what was hit.
-    private func begin(at point: CGPoint, extend: Bool, model: TimelineViewModel) {
+    /// Press: select according to what was hit, or grab the playhead.
+    private func begin(at point: CGPoint, extend: Bool, grabPlayhead: Bool, model: TimelineViewModel) {
         let hit = model.hitTest(point)
         store.focusArea = .timeline
+        store.reclaimKeyboardFocus()
         store.statusMessage = nil
+        let onEmptySpace: Bool
+        switch hit {
+        case .track, .none: onEmptySpace = true
+        default: onEmptySpace = false
+        }
+        if grabPlayhead || (onEmptySpace && abs(point.x - model.x(forTime: model.playhead)) <= Self.playheadGrabZone) {
+            drag = .scrubbing
+            store.cancelActiveGesture = { [weak self] in self?.cancel() }
+            scrub(to: point, model: model)
+            return
+        }
         switch hit {
         case let .clipBody(id), let .clipHead(id), let .clipTail(id):
             let wasSelected = store.selection.contains(id)
@@ -199,19 +238,19 @@ final class TimelineGestureController: ObservableObject {
             let start = moving.map(\.start).min() ?? anchor.start
             let end = moving.map(\.end).max() ?? anchor.end
             snapshot = model
-            store.engine.beginCoalescing(withKey: "timeline.move")
+            store.engine.beginCoalescing(withKey: Self.moveGroup)
             drag = .moving(ids: ids, origin: origin, start: start, end: end,
                            excluded: model.expandingLinks(Set(ids)), originKind: row.track.kind,
                            originIndex: row.track.index)
         case let .clipHead(id):
             guard let clip = model.clip(id: id) else { drag = .cancelled; return }
             snapshot = model
-            store.engine.beginCoalescing(withKey: "timeline.trim")
+            store.engine.beginCoalescing(withKey: Self.trimGroup)
             drag = .trimmingHead(clip: id, origin: origin, edge: clip.start, excluded: model.expandingLinks([id]))
         case let .clipTail(id):
             guard let clip = model.clip(id: id) else { drag = .cancelled; return }
             snapshot = model
-            store.engine.beginCoalescing(withKey: "timeline.trim")
+            store.engine.beginCoalescing(withKey: Self.trimGroup)
             drag = .trimmingTail(clip: id, origin: origin, edge: clip.end, excluded: model.expandingLinks([id]))
         default:
             drag = .cancelled
@@ -239,9 +278,19 @@ final class TimelineGestureController: ObservableObject {
         // Only clips of the dragged row's kind change tracks (selected audio stays on its tracks
         // when the drag moves between video rows).
         let kind: VETrackKind = originKind == .video ? .video : .audio
-        let result = store.engine.moveClips(ids.map { NSNumber(value: $0) }, by: deltaTime, trackOffset: trackOffset,
-                                            of: kind)
+        let result = store.engine.performInCoalescingGroup(Self.moveGroup) {
+            store.engine.moveClips(ids.map { NSNumber(value: $0) }, by: deltaTime, trackOffset: trackOffset, of: kind)
+        }
         store.statusMessage = result.ok ? nil : result.message
+    }
+
+    /// Moves the playhead to the pointer (snapping to clip edges, never to itself).
+    private func scrub(to location: CGPoint, model: TimelineViewModel) {
+        var seconds = model.time(forX: location.x)
+        if let snap = model.snap(seconds, excluding: [], includePlayhead: false) {
+            seconds = snap.time
+        }
+        store.scrub(toSeconds: max(0, seconds))
     }
 
     private func trimTime(edge: Double, origin: CGPoint, location: CGPoint, excluded: Set<Int64>,

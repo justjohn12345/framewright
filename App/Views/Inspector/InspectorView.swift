@@ -128,17 +128,30 @@ private struct ParameterSlider: View {
     let key: String
     let apply: (inout VEVideoParams, Double) -> Void
 
+    /// The coalescing group of the slider drag in progress (nil: not dragging).
+    @State private var dragGroup: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             NumberField(label: label, value: value, range: range) { set($0) }
             Slider(value: Binding(get: { value }, set: { set($0) }), in: range) { editing in
                 if editing {
-                    store.engine.beginCoalescing(withKey: "inspector.\(key).\(clipID)")
+                    let group = "inspector.\(key).\(clipID)"
+                    store.engine.beginCoalescing(withKey: group)
+                    dragGroup = group
                 } else {
+                    dragGroup = nil
                     store.engine.endCoalescing()
                 }
             }
             .controlSize(.mini)
+        }
+        .onDisappear {
+            // The inspector changed selection mid-drag: commit what the drag did.
+            if dragGroup != nil {
+                dragGroup = nil
+                store.engine.endCoalescing()
+            }
         }
     }
 
@@ -146,7 +159,15 @@ private struct ParameterSlider: View {
         guard let current = store.clips[clipID] else { return }
         var params = current.videoParams
         apply(&params, min(range.upperBound, max(range.lowerBound, newValue)))
-        store.report(store.engine.setVideoParams(params, forClip: clipID))
+        let clip = clipID
+        if let group = dragGroup {
+            // A slider drag step: part of the drag's undo step.
+            store.report(store.engine.performInCoalescingGroup(group) {
+                store.engine.setVideoParams(params, forClip: clip)
+            })
+        } else {
+            store.report(store.engine.setVideoParams(params, forClip: clip))
+        }
     }
 }
 
@@ -154,6 +175,8 @@ private struct ParameterSlider: View {
 private struct AudioSection: View {
     @ObservedObject var store: ProjectStore
     let clip: VEClipInfo
+    /// The coalescing group of the gain slider drag in progress (nil: not dragging).
+    @State private var dragGroup: String?
 
     var body: some View {
         let params = clip.audioParams
@@ -162,12 +185,21 @@ private struct AudioSection: View {
             NumberField(label: "Gain dB", value: params.gainDb, range: -60 ... 24) { update { $0.gainDb = $1 }($0) }
             Slider(value: Binding(get: { params.gainDb }, set: { update { $0.gainDb = $1 }($0) }), in: -60 ... 24) { editing in
                 if editing {
-                    store.engine.beginCoalescing(withKey: "inspector.gain.\(clip.clipID)")
+                    let group = "inspector.gain.\(clip.clipID)"
+                    store.engine.beginCoalescing(withKey: group)
+                    dragGroup = group
                 } else {
+                    dragGroup = nil
                     store.engine.endCoalescing()
                 }
             }
             .controlSize(.mini)
+            .onDisappear {
+                if dragGroup != nil {
+                    dragGroup = nil
+                    store.engine.endCoalescing()
+                }
+            }
             NumberField(label: "Fade In s", value: params.fadeInDuration.secondsOrZero, range: 0 ... clip.duration.secondsOrZero) {
                 update { $0.fadeInDuration = store.frameTime($1) }($0)
             }
@@ -182,7 +214,14 @@ private struct AudioSection: View {
             guard let current = store.clips[clip.clipID] else { return }
             var params = current.audioParams
             change(&params, value)
-            store.report(store.engine.setAudioParams(params, forClip: clip.clipID))
+            let clipID = clip.clipID
+            if let group = dragGroup {
+                store.report(store.engine.performInCoalescingGroup(group) {
+                    store.engine.setAudioParams(params, forClip: clipID)
+                })
+            } else {
+                store.report(store.engine.setAudioParams(params, forClip: clipID))
+            }
         }
     }
 }

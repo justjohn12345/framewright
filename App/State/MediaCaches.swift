@@ -9,7 +9,10 @@ import VidEditEngine
 /// `image(...)` returns what is cached and starts a fetch for a miss; when images arrive the
 /// cache bumps `version` (coalesced to one change per run loop turn) so observing views redraw.
 /// A failed fetch is not retried for `retryInterval` (a file that comes back, or a transient
-/// decoder error, is picked up again afterwards).
+/// decoder error, is picked up again afterwards). `removeAll()` (a project was closed) starts a
+/// new generation: fetches still running for the previous project are ignored when they
+/// complete, so they can neither fill nor poison the new project's keys (asset ids restart per
+/// project). A fetch the engine reports as belonging to a closed project is not a failure.
 @MainActor
 final class ThumbnailCache: ObservableObject {
     struct Key: Hashable {
@@ -27,16 +30,26 @@ final class ThumbnailCache: ObservableObject {
     private var inFlight: Set<Key> = []
     private var failed: [Key: Date] = [:]
     private var flushScheduled = false
+    private var generation = 0
     private let capacity: Int
     private let retryInterval: TimeInterval
+    private let now: () -> Date
     /// Fetches started (diagnostics and tests).
     private(set) var requestsStarted = 0
+    /// Failures recorded, and completions of an earlier generation ignored (diagnostics and tests).
+    private(set) var failuresRecorded = 0
+    private(set) var ignoredCompletions = 0
 
-    init(engine: VEEngine, capacity: Int = 600, retryInterval: TimeInterval = 30) {
+    /// `now` is the clock the retry interval is measured with (tests pass a manual one).
+    init(engine: VEEngine, capacity: Int = 600, retryInterval: TimeInterval = 30, now: @escaping () -> Date = Date.init) {
         self.engine = engine
         self.capacity = capacity
         self.retryInterval = retryInterval
+        self.now = now
     }
+
+    /// Whether a fetch is running (diagnostics and tests).
+    var isFetching: Bool { !inFlight.isEmpty }
 
     /// The thumbnail if cached, else nil (and a fetch is started).
     func image(asset: VEAssetID, seconds: Double, maxDimension: Int) -> CGImage? {
@@ -57,8 +70,9 @@ final class ThumbnailCache: ObservableObject {
         return nil
     }
 
-    /// Forgets everything (project closed).
+    /// Forgets everything (project closed); fetches still running are ignored when they finish.
     func removeAll() {
+        generation &+= 1
         images.removeAll()
         order.removeAll()
         inFlight.removeAll()
@@ -79,7 +93,7 @@ final class ThumbnailCache: ObservableObject {
     /// Whether `key` failed recently (an expired failure is forgotten).
     private func recentlyFailed(_ key: Key) -> Bool {
         guard let when = failed[key] else { return false }
-        if Date().timeIntervalSince(when) < retryInterval { return true }
+        if now().timeIntervalSince(when) < retryInterval { return true }
         failed[key] = nil
         return false
     }
@@ -89,13 +103,21 @@ final class ThumbnailCache: ObservableObject {
         inFlight.insert(key)
         requestsStarted += 1
         let time = CMTime(value: key.millis, timescale: 1000)
-        engine.thumbnail(forAsset: key.assetID, at: time, maxDimension: key.maxDimension) { [weak self] image, _ in
+        let generation = self.generation
+        engine.thumbnail(forAsset: key.assetID, at: time, maxDimension: key.maxDimension) { [weak self] image, error in
             MainActor.assumeIsolated {
-                guard let self, self.inFlight.remove(key) != nil else { return }
+                guard let self else { return }
+                // A fetch of a previous generation (another project) must not touch this one's keys.
+                guard generation == self.generation else {
+                    self.ignoredCompletions += 1
+                    return
+                }
+                guard self.inFlight.remove(key) != nil else { return }
                 if let image {
                     self.store(image, for: key)
-                } else {
-                    self.failed[key] = Date()
+                } else if !isProjectClosed(error) {
+                    self.failed[key] = self.now()
+                    self.failuresRecorded += 1
                 }
             }
         }
@@ -127,7 +149,7 @@ final class ThumbnailCache: ObservableObject {
 /// Main-thread cache of waveform peaks per asset, and of the timeline's pre-rendered waveform
 /// strips: images of an asset's peaks at a power-of-two zoom level, cut into fixed-width tiles,
 /// so drawing an audio clip costs a few image draws instead of a peak query every 2 points.
-/// A failed load is retried after `retryInterval`.
+/// A failed load is retried after `retryInterval`. Generations work as in `ThumbnailCache`.
 @MainActor
 final class WaveformCache: ObservableObject {
     @Published private(set) var version = 0
@@ -149,15 +171,22 @@ final class WaveformCache: ObservableObject {
     private var failed: [VEAssetID: Date] = [:]
     private var strips: [StripKey: CGImage] = [:]
     private var stripOrder: [StripKey] = []
+    private var generation = 0
     private let stripCapacity: Int
     private let retryInterval: TimeInterval
+    private let now: () -> Date
     /// Tiles rendered so far (diagnostics and tests).
     private(set) var stripsRendered = 0
+    /// Loads started and failures recorded (diagnostics and tests).
+    private(set) var loadsStarted = 0
+    private(set) var failuresRecorded = 0
 
-    init(engine: VEEngine, stripCapacity: Int = 240, retryInterval: TimeInterval = 30) {
+    init(engine: VEEngine, stripCapacity: Int = 240, retryInterval: TimeInterval = 30,
+         now: @escaping () -> Date = Date.init) {
         self.engine = engine
         self.stripCapacity = stripCapacity
         self.retryInterval = retryInterval
+        self.now = now
     }
 
     /// The peaks if loaded, else nil (and loading starts).
@@ -167,7 +196,7 @@ final class WaveformCache: ObservableObject {
         }
         guard let engine, !inFlight.contains(asset) else { return nil }
         if let when = failed[asset] {
-            if Date().timeIntervalSince(when) < retryInterval { return nil }
+            if now().timeIntervalSince(when) < retryInterval { return nil }
             failed[asset] = nil
         }
         if let cached = engine.cachedWaveform(forAsset: asset) {
@@ -175,14 +204,17 @@ final class WaveformCache: ObservableObject {
             return cached
         }
         inFlight.insert(asset)
-        engine.waveform(forAsset: asset) { [weak self] waveform, _ in
+        loadsStarted += 1
+        let generation = self.generation
+        engine.waveform(forAsset: asset) { [weak self] waveform, error in
             MainActor.assumeIsolated {
-                guard let self, self.inFlight.remove(asset) != nil else { return }
+                guard let self, generation == self.generation, self.inFlight.remove(asset) != nil else { return }
                 if let waveform {
                     self.waveforms[asset] = waveform
                     self.version &+= 1
-                } else {
-                    self.failed[asset] = Date()
+                } else if !isProjectClosed(error) {
+                    self.failed[asset] = self.now()
+                    self.failuresRecorded += 1
                 }
             }
         }
@@ -251,7 +283,9 @@ final class WaveformCache: ObservableObject {
         version &+= 1
     }
 
+    /// Forgets everything (project closed); loads still running are ignored when they finish.
     func removeAll() {
+        generation &+= 1
         waveforms.removeAll()
         inFlight.removeAll()
         failed.removeAll()
@@ -259,4 +293,11 @@ final class WaveformCache: ObservableObject {
         stripOrder.removeAll()
         version &+= 1
     }
+}
+
+/// Whether `error` is the engine's report that a request belonged to a project that was closed
+/// meanwhile (not a failure of the media).
+func isProjectClosed(_ error: Error?) -> Bool {
+    guard let error = error as NSError? else { return false }
+    return error.domain == VEEngineErrorDomain && error.code == VEEngineError.Code.projectClosed.rawValue
 }

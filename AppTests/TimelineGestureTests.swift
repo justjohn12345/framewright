@@ -1,5 +1,6 @@
 import AppKit
 import CoreMedia
+import SwiftUI
 import VidEditEngine
 import XCTest
 @testable import VidEdit
@@ -162,5 +163,93 @@ final class TimelineGestureTests: XCTestCase {
         XCTAssertEqual(start(y), 1.1, accuracy: 1e-9, "no snap to the previewed edge at 1 s")
         XCTAssertNil(store.snapIndicator)
         gestures.ended()
+    }
+
+    func testDraggingThePlayheadInTheTrackArea() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let clip = try fixture.placeMovie(movie, at: 0) // V1, x 0...100
+        store.selection = []
+        store.playheadTime = CMTime(value: 3, timescale: 1) // x = 150
+        let gestures = TimelineGestureController(store: store)
+        // Empty space next to the playhead line grabs it (no marquee).
+        drag(gestures, from: CGPoint(x: 152, y: 90), through: [CGPoint(x: 175, y: 90)], end: false)
+        XCTAssertEqual(gestures.drag, .scrubbing)
+        XCTAssertEqual(store.engine.playbackState, .scrubbing)
+        XCTAssertEqual(store.playheadTime.seconds, 3.5, accuracy: 1e-9)
+        XCTAssertNil(gestures.marquee)
+        gestures.ended()
+        XCTAssertEqual(store.engine.playbackState, .stopped)
+        XCTAssertEqual(store.focusArea, .timeline)
+        // With Option held the playhead is dragged anywhere, even from a clip, which stays put.
+        gestures.changed(location: CGPoint(x: 50, y: 90), startLocation: CGPoint(x: 50, y: 90), modifiers: .option)
+        gestures.changed(location: CGPoint(x: 60, y: 90), startLocation: CGPoint(x: 50, y: 90), modifiers: .option)
+        gestures.ended()
+        XCTAssertEqual(store.playheadTime, CMTime(value: 36, timescale: 30))
+        XCTAssertEqual(start(clip), 0, accuracy: 1e-9)
+        XCTAssertEqual(store.undoActionName, "Overwrite", "no edit")
+        // Escape during a playhead drag ends the scrub where it is.
+        drag(gestures, from: CGPoint(x: 61, y: 20), through: [CGPoint(x: 80, y: 20)], end: false)
+        XCTAssertEqual(gestures.drag, .scrubbing)
+        store.cancelActiveGesture?()
+        XCTAssertEqual(store.engine.playbackState, .stopped)
+        gestures.ended()
+        XCTAssertEqual(gestures.drag, .idle)
+    }
+
+    /// The real SwiftUI path: mouse events sent to a window hosting the timeline drive the
+    /// track area's DragGesture into the controller. A completed drag is committed once, and
+    /// the gesture state's reset after the release must not revert it (abandon()).
+    func testARealDragThroughSwiftUIIsCommittedAndNotReverted() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let clip = try fixture.placeMovie(movie, at: 0)
+        store.selection = []
+        let size = NSSize(width: 900, height: 400)
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: TimelineView(store: store).frame(width: size.width, height: size.height))
+        window.contentView = host
+        // A click in a window that is not key only activates it: make it key first.
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        host.layoutSubtreeIfNeeded()
+        await StoreFixture.wait(until: { window.isKeyWindow }, timeout: 1)
+        // A point of the track area (see testTimelinePaintsItsClips) in window coordinates.
+        func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+            NSPoint(x: TimelineView.headerWidth + 1 + x, y: host.bounds.height - (TimelineView.rulerHeight + 1 + y))
+        }
+        var eventNumber = 0
+        func send(_ type: NSEvent.EventType, _ location: NSPoint) async {
+            eventNumber += 1
+            if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                                              timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: window.windowNumber, context: nil,
+                                              eventNumber: eventNumber, clickCount: 1, pressure: 1) {
+                window.sendEvent(event)
+            }
+            await StoreFixture.wait(until: { false }, timeout: 0.03)
+        }
+        await send(.leftMouseDown, point(50, 90))
+        await send(.leftMouseDragged, point(60, 90))
+        await send(.leftMouseDragged, point(80, 90))
+        await send(.leftMouseDragged, point(100, 90))
+        await send(.leftMouseUp, point(100, 90))
+        let committed = await StoreFixture.wait(until: { !self.store.engine.isCoalescing && self.start(clip) != 0 },
+                                                timeout: 2)
+        if !committed, start(clip) == 0, store.undoActionName == "Overwrite", store.selection.isEmpty {
+            throw XCTSkip("synthetic mouse events do not reach SwiftUI gestures in this test host")
+        }
+        XCTAssertEqual(start(clip), 1, accuracy: 1e-9)
+        XCTAssertEqual(store.undoActionName, "Move Clip")
+        XCTAssertNil(store.cancelActiveGesture)
+        // Give SwiftUI time to reset the gesture state (which calls abandon() when it sees an
+        // unfinished drag): the finished drag stays.
+        await StoreFixture.wait(until: { false }, timeout: 0.3)
+        XCTAssertEqual(start(clip), 1, accuracy: 1e-9, "the completed drag was reverted")
+        XCTAssertEqual(store.undoActionName, "Move Clip")
     }
 }

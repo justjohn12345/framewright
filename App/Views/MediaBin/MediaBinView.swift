@@ -34,6 +34,7 @@ struct MediaBinView: View {
                                 .onTapGesture {
                                     store.selectedAssetID = asset.assetID
                                     store.focusArea = .mediaBin
+                                    store.reclaimKeyboardFocus()
                                 }
                                 .draggable(AssetReference(assetID: asset.assetID)) {
                                     AssetTileView(asset: asset, thumbnails: thumbnails, isSelected: true)

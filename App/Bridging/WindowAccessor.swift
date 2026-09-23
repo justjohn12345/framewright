@@ -2,13 +2,16 @@ import AppKit
 import SwiftUI
 
 /// Gives SwiftUI content access to its hosting `NSWindow`: keeps the title, represented file and
-/// edited dot in sync with the project, and asks before closing a window with unsaved changes.
+/// edited dot in sync with the project, asks before closing a window with unsaved changes, and
+/// reports the window (`onWindow`).
 struct WindowAccessor: NSViewRepresentable {
     var title: String
     var representedURL: URL?
     var isEdited: Bool
     /// Returns whether the window may close (e.g. after a save-or-discard prompt).
     var shouldClose: @MainActor () -> Bool
+    /// Receives the hosting window whenever the view is (re)attached or updated.
+    var onWindow: @MainActor (NSWindow) -> Void = { _ in }
 
     func makeNSView(context: Context) -> WindowObserverView {
         let view = WindowObserverView()
@@ -48,6 +51,7 @@ struct WindowAccessor: NSViewRepresentable {
     }
 
     private func apply(to window: NSWindow) {
+        onWindow(window)
         if window.title != title { window.title = title }
         if window.representedURL != representedURL { window.representedURL = representedURL }
         if window.isDocumentEdited != isEdited { window.isDocumentEdited = isEdited }

@@ -4,12 +4,17 @@ import Foundation
 /// Editing keys that SwiftUI handles unreliably (bare keys without modifiers, arrows), routed to
 /// the store through an application-local key-down monitor.
 ///
-/// Keys go to the focused control instead when one takes keyboard input: a text field being
-/// edited, or a focused control that uses the keys itself (a slider, button, table, pop-up; see
-/// `shouldHandleKeys(firstResponder:)`). Handled: Space (play/pause), J/K/L (shuttle), ←/→ (one
-/// frame), Home/End (start/end), Delete / Forward Delete (delete selection), Shift+Delete
-/// (ripple delete), I/O (source in/out), Escape (cancel drag), Command-A (select all clips).
-/// Transport keys drive the monitor that has focus (see `PlaybackActions`).
+/// Only key presses in the editor window (`ProjectStore.editorWindow`) are handled; the Settings
+/// window, panels and alerts keep their keys. Keys go to the focused control instead when one
+/// takes keyboard input: a text field being edited, or a focused control that uses the keys
+/// itself (a slider, button, table, pop-up; see `shouldHandleKeys(firstResponder:)`); a click
+/// in the timeline, a monitor or the bin takes that focus back (`ProjectStore.reclaimKeyboardFocus`).
+/// Handled: Space (play/pause), J/K/L (shuttle), ←/→ (one frame), Home/End (start/end), Delete /
+/// Forward Delete (delete in the focused panel), Shift+Delete (ripple delete), I/O (source
+/// in/out), = or + / - (zoom the timeline, like Command-= / Command--), Escape (cancel the drag in
+/// progress; passed on when there is none), Command-A (select all clips). Auto-repeat of Space and
+/// J/K/L is ignored (holding L does not race to 8x, holding Space does not toggle). Transport
+/// keys drive the monitor that has focus (see `PlaybackActions`).
 @MainActor
 final class KeyboardController {
     enum Action: Equatable {
@@ -18,8 +23,17 @@ final class KeyboardController {
         case goToStart, goToEnd
         case delete, rippleDelete
         case markIn, markOut
+        case zoomIn, zoomOut
         case cancel
         case selectAll
+
+        /// Keys whose auto-repeat is ignored (each press is a discrete transport command).
+        var ignoresRepeat: Bool {
+            switch self {
+            case .togglePlay, .shuttleReverse, .shuttleStop, .shuttleForward: return true
+            default: return false
+            }
+        }
     }
 
     private weak var store: ProjectStore?
@@ -65,6 +79,10 @@ final class KeyboardController {
         default:
             break
         }
+        // "+" is Shift+= on most layouts: accept it with or without Shift.
+        if characters == "+", flags.isEmpty || flags == .shift {
+            return .zoomIn
+        }
         guard flags.isEmpty else { return nil }
         switch characters.lowercased() {
         case " ": return .togglePlay
@@ -73,6 +91,8 @@ final class KeyboardController {
         case "l": return .shuttleForward
         case "i": return .markIn
         case "o": return .markOut
+        case "=": return .zoomIn
+        case "-": return .zoomOut
         default: return nil
         }
     }
@@ -89,20 +109,31 @@ final class KeyboardController {
         }
     }
 
-    private func handle(_ event: NSEvent) -> Bool {
-        guard let store, let window = event.window, window.isKeyWindow, window.attachedSheet == nil else {
+    /// Handles a key-down event sent to `window` (the event's window; tests pass one). Returns
+    /// whether it was consumed.
+    func handle(_ event: NSEvent, window: NSWindow?) -> Bool {
+        guard let store, let window, window === store.editorWindow, window.attachedSheet == nil else {
             return false
         }
         let action = Self.action(keyCode: event.keyCode, characters: event.charactersIgnoringModifiers ?? "",
                                  modifiers: event.modifierFlags)
         guard let action else { return false }
-        // Escape always reaches a drag in progress; everything else defers to focused controls.
-        if action != .cancel || store.cancelActiveGesture == nil,
-           !Self.shouldHandleKeys(firstResponder: window.firstResponder) {
-            return false
+        if action == .cancel {
+            // Escape cancels a drag in progress (whatever has focus); otherwise it is not ours.
+            guard let cancel = store.cancelActiveGesture else { return false }
+            cancel()
+            return true
+        }
+        guard Self.shouldHandleKeys(firstResponder: window.firstResponder) else { return false }
+        if event.isARepeat, action.ignoresRepeat {
+            return true // swallowed: a held key is one command
         }
         perform(action, on: store)
         return true
+    }
+
+    private func handle(_ event: NSEvent) -> Bool {
+        handle(event, window: event.window)
     }
 
     func perform(_ action: Action, on store: ProjectStore) {
@@ -119,6 +150,8 @@ final class KeyboardController {
         case .rippleDelete: store.deleteSelection(ripple: true)
         case .markIn: store.markSourceIn()
         case .markOut: store.markSourceOut()
+        case .zoomIn: store.zoomIn()
+        case .zoomOut: store.zoomOut()
         case .cancel: store.cancelActiveGesture?()
         case .selectAll: store.selectAll()
         }

@@ -1,9 +1,10 @@
+import CoreMedia
 import SwiftUI
 import VidEditEngine
 
 /// Debug HUD over the program monitor (View > Show Playback HUD): the playback controller's
-/// counters (`VEPlaybackStats`) and the preview view's render state, refreshed four times a
-/// second.
+/// counters (`VEPlaybackStats`), the presented frame against the (audio) clock, and the preview
+/// view's render state, refreshed four times a second.
 struct PlaybackHUD: View {
     /// UserDefaults key of the View menu toggle.
     static let defaultsKey = "showPlaybackHUD"
@@ -12,7 +13,8 @@ struct PlaybackHUD: View {
 
     var body: some View {
         SwiftUI.TimelineView(.periodic(from: .now, by: 0.25)) { _ in
-            Text(Self.lines(stats: engine.playbackStats, status: engine.playbackStatus, view: engine.programView))
+            Text(Self.lines(stats: engine.playbackStats, status: engine.playbackStatus, view: engine.programView,
+                            frameDuration: engine.sequence.frameDuration))
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.white)
                 .padding(6)
@@ -24,7 +26,8 @@ struct PlaybackHUD: View {
     }
 
     /// The HUD text (also used by tests).
-    static func lines(stats: VEPlaybackStats, status: VEPlaybackStatus, view: VEPreviewView?) -> String {
+    static func lines(stats: VEPlaybackStats, status: VEPlaybackStatus, view: VEPreviewView?,
+                      frameDuration: CMTime = .invalid) -> String {
         var lines: [String] = []
         let state: String
         switch status.state {
@@ -45,6 +48,7 @@ struct PlaybackHUD: View {
                             status.time.secondsOrZero, clock, stats.fps))
         lines.append("frames \(stats.presentedFrames)  dropped \(stats.droppedFrames)  late \(stats.lateFrames)"
             + "  holds \(stats.monotonicHolds)")
+        lines.append(presentedLine(stats: stats, frameDuration: frameDuration))
         lines.append(String(format: "cache hit %.0f%%  %.0f MB  queue %ld  map failures %llu", stats.cacheHitRate * 100,
                             Double(stats.cacheBytes) / 1_048_576, stats.decodeQueueDepth, stats.mapFailures))
         lines.append(String(format: "audio %@ %@  latency %.1f ms  underruns %llu (%llu frames)",
@@ -66,5 +70,23 @@ struct PlaybackHUD: View {
             lines.append("audio error: \(stats.errorMessage)")
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// "presented #N for t, clock c (d frames)": the last presented sequence frame against the
+    /// clock (audio samples while audio drives playback), d = (t - c) / frame duration.
+    static func presentedLine(stats: VEPlaybackStats, frameDuration: CMTime) -> String {
+        guard stats.presentedFrameIndex >= 0, stats.presentedTime.isNumeric else {
+            return "presented -  clock \(String(format: "%.3f s", stats.clockTime.secondsOrZero))"
+        }
+        var line = String(format: "presented #%lld for %.3f s  clock %.3f s", stats.presentedFrameIndex,
+                          stats.presentedTime.secondsOrZero, stats.clockTime.secondsOrZero)
+        if frameDuration.isNumeric, frameDuration.seconds > 0, stats.clockTime.isNumeric {
+            let frames = (stats.presentedTime.seconds - stats.clockTime.seconds) / frameDuration.seconds
+            line += String(format: " (%+.1f frames)", frames)
+        }
+        if !stats.presentedClockDriven {
+            line += " paused"
+        }
+        return line
     }
 }

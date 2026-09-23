@@ -11,7 +11,10 @@ import VidEditEngine
 /// vertical movement changes tracks within the same kind; the engine applies overwrite
 /// semantics), dragging within 8 pt of a clip edge trims it. Every drag is one coalesced undo
 /// step, committed on release; Escape cancels it. Dragging in the ruler scrubs the program
-/// monitor (silently; the frame shows as soon as it decodes). Media dropped from the bin lands
+/// monitor (silently; the frame shows as soon as it decodes), and so does dragging the playhead
+/// line in the track area (press on empty space next to it, or anywhere with Option held; see
+/// `TimelineGestureController`). A press anywhere gives the timeline the keyboard focus (a text
+/// field that had it ends editing). Media dropped from the bin lands
 /// at the drop position and row (overwrite; hold Command to insert). Scroll to pan,
 /// Option/Command-scroll to zoom.
 ///
