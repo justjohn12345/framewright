@@ -1,9 +1,7 @@
 # Integration notes for the next round (collected from the 2026-09-22 fix agents)
 
 State at 5325cd9: full suite green (327 EngineTests incl. 140 doctest cases, 17 AppTests), zero warnings, app launches.
-All four review docs' findings are fixed EXCEPT the facade/Swift items in `2026-09-22-playback-facade-ui-review.md`
-(findings 1, 2, 3, 8, 9, 10, 11, 12 and the facade/Swift parts of 14, plus test gaps 5 (facade), 6). Those are the next round,
-together with phase 5b (wiring PlaybackController into VEEngine/ProjectStore) and a scaffold pass.
+Unfixed findings are in `open-findings.md`; this file lists the API changes the next round must adopt.
 
 ## Facade (VEEngine) must adopt
 - Model: `insertAsset` now ripples all unlocked tracks; `rippleDeleteClips`/`setSpeed` default to all tracks and can return
@@ -25,19 +23,6 @@ together with phase 5b (wiring PlaybackController into VEEngine/ProjectStore) an
   `frame.status` from `TextureCache::textures()` errors and reset it to ok on every fresh frame; `PlaybackConfig::makeOutput`
   is `unique_ptr<IAudioOutput>(AudioMixer&)`; `AutomaticAudioOutput(mixer, EngineFactory, retryInterval)`; audio device starts
   when a sequence opens and stops after `outputIdleTimeout` (10 s); `setMuted` keeps the audio clock.
-- Facade fixes still open (from the playback/facade/UI review): async import must not close a user coalescing group and must
-  capture `_projectGeneration`; asset/clip ids must never be reused after undo (or purge every id-keyed cache and bookmark);
-  multi-clip vertical move must lift-then-place; snapping candidates from the pre-gesture snapshot; double close prompt and
-  Finder-open-at-launch; split ProjectStore observables and cache `timelineModel` per changeCount before playhead is wired;
-  source monitor via VEPreviewView + scrub lane; Cmd+Z during drag; VE_ASSERT_MAIN in Release; stale useCount; memory
-  pressure to all caches; Swift cache `failed` sets; ruler snap; unlinked audio trackOffset; drag state leak; key monitor focus.
-
-## Scaffold items still open (render review 10, 13)
-- `ENABLE_HARDENED_RUNTIME` off with no stated reason; add hardened runtime + Developer ID in a Release/Archive config.
-- LGPL compliance: bundle `COPYING.LGPLv2.1` and a notice in Resources; README source offer / build-script reference.
-- `-Wall -Wextra`, `GCC_TREAT_WARNINGS_AS_ERRORS`, `SWIFT_TREAT_WARNINGS_AS_ERRORS` (build is warning-clean).
-- `.gitignore`: `.swiftpm/`, `.build/`; README: mention `make_test_media.swift`, the ffmpeg tools build (`BUILD_TOOLS=1`,
-  `ENABLE_SVTAV1=1`), Metal Toolchain download. Add `CoreAudio.framework` to enable a real device-appeared listener.
 
 ## ExportJob (phase 7) notes
 - Create the compositor with `Compositor::create(device, {MTLPixelFormatRGBA16Float})`; `renderAndWait` into a pooled
