@@ -68,6 +68,8 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 /// Display size in pixels (rotation applied); zero for audio.
 @property (nonatomic, readonly) NSInteger width;
 @property (nonatomic, readonly) NSInteger height;
+/// Container display rotation in degrees clockwise (0, 90, 180 or 270); zero for audio.
+@property (nonatomic, readonly) NSInteger rotationDegrees;
 /// Nominal frame duration; invalid for stills and audio.
 @property (nonatomic, readonly) CMTime frameDuration;
 /// "29.97", "25", ... ("" for stills and audio).

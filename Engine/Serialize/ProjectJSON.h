@@ -9,9 +9,12 @@
 // == p bit for bit. Unknown fields are ignored so newer minor additions do not break loading.
 //
 // Older files are upgraded on load by migrateProjectJson, one schema version at a time. Loading
-// never throws: errors come back as a message naming the offending JSON path; values a
-// migration had to adjust are listed in ProjectLoadResult::warnings; a loaded project must pass
-// validateProject.
+// never throws: errors come back as a message naming the offending JSON path; recoverable
+// oddities (an unknown transition kind, values a migration had to adjust) are fixed and listed
+// in ProjectLoadResult::warnings; a loaded project must pass validateProject.
+//
+// Writing never throws either: strings that are not valid UTF-8 are written with U+FFFD in
+// place of the bad bytes.
 
 #pragma once
 

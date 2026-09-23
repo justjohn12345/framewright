@@ -1,5 +1,8 @@
 #include "../Model/ModelFixtures.h"
 
+#include <fstream>
+#include <sstream>
+
 using namespace vetest;
 using nlohmann::json;
 
@@ -47,6 +50,67 @@ bool contains(const std::string &haystack, const std::string &needle) {
 
 bool anyContains(const std::vector<std::string> &list, const std::string &needle) {
     return std::any_of(list.begin(), list.end(), [&](const std::string &s) { return contains(s, needle); });
+}
+
+std::string goldenPath(const char *name) {
+    const std::string here = __FILE__;
+    return here.substr(0, here.find_last_of('/')) + "/golden/" + name;
+}
+
+std::string readFile(const std::string &path) {
+    std::ifstream in(path, std::ios::binary);
+    REQUIRE_MESSAGE(in.good(), doctest::String(("cannot open " + path).c_str()));
+    std::ostringstream text;
+    text << in.rdbuf();
+    return text.str();
+}
+
+// The golden version 1 project as the current model expresses it.
+Fixture goldenFixture() {
+    Fixture fx;
+    fx.project.name = "Golden v1 \xE2\x9C\x93";
+    MediaAsset music;
+    music.name = "music 44k.m4a";
+    music.url = "/Volumes/Media/music 44k.m4a";
+    music.kind = AssetKind::Audio;
+    music.duration = CMTimeMake(30 * 44100 + 17, 44100);
+    music.audioSampleRate = 44100;
+    music.audioChannels = 2;
+    music.backendHint = "apple";
+    const AssetId music44 = fx.project.addAsset(music);
+    const auto [v, a] = fx.addLinkedPair(0, 60, 30);
+    const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
+    fx.addTransition(fx.v1, v, b, 12);
+    fx.addClip(fx.v2, fx.video60, 30, 45, 0, 0.5);
+    fx.addClip(fx.v2, fx.still, 100, 150);
+    const ClipId m = fx.addClip(fx.a2, fx.audioOnly, 0, 90, 0, 1.0 / 3.0);
+    fx.sequence().findClip(m)->audio = AudioParams{-4.5, f30(10), CMTimeMake(7, 48000)};
+    Clip c;
+    c.id = fx.project.ids.make<ClipId>();
+    c.assetId = music44;
+    c.trackId = fx.a2;
+    c.timelineStart = f30(90);
+    c.sourceIn = CMTimeMake(44101, 44100);
+    c.timelineDuration = f30(60);
+    fx.track(fx.a2).clips.push_back(c);
+    fx.sequence().findClip(v)->video = VideoParams{12.25, -8.5, 1.1, 33.3, 0.8};
+    fx.track(fx.v2).muted = true;
+    fx.track(fx.v2).solo = true;
+    fx.track(fx.a1).locked = true;
+    fx.track(fx.a1).name = "Dialogue \"main\"";
+    fx.project.findAsset(fx.video60)->isVFR = true;
+    const SequenceId second = fx.project.addSequence("NTSC", CMTimeMake(1001, 30000), 1280, 720, 1, 0);
+    Sequence &s2 = *fx.project.findSequence(second);
+    Clip n;
+    n.id = fx.project.ids.make<ClipId>();
+    n.assetId = fx.av24;
+    n.trackId = s2.videoTracks[0].id;
+    n.timelineStart = CMTimeMake(1001 * 10, 30000);
+    n.sourceIn = CMTimeMake(1001 * 5, 24000);
+    n.timelineDuration = CMTimeMake(1001 * 48, 30000);
+    s2.videoTracks[0].clips.push_back(n);
+    fx.requireValid();
+    return fx;
 }
 
 // A minimal version 1 document with one clip on V1 of a 30 fps sequence; `clip` fields are
@@ -248,16 +312,13 @@ TEST_CASE("ProjectJSON: malformed input yields clear errors, never exceptions") 
         j["assets"][0]["duration"] = epoch;
         CHECK(contains(loadError(j), "has epoch 1"));
     }
-    SUBCASE("unknown enum values are errors") {
+    SUBCASE("unknown asset and track kinds are errors") {
         json j = good;
         j["assets"][0]["kind"] = "hologram";
         CHECK(contains(loadError(j), "assets[0].kind: unknown asset kind \"hologram\""));
         j = good;
         j["sequences"][0]["videoTracks"][1]["kind"] = "smell";
         CHECK(contains(loadError(j), "unknown track kind"));
-        j = good;
-        j["sequences"][0]["transitions"][0]["kind"] = "wipe";
-        CHECK(contains(loadError(j), "unknown transition kind"));
     }
     SUBCASE("negative or oversized ids") {
         json j = good;
@@ -289,6 +350,29 @@ TEST_CASE("ProjectJSON: malformed input yields clear errors, never exceptions") 
     }
 }
 
+TEST_CASE("ProjectJSON: an unknown transition kind degrades to a cross dissolve with a warning") {
+    const Fixture fx = richFixture();
+    json j = projectToJson(fx.project);
+    j["sequences"][0]["transitions"][0]["kind"] = "wipe";
+    const ProjectLoadResult loaded = projectFromJson(j);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(*loaded.project == fx.project);
+    REQUIRE(loaded.warnings.size() == 1);
+    CHECK(contains(loaded.warnings[0], "sequences[0].transitions[0].kind: unknown transition kind \"wipe\""));
+}
+
+TEST_CASE("ProjectJSON: invalid UTF-8 never throws on save") {
+    Fixture fx = richFixture();
+    fx.project.name = "bad \xC3\x28 bytes \xFF";
+    fx.project.findAsset(fx.av30)->url = "/media/\xE2\x82";
+    std::string text;
+    CHECK_NOTHROW(text = serializeProject(fx.project));
+    CHECK(contains(text, "bad \xEF\xBF\xBD( bytes \xEF\xBF\xBD")); // U+FFFD for each bad sequence
+    const ProjectLoadResult loaded = parseProject(text);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(loaded.project->name == "bad \xEF\xBF\xBD( bytes \xEF\xBF\xBD");
+}
+
 TEST_CASE("ProjectJSON: unknown fields are ignored and optional fields default") {
     const Fixture fx = richFixture();
     json j = projectToJson(fx.project);
@@ -316,6 +400,33 @@ TEST_CASE("ProjectJSON: unknown fields are ignored and optional fields default")
     CHECK(still->video == VideoParams{});
     CHECK(still->audio == AudioParams{});
     CHECK(still->speed == Ratio{1, 1});
+}
+
+TEST_CASE("ProjectJSON: the checked-in version 1 project loads through the migration") {
+    const std::string text = readFile(goldenPath("project-v1.json"));
+    REQUIRE(json::parse(text).at("schemaVersion") == 1);
+    const ProjectLoadResult loaded = parseProject(text);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(loaded.warnings.empty());
+    const Fixture expected = goldenFixture();
+    CHECK(*loaded.project == expected.project);
+    // Spot checks of what the migration derived.
+    const Sequence &main = *loaded.project->findSequence(expected.seq);
+    const Clip &third = main.audioTracks[1].clips[0]; // 1/3 speed, 90 frames of 30 source frames
+    CHECK(third.speed == Ratio{1, 3});
+    CHECK(identical(third.timelineDuration, CMTimeMake(90, 30)));
+    CHECK(third.sourceOut() == CMTimeMake(1, 1));
+    const Clip &in44 = main.audioTracks[1].clips[1];
+    CHECK(identical(in44.sourceIn, CMTimeMake(44101, 44100)));
+    CHECK(identical(in44.timelineDuration, CMTimeMake(60, 30)));
+}
+
+TEST_CASE("ProjectJSON: the checked-in version 2 project matches the current writer byte for byte") {
+    const std::string text = readFile(goldenPath("project-v2.json"));
+    const ProjectLoadResult loaded = parseProject(text);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(*loaded.project == goldenFixture().project);
+    CHECK(serializeProject(*loaded.project) + "\n" == text);
 }
 
 TEST_CASE("ProjectJSON: version 1 migration") {

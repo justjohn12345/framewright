@@ -24,6 +24,7 @@ VEAudioParams VEAudioParamsDefault(void) {
 @property (nonatomic, readwrite) CMTime duration;
 @property (nonatomic, readwrite) NSInteger width;
 @property (nonatomic, readwrite) NSInteger height;
+@property (nonatomic, readwrite) NSInteger rotationDegrees;
 @property (nonatomic, readwrite) CMTime frameDuration;
 @property (nonatomic, readwrite, copy) NSString *fpsString;
 @property (nonatomic, readwrite) BOOL isVFR;
@@ -328,6 +329,7 @@ VEAssetInfo *makeAssetInfo(const MediaAsset &asset, const AssetDetails *details,
     info.duration = asset.isStill() ? kCMTimeInvalid : asset.duration;
     info.width = asset.hasVideo() ? asset.width : 0;
     info.height = asset.hasVideo() ? asset.height : 0;
+    info.rotationDegrees = asset.hasVideo() ? asset.rotationDegrees : 0;
     info.frameDuration = asset.frameDuration;
     info.fpsString = asset.isStill() ? @"" : fpsString(asset.frameDuration);
     info.isVFR = asset.isVFR;

@@ -561,7 +561,8 @@ struct ProbedFile {
         }
     }
     json[kBookmarksKey] = std::move(bookmarks);
-    const std::string text = json.dump(2) + "\n";
+    // Invalid UTF-8 in names or paths is written as U+FFFD rather than throwing.
+    const std::string text = json.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
     NSData *data = [NSData dataWithBytes:text.data() length:text.size()];
     NSError *writeError = nil;
     if (![data writeToURL:url options:NSDataWritingAtomic error:&writeError]) {

@@ -297,12 +297,15 @@ TrackKind parseTrackKind(const Node &node) {
 
 using Warnings = std::vector<std::string>;
 
-TransitionKind parseTransitionKind(const Node &node) {
+// Transition kinds are not critical: an unknown one (from a newer version) becomes a cross
+// dissolve so the rest of the file still loads.
+TransitionKind parseTransitionKind(const Node &node, Warnings &warnings) {
     const std::string s = node.asString();
     if (s == nameOf(TransitionKind::CrossDissolve)) {
         return TransitionKind::CrossDissolve;
     }
-    node.fail("unknown transition kind \"" + s + "\"");
+    warnings.push_back(node.path() + ": unknown transition kind \"" + s + "\"; using a cross dissolve");
+    return TransitionKind::CrossDissolve;
 }
 
 MediaAsset parseAsset(const Node &node) {
@@ -395,19 +398,19 @@ Track parseTrack(const Node &node) {
     return track;
 }
 
-Transition parseTransition(const Node &node) {
+Transition parseTransition(const Node &node, Warnings &warnings) {
     node.requireObject();
     Transition transition;
     transition.id = node.field("id").asId<TransitionId>();
     transition.trackId = node.field("trackId").asId<TrackId>();
-    transition.kind = parseTransitionKind(node.field("kind"));
+    transition.kind = parseTransitionKind(node.field("kind"), warnings);
     transition.fromClipId = node.field("fromClipId").asId<ClipId>();
     transition.toClipId = node.field("toClipId").asId<ClipId>();
     transition.duration = node.field("duration").asTime();
     return transition;
 }
 
-Sequence parseSequence(const Node &node) {
+Sequence parseSequence(const Node &node, Warnings &warnings) {
     node.requireObject();
     Sequence sequence;
     sequence.id = node.field("id").asId<SequenceId>();
@@ -429,7 +432,7 @@ Sequence parseSequence(const Node &node) {
     if (node.has("transitions")) {
         const Node list = node.field("transitions");
         for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
-            sequence.transitions.push_back(parseTransition(list.element(i)));
+            sequence.transitions.push_back(parseTransition(list.element(i), warnings));
         }
     }
     return sequence;
@@ -627,7 +630,7 @@ void runMigrations(json &document, int fromVersion, Warnings &warnings) {
     }
 }
 
-Project parseProjectNode(const Node &root) {
+Project parseProjectNode(const Node &root, Warnings &warnings) {
     root.requireObject();
     Project project;
     project.name = root.stringOr("name", "");
@@ -640,7 +643,7 @@ Project parseProjectNode(const Node &root) {
     if (root.has("sequences")) {
         const Node list = root.field("sequences");
         for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
-            project.sequences.push_back(parseSequence(list.element(i)));
+            project.sequences.push_back(parseSequence(list.element(i), warnings));
         }
     }
     if (root.has("activeSequenceId")) {
@@ -703,7 +706,7 @@ json projectToJson(const Project &project) {
 }
 
 std::string serializeProject(const Project &project, int indent) {
-    return projectToJson(project).dump(indent);
+    return projectToJson(project).dump(indent, ' ', false, json::error_handler_t::replace);
 }
 
 std::optional<std::string> migrateProjectJson(json &document, int fromVersion, std::vector<std::string> &warnings) {
@@ -729,9 +732,9 @@ ProjectLoadResult projectFromJson(const json &document) {
         if (version < kProjectSchemaVersion) {
             json upgraded = document;
             runMigrations(upgraded, version, warnings);
-            project = parseProjectNode(Node(upgraded, ""));
+            project = parseProjectNode(Node(upgraded, ""), warnings);
         } else {
-            project = parseProjectNode(Node(document, ""));
+            project = parseProjectNode(Node(document, ""), warnings);
         }
         if (auto problem = validateProject(project)) {
             result.error = "invalid project: " + *problem;
