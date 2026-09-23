@@ -6,6 +6,7 @@
 #import <VidEditEngine/VidEditEngine.h>
 #import <XCTest/XCTest.h>
 
+#include "../Media/BurnIn.h"
 #include "../Media/TestMedia.h"
 
 #include <string>
@@ -793,42 +794,65 @@ NSURL *scratchURL() {
         XCTSkip(@"no Metal device");
     }
     VEEngine *engine = [self makeEngine];
-    VEAssetInfo *png = [self importOne:"still.png" into:engine];
+    VEAssetInfo *clip = [self importOne:"h264_1080p30.mp4" into:engine]; // burn-in index = frame number
     VEPreviewView *view = [[VEPreviewView alloc] initWithFrame:NSMakeRect(0, 0, 480, 270) device:device error:nil];
     XCTAssertNotNil(view);
     [engine attachProgramView:view];
-    VEEditResult *r = [engine insertAsset:png.assetID
+    VEEditResult *r = [engine insertAsset:clip.assetID
                                    atTime:kCMTimeZero
                                videoTrack:[self videoTrack:engine index:0]
                                audioTrack:0
                                  sourceIn:kCMTimeInvalid
                                 sourceOut:kCMTimeInvalid];
     XCTAssertTrue(r.ok, @"%@", r.message);
-    [engine showProgramFrameAtTime:seconds(1)];
-    // Wait until the frame was decoded and rendered.
-    const NSUInteger before = view.renderCount;
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
-    while (view.renderCount == before && deadline.timeIntervalSinceNow > 0) {
-        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
-    }
-    // The frame source may render once on attach (black) and again when the still arrives.
-    [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.3]];
-    XCTAssertGreaterThan(view.renderCount, before);
-    CGImageRef image = [view snapshot];
-    XCTAssertTrue(image != NULL);
-    if (image != NULL) {
-        // The still fills the 16:9 frame with a non-black palette background.
+
+    // Reads the burn-in frame index of what the view shows now (-1 if unreadable).
+    auto shownIndex = [view]() -> int {
+        CGImageRef image = [view snapshot];
+        if (image == NULL) {
+            return -1;
+        }
         const size_t w = CGImageGetWidth(image);
         const size_t h = CGImageGetHeight(image);
-        uint8_t pixel[4] = {0, 0, 0, 0};
-        CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
-        CGContextRef ctx = CGBitmapContextCreate(pixel, 1, 1, 8, 4, space,
-                                                 CGBitmapInfo(kCGImageAlphaPremultipliedLast) | CGBitmapInfo(kCGBitmapByteOrder32Big));
-        CGContextDrawImage(ctx, CGRectMake(-CGFloat(w) / 2, -CGFloat(h) * 0.8, CGFloat(w), CGFloat(h)), image);
+        CVPixelBufferRef buffer = nullptr;
+        if (CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA, nullptr, &buffer) !=
+            kCVReturnSuccess) {
+            return -1;
+        }
+        CVPixelBufferLockBaseAddress(buffer, 0);
+        // Same colour space as the image, so the pixels are copied, not colour matched.
+        CGContextRef ctx = CGBitmapContextCreate(CVPixelBufferGetBaseAddress(buffer), w, h, 8,
+                                                 CVPixelBufferGetBytesPerRow(buffer), CGImageGetColorSpace(image),
+                                                 CGBitmapInfo(kCGImageAlphaNoneSkipFirst) |
+                                                     CGBitmapInfo(kCGBitmapByteOrder32Little));
+        CGContextSetBlendMode(ctx, kCGBlendModeCopy);
+        CGContextDrawImage(ctx, CGRectMake(0, 0, CGFloat(w), CGFloat(h)), image);
         CGContextRelease(ctx);
-        CGColorSpaceRelease(space);
-        XCTAssertGreaterThan(int(pixel[0]) + int(pixel[1]) + int(pixel[2]), 60, @"%d %d %d", pixel[0], pixel[1],
-                             pixel[2]);
+        CVPixelBufferUnlockBaseAddress(buffer, 0);
+        const int index = ve::test::readBurnIn(buffer).value_or(-1);
+        CVPixelBufferRelease(buffer);
+        return index;
+    };
+
+    for (const auto &[atSeconds, expectedFrame] : {std::pair<double, int>{1.0, 30}, std::pair<double, int>{2.5, 75}}) {
+        [engine showProgramFrameAtTime:CMTimeMake(expectedFrame, 30)];
+        // The frame is decoded asynchronously and then rendered by the engine; render (and wait
+        // for the GPU) until the view shows it. Earlier frames (time 0 from the insert) may
+        // show first, never a later one.
+        int shown = -1;
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
+        while (shown != expectedFrame && deadline.timeIntervalSinceNow > 0) {
+            XCTestExpectation *rendered = [self expectationWithDescription:@"rendered"];
+            [view renderOnceWithCompletion:^(NSError *error) {
+                [rendered fulfill];
+            }];
+            [self waitForExpectations:@[ rendered ] timeout:5];
+            shown = shownIndex();
+            XCTAssertTrue(shown <= expectedFrame, @"showed frame %d past the requested %d", shown, expectedFrame);
+        }
+        XCTAssertEqual(shown, expectedFrame, @"at %.1f s", atSeconds);
+        XCTAssertNil(view.lastError);
+        XCTAssertEqual(view.missingLayerCount, 0u);
     }
     [engine attachProgramView:nil];
 }
