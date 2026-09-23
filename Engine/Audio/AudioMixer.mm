@@ -434,6 +434,49 @@ bool AudioMixer::waitForBuffered(std::chrono::milliseconds timeout) {
     }
 }
 
+bool AudioMixer::isRangeReady(int64_t from, int64_t frames) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!latest_ || frames <= 0) {
+        return true;
+    }
+    const int64_t to = from + frames;
+    for (const PlanSource &ps : latest_->sources) {
+        if (ps.spanEnd <= from || ps.spanStart >= to) {
+            continue;
+        }
+        const int64_t a = std::max(ps.spanStart, from);
+        if (!ps.source->isReady(a, std::min(to, ps.spanEnd) - a)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::optional<AudioMixer::SourceInfo> AudioMixer::failedSourceIn(int64_t from, int64_t frames) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!latest_) {
+        return std::nullopt;
+    }
+    const int64_t to = from + frames;
+    for (const PlanSource &ps : latest_->sources) {
+        if (ps.spanEnd <= from || ps.spanStart >= to) {
+            continue;
+        }
+        const ClipAudioSource::Stats st = ps.source->stats();
+        if (st.failed) {
+            TrackId track;
+            for (const SourceEntry &entry : sources_) {
+                if (entry.source.get() == ps.source) {
+                    track = entry.track;
+                }
+            }
+            return SourceInfo{ps.source->mapping().asset, track, st.backend, st.error, true,
+                              st.bufferedFrames, st.repositions, st.wakeups};
+        }
+    }
+    return std::nullopt;
+}
+
 void AudioMixer::setMasterGain(float gain) {
     masterGain_.store(std::isfinite(gain) ? std::max(0.0f, gain) : 1.0f, std::memory_order_relaxed);
 }

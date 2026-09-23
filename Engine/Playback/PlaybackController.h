@@ -112,6 +112,14 @@
 
 namespace ve::playback {
 
+/// FrameCache slot of the picture `layer` shows: the asset's frame grid slot containing the
+/// layer's source time, 0 for stills. The program monitor looks pictures up by it, and export
+/// renders the same pictures.
+int64_t frameSlotFor(const VideoLayer &layer, const MediaAsset &asset);
+
+/// Absolute POSIX path of a model media URL (the model may hold "file://" URLs or plain paths).
+std::string mediaPathForURL(const std::string &url);
+
 enum class PlaybackState {
     Stopped,    ///< Paused (showing displayTime).
     Prerolling, ///< play() is waiting for the first frames and audio.

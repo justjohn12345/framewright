@@ -28,10 +28,7 @@ const char *nameOf(PlaybackState state) {
     return "?";
 }
 
-namespace {
-
-/// Media paths are absolute POSIX paths; the model may hold file URLs.
-std::string mediaPath(const std::string &url) {
+std::string mediaPathForURL(const std::string &url) {
     if (url.rfind("file://", 0) == 0) {
         @autoreleasepool {
             NSURL *u = [NSURL URLWithString:[NSString stringWithUTF8String:url.c_str()]];
@@ -41,6 +38,17 @@ std::string mediaPath(const std::string &url) {
         }
     }
     return url;
+}
+
+int64_t frameSlotFor(const VideoLayer &layer, const MediaAsset &asset) {
+    return asset.isStill() ? 0 : FrameCache::frameIndex(layer.sourceTime, asset.frameDuration);
+}
+
+namespace {
+
+/// Media paths are absolute POSIX paths; the model may hold file URLs.
+std::string mediaPath(const std::string &url) {
+    return mediaPathForURL(url);
 }
 
 CMTime lastFrameStartOf(const Sequence &sequence) {
@@ -53,7 +61,7 @@ CMTime lastFrameStartOf(const Sequence &sequence) {
 }
 
 int64_t slotFor(const VideoLayer &layer, const MediaAsset &asset) {
-    return asset.isStill() ? 0 : FrameCache::frameIndex(layer.sourceTime, asset.frameDuration);
+    return frameSlotFor(layer, asset);
 }
 
 double absRate(double rate) {

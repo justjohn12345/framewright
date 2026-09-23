@@ -177,6 +177,17 @@ class AudioMixer {
     /// up to its end) decoded ahead of it, without repositioning. Blocking: tests and tools.
     bool waitForBuffered(std::chrono::milliseconds timeout);
 
+    /// Offline rendering (OfflineAudioRenderer): every source of the newest plan that sounds
+    /// within sequence samples [from, from + frames) has decoded that part (or can only produce
+    /// silence there: its decoder failed, or the media ended). Non-blocking.
+    bool isRangeReady(int64_t from, int64_t frames) const;
+    /// The first source of the newest plan sounding within [from, from + frames) whose decoder
+    /// failed (it renders silence), or nullopt.
+    std::optional<SourceInfo> failedSourceIn(int64_t from, int64_t frames) const;
+    /// Frames rendered as silence because a source was not ready (Stats::underrunFrames), without
+    /// copying the stats. Any thread.
+    uint64_t underrunFrames() const noexcept { return underrunFrames_.load(std::memory_order_relaxed); }
+
     void setMasterGain(float gain);
     float masterGain() const;
     /// Silences the output (ramped) while the transport and the clock keep running.
