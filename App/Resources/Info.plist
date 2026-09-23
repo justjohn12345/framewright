@@ -95,5 +95,48 @@
 			<string>com.justjohn12345.framewright.transition.audio-crossfade</string>
 		</dict>
 	</array>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>File Promise</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.apple.NSFilePromiseItemMetaData</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Promised File URL</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.apple.pasteboard.promised-file-url</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Promised File Content Type</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.apple.pasteboard.promised-file-content-type</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>com.apple.package</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Live Photo</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.apple.live-photo-bundle</string>
+		</dict>
+	</array>
 </dict>
 </plist>

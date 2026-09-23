@@ -76,6 +76,8 @@ struct AppCommands: Commands {
             Divider()
             Button("Import Media…") { presentImportPanel(store: store) }
                 .keyboardShortcut("i")
+            Button("Import from Photos…") { store.photosPicker.present() }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
         }
         CommandGroup(replacing: .saveItem) {
             Button("Save") { documents.save() }

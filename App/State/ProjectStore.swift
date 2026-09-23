@@ -40,6 +40,12 @@ final class ProjectStore: ObservableObject {
     private(set) lazy var playbackActions: PlaybackActions = EnginePlaybackActions(store: self)
     /// The inspector's editing logic (parameters, nudges, sliders, resets, messages).
     private(set) lazy var inspector = InspectorModel(store: self)
+    /// Where media received from Photos is kept (the project's Media folder).
+    let mediaFolder = ImportedMediaFolder()
+    /// Media arriving from Photos (file promise drops, Import from Photos…), shown in the bin.
+    private(set) lazy var incoming = IncomingMedia(store: self)
+    /// File > Import from Photos… (the system photo picker).
+    private(set) lazy var photosPicker = PhotosImportPicker(store: self)
     /// The Editing preferences (Settings > Editing), observed: a change re-renders every view
     /// observing the store (durations re-format at once, without a model change).
     let preferences = EditingPreferencesModel()
@@ -999,6 +1005,40 @@ final class ProjectStore: ObservableObject {
         }
     }
 
+    /// Imports dropped files and places them on the timeline where they were dropped (one after
+    /// another, in drop order) once they are imported.
+    func importAndPlace(_ urls: [URL], at placement: IncomingMedia.Placement) {
+        guard !urls.isEmpty else { return }
+        importMedia(urls) { [weak self] imported in
+            self?.place(imported: imported, from: urls, at: placement)
+        }
+    }
+
+    /// Places the assets imported from `files` on the timeline at `placement`: the first at the drop
+    /// point on the drop row (its partner on the matching track), each next one where the previous
+    /// ends; overwrite, or insert when Command was held. Skipped, with a message, while a drag or
+    /// another gesture is in progress (the media stays in the bin).
+    func place(imported assets: [VEAssetInfo], from files: [URL], at placement: IncomingMedia.Placement) {
+        let ordered = files.compactMap { url in assets.first { Self.samePath($0.path, url.path) } }
+        guard !ordered.isEmpty else { return }
+        guard !isGestureActive else {
+            statusMessage = "The dropped media is in the media bin: a drag was in progress when it arrived."
+            return
+        }
+        var seconds = placement.seconds
+        for asset in ordered {
+            guard dropAsset(asset.assetID, onTrack: placement.trackID, at: seconds, overwrite: !placement.insert) else {
+                break
+            }
+            seconds = selection.compactMap { clips[$0]?.timelineEnd.secondsOrZero }.max() ?? seconds
+        }
+    }
+
+    /// Whether two paths name the same file (symbolic links such as /var -> /private/var resolved).
+    static func samePath(_ a: String, _ b: String) -> Bool {
+        URL(fileURLWithPath: a).resolvingSymlinksInPath().path == URL(fileURLWithPath: b).resolvingSymlinksInPath().path
+    }
+
     func removeAsset(_ id: VEAssetID) {
         if report(engine.removeAsset(id)), selectedAssetID == id {
             selectedAssetID = nil
@@ -1034,6 +1074,9 @@ final class ProjectStore: ObservableObject {
 
     private func resetUIState() {
         kenBurns = nil
+        // Media still arriving belongs to the previous project (its Media folder).
+        incoming.discardAll()
+        mediaFolder.reset()
         thumbnails.removeAll()
         waveforms.removeAll()
         selection = []

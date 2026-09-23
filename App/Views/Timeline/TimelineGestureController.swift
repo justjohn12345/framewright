@@ -109,7 +109,7 @@ final class TimelineGestureController: ObservableObject {
     /// Sets the cursor (tests may observe it instead).
     var applyCursor: (PointerCursor) -> Void = { $0.nsCursor.set() }
 
-    private unowned let store: ProjectStore
+    unowned let store: ProjectStore
     /// The timeline's content when the drag started (snap candidates).
     private var snapshot: TimelineViewModel?
 
@@ -243,6 +243,16 @@ final class TimelineGestureController: ObservableObject {
         guard drag != .idle else { return }
         cancel()
         reset()
+    }
+
+    /// Where media dropped at `location` goes: the row under it and the time (snapped like a
+    /// clip), overwriting unless `insert`. Nil when the drop is not on a track row.
+    func placement(at location: CGPoint, insert: Bool) -> IncomingMedia.Placement? {
+        let model = store.timelineModel
+        guard let row = model.layout(atY: location.y), location.x >= 0 else { return nil }
+        var seconds = model.time(forX: location.x)
+        if let snap = model.snap(seconds) { seconds = snap.time }
+        return IncomingMedia.Placement(trackID: row.track.id, seconds: max(0, seconds), insert: insert)
     }
 
     /// Media dropped from the bin: lands at the drop position and row (overwrite; `insert`

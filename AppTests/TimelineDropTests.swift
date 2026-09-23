@@ -66,7 +66,8 @@ final class TimelineDropTests: XCTestCase {
             XCTAssertFalse(declared.isDynamic)
         }
         XCTAssertEqual(Set(TimelineDropDelegate.types),
-                       [.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade])
+                       Set([.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade]
+                           + MediaDrop.types), "in-app types, and media files and file promises (Photos)")
     }
 
     func testATransitionDroppedOnACutIsAdded() async throws {

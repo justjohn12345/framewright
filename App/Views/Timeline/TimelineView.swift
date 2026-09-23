@@ -368,15 +368,18 @@ protocol TimelineDropInfo {
 extension DropInfo: TimelineDropInfo {}
 
 /// Drops on the track area: media from the bin (placed at the drop point, overwrite; hold
-/// Command to insert) and transitions from the Effects tab (added on the nearest cut; the cut is
-/// highlighted while dragging, in red with the reason when it cannot take one). A transition is
-/// recognised by its exported content type (`TransitionKind.contentType`, declared in
-/// Info.plist), which the Effects tab's drag source (`TransitionReference`) provides; the payload
-/// itself is not read. The `handle...` methods take any `TimelineDropInfo`, so the drop logic is
-/// tested without a real drag (which only a person or a UI test can perform).
+/// Command to insert), media files from the Finder and file promises from Photos (imported, then
+/// placed there once they have arrived; `MediaDrop`, `IncomingMedia`) and transitions from the
+/// Effects tab (added on the nearest cut; the cut is highlighted while dragging, in red with the
+/// reason when it cannot take one). A transition is recognised by its exported content type
+/// (`TransitionKind.contentType`, declared in Info.plist), which the Effects tab's drag source
+/// (`TransitionReference`) provides; the payload itself is not read. The `handle...` methods take
+/// any `TimelineDropInfo`, so the drop logic is tested without a real drag (which only a person or
+/// a UI test can perform).
 @MainActor
 struct TimelineDropDelegate: DropDelegate {
     static let types: [UTType] = [.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade]
+        + MediaDrop.types
 
     let gestures: TimelineGestureController
     @Binding var isAssetTargeted: Bool
@@ -391,7 +394,9 @@ struct TimelineDropDelegate: DropDelegate {
     func dropEntered(info: DropInfo) { handleEntered(info) }
     func dropUpdated(info: DropInfo) -> DropProposal? { handleUpdated(info) }
     func dropExited(info: DropInfo) { handleExited(info) }
-    func performDrop(info: DropInfo) -> Bool { handlePerform(info) }
+    func performDrop(info: DropInfo) -> Bool {
+        handlePerform(info, pasteboardPromises: { PasteboardFilePromise.fromDragPasteboard() })
+    }
 
     func handleValidate(_ info: some TimelineDropInfo) -> Bool {
         info.hasItemsConforming(to: Self.types)
@@ -412,12 +417,22 @@ struct TimelineDropDelegate: DropDelegate {
         gestures.transitionDragExited()
     }
 
-    func handlePerform(_ info: some TimelineDropInfo) -> Bool {
+    /// `pasteboardPromises`: the drag pasteboard's file promises (a real drop); see `MediaDrop`.
+    func handlePerform(_ info: some TimelineDropInfo,
+                       pasteboardPromises: () -> [PromisedFile] = { [] }) -> Bool {
         isAssetTargeted = false
         if let kind = Self.transitionKind(info) {
             return gestures.dropTransition(kind: kind, at: info.location)
         }
-        guard let provider = info.itemProviders(for: [.framewrightAssetReference]).first else { return false }
+        guard let provider = info.itemProviders(for: [.framewrightAssetReference]).first else {
+            guard MediaDrop.accepts(info) else { return false }
+            let placement = gestures.placement(at: info.location, insert: commandHeld())
+            if placement == nil {
+                gestures.store.statusMessage = "Drop media on a track to place it; it is imported into the media bin."
+            }
+            return MediaDrop.perform(info, store: gestures.store, placement: placement,
+                                     pasteboardPromises: pasteboardPromises)
+        }
         let location = info.location
         let insert = commandHeld()
         let controller = gestures

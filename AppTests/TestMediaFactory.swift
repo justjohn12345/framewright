@@ -1,6 +1,9 @@
 import AVFoundation
+import CoreGraphics
 import CoreVideo
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 import XCTest
 
 /// Writes small media files for app-level tests into the (sandboxed) temporary directory.
@@ -93,5 +96,21 @@ enum TestMediaFactory {
         if writer.status != .completed {
             throw writer.error ?? CocoaError(.fileWriteUnknown)
         }
+    }
+
+    /// A still photo encoded as HEIC (what Photos hands over for an iPhone photo).
+    static func writeHEIC(to url: URL, width: Int = 320, height: Int = 240) throws {
+        let space = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        context.setFillColor(CGColor(red: 0.9, green: 0.5, blue: 0.1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        guard let image = context.makeImage(),
+              let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.heic.identifier as CFString, 1, nil)
+        else { throw CocoaError(.fileWriteUnknown) }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
     }
 }

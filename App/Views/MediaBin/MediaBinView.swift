@@ -4,16 +4,20 @@ import UniformTypeIdentifiers
 import FramewrightEngine
 
 /// The project's media: a grid of assets with thumbnails, name, duration and a codec/backend/
-/// hardware badge. Import with the button, File > Import Media… or by dropping files from the
-/// Finder. Drag an asset to the timeline; double-click to open it in the source monitor.
+/// hardware badge. Import with the button, File > Import Media…, File > Import from Photos…, or by
+/// dropping files from the Finder or photos and videos from Photos (file promises: received into
+/// the project's Media folder, listed at the top while they arrive, each with Cancel). Drag an
+/// asset to the timeline; double-click to open it in the source monitor.
 struct MediaBinView: View {
     @ObservedObject var store: ProjectStore
     @ObservedObject var thumbnails: ThumbnailCache
+    @ObservedObject var incoming: IncomingMedia
     @State private var isDropTargeted = false
 
     init(store: ProjectStore) {
         self.store = store
         thumbnails = store.thumbnails
+        incoming = store.incoming
     }
 
     private let columns = [GridItem(.adaptive(minimum: 132, maximum: 180), spacing: 10)]
@@ -22,8 +26,12 @@ struct MediaBinView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            if !incoming.items.isEmpty {
+                IncomingMediaList(incoming: incoming)
+                Divider()
+            }
             ScrollView {
-                if store.assets.isEmpty {
+                if store.assets.isEmpty && incoming.items.isEmpty {
                     emptyState
                 } else {
                     LazyVGrid(columns: columns, spacing: 10) {
@@ -51,11 +59,7 @@ struct MediaBinView: View {
                 }
             }
             .background(isDropTargeted ? Color.accentColor.opacity(0.12) : Color.clear)
-            .dropDestination(for: URL.self) { urls, _ in
-                let files = urls.filter(\.isFileURL)
-                store.importMedia(files)
-                return !files.isEmpty
-            } isTargeted: { isDropTargeted = $0 }
+            .onDrop(of: MediaDrop.types, delegate: MediaBinDropDelegate(store: store, isTargeted: $isDropTargeted))
         }
         .accessibilityIdentifier("MediaBin")
     }
@@ -93,11 +97,102 @@ struct MediaBinView: View {
             Image(systemName: "film.stack")
                 .font(.largeTitle)
                 .foregroundStyle(.secondary)
-            Text("Drop media files here\nor click Import.")
+            Text("Drop media files or photos here\nor click Import.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, minHeight: 200)
+    }
+}
+
+/// Drops on the media bin: files from the Finder and file promises from Photos (see `MediaDrop`).
+/// The `handle...` methods take any `TimelineDropInfo`, so they are tested with a double.
+@MainActor
+struct MediaBinDropDelegate: DropDelegate {
+    let store: ProjectStore
+    @Binding var isTargeted: Bool
+
+    func validateDrop(info: DropInfo) -> Bool { handleValidate(info) }
+    func dropEntered(info: DropInfo) { handleEntered(info) }
+    func dropExited(info: DropInfo) { handleExited(info) }
+    func performDrop(info: DropInfo) -> Bool {
+        handlePerform(info, pasteboardPromises: { PasteboardFilePromise.fromDragPasteboard() })
+    }
+
+    func handleValidate(_ info: some TimelineDropInfo) -> Bool {
+        MediaDrop.accepts(info)
+    }
+
+    func handleEntered(_ info: some TimelineDropInfo) {
+        isTargeted = MediaDrop.accepts(info)
+    }
+
+    func handleExited(_ info: some TimelineDropInfo) {
+        isTargeted = false
+    }
+
+    func handlePerform(_ info: some TimelineDropInfo, pasteboardPromises: () -> [PromisedFile] = { [] }) -> Bool {
+        isTargeted = false
+        return MediaDrop.perform(info, store: store, placement: nil, pasteboardPromises: pasteboardPromises)
+    }
+}
+
+/// Media arriving from Photos: one row per item (name, progress or a spinner while the source
+/// does not report it, the state, Cancel) and Cancel All.
+struct IncomingMediaList: View {
+    @ObservedObject var incoming: IncomingMedia
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Receiving from Photos")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Button("Cancel All") { incoming.cancelAll() }
+                    .controlSize(.small)
+                    .disabled(!incoming.items.contains { $0.state == .receiving })
+                    .accessibilityIdentifier("CancelAllIncoming")
+            }
+            ForEach(incoming.items) { item in
+                HStack(spacing: 6) {
+                    Text(item.name)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    switch item.state {
+                    case .receiving:
+                        if let fraction = item.fraction {
+                            ProgressView(value: fraction)
+                                .frame(width: 60)
+                        } else {
+                            ProgressView()
+                                .controlSize(.mini)
+                        }
+                        Button {
+                            incoming.cancel(item.id)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Stop waiting for “\(item.name)”")
+                    case .received:
+                        Image(systemName: "checkmark.circle")
+                            .foregroundStyle(.green)
+                            .help("Received; imported with the rest of its batch")
+                    case let .failed(reason):
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                            .help(reason)
+                    case .cancelled:
+                        Text("Cancelled").foregroundStyle(.secondary)
+                    }
+                }
+                .font(.caption)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .accessibilityIdentifier("IncomingMedia")
     }
 }
 
