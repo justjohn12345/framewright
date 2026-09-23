@@ -1,6 +1,6 @@
 # Open findings
 
-## UX round (2026-09-23 review, `2026-09-23-ux-round-review.md`)
+## UX round (2026-09-23 review; report in git history at 95f445d)
 All eight findings are fixed and test gaps 1-5 are covered (see `integration-notes.md`, "UX round fixes"):
 1. VFR pictures are the frame containing the exact source time (`playback::pictureTimeFor`, FrameCache's time
    lookup; the slot lookup is gone from playback and export): `VariableFrameRatePictureTests` (both backends, paused

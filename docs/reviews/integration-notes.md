@@ -300,7 +300,7 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   bin's drop, test them with a `TimelineDropInfo` double whose providers carry the promise types;
   slow-motion and iPhone VFR media rely on `pictureTimeFor` (see "UX round fixes").
 
-## UX round fixes (`2026-09-23-ux-round-review.md`)
+## UX round fixes (2026-09-23 UX round review; report in git history at 95f445d)
 State: full Framewright scheme green (428 EngineTests, 115 AppTests, one known skip: gap 9 below in
 `open-findings.md`), zero warnings; all 428 EngineTests clean under ThreadSanitizer
 (`-enableThreadSanitizer YES`; three timing/allocation tests skip themselves there).
