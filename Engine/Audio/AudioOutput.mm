@@ -47,8 +47,8 @@ void renderInto(RenderContext *ctx, const AudioTimeStamp *timestamp, AVAudioFram
     const uint64_t entry = HostClock::machToNanos(mach_absolute_time());
     const bool valid =
         timestamp && (timestamp->mFlags & kAudioTimeStampHostTimeValid) != 0 && timestamp->mHostTime != 0;
-    const uint64_t io =
-        valid ? HostClock::machToNanos(timestamp->mHostTime) : entry + ctx->fallbackIoOffsetNanos.load(std::memory_order_relaxed);
+    const uint64_t io = valid ? HostClock::machToNanos(timestamp->mHostTime)
+                              : entry + ctx->fallbackIoOffsetNanos.load(std::memory_order_relaxed);
     if (!valid) {
         ctx->hostTimeFallbacks.fetch_add(1, std::memory_order_relaxed);
     }
@@ -105,6 +105,15 @@ uint32_t outputUnitProperty(AudioUnit unit, AudioUnitPropertyID property) {
 
 std::string describe(NSException *e) {
     return e.reason ? std::string(e.reason.UTF8String) : std::string("exception");
+}
+
+/// AutomaticAudioOutput's default engine: AudioOutput::create.
+media::Result<std::unique_ptr<IAudioOutput>> createEngine(AudioMixer &mixer) {
+    auto created = AudioOutput::create(mixer);
+    if (!created.ok()) {
+        return std::move(created).error();
+    }
+    return std::unique_ptr<IAudioOutput>(std::move(created).value());
 }
 
 } // namespace
@@ -176,7 +185,8 @@ struct AudioOutput::Impl {
             b.pipelineLatency = b.presentationLatency;
         }
         if (b.deviceSampleRate > 0 && b.deviceSampleRate != b.mixerSampleRate) {
-            b.converterDelay = AudioOutput::measureConverterDelay(b.mixerSampleRate, b.deviceSampleRate, mixer->channels());
+            b.converterDelay =
+                AudioOutput::measureConverterDelay(b.mixerSampleRate, b.deviceSampleRate, mixer->channels());
         }
         // The engine's own mixer latency is already in the pipeline figure; add only the part of
         // the measured converter delay it does not report.
@@ -438,14 +448,14 @@ double AudioOutput::measureConverterDelay(double fromRate, double toRate, int ch
     @autoreleasepool {
         @try {
             AVAudioEngine *engine = [[AVAudioEngine alloc] init];
-            AVAudioFormat *in = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:fromRate
-                                                                               channels:static_cast<AVAudioChannelCount>(channels)];
-            AVAudioFormat *out = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:toRate
-                                                                                channels:static_cast<AVAudioChannelCount>(channels)];
+            const auto channelCount = static_cast<AVAudioChannelCount>(channels);
+            AVAudioFormat *in = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:fromRate channels:channelCount];
+            AVAudioFormat *out = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:toRate channels:channelCount];
             __block int64_t position = 0;
             AVAudioSourceNode *source = [[AVAudioSourceNode alloc]
                 initWithFormat:in
-                   renderBlock:^OSStatus(BOOL *, const AudioTimeStamp *, AVAudioFrameCount frames, AudioBufferList *abl) {
+                   renderBlock:^OSStatus(BOOL *, const AudioTimeStamp *, AVAudioFrameCount frames,
+                                         AudioBufferList *abl) {
                      for (UInt32 b = 0; b < abl->mNumberBuffers; ++b) {
                          auto *d = static_cast<float *>(abl->mBuffers[b].mData);
                          for (AVAudioFrameCount k = 0; k < frames; ++k) {
@@ -471,9 +481,11 @@ double AudioOutput::measureConverterDelay(double fromRate, double toRate, int ch
             std::vector<double> rendered;
             rendered.reserve(static_cast<size_t>(total));
             while (static_cast<AVAudioFramePosition>(rendered.size()) < total) {
-                const AVAudioFrameCount want =
-                    static_cast<AVAudioFrameCount>(std::min<AVAudioFramePosition>(4096, total - static_cast<AVAudioFramePosition>(rendered.size())));
-                if ([engine renderOffline:want toBuffer:buffer error:&error] != AVAudioEngineManualRenderingStatusSuccess) {
+                const auto left = total - static_cast<AVAudioFramePosition>(rendered.size());
+                const auto want = static_cast<AVAudioFrameCount>(std::min<AVAudioFramePosition>(4096, left));
+                const AVAudioEngineManualRenderingStatus status =
+                    [engine renderOffline:want toBuffer:buffer error:&error];
+                if (status != AVAudioEngineManualRenderingStatusSuccess) {
                     break;
                 }
                 const float *d = buffer.floatChannelData[0];
@@ -489,7 +501,8 @@ double AudioOutput::measureConverterDelay(double fromRate, double toRate, int ch
             const auto last = static_cast<int64_t>(std::ceil((kBurstStart + kBurstLength + 0.006) * toRate));
             for (int lag = -maxLag; lag <= maxLag; ++lag) {
                 double sum = 0.0;
-                for (int64_t n = std::max<int64_t>(0, first); n < last && n < static_cast<int64_t>(rendered.size()); ++n) {
+                const int64_t end = std::min<int64_t>(last, static_cast<int64_t>(rendered.size()));
+                for (int64_t n = std::max<int64_t>(0, first); n < end; ++n) {
                     sum += rendered[static_cast<size_t>(n)] * burst(static_cast<double>(n - lag) / toRate);
                 }
                 r[static_cast<size_t>(lag + maxLag)] = sum;
@@ -639,14 +652,7 @@ NullAudioOutput::Capture NullAudioOutput::capture() const {
 
 AutomaticAudioOutput::AutomaticAudioOutput(AudioMixer &mixer, EngineFactory engineFactory,
                                            std::chrono::milliseconds retryInterval)
-    : mixer_(mixer), engineFactory_(engineFactory ? std::move(engineFactory)
-                                                  : EngineFactory([](AudioMixer &m) -> media::Result<std::unique_ptr<IAudioOutput>> {
-                                                        auto created = AudioOutput::create(m);
-                                                        if (!created.ok()) {
-                                                            return std::move(created).error();
-                                                        }
-                                                        return std::unique_ptr<IAudioOutput>(std::move(created).value());
-                                                    })),
+    : mixer_(mixer), engineFactory_(engineFactory ? std::move(engineFactory) : EngineFactory(&createEngine)),
       retryInterval_(retryInterval) {}
 
 AutomaticAudioOutput::~AutomaticAudioOutput() {
@@ -716,7 +722,9 @@ Status AutomaticAudioOutput::start() {
             }
         }
         const auto now = std::chrono::steady_clock::now();
-        if (!done && (!attempted_ || engineFailed_.load(std::memory_order_acquire) || now - lastAttempt_ >= retryInterval_)) {
+        const bool retryDue =
+            !attempted_ || engineFailed_.load(std::memory_order_acquire) || now - lastAttempt_ >= retryInterval_;
+        if (!done && retryDue) {
             attempted_ = true;
             lastAttempt_ = now;
             nextAttemptNanos_.store(

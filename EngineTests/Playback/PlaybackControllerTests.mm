@@ -313,7 +313,8 @@ double rmsOver(const audio::NullAudioOutput::Capture &capture, int64_t from, int
     // the rendered position, less the 2x decimation filter's delay: 1.2 s + 2 * output seconds.
     const double filterDelay = 2.0 * h.controller->mixer().processingLatency(2);
     XCTAssertGreaterThan(filterDelay, 0.0);
-    XCTAssertEqualWithAccuracy(secondsOf(h.controller->clock().now()), static_cast<double>(p1) / kSr - filterDelay, 1e-8);
+    XCTAssertEqualWithAccuracy(secondsOf(h.controller->clock().now()), static_cast<double>(p1) / kSr - filterDelay,
+                               1e-8);
     // The beep of a' (2.0 s) was played at 2x (low-pass decimated, still well above threshold).
     const auto beep = beepAt(h.output->capture(), 1.2);
     XCTAssertTrue(beep.has_value(), @"audio plays at 2x");
@@ -502,13 +503,15 @@ double rmsOver(const audio::NullAudioOutput::Capture &capture, int64_t from, int
         return;
     }
     h.load();
-    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return h.output->isRunning(); }), @"opening a sequence warms the output");
+    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return h.output->isRunning(); }),
+                  @"opening a sequence warms the output");
     XCTAssertGreaterThanOrEqual(h.playAndWait(), 0.0);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     const auto pausedAt = SteadyClock::now();
     h.controller->pause();
     XCTAssertTrue(h.output->isRunning());
-    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return !h.output->isRunning(); }), @"stopped after the idle timeout");
+    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return !h.output->isRunning(); }),
+                  @"stopped after the idle timeout");
     const double idleMs = std::chrono::duration<double, std::milli>(SteadyClock::now() - pausedAt).count();
     XCTAssertGreaterThanOrEqual(idleMs, 250.0, @"not before the timeout");
     XCTAssertFalse(h.controller->stats().outputRunning);
@@ -896,7 +899,8 @@ double rmsOver(const audio::NullAudioOutput::Capture &capture, int64_t from, int
     XCTAssertTrue(good.presented.layers.size() == 1 && good.presented.layers[0].exact);
     // Replace frame 30's slot with a buffer Metal cannot map (not IOSurface backed), then seek
     // there: the source keeps the previous picture and counts a map failure, not a hit.
-    XCTAssertTrue(h.pool->waitUntilIdle(std::chrono::seconds(10)), @"no decoder writes frame 30 behind the test's back");
+    XCTAssertTrue(h.pool->waitUntilIdle(std::chrono::seconds(10)),
+                  @"no decoder writes frame 30 behind the test's back");
     CVPixelBufferRef raw = nullptr;
     XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32BGRA, nullptr, &raw),
                    kCVReturnSuccess);

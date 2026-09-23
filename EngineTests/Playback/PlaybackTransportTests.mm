@@ -130,7 +130,8 @@ struct Worst {
     XCTAssertEqual(rig.controller->clock().mode(), audio::ClockMode::HostTime, @"4x: video only");
     measure("setRate(1) playing", [&] { rig.controller->setRate(1.0); });
     XCTAssertEqual(rig.controller->state(), PlaybackState::Playing, @"4x -> 1x without pre-roll");
-    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return rig.controller->clock().mode() == audio::ClockMode::AudioSamples; }),
+    auto onAudioClock = [&] { return rig.controller->clock().mode() == audio::ClockMode::AudioSamples; };
+    XCTAssertTrue(PlaybackHarness::waitUntil(onAudioClock),
                   @"the audio joins the running playback");
     rig.tones->setReadsBlocked(true);
     measure("seek playing", [&] { rig.controller->seek(CMTimeMake(5, 1)); });
@@ -243,7 +244,8 @@ struct Worst {
     rig.controller->seek(kCMTimeZero);
     rig.controller->setRate(1.0);
     XCTAssertTrue(rig.waitForState(PlaybackState::Playing));
-    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return rig.controller->clock().mode() == audio::ClockMode::AudioSamples; }));
+    XCTAssertTrue(PlaybackHarness::waitUntil(
+        [&] { return rig.controller->clock().mode() == audio::ClockMode::AudioSamples; }));
     XCTAssertTrue(PlaybackHarness::waitUntil([&] {
         return std::fabs(rig.controller->clock().outputLatency() - rig.out->outputLatency()) < 1e-9;
     }));
@@ -257,13 +259,13 @@ struct Worst {
     ToneRig rig(1);
     dispatch_queue_t queue = dispatch_queue_create("playback.error.test", DISPATCH_QUEUE_SERIAL);
     std::atomic<bool> errorSeen{false};
-    rig.controller->setObserver(queue, PlaybackObserver{[&](const PlaybackStatus &status) {
-                                                             if (status.lastError &&
-                                                                 status.lastError->code == PlaybackErrorCode::AudioDeviceLost) {
-                                                                 errorSeen = true;
-                                                             }
-                                                         },
-                                                         nullptr});
+    PlaybackObserver observer;
+    observer.statusChanged = [&](const PlaybackStatus &status) {
+        if (status.lastError && status.lastError->code == PlaybackErrorCode::AudioDeviceLost) {
+            errorSeen = true;
+        }
+    };
+    rig.controller->setObserver(queue, observer);
     rig.load();
     rig.controller->play();
     XCTAssertTrue(rig.waitForState(PlaybackState::Playing));
@@ -316,8 +318,9 @@ struct Worst {
     XCTAssertTrue(PlaybackHarness::waitUntil([&] { return rig.tones->blockedReads.load() >= 1; }));
     // The playing clip goes away (the sequence goes on to 20 s): its source must be destroyed.
     Track &a1 = rig.sequence().audioTracks[0];
-    a1.clips.erase(std::remove_if(a1.clips.begin(), a1.clips.end(), [&](const Clip &c) { return c.id == rig.clips[0]; }),
-                   a1.clips.end());
+    a1.clips.erase(
+        std::remove_if(a1.clips.begin(), a1.clips.end(), [&](const Clip &c) { return c.id == rig.clips[0]; }),
+        a1.clips.end());
     const double edit = timed([&] { rig.publish(); });
     Worst worst;
     worst.note("modelChanged", edit);
@@ -350,7 +353,8 @@ struct Worst {
     const uint64_t playingStart = rig.producerWakeups();
     const auto playingT0 = SteadyClock::now();
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    const double playingRate = static_cast<double>(rig.producerWakeups() - playingStart) / (msSince(playingT0) / 1000.0);
+    const double playingRate =
+        static_cast<double>(rig.producerWakeups() - playingStart) / (msSince(playingT0) / 1000.0);
     rig.controller->pause();
     // The device keeps rendering (silence); the paused sources top up (at least to the refill
     // level, then on to the lookahead) and go to sleep.

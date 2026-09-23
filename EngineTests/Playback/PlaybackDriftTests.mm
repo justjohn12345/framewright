@@ -140,8 +140,9 @@ DriftResult runDrift(const std::string &path, int clips, double speedup) {
             ++r.indexErrors;
             r.worstIndexError = std::max(r.worstIndexError, std::llabs(s.presented.frameIndex - expected));
             if (r.failures.size() < 5) {
-                r.failures.push_back("vsync " + std::to_string(j) + ": frame " + std::to_string(s.presented.frameIndex) +
-                                     ", schedule says " + std::to_string(expected));
+                r.failures.push_back("vsync " + std::to_string(j) + ": frame " +
+                                     std::to_string(s.presented.frameIndex) + ", schedule says " +
+                                     std::to_string(expected));
             }
         }
         bool late = s.presented.layers.empty();
@@ -175,13 +176,15 @@ DriftResult runDrift(const std::string &path, int clips, double speedup) {
     const int64_t frames = static_cast<int64_t>(capture.samples.size()) / 2;
     for (int c = 0; c < clips; ++c) {
         const int64_t beep = std::llround((c * 10.0 + 2.0) * kSr);
-        const auto onset = findBeepOnset(capture.samples.data(), frames, 2, kSr, beep - capture.firstSequenceSample - 2400);
+        const int64_t searchFrom = beep - capture.firstSequenceSample - 2400;
+        const auto onset = findBeepOnset(capture.samples.data(), frames, 2, kSr, searchFrom);
         if (!onset) {
             r.failures.push_back("no beep for clip " + std::to_string(c));
             continue;
         }
         ++r.beepsFound;
-        const int64_t error = std::llround(*onset * kSr) + capture.firstSequenceSample - (beep + kBeepDetectorLatencyFrames48k);
+        const int64_t detected = std::llround(*onset * kSr) + capture.firstSequenceSample;
+        const int64_t error = detected - (beep + kBeepDetectorLatencyFrames48k);
         r.worstBeepError = std::max(r.worstBeepError, std::llabs(error));
     }
     return r;
@@ -193,8 +196,8 @@ void report(XCTestCase *test, const char *label, const DriftResult &r, int clips
           @"edge, skipped); burn-in errors %d; late %d (%.2f %%), dropped %llu; audio: %d/%d beeps, worst %lld samples "
           @"from the timeline, underruns %llu (%llu frames), mixer position vs rendered %lld samples",
           label, clips * 10, r.wallSeconds, r.presentations, r.indexErrors, r.boundarySkips, r.burnInErrors,
-          r.latePresentations, 100.0 * r.latePresentations / std::max(1, r.presentations), r.dropped, r.beepsFound, clips,
-          r.worstBeepError, r.underruns, r.underrunFrames, r.positionError);
+          r.latePresentations, 100.0 * r.latePresentations / std::max(1, r.presentations), r.dropped, r.beepsFound,
+          clips, r.worstBeepError, r.underruns, r.underrunFrames, r.positionError);
 }
 
 } // namespace

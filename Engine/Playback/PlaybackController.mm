@@ -64,7 +64,6 @@ double absRate(double rate) {
 
 // MARK: - Shared core (control side + frame source)
 
-
 struct PlaybackController::Core {
     Core(std::shared_ptr<audio::HostClock> host, double sampleRate, std::shared_ptr<FrameCache> frameCache)
         : clock(std::move(host), sampleRate), cache(std::move(frameCache)) {}
@@ -734,7 +733,8 @@ void PlaybackController::warmAudioLocked() {
     if (now < displayChangedAt_ + config_.audioWarmDelay) {
         return;
     }
-    const bool faded = !outputStarted_ || mixer_->stopCompleted(lastStopSerial_) || now - lastStopAt_ >= config_.stopFadeTimeout;
+    const bool faded =
+        !outputStarted_ || mixer_->stopCompleted(lastStopSerial_) || now - lastStopAt_ >= config_.stopFadeTimeout;
     if (!faded) {
         return;
     }
@@ -754,8 +754,8 @@ void PlaybackController::advanceJoinLocked(CMTime t) {
         if (outputStarted_ && !mixer_->stopCompleted(lastStopSerial_) && now - lastStopAt_ < config_.stopFadeTimeout) {
             return;
         }
-        const CMTime at = snapToFrame(t + CMTimeMakeWithSeconds(config_.audioJoinLeadSeconds * rate_, kPreciseTimescale),
-                                      sequence->frameDuration, SnapMode::Ceil);
+        const CMTime lead = CMTimeMakeWithSeconds(config_.audioJoinLeadSeconds * rate_, kPreciseTimescale);
+        const CMTime at = snapToFrame(t + lead, sequence->frameDuration, SnapMode::Ceil);
         if (at >= sequence->duration()) {
             return; // too close to the end to bother
         }
@@ -1226,7 +1226,8 @@ PlaybackStats PlaybackController::stats() const {
     // The HUD rate decays to 0 once presentations stop (paused view, stalled display link).
     const uint64_t lastPresent = core_->lastClockPresentNanos.load(std::memory_order_relaxed);
     const uint64_t hostNow = core_->clock.hostClock()->nowNanos();
-    s.fps = lastPresent > 0 && hostNow - lastPresent < 500'000'000ull ? core_->fps.load(std::memory_order_relaxed) : 0.0;
+    const bool recent = lastPresent > 0 && hostNow - lastPresent < 500'000'000ull;
+    s.fps = recent ? core_->fps.load(std::memory_order_relaxed) : 0.0;
     s.clockMode = core_->clock.mode();
     s.clockTime = core_->clock.now();
     s.outputLatency = core_->clock.outputLatency();

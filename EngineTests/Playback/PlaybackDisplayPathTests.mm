@@ -197,8 +197,8 @@ JitterRun runWithLateCallbacks(ToneRig &rig, bool stampEntryTime) {
     auto audibleAt = [&](int64_t sample) -> std::optional<uint64_t> {
         for (const auto &e : timeline) {
             if (e.transportSample >= 0 && sample >= e.transportSample && sample < e.transportSample + e.frames) {
-                return e.ioHostNanos + static_cast<uint64_t>(static_cast<double>(sample - e.transportSample) * 1e9 / kSr) +
-                       static_cast<uint64_t>(latency * 1e9);
+                const double intoBlock = static_cast<double>(sample - e.transportSample) / kSr;
+                return e.ioHostNanos + static_cast<uint64_t>((intoBlock + latency) * 1e9);
             }
         }
         return std::nullopt;

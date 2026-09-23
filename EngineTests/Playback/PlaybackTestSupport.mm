@@ -105,8 +105,9 @@ void ScriptedAudioOutput::resetCapture() {
 // MARK: - ToneRig
 
 ToneRig::ToneRig(int clipCount, const std::function<void(PlaybackConfig &)> &adjust)
-    : tones(std::make_shared<ToneBehavior>()), router(makeToneRouter(tones)), cache(std::make_shared<media::FrameCache>()),
-      pool(std::make_shared<media::DecodePool>(router, cache)), host(audio::HostClock::makeVirtual()) {
+    : tones(std::make_shared<ToneBehavior>()), router(makeToneRouter(tones)),
+      cache(std::make_shared<media::FrameCache>()), pool(std::make_shared<media::DecodePool>(router, cache)),
+      host(audio::HostClock::makeVirtual()) {
     const double sr = 48000.0;
     tones->lengthFrames = static_cast<int64_t>(20 * sr);
     PlaybackConfig config;
@@ -318,8 +319,9 @@ void PlaybackHarness::setClipGain(ClipId clip, double gainDb) {
 void PlaybackHarness::moveClipToTrack(ClipId clipId, TrackId trackId) {
     Clip moved = *sequence().findClip(clipId);
     Track &from = *sequence().findTrack(moved.trackId);
-    from.clips.erase(std::remove_if(from.clips.begin(), from.clips.end(), [&](const Clip &c) { return c.id == clipId; }),
-                     from.clips.end());
+    from.clips.erase(
+        std::remove_if(from.clips.begin(), from.clips.end(), [&](const Clip &c) { return c.id == clipId; }),
+        from.clips.end());
     moved.trackId = trackId;
     Track &to = *sequence().findTrack(trackId);
     to.clips.push_back(moved);

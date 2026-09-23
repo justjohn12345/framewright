@@ -88,7 +88,8 @@ AudioMixer::~AudioMixer() {
         reclaimRetired();
         std::unordered_set<Plan *> plans(garbage_.plans.begin(), garbage_.plans.end());
         garbage_.plans.clear();
-        for (Plan *plan : {pending_.exchange(nullptr, std::memory_order_acq_rel), current_, fadePlan_, blendPlan_, latest_}) {
+        Plan *const pending = pending_.exchange(nullptr, std::memory_order_acq_rel);
+        for (Plan *plan : {pending, current_, fadePlan_, blendPlan_, latest_}) {
             if (plan) {
                 plans.insert(plan);
             }
@@ -383,7 +384,8 @@ void AudioMixer::prepare(CMTime at) {
 bool AudioMixer::isPrimed(CMTime at) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const std::vector<Window> windows = primeWindows(sampleFor(at));
-    return std::all_of(windows.begin(), windows.end(), [](const Window &w) { return w.source->isReady(w.from, w.frames); });
+    return std::all_of(windows.begin(), windows.end(),
+                       [](const Window &w) { return w.source->isReady(w.from, w.frames); });
 }
 
 bool AudioMixer::prime(CMTime at, std::chrono::milliseconds timeout) {
@@ -790,8 +792,8 @@ void AudioMixer::render(float *interleaved, int frames, int channels, uint64_t h
         }
     }
     if (k < frames && outGain_ != 1.0f) {
-        vDSP_vsmul(interleaved + static_cast<size_t>(k) * ch, 1, &outGain_, interleaved + static_cast<size_t>(k) * ch, 1,
-                   static_cast<vDSP_Length>(static_cast<size_t>(frames - k) * ch));
+        float *rest = interleaved + static_cast<size_t>(k) * ch;
+        vDSP_vsmul(rest, 1, &outGain_, rest, 1, static_cast<vDSP_Length>(static_cast<size_t>(frames - k) * ch));
     }
     const float lo = -1.0f;
     const float hi = 1.0f;
