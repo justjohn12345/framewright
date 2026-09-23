@@ -310,14 +310,17 @@ struct ProbedFile {
 }
 
 - (void)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID {
+    VE_ASSERT_MAIN();
     [self entryForClip:clipID].video = fromVE(params);
 }
 
 - (void)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID {
+    VE_ASSERT_MAIN();
     [self entryForClip:clipID].audio = fromVE(params);
 }
 
 - (NSUInteger)count {
+    VE_ASSERT_MAIN();
     return _changes.size();
 }
 
@@ -1836,7 +1839,8 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     if (!CMTIME_IS_NUMERIC(duration)) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The transition duration is not a valid time."];
     }
-    int64_t frames = frameIndexAt(snapToFrame(duration, frameDuration, SnapMode::Round), frameDuration, SnapMode::Round);
+    const int64_t frames =
+        frameIndexAt(snapToFrame(duration, frameDuration, SnapMode::Round), frameDuration, SnapMode::Round);
     if (frames < 1) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
                                      message:@"A transition must be at least one frame long."];
@@ -1849,32 +1853,35 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
         return [VEEditResult failureWithCode:refusalCode(limit)
                                      message:transitionRefusal(limit, frames, frameDuration)];
     }
+    // Each transition is fitted to its own cut: the linked partners' cut never shortens the
+    // requested one, nor the other way round.
+    const int64_t requested = frames;
     NSMutableArray<NSString *> *notes = [NSMutableArray array];
-    if (frames > limit.maximumFrames) {
-        frames = limit.maximumFrames;
-        [notes addObject:[NSString stringWithFormat:@"Shortened to %@: %@", describeFrames(frames, frameDuration),
+    int64_t mainFrames = requested;
+    if (mainFrames > limit.maximumFrames) {
+        mainFrames = limit.maximumFrames;
+        [notes addObject:[NSString stringWithFormat:@"Shortened to %@: %@", describeFrames(mainFrames, frameDuration),
                                                     toNS(limit.reason)]];
     }
 
     // The linked partners' cut (the audio under a video dissolve).
     std::optional<std::pair<ClipId, ClipId>> partners;
+    int64_t partnerFrames = requested;
     if (options & VETransitionOptionIncludeLinked) {
         const Clip *fromClip = sequence.findClip(from);
         const Clip *toClip = sequence.findClip(to);
         if (fromClip && toClip && fromClip->linkedClipId && toClip->linkedClipId) {
             const TransitionLimit linked =
                 transitionLimit(_project, sequenceId, *fromClip->linkedClipId, *toClip->linkedClipId);
-            if (linked.maximumFrames == 0) {
+            if (linked.maximumFrames == 0 ||
+                (requested > linked.maximumFrames && !(options & VETransitionOptionFitToCut))) {
                 [notes addObject:[NSString stringWithFormat:@"The linked clips got no transition: %@",
-                                                            transitionRefusal(linked, frames, frameDuration)]];
-            } else if (frames > linked.maximumFrames && !(options & VETransitionOptionFitToCut)) {
-                [notes addObject:[NSString stringWithFormat:@"The linked clips got no transition: %@",
-                                                            transitionRefusal(linked, frames, frameDuration)]];
+                                                            transitionRefusal(linked, requested, frameDuration)]];
             } else {
-                if (frames > linked.maximumFrames) {
-                    frames = linked.maximumFrames;
-                    [notes addObject:[NSString stringWithFormat:@"Shortened to %@ to fit the linked clips: %@",
-                                                                describeFrames(frames, frameDuration),
+                if (partnerFrames > linked.maximumFrames) {
+                    partnerFrames = linked.maximumFrames;
+                    [notes addObject:[NSString stringWithFormat:@"The linked clips' transition was shortened to %@: %@",
+                                                                describeFrames(partnerFrames, frameDuration),
                                                                 toNS(linked.reason)]];
                 }
                 partners = std::make_pair(*fromClip->linkedClipId, *toClip->linkedClipId);
@@ -1884,13 +1891,13 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
         }
     }
 
-    const CMTime length = timeForFrame(frames, frameDuration);
-    auto main = std::make_unique<AddTransition>(sequenceId, from, to, length);
+    auto main = std::make_unique<AddTransition>(sequenceId, from, to, timeForFrame(mainFrames, frameDuration));
     AddTransition *mainRaw = main.get();
     AddTransition *partnerRaw = nullptr;
     std::unique_ptr<Command> command;
     if (partners) {
-        auto partner = std::make_unique<AddTransition>(sequenceId, partners->first, partners->second, length);
+        auto partner = std::make_unique<AddTransition>(sequenceId, partners->first, partners->second,
+                                                       timeForFrame(partnerFrames, frameDuration));
         partnerRaw = partner.get();
         std::vector<std::unique_ptr<Command>> children;
         children.push_back(std::move(main));

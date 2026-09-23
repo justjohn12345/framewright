@@ -116,13 +116,17 @@ typedef NS_OPTIONS(NSUInteger, VETransitionOptions) {
     /// the result's note says so. Still refused when not even one frame fits.
     VETransitionOptionFitToCut = 1 << 0,
     /// Also add a transition on the cut between the two clips' linked partners (the audio
-    /// crossfade of a video dissolve), with the same duration, in the same undo step. When the
-    /// partners do not meet at a cut, or theirs cannot take the transition, only the requested
-    /// one is added and the note says why.
+    /// crossfade of a video dissolve) of the requested duration, in the same undo step. With
+    /// FitToCut each of the two is fitted to its own cut independently (a tight audio cut never
+    /// shortens the video dissolve, nor the other way round) and the note names each shortening.
+    /// When the partners do not meet at a cut, or theirs cannot take the transition, only the
+    /// requested one is added and the note says why.
     VETransitionOptionIncludeLinked = 1 << 1,
 };
 
 /// New parameters for several clips, applied by -applyClipParams: as one undo step.
+/// Main thread only, like VEEngine (Swift sees it as @MainActor): build it where the edit is made.
+NS_SWIFT_UI_ACTOR
 @interface VEClipParamsBatch : NSObject
 /// Sets the video parameters of a clip on a video track (replaces an earlier entry for it).
 - (void)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID;

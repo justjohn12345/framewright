@@ -274,6 +274,52 @@ CMTime frames30(int64_t n) {
     XCTAssertTrue(single.ok, @"%@", single.message);
     XCTAssertEqual(single.createdIDs.count, 1u);
     XCTAssertTrue([single.note containsString:@"do not meet at a cut"], @"%@", single.note);
+
+    // Asymmetric room (review finding 1): each transition is fitted to its own cut. A = [0, 60),
+    // B = [60, 120), C = [120, 180) on V1 + A1, with plenty of media beyond every cut; a 100-frame
+    // crossfade [70, 170) on the audio B|C cut leaves the audio A|B cut room for 20 frames only.
+    VEAssetInfo *asset2 = nil;
+    VEEngine *tight = [self engineWithAsset:&asset2];
+    const auto ta = [self place:tight asset:asset2 at:0 from:0 to:60];
+    const auto tb = [self place:tight asset:asset2 at:60 from:90 to:150];
+    const auto tc = [self place:tight asset:asset2 at:120 from:200 to:260];
+    VEEditResult *neighbour = [tight addTransitionFromClip:tb.second toClip:tc.second duration:frames30(100)];
+    XCTAssertTrue(neighbour.ok, @"%@", neighbour.message);
+    XCTAssertEqual([tight transitionLimitFromClip:ta.second toClip:tb.second].maximumFrames, 20);
+    XCTAssertGreaterThanOrEqual([tight transitionLimitFromClip:ta.first toClip:tb.first].maximumFrames, 30);
+    const uint64_t beforeFit = tight.changeCount;
+    VEEditResult *fitted = [tight addTransitionFromClip:ta.first
+                                                 toClip:tb.first
+                                               duration:frames30(30)
+                                                options:VETransitionOptionIncludeLinked | VETransitionOptionFitToCut];
+    XCTAssertTrue(fitted.ok, @"%@", fitted.message);
+    XCTAssertEqual(fitted.createdIDs.count, 2u);
+    XCTAssertEqual(CMTimeCompare([tight transitionInfo:fitted.createdIDs[0].longLongValue].duration, frames30(30)), 0,
+                   @"the video dissolve keeps the requested length: its own cut has room");
+    XCTAssertEqual(CMTimeCompare([tight transitionInfo:fitted.createdIDs[1].longLongValue].duration, frames30(20)), 0,
+                   @"the audio crossfade is shortened to what its cut allows");
+    XCTAssertTrue([fitted.note containsString:@"The linked clips' transition was shortened to 20 frames"], @"%@",
+                  fitted.note);
+    XCTAssertFalse([fitted.note containsString:@"Shortened to"], @"the dissolve was not shortened: %@", fitted.note);
+    XCTAssertEqual(tight.changeCount, beforeFit + 1, @"one undo step");
+    XCTAssertEqual(tight.sequence.transitions.count, 3u);
+    XCTAssertTrue([tight undo]);
+    XCTAssertEqual(tight.sequence.transitions.count, 1u, @"both came off in one undo");
+
+    // The other way round: the video cut is the tight one (a neighbouring dissolve on B|C), the
+    // audio crossfade keeps the requested length; each shortening is noted on its own.
+    XCTAssertTrue([tight undo]); // the audio neighbour
+    XCTAssertTrue([tight addTransitionFromClip:tb.first toClip:tc.first duration:frames30(100)].ok);
+    VEEditResult *swapped = [tight addTransitionFromClip:ta.first
+                                                  toClip:tb.first
+                                                duration:frames30(30)
+                                                 options:VETransitionOptionIncludeLinked | VETransitionOptionFitToCut];
+    XCTAssertTrue(swapped.ok, @"%@", swapped.message);
+    XCTAssertEqual(swapped.createdIDs.count, 2u);
+    XCTAssertEqual(CMTimeCompare([tight transitionInfo:swapped.createdIDs[0].longLongValue].duration, frames30(20)), 0);
+    XCTAssertEqual(CMTimeCompare([tight transitionInfo:swapped.createdIDs[1].longLongValue].duration, frames30(30)), 0);
+    XCTAssertTrue([swapped.note hasPrefix:@"Shortened to 20 frames"], @"%@", swapped.note);
+    XCTAssertFalse([swapped.note containsString:@"linked clips"], @"%@", swapped.note);
 }
 
 - (void)testTransitionDurationIsBoundedByTheCut {
