@@ -1,10 +1,14 @@
-// Clock: sample-driven interpolation, monotonicity, rates, epochs, host-time fallback.
+// Clock: sample-driven interpolation (on IO timestamps), monotonicity, rates, epochs,
+// continuations (rate changes and audio joining a host-clock run without a jump or a freeze),
+// host-time fallback, and the single-control-writer check.
 
 #import <XCTest/XCTest.h>
 
 #include "../../Engine/Audio/Clock.h"
 
+#include <atomic>
 #include <thread>
+#include <vector>
 
 using namespace ve;
 using namespace ve::audio;
@@ -237,6 +241,160 @@ double seconds(CMTime t) {
         t.join();
     }
     XCTAssertEqual(violations.load(), 0);
+}
+
+- (void)testIOTimestampsGiveAContinuousLineThroughEveryCallback {
+    // Callbacks stamped with the IO time of their first frame, which lies one period after the
+    // callback runs (as AVAudioEngine's mHostTime does): readers between callbacks interpolate
+    // backwards into the block already rendered, so there is no jump when a callback lands.
+    auto host = HostClock::makeVirtual();
+    Clock clock(host, kRate);
+    clock.start(kCMTimeZero, 1.0);
+    const uint64_t period = static_cast<uint64_t>(512 * 1e9 / kRate);
+    const uint64_t h0 = host->nowNanos() + period; // IO time of the first block
+    double worst = 0.0;
+    double previous = -1.0;
+    for (int k = 0; k < 200; ++k) {
+        clock.advanceSamples(512, h0 + static_cast<uint64_t>(k) * period); // runs at h0 + (k - 1) P
+        for (int step = 0; step < 8; ++step) {
+            const uint64_t now = host->nowNanos();
+            const double t = seconds(clock.now());
+            const double ideal = now >= h0 ? static_cast<double>(now - h0) * 1e-9 : 0.0;
+            worst = std::max(worst, std::fabs(t - ideal));
+            XCTAssertGreaterThanOrEqual(t, previous);
+            previous = t;
+            host->advance(period / 8);
+        }
+    }
+    XCTAssertLessThan(worst, 1e-6, @"exactly the line through the IO timestamps (worst %.3g s)", worst);
+}
+
+- (void)testContinuationChangesRateWithoutAJumpOrAFreeze {
+    // 1x -> 2x on a device with 160 ms of output latency (a Bluetooth route): 160 ms of 1x audio
+    // are still in flight when the rate changes. The clock keeps the 1x line until the first 2x
+    // sample is audible, then follows the 2x samples.
+    auto host = HostClock::makeVirtual();
+    Clock clock(host, kRate);
+    const double latency = 0.160;
+    clock.setOutputLatency(latency);
+    const uint32_t first = clock.start(kCMTimeZero, 1.0);
+    const uint64_t period = static_cast<uint64_t>(512 * 1e9 / kRate);
+    const uint64_t h0 = host->nowNanos() + period;
+    int64_t position = 0; // sequence sample the next block renders
+    int k = 0;
+    auto callback = [&](uint32_t epoch, int rate) {
+        clock.advanceSamples(512, h0 + static_cast<uint64_t>(k) * period, epoch, position);
+        position += 512 * rate;
+        ++k;
+        host->advance(period);
+    };
+    for (int i = 0; i < 100; ++i) {
+        callback(first, 1);
+    }
+    host->advance(period / 3); // the switch happens between callbacks
+    const double atSwitch = seconds(clock.now());
+    const uint32_t second = clock.startContinuation(2.0);
+    XCTAssertNotEqual(second, first);
+    XCTAssertEqual(clock.rate(), 2.0);
+    XCTAssertEqualWithAccuracy(seconds(clock.now()), atSwitch, 1e-9, @"no jump at the switch");
+    // The render thread renders one more old-epoch block before it adopts the change.
+    host->advance(period - period / 3);
+    clock.advanceSamples(512, h0 + static_cast<uint64_t>(k) * period, first, position); // ignored: old epoch
+    position += 512;
+    ++k;
+    host->advance(period);
+    const int64_t origin = position;
+    double previous = seconds(clock.now());
+    double worstStep = 0.0;
+    const uint64_t probe = period / 8;
+    for (int i = 0; i < 60; ++i) {
+        clock.advanceSamples(512, h0 + static_cast<uint64_t>(k) * period, second, position);
+        position += 1024;
+        ++k;
+        for (int step = 0; step < 8; ++step) {
+            host->advance(probe);
+            const double t = seconds(clock.now());
+            XCTAssertGreaterThanOrEqual(t, previous);
+            worstStep = std::max(worstStep, t - previous);
+            previous = t;
+        }
+    }
+    // Steps never exceed the 2x advance of one probe interval (no jump), and the line reaches
+    // the render origin exactly when the first 2x sample is audible.
+    XCTAssertLessThanOrEqual(worstStep, 2.0 * static_cast<double>(probe) * 1e-9 + 1e-8);
+    const uint64_t originAudible = h0 + static_cast<uint64_t>(101) * period + static_cast<uint64_t>(latency * 1e9);
+    XCTAssertEqualWithAccuracy(seconds(clock.timeAt(originAudible)), static_cast<double>(origin) / kRate, 1e-6);
+    XCTAssertEqualWithAccuracy(seconds(clock.timeAt(originAudible + 100'000'000)),
+                               static_cast<double>(origin) / kRate + 0.2, 1e-6, @"then 2x");
+    XCTAssertEqualWithAccuracy(seconds(clock.timeAt(originAudible - 100'000'000)),
+                               static_cast<double>(origin) / kRate - 0.1, 1e-6, @"1x before");
+}
+
+- (void)testContinuationJoinsAudioIntoAHostClockRun {
+    auto host = HostClock::makeVirtual();
+    Clock clock(host, kRate);
+    clock.setOutputLatency(0.020);
+    clock.start(CMTimeMake(5, 1), 1.0, ClockMode::HostTime);
+    host->advance(300'000'000);
+    const double atJoin = seconds(clock.now());
+    XCTAssertEqualWithAccuracy(atJoin, 5.3, 1e-9);
+    const uint32_t epoch = clock.startContinuation(1.0);
+    XCTAssertEqual(clock.mode(), ClockMode::AudioSamples);
+    // The mixer starts at 5.35 s; its first block reaches the device 30 ms after the join and is
+    // audible 20 ms later: exactly when the host line reaches 5.35 s.
+    const uint64_t join = host->nowNanos();
+    const uint64_t io = join + 30'000'000;
+    const int64_t origin = std::llround(5.35 * kRate);
+    double previous = atJoin;
+    for (int i = 0; i < 40; ++i) {
+        host->advance(2'500'000);
+        if (i == 2) {
+            clock.advanceSamples(512, io, epoch, origin);
+        }
+        const double t = seconds(clock.now());
+        XCTAssertGreaterThanOrEqual(t, previous);
+        XCTAssertLessThanOrEqual(t - previous, 0.0025 + 1e-9, @"no jump");
+        previous = t;
+    }
+    XCTAssertEqualWithAccuracy(seconds(clock.timeAt(io + 20'000'000)), 5.35, 1e-6);
+    XCTAssertEqualWithAccuracy(seconds(clock.timeAt(join + 10'000'000)), 5.31, 1e-6, @"the host line before");
+}
+
+- (void)testOverlappingControlCallsAreDetected {
+    Clock clock(HostClock::makeVirtual(), kRate);
+    for (int i = 0; i < 10000; ++i) {
+        clock.setTime(CMTimeMake(i, 30));
+        clock.start(CMTimeMake(i, 30), 1.0);
+        clock.setOutputLatency(0.01);
+    }
+    XCTAssertEqual(clock.controlViolations(), 0u, @"one control thread is fine");
+    // Positive control: two control threads at once (what a device-change handler writing the
+    // latency from AVAudioEngine's thread used to do). It is a deliberate data race on the
+    // control state, which Thread Sanitizer would (rightly) report, so it only runs without it.
+#if defined(__has_feature) && __has_feature(thread_sanitizer)
+    NSLog(@"positive control skipped under Thread Sanitizer");
+#else
+    std::atomic<bool> go{false};
+    std::vector<std::thread> writers;
+    for (int w = 0; w < 2; ++w) {
+        writers.emplace_back([&, w] {
+            while (!go.load()) {
+            }
+            for (int i = 0; i < 200000 && clock.controlViolations() == 0; ++i) {
+                if (w == 0) {
+                    clock.setTime(CMTimeMake(i, 30));
+                } else {
+                    clock.setOutputLatency(0.001 * (i % 10));
+                }
+            }
+        });
+    }
+    go = true;
+    for (auto &t : writers) {
+        t.join();
+    }
+    XCTAssertGreaterThan(clock.controlViolations(), 0u, @"the check sees a second writer");
+#endif
 }
 
 @end

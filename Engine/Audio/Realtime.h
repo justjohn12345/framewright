@@ -103,13 +103,27 @@ class HostClock {
     std::atomic<uint64_t> virtualNow_;
 };
 
+// MARK: - Spin back-off
+
+/// Tells the CPU the caller is spinning (yield to the sibling hardware thread, save power, and
+/// avoid hammering the cache line a writer is about to publish). Realtime-safe: one
+/// instruction, no system call.
+inline void cpuRelax() noexcept {
+#if defined(__aarch64__) || defined(__arm64__)
+    __builtin_arm_yield();
+#elif defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#endif
+}
+
 // MARK: - SeqLock
 
 /// A sequence lock holding one trivially copyable T.
 ///
 /// Threading: exactly one writer at a time (callers serialise writers externally); any number
 /// of concurrent readers. store() is wait-free; load() is lock-free (it retries while a write
-/// is in progress, which lasts a few stores). Both are realtime-safe.
+/// is in progress, which lasts a few stores, backing off with cpuRelax() between attempts).
+/// Both are realtime-safe.
 template <class T> class SeqLock {
     static_assert(std::is_trivially_copyable_v<T>, "SeqLock needs a trivially copyable type");
     static constexpr size_t kWords = (sizeof(T) + sizeof(uint64_t) - 1) / sizeof(uint64_t);
@@ -135,6 +149,7 @@ template <class T> class SeqLock {
         for (;;) {
             const uint64_t before = sequence_.load(std::memory_order_acquire);
             if (before & 1u) {
+                cpuRelax();
                 continue;
             }
             for (size_t i = 0; i < kWords; ++i) {
@@ -144,6 +159,7 @@ template <class T> class SeqLock {
             if (sequence_.load(std::memory_order_relaxed) == before) {
                 break;
             }
+            cpuRelax();
         }
         T value;
         std::memcpy(&value, words.data(), sizeof(T));
