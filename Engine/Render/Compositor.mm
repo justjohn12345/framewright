@@ -637,7 +637,8 @@ const TextureCache &Compositor::textureCache() const {
     return impl_->textureCache;
 }
 
-Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device) {
+Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device,
+                                                       std::initializer_list<MTLPixelFormat> preparedFormats) {
     if (device == nil) {
         return makeError(MediaErrorCode::InvalidArgument, "Compositor: no Metal device");
     }
@@ -686,7 +687,7 @@ Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device) {
     impl->textureCache = std::move(cache).value();
 
     impl->pipelines.reserve(32);
-    for (MTLPixelFormat format : {MTLPixelFormatBGRA8Unorm, kIntermediateFormat}) {
+    for (MTLPixelFormat format : preparedFormats) {
         for (int bits = 0; bits < 8; ++bits) {
             PipelineKey key{(bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0, format};
             if (!key.hasPartner && key.bIsYCbCr) {

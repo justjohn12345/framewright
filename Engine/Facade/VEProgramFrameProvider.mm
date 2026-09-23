@@ -14,8 +14,10 @@ struct ProgramFrameProvider::Pending {
     uint64_t generation = 0;
     RenderGraph graph;
     std::vector<media::PixelBuffer> buffers;
+    std::vector<int> attempts; // per layer: requests made so far
     std::map<AssetId, std::vector<size_t>> queued;
     size_t remaining = 0;
+    media::Status status; // first failure
     std::function<void()> onReady;
 };
 
@@ -27,6 +29,7 @@ render::PreviewFrameSource ProgramFrameProvider::makeSource() const {
     return [shared](const render::PreviewFrameRequest &request, render::PreviewFrame &frame) {
         RenderGraph graph;
         std::vector<media::PixelBuffer> buffers;
+        media::Status status;
         {
             std::lock_guard<std::mutex> lock(shared->mutex);
             if (!shared->changed) {
@@ -35,18 +38,30 @@ render::PreviewFrameSource ProgramFrameProvider::makeSource() const {
             shared->changed = false;
             graph = shared->graph;
             buffers = shared->buffers;
+            status = shared->status;
         }
         frame.graph = std::move(graph);
         frame.textures.resize(frame.graph.layers.size());
         for (size_t i = 0; i < frame.textures.size(); ++i) {
             frame.textures[i].reset();
-            if (i < buffers.size() && buffers[i] && request.textureCache != nullptr) {
-                auto textures = request.textureCache->textures(buffers[i]);
-                if (textures.ok()) {
-                    frame.textures[i] = std::move(textures).value();
+            if (i >= buffers.size() || !buffers[i]) {
+                continue;
+            }
+            if (request.textureCache == nullptr) {
+                if (status.ok()) {
+                    status = media::makeError(media::MediaErrorCode::InvalidState,
+                                              "program monitor: the view has no texture cache (Metal unavailable)");
                 }
+                continue;
+            }
+            auto textures = request.textureCache->textures(buffers[i]);
+            if (textures.ok()) {
+                frame.textures[i] = std::move(textures).value();
+            } else if (status.ok()) {
+                status = std::move(textures).error();
             }
         }
+        frame.status = std::move(status);
         return true;
     };
 }
@@ -58,7 +73,7 @@ void ProgramFrameProvider::cancel() {
 void ProgramFrameProvider::show(RenderGraph graph, std::function<void()> onReady) {
     const uint64_t generation = ++generation_;
     if (graph.layers.empty()) {
-        publish(std::move(graph), {});
+        publish(std::move(graph), {}, media::okStatus());
         if (onReady) {
             onReady();
         }
@@ -67,6 +82,7 @@ void ProgramFrameProvider::show(RenderGraph graph, std::function<void()> onReady
     auto pending = std::make_shared<Pending>();
     pending->generation = generation;
     pending->buffers.resize(graph.layers.size());
+    pending->attempts.assign(graph.layers.size(), 0);
     pending->remaining = graph.layers.size();
     pending->onReady = std::move(onReady);
     for (size_t i = 0; i < graph.layers.size(); ++i) {
@@ -86,6 +102,7 @@ void ProgramFrameProvider::show(RenderGraph graph, std::function<void()> onReady
 
 void ProgramFrameProvider::request(const std::shared_ptr<Pending> &pending, size_t layer) {
     const VideoLayer &l = pending->graph.layers[layer];
+    ++pending->attempts[layer];
     std::weak_ptr<ProgramFrameProvider> weakSelf = weak_from_this();
     pool_->requestFrame(l.assetId, l.isStill ? kCMTimeZero : l.sourceTime,
                         [weakSelf, pending, layer](media::Result<media::ScrubFrame> result) {
@@ -104,10 +121,19 @@ void ProgramFrameProvider::deliver(const std::shared_ptr<Pending> &pending, size
     if (pending->generation != generation_) {
         return; // superseded by a newer show()
     }
+    if (!result.ok() && result.error().code == media::MediaErrorCode::Cancelled &&
+        pending->attempts[layer] <= kMaxRerequests) {
+        // Another request for the same asset (possibly from another client) replaced ours
+        // before it started; this frame is still wanted, so ask again.
+        request(pending, layer);
+        return;
+    }
     if (result.ok()) {
         pending->buffers[layer] = std::move(result).value().image;
+    } else if (pending->status.ok()) {
+        // The layer stays empty (the compositor skips it); the frame reports why.
+        pending->status = std::move(result).error();
     }
-    // A failed layer stays empty: the compositor skips it.
     const AssetId asset = pending->graph.layers[layer].assetId;
     auto &next = pending->queued[asset];
     if (!next.empty()) {
@@ -116,17 +142,18 @@ void ProgramFrameProvider::deliver(const std::shared_ptr<Pending> &pending, size
         request(pending, nextLayer);
     }
     if (--pending->remaining == 0) {
-        publish(std::move(pending->graph), std::move(pending->buffers));
+        publish(std::move(pending->graph), std::move(pending->buffers), std::move(pending->status));
         if (pending->onReady) {
             pending->onReady();
         }
     }
 }
 
-void ProgramFrameProvider::publish(RenderGraph graph, std::vector<media::PixelBuffer> buffers) {
+void ProgramFrameProvider::publish(RenderGraph graph, std::vector<media::PixelBuffer> buffers, media::Status status) {
     std::lock_guard<std::mutex> lock(shared_->mutex);
     shared_->graph = std::move(graph);
     shared_->buffers = std::move(buffers);
+    shared_->status = std::move(status);
     shared_->changed = true;
 }
 

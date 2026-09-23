@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "../Media/Result.h"
 #include "RenderGraph.h"
 #include "TextureCache.h"
 
@@ -28,11 +29,17 @@ struct PreviewFrameRequest {
 
 /// The frame to show: the graph and one TextureSet per layer (index-aligned with
 /// graph.layers; an empty TextureSet means the picture is not decoded yet and the layer is
-/// skipped). The view keeps one PreviewFrame and hands the same object to every call so its
-/// vectors keep their capacity: update it in place (assign/resize), avoid rebuilding it.
+/// skipped, which the view counts in skippedLayerCount). The view keeps one PreviewFrame and
+/// hands the same object to every call so its vectors keep their capacity: update it in place
+/// (assign/resize), avoid rebuilding it.
 struct PreviewFrame {
     RenderGraph graph;
     std::vector<TextureSet> textures;
+    /// Why a picture of this frame is missing, when it is an error rather than "not decoded
+    /// yet": a decode failure, or TextureCache::textures() failing. The view reports it as its
+    /// lastError once the frame is on screen (and clears lastError with the next frame whose
+    /// status is ok). Set it together with the frame (reset it when the problem is gone).
+    media::Status status;
 };
 
 /// Called on the view's render thread (never the main thread), one call at a time.

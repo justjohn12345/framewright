@@ -10,10 +10,22 @@ NS_ASSUME_NONNULL_BEGIN
 /// Rendering runs on a dedicated render thread owned by the view:
 /// - While not paused, the view's display link (NSView.displayLink, follows the view's screen)
 ///   fires on the render thread every vsync; each tick asks the frame source for the current
-///   frame and, if it changed, composites it into the next drawable and presents it.
+///   frame and, if it changed, composites it into the next drawable and presents it. A tick
+///   never blocks: when every frame slot is still on the GPU it is skipped (before asking the
+///   source or taking a drawable) and the frame is drawn at the next vsync.
 /// - While paused (the default) the display link is stopped and nothing renders until
 ///   -renderOnce is called (after a seek, an edit or a parameter change) or the view is resized.
-///   A paused view does no GPU work.
+///   A paused view does no GPU work. Pausing also releases unused texture-cache entries.
+/// - While the window is fully occluded (minimised, hidden, covered) the display link is stopped
+///   as well, and renderOnce is deferred; the current frame is redrawn when the window becomes
+///   visible again (NSWindowDidChangeOcclusionStateNotification).
+/// - A frame that could not be presented (no drawable from the window server, GPU busy) is not
+///   lost: it is redrawn at the next vsync, or, while the loop is stopped, retried shortly after
+///   (backing off, up to 8 times; then lastError says so).
+///
+/// Output: the drawable is 10-bit (MTLPixelFormatBGR10A2Unorm, tagged ITU-R BT.709) so 10-bit
+/// sources, opacity and dissolves do not band; it costs the same 4 bytes per pixel as 8-bit
+/// BGRA. -snapshot returns 8-bit.
 ///
 /// The frame source is C++ and set by the engine (see Engine/Render/VEPreviewView+Internal.h):
 /// VEEngine -attachProgramView: installs a still-frame source for the frame at the playhead;
@@ -53,17 +65,29 @@ NS_ASSUME_NONNULL_BEGIN
 /// debug HUD and tests).
 @property (atomic, readonly) NSUInteger renderCount;
 
+/// Layers drawn without their picture (not decoded yet, or failed), summed over every
+/// completed frame; `missingLayerCount` is the number in the most recently completed frame.
+/// For the debug HUD and tests.
+@property (atomic, readonly) NSUInteger skippedLayerCount;
+@property (atomic, readonly) NSUInteger missingLayerCount;
+
 /// Pixel size of the drawable (bounds x backing scale).
 @property (atomic, readonly) CGSize drawableSize;
 
-/// The last error from Metal setup or rendering (nil if none).
+/// The error behind what is on screen: Metal setup, an invalid frame, a GPU failure, or the
+/// frame source's report of a picture it could not produce (decode or texture mapping). Nil
+/// once a frame completes without one. Transient conditions (no drawable, GPU busy) are
+/// retried instead and only reported here when retrying gives up.
 @property (atomic, readonly, nullable) NSError *lastError;
+
+/// Releases memory that is only a cache (pooled pre-scale textures, unused texture-cache
+/// entries). Call on memory pressure; the next frames re-create what they need.
+- (void)handleMemoryPressure;
 
 /// The last rendered frame at drawable size (letterbox included), or NULL if nothing has been
 /// rendered yet. Re-composites the current frame into an offscreen texture and blocks until
 /// the GPU finished (a few milliseconds).
 - (nullable CGImageRef)snapshot CF_RETURNS_NOT_RETAINED;
-
 
 @end
 

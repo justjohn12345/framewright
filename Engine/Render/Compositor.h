@@ -60,7 +60,7 @@
 // Pictures drawn at >= 0.75 of their size (including all magnification) take no extra pass.
 //
 // Resources: one render pipeline per (source A class, has partner, source B class, target
-// format), created lazily and cached (BGRA8 and RGBA16Float variants are created up front).
+// format), created lazily and cached (those for create()'s prepared formats up front).
 // Per-draw uniforms live in a triple-buffered ring of MTLBuffers (kFramesInFlight slots);
 // steady-state rendering makes no heap allocations of its own (Metal still creates its
 // command buffer and encoders per frame).
@@ -82,6 +82,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <variant>
 #include <vector>
@@ -166,8 +167,13 @@ class Compositor {
   public:
     static constexpr std::size_t kFramesInFlight = 3;
 
-    /// Loads the engine's Metal library from the framework bundle and prepares the pipelines.
-    static media::Result<std::unique_ptr<Compositor>> create(id<MTLDevice> device);
+    /// Loads the engine's Metal library from the framework bundle and prepares the pipelines
+    /// for rendering into `preparedFormats` (pipelines for other target formats are built on
+    /// first use, which costs a few milliseconds on that frame). Pixel-buffer targets render
+    /// through an RGBA16Float intermediate.
+    static media::Result<std::unique_ptr<Compositor>>
+    create(id<MTLDevice> device,
+           std::initializer_list<MTLPixelFormat> preparedFormats = {MTLPixelFormatBGRA8Unorm, MTLPixelFormatRGBA16Float});
 
     ~Compositor();
     Compositor(const Compositor &) = delete;
