@@ -6,6 +6,7 @@
 #include "../../Engine/Render/TextureCache.h"
 #include "CompositorTestSupport.h"
 
+#include <optional>
 #include <string>
 
 using namespace ve;
@@ -100,6 +101,57 @@ struct FormatCase {
             XCTAssertEqual(cc[1] >> 6, cr, @"%s", name.c_str());
         }
     }
+}
+
+// The chroma siting attachment selects the luma-uv -> chroma-uv transform; untagged 4:2:0 and
+// 4:2:2 are left sited; odd widths scale the chroma uv (960 chroma columns cover 1920 luma
+// columns of a 1919-wide picture).
+- (void)testChromaSitingAndTransform {
+    struct Case {
+        OSType format;
+        size_t width, height;
+        std::optional<ChromaSiting> tag;
+        ChromaSiting expected;
+        simd_float4 transform;
+    };
+    const OSType k420 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    const OSType k422 = kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange;
+    const OSType k444 = kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange;
+    const Case cases[] = {
+        {k420, 1920, 1080, std::nullopt, ChromaSiting::Left, {1, 1, 0.25f / 960, 0}},
+        {k420, 1920, 1080, ChromaSiting::Left, ChromaSiting::Left, {1, 1, 0.25f / 960, 0}},
+        {k420, 1920, 1080, ChromaSiting::Center, ChromaSiting::Center, {1, 1, 0, 0}},
+        {k420, 1920, 1080, ChromaSiting::TopLeft, ChromaSiting::TopLeft, {1, 1, 0.25f / 960, 0.25f / 540}},
+        {k420, 1920, 1080, ChromaSiting::Top, ChromaSiting::Top, {1, 1, 0, 0.25f / 540}},
+        {k420, 1920, 1080, ChromaSiting::BottomLeft, ChromaSiting::BottomLeft, {1, 1, 0.25f / 960, -0.25f / 540}},
+        {k420, 1920, 1080, ChromaSiting::Bottom, ChromaSiting::Bottom, {1, 1, 0, -0.25f / 540}},
+        {k420, 1919, 1079, ChromaSiting::Center, ChromaSiting::Center, {1919.0f / 1920, 1079.0f / 1080, 0, 0}},
+        {k422, 1280, 720, ChromaSiting::TopLeft, ChromaSiting::TopLeft, {1, 1, 0.25f / 640, 0}},
+        {k444, 64, 64, ChromaSiting::Left, ChromaSiting::Center, {1, 1, 0, 0}},
+    };
+    for (const Case &c : cases) {
+        media::PixelBuffer buffer = makeBuffer(c.format, c.width, c.height);
+        tagYCbCr(buffer, media::YCbCrMatrix::BT709, c.tag);
+        auto set = _cache.textures(buffer);
+        XCTAssertTrue(set.ok());
+        if (!set.ok()) {
+            continue;
+        }
+        XCTAssertEqual(set->chromaSiting(), c.expected, @"%s tag %d", fourCCString(c.format).c_str(),
+                       c.tag ? int(*c.tag) : -1);
+        const simd_float4 t = set->chromaTransform();
+        for (int k = 0; k < 4; ++k) {
+            XCTAssertEqualWithAccuracy(t[k], c.transform[k], 1e-7, @"%s %zux%zu component %d",
+                                       fourCCString(c.format).c_str(), c.width, c.height, k);
+        }
+    }
+    // DV 4:2:0 is taken as left sited; no attachment gives the fallback.
+    media::PixelBuffer dv = makeBuffer(k420, 64, 64);
+    CVBufferSetAttachment(dv.get(), kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocation_DV420,
+                          kCVAttachmentMode_ShouldPropagate);
+    XCTAssertEqual(chromaSitingOf(dv.get(), ChromaSiting::Center), ChromaSiting::Left);
+    CVBufferRemoveAttachment(dv.get(), kCVImageBufferChromaLocationTopFieldKey);
+    XCTAssertEqual(chromaSitingOf(dv.get(), ChromaSiting::Top), ChromaSiting::Top);
 }
 
 - (void)testBGRAMapsToOneTexture {

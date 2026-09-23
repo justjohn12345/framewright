@@ -51,6 +51,9 @@ struct VESourceUniforms {
     // where (px, py) is a position in sequence pixels (origin top left, +y down).
     VEFloat4 uvFromFrameX;
     VEFloat4 uvFromFrameY;
+    // Chroma plane uv = uv * chromaTransform.xy + chromaTransform.zw (chroma siting and odd
+    // sizes; see TextureCache.h). Unused for RGBA sources.
+    VEFloat4 chromaTransform;
     // x: weight (opacity; times the transition weight when drawn without its partner).
     // y, z, w: unused.
     VEFloat4 params;

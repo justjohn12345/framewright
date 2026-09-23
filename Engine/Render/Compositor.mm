@@ -27,8 +27,8 @@ using media::PixelBuffer;
 using media::Result;
 using media::Status;
 
-static_assert(sizeof(VESourceUniforms) == 112, "VESourceUniforms layout must match Shaders.metal");
-static_assert(sizeof(VEDrawUniforms) == 64 + 2 * 112, "VEDrawUniforms layout must match Shaders.metal");
+static_assert(sizeof(VESourceUniforms) == 128, "VESourceUniforms layout must match Shaders.metal");
+static_assert(sizeof(VEDrawUniforms) == 64 + 2 * 128, "VEDrawUniforms layout must match Shaders.metal");
 static_assert(sizeof(VEConvertUniforms) == 64, "VEConvertUniforms layout must match Shaders.metal");
 
 PixelRect fitRect(double sourceWidth, double sourceHeight, std::int32_t destWidth, std::int32_t destHeight) {
@@ -147,6 +147,7 @@ void fillSource(VESourceUniforms &u, const TextureSet &textures, const Placement
     u.colorMatrix = textures.colorMatrix();
     u.uvFromFrameX = placement.uvFromFrameX;
     u.uvFromFrameY = placement.uvFromFrameY;
+    u.chromaTransform = textures.chromaTransform();
     u.params = simd_make_float4(float(std::clamp(weight, 0.0, 1.0)), 0.0f, 0.0f, 0.0f);
 }
 
@@ -641,14 +642,25 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         convert.size = simd_make_uint4(static_cast<unsigned>(w), static_cast<unsigned>(h), 0, 0);
         media::ColorInfo tags = media::ColorInfo::bt709();
         const bool biplanar = format != kCVPixelFormatType_32BGRA;
+        CVBufferRef targetRef = targetBuffer->get();
         if (biplanar) {
+            // ve_convert_to_420 produces left-sited chroma (the H.264/HEVC default, so players that
+            // ignore the tag still place it right); say so.
+            CVBufferSetAttachment(targetRef, kCVImageBufferChromaLocationTopFieldKey,
+                                  chromaLocationString(ChromaSiting::Left), kCVAttachmentMode_ShouldPropagate);
+            CVBufferSetAttachment(targetRef, kCVImageBufferChromaLocationBottomFieldKey,
+                                  chromaLocationString(ChromaSiting::Left), kCVAttachmentMode_ShouldPropagate);
             tags.fullRange = format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
             const RGBToYCbCrRows rows = rgbToYCbCr8Rows(media::YCbCrMatrix::BT709, tags.fullRange);
             convert.yRow = rows.y;
             convert.cbRow = rows.cb;
             convert.crRow = rows.cr;
         } else {
+            // RGB output: no matrix or chroma siting (pooled buffers may carry stale ones).
             tags.matrix = media::YCbCrMatrix::Unknown;
+            CVBufferRemoveAttachment(targetRef, kCVImageBufferYCbCrMatrixKey);
+            CVBufferRemoveAttachment(targetRef, kCVImageBufferChromaLocationTopFieldKey);
+            CVBufferRemoveAttachment(targetRef, kCVImageBufferChromaLocationBottomFieldKey);
         }
         const std::size_t offset = slot.drawCapacity * kDrawStride;
         std::memcpy(uniformBytes + offset, &convert, sizeof(convert));
@@ -668,7 +680,7 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         const NSUInteger th = std::max<NSUInteger>(1, state.maxTotalThreadsPerThreadgroup / tw);
         [compute dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(tw, std::min<NSUInteger>(th, 16), 1)];
         [compute endEncoding];
-        media::attachColorInfo(targetBuffer->get(), tags);
+        media::attachColorInfo(targetRef, tags);
         slot.retained.push_back(std::move(outputPlanes));
     }
 

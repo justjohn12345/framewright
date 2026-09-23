@@ -12,6 +12,13 @@
 // BT.709 when the height is >= 720 and BT.601 below (the usual HD/SD convention).
 // BGRA buffers are taken as premultiplied alpha (the convention of the still-image decoder and
 // of CGBitmapContext); their colour matrix is unused.
+//
+// Chroma siting: where the subsampled chroma samples sit relative to the luma grid comes from
+// the buffer's kCVImageBufferChromaLocationTopFieldKey attachment (Left, Center, TopLeft, Top,
+// BottomLeft, Bottom; DV420 is taken as Left). Untagged 4:2:0 and 4:2:2 buffers are Left sited,
+// the H.264/HEVC/MPEG-2 default (chroma_sample_loc_type 0). 4:4:4 has no siting. The TextureSet
+// carries the resulting luma-uv -> chroma-uv transform, which also accounts for odd sizes
+// (a 1919-pixel-wide 4:2:0 picture has 960 chroma columns covering 1920 luma columns).
 
 #pragma once
 
@@ -31,6 +38,18 @@ namespace ve::render {
 
 /// Class of a source picture, which selects the fragment shader variant.
 enum class SourceClass : std::uint8_t { YCbCrBiPlanar, RGBA };
+
+/// Position of a subsampled chroma sample relative to the luma samples it covers (the
+/// kCVImageBufferChromaLocation values). For 4:2:0: Left = co-sited with the left luma column,
+/// vertically between the two rows; Center = centre of the 2x2 block; Top* / Bottom* = on the
+/// top / bottom row. 4:2:2 uses only the horizontal part.
+enum class ChromaSiting : std::uint8_t { Left, Center, TopLeft, Top, BottomLeft, Bottom };
+
+/// Reads a buffer's chroma location attachment (top field); `fallback` when untagged or unknown.
+ChromaSiting chromaSitingOf(CVPixelBufferRef buffer, ChromaSiting fallback = ChromaSiting::Left);
+
+/// The CoreVideo attachment value for a siting.
+CFStringRef chromaLocationString(ChromaSiting siting);
 
 /// The Metal textures of one pixel buffer, valid while this object (or a copy) lives: it owns
 /// the CVMetalTextureRefs (and so the IOSurface use), not just the id<MTLTexture>s.
@@ -52,6 +71,11 @@ class TextureSet {
     OSType pixelFormat() const noexcept { return pixelFormat_; }
     /// See VESourceUniforms.colorMatrix; identity for RGBA.
     const simd_float4x4 &colorMatrix() const noexcept { return colorMatrix_; }
+    /// Chroma siting of a YCbCr picture (Center for RGBA and 4:4:4, where it has no effect).
+    ChromaSiting chromaSiting() const noexcept { return chromaSiting_; }
+    /// Chroma uv = luma uv * xy + zw (see VESourceUniforms.chromaTransform); (1, 1, 0, 0) for
+    /// RGBA and 4:4:4.
+    simd_float4 chromaTransform() const noexcept { return chromaTransform_; }
     /// The buffer the textures alias.
     const media::PixelBuffer &pixelBuffer() const noexcept { return buffer_; }
 
@@ -67,6 +91,8 @@ class TextureSet {
     std::size_t height_ = 0;
     OSType pixelFormat_ = 0;
     simd_float4x4 colorMatrix_ = matrix_identity_float4x4;
+    ChromaSiting chromaSiting_ = ChromaSiting::Center;
+    simd_float4 chromaTransform_ = {1.0f, 1.0f, 0.0f, 0.0f};
 };
 
 enum class TextureAccess : std::uint8_t {

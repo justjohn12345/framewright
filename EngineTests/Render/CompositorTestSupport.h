@@ -9,6 +9,9 @@
 #import <Metal/Metal.h>
 
 #include <cstdint>
+#include <functional>
+#include <optional>
+#include <utility>
 #include <vector>
 
 namespace ve::rtest {
@@ -24,6 +27,16 @@ int bitDepthOf(OSType format);
 /// Fills every sample of a biplanar YCbCr buffer with the given integer codes (at the format's
 /// bit depth) and tags it with `matrix`.
 void fillYCbCr(const media::PixelBuffer &buffer, int y, int cb, int cr, media::YCbCrMatrix matrix);
+
+/// Fills a biplanar YCbCr buffer sample by sample: `luma(x, y)` for every luma sample and
+/// `chroma(i, j)` = {Cb, Cr} for every chroma sample, as integer codes at the format's bit depth
+/// (rounded). Attachments are left alone (see tagYCbCr).
+void fillYCbCrPattern(const media::PixelBuffer &buffer, const std::function<double(size_t x, size_t y)> &luma,
+                      const std::function<std::pair<double, double>(size_t i, size_t j)> &chroma);
+
+/// Sets (or, when nullopt, removes) the YCbCr matrix and chroma location attachments.
+void tagYCbCr(const media::PixelBuffer &buffer, std::optional<media::YCbCrMatrix> matrix,
+              std::optional<render::ChromaSiting> siting);
 
 struct RGBA8 {
     uint8_t r = 0, g = 0, b = 0, a = 255;
@@ -53,7 +66,13 @@ id<MTLTexture> makeTargetTexture(size_t width, size_t height);
 struct RGBd {
     double r, g, b;
 };
-RGBd referenceRGB(int y, int cb, int cr, int bitDepth, bool fullRange, media::YCbCrMatrix matrix);
+RGBd referenceRGB(double y, double cb, double cr, int bitDepth, bool fullRange, media::YCbCrMatrix matrix);
+
+/// The CPU reference picture of a YCbCr buffer as the compositor should show it at 1:1: every
+/// luma sample converted with the chroma bilinearly interpolated at its position for `siting`
+/// (edges clamped), 8-bit-scaled R'G'B' clamped to [0, 255].
+RGBd referencePixel(const media::PixelBuffer &buffer, size_t x, size_t y, media::YCbCrMatrix matrix,
+                    render::ChromaSiting siting);
 
 /// Graph helpers.
 RenderGraph makeGraph(int32_t width, int32_t height);

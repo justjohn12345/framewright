@@ -10,7 +10,11 @@
 //      The two layers of a cross dissolve are drawn in one pass as mix(A, B, mix) of their
 //      premultiplied samples, so a dissolve between (partly) transparent layers never dips.
 //   3. Pixel-buffer targets: the frame is composited into an RGBA16Float intermediate, then a
-//      compute pass writes the target's planes (BGRA, or 4:2:0 BT.709 YCbCr for 420v/420f).
+//      compute pass writes the target's planes (BGRA, or 4:2:0 BT.709 YCbCr for 420v/420f with
+//      left-sited chroma, tagged as such).
+//
+// Chroma: YCbCr sources are sampled with their chroma plane offset for the buffer's chroma
+// siting (TextureCache.h), so left-sited H.264/HEVC chroma lines up with its luma.
 //
 // Geometry (all in sequence pixels, origin top left, +y down): the decoded picture (storage
 // orientation) is first turned clockwise by VideoLayer::sourceRotationDegrees (the container's
@@ -93,7 +97,8 @@ struct TextureTarget {
 };
 
 /// Render into an IOSurface-backed CVPixelBuffer of format '32BGRA', '420v' or '420f' (BT.709
-/// matrix; colour attachments are set on the buffer). The frame is fitted into the buffer.
+/// matrix, left-sited chroma; colour and chroma-location attachments are set on the buffer, and
+/// removed from BGRA buffers). The frame is fitted into the buffer.
 struct PixelBufferTarget {
     media::PixelBuffer buffer;
 };

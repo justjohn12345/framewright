@@ -74,11 +74,14 @@ static float edgeCoverage(float2 uv) {
     return coverage.x * coverage.y;
 }
 
-static float4 sampleYCbCr(texture2d<float> luma, texture2d<float> chroma, float2 uv, float4x4 colorMatrix) {
+// Chroma is sampled at the luma position mapped through the source's chroma transform, so
+// left/top/bottom-sited chroma lines up with the luma it belongs to (see TextureCache.h).
+static float4 sampleYCbCr(texture2d<float> luma, texture2d<float> chroma, float2 uv, constant VESourceUniforms &source) {
     constexpr sampler bilinear(address::clamp_to_edge, filter::linear);
     const float y = luma.sample(bilinear, uv).r;
-    const float2 cbcr = chroma.sample(bilinear, uv).rg;
-    const float3 rgb = saturate((colorMatrix * float4(y, cbcr, 1.0)).rgb);
+    const float2 chromaUV = uv * source.chromaTransform.xy + source.chromaTransform.zw;
+    const float2 cbcr = chroma.sample(bilinear, chromaUV).rg;
+    const float3 rgb = saturate((source.colorMatrix * float4(y, cbcr, 1.0)).rgb);
     return float4(rgb, 1.0);
 }
 
@@ -97,7 +100,7 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     const float coverageA = edgeCoverage(uvA);
     float4 colorA;
     if (kSourceAIsYCbCr) {
-        colorA = sampleYCbCr(a0, a1, uvA, uniforms.a.colorMatrix);
+        colorA = sampleYCbCr(a0, a1, uvA, uniforms.a);
     } else {
         colorA = sampleRGBA(a0, uvA);
     }
@@ -110,7 +113,7 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     const float coverageB = edgeCoverage(uvB);
     float4 colorB;
     if (kSourceBIsYCbCr) {
-        colorB = sampleYCbCr(b0, b1, uvB, uniforms.b.colorMatrix);
+        colorB = sampleYCbCr(b0, b1, uvB, uniforms.b);
     } else {
         colorB = sampleRGBA(b0, uvB);
     }
@@ -132,32 +135,43 @@ kernel void ve_convert_to_bgra(texture2d<float, access::read> composite [[textur
     output.write(float4(saturate(c.rgb), 1.0), gid);
 }
 
-// One thread per chroma sample (2x2 luma block, 4:2:0). Chroma is the average of the block's
-// R'G'B' converted with the target matrix (centre sited).
+// One thread per chroma sample (2x2 luma block, 4:2:0): writes the block's four luma samples and
+// one left-sited chroma sample (co-sited with the block's left column, vertically between its
+// rows: kCVImageBufferChromaLocation_Left, the H.264/HEVC default). Chroma is the target
+// matrix applied to the [1 2 1] / 4 horizontal filter around the left column, averaged over the
+// block's two rows; edges repeat the outermost pixel, and a missing second row or column (odd
+// sizes) is left out.
 kernel void ve_convert_to_420(texture2d<float, access::read> composite [[texture(VETextureIndexComposite)]],
                               texture2d<float, access::write> luma [[texture(VETextureIndexOut0)]],
                               texture2d<float, access::write> chroma [[texture(VETextureIndexOut1)]],
                               constant VEConvertUniforms &uniforms [[buffer(VEBufferIndexConvert)]],
                               uint2 gid [[thread_position_in_grid]]) {
-    const uint2 chromaSize = (uniforms.size.xy + 1) / 2;
+    const uint2 size = uniforms.size.xy;
+    const uint2 chromaSize = (size + 1) / 2;
     if (gid.x >= chromaSize.x || gid.y >= chromaSize.y) {
         return;
     }
+    const uint x0 = gid.x * 2;
+    const bool hasRight = x0 + 1 < size.x;
     float3 sum = float3(0.0);
-    float count = 0.0;
+    float rows = 0.0;
     for (uint dy = 0; dy < 2; ++dy) {
-        for (uint dx = 0; dx < 2; ++dx) {
-            const uint2 p = gid * 2 + uint2(dx, dy);
-            if (p.x < uniforms.size.x && p.y < uniforms.size.y) {
-                const float3 rgb = saturate(composite.read(p).rgb);
-                luma.write(float4(dot(uniforms.yRow.xyz, rgb) + uniforms.yRow.w), p);
-                sum += rgb;
-                count += 1.0;
-            }
+        const uint y = gid.y * 2 + dy;
+        if (y >= size.y) {
+            break;
         }
+        const float3 centre = saturate(composite.read(uint2(x0, y)).rgb);
+        const float3 right = hasRight ? saturate(composite.read(uint2(x0 + 1, y)).rgb) : centre;
+        const float3 left = x0 > 0 ? saturate(composite.read(uint2(x0 - 1, y)).rgb) : centre;
+        luma.write(float4(dot(uniforms.yRow.xyz, centre) + uniforms.yRow.w), uint2(x0, y));
+        if (hasRight) {
+            luma.write(float4(dot(uniforms.yRow.xyz, right) + uniforms.yRow.w), uint2(x0 + 1, y));
+        }
+        sum += 0.25 * left + 0.5 * centre + 0.25 * right;
+        rows += 1.0;
     }
-    const float3 average = sum / count;
-    const float cb = dot(uniforms.cbRow.xyz, average) + uniforms.cbRow.w;
-    const float cr = dot(uniforms.crRow.xyz, average) + uniforms.crRow.w;
+    const float3 filtered = sum / rows;
+    const float cb = dot(uniforms.cbRow.xyz, filtered) + uniforms.cbRow.w;
+    const float cr = dot(uniforms.crRow.xyz, filtered) + uniforms.crRow.w;
     chroma.write(float4(cb, cr, 0.0, 0.0), gid);
 }

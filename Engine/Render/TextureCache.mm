@@ -23,7 +23,33 @@ struct FormatLayout {
     MTLPixelFormat plane1; // MTLPixelFormatInvalid for single-plane formats
     int bitDepth;
     bool fullRange;
+    int subsampleX = 1; // luma columns per chroma column
+    int subsampleY = 1; // luma rows per chroma row
 };
+
+int subsamplingX(OSType format) {
+    switch (format) {
+    case kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange:
+    case kCVPixelFormatType_444YpCbCr8BiPlanarFullRange:
+    case kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange:
+    case kCVPixelFormatType_444YpCbCr10BiPlanarFullRange:
+        return 1;
+    default:
+        return 2;
+    }
+}
+
+int subsamplingY(OSType format) {
+    switch (format) {
+    case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
+    case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
+    case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange:
+    case kCVPixelFormatType_420YpCbCr10BiPlanarFullRange:
+        return 2;
+    default:
+        return 1;
+    }
+}
 
 bool layoutFor(OSType format, FormatLayout &out) {
     switch (format) {
@@ -37,7 +63,7 @@ bool layoutFor(OSType format, FormatLayout &out) {
     case kCVPixelFormatType_422YpCbCr8BiPlanarFullRange:
     case kCVPixelFormatType_444YpCbCr8BiPlanarFullRange:
         out = {SourceClass::YCbCrBiPlanar, MTLPixelFormatR8Unorm, MTLPixelFormatRG8Unorm, 8,
-               media::isFullRangeYCbCr(format)};
+               media::isFullRangeYCbCr(format), subsamplingX(format), subsamplingY(format)};
         return true;
     case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange:
     case kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange:
@@ -46,7 +72,7 @@ bool layoutFor(OSType format, FormatLayout &out) {
     case kCVPixelFormatType_422YpCbCr10BiPlanarFullRange:
     case kCVPixelFormatType_444YpCbCr10BiPlanarFullRange:
         out = {SourceClass::YCbCrBiPlanar, MTLPixelFormatR16Unorm, MTLPixelFormatRG16Unorm, 10,
-               media::isFullRangeYCbCr(format)};
+               media::isFullRangeYCbCr(format), subsamplingX(format), subsamplingY(format)};
         return true;
     default:
         return false;
@@ -66,6 +92,57 @@ media::YCbCrMatrix matrixOf(CVPixelBufferRef buffer) {
     return matrix;
 }
 
+// Luma-uv -> chroma-uv transform for a chroma plane of chromaWidth x chromaHeight samples, each
+// covering subsampleX x subsampleY luma samples, sited as `siting`.
+//
+// In luma pixel coordinates (pixel j spans [j, j + 1)), chroma sample i sits at
+// X = subsampleX * i + 0.5 + dx, where dx is the siting offset from the first covered luma
+// sample's centre (0 for left/co-sited, 0.5 for centred 2:1). Its texel centre is at chroma
+// coordinate i + 0.5, so chroma coordinate c = (X - 0.5 - dx) / subsampleX + 0.5, and with
+// X = u * lumaWidth and u_c = c / chromaWidth:
+//   u_c = u * lumaWidth / (subsampleX * chromaWidth) + (0.5 - (0.5 + dx) / subsampleX) / chromaWidth.
+simd_float4 chromaTransformFor(ChromaSiting siting, std::size_t lumaWidth, std::size_t lumaHeight,
+                               std::size_t chromaWidth, std::size_t chromaHeight, int subsampleX, int subsampleY) {
+    double dx = 0.5;
+    double dy = 0.5;
+    switch (siting) {
+    case ChromaSiting::Left:
+        dx = 0.0;
+        dy = 0.5;
+        break;
+    case ChromaSiting::Center:
+        dx = 0.5;
+        dy = 0.5;
+        break;
+    case ChromaSiting::TopLeft:
+        dx = 0.0;
+        dy = 0.0;
+        break;
+    case ChromaSiting::Top:
+        dx = 0.5;
+        dy = 0.0;
+        break;
+    case ChromaSiting::BottomLeft:
+        dx = 0.0;
+        dy = 1.0;
+        break;
+    case ChromaSiting::Bottom:
+        dx = 0.5;
+        dy = 1.0;
+        break;
+    }
+    if (subsampleX == 1) {
+        dx = 0.0;
+    }
+    if (subsampleY == 1) {
+        dy = 0.0;
+    }
+    const double cw = static_cast<double>(chromaWidth);
+    const double ch = static_cast<double>(chromaHeight);
+    return simd_make_float4(float(double(lumaWidth) / (subsampleX * cw)), float(double(lumaHeight) / (subsampleY * ch)),
+                            float((0.5 - (0.5 + dx) / subsampleX) / cw), float((0.5 - (0.5 + dy) / subsampleY) / ch));
+}
+
 double secondsFromMachTicks(std::uint64_t ticks) {
     static const double scale = [] {
         mach_timebase_info_data_t info;
@@ -76,6 +153,56 @@ double secondsFromMachTicks(std::uint64_t ticks) {
 }
 
 } // namespace
+
+ChromaSiting chromaSitingOf(CVPixelBufferRef buffer, ChromaSiting fallback) {
+    if (buffer == nullptr) {
+        return fallback;
+    }
+    CFRef<CFTypeRef> value =
+        CFRef<CFTypeRef>::adopt(CVBufferCopyAttachment(buffer, kCVImageBufferChromaLocationTopFieldKey, nullptr));
+    if (!value || CFGetTypeID(value.get()) != CFStringGetTypeID()) {
+        return fallback;
+    }
+    const auto location = static_cast<CFStringRef>(value.get());
+    struct Entry {
+        CFStringRef key;
+        ChromaSiting siting;
+    };
+    const Entry entries[] = {
+        {kCVImageBufferChromaLocation_Left, ChromaSiting::Left},
+        {kCVImageBufferChromaLocation_Center, ChromaSiting::Center},
+        {kCVImageBufferChromaLocation_TopLeft, ChromaSiting::TopLeft},
+        {kCVImageBufferChromaLocation_Top, ChromaSiting::Top},
+        {kCVImageBufferChromaLocation_BottomLeft, ChromaSiting::BottomLeft},
+        {kCVImageBufferChromaLocation_Bottom, ChromaSiting::Bottom},
+        // DV 4:2:0 sites Cb and Cr on different rows; both are left sited horizontally.
+        {kCVImageBufferChromaLocation_DV420, ChromaSiting::Left},
+    };
+    for (const Entry &e : entries) {
+        if (CFEqual(location, e.key)) {
+            return e.siting;
+        }
+    }
+    return fallback;
+}
+
+CFStringRef chromaLocationString(ChromaSiting siting) {
+    switch (siting) {
+    case ChromaSiting::Left:
+        return kCVImageBufferChromaLocation_Left;
+    case ChromaSiting::Center:
+        return kCVImageBufferChromaLocation_Center;
+    case ChromaSiting::TopLeft:
+        return kCVImageBufferChromaLocation_TopLeft;
+    case ChromaSiting::Top:
+        return kCVImageBufferChromaLocation_Top;
+    case ChromaSiting::BottomLeft:
+        return kCVImageBufferChromaLocation_BottomLeft;
+    case ChromaSiting::Bottom:
+        return kCVImageBufferChromaLocation_Bottom;
+    }
+    return kCVImageBufferChromaLocation_Left;
+}
 
 std::string fourCCString(OSType code) {
     std::string s;
@@ -200,6 +327,11 @@ Result<TextureSet> TextureCache::textures(const PixelBuffer &buffer, TextureAcce
         encoding.fullRange = layout.fullRange;
         encoding.msbPacked16 = layout.bitDepth > 8;
         set.colorMatrix_ = yCbCrToRGBMatrix(encoding);
+        const bool subsampled = layout.subsampleX > 1 || layout.subsampleY > 1;
+        set.chromaSiting_ = subsampled ? chromaSitingOf(pb, ChromaSiting::Left) : ChromaSiting::Center;
+        set.chromaTransform_ =
+            chromaTransformFor(set.chromaSiting_, set.width_, set.height_, CVPixelBufferGetWidthOfPlane(pb, 1),
+                               CVPixelBufferGetHeightOfPlane(pb, 1), layout.subsampleX, layout.subsampleY);
     }
     return set;
 }

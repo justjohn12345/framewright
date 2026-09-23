@@ -82,6 +82,62 @@ void fillYCbCr(const PixelBuffer &buffer, int y, int cb, int cr, media::YCbCrMat
     media::attachColorInfo(pb, info);
 }
 
+void fillYCbCrPattern(const PixelBuffer &buffer, const std::function<double(size_t x, size_t y)> &luma,
+                      const std::function<std::pair<double, double>(size_t i, size_t j)> &chroma) {
+    CVPixelBufferRef pb = buffer.get();
+    const int depth = bitDepthOf(buffer.pixelFormat());
+    const long maxCode = depth == 8 ? 255 : 1023;
+    auto code = [maxCode](double v) { return std::clamp(std::lround(v), 0L, maxCode); };
+    media::PixelBufferLock lock(pb, false);
+    for (size_t plane = 0; plane < 2; ++plane) {
+        auto *base = static_cast<uint8_t *>(CVPixelBufferGetBaseAddressOfPlane(pb, plane));
+        const size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pb, plane);
+        const size_t w = CVPixelBufferGetWidthOfPlane(pb, plane);
+        const size_t h = CVPixelBufferGetHeightOfPlane(pb, plane);
+        for (size_t row = 0; row < h; ++row) {
+            uint8_t *line = base + row * stride;
+            auto *line16 = reinterpret_cast<uint16_t *>(line);
+            for (size_t x = 0; x < w; ++x) {
+                if (plane == 0) {
+                    const long v = code(luma(x, row));
+                    if (depth == 8) {
+                        line[x] = static_cast<uint8_t>(v);
+                    } else {
+                        line16[x] = static_cast<uint16_t>(v << 6);
+                    }
+                } else {
+                    const auto [cb, cr] = chroma(x, row);
+                    if (depth == 8) {
+                        line[2 * x] = static_cast<uint8_t>(code(cb));
+                        line[2 * x + 1] = static_cast<uint8_t>(code(cr));
+                    } else {
+                        line16[2 * x] = static_cast<uint16_t>(code(cb) << 6);
+                        line16[2 * x + 1] = static_cast<uint16_t>(code(cr) << 6);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void tagYCbCr(const PixelBuffer &buffer, std::optional<media::YCbCrMatrix> matrix,
+              std::optional<render::ChromaSiting> siting) {
+    CVPixelBufferRef pb = buffer.get();
+    if (matrix) {
+        media::ColorInfo info = media::ColorInfo::bt709();
+        info.matrix = *matrix;
+        media::attachColorInfo(pb, info);
+    } else {
+        CVBufferRemoveAttachment(pb, kCVImageBufferYCbCrMatrixKey);
+    }
+    if (siting) {
+        CVBufferSetAttachment(pb, kCVImageBufferChromaLocationTopFieldKey, render::chromaLocationString(*siting),
+                              kCVAttachmentMode_ShouldPropagate);
+    } else {
+        CVBufferRemoveAttachment(pb, kCVImageBufferChromaLocationTopFieldKey);
+    }
+}
+
 void fillBGRARect(const PixelBuffer &buffer, size_t x0, size_t y0, size_t x1, size_t y1, RGBA8 c) {
     CVPixelBufferRef pb = buffer.get();
     media::PixelBufferLock lock(pb, false);
@@ -143,6 +199,9 @@ PixelBuffer convertBGRATo420v(const PixelBuffer &bgra) {
         }
     }
     media::attachColorInfo(out.get(), media::ColorInfo::bt709());
+    // Chroma is the plain 2x2 average: centre sited.
+    CVBufferSetAttachment(out.get(), kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocation_Center,
+                          kCVAttachmentMode_ShouldPropagate);
     return out;
 }
 
@@ -177,7 +236,7 @@ id<MTLTexture> makeTargetTexture(size_t width, size_t height) {
     return [device() newTextureWithDescriptor:desc];
 }
 
-RGBd referenceRGB(int y, int cb, int cr, int bitDepth, bool fullRange, media::YCbCrMatrix matrix) {
+RGBd referenceRGB(double y, double cb, double cr, int bitDepth, bool fullRange, media::YCbCrMatrix matrix) {
     double kr = 0.2126, kb = 0.0722;
     if (matrix == media::YCbCrMatrix::BT601) {
         kr = 0.299;
@@ -185,6 +244,9 @@ RGBd referenceRGB(int y, int cb, int cr, int bitDepth, bool fullRange, media::YC
     } else if (matrix == media::YCbCrMatrix::BT2020) {
         kr = 0.2627;
         kb = 0.0593;
+    } else if (matrix == media::YCbCrMatrix::SMPTE240M) {
+        kr = 0.212;
+        kb = 0.087;
     }
     const double kg = 1.0 - kr - kb;
     const double s = std::ldexp(1.0, bitDepth - 8);
@@ -203,6 +265,61 @@ RGBd referenceRGB(int y, int cb, int cr, int bitDepth, bool fullRange, media::YC
     const double b = yn + 2.0 * (1.0 - kb) * cbn;
     const double g = (yn - kr * r - kb * b) / kg;
     return {r * 255.0, g * 255.0, b * 255.0};
+}
+
+RGBd referencePixel(const PixelBuffer &buffer, size_t x, size_t y, media::YCbCrMatrix matrix,
+                    render::ChromaSiting siting) {
+    CVPixelBufferRef pb = buffer.get();
+    const OSType format = buffer.pixelFormat();
+    const int depth = bitDepthOf(format);
+    media::PixelBufferLock lock(pb, true);
+    auto sampleAt = [&](size_t plane, size_t px, size_t py, size_t component, size_t components) -> double {
+        const auto *base = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddressOfPlane(pb, plane));
+        const uint8_t *line = base + py * CVPixelBufferGetBytesPerRowOfPlane(pb, plane);
+        if (depth == 8) {
+            return line[px * components + component];
+        }
+        return reinterpret_cast<const uint16_t *>(line)[px * components + component] >> 6;
+    };
+    const size_t w = buffer.width();
+    const size_t h = buffer.height();
+    const size_t cw = CVPixelBufferGetWidthOfPlane(pb, 1);
+    const size_t ch = CVPixelBufferGetHeightOfPlane(pb, 1);
+    const int sx = cw < w ? 2 : 1;
+    const int sy = ch < h ? 2 : 1;
+    double dx = 0.5, dy = 0.5;
+    switch (siting) {
+    case render::ChromaSiting::Left: dx = 0.0; dy = 0.5; break;
+    case render::ChromaSiting::Center: dx = 0.5; dy = 0.5; break;
+    case render::ChromaSiting::TopLeft: dx = 0.0; dy = 0.0; break;
+    case render::ChromaSiting::Top: dx = 0.5; dy = 0.0; break;
+    case render::ChromaSiting::BottomLeft: dx = 0.0; dy = 1.0; break;
+    case render::ChromaSiting::Bottom: dx = 0.5; dy = 1.0; break;
+    }
+    if (sx == 1) {
+        dx = 0.0;
+    }
+    if (sy == 1) {
+        dy = 0.0;
+    }
+    // Chroma texel coordinate (texel i centred on i) of this luma sample's centre.
+    const double tx = std::clamp((double(x) + 0.5 - 0.5 - dx) / sx, 0.0, double(cw - 1));
+    const double ty = std::clamp((double(y) + 0.5 - 0.5 - dy) / sy, 0.0, double(ch - 1));
+    const size_t ix = static_cast<size_t>(std::floor(tx));
+    const size_t iy = static_cast<size_t>(std::floor(ty));
+    const size_t ix1 = std::min(ix + 1, cw - 1);
+    const size_t iy1 = std::min(iy + 1, ch - 1);
+    const double fx = tx - double(ix);
+    const double fy = ty - double(iy);
+    auto bilinear = [&](size_t component) {
+        const double top = sampleAt(1, ix, iy, component, 2) * (1 - fx) + sampleAt(1, ix1, iy, component, 2) * fx;
+        const double bottom = sampleAt(1, ix, iy1, component, 2) * (1 - fx) + sampleAt(1, ix1, iy1, component, 2) * fx;
+        return top * (1 - fy) + bottom * fy;
+    };
+    const RGBd rgb = referenceRGB(sampleAt(0, x, y, 0, 1), bilinear(0), bilinear(1), depth,
+                                  media::isFullRangeYCbCr(format), matrix);
+    auto clamp255 = [](double v) { return std::clamp(v, 0.0, 255.0); };
+    return {clamp255(rgb.r), clamp255(rgb.g), clamp255(rgb.b)};
 }
 
 RenderGraph makeGraph(int32_t width, int32_t height) {

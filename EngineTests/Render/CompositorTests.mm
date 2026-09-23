@@ -202,6 +202,120 @@ struct FrameLog {
     }
 }
 
+// Non-uniform fills: luma and chroma gradients, so a chroma sample drawn half a luma pixel off
+// (wrong siting), a wrong subsampling or a wrong matrix shows up as a colour error. Every
+// output pixel of a 1:1 render is compared with the CPU reference (bilinear chroma at the
+// buffer's siting). Covers every siting, 4:2:0 / 4:2:2 / 4:4:4, 8 and 10 bit, video and full
+// range, the BT.709 / BT.601 / BT.2020 / SMPTE 240M matrices, odd sizes, and untagged buffers
+// (BT.709 from 720 lines up, BT.601 below; left-sited chroma).
+- (void)testChromaSitingSubsamplingAndMatricesWithGradients {
+    struct Case {
+        OSType format;
+        size_t width, height;
+        std::optional<YCbCrMatrix> tagMatrix;
+        std::optional<ChromaSiting> tagSiting;
+        YCbCrMatrix expectedMatrix;
+        ChromaSiting expectedSiting;
+    };
+    const OSType k420v = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    const OSType k420f = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+    const OSType k422v = kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange;
+    const OSType k444v = kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange;
+    const OSType kx420 = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
+    const OSType kxf20 = kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
+    const OSType kx422 = kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange;
+    const OSType kx444 = kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange;
+    const OSType kxf44 = kCVPixelFormatType_444YpCbCr10BiPlanarFullRange;
+    using S = ChromaSiting;
+    using M = YCbCrMatrix;
+    const Case cases[] = {
+        {k420v, 32, 16, M::BT709, S::Left, M::BT709, S::Left},
+        {k420v, 32, 16, M::BT709, S::Center, M::BT709, S::Center},
+        {k420v, 32, 16, M::BT709, S::TopLeft, M::BT709, S::TopLeft},
+        {k420v, 32, 16, M::BT709, S::Top, M::BT709, S::Top},
+        {k420v, 32, 16, M::BT709, S::BottomLeft, M::BT709, S::BottomLeft},
+        {k420v, 32, 16, M::BT709, S::Bottom, M::BT709, S::Bottom},
+        {k420v, 32, 16, M::BT709, std::nullopt, M::BT709, S::Left}, // untagged siting: left
+        {k420v, 31, 15, M::BT601, S::Left, M::BT601, S::Left},      // odd sizes
+        {k420v, 33, 17, M::BT709, S::Center, M::BT709, S::Center},
+        {k420v, 32, 16, M::SMPTE240M, S::Left, M::SMPTE240M, S::Left},
+        {k420v, 32, 16, M::BT2020, S::Left, M::BT2020, S::Left},
+        {k420f, 32, 16, M::BT601, S::Center, M::BT601, S::Center},
+        {k422v, 32, 16, M::BT709, S::Left, M::BT709, S::Left},
+        {k422v, 32, 16, M::BT601, S::Center, M::BT601, S::Center},
+        {k422v, 31, 16, M::BT709, S::TopLeft, M::BT709, S::TopLeft}, // vertical part ignored for 4:2:2
+        {k444v, 32, 16, M::BT709, S::Left, M::BT709, S::Left},       // no siting at 4:4:4
+        {kx420, 32, 16, M::BT2020, S::TopLeft, M::BT2020, S::TopLeft},
+        {kxf20, 32, 16, M::BT709, S::Left, M::BT709, S::Left},
+        {kxf20, 33, 15, M::SMPTE240M, S::Bottom, M::SMPTE240M, S::Bottom},
+        {kx422, 32, 16, M::BT601, S::Left, M::BT601, S::Left},
+        {kx444, 32, 16, M::BT709, std::nullopt, M::BT709, S::Left},
+        {kxf44, 32, 16, M::BT2020, S::Center, M::BT2020, S::Center},
+        // Untagged matrix: BT.709 from 720 lines up, BT.601 below.
+        {k420v, 1280, 720, std::nullopt, S::Left, M::BT709, S::Left},
+        {k420v, 1280, 719, std::nullopt, S::Left, M::BT601, S::Left},
+        {kx420, 720, 576, std::nullopt, std::nullopt, M::BT601, S::Left},
+    };
+    for (const Case &c : cases) {
+        const std::string name = fourCCString(c.format) + " " + std::to_string(c.width) + "x" +
+                                 std::to_string(c.height) + " matrix " + std::to_string(int(c.expectedMatrix)) +
+                                 " siting " + std::to_string(int(c.expectedSiting)) +
+                                 (c.tagSiting ? "" : " (untagged siting)") + (c.tagMatrix ? "" : " (untagged matrix)");
+        media::PixelBuffer source = makeBuffer(c.format, c.width, c.height);
+        XCTAssertTrue(source, @"%s", name.c_str());
+        if (!source) {
+            continue;
+        }
+        const double s = bitDepthOf(c.format) == 8 ? 1.0 : 4.0;
+        const double w = double(c.width), h = double(c.height);
+        // Steep chroma gradients (a half-luma-pixel shift moves Cb by ~2 and Cr by ~3 8-bit codes)
+        // that stay inside the R'G'B' cube, so no clamping hides an error.
+        const double cw = double(CVPixelBufferGetWidthOfPlane(source.get(), 1));
+        const double ch = double(CVPixelBufferGetHeightOfPlane(source.get(), 1));
+        fillYCbCrPattern(
+            source, [&](size_t x, size_t y) { return s * (80.0 + 40.0 * x / w + 30.0 * y / h); },
+            [&](size_t i, size_t j) {
+                return std::pair<double, double>{s * (96.0 + 74.0 * i / cw), s * (96.0 + 64.0 * j / ch)};
+            });
+        tagYCbCr(source, c.tagMatrix, c.tagSiting);
+        const TextureSet set = texturesFor(*_compositor, source);
+        const bool is444 = CVPixelBufferGetWidthOfPlane(source.get(), 1) == c.width;
+        XCTAssertEqual(set.chromaSiting(), is444 ? S::Center : c.expectedSiting, @"%s", name.c_str());
+        media::PixelBuffer out = makeBuffer(kCVPixelFormatType_32BGRA, c.width, c.height);
+        RenderGraph g = makeGraph(int32_t(c.width), int32_t(c.height));
+        g.layers.push_back(makeLayer(1));
+        [self render:g textures:{set} target:PixelBufferTarget{out}];
+
+        struct Worst {
+            double error = 0;
+            size_t x = 0, y = 0;
+        };
+        auto compare = [&](YCbCrMatrix matrix, ChromaSiting siting) {
+            Worst worst;
+            for (size_t y = 0; y < c.height; y += (c.height > 100 ? 5 : 1)) {
+                for (size_t x = 0; x < c.width; x += (c.width > 100 ? 7 : 1)) {
+                    const RGBd ref = referencePixel(source, x, y, matrix, siting);
+                    const RGBA8 got = pixelAt(out, x, y);
+                    const double err =
+                        std::max({std::fabs(got.r - ref.r), std::fabs(got.g - ref.g), std::fabs(got.b - ref.b)});
+                    if (err > worst.error) {
+                        worst = {err, x, y};
+                    }
+                }
+            }
+            return worst;
+        };
+        const Worst worst = compare(c.expectedMatrix, c.expectedSiting);
+        XCTAssertLessThanOrEqual(worst.error, 1.5, @"%s: worst error %.2f at (%zu, %zu)", name.c_str(), worst.error,
+                                 worst.x, worst.y);
+        if (c.format == k420v && c.width == 32 && c.expectedSiting == S::Left) {
+            // The gradients are steep enough to see half a luma pixel of misplacement either way.
+            XCTAssertGreaterThan(compare(c.expectedMatrix, S::Center).error, 1.5, @"%s: horizontal", name.c_str());
+            XCTAssertGreaterThan(compare(c.expectedMatrix, S::TopLeft).error, 1.5, @"%s: vertical", name.c_str());
+        }
+    }
+}
+
 // (d) Scale 0.5 + offset lands at the expected pixels; rotation 90 moves the marker clockwise.
 - (void)testScaleOffsetAndRotation {
     const RGBA8 white{255, 255, 255, 255};
@@ -425,6 +539,109 @@ struct FrameLog {
     if (!result.ok()) {
         XCTAssertEqual(result.error().code, media::MediaErrorCode::UnsupportedFormat);
     }
+}
+
+// Export to 4:2:0 (video and full range, even and odd sizes): every luma sample and every
+// chroma sample is checked against a CPU reference of the left-sited filter (the [1 2 1] / 4
+// horizontal filter around the block's left column, averaged over its rows, edges repeated),
+// and the buffer is tagged BT.709 with left chroma siting. A BGRA target drops stale YCbCr tags.
+- (void)testExport420ChromaIsLeftSitedFilteredAndTagged {
+    for (OSType format : {kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange}) {
+        for (const auto &[w, h] : {std::pair<size_t, size_t>{64, 36}, std::pair<size_t, size_t>{63, 35}}) {
+            const std::string name = fourCCString(format) + " " + std::to_string(w) + "x" + std::to_string(h);
+            media::PixelBuffer source = makeBuffer(kCVPixelFormatType_32BGRA, w, h);
+            {
+                media::PixelBufferLock lock(source.get(), false);
+                auto *base = static_cast<uint8_t *>(CVPixelBufferGetBaseAddress(source.get()));
+                const size_t stride = CVPixelBufferGetBytesPerRow(source.get());
+                for (size_t y = 0; y < h; ++y) {
+                    for (size_t x = 0; x < w; ++x) {
+                        uint8_t *p = base + y * stride + x * 4;
+                        p[0] = static_cast<uint8_t>((x * 53 + y * 17) % 256); // B: sharp, varies per pixel
+                        p[1] = static_cast<uint8_t>(40 + (x * 3 + y * 5) % 180);
+                        p[2] = static_cast<uint8_t>((x % 2) ? 230 : 20); // R: one-pixel stripes
+                        p[3] = 255;
+                    }
+                }
+            }
+            media::PixelBuffer out = makeBuffer(format, w, h);
+            RenderGraph g = makeGraph(int32_t(w), int32_t(h));
+            g.layers.push_back(makeLayer(1));
+            [self render:g textures:{texturesFor(*_compositor, source)} target:PixelBufferTarget{out}];
+
+            const bool full = format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+            const double kr = 0.2126, kb = 0.0722, kg = 1.0 - kr - kb;
+            const double ySpan = full ? 255.0 : 219.0, yBase = full ? 0.0 : 16.0, cSpan = full ? 255.0 : 224.0;
+            auto rgbAt = [&](size_t x, size_t y) {
+                const RGBA8 p = pixelAt(source, x, y);
+                return RGBd{p.r / 255.0, p.g / 255.0, p.b / 255.0};
+            };
+            media::PixelBufferLock lock(out.get(), true);
+            const auto *luma = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddressOfPlane(out.get(), 0));
+            const auto *chroma = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddressOfPlane(out.get(), 1));
+            const size_t lumaStride = CVPixelBufferGetBytesPerRowOfPlane(out.get(), 0);
+            const size_t chromaStride = CVPixelBufferGetBytesPerRowOfPlane(out.get(), 1);
+            double worstLuma = 0, worstChroma = 0;
+            for (size_t y = 0; y < h; ++y) {
+                for (size_t x = 0; x < w; ++x) {
+                    const RGBd c = rgbAt(x, y);
+                    const double expected = yBase + ySpan * (kr * c.r + kg * c.g + kb * c.b);
+                    worstLuma = std::max(worstLuma, std::fabs(luma[y * lumaStride + x] - expected));
+                }
+            }
+            for (size_t j = 0; j < (h + 1) / 2; ++j) {
+                for (size_t i = 0; i < (w + 1) / 2; ++i) {
+                    RGBd sum{0, 0, 0};
+                    int rows = 0;
+                    for (size_t y = 2 * j; y < std::min(h, 2 * j + 2); ++y) {
+                        const size_t x0 = 2 * i;
+                        const RGBd centre = rgbAt(x0, y);
+                        const RGBd left = x0 > 0 ? rgbAt(x0 - 1, y) : centre;
+                        const RGBd right = x0 + 1 < w ? rgbAt(x0 + 1, y) : centre;
+                        sum.r += 0.25 * left.r + 0.5 * centre.r + 0.25 * right.r;
+                        sum.g += 0.25 * left.g + 0.5 * centre.g + 0.25 * right.g;
+                        sum.b += 0.25 * left.b + 0.5 * centre.b + 0.25 * right.b;
+                        ++rows;
+                    }
+                    const double r = sum.r / rows, gg = sum.g / rows, b = sum.b / rows;
+                    const double yy = kr * r + kg * gg + kb * b;
+                    const double cb = 128.0 + cSpan * (b - yy) / (2.0 * (1.0 - kb));
+                    const double cr = 128.0 + cSpan * (r - yy) / (2.0 * (1.0 - kr));
+                    const uint8_t *got = chroma + j * chromaStride + i * 2;
+                    worstChroma = std::max({worstChroma, std::fabs(got[0] - cb), std::fabs(got[1] - cr)});
+                }
+            }
+            XCTAssertLessThanOrEqual(worstLuma, 1.0, @"%s luma", name.c_str());
+            XCTAssertLessThanOrEqual(worstChroma, 1.0, @"%s chroma", name.c_str());
+
+            auto attachment = [&](CFStringRef key) {
+                return media::CFRef<CFTypeRef>::adopt(CVBufferCopyAttachment(out.get(), key, nullptr));
+            };
+            auto top = attachment(kCVImageBufferChromaLocationTopFieldKey);
+            auto bottom = attachment(kCVImageBufferChromaLocationBottomFieldKey);
+            auto matrix = attachment(kCVImageBufferYCbCrMatrixKey);
+            XCTAssertTrue(top && CFEqual(top.get(), kCVImageBufferChromaLocation_Left), @"%s", name.c_str());
+            XCTAssertTrue(bottom && CFEqual(bottom.get(), kCVImageBufferChromaLocation_Left), @"%s", name.c_str());
+            XCTAssertTrue(matrix && CFEqual(matrix.get(), kCVImageBufferYCbCrMatrix_ITU_R_709_2), @"%s", name.c_str());
+            XCTAssertEqual(chromaSitingOf(out.get(), ChromaSiting::Center), ChromaSiting::Left);
+        }
+    }
+
+    // A BGRA target (e.g. a recycled pool buffer) loses stale YCbCr tags.
+    media::PixelBuffer source = makeBuffer(kCVPixelFormatType_32BGRA, 32, 18);
+    fillBGRA(source, {10, 200, 30, 255});
+    media::PixelBuffer out = makeBuffer(kCVPixelFormatType_32BGRA, 32, 18);
+    CVBufferSetAttachment(out.get(), kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocation_Center,
+                          kCVAttachmentMode_ShouldPropagate);
+    CVBufferSetAttachment(out.get(), kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+                          kCVAttachmentMode_ShouldPropagate);
+    RenderGraph g = makeGraph(32, 18);
+    g.layers.push_back(makeLayer(1));
+    [self render:g textures:{texturesFor(*_compositor, source)} target:PixelBufferTarget{out}];
+    XCTAssertFalse(media::CFRef<CFTypeRef>::adopt(
+        CVBufferCopyAttachment(out.get(), kCVImageBufferChromaLocationTopFieldKey, nullptr)));
+    XCTAssertFalse(media::CFRef<CFTypeRef>::adopt(CVBufferCopyAttachment(out.get(), kCVImageBufferYCbCrMatrixKey, nullptr)));
+    XCTAssertTrue(near(pixelAt(out, 5, 5), 10, 200, 30, 1));
 }
 
 // (h) Layers without a picture are skipped and reported; the rest still renders.
