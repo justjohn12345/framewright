@@ -15,6 +15,7 @@
 #include <cmath>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -211,12 +212,17 @@ static bool showsFrame(int shown, int64_t f) {
                           timeout:10]);
     XCTAssertTrue(engine.playbackStatus.isRunning);
 
-    // For 3 s: render (completion API), read the burn-in, and check it against the clock read
-    // around the render: the picture is the frame at the clock within one frame.
+    // Until 20 different pictures were checked and the playhead is past the dissolve (bounded
+    // by the sequence position, not wall time): render (completion API), read the burn-in, and
+    // check it against the clock read around the render: the picture is the frame at the clock
+    // within one frame.
     const CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
     int checked = 0;
     int64_t previousFrame = -1;
-    while (CFAbsoluteTimeGetCurrent() - start < 3.0 && engine.playbackState == VEPlaybackStatePlaying) {
+    std::set<int> pictures;
+    constexpr size_t kPictures = 20;
+    while ((pictures.size() < kPictures || CMTimeGetSeconds(engine.currentTime) < 2.5) &&
+           engine.playbackState == VEPlaybackStatePlaying && CMTimeGetSeconds(engine.currentTime) < 4.5) {
         const int64_t before = frameOf(engine.currentTime);
         [self renderAndWait:view];
         const int64_t after = frameOf(engine.currentTime);
@@ -232,14 +238,18 @@ static bool showsFrame(int shown, int64_t f) {
         XCTAssertGreaterThanOrEqual(after, previousFrame, @"the clock never goes backwards");
         previousFrame = after;
         ++checked;
+        pictures.insert(shown);
     }
-    XCTAssertGreaterThan(checked, 30, @"enough samples over 3 s");
+    XCTAssertGreaterThanOrEqual(pictures.size(), kPictures, @"enough pictures before the end of the sequence (%d checks)",
+                                checked);
     const NSInteger duringPlay = notifications;
     const double elapsed = CFAbsoluteTimeGetCurrent() - start;
     XCTAssertLessThanOrEqual(double(duringPlay), elapsed * 30.0 + 10, @"at most one notification per frame");
 
     VEPlaybackStats *stats = engine.playbackStats;
-    XCTAssertGreaterThan(stats.presentedFrames, 30u);
+    XCTAssertGreaterThanOrEqual(stats.presentedFrames, uint64_t(kPictures), @"every picture seen was presented");
+    XCTAssertGreaterThanOrEqual(stats.presentedFrameIndex, 0, @"the HUD's presented frame is reported");
+    XCTAssertTrue(stats.presentedClockDriven);
     XCTAssertGreaterThan(stats.cacheHits, 0u);
     XCTAssertGreaterThan(stats.cacheHitRate, 0.5);
     XCTAssertNotEqual(stats.clockMode, VEClockModeStopped);

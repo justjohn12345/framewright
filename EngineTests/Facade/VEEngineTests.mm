@@ -431,7 +431,13 @@ NSURL *scratchURL() {
     NSString *beforeDrag = engine.projectJSON;
     [engine beginCoalescingWithKey:@"drag"];
     for (int step = 1; step <= 4; ++step) {
-        XCTAssertTrue([engine moveClips:all byTime:seconds(0.5 * step) trackOffset:0].ok);
+        XCTAssertTrue([engine performInCoalescingGroup:@"drag"
+                                                  edit:^VEEditResult * {
+                                                      return [engine moveClips:all
+                                                                        byTime:seconds(0.5 * step)
+                                                                   trackOffset:0];
+                                                  }]
+                          .ok);
     }
     [engine endCoalescing];
     XCTAssertEqualWithAccuracy(CMTimeGetSeconds([engine clipInfo:first.createdIDs[0].longLongValue].timelineStart), 3,
@@ -476,7 +482,13 @@ NSURL *scratchURL() {
     [engine beginCoalescingWithKey:@"drag"];
     XCTAssertTrue(engine.isCoalescing);
     for (int step = 1; step <= 10; ++step) {
-        XCTAssertTrue([engine moveClip:clip toTrack:a1 start:seconds(step * 0.5)].ok);
+        XCTAssertTrue([engine performInCoalescingGroup:@"drag"
+                                                  edit:^VEEditResult * {
+                                                      return [engine moveClip:clip
+                                                                      toTrack:a1
+                                                                        start:seconds(step * 0.5)];
+                                                  }]
+                          .ok);
     }
     [engine endCoalescing];
     XCTAssertEqualWithAccuracy(CMTimeGetSeconds([engine clipInfo:clip].timelineStart), 5, 1e-9);
@@ -484,7 +496,11 @@ NSURL *scratchURL() {
     XCTAssertEqualObjects(engine.projectJSON, before, @"the whole drag is one undo step");
 
     [engine beginCoalescingWithKey:@"drag"];
-    XCTAssertTrue([engine moveClip:clip toTrack:a1 start:seconds(3)].ok);
+    XCTAssertTrue([engine performInCoalescingGroup:@"drag"
+                                              edit:^VEEditResult * {
+                                                  return [engine moveClip:clip toTrack:a1 start:seconds(3)];
+                                              }]
+                      .ok);
     [engine cancelCoalescing];
     XCTAssertFalse(engine.isCoalescing);
     XCTAssertEqualObjects(engine.projectJSON, before, @"cancel reverts the drag");
@@ -843,7 +859,7 @@ NSURL *scratchURL() {
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
         while (shown != expectedFrame && deadline.timeIntervalSinceNow > 0) {
             XCTestExpectation *rendered = [self expectationWithDescription:@"rendered"];
-            [view renderOnceWithCompletion:^(NSError *error) {
+            [view renderOnceWithCompletion:^(NSError *) {
                 [rendered fulfill];
             }];
             [self waitForExpectations:@[ rendered ] timeout:5];

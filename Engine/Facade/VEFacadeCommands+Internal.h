@@ -87,6 +87,8 @@ class CompositeCommand final : public Command {
 /// media. This wrapper raises the generator to `floor` (the highest value the project's
 /// generator has reached) before running `inner`, and restores the generator exactly on
 /// revert, so the history below it still replays bit for bit and redo recreates the same ids.
+/// Under Accumulate coalescing a FreshIds absorbs the next FreshIds by merging their inner
+/// commands (the merged step reverts to the first one's generator).
 class FreshIds final : public Command {
   public:
     FreshIds(std::unique_ptr<Command> inner, uint64_t floor);
@@ -94,6 +96,7 @@ class FreshIds final : public Command {
     void revert(Project &project) override;
     bool canRevert(const Project &project) const override;
     bool isNoOp() const override;
+    bool mergeWith(const Command &next) override;
     std::string name() const override {
         return inner_->name();
     }
@@ -109,9 +112,10 @@ class FreshIds final : public Command {
 /// clip never cuts another clip of the same move. `delta` (snapped to the sequence frame grid)
 /// applies to every moved clip; `trackOffset` moves the listed clips on tracks of `offsetKind`
 /// (every kind when nullopt) that many tracks within their kind. Other clips, and linked
-/// partners that are not listed, keep their track and follow in time. Refused when a
-/// destination track does not exist or is locked, a clip would start before zero, or two moved
-/// clips would overlap each other.
+/// partners that are not listed, keep their track and follow in time. A transition whose two
+/// clips both land on the same track moves there with them (its cut still exists); one whose
+/// cut the move breaks is dropped and reported. Refused when a destination track does not exist
+/// or is locked, a clip would start before zero, or two moved clips would overlap each other.
 class MoveClips final : public SequenceCommand {
   public:
     MoveClips(SequenceId sequenceId, std::vector<ClipId> clipIds, CMTime delta, int64_t trackOffset,

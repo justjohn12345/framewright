@@ -3,6 +3,7 @@
 #include "../Edit/EditPrimitives.h"
 
 #include <algorithm>
+#include <map>
 #include <set>
 
 namespace ve::facade {
@@ -163,6 +164,11 @@ bool FreshIds::isNoOp() const {
     return inner_->isNoOp();
 }
 
+bool FreshIds::mergeWith(const Command &next) {
+    const auto *other = dynamic_cast<const FreshIds *>(&next);
+    return other != nullptr && inner_->mergeWith(*other->inner_);
+}
+
 // MARK: - MoveClips
 
 MoveClips::MoveClips(SequenceId sequenceId, std::vector<ClipId> clipIds, CMTime delta, int64_t trackOffset,
@@ -247,6 +253,19 @@ EditResult MoveClips::perform(const Project &, Sequence &sequence, IdGenerator &
                 placements[i].clip.timelineRange().intersects(placements[j].clip.timelineRange())) {
                 return EditResult::failure(EditError::Overlap, "the moved clips would overlap each other");
             }
+        }
+    }
+    // Transitions whose two clips land on the same track move there with them: the whole move
+    // shares one delta, so the cut between them is intact.
+    std::map<ClipId, TrackId> destinationOf;
+    for (const Placement &p : placements) {
+        destinationOf[p.clip.id] = p.destination;
+    }
+    for (Transition &transition : sequence.transitions) {
+        auto from = destinationOf.find(transition.fromClipId);
+        auto to = destinationOf.find(transition.toClipId);
+        if (from != destinationOf.end() && to != destinationOf.end() && from->second == to->second) {
+            transition.trackId = from->second;
         }
     }
     SplitList splits;

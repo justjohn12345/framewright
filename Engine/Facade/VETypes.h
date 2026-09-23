@@ -95,7 +95,8 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 @property (nonatomic, readonly) BOOL hasVideo;
 @property (nonatomic, readonly) BOOL hasAudio;
 @property (nonatomic, readonly) BOOL isStill;
-/// Number of clips of the active sequence using this asset.
+/// Number of clips using this asset in every sequence of the project (the count removeAsset:
+/// checks: the asset can be removed only at 0).
 @property (nonatomic, readonly) NSInteger useCount;
 - (instancetype)init NS_UNAVAILABLE;
 @end
@@ -289,6 +290,13 @@ typedef NS_ENUM(NSInteger, VEClockMode) {
 @property (nonatomic, readonly) uint64_t monotonicHolds;
 @property (nonatomic, readonly) VEClockMode clockMode;
 @property (nonatomic, readonly) CMTime clockTime;
+/// Sequence frame index of the most recently presented program frame (-1: none yet); compare
+/// with clockTime to see how far the picture is from the (audio) clock.
+@property (nonatomic, readonly) int64_t presentedFrameIndex;
+/// The clock (or paused) time that frame was chosen for.
+@property (nonatomic, readonly) CMTime presentedTime;
+/// The frame was chosen by the running clock (playing) rather than the paused position.
+@property (nonatomic, readonly) BOOL presentedClockDriven;
 @property (nonatomic, readonly) BOOL audioActive;
 @property (nonatomic, readonly) BOOL outputRunning;
 /// Output latency the clock subtracts, in seconds.

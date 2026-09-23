@@ -43,7 +43,7 @@ VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *crea
                              NSString *note);
 VEPlaybackState playbackStateToVE(playback::PlaybackState state);
 VEPlaybackStatus *makePlaybackStatus(const playback::PlaybackStatus &status);
-VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats);
+VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats, const playback::PresentedFrame &presented);
 
 /// "29.97", "25", "23.976" for a frame duration; "" when not positive.
 NSString *fpsString(CMTime frameDuration);

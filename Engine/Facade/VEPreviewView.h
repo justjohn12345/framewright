@@ -32,7 +32,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// the playback controller installs its own while playing. Without one the view shows black.
 ///
 /// Threading: all methods must be called on the main thread except -snapshot, which may be
-/// called from any thread other than the view's render thread.
+/// called from any thread other than the view's render thread. Swift sees the class as
+/// @MainActor (NS_SWIFT_UI_ACTOR). Release the last reference on the main thread (it stops the
+/// display link and the render thread).
+NS_SWIFT_UI_ACTOR
 @interface VEPreviewView : NSView
 
 /// Uses the system default Metal device. If Metal setup fails the view stays black and
@@ -87,7 +90,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// The last rendered frame at drawable size (letterbox included), or NULL if nothing has been
 /// rendered yet. Re-composites the current frame into an offscreen texture and blocks until
 /// the GPU finished (a few milliseconds).
-- (nullable CGImageRef)snapshot CF_RETURNS_NOT_RETAINED;
+- (nullable CGImageRef)snapshot CF_RETURNS_NOT_RETAINED NS_SWIFT_NONISOLATED;
 
 @end
 

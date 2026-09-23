@@ -6,7 +6,10 @@
 // Rules:
 // - Main thread only. Every instance method must be called on the main thread; a call from
 //   another thread raises NSInternalInconsistencyException (in every build configuration).
-//   Completion blocks and notifications are delivered on the main thread.
+//   Swift sees the class as @MainActor (NS_SWIFT_UI_ACTOR), so the compiler rejects such calls
+//   there instead. Completion blocks and notifications are delivered on the main thread. The
+//   last reference must also be released on the main thread: -dealloc detaches the monitor
+//   views (AppKit work). The class properties (versions, license) may be read on any thread.
 // - Nothing here blocks on media I/O. Model calls are synchronous and cheap; probing, decoding,
 //   thumbnails and waveforms run on background threads and report back asynchronously.
 // - Snapshots, never pointers: the info objects returned (VETypes.h) are immutable copies of
@@ -14,17 +17,24 @@
 // - Every model edit is an undoable command. Edits return a VEEditResult; a refused edit
 //   changes nothing. `changeCount` increases with every change (edit, undo, redo, coalesced
 //   drag step, import, asset removal, project load) and serves as the model version.
-// - Continuous gestures: call beginCoalescingWithKey: before the first edit of a drag,
-//   endCoalescing on release (one undo step), or cancelCoalescing on Escape (reverts the drag).
-//   While a group is open, each edit replaces the previous edit of the group, so express
-//   every step relative to the state before the gesture (e.g. "move clip 7 to 12 s"). An import
-//   that finishes while a group is open is added when the group ends (endCoalescing,
-//   cancelCoalescing, undo, redo); edits that would end the group from the side (removeAsset:)
-//   are refused with VEEditErrorBusy.
+// - Continuous gestures: call beginCoalescingWithKey: before the first edit of a drag, make
+//   every edit of the gesture inside performInCoalescingGroup:edit: with the same key, and call
+//   endCoalescing on release (one undo step) or cancelCoalescing on Escape (reverts the drag).
+//   Within the group each edit replaces the previous edit of the group, so express every step
+//   relative to the state before the gesture (e.g. "move clip 7 to 12 s"). Only those tagged
+//   edits join the group. Any other edit made while it is open (a menu command, a key) first
+//   ends the group, committing the gesture as its own undo step, and then applies as a separate
+//   step; the gesture's later edits are refused with VEEditErrorBusy (its group has ended), so
+//   they can never replace or resurrect what the other edit did. (The app does not issue edit
+//   commands during a gesture at all; this is the engine's guarantee.) An import that finishes
+//   while a group is open is added when the group ends (endCoalescing, cancelCoalescing, undo,
+//   redo); removeAsset: is refused with VEEditErrorBusy while a group is open.
 // - Playback: the engine owns one playback controller for the active sequence (program monitor)
 //   and one for the source monitor. Transport calls never block (each returns in well under a
 //   millisecond); the state follows asynchronously through VEEnginePlaybackDidChangeNotification
-//   (at most once per displayed frame). The owner of a monitor view un-pauses it
+//   (at most once per displayed frame). One monitor plays at a time: starting the program
+//   (play, togglePlay, setRate:, shuttle) pauses the source monitor, and starting the source
+//   monitor pauses the program. The owner of a monitor view un-pauses it
 //   (VEPreviewView.paused = NO) while the monitor's status isRunning, and keeps it paused
 //   otherwise; the engine renders the paused picture itself.
 
@@ -99,19 +109,20 @@ typedef NS_ENUM(NSInteger, VERippleScope) {
 - (void)engine:(VEEngine *)engine sourcePlaybackDidChange:(VEPlaybackStatus *)status;
 @end
 
+NS_SWIFT_UI_ACTOR
 @interface VEEngine : NSObject
 
 // MARK: Versions
 
 /// Engine version, from the framework's CFBundleShortVersionString (e.g. "0.1.0").
 /// Not named `version`: NSObject already has `+ (NSInteger)version` (NSCoder class versioning).
-@property (class, nonatomic, readonly, copy) NSString *engineVersion;
+@property (class, nonatomic, readonly, copy) NSString *engineVersion NS_SWIFT_NONISOLATED;
 
 /// Version of the FFmpeg libraries the engine is running against (av_version_info(), e.g. "7.1.5").
-@property (class, nonatomic, readonly, copy) NSString *ffmpegVersion;
+@property (class, nonatomic, readonly, copy) NSString *ffmpegVersion NS_SWIFT_NONISOLATED;
 
 /// License string reported by the loaded libavcodec (avcodec_license()).
-@property (class, nonatomic, readonly, copy) NSString *ffmpegLicense;
+@property (class, nonatomic, readonly, copy) NSString *ffmpegLicense NS_SWIFT_NONISOLATED;
 
 // MARK: Lifetime
 
@@ -129,8 +140,9 @@ typedef NS_ENUM(NSInteger, VERippleScope) {
 /// Replaces the project with an empty one (one 1080p30 sequence, tracks V1 V2 / A1 A2).
 - (void)newProjectWithName:(NSString *)name;
 /// Loads a .videdit file. Asset paths are resolved through their stored security-scoped
-/// bookmarks (a moved file is followed); files that cannot be found are listed in
-/// `missingAssetIDs`. On failure the current project is kept.
+/// bookmarks (a moved file is followed; resolution runs off the main thread, never mounts a
+/// volume and is given at most a few seconds, after which the stored path is used); files that
+/// cannot be found are listed in `missingAssetIDs`. On failure the current project is kept.
 - (BOOL)openProjectAtURL:(NSURL *)url error:(NSError *_Nullable *_Nullable)error;
 /// Writes the project as JSON (atomic write), with a security-scoped bookmark next to every
 /// asset path, marks it clean and remembers `url` as `projectURL`.
@@ -180,6 +192,9 @@ typedef NS_ENUM(NSInteger, VERippleScope) {
 /// VEEngineErrorProjectClosed. While a coalescing group is open the import waits for it to end.
 - (void)importMediaAtURLs:(NSArray<NSURL *> *)urls
                completion:(nullable void (^)(NSArray<VEAssetInfo *> *assets, NSArray<NSError *> *errors))completion;
+/// Imports whose files were probed and that wait for the open coalescing group to end
+/// (diagnostics and tests).
+@property (nonatomic, readonly) NSUInteger deferredImportCount;
 /// Removes an asset (undoable). Refused while any clip of any sequence uses it, and while a
 /// coalescing group is open.
 - (VEEditResult *)removeAsset:(VEAssetID)assetID;
@@ -289,6 +304,13 @@ typedef NS_ENUM(NSInteger, VERippleScope) {
 // MARK: Undo
 
 - (void)beginCoalescingWithKey:(NSString *)key;
+/// Runs `edit` (which calls edit methods of this engine) as a step of the open coalescing group
+/// `key`: only edits made inside it join the group (see the rules above). Refused with
+/// VEEditErrorBusy, without running `edit`, when no group with that key is open (it was never
+/// begun, or another edit ended it). Returns what `edit` returned.
+- (VEEditResult *)performInCoalescingGroup:(NSString *)key
+                                      edit:(NS_NOESCAPE VEEditResult * (^)(void))edit
+    NS_SWIFT_NAME(performInCoalescingGroup(_:edit:));
 - (void)endCoalescing;
 /// Reverts the edits of the open coalescing group and closes it.
 - (void)cancelCoalescing;

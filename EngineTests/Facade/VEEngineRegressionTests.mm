@@ -80,7 +80,11 @@ CMTime seconds(double s) {
 
     // A drag: 1 s, then an import completes while the pointer is still down, then 2 s.
     [engine beginCoalescingWithKey:@"timeline.move"];
-    XCTAssertTrue([engine moveClips:@[ clip ] byTime:seconds(1) trackOffset:0].ok);
+    XCTAssertTrue([engine performInCoalescingGroup:@"timeline.move"
+                                              edit:^VEEditResult * {
+                                                  return [engine moveClips:@[ clip ] byTime:seconds(1) trackOffset:0];
+                                              }]
+                      .ok);
     __block BOOL importCompleted = NO;
     __block NSArray<VEAssetInfo *> *imported = nil;
     [engine importMediaAtURLs:@[ [self mediaURL:"audio_only.m4a"] ]
@@ -89,13 +93,20 @@ CMTime seconds(double s) {
                        imported = assets;
                        importCompleted = YES;
                    }];
-    // Long enough for the probe to finish (the engine may hold the result until the drag ends).
-    [self spinUntil:^BOOL {
-        return importCompleted;
+    // The probe finishes while the drag is open: the engine holds the result until it ends.
+    XCTAssertTrue([self spinUntil:^BOOL {
+        return engine.deferredImportCount == 1;
     }
-            timeout:3];
+                          timeout:30],
+                  @"the import's probe finished and was deferred");
+    XCTAssertFalse(importCompleted, @"the import completes only when the drag ends");
+    XCTAssertEqual(engine.allAssets.count, 1u);
     XCTAssertTrue(engine.isCoalescing, @"the import must not end the drag's undo group");
-    XCTAssertTrue([engine moveClips:@[ clip ] byTime:seconds(2) trackOffset:0].ok);
+    XCTAssertTrue([engine performInCoalescingGroup:@"timeline.move"
+                                              edit:^VEEditResult * {
+                                                  return [engine moveClips:@[ clip ] byTime:seconds(2) trackOffset:0];
+                                              }]
+                      .ok);
     XCTAssertEqualWithAccuracy(CMTimeGetSeconds([engine clipInfo:clip.longLongValue].timelineStart), 2.5, 1e-9,
                                @"the drag's total offset is applied to the position before the drag");
     [engine endCoalescing];
@@ -113,6 +124,51 @@ CMTime seconds(double s) {
     XCTAssertEqual(engine.allAssets.count, 1u);
     XCTAssertTrue([engine undo]);
     XCTAssertEqualObjects(engine.projectJSON, beforeDrag, @"one undo reverts the whole drag");
+}
+
+- (void)testAnImportDeferredByADragIsDroppedWhenTheProjectCloses {
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *wav = [self importOne:"audio_only.wav" into:engine];
+    const VETrackID a1 = engine.sequence.audioTrackIDs[0].longLongValue;
+    NSNumber *clip = [engine insertAsset:wav.assetID
+                                  atTime:kCMTimeZero
+                              videoTrack:0
+                              audioTrack:a1
+                                sourceIn:kCMTimeZero
+                               sourceOut:seconds(1)]
+                         .createdIDs.firstObject;
+    [engine beginCoalescingWithKey:@"timeline.move"];
+    XCTAssertTrue([engine performInCoalescingGroup:@"timeline.move"
+                                              edit:^VEEditResult * {
+                                                  return [engine moveClips:@[ clip ] byTime:seconds(1) trackOffset:0];
+                                              }]
+                      .ok);
+    __block BOOL completed = NO;
+    __block NSArray<VEAssetInfo *> *imported = nil;
+    __block NSArray<NSError *> *failures = nil;
+    [engine importMediaAtURLs:@[ [self mediaURL:"audio_only.m4a"] ]
+                   completion:^(NSArray<VEAssetInfo *> *assets, NSArray<NSError *> *errors) {
+                       imported = assets;
+                       failures = errors;
+                       completed = YES;
+                   }];
+    XCTAssertTrue([self spinUntil:^BOOL {
+        return engine.deferredImportCount == 1;
+    }
+                          timeout:30]);
+    XCTAssertFalse(completed);
+    [engine newProjectWithName:@"Next"]; // closes the project while the import waits for the drag
+    XCTAssertTrue([self spinUntil:^BOOL {
+        return completed;
+    }
+                          timeout:10]);
+    XCTAssertEqual(engine.deferredImportCount, 0u);
+    XCTAssertEqual(imported.count, 0u);
+    XCTAssertEqual(failures.count, 1u);
+    XCTAssertEqual(failures.firstObject.code, VEEngineErrorProjectClosed);
+    XCTAssertEqual(engine.allAssets.count, 0u, @"nothing was added to the new project");
+    XCTAssertFalse(engine.isCoalescing);
+    XCTAssertFalse(engine.canUndo);
 }
 
 - (void)testImportStartedBeforeANewProjectIsNotAddedToIt {

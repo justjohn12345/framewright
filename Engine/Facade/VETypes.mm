@@ -144,6 +144,9 @@ VEAudioParams VEAudioParamsDefault(void) {
 @property (nonatomic, readwrite) uint64_t monotonicHolds;
 @property (nonatomic, readwrite) VEClockMode clockMode;
 @property (nonatomic, readwrite) CMTime clockTime;
+@property (nonatomic, readwrite) int64_t presentedFrameIndex;
+@property (nonatomic, readwrite) CMTime presentedTime;
+@property (nonatomic, readwrite) BOOL presentedClockDriven;
 @property (nonatomic, readwrite) BOOL audioActive;
 @property (nonatomic, readwrite) BOOL outputRunning;
 @property (nonatomic, readwrite) double outputLatency;
@@ -626,7 +629,7 @@ VEPlaybackStatus *makePlaybackStatus(const playback::PlaybackStatus &status) {
     return info;
 }
 
-VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats) {
+VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats, const playback::PresentedFrame &presented) {
     VEPlaybackStats *info = [[VEPlaybackStats alloc] initInternal];
     info.fps = stats.fps;
     info.presentedFrames = stats.presentedFrames;
@@ -646,6 +649,9 @@ VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats) {
     case audio::ClockMode::HostTime: info.clockMode = VEClockModeHostTime; break;
     }
     info.clockTime = stats.clockTime;
+    info.presentedFrameIndex = presented.frameIndex;
+    info.presentedTime = presented.time;
+    info.presentedClockDriven = presented.clockDriven;
     info.audioActive = stats.audioActive;
     info.outputRunning = stats.outputRunning;
     info.outputLatency = stats.outputLatency;

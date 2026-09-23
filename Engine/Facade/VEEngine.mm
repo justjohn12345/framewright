@@ -30,6 +30,7 @@
 #include <climits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -96,6 +97,16 @@ NSError *makeError(const media::MediaError &error, NSString *context) {
 VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created = @[], NSString *note = nil) {
     return makeEditResult(result, created, note);
 }
+
+/// Shares of the frame cache budget the two decode pools may fill with lookahead windows. They
+/// add up to the single pool's former 0.75, leaving the rest for scrubbed and pinned frames;
+/// the program monitor gets the larger share (it plays multi-layer sequences).
+constexpr double kProgramPoolBudgetShare = 0.5;
+constexpr double kSourcePoolBudgetShare = 0.25;
+/// Longest the main thread waits for the bookmarks of a project being opened (they resolve in
+/// parallel, never mounting volumes or showing UI); an asset whose bookmark is not resolved in
+/// time keeps its stored path.
+constexpr double kBookmarkResolutionTimeout = 3.0;
 
 /// Lanes of DecodePool::requestFrame: the program controller's layers use kProgramLaneBase + i,
 /// the source monitor's scrub provider and controller their own ranges (on the source pool).
@@ -215,6 +226,56 @@ AssetDetails detailsFor(const media::RoutedMediaInfo &routed) {
     return details;
 }
 
+/// A bookmark resolved by resolveBookmarks(): nil url when it could not be resolved (in time).
+struct ResolvedBookmark {
+    NSURL *url = nil;
+    BOOL stale = NO;
+};
+
+/// Resolves `bookmarks` concurrently on a background queue, security-scoped first, then plain,
+/// without mounting volumes or showing UI; waits at most kBookmarkResolutionTimeout seconds in
+/// total. Results that arrive later are discarded. Security-scoped access is not started here.
+std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
+    struct Shared {
+        std::mutex mutex;
+        std::vector<ResolvedBookmark> results;
+        bool abandoned = false;
+    };
+    auto shared = std::make_shared<Shared>();
+    shared->results.resize(bookmarks.count);
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+    for (NSUInteger i = 0; i < bookmarks.count; ++i) {
+        NSData *data = bookmarks[i];
+        dispatch_group_async(group, queue, ^{
+            const NSURLBookmarkResolutionOptions options =
+                NSURLBookmarkResolutionWithoutUI | NSURLBookmarkResolutionWithoutMounting;
+            BOOL stale = NO;
+            NSURL *url = [NSURL URLByResolvingBookmarkData:data
+                                                   options:options | NSURLBookmarkResolutionWithSecurityScope
+                                             relativeToURL:nil
+                                       bookmarkDataIsStale:&stale
+                                                     error:nil];
+            if (url == nil) {
+                stale = NO;
+                url = [NSURL URLByResolvingBookmarkData:data
+                                                options:options
+                                          relativeToURL:nil
+                                    bookmarkDataIsStale:&stale
+                                                  error:nil];
+            }
+            std::lock_guard<std::mutex> lock(shared->mutex);
+            if (!shared->abandoned) {
+                shared->results[i] = ResolvedBookmark{url, stale};
+            }
+        });
+    }
+    dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, int64_t(kBookmarkResolutionTimeout * NSEC_PER_SEC)));
+    std::lock_guard<std::mutex> lock(shared->mutex);
+    shared->abandoned = true;
+    return shared->results;
+}
+
 /// Result of probing one file on the background queue.
 struct ProbedFile {
     std::optional<MediaAsset> asset;
@@ -229,6 +290,7 @@ struct ProbedFile {
 @implementation VEEngine {
     std::shared_ptr<media::BackendRouter> _router;
     std::shared_ptr<media::FrameCache> _frameCache;
+    media::FrameCache::Epoch _mediaEpoch; // advanced on every New/Open (ids restart per project)
     std::shared_ptr<media::DecodePool> _decodePool;
     std::unique_ptr<thumbs::ThumbnailService> _thumbnails;
     std::unique_ptr<thumbs::WaveformService> _waveforms;
@@ -262,6 +324,7 @@ struct ProbedFile {
     VERippleScope _rippleScope;
     NSMutableArray<dispatch_block_t> *_deferredImports; // imports waiting for a coalescing group
     NSString *_coalescingKey;
+    NSString *_gestureEditKey; // set while performInCoalescingGroup:edit: runs its block
 
     std::map<AssetId, AssetDetails> _details;
     std::set<AssetId> _missing;
@@ -317,7 +380,10 @@ struct ProbedFile {
         _router = media::BackendRouter::makeDefault();
         (void)_router->registerBackend(media::ffmpeg::makeFFmpegBackend());
         _frameCache = std::make_shared<media::FrameCache>();
-        _decodePool = std::make_shared<media::DecodePool>(_router, _frameCache);
+        _mediaEpoch = _frameCache->epoch();
+        media::DecodePool::Config programPoolConfig;
+        programPoolConfig.budgetFraction = kProgramPoolBudgetShare;
+        _decodePool = std::make_shared<media::DecodePool>(_router, _frameCache, programPoolConfig);
         thumbs::ThumbnailService::Config thumbConfig;
         thumbs::WaveformService::Config waveConfig;
         if (cacheDirectory != nil) {
@@ -328,7 +394,9 @@ struct ProbedFile {
         }
         _thumbnails = std::make_unique<thumbs::ThumbnailService>(_router, thumbConfig);
         _waveforms = std::make_unique<thumbs::WaveformService>(_router, waveConfig);
-        _sourcePool = std::make_shared<media::DecodePool>(_router, _frameCache);
+        media::DecodePool::Config sourcePoolConfig;
+        sourcePoolConfig.budgetFraction = kSourcePoolBudgetShare;
+        _sourcePool = std::make_shared<media::DecodePool>(_router, _frameCache, sourcePoolConfig);
         _sourceProvider = std::make_shared<ProgramFrameProvider>(_sourcePool, kSourceScrubLaneBase);
         _sourceTime = kCMTimeZero;
         _sourceUsesController = false;
@@ -376,6 +444,11 @@ struct ProbedFile {
 }
 
 - (void)dealloc {
+    // The last reference must be released on the main thread (see VEEngine.h): detaching the
+    // monitor views below is main-thread AppKit work.
+    if (!NSThread.isMainThread) {
+        os_log_fault(_log, "VEEngine deallocated off the main thread; release it on the main thread");
+    }
     if (_memoryPressureSource != nil) {
         dispatch_source_cancel(_memoryPressureSource);
     }
@@ -483,19 +556,25 @@ struct ProbedFile {
 /// Forgets everything cached for the current project's assets (ids restart in every project).
 - (void)forgetProjectMedia {
     // The controllers stop using the old assets first (their ids will name other files).
-    auto empty = std::make_shared<const Project>();
-    _playback->setSequence(empty, SequenceId{});
+    _playback->setSequence(std::make_shared<const Project>(), SequenceId{});
     _playbackPublished = false;
+    [self resetSourceMonitor]; // stops the source controller and drops its private project
     for (const MediaAsset &asset : _project.assets) {
         _thumbnails->cancelPending(asset.id);
         _thumbnails->purge(asset.id);
         _waveforms->purge(asset.id);
-        _decodePool->invalidate(asset.id);
     }
-    _decodePool->setTargets({});
-    _sourcePool->setTargets({});
-    _frameCache->purgeAll();
-    [self resetSourceMonitor];
+    // A new media epoch: the frame cache drops every frame and refuses any decoded for the old
+    // ids, and both decode pools forget every asset, target, scrub request and decoder, so no
+    // decode in flight can publish the previous project's picture under a reused id (see
+    // FrameCache.h and DecodePool.h). The controllers register the new project's assets again.
+    _mediaEpoch = _frameCache->beginEpoch();
+    _decodePool->beginEpoch(_mediaEpoch);
+    _sourcePool->beginEpoch(_mediaEpoch);
+    _playback->forgetMedia();
+    if (_sourcePlayback) {
+        _sourcePlayback->forgetMedia();
+    }
     _routing.clear();
     _details.clear();
     _missing.clear();
@@ -596,26 +675,28 @@ struct ProbedFile {
     _loadWarnings = warningStrings;
 
     // Resolve every asset: through its bookmark (follows moves and grants sandbox access),
-    // else by path.
+    // else by path. The bookmarks resolve in parallel off the main thread, bounded in time.
+    NSMutableArray<NSData *> *toResolve = [NSMutableArray array];
+    std::vector<size_t> resolvedAsset; // index into _project.assets per entry of toResolve
+    for (size_t i = 0; i < _project.assets.size(); ++i) {
+        if (NSData *bookmark = bookmarks[@(static_cast<int64_t>(_project.assets[i].id.value()))]) {
+            [toResolve addObject:bookmark];
+            resolvedAsset.push_back(i);
+        }
+    }
+    const std::vector<ResolvedBookmark> resolutions = resolveBookmarks(toResolve);
+    std::vector<std::optional<ResolvedBookmark>> resolutionOf(_project.assets.size());
+    for (size_t k = 0; k < resolutions.size(); ++k) {
+        resolutionOf[resolvedAsset[k]] = resolutions[k];
+    }
     bool relinked = false;
-    for (MediaAsset &asset : _project.assets) {
+    for (size_t i = 0; i < _project.assets.size(); ++i) {
+        MediaAsset &asset = _project.assets[i];
         NSNumber *key = @(static_cast<int64_t>(asset.id.value()));
         NSData *bookmark = bookmarks[key];
-        if (bookmark != nil) {
-            BOOL stale = NO;
-            NSURL *resolved = [NSURL URLByResolvingBookmarkData:bookmark
-                                                        options:NSURLBookmarkResolutionWithSecurityScope |
-                                                                NSURLBookmarkResolutionWithoutUI
-                                                  relativeToURL:nil
-                                            bookmarkDataIsStale:&stale
-                                                          error:nil];
-            if (resolved == nil) {
-                resolved = [NSURL URLByResolvingBookmarkData:bookmark
-                                                     options:NSURLBookmarkResolutionWithoutUI
-                                               relativeToURL:nil
-                                         bookmarkDataIsStale:&stale
-                                                       error:nil];
-            }
+        if (resolutionOf[i]) {
+            NSURL *resolved = resolutionOf[i]->url;
+            const BOOL stale = resolutionOf[i]->stale;
             if (resolved != nil) {
                 if ([resolved startAccessingSecurityScopedResource]) {
                     [_accessedURLs addObject:resolved];
@@ -643,10 +724,11 @@ struct ProbedFile {
         ++_extraChanges;
     }
 
+    // Every asset is registered with both decode pools now, the missing ones included (their
+    // decodes fail as missing instead of finding whatever the id named before).
     for (const MediaAsset &asset : _project.assets) {
-        if (!_missing.count(asset.id)) {
-            _decodePool->registerAsset(asset.id, asset.url);
-        }
+        _decodePool->registerAsset(asset.id, asset.url);
+        _sourcePool->registerAsset(asset.id, asset.url);
     }
     [self probeDetailsForProjectAssets];
     [self notifyAssetsChanged];
@@ -1008,6 +1090,11 @@ struct ProbedFile {
     }
 }
 
+- (NSUInteger)deferredImportCount {
+    VE_ASSERT_MAIN();
+    return _deferredImports.count;
+}
+
 - (void)startPosterAndWaveformForAsset:(AssetId)id {
     const MediaAsset *asset = _project.findAsset(id);
     if (asset == nullptr) {
@@ -1083,7 +1170,7 @@ struct ProbedFile {
                          [weakSelf, generation, completion](media::Result<thumbs::ThumbnailImage> result) {
                              VEEngine *strongSelf = weakSelf;
                              if (strongSelf == nil || strongSelf->_projectGeneration != generation) {
-                                 completion(NULL, makeError(VEEngineErrorReadFailed, @"the project was closed"));
+                                 completion(NULL, makeError(VEEngineErrorProjectClosed, @"the project was closed"));
                              } else if (!result.ok()) {
                                  completion(NULL, makeError(result.error(), @"thumbnail"));
                              } else {
@@ -1114,7 +1201,7 @@ struct ProbedFile {
                         [weakSelf, generation, completion, id](thumbs::WaveformResult result) {
                             VEEngine *strongSelf = weakSelf;
                             if (strongSelf == nil || strongSelf->_projectGeneration != generation) {
-                                completion(nil, makeError(VEEngineErrorReadFailed, @"the project was closed"));
+                                completion(nil, makeError(VEEngineErrorProjectClosed, @"the project was closed"));
                             } else if (!result.ok()) {
                                 completion(nil, makeError(result.error(), @"waveform"));
                             } else {
@@ -1207,9 +1294,14 @@ struct ProbedFile {
     return _project.activeSequenceId;
 }
 
-/// Pushes a command onto the undo stack, wrapped so it never reuses an id (see FreshIds), and
-/// tagged with the open coalescing group's key.
+/// Pushes a command onto the undo stack, wrapped so it never reuses an id (see FreshIds). Only
+/// the open gesture's own edits (made inside performInCoalescingGroup:edit: with the group's
+/// key) join its coalescing group; any other edit first ends the group, committing the gesture
+/// as one undo step, and is then pushed on its own.
 - (EditResult)pushCommand:(std::unique_ptr<Command>)command {
+    if (_coalescingKey != nil && ![_gestureEditKey isEqualToString:_coalescingKey]) {
+        [self closeCoalescingIfOpen];
+    }
     _idFloor = std::max(_idFloor, _project.ids.nextValue());
     auto wrapped = std::make_unique<FreshIds>(std::move(command), _idFloor);
     if (_coalescingKey != nil) {
@@ -1686,6 +1778,19 @@ struct ProbedFile {
     _undo->beginCoalescing(toStd(_coalescingKey));
 }
 
+- (VEEditResult *)performInCoalescingGroup:(NSString *)key edit:(NS_NOESCAPE VEEditResult * (^)(void))edit {
+    VE_ASSERT_MAIN();
+    if (_coalescingKey == nil || ![_coalescingKey isEqualToString:key]) {
+        return [VEEditResult failureWithCode:VEEditErrorBusy
+                                     message:@"The gesture's edit group has ended (another edit committed it)."];
+    }
+    NSString *outer = _gestureEditKey;
+    _gestureEditKey = [key copy];
+    VEEditResult *result = edit();
+    _gestureEditKey = outer;
+    return result ?: [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"The edit returned no result."];
+}
+
 - (void)endCoalescing {
     VE_ASSERT_MAIN();
     [self closeCoalescingIfOpen];
@@ -1858,8 +1963,27 @@ struct ProbedFile {
     [self seekToTime:time];
 }
 
+static bool isRunning(playback::PlaybackState state) {
+    return state == playback::PlaybackState::Playing || state == playback::PlaybackState::Prerolling;
+}
+
+/// One monitor plays at a time (as in Premiere): starting the program pauses the source monitor.
+- (void)pauseSourceMonitorIfRunning {
+    if (_sourceUsesController && _sourcePlayback && isRunning(_sourcePlayback->state())) {
+        _sourcePlayback->pause();
+    }
+}
+
+/// Starting the source monitor pauses the program.
+- (void)pauseProgramIfRunning {
+    if (isRunning(_playback->state())) {
+        _playback->pause();
+    }
+}
+
 - (void)play {
     VE_ASSERT_MAIN();
+    [self pauseSourceMonitorIfRunning];
     _playback->play();
 }
 
@@ -1870,6 +1994,9 @@ struct ProbedFile {
 
 - (void)togglePlay {
     VE_ASSERT_MAIN();
+    if (!isRunning(_playback->state())) {
+        [self pauseSourceMonitorIfRunning];
+    }
     _playback->togglePlay();
 }
 
@@ -1880,16 +2007,21 @@ struct ProbedFile {
 
 - (void)setRate:(double)rate {
     VE_ASSERT_MAIN();
+    if (rate != 0) {
+        [self pauseSourceMonitorIfRunning];
+    }
     _playback->setRate(rate);
 }
 
 - (void)shuttleForward {
     VE_ASSERT_MAIN();
+    [self pauseSourceMonitorIfRunning];
     _playback->shuttleForward();
 }
 
 - (void)shuttleReverse {
     VE_ASSERT_MAIN();
+    [self pauseSourceMonitorIfRunning];
     _playback->shuttleReverse();
 }
 
@@ -1956,7 +2088,7 @@ struct ProbedFile {
 
 - (VEPlaybackStats *)playbackStats {
     VE_ASSERT_MAIN();
-    return makePlaybackStats(_playback->stats());
+    return makePlaybackStats(_playback->stats(), _playback->lastPresented());
 }
 
 // MARK: - Source monitor
@@ -2132,6 +2264,9 @@ struct ProbedFile {
 - (void)sourceMonitorTogglePlay {
     VE_ASSERT_MAIN();
     if ([self prepareSourcePlayback]) {
+        if (!isRunning(_sourcePlayback->state())) {
+            [self pauseProgramIfRunning];
+        }
         _sourcePlayback->togglePlay();
     }
 }
@@ -2146,6 +2281,7 @@ struct ProbedFile {
 - (void)sourceMonitorShuttleForward {
     VE_ASSERT_MAIN();
     if ([self prepareSourcePlayback]) {
+        [self pauseProgramIfRunning];
         _sourcePlayback->shuttleForward();
     }
 }
@@ -2153,6 +2289,7 @@ struct ProbedFile {
 - (void)sourceMonitorShuttleReverse {
     VE_ASSERT_MAIN();
     if ([self prepareSourcePlayback]) {
+        [self pauseProgramIfRunning];
         _sourcePlayback->shuttleReverse();
     }
 }
