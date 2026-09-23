@@ -3,13 +3,16 @@
 ## User feedback from hands-on testing (2026-09-23, iPhone 1280x720 VFR H.264 clip split once)
 
 Functional:
-1. HIGH: "cross dissolve didn't work". To determine: (a) drag-and-drop from the Transitions panel never lands (the panel's
-   SwiftUI `.draggable` + custom UTType drop was never verified in the real app; the "+" button path may be what worked),
-   and/or (b) a dissolve added at the split of a VFR clip does not visibly render during playback/scrub. Reproduce with the
-   user's clip type (VFR, 31.579 fps nominal) split with Cmd+K, add via drag AND via "+", scrub across the cut, and check
-   the program monitor shows the mix; add an integration test with a VFR source (the generated `vfr_h264_*` media) through
-   `VEEngine` + the program view. Fix whichever fails; if the drop is the failure, replace the drag source with an
-   `NSItemProvider`-based drag or a plain AppKit drag session that is testable.
+1. RESOLVED AS EXPECTED BEHAVIOUR, with follow-ups: the user split a clip with Cmd+K, selected the first half, pressed the
+   Cross Dissolve "+", saw the band on the timeline, but playback showed no visible transition. At a plain split the two
+   sides show the same source frames, so the dissolve blends identical pictures (same in Premiere/FCP at a "through
+   edit"). Follow-ups: (a) UX: when a dissolve is added at a through edit (both clips from one asset with contiguous
+   source ranges), show a status note "Both sides show the same frames here; trim or move one side to see the dissolve";
+   (b) still add the VFR integration test (dissolve between two different sources on `vfr_h264_*` media through
+   `VEEngine` + the program view, checking the mixed pixels mid-transition); (c) verify panel drag-and-drop in the real
+   app once, since only the "+" path has been exercised by hand.
+1b. LOW: the Transition inspector shows "Starts" as an absolute timeline time. Show it relative to the cut instead:
+   "Cut at 00:00:04:13, −15 f / +15 f" (or start/end offsets), since the duration is what the user edits.
 2. MEDIUM: removing a cross dissolve leaves the linked audio crossfade behind. They were added as one undo step, so
    Delete on either should remove the pair (one undo step); Option-Delete (or a context-menu item) removes only that one.
    Same for changing the duration: offer "also change the linked transition" (default on) in the inspector.
@@ -18,6 +21,17 @@ Functional:
    is stopped and the playhead has been still for ~100 ms, so `play()` finds frames and primed audio and starts within one
    frame. Keep the audio device warm (already done) and measure press-to-first-presented-frame in a test (target < 50 ms
    on cached media, report the cold number).
+
+Feature request:
+8. MEDIUM (new capability): animated zoom/pan over time ("as if the cameraman zoomed in"). This is keyframed Motion, not a
+   transition: Premiere = Effect Controls > Motion > Position/Scale keyframes with linear/ease interpolation; FCP = the
+   Transform keyframes, plus the "Ken Burns" crop mode that sets a start rect and an end rect and animates between them.
+   Design: add keyframe tracks to `VideoParams` (position, scale, rotation, opacity; time relative to the clip's source
+   in point so trims keep them attached to the picture), interpolation per keyframe (hold, linear, ease-in/out), evaluated
+   per frame by the Scheduler into the layer transform; inspector: a keyframe toggle per parameter at the playhead,
+   next/previous keyframe, and an FCP-style "Ken Burns" helper (start/end rectangles drawn on the program monitor);
+   timeline: keyframe markers on the clip; JSON schema v3 with migration; undo per keyframe edit; export renders the same
+   evaluation. Implementer should read the FCP and Premiere docs on Ken Burns / Motion keyframes for behaviour details.
 
 Layout / UX (redesign the default window):
 4. MEDIUM: the source monitor beside the program monitor is a poor use of space. Make the source monitor collapsible
