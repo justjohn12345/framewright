@@ -20,9 +20,11 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace ve::media::ffmpeg {
 
@@ -126,8 +128,11 @@ uint32_t fourCCForStream(const AVCodecParameters *par);
 AVCodecID codecIdForFourCC(uint32_t fourCC);
 /// Human-readable codec name: codecDisplayName() for known four-ccs, else FFmpeg's long name.
 std::string codecName(uint32_t fourCC, AVCodecID id);
-/// Whether this FFmpeg build can decode `id` in software (AV1 is excluded: the build has only
-/// FFmpeg's hwaccel-only "av1" decoder and no VideoToolbox AV1 hwaccel).
+/// The decoder this backend uses for `id`: libdav1d for AV1 (FFmpeg's native "av1" decoder
+/// only drives hardware accelerators, and 7.1 has none for AV1 on macOS), otherwise libavcodec's
+/// default decoder. nullptr when the build has none.
+const AVCodec *findDecoder(AVCodecID id);
+/// Whether this FFmpeg build can decode `id` (findDecoder() finds one).
 bool canDecode(AVCodecID id);
 
 // MARK: - Colour
@@ -145,6 +150,26 @@ ColorInfo colorInfo(const AVCodecParameters *par);
 
 /// Clockwise display rotation in degrees (0, 90, 180, 270) from the stream's display matrix.
 int rotationDegrees(const AVStream *stream);
+
+/// Frame timing observed from a stream's packet timestamps (see scanFrameTiming).
+struct FrameTiming {
+    int intervals = 0;                ///< Consecutive presentation intervals observed.
+    CMTime minimum = kCMTimeInvalid;  ///< Shortest interval.
+    CMTime typical = kCMTimeInvalid;  ///< Median interval.
+    /// Intervals differ from the median by more than one time-base tick and more than 1 %:
+    /// real variable frame rate, not timestamp quantisation (Matroska's 33/34 ms for 30 fps).
+    bool variable = false;
+};
+
+/// Reads packets from the current position of `ctx` (normally right after openInput(), i.e. the
+/// start) and derives the presentation intervals of each stream in `streams` from the sorted
+/// packet timestamps: up to `maxPackets` packets per stream or `maxSeconds` of media. Needed
+/// because containers can declare a constant rate for variable-rate video (a Matroska
+/// DefaultDuration). Leaves the read position wherever the scan stopped: the caller seeks back
+/// if it wants to read from the start. Results are keyed by stream index; streams without two
+/// timestamps get intervals == 0.
+std::map<int, FrameTiming> scanFrameTiming(AVFormatContext *ctx, const std::vector<int> &streams,
+                                           int maxPackets = 240, double maxSeconds = 8.0);
 /// The value of a metadata key, or nullopt.
 std::optional<std::string> metadataValue(const AVDictionary *dict, const char *key);
 /// Scales (w, h) to fit maxDimension (if > 0), preserving aspect ratio, even dimensions.

@@ -95,7 +95,10 @@ struct FFVideoEncoder::Impl {
         if (vt) {
             ctx->pix_fmt = AV_PIX_FMT_VIDEOTOOLBOX;
             ctx->sw_pix_fmt = inputFormat;
+            // Hardware required, or software required: never "either", so usesHardware() is a
+            // fact rather than a guess about which encoder VideoToolbox picked.
             av_dict_set(&options, "allow_sw", allowSoftware ? "1" : "0", 0);
+            av_dict_set(&options, "require_sw", allowSoftware ? "1" : "0", 0);
             if (settings.codec == VideoCodec::ProRes422) {
                 av_dict_set(&options, "profile", "standard", 0);
             }

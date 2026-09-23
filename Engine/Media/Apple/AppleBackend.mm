@@ -53,25 +53,32 @@ bool videoCodecSupported(uint32_t code) {
     return false;
 }
 
-bool audioCodecSupported(uint32_t c) {
+bool audioCodecSupported(uint32_t code) {
+    const uint32_t c = canonicalCodec(code);
     return c == fourcc::AAC || c == fourcc::LinearPCM || c == fourcc::make("aach") || c == fourcc::make("aacp") ||
            c == fourcc::make("alac") || c == fourcc::make(".mp3") || c == fourcc::make("ac-3") ||
-           c == fourcc::make("ec-3") || c == fourcc::make("opus") || c == fourcc::make("fLaC") ||
-           c == fourcc::make("ulaw") || c == fourcc::make("alaw");
+           c == fourcc::make("ec-3") || c == fourcc::Opus || c == fourcc::FLAC || c == fourcc::make("ulaw") ||
+           c == fourcc::make("alaw");
 }
 
 } // namespace
 
 bool AppleBackend::canHandle(const MediaInfo &info) const {
     const bool stillContainer = contains({"png", "jpeg", "heic", "tiff", "gif", "avif"}, info.container);
-    const bool avContainer = contains({"mov", "mp4", "m4a", "m4v", "wav", "aiff", "caf", "mp3"}, info.container);
+    const bool avContainer = contains({"mov", "mp4", "m4a", "m4v", "wav", "aiff", "caf", "mp3", "aac"}, info.container);
     if (!stillContainer && !avContainer) {
         return false;
     }
     if (info.tracks.empty()) {
         return false;
     }
+    // Our own prober's verdict is evidence (AVFoundation + a VideoToolbox session were asked);
+    // another backend's TrackInfo::decodable says nothing about us.
+    const bool ownProbe = info.backend == "apple";
     for (const TrackInfo &t : info.tracks) {
+        if (ownProbe && !t.decodable) {
+            return false;
+        }
         switch (t.kind) {
         case TrackKind::Still:
             if (!stillContainer) {

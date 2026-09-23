@@ -12,9 +12,9 @@ namespace ve::media::ffmpeg {
 /// - H.264 / HEVC / ProRes 422: h264_videotoolbox / hevc_videotoolbox / prores_videotoolbox.
 ///   When HardwareCaps reports a hardware encoder for the codec, VideoToolbox is required to use
 ///   it (allow_sw=0) and usesHardware() is true. Otherwise (or if the hardware session cannot be
-///   created and requireHardware is false) VideoToolbox's software encoder is allowed
-///   (allow_sw=1) and usesHardware() is false. requireHardware without a hardware encoder fails
-///   with UnsupportedCodec.
+///   created and requireHardware is false) VideoToolbox's software encoder is required
+///   (allow_sw=1, require_sw=1) and usesHardware() is false: either way the answer is a fact.
+///   requireHardware without a hardware encoder fails with UnsupportedCodec.
 /// - ProRes falls back to FFmpeg's prores_ks (software, LGPL) if no VideoToolbox ProRes encoder
 ///   can be opened. The LGPL build has no software H.264/HEVC encoder.
 ///

@@ -66,6 +66,9 @@ uint32_t canonicalCodec(uint32_t code) {
     if (code == fourcc::make("avc3")) {
         return fourcc::H264;
     }
+    if (code == fourcc::make("fLaC")) {
+        return fourcc::FLAC; // ISO-BMFF sample entry -> CoreAudio kAudioFormatFLAC.
+    }
     return code;
 }
 
@@ -111,6 +114,7 @@ std::string codecDisplayName(uint32_t code) {
         {fourcc::make("ac-3"), "AC-3"},
         {fourcc::make("ec-3"), "E-AC-3"},
         {fourcc::make("opus"), "Opus"},
+        {fourcc::FLAC, "FLAC"},
         {fourcc::make("fLaC"), "FLAC"},
     };
     for (const Entry &e : entries) {
@@ -293,6 +297,50 @@ std::string MediaInfo::description() const {
         s << " duration " << timeString(t.duration) << "\n";
     }
     return s.str();
+}
+
+bool alphaIsPremultiplied(CVPixelBufferRef buffer, bool untaggedDefault) {
+    if (buffer == nullptr) {
+        return true;
+    }
+    CFTypeRef mode = CVBufferCopyAttachment(buffer, kCVImageBufferAlphaChannelModeKey, nullptr);
+    if (mode != nullptr) {
+        const bool straight = CFGetTypeID(mode) == CFStringGetTypeID() &&
+                              CFEqual(mode, kCVImageBufferAlphaChannelMode_StraightAlpha);
+        CFRelease(mode);
+        return !straight;
+    }
+    return pixelFormatHasAlpha(CVPixelBufferGetPixelFormatType(buffer)) ? untaggedDefault : true;
+}
+
+bool pixelFormatHasAlpha(OSType format) {
+    switch (format) {
+    case kCVPixelFormatType_32BGRA:
+    case kCVPixelFormatType_32ARGB:
+    case kCVPixelFormatType_32RGBA:
+    case kCVPixelFormatType_32ABGR:
+    case kCVPixelFormatType_64ARGB:
+    case kCVPixelFormatType_64RGBAHalf:
+    case kCVPixelFormatType_128RGBAFloat:
+    case kCVPixelFormatType_4444YpCbCrA8:
+    case kCVPixelFormatType_4444YpCbCrA8R:
+    case kCVPixelFormatType_4444AYpCbCr8:
+    case kCVPixelFormatType_4444AYpCbCr16:
+    case kCVPixelFormatType_420YpCbCr8VideoRange_8A_TriPlanar:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void setAlphaMode(CVPixelBufferRef buffer, bool premultiplied) {
+    if (buffer == nullptr) {
+        return;
+    }
+    CVBufferSetAttachment(buffer, kCVImageBufferAlphaChannelModeKey,
+                          premultiplied ? kCVImageBufferAlphaChannelMode_PremultipliedAlpha
+                                        : kCVImageBufferAlphaChannelMode_StraightAlpha,
+                          kCVAttachmentMode_ShouldPropagate);
 }
 
 bool VideoFrame::contains(CMTime t) const {

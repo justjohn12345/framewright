@@ -21,6 +21,11 @@ namespace {
 constexpr int kMaxConsecutiveErrors = 16;
 constexpr int kMaxSeekRetries = 5;
 constexpr int kSilenceChunk = 4096;
+/// Largest gap between packets filled by feeding silence through the resampler (keeps it
+/// continuous). A larger jump (a real discontinuity or a damaged timestamp) restarts the
+/// pipeline at the new position instead, and the gap is read as silence without being
+/// materialised: memory stays bounded whatever the timestamps say.
+constexpr double kMaxSilenceFillSeconds = 1.0;
 
 int64_t floorMod(int64_t a, int64_t m) {
     const int64_t r = a % m;
@@ -104,6 +109,9 @@ struct FFAudioDecoder::Impl {
     std::vector<float> staged;        ///< Output samples starting at stagedStart.
     int64_t stagedStart = 0;
     int64_t position = 0;
+    /// A decoded frame that follows a gap larger than kMaxSilenceFillSeconds; placed (as a new
+    /// start) once everything before the gap has been read.
+    FramePtr gapFrame;
     int consecutiveErrors = 0;
     bool codecNeedsReset = false; ///< Recreate the codec context after an error (see FFVideoDecoder).
 
@@ -303,9 +311,21 @@ struct FFAudioDecoder::Impl {
             stagedStart = nextOut;
         } else {
             const int64_t diff = src - nextSrc;
-            const int64_t tolerance = coarse ? tickSamples / 2 + 1 : 1;
+            // Each timestamp is rounded to the time base, so two consecutive ones can disagree
+            // with the sample count between them by up to a whole tick (Vorbis frames of 1024
+            // samples are 21.33 ms, stored as 21 or 22 ms): only more than that is a real gap.
+            const int64_t tolerance = coarse ? tickSamples + 1 : 1;
             if (std::llabs(diff) <= tolerance) {
                 src = nextSrc; // Timestamp rounding, not a discontinuity.
+            } else if (diff > 0 && static_cast<double>(diff) > kMaxSilenceFillSeconds * rateNow) {
+                // Too far to fill: emit what the resampler holds, keep this frame, and start
+                // over at its timestamp once the data before the gap has been read.
+                VE_MEDIA_TRY(drainResampler());
+                gapFrame.reset(av_frame_clone(f));
+                if (!gapFrame) {
+                    return makeError(MediaErrorCode::Internal, "av_frame_clone failed");
+                }
+                return false;
             } else if (diff > 0) {
                 VE_MEDIA_TRY(feedSilence(diff));
             } else {
@@ -367,6 +387,7 @@ struct FFAudioDecoder::Impl {
     void resetPipeline() {
         avcodec_flush_buffers(codec.get());
         resetResampler();
+        gapFrame.reset();
         demuxEof = false;
         finished = false;
         pendingReadError.reset();
@@ -487,12 +508,26 @@ struct FFAudioDecoder::Impl {
         }
     }
 
-    /// Decodes until at least one more output sample is staged or the stream ends.
+    /// Places the frame held after a large gap as a new start (everything before the gap has
+    /// been read): read() then returns silence up to it.
+    Status resumeAfterGap() {
+        FramePtr held = std::move(gapFrame);
+        resetResampler();
+        nextSrc = AV_NOPTS_VALUE;
+        auto placed = place(held.get());
+        if (!placed.ok()) {
+            return std::move(placed).error();
+        }
+        return okStatus();
+    }
+
+    /// Decodes until at least one more output sample is staged, a large gap is reached, or the
+    /// stream ends.
     Status pump() {
         AVFrame *f = frame.get();
         const int64_t before = nextOut;
         const size_t stagedBefore = staged.size();
-        while (!finished) {
+        while (!finished && !gapFrame) {
             const int rc = avcodec_receive_frame(codec.get(), f);
             if (rc == 0) {
                 consecutiveErrors = 0;
@@ -501,7 +536,7 @@ struct FFAudioDecoder::Impl {
                 if (!placed.ok()) {
                     return std::move(placed).error();
                 }
-                if (nextOut != before || staged.size() != stagedBefore) {
+                if (nextOut != before || staged.size() != stagedBefore || gapFrame) {
                     return okStatus();
                 }
                 continue;
@@ -514,6 +549,12 @@ struct FFAudioDecoder::Impl {
                 continue;
             }
             if (rc == AVERROR_EOF) {
+                if (verifySeek && !fromStart) {
+                    // Nothing decoded since the seek: the demuxer landed past the audio that
+                    // precedes the target (index-less demuxers seek by bitrate). Go further back.
+                    VE_MEDIA_TRY(retrySeek());
+                    continue;
+                }
                 VE_MEDIA_TRY(drainResampler());
                 finished = true;
                 if (pendingReadError) {
@@ -706,6 +747,15 @@ Result<int> FFAudioDecoder::read(float *interleaved, int frames) {
             d.trimConsumed();
             continue;
         }
+        if (d.gapFrame) {
+            Status s = d.resumeAfterGap();
+            if (!s.ok()) {
+                d.running = false;
+                d.codecNeedsReset = true;
+                return std::move(s).error();
+            }
+            continue;
+        }
         if (d.finished) {
             break;
         }
@@ -737,6 +787,17 @@ int FFAudioDecoder::channels() const {
 
 int64_t FFAudioDecoder::lengthFrames() const {
     return impl_->length;
+}
+
+CMTime FFAudioDecoder::seekTolerance() const {
+    const Impl &d = *impl_;
+    if (!d.opened || !d.coarse || d.fixedFrames || d.stream == nullptr) {
+        return kCMTimeZero; // Sample-exact (see the header).
+    }
+    // The first packet after a seek is placed from its rounded timestamp: up to one container
+    // tick off (muxers round or truncate), plus the rounding of that time to an output sample.
+    const AVRational tb = d.stream->time_base;
+    return CMTimeAdd(CMTimeMake(tb.num, tb.den), CMTimeMake(1, d.timescale));
 }
 
 } // namespace ve::media::ffmpeg

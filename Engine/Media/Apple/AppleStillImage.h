@@ -16,8 +16,10 @@ namespace ve::media::apple {
 Result<std::optional<MediaInfo>> probeStillImage(const std::string &path);
 
 /// Decodes the first image of `path` with its EXIF orientation applied, scaled to fit
-/// maxDimension (0 = full size), into an IOSurface-backed 32BGRA buffer (premultiplied alpha,
-/// sRGB, tagged BT.709 primaries / sRGB transfer).
+/// maxDimension (0 = full size, but never more than kMaxImageDimension per side), into an
+/// IOSurface-backed 32BGRA buffer (premultiplied alpha, tagged
+/// kCVImageBufferAlphaChannelMode_PremultipliedAlpha; sRGB, tagged BT.709 primaries / sRGB
+/// transfer).
 ///
 /// Why BGRA rather than 420v: ImageIO decodes to RGB(A). Converting to 4:2:0 YCbCr would
 /// discard alpha (PNG overlays), subsample chroma (visible on graphics and text), and force a

@@ -2,6 +2,7 @@
 
 #include "../CFRef.h"
 #include "../ColorTags.h"
+#include "../Interfaces.h"
 
 #include <CoreGraphics/CoreGraphics.h>
 
@@ -146,7 +147,8 @@ Result<PixelBuffer> renderStill(const DecodedStill &still, int maxDimension) {
     const AVFrame *frame = still.frame.get();
     int dispWidth = still.width;
     int dispHeight = still.height;
-    fitDimensions(maxDimension, dispWidth, dispHeight);
+    const int limit = maxDimension > 0 ? std::min(maxDimension, kMaxImageDimension) : kMaxImageDimension;
+    fitDimensions(limit, dispWidth, dispHeight);
     const bool swap = swapsAxes(still.orientation);
     const int scaledWidth = swap ? dispHeight : dispWidth; // Stored-orientation size after scaling.
     const int scaledHeight = swap ? dispWidth : dispHeight;
@@ -238,6 +240,7 @@ Result<PixelBuffer> renderStill(const DecodedStill &still, int maxDimension) {
         CVBufferSetAttachment(pb, kCVImageBufferICCProfileKey, icc.get(), kCVAttachmentMode_ShouldPropagate);
     }
     attachColorInfo(pb, kStillColor);
+    setAlphaMode(pb, true); // Premultiplied above (or opaque).
     return std::move(buffer).value();
 }
 

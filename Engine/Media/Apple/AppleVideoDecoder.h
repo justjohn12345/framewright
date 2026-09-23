@@ -27,14 +27,23 @@ namespace ve::media::apple {
 /// the AVAssetReader at the target and supportsRandomAccess() is false.
 ///
 /// Timestamps: both paths return container timestamps in the track timeline (cursor/media
-/// timestamps are mapped through the edit list), so pts is exact on either path.
+/// timestamps are mapped through the edit list), so pts is exact on either path. Durations are
+/// display intervals: AVAssetReader's decoded buffers carry none, so the sequential path reads
+/// one frame ahead and uses the next pts; the random-access path uses the next sample in
+/// presentation order. The last frame lasts until the track end.
 ///
-/// Hardware: the random-access path reports what the VTDecompressionSession says
+/// Hardware: the random-access path reports what its VTDecompressionSession says
 /// (kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder). AVAssetReader does not
-/// expose which decoder it picked; it always prefers VideoToolbox hardware, so the sequential
-/// path reports HardwareCaps for the codec. DecodeOptions::allowHardware = false forces the
-/// random-access path for everything (with hardware disabled in the decoder specification)
-/// and fails in open() for files without sample cursors.
+/// expose its decoder, so open() creates a VTDecompressionSession for the track's format
+/// description (same decoder specification) and reports that session's answer for the
+/// sequential path: measured by VideoToolbox, not predicted from HardwareCaps. A format
+/// VideoToolbox refuses fails open() with UnsupportedCodec. DecodeOptions::allowHardware =
+/// false forces the random-access path for everything (with hardware disabled in the decoder
+/// specification) and fails in open() for files without sample cursors.
+///
+/// open() decodes the first frame (kept for the first next()), so streams that fail only when
+/// decoding also fail in open(), where the router can fall back. DecodeOptions::interrupt is
+/// polled per sample buffer / decoded sample.
 ///
 /// Stills decode once in open() through ImageIO into a 32BGRA buffer (see AppleStillImage.h);
 /// next() returns that frame (pts 0, duration +infinity) once after open() and once per seek().

@@ -38,8 +38,19 @@ Result<LoadedAsset> loadAsset(const std::string &path, double timeoutSeconds);
 Result<AVAssetTrack *> selectTrack(const LoadedAsset &loaded, int trackIndex, AVMediaType mediaType,
                                    int *resolvedIndex);
 
-/// Describes a loaded track (video or audio) as a TrackInfo.
+/// Describes a loaded track (video or audio) as a TrackInfo, including the capability fields:
+/// decodable = AVFoundation reports the track playable and decodable and, for video, a
+/// VTDecompressionSession accepts its format; hardwareDecode = that session is hardware
+/// (measureHardwareDecode).
 TrackInfo makeTrackInfo(AVAssetTrack *track, int index);
+
+/// Creates (and immediately invalidates) a VTDecompressionSession for `format` and reports
+/// whether VideoToolbox picked its hardware decoder
+/// (kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder). With allowHardware false
+/// the session is created with hardware disabled and the answer is false. UnsupportedCodec when
+/// VideoToolbox refuses the format altogether (e.g. MPEG-4 Part 2 Advanced Simple Profile:
+/// codecBadDataErr), which is what AVAssetReader would hit on the first sample.
+Result<bool> measureHardwareDecode(CMFormatDescriptionRef format, bool allowHardware);
 
 /// Details of a video format description needed to pick native output formats.
 struct VideoFormatDetails {
@@ -55,12 +66,15 @@ VideoFormatDetails videoFormatDetails(CMFormatDescriptionRef format);
 /// The decoder-native biplanar output format for a source (see DecodeOptions::pixelFormat).
 OSType nativePixelFormat(const VideoFormatDetails &details);
 
-/// Short container token from the file's leading bytes ("mov", "mp4", "m4a", "wav", ...), or
-/// from the extension when the content is not recognised.
+/// Short container token from the file's leading bytes ("mov", "mp4", "m4a", "wav", "mp3", "aac"
+/// for raw ADTS AAC, ...), or from the extension when the content is not recognised.
 std::string sniffContainer(const std::string &path);
 
 /// AudioChannelLayout (Mono, Stereo, or DiscreteInOrder for more channels) for AV settings.
 NSData *channelLayoutData(int channels);
+/// The layout decoders deliver (AudioOptions::channels): 5.1 and 7.1 in WAVE/SMPTE order (the
+/// order libswresample's default layouts use, so both backends agree), else channelLayoutData().
+NSData *decodedChannelLayoutData(int channels);
 
 /// Scales (w, h) to fit maxDimension (if > 0), preserving aspect ratio, even dimensions.
 void fitDimensions(int maxDimension, int &width, int &height);

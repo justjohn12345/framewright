@@ -6,6 +6,7 @@
 #include <CoreVideo/CoreVideo.h>
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -38,6 +39,9 @@ constexpr uint32_t AV1 = make("av01");
 constexpr uint32_t VP9 = make("vp09");
 constexpr uint32_t AAC = make("aac ");
 constexpr uint32_t LinearPCM = make("lpcm");
+/// CoreAudio kAudioFormatFLAC. The ISO-BMFF sample entry 'fLaC' canonicalises to it.
+constexpr uint32_t FLAC = make("flac");
+constexpr uint32_t Opus = make("opus");
 constexpr uint32_t PNG = make("png ");
 constexpr uint32_t JPEG = make("jpeg");
 constexpr uint32_t HEIC = make("heic");
@@ -47,7 +51,8 @@ constexpr uint32_t HEIC = make("heic");
 std::string fourCCToString(uint32_t code);
 /// Human-readable codec name ("H.264", "HEVC", "Apple ProRes 422", "AAC", ...), or the four-cc.
 std::string codecDisplayName(uint32_t code);
-/// Maps aliases to one canonical code ('hev1' -> 'hvc1', 'avc3' -> 'avc1'); others unchanged.
+/// Maps aliases to one canonical code ('hev1' -> 'hvc1', 'avc3' -> 'avc1', 'fLaC' -> 'flac');
+/// others unchanged.
 uint32_t canonicalCodec(uint32_t code);
 bool isProRes(uint32_t code);
 
@@ -121,12 +126,24 @@ struct TrackInfo {
     CMTime startTime = kCMTimeZero;
     /// Track duration; kCMTimeIndefinite for stills.
     CMTime duration = kCMTimeInvalid;
+
+    // Backend capability, as determined by the prober that produced this TrackInfo (so it
+    // describes THAT backend, not the file in general).
+    /// The backend can decode this track: its decoder exists and accepted the stream's format
+    /// (the Apple prober creates a VTDecompressionSession for video and checks AVFoundation's
+    /// playable/decodable; FFmpeg checks for a decoder in this build).
+    bool decodable = true;
+    /// Measured, not predicted: VideoToolbox reported
+    /// kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder for a session created
+    /// from this track's format (video only; false when hardware decode is unavailable or could
+    /// not be measured).
+    bool hardwareDecode = false;
 };
 
 struct MediaInfo {
     std::string path;
     /// Short lowercase container token derived from the file content where possible:
-    /// "mov", "mp4", "m4a", "m4v", "wav", "aiff", "caf", "mp3", "mkv", "webm", "avi", "mpegts",
+    /// "mov", "mp4", "m4a", "m4v", "wav", "aiff", "caf", "mp3", "aac" (ADTS), "mkv", "webm", "avi", "mpegts",
     /// "png", "jpeg", "heic", "tiff", "gif". The FFmpeg backend maps its demuxer (and for the
     /// ISO-BMFF family the ftyp major brand) onto the same tokens.
     std::string container;
@@ -144,6 +161,15 @@ struct MediaInfo {
 
 // MARK: - Decode options
 
+class DecodeInterrupt; // Interfaces.h
+
+/// Largest image side the media layer produces: Metal's maximum 2D texture size on every
+/// Apple-silicon GPU family (MTLGPUFamilyApple3 and later). Stills larger than this (panoramas)
+/// are scaled down to fit when decoded at full size (maxDimension = 0), because a bigger buffer
+/// could neither be allocated from an IOSurface-backed pool reliably nor be sampled by the
+/// compositor.
+constexpr int kMaxImageDimension = 16384;
+
 /// Options for IVideoDecoder::open.
 struct DecodeOptions {
     /// Output pixel format. 0 = decoder-native biplanar YCbCr matching the source:
@@ -157,16 +183,23 @@ struct DecodeOptions {
     /// backend converts (in the decoder where possible).
     OSType pixelFormat = 0;
     /// If > 0, frames are scaled (preserving aspect ratio, even dimensions) so that neither
-    /// side exceeds this many pixels. Intended for thumbnails; 0 = full size.
+    /// side exceeds this many pixels. Intended for thumbnails; 0 = full size (stills are still
+    /// limited to kMaxImageDimension).
     int maxDimension = 0;
     /// Allow a hardware decoder. When false the backend must use a software decoder.
     bool allowHardware = true;
+    /// Optional cancellation shared with the owner (see DecodeInterrupt in Interfaces.h).
+    std::shared_ptr<DecodeInterrupt> interrupt;
 };
 
 /// Options for IAudioDecoder::open. Output is always 32-bit float, interleaved, native endian.
 struct AudioOptions {
     double sampleRate = 48000;
-    int channels = 2; ///< 1..8; up/down-mixing follows the source's channel layout.
+    /// 1..8; up/down-mixing follows the source's channel layout. Output channel order, the same
+    /// on every backend: mono; stereo L R; 6 = 5.1 as L R C LFE Ls Rs; 8 = 7.1 as L R C LFE Lrs
+    /// Rrs Ls Rs (WAVE/SMPTE order). Other counts (3, 4, 5, 7) have no agreed layout and their
+    /// channel order is backend-specific.
+    int channels = 2;
 };
 
 // MARK: - Encode settings

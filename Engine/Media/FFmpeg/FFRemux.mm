@@ -13,7 +13,7 @@ namespace ve::media::ffmpeg {
 namespace {
 
 Status remuxInto(AVFormatContext *in, AVFormatContext *out, const std::string &destination,
-                 const std::string &formatName) {
+                 const std::string &formatName, const RemuxOptions &options) {
     const bool matroska = formatName == "matroska" || formatName == "webm";
     std::vector<int> map(in->nb_streams, -1);
     for (unsigned i = 0; i < in->nb_streams; ++i) {
@@ -33,8 +33,14 @@ Status remuxInto(AVFormatContext *in, AVFormatContext *out, const std::string &d
         }
         dst->codecpar->codec_tag = 0; // Let the muxer pick its own tag for the codec.
         dst->time_base = src->time_base;
-        dst->avg_frame_rate = src->avg_frame_rate;
-        dst->r_frame_rate = src->r_frame_rate;
+        if (options.frameRate) {
+            dst->avg_frame_rate = src->avg_frame_rate;
+            dst->r_frame_rate = src->r_frame_rate;
+        } else {
+            dst->avg_frame_rate = AVRational{0, 1};
+            dst->r_frame_rate = AVRational{0, 1};
+            dst->codecpar->framerate = AVRational{0, 1};
+        }
         dst->sample_aspect_ratio = src->sample_aspect_ratio;
         map[i] = dst->index;
     }
@@ -98,6 +104,9 @@ Status remuxInto(AVFormatContext *in, AVFormatContext *out, const std::string &d
     auto write = [&](AVPacket *p) -> Status {
         const auto si = static_cast<size_t>(p->stream_index);
         const int di = map[si];
+        if (!options.packetDurations) {
+            p->duration = 0;
+        }
         av_packet_rescale_ts(p, in->streams[si]->time_base, out->streams[di]->time_base);
         p->stream_index = di;
         p->pos = -1;
@@ -140,7 +149,8 @@ Status remuxInto(AVFormatContext *in, AVFormatContext *out, const std::string &d
 
 } // namespace
 
-Status remux(const std::string &source, const std::string &destination, const std::string &formatName) {
+Status remux(const std::string &source, const std::string &destination, const std::string &formatName,
+             const RemuxOptions &options) {
     auto input = openInput(source);
     if (!input.ok()) {
         return std::move(input).error();
@@ -160,7 +170,7 @@ Status remux(const std::string &source, const std::string &destination, const st
                        "avformat_alloc_output_context2(" + formatName + ")");
     }
     FormatOutputPtr output(raw);
-    Status s = remuxInto(input->get(), output.get(), destination, formatName);
+    Status s = remuxInto(input->get(), output.get(), destination, formatName, options);
     output.reset();
     if (!s.ok()) {
         ::unlink(destination.c_str());

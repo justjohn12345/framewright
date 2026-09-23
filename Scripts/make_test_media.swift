@@ -74,6 +74,15 @@ func drawBurnIn(index: Int, base: UnsafeMutableRawPointer, bytesPerRow: Int, wid
     }
 }
 
+/// Sets the alpha byte of the left half of a BGRA frame (colour stays straight, unmultiplied:
+/// the ProRes 4444 alpha convention).
+func setLeftHalfAlpha(_ alpha: UInt8, base: UnsafeMutableRawPointer, bytesPerRow: Int, width: Int, height: Int) {
+    for y in 0..<height {
+        let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: UInt8.self)
+        for x in 0..<(width / 2) { row[x * 4 + 3] = alpha }
+    }
+}
+
 // MARK: - Audio
 
 func audioSample(frame: Int, rate: Double, frequency: Double) -> Float {
@@ -106,10 +115,14 @@ final class AudioSource {
             mBytesPerPacket: UInt32(4 * channels), mFramesPerPacket: 1, mBytesPerFrame: UInt32(4 * channels),
             mChannelsPerFrame: UInt32(channels), mBitsPerChannel: 32, mReserved: 0)
         var desc: CMAudioFormatDescription?
-        guard CMAudioFormatDescriptionCreate(
-            allocator: kCFAllocatorDefault, asbd: &asbd, layoutSize: 0, layout: nil, magicCookieSize: 0,
-            magicCookie: nil, extensions: nil, formatDescriptionOut: &desc) == noErr, let desc
-        else { fail("CMAudioFormatDescriptionCreate") }
+        let layout = stereoLayout(channels)
+        let status = layout.withUnsafeBytes { raw in
+            CMAudioFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault, asbd: &asbd, layoutSize: raw.count,
+                layout: raw.baseAddress!.assumingMemoryBound(to: AudioChannelLayout.self), magicCookieSize: 0,
+                magicCookie: nil, extensions: nil, formatDescriptionOut: &desc)
+        }
+        guard status == noErr, let desc else { fail("CMAudioFormatDescriptionCreate") }
         format = desc
     }
 
@@ -148,7 +161,12 @@ final class AudioSource {
 
 func stereoLayout(_ channels: Int) -> Data {
     var layout = AudioChannelLayout()
-    layout.mChannelLayoutTag = channels == 1 ? kAudioChannelLayoutTag_Mono : kAudioChannelLayoutTag_Stereo
+    switch channels {
+    case 1: layout.mChannelLayoutTag = kAudioChannelLayoutTag_Mono
+    case 2: layout.mChannelLayoutTag = kAudioChannelLayoutTag_Stereo
+    case 6: layout.mChannelLayoutTag = kAudioChannelLayoutTag_MPEG_5_1_D // C L R Ls Rs LFE (AAC order)
+    default: fail("no channel layout for \(channels) channels")
+    }
     return Data(bytes: &layout, count: MemoryLayout<AudioChannelLayout>.size)
 }
 
@@ -164,7 +182,8 @@ struct AudioSpec {
         switch codec {
         case .aac:
             return [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: rate, AVNumberOfChannelsKey: channels,
-                    AVEncoderBitRateKey: 128_000, AVChannelLayoutKey: stereoLayout(channels)]
+                    AVEncoderBitRateKey: channels > 2 ? 64_000 * channels : 128_000,
+                    AVChannelLayoutKey: stereoLayout(channels)]
         case .pcm16:
             return [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: rate, AVNumberOfChannelsKey: channels,
                     AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
@@ -181,6 +200,33 @@ struct VideoSpec {
     var frames: Int
     var bitRate: Int?
     var keyFrameInterval: Int?
+    /// Presentation times of the frames; nil = frame i at i * frameDuration.
+    var times: [CMTime]? = nil
+    /// End of the last frame (the session end); nil = frames * frameDuration.
+    var end: CMTime? = nil
+    /// Track display transform (AVAssetWriterInput.transform).
+    var transform: CGAffineTransform = .identity
+    /// Alpha channel drawn into the source frames (ProRes 4444): the left half of every frame
+    /// gets this alpha (straight colour), the right half stays opaque.
+    var leftHalfAlpha: UInt8? = nil
+    var allowFrameReordering: Bool = true
+
+    func time(_ i: Int) -> CMTime { times?[i] ?? CMTimeMultiply(frameDuration, multiplier: Int32(i)) }
+    var endTime: CMTime { end ?? CMTimeMultiply(frameDuration, multiplier: Int32(frames)) }
+}
+
+/// Frame times of the variable-frame-rate clip: durations cycle through `vfrPattern` (units
+/// of 1/600 s), starting at 0. Keep in sync with EngineTests/Media/TestMedia.mm.
+let vfrPattern: [Int64] = [20, 20, 60, 20, 10, 10, 20, 100, 20, 30, 20, 15]
+
+func vfrTimes(frames: Int) -> (times: [CMTime], end: CMTime) {
+    var t: Int64 = 0
+    var times: [CMTime] = []
+    for i in 0..<frames {
+        times.append(CMTime(value: t, timescale: 600))
+        t += vfrPattern[i % vfrPattern.count]
+    }
+    return (times, CMTime(value: t, timescale: 600))
 }
 
 func waitReady(_ input: AVAssetWriterInput, _ writer: AVAssetWriter) {
@@ -221,14 +267,16 @@ func writeVideo(_ url: URL, type: AVFileType, video v: VideoSpec, audio a: Audio
             AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
         ],
     ]
-    if v.codec != .proRes422 {
+    if v.codec != .proRes422 && v.codec != .proRes4444 {
         var compression: [String: Any] = [AVVideoExpectedSourceFrameRateKey: Int((1 / v.frameDuration.seconds).rounded())]
         if let bitRate = v.bitRate { compression[AVVideoAverageBitRateKey] = bitRate }
         if let key = v.keyFrameInterval { compression[AVVideoMaxKeyFrameIntervalKey] = key }
+        compression[AVVideoAllowFrameReorderingKey] = v.allowFrameReordering
         settings[AVVideoCompressionPropertiesKey] = compression
     }
     let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
     videoInput.expectsMediaDataInRealTime = false
+    videoInput.transform = v.transform
     var timescale = v.frameDuration.timescale
     while timescale < 600 { timescale *= 2 }
     videoInput.mediaTimeScale = timescale
@@ -241,7 +289,7 @@ func writeVideo(_ url: URL, type: AVFileType, video v: VideoSpec, audio a: Audio
         ])
     guard writer.canAdd(videoInput) else { fail("cannot add video input") }
     writer.add(videoInput)
-    let end = CMTimeMultiply(v.frameDuration, multiplier: Int32(v.frames))
+    let end = v.endTime
     var audioInput: AVAssetWriterInput?
     var source: AudioSource?
     if let a {
@@ -260,7 +308,7 @@ func writeVideo(_ url: URL, type: AVFileType, video v: VideoSpec, audio a: Audio
     while i < v.frames || !audioFinished {
         if writer.status == .failed { fail("writer failed: \(String(describing: writer.error))") }
         var progressed = false
-        let pts = CMTimeMultiply(v.frameDuration, multiplier: Int32(i))
+        let pts = i < v.frames ? v.time(i) : end
         let audioTime = source.map { Double($0.written) / $0.rate } ?? .infinity
         if i < v.frames, videoInput.isReadyForMoreMediaData, audioFinished || audioTime >= pts.seconds {
             guard let pool = adaptor.pixelBufferPool else { fail("no pixel buffer pool") }
@@ -269,6 +317,10 @@ func writeVideo(_ url: URL, type: AVFileType, video v: VideoSpec, audio a: Audio
             CVPixelBufferLockBaseAddress(pb, [])
             drawBurnIn(index: i, base: CVPixelBufferGetBaseAddress(pb)!, bytesPerRow: CVPixelBufferGetBytesPerRow(pb),
                        width: v.width, height: v.height)
+            if let alpha = v.leftHalfAlpha {
+                setLeftHalfAlpha(alpha, base: CVPixelBufferGetBaseAddress(pb)!, bytesPerRow: CVPixelBufferGetBytesPerRow(pb),
+                                 width: v.width, height: v.height)
+            }
             CVPixelBufferUnlockBaseAddress(pb, [])
             if !adaptor.append(pb, withPresentationTime: pts) { fail("video append: \(String(describing: writer.error))") }
             i += 1
@@ -377,6 +429,60 @@ writeStill(outDir.appendingPathComponent("still.png"), type: .png, width: 1280, 
 record("still.png", ["width": 1280, "height": 720, "burnIn": 0x1234])
 writeStill(outDir.appendingPathComponent("still.heic"), type: .heic, width: 1024, height: 576, index: 0xBEEF)
 record("still.heic", ["width": 1024, "height": 576, "burnIn": 0xBEEF])
+
+// Variable frame rate: irregular frame durations (vfrPattern), B-frames, keyframe every 30.
+let vfr = vfrTimes(frames: 150)
+writeVideo(outDir.appendingPathComponent("vfr_h264.mp4"), type: .mp4,
+           video: VideoSpec(codec: .h264, width: 640, height: 360, frameDuration: CMTime(value: 1, timescale: 30),
+                            frames: 150, bitRate: 2_000_000, keyFrameInterval: 30, times: vfr.times, end: vfr.end),
+           audio: nil, fastStart: true)
+record("vfr_h264.mp4", ["codec": "avc1", "width": 640, "height": 360, "frames": 150, "vfrPattern600": vfrPattern])
+
+// Display rotation: stored landscape, shown rotated 90 degrees clockwise (an iPhone portrait clip).
+writeVideo(outDir.appendingPathComponent("rotated90_h264.mp4"), type: .mp4,
+           video: VideoSpec(codec: .h264, width: 640, height: 360, frameDuration: CMTime(value: 1, timescale: 30),
+                            frames: 30, bitRate: 1_000_000, keyFrameInterval: 30,
+                            transform: CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 360, ty: 0)),
+           audio: nil, fastStart: true)
+record("rotated90_h264.mp4", ["codec": "avc1", "width": 640, "height": 360, "frames": 30, "rotation": 90])
+
+// Long GOP: one keyframe every 5 s (150 frames), for seeks deep into a GOP.
+writeVideo(outDir.appendingPathComponent("gop5s_h264_1080p30.mp4"), type: .mp4,
+           video: VideoSpec(codec: .h264, width: 1920, height: 1080, frameDuration: CMTime(value: 1, timescale: 30),
+                            frames: 300, bitRate: 8_000_000, keyFrameInterval: 150),
+           audio: nil, fastStart: true)
+record("gop5s_h264_1080p30.mp4", ["codec": "avc1", "width": 1920, "height": 1080, "frames": 300, "gop": 150])
+
+// Leading empty edit: the first video frame is presented at 0.5 s.
+let gapStart = CMTime(value: 1, timescale: 2)
+writeVideo(outDir.appendingPathComponent("leading_gap_h264.mov"), type: .mov,
+           video: VideoSpec(codec: .h264, width: 640, height: 360, frameDuration: CMTime(value: 1, timescale: 30),
+                            frames: 60, bitRate: 1_000_000, keyFrameInterval: 30,
+                            times: (0..<60).map { CMTimeAdd(gapStart, CMTime(value: CMTimeValue($0), timescale: 30)) },
+                            end: CMTimeAdd(gapStart, CMTime(value: 60, timescale: 30))),
+           audio: nil, fastStart: false)
+record("leading_gap_h264.mov", ["codec": "avc1", "width": 640, "height": 360, "frames": 60, "firstFrame": 0.5])
+
+// ProRes 4444 with alpha: left half 50 % transparent with straight (unpremultiplied) colour.
+writeVideo(outDir.appendingPathComponent("prores4444_alpha.mov"), type: .mov,
+           video: VideoSpec(codec: .proRes4444, width: 576, height: 324, frameDuration: CMTime(value: 1, timescale: 25),
+                            frames: 10, bitRate: nil, keyFrameInterval: nil, leftHalfAlpha: 128),
+           audio: nil, fastStart: false)
+record("prores4444_alpha.mov", ["codec": "ap4h", "width": 576, "height": 324, "frames": 10, "leftHalfAlpha": 128])
+
+// Audio variants: 44.1 kHz (AAC and PCM), mono AAC, 5.1 AAC.
+writeAudioOnly(outDir.appendingPathComponent("audio_44k.m4a"), type: .m4a,
+               audio: AudioSpec(codec: .aac, frequency: 880, rate: 44100), seconds: 6)
+record("audio_44k.m4a", ["audio": "aac", "toneHz": 880, "rate": 44100, "seconds": 6])
+writeAudioOnly(outDir.appendingPathComponent("audio_44k.wav"), type: .wav,
+               audio: AudioSpec(codec: .pcm16, frequency: 990, rate: 44100), seconds: 6)
+record("audio_44k.wav", ["audio": "lpcm", "toneHz": 990, "rate": 44100, "seconds": 6])
+writeAudioOnly(outDir.appendingPathComponent("audio_mono.m4a"), type: .m4a,
+               audio: AudioSpec(codec: .aac, frequency: 660, channels: 1), seconds: 4)
+record("audio_mono.m4a", ["audio": "aac", "toneHz": 660, "channels": 1, "seconds": 4])
+writeAudioOnly(outDir.appendingPathComponent("audio_51.m4a"), type: .m4a,
+               audio: AudioSpec(codec: .aac, frequency: 520, channels: 6), seconds: 4)
+record("audio_51.m4a", ["audio": "aac", "toneHz": 520, "channels": 6, "seconds": 4])
 
 let manifestData = try! JSONSerialization.data(withJSONObject: ["files": manifest, "beepStart": beepStart,
                                                                 "beepHz": beepFrequency], options: [.prettyPrinted, .sortedKeys])

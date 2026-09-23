@@ -2,6 +2,8 @@
 
 #include "../ColorTags.h"
 
+#import <VideoToolbox/VideoToolbox.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -149,7 +151,7 @@ Result<LoadedAsset> loadAsset(const std::string &path, double timeoutSeconds) {
     loaded.tracks = loaded.asset.tracks;
     NSArray<NSString *> *trackKeys = @[
         @"formatDescriptions", @"timeRange", @"nominalFrameRate", @"minFrameDuration", @"naturalSize",
-        @"preferredTransform", @"segments", @"naturalTimeScale", @"canProvideSampleCursors"
+        @"preferredTransform", @"segments", @"naturalTimeScale", @"canProvideSampleCursors", @"playable", @"decodable"
     ];
     // Only the format and time range are essential; the rest have safe defaults (0, identity,
     // no cursors) and some formats cannot provide them.
@@ -281,6 +283,34 @@ int intExtension(CMFormatDescriptionRef format, CFStringRef key, int fallback) {
 
 } // namespace
 
+Result<bool> measureHardwareDecode(CMFormatDescriptionRef format, bool allowHardware) {
+    if (format == nullptr) {
+        return makeError(MediaErrorCode::InvalidArgument, "measureHardwareDecode: no format description");
+    }
+    NSDictionary *spec = @{
+        (__bridge NSString *)kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder : @(allowHardware),
+    };
+    VTDecompressionSessionRef session = nullptr;
+    const OSStatus st =
+        VTDecompressionSessionCreate(kCFAllocatorDefault, format, (__bridge CFDictionaryRef)spec, nullptr, nullptr, &session);
+    if (st != noErr || session == nullptr) {
+        return errorFromOSStatus(st != noErr ? st : kVTVideoDecoderMalfunctionErr, MediaErrorCode::UnsupportedCodec,
+                                 "VTDecompressionSessionCreate (" +
+                                     fourCCToString(CMFormatDescriptionGetMediaSubType(format)) + ")");
+    }
+    bool hardware = false;
+    CFBooleanRef usingHW = nullptr;
+    if (VTSessionCopyProperty(session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
+                              kCFAllocatorDefault, &usingHW) == noErr &&
+        usingHW != nullptr) {
+        hardware = CFGetTypeID(usingHW) == CFBooleanGetTypeID() && CFBooleanGetValue(usingHW);
+        CFRelease(usingHW);
+    }
+    VTDecompressionSessionInvalidate(session);
+    CFRelease(session);
+    return hardware && allowHardware;
+}
+
 VideoFormatDetails videoFormatDetails(CMFormatDescriptionRef format) {
     VideoFormatDetails d;
     if (format == nullptr) {
@@ -356,8 +386,16 @@ TrackInfo makeTrackInfo(AVAssetTrack *track, int index) {
     if (track.formatDescriptions.count > 0) {
         format = (__bridge CMFormatDescriptionRef)track.formatDescriptions.firstObject;
     }
+    // AVFoundation's own verdict (it does not look at the bitstream: MPEG-4 Part 2 ASP is
+    // "decodable" but VideoToolbox rejects it), refined for video by a VideoToolbox session.
+    info.decodable = track.playable && track.decodable;
     if ([track.mediaType isEqualToString:AVMediaTypeVideo]) {
         info.kind = TrackKind::Video;
+        if (info.decodable) {
+            auto measured = measureHardwareDecode(format, true);
+            info.decodable = measured.ok();
+            info.hardwareDecode = measured.ok() && measured.value();
+        }
         const VideoFormatDetails d = videoFormatDetails(format);
         info.codec = {d.codec, codecDisplayName(d.codec)};
         info.width = d.width;
@@ -467,11 +505,31 @@ std::string sniffContainer(const std::string &path) {
     if (n >= 189 && b[0] == 0x47 && b[188] == 0x47) {
         return "mpegts";
     }
-    if (n >= 3 && (bytesEqual(b, "ID3", 3) || (b[0] == 0xFF && (b[1] & 0xE0) == 0xE0))) {
+    // Both start with a frame sync: ADTS (raw AAC) has a 12-bit sync and layer bits 00, which
+    // MPEG audio (MP3) reserves; MP3 has layer 01..11. ID3 tags are MP3's.
+    if (n >= 2 && b[0] == 0xFF && (b[1] & 0xF6) == 0xF0) {
+        return "aac";
+    }
+    if (n >= 3 && (bytesEqual(b, "ID3", 3) || (b[0] == 0xFF && (b[1] & 0xE0) == 0xE0 && (b[1] & 0x06) != 0))) {
         return "mp3";
     }
     NSString *ext = @(path.c_str()).pathExtension.lowercaseString;
     return toStdString(ext);
+}
+
+NSData *decodedChannelLayoutData(int channels) {
+    AudioChannelLayout layout{};
+    switch (channels) {
+    case 6:
+        layout.mChannelLayoutTag = kAudioChannelLayoutTag_MPEG_5_1_A; // L R C LFE Ls Rs
+        break;
+    case 8:
+        layout.mChannelLayoutTag = kAudioChannelLayoutTag_WAVE_7_1; // L R C LFE Rls Rrs Ls Rs
+        break;
+    default:
+        return channelLayoutData(channels);
+    }
+    return [NSData dataWithBytes:&layout length:sizeof layout];
 }
 
 NSData *channelLayoutData(int channels) {

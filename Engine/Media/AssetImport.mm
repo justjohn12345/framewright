@@ -74,6 +74,8 @@ Result<MediaAsset> makeMediaAsset(const RoutedMediaInfo &routed, AssetId id, con
         }
         asset.width = w;
         asset.height = h;
+        // Stills come out of the decoders already oriented (EXIF applied): no rotation left.
+        asset.rotationDegrees = still != nullptr ? 0 : ((visual->rotationDegrees % 360) + 360) % 360;
     }
     if (video != nullptr) {
         if (!isPositive(video->frameDuration)) {

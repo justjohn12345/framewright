@@ -5,6 +5,7 @@
 #include "../../Engine/Media/Apple/AppleBackend.h"
 #include "../../Engine/Media/BackendRouter.h"
 #include "../../Engine/Media/HardwareCaps.h"
+#include "BurnIn.h"
 #include "RouterTestSupport.h"
 #include "TestMedia.h"
 
@@ -142,7 +143,8 @@ static bool contains(const std::string &haystack, const std::string &needle) {
         XCTAssertTrue(contains(r.reason, "apple cannot probe the file"), @"%s", r.reason.c_str());
     }
     XCTAssertTrue(contains(routed->reason, "probe: apple failed"), @"%s", routed->reason.c_str());
-    // H.264 is VideoToolbox-decodable, so even the FFmpeg-style route expects hardware.
+    // The route reports what the chosen backend's prober measured (the fake reports hardware
+    // for H.264 like a real prober on this machine would).
     XCTAssertEqual(routed->firstRoute(TrackKind::Video)->hardwareDecode,
                    HardwareCaps::get().hardwareDecode(fourcc::H264));
 }
@@ -196,7 +198,7 @@ static bool contains(const std::string &haystack, const std::string &needle) {
     const TrackRoute &r = routed->routes.at(0);
     XCTAssertEqual(r.backend, "apple");
     XCTAssertFalse(r.hardwareDecode);
-    XCTAssertTrue(contains(r.reason, "not VideoToolbox hardware decodable"), @"%s", r.reason.c_str());
+    XCTAssertTrue(contains(r.reason, "does not decode in VideoToolbox hardware here"), @"%s", r.reason.c_str());
     XCTAssertTrue(contains(routed->reason, "[sw]"), @"%s", routed->reason.c_str());
 }
 
@@ -271,6 +273,85 @@ static bool contains(const std::string &haystack, const std::string &needle) {
     XCTAssertEqual(failed.error().code, MediaErrorCode::DecodeFailed);
     XCTAssertTrue(contains(failed.error().message, "apple open failed"), @"%s", failed.error().message.c_str());
     XCTAssertTrue(contains(failed.error().message, "other open failed"), @"%s", failed.error().message.c_str());
+}
+
+/// The routed decoder switches backends at run time: the Apple-routed decoder opens (so open-
+/// time fallback cannot help) and then fails while decoding; the wrapper moves to the next
+/// backend and resumes exactly where the caller was. Interrupts are not failures.
+- (void)testRuntimeFallbackSwitchesBackendAndResumes {
+    _apple->probe = answer("mov", fourcc::H264, true, 0, "apple");
+    _other->probe = answer("mov", fourcc::H264, true, 0, "other");
+    _apple->failAtFrame = 45;
+    XCTAssertTrue(_router->registerBackend(std::make_shared<FakeBackend>(_apple)).ok());
+    XCTAssertTrue(_router->registerBackend(std::make_shared<FakeBackend>(_other)).ok());
+    auto routed = _router->probe("/media/a.mov");
+    XCTAssertTrue(routed.ok());
+    XCTAssertEqual(routed->backendFor(TrackKind::Video), "apple");
+    auto opened = _router->makeVideoDecoder(routed.value(), -1, {});
+    XCTAssertTrue(opened.ok());
+    if (!opened.ok()) {
+        return;
+    }
+    IVideoDecoder &decoder = *opened->decoder;
+    XCTAssertEqual(opened->backend, "apple");
+    XCTAssertFalse(opened->fellBack);
+    XCTAssertEqual(decoder.activeBackend(), "apple");
+    for (int i = 0; i < 60; ++i) {
+        auto f = decoder.next();
+        XCTAssertTrue(f.ok() && f.value(), @"frame %d: %s", i, f.ok() ? "end" : f.error().description().c_str());
+        if (!f.ok() || !f.value()) {
+            return;
+        }
+        XCTAssertEqual(readBurnIn(f.value()->image.get()), std::optional<int>(i), @"continuous across the switch");
+    }
+    XCTAssertEqual(decoder.activeBackend(), "other");
+    XCTAssertEqual(_other->opens.load(), 1);
+
+    // A failure on the very first frame switches too; a seek target is replayed.
+    _apple->failAtFrame = 0;
+    auto second = _router->makeVideoDecoder(routed.value(), -1, {});
+    // The Apple fake fails at frame 0 only when decoding, so open succeeds.
+    XCTAssertTrue(second.ok());
+    if (second.ok()) {
+        XCTAssertTrue(second->decoder->seek(CMTimeMake(3, 1)).ok());
+        auto f = second->decoder->next();
+        XCTAssertTrue(f.ok() && f.value());
+        if (f.ok() && f.value()) {
+            XCTAssertEqual(readBurnIn(f.value()->image.get()), std::optional<int>(90), @"resumed at the seek target");
+        }
+        XCTAssertEqual(second->decoder->activeBackend(), "other");
+    }
+
+    // Cancelled is not a decode failure: no switch.
+    _apple->failAtFrame = 5;
+    _apple->failCode = MediaErrorCode::Cancelled;
+    auto third = _router->makeVideoDecoder(routed.value(), -1, {});
+    XCTAssertTrue(third.ok());
+    if (third.ok()) {
+        for (int i = 0; i < 5; ++i) {
+            XCTAssertTrue(third->decoder->next().ok());
+        }
+        auto f = third->decoder->next();
+        XCTAssertFalse(f.ok());
+        XCTAssertEqual(third->decoder->activeBackend(), "apple");
+    }
+
+    // Audio: the wrapper resumes at the sample position read() had reached.
+    _apple->failAudioAtSample = 48000;
+    auto audio = _router->makeAudioDecoder(routed.value(), -1, {});
+    XCTAssertTrue(audio.ok());
+    if (audio.ok()) {
+        std::vector<float> buffer(4096 * 2);
+        int64_t total = 0;
+        for (int i = 0; i < 20; ++i) {
+            auto n = audio->decoder->read(buffer.data(), 4096);
+            XCTAssertTrue(n.ok());
+            total += n.ok() ? n.value() : 0;
+        }
+        XCTAssertEqual(total, 20 * 4096);
+        XCTAssertEqual(audio->decoder->position(), total, @"no samples lost or repeated across the switch");
+        XCTAssertEqual(audio->decoder->activeBackend(), "other");
+    }
 }
 
 - (void)testUnroutableTracksAndTotalFailure {

@@ -24,7 +24,9 @@ class AppleBackend final : public IMediaBackend {
     std::unique_ptr<IMediaWriter> makeWriter() override;
     /// Accepts ISO-BMFF/QuickTime, WAVE/AIFF/CAF/MP3 and ImageIO still containers whose codecs
     /// AVFoundation decodes; AV1 and VP9 only when VideoToolbox decodes them in hardware
-    /// (otherwise the FFmpeg backend's software decoders are the better choice).
+    /// (otherwise the FFmpeg backend's software decoders are the better choice). When `info`
+    /// comes from this backend's own prober, tracks it found undecodable (TrackInfo::decodable:
+    /// AVFoundation's playable/decodable and a VideoToolbox session for the format) are refused.
     bool canHandle(const MediaInfo &info) const override;
     bool canWrite(const EncodeSettings &settings) const override;
 

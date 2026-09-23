@@ -20,6 +20,7 @@
 #include "TestMedia.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,8 +32,10 @@
 /// The backend instance for this test run (created from +backend once per test).
 @property (nonatomic, readonly) std::shared_ptr<ve::media::IMediaBackend> backendUnderTest;
 
-/// Whether decoding `codecType` is expected to use hardware. Default: HardwareCaps.
-- (BOOL)expectsHardwareDecodeForCodec:(uint32_t)codecType;
+/// Whether VideoToolbox decodes `clip`'s video in hardware, asked from VideoToolbox itself (a
+/// VTDecompressionSession for the generated ISO-BMFF original's format description), never from
+/// HardwareCaps, which the code under test uses too. nullopt if VideoToolbox refuses the format.
+- (std::optional<bool>)videoToolboxAnswerForClip:(const ve::test::TestClip &)clip;
 
 /// Expected MediaInfo::container for a generated clip. Default: clip.container.
 - (std::string)expectedContainerForClip:(const ve::test::TestClip &)clip;

@@ -26,7 +26,27 @@ namespace ve::media::ffmpeg {
 /// frame duration (Matroska/WebM store milliseconds, so 1/30 s becomes 33 or 34 ms) are
 /// quantised: for constant-rate tracks, timestamps within half a time-base tick of the nominal
 /// frame grid (trackStart + n * frameDuration) are snapped to it, so a 29.97 fps MKV yields the
-/// same CMTimes as the same frames in a QuickTime file.
+/// same CMTimes as the same frames in a QuickTime file. Whether a track is constant-rate is
+/// decided from its timestamps (scanFrameTiming), not from the declared rate: a Matroska
+/// DefaultDuration on variable-rate video must not snap it.
+///
+/// Durations: one decoded frame is held back until the next one (in presentation order) is
+/// decoded, and its duration is the difference of their timestamps. Container durations are
+/// not trusted: Matroska readers only see the DefaultDuration where the muxer wrote no
+/// BlockDuration (mkvmerge never does for video), and ISO-BMFF sample durations of reordered
+/// streams are decode-order deltas. The last frame lasts until the track end when that is after
+/// its pts (ISO-BMFF edit lists make it exact), else one frameDuration(). Frames therefore tile
+/// the track and seek(t) returns the frame whose real display interval contains t.
+///
+/// Track end: in ISO-BMFF the edit list defines it exactly and frames at or after it are not
+/// delivered. Other containers only know an approximate end (a Matroska DURATION tag equals the
+/// last frame's timestamp when the muxer knew no durations), so every frame is delivered and
+/// seeks up to one frameDuration() past the declared end still find the last frame.
+///
+/// open() decodes the first frame (kept for the first next()), so an unsupported stream fails
+/// in open(), where the router can still fall back to another backend, and usedHardware() is
+/// measured from the start. DecodeOptions::interrupt is polled per demuxed packet and per
+/// decoded frame (see DecodeInterrupt).
 ///
 /// Seeking: seek(t) ahead of the current position by at most kCloseAheadSeconds decodes
 /// forward. Otherwise it seeks the demuxer to the last keyframe at or before t
@@ -54,6 +74,8 @@ class FFVideoDecoder final : public IVideoDecoder {
     FFVideoDecoder &operator=(const FFVideoDecoder &) = delete;
 
     Status open(const std::string &path, int trackIndex, const DecodeOptions &options) override;
+    /// open() for a track this backend's prober already described (skips the timing scan).
+    Status openTrack(const std::string &path, const TrackInfo &track, const DecodeOptions &options);
     Status seek(CMTime t) override;
     Result<std::optional<VideoFrame>> next() override;
     CMTime frameDuration() const override;
@@ -65,6 +87,8 @@ class FFVideoDecoder final : public IVideoDecoder {
     int demuxerSeekCount() const;
 
   private:
+    Status openImpl(const std::string &path, int trackIndex, const DecodeOptions &options, const TrackInfo *known);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

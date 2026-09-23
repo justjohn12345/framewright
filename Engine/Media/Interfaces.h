@@ -28,6 +28,7 @@
 #include "PixelBuffer.h"
 #include "Result.h"
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -53,14 +54,54 @@ class IMediaProber {
 struct VideoFrame {
     /// Presentation timestamp, exactly as stored in the container (track timeline).
     CMTime pts = kCMTimeInvalid;
-    /// Display duration of this frame. For stills: kCMTimePositiveInfinity (with pts = 0).
+    /// Display interval of this frame: the time until the next frame's pts in presentation order
+    /// (decoders read one frame ahead where the container does not store it, as for B-frame MP4
+    /// or Matroska without BlockDurations), and for the last frame the time to the track's end.
+    /// Consecutive frames therefore tile the track without gaps or overlaps. For stills:
+    /// kCMTimePositiveInfinity (with pts = 0).
     CMTime duration = kCMTimeInvalid;
     /// Decoded image, IOSurface backed. Treat as read-only; it may be shared with the decoder's
     /// pool and other holders.
     PixelBuffer image;
     bool wasHardwareDecoded = false;
+    /// Alpha contract. For pixel formats with an alpha channel (32BGRA from stills, ProRes 4444,
+    /// software-decoded formats with alpha): true when the colour channels are premultiplied by
+    /// alpha, false for straight (unassociated) alpha. Every decoder also tags the buffer itself
+    /// with kCVImageBufferAlphaChannelModeKey (kCVImageBufferAlphaChannelMode_PremultipliedAlpha /
+    /// _StraightAlpha) with the same value; the tag is the authoritative carrier once the buffer
+    /// travels without its VideoFrame (FrameCache, TextureCache). Producers: stills are
+    /// premultiplied (ImageIO/CoreGraphics convention); video with alpha is straight (ProRes 4444
+    /// via VideoToolbox, libswscale BGRA output). Opaque formats report true (nothing to undo).
+    bool alphaIsPremultiplied = true;
 
     bool contains(CMTime t) const;
+};
+
+/// Reads the alpha contract of a decoded buffer: kCVImageBufferAlphaChannelModeKey when present;
+/// untagged buffers without an alpha channel count as premultiplied (opaque), untagged buffers
+/// with one as `untaggedDefault`.
+bool alphaIsPremultiplied(CVPixelBufferRef buffer, bool untaggedDefault);
+/// Tags `buffer` with kCVImageBufferAlphaChannelModeKey (propagated attachment).
+void setAlphaMode(CVPixelBufferRef buffer, bool premultiplied);
+/// Whether CoreVideo pixel format `format` has an alpha channel.
+bool pixelFormatHasAlpha(OSType format);
+
+/// Cooperative cancellation for a decoder's long-running calls. The decode pool (or any owner)
+/// shares one instance with a decoder through DecodeOptions::interrupt and may call request()
+/// from any thread while another thread is inside the decoder's open/seek/next. Decoders poll
+/// it between units of work (demuxed packets, decoded frames, preroll frames dropped before a
+/// seek target), so a request takes effect within one frame decode, never a whole GOP. The
+/// interrupted call returns MediaErrorCode::Cancelled; the decoder stays usable and keeps the
+/// position it was asked for (the next next() resumes the interrupted seek unless seek() is
+/// called first). The owner clears the flag before it issues the next call.
+class DecodeInterrupt {
+  public:
+    void request() noexcept { flag_.store(true, std::memory_order_release); }
+    void clear() noexcept { flag_.store(false, std::memory_order_release); }
+    bool requested() const noexcept { return flag_.load(std::memory_order_acquire); }
+
+  private:
+    std::atomic<bool> flag_{false};
 };
 
 class IVideoDecoder {
@@ -82,7 +123,8 @@ class IVideoDecoder {
 
     /// Returns the next frame in presentation order, std::nullopt at end of stream, or an error
     /// (the decoder may be seeked again after an error). Stills return their single frame once
-    /// after open() and once after each seek(), then std::nullopt.
+    /// after open() and once after each seek(), then std::nullopt. MediaErrorCode::Cancelled
+    /// when DecodeOptions::interrupt was requested during the call (see DecodeInterrupt).
     virtual Result<std::optional<VideoFrame>> next() = 0;
 
     /// Nominal frame duration of the track (TrackInfo::frameDuration); invalid for stills.
@@ -95,6 +137,9 @@ class IVideoDecoder {
     virtual bool usedHardware() const = 0;
     /// Pixel format of returned frames (resolved when DecodeOptions::pixelFormat was 0).
     virtual OSType outputPixelFormat() const = 0;
+    /// Name of the backend currently decoding, for decoders that can switch backends at run time
+    /// (the router's fallback decoder); empty for plain backend decoders.
+    virtual std::string activeBackend() const { return {}; }
 };
 
 // MARK: - Audio decode
@@ -109,7 +154,12 @@ class IAudioDecoder {
     virtual Status open(const std::string &path, int trackIndex, const AudioOptions &options) = 0;
 
     /// Sets the read position to sample floor(t * sampleRate) (clamped at 0). The next read()
-    /// returns exactly that sample: sample-accurate, including decoder pre-roll handling.
+    /// returns that sample: sample-accurate, including decoder pre-roll handling, with one
+    /// exception reported by seekTolerance(): codecs with variable frame sizes (Opus, Vorbis) in
+    /// containers whose timestamps are coarser than a sample (Matroska/WebM store milliseconds)
+    /// place the first packet after a seek from its rounded timestamp, so the audio read after
+    /// such a seek may be offset by up to one container tick (1 ms = 48 samples at 48 kHz).
+    /// Sequential reads are always sample-exact.
     virtual Status seek(CMTime t) = 0;
 
     /// Reads up to `frames` sample frames (frames * channels floats) into `interleaved`.
@@ -126,6 +176,11 @@ class IAudioDecoder {
     /// Track length in output sample frames (from the container duration; the exact count
     /// delivered by read() may differ by a codec frame).
     virtual int64_t lengthFrames() const = 0;
+    /// Maximum error of the position after seek() (see seek()); kCMTimeZero when seeks are
+    /// sample-exact.
+    virtual CMTime seekTolerance() const { return kCMTimeZero; }
+    /// See IVideoDecoder::activeBackend().
+    virtual std::string activeBackend() const { return {}; }
 };
 
 // MARK: - Encode and mux (separable pipeline, used by backends that have discrete components)

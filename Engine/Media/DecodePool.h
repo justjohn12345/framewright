@@ -8,14 +8,27 @@
 //   variable notify, no I/O).
 // - Each target is served by a stream that owns one IVideoDecoder (opened through the
 //   BackendRouter, off the caller's thread). A stream decodes frames in presentation order and
-//   puts them into the FrameCache until its window is covered: [t, t + lookahead] forward,
-//   [t - lookahead, t] backward (reverse play: the stream seeks back a window at a time and
+//   puts them into the FrameCache until its window is covered: [t, t + window] forward,
+//   [t - window, t] backward (reverse play: the stream seeks back a window at a time and
 //   decodes forward through it). Then it goes idle and wakes on the next setTargets that moves
 //   t or changes the direction (frames were consumed), or on setLookahead().
+// - Window = min(lookahead, what the cache budget allows): each stream gets an equal share of
+//   Config::budgetFraction of FrameCache::budget(), divided by the bytes of one of its decoded
+//   frames (measured from the first frame), and at least minWindowFrames frames. Two 4K 10-bit
+//   streams (24.9 MB per frame) under the 512 MB default get about 7 frames each instead of a
+//   1 s window (1.5 GB) that would evict the frames under the playhead. The pool also tells the
+//   cache where each target's playhead is (FrameCache::setFocus), so eviction removes frames
+//   behind the playhead and far ahead before the ones about to be shown.
 // - A stream keeps a contiguous decoded range. A target inside the range (or at most
 //   `seekAheadThreshold` past its end) continues decoding without a seek; anything else seeks
 //   (a jump, a scrub release, a trim). If the frame under the playhead has vanished from the
-//   cache (memory pressure, purge) the stream re-seeks once to restore it.
+//   cache (memory pressure, purge) the stream re-seeks to restore it, once per target position
+//   (a new position re-arms the repair).
+// - Re-targeting is prompt even inside a long decode: each stream's decoder is opened with a
+//   DecodeInterrupt (DecodeOptions::interrupt), and setTargets() requests it when the new
+//   target makes the work in flight useless (outside the decoded range plus
+//   seekAheadThreshold, or a direction change). A far seek into a long GOP is then abandoned
+//   after the frame being decoded instead of after the whole GOP.
 // - Targets are matched to streams by (asset, trackIndex, lane); `lane` distinguishes two
 //   simultaneous uses of one asset (pass e.g. the clip id). Streams whose key is absent from
 //   the latest setTargets are cancelled and their decoders destroyed on a worker thread.
@@ -31,12 +44,20 @@
 //   stepped by one worker at a time (decoders are not thread-safe, but may migrate between
 //   threads between calls, per Interfaces.h).
 // - One scrub thread, started on the first requestFrame(), with its own decoders (at most
-//   Config::maxScrubDecoders, LRU) so scrubbing never disturbs the sequential streams.
+//   Config::maxScrubDecoders, LRU, one per (asset, lane)) so scrubbing never disturbs the
+//   sequential streams. A newer request for the same (asset, lane) interrupts the decode in
+//   flight (it completes with Cancelled) instead of waiting for its preroll.
 // - No busy waiting: idle threads block on condition variables.
 // - Callbacks from requestFrame() run on the scrub thread, never inside requestFrame() and
 //   never with a pool lock held (they may call back into the pool). Each callback is invoked
 //   exactly once: with the frame, with an error, or with MediaErrorCode::Cancelled when a
-//   newer request for the same asset superseded it or the pool is being destroyed.
+//   newer request for the same (asset, lane) superseded it (pending or in flight) or the pool
+//   is being destroyed.
+// - Failures: a stream whose decoder cannot be opened is marked failed and stays idle. A
+//   permanent failure (unsupported, corrupt, missing file) waits for registerAsset()/invalidate();
+//   a transient one (Timeout, Cancelled: see isTransient) is retried on the next target move,
+//   and transient probe errors are never cached. The failed state is recomputed after every
+//   step, and a reopen requested while a failing open was in flight wins over that failure.
 // - The destructor cancels pending scrub requests (invoking their callbacks), stops and joins
 //   every thread and destroys every decoder before returning. Frames already in the cache
 //   stay there.
@@ -93,7 +114,13 @@ class DecodePool {
         CMTime seekAheadThreshold = CMTimeMake(1, 2);
         int maxThreads = 4;
         int maxScrubDecoders = 4;
-        /// Options for every decoder the pool opens (pixelFormat, allowHardware...).
+        /// Share of FrameCache::budget() all lookahead windows together may fill (the rest is
+        /// headroom for pinned frames, scrubbed frames and other assets).
+        double budgetFraction = 0.75;
+        /// Smallest window in frames, whatever the budget says (the playhead frame and the next).
+        int minWindowFrames = 2;
+        /// Options for every decoder the pool opens (pixelFormat, allowHardware...). The pool
+        /// sets DecodeOptions::interrupt itself.
         DecodeOptions decodeOptions;
     };
 
@@ -108,8 +135,11 @@ class DecodePool {
         CMTime target = kCMTimeInvalid;
         CMTime rangeStart = kCMTimeInvalid; ///< Decoded contiguous range.
         CMTime rangeEnd = kCMTimeInvalid;
+        CMTime window = kCMTimeInvalid;     ///< Lookahead actually used (budget-limited).
+        size_t frameBytes = 0;              ///< Bytes of one decoded frame (0 before the first).
         uint64_t framesDecoded = 0;
         uint64_t seeks = 0;
+        uint64_t interrupts = 0;            ///< Decodes abandoned because the target moved.
         std::optional<MediaError> error;
     };
 
@@ -141,11 +171,13 @@ class DecodePool {
     CMTime lookahead() const;
 
     /// Scrub path: decode the frame of `asset` at `time` as soon as possible (cache first).
-    /// Only the latest pending request per asset is serviced; a request replaced before it
-    /// started gets its callback invoked with Cancelled. The asset's path must be known from
-    /// registerAsset() or a target (else the callback receives InvalidArgument). Uses the
-    /// asset's first video/still track.
-    void requestFrame(AssetId asset, CMTime time, ScrubCallback callback);
+    /// Requests are coalesced per (asset, lane): only the latest one is serviced; an older
+    /// pending one gets Cancelled, and one being decoded is interrupted (Cancelled too). Give
+    /// independent clients (the program monitor's layers, the source monitor) different lanes
+    /// so they do not supersede each other. The asset's path must be known from registerAsset()
+    /// or a target (else the callback receives InvalidArgument). Uses the asset's first
+    /// video/still track.
+    void requestFrame(AssetId asset, CMTime time, ScrubCallback callback, uint64_t lane = 0);
 
     /// Blocks until every stream is idle (window covered, end of stream or failed), removed
     /// streams' decoders are destroyed and no scrub request is pending or running, or until
@@ -164,6 +196,11 @@ class DecodePool {
         uint64_t lane = 0;
         friend auto operator<=>(const StreamKey &, const StreamKey &) = default;
     };
+    struct ScrubKey {
+        AssetId asset;
+        uint64_t lane = 0;
+        friend auto operator<=>(const ScrubKey &, const ScrubKey &) = default;
+    };
     struct ScrubRequest {
         CMTime time = kCMTimeInvalid;
         ScrubCallback callback;
@@ -178,9 +215,12 @@ class DecodePool {
     void scrubMain();
     Stream *pickStream(); // mutex_ held
     StepResult step(Stream &stream, const DecodeTarget &target, const std::shared_ptr<AssetSlot> &slot, CMTime window,
-                    bool reopen);
+                    size_t streamCount, bool reopen);
+    CMTime effectiveWindow(const Stream &stream, CMTime lookahead, size_t streamCount) const;
+    bool makesWorkInFlightUseless(const Stream &stream, const DecodeTarget &next) const; // mutex_ held
     void publish(Stream &stream); // mutex_ held
-    Result<ScrubFrame> serviceScrub(AssetId asset, const std::shared_ptr<AssetSlot> &slot, CMTime time);
+    void updateFocus();           // mutex_ held
+    Result<ScrubFrame> serviceScrub(const ScrubKey &key, const std::shared_ptr<AssetSlot> &slot, CMTime time);
 
     const std::shared_ptr<BackendRouter> router_;
     const std::shared_ptr<FrameCache> cache_;
@@ -200,17 +240,19 @@ class DecodePool {
     std::vector<std::thread> workers_;
 
     // Scrub state (mutex_).
-    std::map<AssetId, ScrubRequest> scrubPending_;
+    std::map<ScrubKey, ScrubRequest> scrubPending_;
     std::vector<ScrubCallback> scrubToCancel_;
     uint64_t scrubSequence_ = 0;
     bool scrubBusy_ = false;
+    ScrubKey scrubInFlight_;                            ///< Valid while scrubBusy_.
+    std::shared_ptr<DecodeInterrupt> scrubInterrupt_;   ///< Of the decode in flight.
     std::thread scrubThread_;
     uint64_t scrubRequests_ = 0;
     uint64_t scrubServiced_ = 0;
     uint64_t scrubCancelled_ = 0;
     uint64_t scrubFailed_ = 0;
     /// Scrub decoders: touched only by the scrub thread (and the destructor after joining it).
-    std::map<AssetId, std::unique_ptr<ScrubDecoder>> scrubDecoders_;
+    std::map<ScrubKey, std::unique_ptr<ScrubDecoder>> scrubDecoders_;
     uint64_t scrubUseCounter_ = 0;
 };
 

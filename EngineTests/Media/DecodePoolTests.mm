@@ -4,6 +4,7 @@
 
 #include "../../Engine/Media/Apple/AppleBackend.h"
 #include "../../Engine/Media/DecodePool.h"
+#include "../../Engine/Media/FFmpeg/FFmpegBackend.h"
 #include "../../Engine/Model/TimeUtil.h"
 #include "BurnIn.h"
 #include "RouterTestSupport.h"
@@ -158,41 +159,109 @@ struct ScrubLog {
 
 // MARK: - Fakes: timing, priorities, lanes, errors
 
+/// Re-targeting costs at most the frame in flight, with a deterministic gate instead of a clock:
+/// the worker is held inside the decode of frame 10 while the target jumps to 5 s; once it is
+/// released, the next frame it decodes must be the new target's (150), and the frame that was in
+/// flight is abandoned (the fake decoder honours DecodeOptions::interrupt like the real ones).
 - (void)testRetargetTakesEffectWithinOneFrameDecode {
-    constexpr auto kDecode = std::chrono::milliseconds(20);
-    _fake->decodeDelay = kDecode;
-    Latch reachedNewTarget(1);
-    Clock::time_point firstNewFrame{};
+    Gate release;
+    Latch inFrame10(1);
     std::mutex m;
+    std::vector<int64_t> decodedAfterRetarget;
+    std::atomic<bool> retargeted{false};
     _fake->onDecode = [&](int64_t index) {
-        if (index == 150) {
+        const bool after = retargeted.load(); // Sampled when this frame's decode starts.
+        if (index == 10 && !after) {
+            inFrame10.countDown();
+            release.pass();
+        }
+        if (after) {
             std::lock_guard<std::mutex> lock(m);
-            if (firstNewFrame == Clock::time_point{}) {
-                firstNewFrame = Clock::now();
-                reachedNewTarget.countDown();
-            }
+            decodedAfterRetarget.push_back(index);
         }
     };
     DecodePool pool(_fakeRouter, _cache);
     pool.setTargets({DecodeTarget{AssetId(1), "/fake/a.mov", -1, kCMTimeZero}});
-    // Let it get going (open + a few frames).
-    std::this_thread::sleep_for(std::chrono::milliseconds(120));
-    XCTAssertFalse(pool.waitUntilIdle(std::chrono::milliseconds(0)), @"still filling");
-    const auto retarget = Clock::now();
+    XCTAssertTrue(inFrame10.wait(std::chrono::seconds(10)), @"the worker is decoding frame 10");
+    retargeted = true;
     pool.setTargets({DecodeTarget{AssetId(1), "/fake/a.mov", -1, CMTimeMake(5, 1)}});
-    XCTAssertTrue(reachedNewTarget.wait(std::chrono::seconds(5)));
-    double latency = 0;
+    release.open();
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
     {
         std::lock_guard<std::mutex> lock(m);
-        latency = std::chrono::duration<double, std::milli>(firstNewFrame - retarget).count();
+        XCTAssertFalse(decodedAfterRetarget.empty());
+        if (!decodedAfterRetarget.empty()) {
+            XCTAssertEqual(decodedAfterRetarget.front(), 150, @"the first frame after the re-target is the new one");
+        }
+        for (int64_t index : decodedAfterRetarget) {
+            XCTAssertGreaterThanOrEqual(index, 150, @"no old-window frame decoded after the re-target");
+        }
     }
-    NSLog(@"re-target latency with a 20 ms/frame decoder: %.1f ms (the frame in flight, then the seek)", latency);
-    // At most the in-flight decode (20 ms) plus scheduling slack; the new frame's own decode
-    // starts after this point.
-    XCTAssertLessThan(latency, 20.0 + 40.0);
-    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(5)));
+    XCTAssertGreaterThanOrEqual(_fake->interrupted.load(), 1, @"the frame in flight was abandoned");
+    XCTAssertFalse(_cache->contains(AssetId(1), int64_t(10)), @"the abandoned frame never reached the cache");
+    XCTAssertGreaterThanOrEqual(pool.stats().streams.at(0).interrupts, uint64_t(1));
     XCTAssertTrue(covers(*_cache, AssetId(1), 150, 180));
     XCTAssertFalse(covers(*_cache, AssetId(1), 0, 30), @"the old window was abandoned");
+}
+
+/// The same with a real decoder: a far seek into a 5 s GOP of 1080p H.264, decoded in software
+/// (so the preroll is long), then a re-target elsewhere while that preroll runs. The decode in
+/// flight must be abandoned, not finished: the old target's frame never reaches the cache, and
+/// the new window is covered after at most one frame of the old preroll per poll (compared with
+/// the time the full preroll takes in the same run, not with an absolute clock).
+- (void)testRetargetAbandonsAFarPrerollWithARealDecoder {
+    const std::string path = [self mediaPath:"gop5s_h264_1080p30.mp4"];
+    if (path.empty()) {
+        return;
+    }
+    auto router = std::make_shared<BackendRouter>();
+    XCTAssertTrue(router->registerBackend(ffmpeg::makeFFmpegBackend()).ok());
+    DecodePool::Config config;
+    config.decodeOptions.allowHardware = false;
+    const CMTime fd = CMTimeMake(1, 30);
+    const AssetId asset(1);
+
+    // Reference: how long the full preroll to frame 148 (deep in the first GOP) takes.
+    double fullPrerollMs = 0;
+    {
+        auto cache = std::make_shared<FrameCache>();
+        DecodePool pool(router, cache, config);
+        pool.setTargets({DecodeTarget{asset, path, -1, CMTimeMake(1, 30)}}); // Open first.
+        XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(30)));
+        const auto start = Clock::now();
+        pool.setTargets({DecodeTarget{asset, path, -1, CMTimeMultiply(fd, 148)}});
+        XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(30)));
+        fullPrerollMs = msSince(start);
+        XCTAssertTrue(cache->contains(asset, int64_t(148)));
+    }
+
+    auto cache = std::make_shared<FrameCache>();
+    DecodePool pool(router, cache, config);
+    pool.setTargets({DecodeTarget{asset, path, -1, CMTimeMake(1, 30)}});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(30)));
+    if (fullPrerollMs < 60) {
+        XCTSkip(@"the full preroll took only %.1f ms: too short to interrupt deterministically", fullPrerollMs);
+    }
+    pool.setTargets({DecodeTarget{asset, path, -1, CMTimeMultiply(fd, 148)}}); // Far: seek + long preroll.
+    // Wait until the worker has seeked and is inside the preroll (well before it can finish).
+    const auto deadline = Clock::now() + std::chrono::seconds(10);
+    while (pool.stats().streams.at(0).seeks < 1 && Clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(fullPrerollMs / 6));
+    XCTAssertFalse(cache->contains(asset, int64_t(148)), @"re-targeting while the preroll is still running");
+    const auto retarget = Clock::now();
+    pool.setTargets({DecodeTarget{asset, path, -1, CMTimeMultiply(fd, 250)}}); // Second GOP.
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(30)));
+    const double retargetMs = msSince(retarget);
+    const auto stats = pool.stats().streams.at(0);
+    NSLog(@"real decoder: full preroll %.1f ms; re-target during it to the next GOP and fill: %.1f ms; %llu "
+          @"interrupts",
+          fullPrerollMs, retargetMs, stats.interrupts);
+    XCTAssertGreaterThanOrEqual(stats.interrupts, uint64_t(1), @"the preroll in flight was interrupted");
+    XCTAssertFalse(cache->contains(asset, int64_t(148)), @"the abandoned target was never decoded");
+    XCTAssertTrue(covers(*cache, asset, 250, 260));
+    XCTAssertEqual(readBurnIn(cache->get(asset, int64_t(250))->image.get()), std::optional<int>(250));
 }
 
 - (void)testPriorityOrdersStreamsOnASingleThread {
@@ -259,6 +328,54 @@ struct ScrubLog {
     XCTAssertTrue(covers(*_cache, AssetId(1), 31, 91));
 }
 
+/// A dissolve between two 4K 10-bit streams (24.9 MB per frame) with the default 512 MB
+/// budget: a 1 s window per stream would need about 1.5 GB. Playback is simulated frame by
+/// frame the way the render thread uses the cache (the shown frames stay pinned until the next
+/// ones are acquired); the frame under the playhead of both streams must be in the cache every
+/// time the pool has settled.
+- (void)testNoPlayheadMissesAcrossA4KDissolveWithTheDefaultBudget {
+    _fake->width = 3840;
+    _fake->height = 2160;
+    _fake->pixelFormat = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
+    auto cache = std::make_shared<FrameCache>(); // Default budget.
+    DecodePool pool(_fakeRouter, cache);
+    const CMTime fd = CMTimeMake(1, 30);
+    const AssetId a(1), b(2);
+    std::vector<FrameCache::PinnedFrame> shown;
+    int misses = 0;
+    size_t worstUnpinnedBytes = 0;
+    for (int k = 0; k < 60; ++k) {
+        const CMTime t = CMTimeMultiply(fd, k);
+        pool.setTargets({DecodeTarget{a, "/fake/a.mov", -1, t}, DecodeTarget{b, "/fake/b.mov", -1, t}});
+        XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(20)));
+        std::vector<FrameCache::PinnedFrame> next;
+        for (AssetId asset : {a, b}) {
+            FrameCache::PinnedFrame pin = cache->acquire(asset, FrameCache::frameIndex(t, fd));
+            if (!pin) {
+                ++misses;
+            }
+            next.push_back(std::move(pin));
+        }
+        shown = std::move(next);
+        const FrameCache::Stats st = cache->stats();
+        worstUnpinnedBytes = std::max(worstUnpinnedBytes, st.bytes - st.pinnedBytes);
+    }
+    const auto streams = pool.stats().streams;
+    NSLog(@"4K dissolve: %d playhead misses in 60 frames x 2 streams; cache %zu MB (budget %zu MB); window %.3f s "
+          @"(%zu bytes per frame)",
+          misses, worstUnpinnedBytes >> 20, cache->budget() >> 20,
+          streams.empty() ? 0.0 : CMTimeGetSeconds(streams[0].window), streams.empty() ? size_t(0) : streams[0].frameBytes);
+    for (const auto &st : streams) {
+        // An equal share of 75 % of the budget: floor(0.75 * 512 MB / 2 / frameBytes) frames.
+        const auto frames = static_cast<int64_t>(std::floor(0.75 * static_cast<double>(cache->budget()) / 2.0 /
+                                                            static_cast<double>(st.frameBytes)));
+        XCTAssertEqual(CMTimeCompare(st.window, CMTimeMultiply(fd, static_cast<int32_t>(frames))), 0,
+                       @"window %.4f s, wanted %lld frames", CMTimeGetSeconds(st.window), frames);
+    }
+    XCTAssertEqual(misses, 0, @"playhead frames missing from the cache after the pool settled");
+    XCTAssertLessThanOrEqual(worstUnpinnedBytes, cache->budget());
+}
+
 - (void)testOpenFailureIsReportedAndDoesNotSpin {
     _fake->failOpen = true;
     DecodePool pool(_fakeRouter, _cache);
@@ -286,6 +403,117 @@ struct ScrubLog {
     XCTAssertEqual(pool.stats().streams.at(0).error->code, MediaErrorCode::InvalidArgument);
 }
 
+/// invalidate() while a failing open is in flight: the stale failure must not stick; the
+/// stream reopens (and succeeds, the cause having been fixed).
+- (void)testReopenRequestedDuringAFailingOpenWins {
+    Gate release;
+    Latch inOpen(1);
+    std::atomic<int> opens{0};
+    _fake->failOpen = true;
+    _fake->onOpen = [&] {
+        if (opens++ == 0) {
+            inOpen.countDown();
+            release.pass();
+        }
+    };
+    DecodePool pool(_fakeRouter, _cache);
+    pool.setTargets({DecodeTarget{AssetId(1), "/fake/a.mov", -1, kCMTimeZero}});
+    XCTAssertTrue(inOpen.wait(std::chrono::seconds(10)));
+    _fake->failOpen = false; // e.g. the user relinked the file...
+    pool.invalidate(AssetId(1)); // ...while the old open is still failing.
+    release.open();
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    const auto stats = pool.stats().streams.at(0);
+    XCTAssertFalse(stats.failed, @"the failure of the superseded open is stale");
+    XCTAssertTrue(_cache->contains(AssetId(1), int64_t(0)));
+    XCTAssertEqual(opens.load(), 2);
+}
+
+/// A transient probe error (a load timeout) is neither cached nor sticky: the next target move
+/// probes again and the stream recovers.
+- (void)testTransientProbeFailureIsRetried {
+    std::atomic<int> calls{0};
+    _fake->probe = [&](const std::string &p) -> Result<MediaInfo> {
+        if (calls++ == 0) {
+            return makeError(MediaErrorCode::Timeout, "loading timed out");
+        }
+        return makeFakeInfo(p, "mov", fourcc::H264);
+    };
+    DecodePool pool(_fakeRouter, _cache);
+    pool.setTargets({DecodeTarget{AssetId(1), "/fake/a.mov", -1, kCMTimeZero}});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    auto stats = pool.stats().streams.at(0);
+    XCTAssertTrue(stats.failed);
+    XCTAssertTrue(stats.error && stats.error->code == MediaErrorCode::Timeout);
+    pool.setTargets({DecodeTarget{AssetId(1), "/fake/a.mov", -1, CMTimeMake(1, 30)}});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    stats = pool.stats().streams.at(0);
+    XCTAssertFalse(stats.failed, @"recovered on the next target move");
+    XCTAssertEqual(calls.load(), 2, @"probed again: the timeout was not cached");
+    XCTAssertTrue(_cache->contains(AssetId(1), int64_t(1)));
+    // A permanent failure still stays failed (and is not re-probed) until invalidated.
+    _fake->failOpen = true;
+    pool.invalidate(AssetId(1));
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    const int opensBefore = _fake->opens.load();
+    pool.setTargets({DecodeTarget{AssetId(1), "/fake/a.mov", -1, CMTimeMake(2, 1)}});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    XCTAssertTrue(pool.stats().streams.at(0).failed);
+    XCTAssertEqual(_fake->opens.load(), opensBefore, @"a permanent failure is not retried on target moves");
+}
+
+/// The first frame of a clip with a leading empty edit is presented at 0.5 s; the decoder
+/// returns it for any earlier time, and the cache must answer the same for the gap (the pool
+/// records the seek target the frame answered).
+- (void)testLeadingGapIsCoveredByTheFirstFrame {
+    const std::string path = [self mediaPath:"leading_gap_h264.mov"];
+    if (path.empty()) {
+        return;
+    }
+    DecodePool pool(BackendRouter::makeDefault(), _cache);
+    pool.setTargets({DecodeTarget{AssetId(1), path, -1, CMTimeMake(1, 5)}});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(20)));
+    auto frame = _cache->get(AssetId(1), CMTimeMake(1, 5));
+    XCTAssertTrue(frame.has_value(), @"0.2 s, inside the leading gap, is answered");
+    if (frame) {
+        XCTAssertEqual(readBurnIn(frame->image.get()), std::optional<int>(0));
+        XCTAssertEqual(CMTimeCompare(frame->pts, CMTimeMake(1, 2)), 0);
+    }
+    XCTAssertTrue(_cache->contains(AssetId(1), FrameCache::frameIndex(CMTimeMake(1, 5), CMTimeMake(1, 30))),
+                  @"the playback frame source's slot lookup agrees");
+}
+
+/// Variable frame rate through the pool and the slot lookups the playback frame source uses:
+/// with the asset's frame duration (the shortest frame, 1/60 s), every slot of the playhead's
+/// window is answered, by the frame the decoder shows at the slot's start.
+- (void)testVariableFrameRateWindowHasNoMisses {
+    const std::string path = [self mediaPath:"vfr_h264.mp4"];
+    if (path.empty()) {
+        return;
+    }
+    const CMTime fd = CMTimeMake(10, 600); // TrackInfo::frameDuration of the VFR clip.
+    DecodePool pool(BackendRouter::makeDefault(), _cache);
+    int misses = 0;
+    int wrong = 0;
+    for (int64_t slot = 0; slot < 240; slot += 7) {
+        const CMTime t = timeForFrame(slot, fd);
+        pool.setTargets({DecodeTarget{AssetId(1), path, -1, t}});
+        XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(20)));
+        for (int64_t k = slot; k < slot + 30; ++k) { // The next half second of slots.
+            FrameCache::PinnedFrame pin = _cache->acquire(AssetId(1), k);
+            if (!pin) {
+                ++misses;
+                continue;
+            }
+            if (readBurnIn(pin.image().get()) != std::optional<int>(vfrFrameAt(timeForFrame(k, fd)))) {
+                ++wrong;
+            }
+        }
+    }
+    XCTAssertEqual(misses, 0, @"slots of the window without a frame");
+    XCTAssertEqual(wrong, 0, @"slots answered with a frame not shown at the slot's start");
+}
+
 - (void)testRemovedTargetsReleaseTheirDecoders {
     DecodePool pool(_fakeRouter, _cache);
     pool.setTargets({DecodeTarget{AssetId(1), "/fake/a.mov"}, DecodeTarget{AssetId(2), "/fake/b.mov"}});
@@ -300,6 +528,37 @@ struct ScrubLog {
 }
 
 // MARK: - Scrub
+
+/// Lanes keep independent clients apart: a request for the same asset in another lane neither
+/// cancels nor interrupts the one being serviced.
+- (void)testScrubLanesDoNotSupersedeEachOther {
+    Gate firstSeek;
+    Latch inFirstSeek(1);
+    std::atomic<int> seekCount{0};
+    _fake->onSeek = [&](CMTime) {
+        if (seekCount++ == 0) {
+            inFirstSeek.countDown();
+            firstSeek.pass();
+        }
+    };
+    ScrubLog log;
+    DecodePool pool(_fakeRouter, _cache);
+    pool.registerAsset(AssetId(1), "/fake/a.mov");
+    pool.requestFrame(AssetId(1), CMTimeMake(1, 1), log.callback(1), 7);
+    XCTAssertTrue(inFirstSeek.wait(std::chrono::seconds(5)));
+    pool.requestFrame(AssetId(1), CMTimeMake(4, 1), log.callback(2), 8);
+    firstSeek.open();
+    XCTAssertTrue(log.waitFor(2, std::chrono::seconds(10)));
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    std::lock_guard<std::mutex> lock(log.mutex);
+    XCTAssertTrue(log.results[1].at(0).ok(), @"lane 7 is not superseded by lane 8");
+    XCTAssertTrue(log.results[2].at(0).ok());
+    if (log.results[1].at(0).ok() && log.results[2].at(0).ok()) {
+        XCTAssertEqual(readBurnIn(log.results[1].at(0).value().image.get()), std::optional<int>(30));
+        XCTAssertEqual(readBurnIn(log.results[2].at(0).value().image.get()), std::optional<int>(120));
+    }
+    XCTAssertEqual(pool.stats().scrubCancelled, uint64_t(0));
+}
 
 - (void)testScrubCoalescingDropsStaleRequestsAndCallsEachCallbackOnce {
     Gate firstSeek;
@@ -335,7 +594,9 @@ struct ScrubLog {
         const auto &r = log.results[id].at(0);
         return r.ok() ? readBurnIn(r.value().image.get()) : std::nullopt;
     };
-    XCTAssertEqual(frameOf(1), std::optional<int>(30));
+    // Request 1 was being decoded when newer requests for the same asset arrived: its decode is
+    // interrupted (a scrub must not wait for a stale preroll) and it completes with Cancelled.
+    XCTAssertEqual(log.results[1].at(0).error().code, MediaErrorCode::Cancelled);
     XCTAssertEqual(log.results[2].at(0).error().code, MediaErrorCode::Cancelled);
     XCTAssertEqual(log.results[3].at(0).error().code, MediaErrorCode::Cancelled);
     XCTAssertEqual(frameOf(4), std::optional<int>(105));
@@ -343,8 +604,8 @@ struct ScrubLog {
     XCTAssertEqual(frameOf(5), std::optional<int>(120));
     const auto stats = pool.stats();
     XCTAssertEqual(stats.scrubRequests, uint64_t(5));
-    XCTAssertEqual(stats.scrubServiced, uint64_t(3));
-    XCTAssertEqual(stats.scrubCancelled, uint64_t(2));
+    XCTAssertEqual(stats.scrubServiced, uint64_t(2));
+    XCTAssertEqual(stats.scrubCancelled, uint64_t(3));
     XCTAssertTrue(_cache->contains(AssetId(1), 105), @"scrubbed frames land in the cache");
 }
 
@@ -438,23 +699,46 @@ struct ScrubLog {
         XCTAssertEqual(log.results.size(), size_t(2));
         XCTAssertEqual(log.results[1].size(), size_t(1));
         XCTAssertEqual(log.results[2].size(), size_t(1));
-        XCTAssertTrue(log.results[1].at(0).ok(), @"the in-flight request completes");
+        // Shutdown interrupts the decode in flight: it completes (once) with Cancelled.
+        XCTAssertEqual(log.results[1].at(0).error().code, MediaErrorCode::Cancelled);
         XCTAssertEqual(log.results[2].at(0).error().code, MediaErrorCode::Cancelled);
     }
     XCTAssertEqual(_fake->liveDecoders.load(), 0, @"every decoder was destroyed");
     opener.join();
 }
 
+/// Destruction abandons decodes in flight: with both workers held inside a frame decode, the
+/// destructor (on another thread) cannot finish, and once they are released it finishes without
+/// decoding another frame: nothing waits for a window to fill.
 - (void)testDestructorIsPromptWhileDecoding {
-    _fake->decodeDelay = std::chrono::milliseconds(20);
+    Gate release;
+    Latch bothDecoding(2);
+    std::atomic<int> started{0};
+    std::atomic<bool> destroying{false};
+    std::atomic<int> decodedWhileDestroying{0};
+    _fake->onDecode = [&](int64_t) {
+        if (destroying) {
+            ++decodedWhileDestroying;
+        }
+        if (started++ < 2) {
+            bothDecoding.countDown();
+            release.pass();
+        }
+    };
     auto pool = std::make_unique<DecodePool>(_fakeRouter, _cache);
     pool->setTargets({DecodeTarget{AssetId(1), "/fake/a.mov"}, DecodeTarget{AssetId(2), "/fake/b.mov"}});
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    const auto start = Clock::now();
-    pool.reset();
-    const double ms = msSince(start);
-    NSLog(@"DecodePool destructor while decoding (20 ms/frame): %.1f ms", ms);
-    XCTAssertLessThan(ms, 20.0 + 50.0);
+    XCTAssertTrue(bothDecoding.wait(std::chrono::seconds(10)));
+    Latch destroyed(1);
+    destroying = true;
+    std::thread destroyer([&] {
+        pool.reset();
+        destroyed.countDown();
+    });
+    XCTAssertFalse(destroyed.wait(std::chrono::milliseconds(50)), @"cannot finish while a decode is blocked");
+    release.open();
+    XCTAssertTrue(destroyed.wait(std::chrono::seconds(10)));
+    destroyer.join();
+    XCTAssertEqual(decodedWhileDestroying.load(), 0, @"no frame decode started after destruction began");
     XCTAssertEqual(_fake->liveDecoders.load(), 0);
 }
 

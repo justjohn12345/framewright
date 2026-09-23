@@ -2,6 +2,7 @@
 
 #include "../../Engine/Media/HardwareCaps.h"
 #include "BurnIn.h"
+#include "VideoToolboxProbe.h"
 
 #include <algorithm>
 #include <cmath>
@@ -41,6 +42,20 @@ int indexAt(const TestClip &clip, double t) {
     return static_cast<int>(std::floor(t / seconds(clip.frameDuration) + 1e-9));
 }
 
+/// Where findBeepOnset() finds the beep in the ideal signal (the generator's), at `rate`: the
+/// reference decoded audio is compared with, to a few samples instead of a millisecond.
+double referenceOnset(double toneHz, double rate, double beepStart) {
+    const auto frames = static_cast<int64_t>((beepStart + 0.2) * rate);
+    const std::vector<float> ideal = makeToneWithBeep(toneHz, rate, 1, frames, beepStart);
+    return findBeepOnset(ideal.data(), frames, 1, rate, static_cast<int64_t>((beepStart - 0.5) * rate)).value_or(-1);
+}
+
+/// Onset tolerance: lossless audio must land on the same sample; lossy codecs smear the attack
+/// by a few samples.
+double onsetTolerance(uint32_t codec, double rate) {
+    return (codec == fourcc::LinearPCM ? 1.0 : 4.0) / rate;
+}
+
 } // namespace
 
 @implementation MediaBackendConformanceTests {
@@ -72,8 +87,17 @@ int indexAt(const TestClip &clip, double t) {
     self.continueAfterFailure = YES;
 }
 
-- (BOOL)expectsHardwareDecodeForCodec:(uint32_t)codecType {
-    return HardwareCaps::get().hardwareDecode(codecType);
+- (std::optional<bool>)videoToolboxAnswerForClip:(const TestClip &)clip {
+    // Remuxed copies (e.g. .mkv) carry the same bitstream as their generated original.
+    const auto stem = [](const std::string &name) { return name.substr(0, name.rfind('.')); };
+    for (const TestClip &original : testClips()) {
+        if (stem(original.file) == stem(clip.file)) {
+            std::string error;
+            const std::string path = testMediaPath(original.file, error);
+            return path.empty() ? std::nullopt : videoToolboxDecodesInHardware(path);
+        }
+    }
+    return std::nullopt;
 }
 
 - (std::string)expectedContainerForClip:(const TestClip &)clip {
@@ -676,7 +700,11 @@ int indexAt(const TestClip &clip, double t) {
         if (!decoder) {
             continue;
         }
-        const BOOL expected = [self expectsHardwareDecodeForCodec:clip.videoCodec];
+        // The platform's own answer, not HardwareCaps (which the decoders consult too).
+        const std::optional<bool> vt = [self videoToolboxAnswerForClip:clip];
+        XCTAssertTrue(vt.has_value(), @"%s: VideoToolbox refuses the format", file);
+        const bool expected = vt.value_or(false);
+        NSLog(@"%s: VideoToolbox hardware decode %d; decoder reports %d", file, expected, decoder->usedHardware());
         auto first = decoder->next();
         XCTAssertTrue(first.ok() && first.value(), @"%s", file);
         if (first.ok() && first.value()) {
@@ -810,15 +838,21 @@ int indexAt(const TestClip &clip, double t) {
         const std::vector<float> all = [self readAll:*decoder clip:*clip];
         const auto frames = static_cast<int64_t>(all.size() / 2);
         const auto expected = static_cast<int64_t>(std::llround(clip->audioSeconds * 48000));
-        XCTAssertLessThanOrEqual(std::llabs(frames - expected), 1024, @"%s: %lld frames, wanted %lld",
+        // Linear PCM has no codec framing: the count is exact. Compressed tracks are exact too
+        // where the container states the length (ISO-BMFF edit lists / iTunSMPB), else within a
+        // codec frame (Matroska).
+        const int64_t countSlack = clip->audioCodec == fourcc::LinearPCM ? 0 : 1024;
+        XCTAssertLessThanOrEqual(std::llabs(frames - expected), countSlack, @"%s: %lld frames, wanted %lld",
                                  clip->file.c_str(), frames, expected);
-        XCTAssertLessThanOrEqual(std::llabs(decoder->lengthFrames() - expected), 1024, @"%s", clip->file.c_str());
+        XCTAssertLessThanOrEqual(std::llabs(decoder->lengthFrames() - expected), countSlack, @"%s",
+                                 clip->file.c_str());
         XCTAssertEqual(decoder->position(), frames, @"%s", clip->file.c_str());
         auto onset = findBeepOnset(all.data(), frames, 2, 48000, static_cast<int64_t>(1.5 * 48000));
         XCTAssertTrue(onset.has_value(), @"%s: no beep", clip->file.c_str());
         if (onset) {
-            XCTAssertEqualWithAccuracy(*onset, kMediaBeepStart, 0.001, @"%s: beep at %.5f s", clip->file.c_str(),
-                                       *onset);
+            XCTAssertEqualWithAccuracy(*onset, referenceOnset(clip->toneHz, 48000, kMediaBeepStart),
+                                       onsetTolerance(clip->audioCodec, 48000), @"%s: beep at %.6f s",
+                                       clip->file.c_str(), *onset);
         }
         XCTAssertFalse(findBeepOnset(all.data(), static_cast<int64_t>(1.95 * 48000), 2, 48000).has_value(),
                        @"%s: loud samples before the beep", clip->file.c_str());
@@ -867,8 +901,10 @@ int indexAt(const TestClip &clip, double t) {
                 auto onset = findBeepOnset(chunk.data(), n.value(), 2, 48000);
                 XCTAssertTrue(onset.has_value(), @"%s", clip->file.c_str());
                 if (onset) {
-                    XCTAssertEqualWithAccuracy(*onset + static_cast<double>(pos) / 48000.0, kMediaBeepStart, 0.001,
-                                               @"%s: beep after seek", clip->file.c_str());
+                    XCTAssertEqualWithAccuracy(*onset + static_cast<double>(pos) / 48000.0,
+                                               referenceOnset(clip->toneHz, 48000, kMediaBeepStart),
+                                               onsetTolerance(clip->audioCodec, 48000), @"%s: beep after seek",
+                                               clip->file.c_str());
                 }
             }
         }
@@ -891,8 +927,9 @@ int indexAt(const TestClip &clip, double t) {
         auto onset = findBeepOnset(all.data(), frames, 1, 44100, static_cast<int64_t>(1.5 * 44100));
         XCTAssertTrue(onset.has_value(), @"%s", clip->file.c_str());
         if (onset) {
-            XCTAssertEqualWithAccuracy(*onset, kMediaBeepStart, 0.001, @"%s: beep at %.5f s at 44.1 kHz mono",
-                                       clip->file.c_str(), *onset);
+            // Resampling to 44.1 kHz moves the attack by at most a couple of output samples.
+            XCTAssertEqualWithAccuracy(*onset, referenceOnset(clip->toneHz, 44100, kMediaBeepStart), 4.0 / 44100,
+                                       @"%s: beep at %.6f s at 44.1 kHz mono", clip->file.c_str(), *onset);
         }
         XCTAssertEqualWithAccuracy(estimateFrequency(all.data(), 22050, 66150, 1, 44100), clip->toneHz,
                                    clip->toneHz * 0.01, @"%s", clip->file.c_str());
@@ -945,7 +982,8 @@ struct WriterCase {
     if (!opened.ok()) {
         return;
     }
-    const bool expectHardware = wc.requireHardware || HardwareCaps::get().hardwareEncode(codecType(wc.codec));
+    // VideoToolbox's own answer for these settings, not HardwareCaps.
+    const bool expectHardware = videoToolboxEncodesInHardware(codecType(wc.codec), kWidth, kHeight);
     XCTAssertEqual(writer->usesHardwareVideoEncoder(), expectHardware, @"%s", wc.name);
 
     auto makeFrame = [&](int i) -> PixelBuffer {
@@ -1056,7 +1094,10 @@ struct WriterCase {
     auto onset = findBeepOnset(decoded.data(), static_cast<int64_t>(decoded.size() / 2), 2, 48000, 24000);
     XCTAssertTrue(onset.has_value(), @"%s: no beep", wc.name);
     if (onset) {
-        XCTAssertEqualWithAccuracy(*onset, kBeep, 0.001, @"%s: beep at %.5f", wc.name, *onset);
+        XCTAssertEqualWithAccuracy(*onset, referenceOnset(kTone, 48000, kBeep),
+                                   onsetTolerance(wc.audio == AudioCodec::LinearPCM ? fourcc::LinearPCM : fourcc::AAC,
+                                                  48000),
+                                   @"%s: beep at %.6f", wc.name, *onset);
     }
     XCTAssertEqualWithAccuracy(estimateFrequency(decoded.data(), 4800, 43200, 2, 48000), kTone, kTone * 0.01, @"%s",
                                wc.name);
@@ -1080,6 +1121,121 @@ struct WriterCase {
 - (void)testWriterRoundTripH264Pull {
     [self roundTrip:{VideoCodec::H264, ContainerFormat::MOV, AudioCodec::AAC, CMTimeMake(1, 30), true, false,
                      "rt_h264_pull.mov"}];
+}
+
+/// Audio that runs past the last video frame is kept (the session ends with the longer
+/// stream); the video track still ends one frame after its last frame.
+- (void)testWriterKeepsAudioLongerThanVideo {
+    const std::string path = scratchDirectory() + "/longer_audio.mov";
+    EncodeSettings settings;
+    settings.container = ContainerFormat::MOV;
+    VideoEncodeSettings v;
+    v.codec = VideoCodec::H264;
+    v.width = 320;
+    v.height = 180;
+    v.frameDuration = CMTimeMake(1, 30);
+    settings.video = v;
+    settings.audio = AudioEncodeSettings{};
+    settings.audio->codec = AudioCodec::LinearPCM;
+    auto writer = self.backendUnderTest->makeWriter();
+    Status opened = writer->open(path, settings);
+    XCTAssertTrue(opened.ok(), @"%@", opened.ok() ? @"" : describe(opened.error()));
+    if (!opened.ok()) {
+        return;
+    }
+    // 1 s of video, 3 s of audio with the beep at 2.5 s (well after the video ended).
+    const std::vector<float> pcm = makeToneWithBeep(440, 48000, 2, 3 * 48000, 2.5);
+    int64_t written = 0;
+    for (int i = 0; i < 30; ++i) {
+        const int64_t until = std::min<int64_t>(3 * 48000, (i + 45) * 1600);
+        while (written < until) {
+            const auto n = static_cast<int>(std::min<int64_t>(1600, until - written));
+            XCTAssertTrue(writer->appendAudio(pcm.data() + written * 2, n).ok());
+            written += n;
+        }
+        auto frame = writer->makePixelBuffer();
+        XCTAssertTrue(frame.ok());
+        if (!frame.ok()) {
+            return;
+        }
+        drawBurnIn(frame->get(), i);
+        XCTAssertTrue(writer->appendVideo(frame.value(), CMTimeMake(i, 30)).ok());
+    }
+    XCTAssertTrue(writer->endStream(TrackKind::Video).ok());
+    while (written < 3 * 48000) {
+        const auto n = static_cast<int>(std::min<int64_t>(4800, 3 * 48000 - written));
+        XCTAssertTrue(writer->appendAudio(pcm.data() + written * 2, n).ok());
+        written += n;
+    }
+    Status finished = writer->finish();
+    XCTAssertTrue(finished.ok(), @"%@", finished.ok() ? @"" : describe(finished.error()));
+    auto info = self.backendUnderTest->makeProber()->probe(path);
+    XCTAssertTrue(info.ok());
+    if (!info.ok()) {
+        return;
+    }
+    XCTAssertEqualWithAccuracy(seconds(info->firstTrack(TrackKind::Audio)->duration), 3.0, 1e-3, @"audio kept");
+    XCTAssertEqualWithAccuracy(seconds(info->firstTrack(TrackKind::Video)->duration), 1.0, 1.0 / 30,
+                               @"video ends after its last frame");
+    auto audio = self.backendUnderTest->makeAudioDecoder();
+    XCTAssertTrue(audio->open(path, -1, {}).ok());
+    TestClip clip;
+    clip.file = "longer_audio.mov";
+    const std::vector<float> decoded = [self readAll:*audio clip:clip];
+    XCTAssertEqual(decoded.size(), pcm.size(), @"every audio sample survives");
+    auto onset = findBeepOnset(decoded.data(), static_cast<int64_t>(decoded.size() / 2), 2, 48000, 96000);
+    XCTAssertTrue(onset.has_value(), @"the beep after the video's end is there");
+    if (onset) {
+        XCTAssertEqualWithAccuracy(*onset, referenceOnset(440, 48000, 2.5), 1.0 / 48000);
+    }
+}
+
+/// A pull callback that fails aborts runPull() with that error (no deadlock waiting for the
+/// other stream, no half-written file left behind), for either stream.
+- (void)testWriterPullCallbackFailureAbortsCleanly {
+    for (int failing = 0; failing < 2; ++failing) {
+        const std::string path = scratchDirectory() + (failing == 0 ? "/fail_video.mov" : "/fail_audio.mov");
+        EncodeSettings settings;
+        settings.container = ContainerFormat::MOV;
+        VideoEncodeSettings v;
+        v.codec = VideoCodec::H264;
+        v.width = 320;
+        v.height = 180;
+        v.frameDuration = CMTimeMake(1, 30);
+        settings.video = v;
+        settings.audio = AudioEncodeSettings{};
+        auto writer = self.backendUnderTest->makeWriter();
+        XCTAssertTrue(writer->open(path, settings).ok());
+        int frames = 0;
+        int64_t samples = 0;
+        IMediaWriter *w = writer.get();
+        // A deadlock (waiting for the stream that did not fail) would hang here.
+        const Status result = w->runPull(
+            [&]() -> Result<std::optional<VideoInput>> {
+                if (failing == 0 && frames == 10) {
+                    return makeError(MediaErrorCode::Internal, "scripted video failure");
+                }
+                auto buffer = w->makePixelBuffer();
+                if (!buffer.ok()) {
+                    return std::move(buffer).error();
+                }
+                return std::optional<VideoInput>(VideoInput{buffer.value(), CMTimeMake(frames++, 30)});
+            },
+            [&](float *dst, int maxFrames) -> Result<int> {
+                if (failing == 1 && samples >= 48000) {
+                    return makeError(MediaErrorCode::Internal, "scripted audio failure");
+                }
+                std::fill_n(dst, maxFrames * 2, 0.0f);
+                samples += maxFrames;
+                return maxFrames;
+            });
+        XCTAssertFalse(result.ok(), @"the callback's error is reported");
+        if (!result.ok()) {
+            XCTAssertEqual(result.error().code, MediaErrorCode::Internal, @"%@", describe(result.error()));
+        }
+        XCTAssertFalse(writer->finish().ok(), @"nothing to finish after an aborted write");
+        XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:ns(path)], @"no partial file");
+    }
 }
 
 - (void)testWriterRejectsInvalidUse {

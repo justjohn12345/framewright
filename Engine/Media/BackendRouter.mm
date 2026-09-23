@@ -1,11 +1,11 @@
 #include "BackendRouter.h"
 
 #include "Apple/AppleBackend.h"
-#include "HardwareCaps.h"
 
 #include <os/log.h>
 
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <sstream>
 
@@ -133,24 +133,25 @@ BackendList candidateOrder(const BackendList &backends, const RoutingPolicy &pol
     return order;
 }
 
-/// Index of the track corresponding to `track` (of `primary`) in `backend`'s numbering, or
-/// nullopt when that backend cannot probe the file or lacks the track.
-std::optional<int> mapTrackIndex(ProbeCache &probes, IMediaBackend &backend, const MediaInfo &primary,
-                                 const TrackInfo &track, std::string &why) {
+/// The track corresponding to `track` (of `primary`) as `backend`'s own prober describes it
+/// (its numbering, its decodability and hardware measurements), or nullptr when that backend
+/// cannot probe the file or lacks the track.
+const TrackInfo *mapTrack(ProbeCache &probes, IMediaBackend &backend, const MediaInfo &primary, const TrackInfo &track,
+                          std::string &why) {
     if (backend.name() == primary.backend) {
-        return track.index;
+        return &track;
     }
     const Result<MediaInfo> &probe = probes.get(backend);
     if (!probe.ok()) {
         why = backend.name() + " cannot probe the file (" + probe.error().description() + ")";
-        return std::nullopt;
+        return nullptr;
     }
     const TrackInfo *mapped = nthOfKind(probe.value(), track.kind, ordinalOf(primary, track.index));
     if (mapped == nullptr) {
         why = backend.name() + "'s prober reports no matching " + toString(track.kind) + " track";
-        return std::nullopt;
+        return nullptr;
     }
-    return mapped->index;
+    return mapped;
 }
 
 void logRouting(const RoutedMediaInfo &routed) {
@@ -308,7 +309,6 @@ Result<RoutedMediaInfo> BackendRouter::probe(const std::string &path, const Rout
     RoutedMediaInfo routed;
     routed.info = *primary;
     routed.policy = policy;
-    const HardwareCaps &caps = HardwareCaps::get();
 
     for (const TrackInfo &track : primary->tracks) {
         TrackRoute route;
@@ -316,20 +316,27 @@ Result<RoutedMediaInfo> BackendRouter::probe(const std::string &path, const Rout
         route.kind = track.kind;
         route.codec = track.codec.fourCC;
         const MediaInfo sub = singleTrack(*primary, track);
-        const bool vtHardware = track.kind == TrackKind::Video && caps.hardwareDecode(track.codec.fourCC);
         std::string notes;
         auto note = [&](const std::string &text) { notes += (notes.empty() ? "" : "; ") + text; };
+        bool chosenHardware = false;
 
+        // A backend is chosen only if its own prober found the track decodable (a VideoToolbox
+        // session for Apple, an opened decoder and a first frame for FFmpeg).
         auto choose = [&](IMediaBackend &b, const std::string &why) -> bool {
             std::string mapWhy;
-            auto index = mapTrackIndex(probes, b, *primary, track, mapWhy);
-            if (!index) {
+            const TrackInfo *mapped = mapTrack(probes, b, *primary, track, mapWhy);
+            if (mapped == nullptr) {
                 note(mapWhy);
                 return false;
             }
+            if (!mapped->decodable) {
+                note(b.name() + " probed it as not decodable");
+                return false;
+            }
             route.backend = b.name();
-            route.backendTrackIndex = *index;
+            route.backendTrackIndex = mapped->index;
             route.reason = why;
+            chosenHardware = mapped->kind == TrackKind::Video && mapped->hardwareDecode;
             return true;
         };
 
@@ -349,12 +356,19 @@ Result<RoutedMediaInfo> BackendRouter::probe(const std::string &path, const Rout
         auto apple = find(backends, kAppleName);
         if (route.backend.empty() && apple) {
             const Result<MediaInfo> &appleProbe = probes.get(*apple);
+            std::string mapWhy;
+            const TrackInfo *appleTrack =
+                appleProbe.ok() ? mapTrack(probes, *apple, *primary, track, mapWhy) : nullptr;
             if (!appleProbe.ok()) {
                 note("apple cannot probe the file");
             } else if (!apple->canHandle(sub)) {
                 note("apple cannot decode " + codecDisplayName(track.codec.fourCC) + " in " + primary->container);
-            } else if (track.kind == TrackKind::Video && !vtHardware) {
-                note(codecDisplayName(track.codec.fourCC) + " is not VideoToolbox hardware decodable");
+            } else if (appleTrack == nullptr) {
+                note(mapWhy);
+            } else if (!appleTrack->decodable) {
+                note("VideoToolbox/AVFoundation refuse this " + codecDisplayName(track.codec.fourCC) + " stream");
+            } else if (track.kind == TrackKind::Video && !appleTrack->hardwareDecode) {
+                note(codecDisplayName(track.codec.fourCC) + " does not decode in VideoToolbox hardware here");
             } else {
                 const char *why = track.kind == TrackKind::Video  ? "apple fast path: VideoToolbox hardware decode"
                                   : track.kind == TrackKind::Audio ? "apple fast path: AVFoundation audio"
@@ -381,7 +395,7 @@ Result<RoutedMediaInfo> BackendRouter::probe(const std::string &path, const Rout
         if (route.backend.empty()) {
             route.reason = "no backend can decode it";
         } else {
-            route.hardwareDecode = policy.allowHardware && vtHardware;
+            route.hardwareDecode = policy.allowHardware && chosenHardware;
         }
         if (!notes.empty()) {
             route.reason += " (" + notes + ")";
@@ -418,71 +432,277 @@ Result<RoutedMediaInfo> BackendRouter::probe(const std::string &path, const Rout
 
 namespace {
 
-template <class Decoder, class Options, class MakeFn>
-Result<RoutedDecoder<Decoder>> openRouted(const BackendList &backends, const RoutedMediaInfo &routed,
-                                          const TrackRoute &route, const Options &options, MakeFn make) {
-    const TrackInfo *track = routed.info.track(route.trackIndex);
-    if (route.backend.empty() || track == nullptr) {
-        return makeError(MediaErrorCode::UnsupportedCodec,
-                         "track " + std::to_string(route.trackIndex) + " is not decodable: " + route.reason);
+/// Errors after which another backend may do better: the stream or codec is the problem, not
+/// the caller (InvalidArgument/InvalidState), the file system, or an interrupt (Cancelled).
+bool worthFallingBack(const MediaError &e) {
+    switch (e.code) {
+    case MediaErrorCode::UnsupportedCodec:
+    case MediaErrorCode::UnsupportedFormat:
+    case MediaErrorCode::DecodeFailed:
+    case MediaErrorCode::CorruptData:
+    case MediaErrorCode::Internal:
+        return true;
+    default:
+        return false;
     }
-    std::vector<std::string> attempts{route.backend};
-    attempts.insert(attempts.end(), route.fallbacks.begin(), route.fallbacks.end());
+}
 
-    std::string log = route.reason;
-    std::optional<MediaError> firstError;
-    ProbeCache probes(routed.info.path);
-    for (size_t i = 0; i < attempts.size(); ++i) {
-        const std::string &name = attempts[i];
-        std::shared_ptr<IMediaBackend> backend;
-        for (const auto &b : backends) {
-            if (b->name() == name) {
-                backend = b;
+/// Opens a track through the route's backend and, on failure, its fallbacks in order. Kept by
+/// the fallback decoders so they can move to the next backend at run time.
+template <class Decoder, class Options> class RoutedOpener {
+  public:
+    using MakeFn = std::function<std::unique_ptr<Decoder>(IMediaBackend &)>;
+    struct Opened {
+        std::unique_ptr<Decoder> decoder;
+        std::string backend;
+        int backendTrackIndex = -1;
+        size_t attempt = 0;
+    };
+
+    RoutedOpener(BackendList backends, std::shared_ptr<const RoutedMediaInfo> routed, TrackRoute route,
+                 Options options, MakeFn make)
+        : backends_(std::move(backends)), routed_(std::move(routed)), route_(std::move(route)),
+          options_(std::move(options)), make_(std::move(make)), probes_(routed_->info.path) {
+        attempts_.push_back(route_.backend);
+        attempts_.insert(attempts_.end(), route_.fallbacks.begin(), route_.fallbacks.end());
+        log_ = route_.reason;
+    }
+
+    const std::string &path() const { return routed_->info.path; }
+    int trackIndex() const { return route_.trackIndex; }
+    const std::string &log() const { return log_; }
+    void note(const std::string &text) { log_ += "; " + text; }
+    bool hasAttemptAfter(size_t attempt) const { return attempt + 1 < attempts_.size(); }
+
+    /// Opens the first attempt at or after `from` that succeeds.
+    Result<Opened> openFrom(size_t from) {
+        const TrackInfo *track = routed_->info.track(route_.trackIndex);
+        if (route_.backend.empty() || track == nullptr) {
+            return makeError(MediaErrorCode::UnsupportedCodec,
+                             "track " + std::to_string(route_.trackIndex) + " is not decodable: " + route_.reason);
+        }
+        std::optional<MediaError> firstError;
+        for (size_t i = from; i < attempts_.size(); ++i) {
+            const std::string &name = attempts_[i];
+            std::shared_ptr<IMediaBackend> backend;
+            for (const auto &b : backends_) {
+                if (b->name() == name) {
+                    backend = b;
+                }
             }
-        }
-        if (!backend) {
-            log += "; " + name + " is no longer registered";
-            continue;
-        }
-        int index = route.backendTrackIndex;
-        if (i > 0) {
-            std::string why;
-            auto mapped = mapTrackIndex(probes, *backend, routed.info, *track, why);
-            if (!mapped) {
-                log += "; fallback " + why;
+            if (!backend) {
+                note(name + " is no longer registered");
                 continue;
             }
-            index = *mapped;
-        }
-        std::unique_ptr<Decoder> decoder = make(*backend);
-        if (!decoder) {
-            log += "; " + name + " provides no decoder";
-            continue;
-        }
-        Status s = decoder->open(routed.info.path, index, options);
-        if (s.ok()) {
+            int index = route_.backendTrackIndex;
             if (i > 0) {
-                log += "; fell back to " + name;
-                os_log_error(routerLog(), "%{public}s track %d: %{public}s", routed.info.path.c_str(),
-                             route.trackIndex, log.c_str());
+                std::string why;
+                const TrackInfo *mapped = mapTrack(probes_, *backend, routed_->info, *track, why);
+                if (mapped == nullptr) {
+                    note("fallback " + why);
+                    continue;
+                }
+                index = mapped->index;
             }
-            RoutedDecoder<Decoder> result;
-            result.decoder = std::move(decoder);
-            result.backend = name;
-            result.backendTrackIndex = index;
-            result.fellBack = i > 0;
-            result.reason = std::move(log);
-            return result;
+            std::unique_ptr<Decoder> decoder = make_(*backend);
+            if (!decoder) {
+                note(name + " provides no decoder");
+                continue;
+            }
+            Status s = decoder->open(routed_->info.path, index, options_);
+            if (s.ok()) {
+                if (i > 0) {
+                    note("fell back to " + name);
+                    os_log_error(routerLog(), "%{public}s track %d: %{public}s", routed_->info.path.c_str(),
+                                 route_.trackIndex, log_.c_str());
+                }
+                return Opened{std::move(decoder), name, index, i};
+            }
+            if (s.error().code == MediaErrorCode::Cancelled) {
+                // Interrupted by the owner (DecodeOptions::interrupt): not the backend's fault, and
+                // the owner no longer wants this decoder, so no fallback either.
+                return s.error();
+            }
+            note(name + " open failed: " + s.error().description());
+            if (!firstError) {
+                firstError = s.error();
+            }
         }
-        log += "; " + name + " open failed: " + s.error().description();
-        if (!firstError) {
-            firstError = s.error();
+        MediaError error = firstError ? *firstError : makeError(MediaErrorCode::UnsupportedCodec, "");
+        error.message =
+            "cannot open track " + std::to_string(route_.trackIndex) + " of " + routed_->info.path + ": " + log_;
+        os_log_error(routerLog(), "%{public}s", error.message.c_str());
+        return error;
+    }
+
+  private:
+    BackendList backends_;
+    std::shared_ptr<const RoutedMediaInfo> routed_;
+    TrackRoute route_;
+    Options options_;
+    MakeFn make_;
+    ProbeCache probes_;
+    std::vector<std::string> attempts_;
+    std::string log_;
+};
+
+using VideoOpener = RoutedOpener<IVideoDecoder, DecodeOptions>;
+using AudioOpener = RoutedOpener<IAudioDecoder, AudioOptions>;
+
+/// A video decoder that moves to the route's next backend when the current one fails to
+/// decode (an error worthFallingBack() accepts, from seek() or next()), resuming at the time
+/// the caller had reached: VideoToolbox can accept a format at open and still refuse samples
+/// later (a lazily created random-access session, a mid-stream parameter-set change). Each
+/// backend is tried at most once. Returned by BackendRouter::makeVideoDecoder already open.
+class FallbackVideoDecoder final : public IVideoDecoder {
+  public:
+    FallbackVideoDecoder(std::unique_ptr<VideoOpener> opener, VideoOpener::Opened opened)
+        : opener_(std::move(opener)), current_(std::move(opened)) {}
+
+    Status open(const std::string &, int, const DecodeOptions &) override {
+        return makeError(MediaErrorCode::InvalidState, "a routed decoder is returned open");
+    }
+    Status seek(CMTime t) override {
+        resumeAt_ = t;
+        while (true) {
+            Status s = current_.decoder->seek(t);
+            if (s.ok() || !worthFallingBack(s.error()) || !switchBackend(s.error())) {
+                return s;
+            }
         }
     }
-    MediaError error = firstError ? *firstError : makeError(MediaErrorCode::UnsupportedCodec, "");
-    error.message = "cannot open track " + std::to_string(route.trackIndex) + " of " + routed.info.path + ": " + log;
-    os_log_error(routerLog(), "%{public}s", error.message.c_str());
-    return error;
+    Result<std::optional<VideoFrame>> next() override {
+        while (true) {
+            auto r = current_.decoder->next();
+            if (r.ok()) {
+                if (r.value()) {
+                    const VideoFrame &f = *r.value();
+                    resumeAt_ = CMTIME_IS_NUMERIC(f.duration) ? CMTimeAdd(f.pts, f.duration) : f.pts;
+                }
+                return r;
+            }
+            if (!worthFallingBack(r.error()) || !switchBackend(r.error())) {
+                return r;
+            }
+            if (CMTIME_IS_NUMERIC(resumeAt_)) {
+                Status s = current_.decoder->seek(resumeAt_);
+                if (!s.ok()) {
+                    return std::move(s).error();
+                }
+            }
+        }
+    }
+    CMTime frameDuration() const override { return current_.decoder->frameDuration(); }
+    bool supportsRandomAccess() const override { return current_.decoder->supportsRandomAccess(); }
+    bool usedHardware() const override { return current_.decoder->usedHardware(); }
+    OSType outputPixelFormat() const override { return current_.decoder->outputPixelFormat(); }
+    std::string activeBackend() const override { return current_.backend; }
+
+  private:
+    /// Replaces the current decoder with the next backend's; false when none is left.
+    bool switchBackend(const MediaError &error) {
+        if (!opener_->hasAttemptAfter(current_.attempt)) {
+            return false;
+        }
+        opener_->note(current_.backend + " failed while decoding: " + error.description());
+        auto next = opener_->openFrom(current_.attempt + 1);
+        if (!next.ok()) {
+            return false;
+        }
+        os_log_error(routerLog(), "%{public}s track %d: switched from %{public}s to %{public}s at run time",
+                     opener_->path().c_str(), opener_->trackIndex(), current_.backend.c_str(),
+                     next.value().backend.c_str());
+        current_ = std::move(next).value();
+        return true;
+    }
+
+    std::unique_ptr<VideoOpener> opener_;
+    VideoOpener::Opened current_;
+    CMTime resumeAt_ = kCMTimeInvalid;
+};
+
+/// The audio counterpart of FallbackVideoDecoder: resumes at the current sample position.
+class FallbackAudioDecoder final : public IAudioDecoder {
+  public:
+    FallbackAudioDecoder(std::unique_ptr<AudioOpener> opener, AudioOpener::Opened opened)
+        : opener_(std::move(opener)), current_(std::move(opened)) {}
+
+    Status open(const std::string &, int, const AudioOptions &) override {
+        return makeError(MediaErrorCode::InvalidState, "a routed decoder is returned open");
+    }
+    Status seek(CMTime t) override {
+        while (true) {
+            Status s = current_.decoder->seek(t);
+            if (s.ok() || !worthFallingBack(s.error()) || !switchBackend(s.error(), false)) {
+                return s;
+            }
+        }
+    }
+    Result<int> read(float *interleaved, int frames) override {
+        while (true) {
+            auto r = current_.decoder->read(interleaved, frames);
+            if (r.ok() || !worthFallingBack(r.error())) {
+                return r;
+            }
+            if (!switchBackend(r.error(), true)) {
+                return r;
+            }
+        }
+    }
+    int64_t position() const override { return current_.decoder->position(); }
+    CMTime positionTime() const override { return current_.decoder->positionTime(); }
+    double sampleRate() const override { return current_.decoder->sampleRate(); }
+    int channels() const override { return current_.decoder->channels(); }
+    int64_t lengthFrames() const override { return current_.decoder->lengthFrames(); }
+    CMTime seekTolerance() const override { return current_.decoder->seekTolerance(); }
+    std::string activeBackend() const override { return current_.backend; }
+
+  private:
+    bool switchBackend(const MediaError &error, bool resume) {
+        if (!opener_->hasAttemptAfter(current_.attempt)) {
+            return false;
+        }
+        const CMTime position = current_.decoder->positionTime();
+        opener_->note(current_.backend + " failed while decoding: " + error.description());
+        auto next = opener_->openFrom(current_.attempt + 1);
+        if (!next.ok()) {
+            return false;
+        }
+        os_log_error(routerLog(), "%{public}s track %d: switched from %{public}s to %{public}s at run time",
+                     opener_->path().c_str(), opener_->trackIndex(), current_.backend.c_str(),
+                     next.value().backend.c_str());
+        current_ = std::move(next).value();
+        if (resume && CMTIME_IS_NUMERIC(position) && !current_.decoder->seek(position).ok()) {
+            return false;
+        }
+        return true;
+    }
+
+    std::unique_ptr<AudioOpener> opener_;
+    AudioOpener::Opened current_;
+};
+
+template <class Decoder, class Options, class Fallback>
+Result<RoutedDecoder<Decoder>> openRouted(const BackendList &backends, const RoutedMediaInfo &routed,
+                                          const TrackRoute &route, const Options &options,
+                                          typename RoutedOpener<Decoder, Options>::MakeFn make) {
+    auto opener = std::make_unique<RoutedOpener<Decoder, Options>>(
+        backends, std::make_shared<const RoutedMediaInfo>(routed), route, options, std::move(make));
+    auto opened = opener->openFrom(0);
+    if (!opened.ok()) {
+        return std::move(opened).error();
+    }
+    RoutedDecoder<Decoder> result;
+    result.backend = opened.value().backend;
+    result.backendTrackIndex = opened.value().backendTrackIndex;
+    result.fellBack = opened.value().attempt > 0;
+    result.reason = opener->log();
+    if (opener->hasAttemptAfter(opened.value().attempt)) {
+        result.decoder = std::make_unique<Fallback>(std::move(opener), std::move(opened).value());
+    } else {
+        result.decoder = std::move(opened.value().decoder);
+    }
+    return result;
 }
 
 } // namespace
@@ -498,8 +718,8 @@ Result<RoutedVideoDecoder> BackendRouter::makeVideoDecoder(const RoutedMediaInfo
     if (!routed.policy.allowHardware) {
         effective.allowHardware = false;
     }
-    return openRouted<IVideoDecoder>(snapshot(), routed, *route, effective,
-                                     [](IMediaBackend &b) { return b.makeVideoDecoder(); });
+    return openRouted<IVideoDecoder, DecodeOptions, FallbackVideoDecoder>(
+        snapshot(), routed, *route, effective, [](IMediaBackend &b) { return b.makeVideoDecoder(); });
 }
 
 Result<RoutedAudioDecoder> BackendRouter::makeAudioDecoder(const RoutedMediaInfo &routed, int trackIndex,
@@ -509,8 +729,8 @@ Result<RoutedAudioDecoder> BackendRouter::makeAudioDecoder(const RoutedMediaInfo
         return makeError(MediaErrorCode::NoSuchTrack,
                          "no audio track " + std::to_string(trackIndex) + " in " + routed.info.path);
     }
-    return openRouted<IAudioDecoder>(snapshot(), routed, *route, options,
-                                     [](IMediaBackend &b) { return b.makeAudioDecoder(); });
+    return openRouted<IAudioDecoder, AudioOptions, FallbackAudioDecoder>(
+        snapshot(), routed, *route, options, [](IMediaBackend &b) { return b.makeAudioDecoder(); });
 }
 
 } // namespace ve::media

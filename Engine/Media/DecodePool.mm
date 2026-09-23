@@ -5,6 +5,7 @@
 #include <os/log.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace ve::media {
 
@@ -49,19 +50,23 @@ struct DecodePool::AssetSlot {
 
     const std::string url; ///< Immutable: readable without `mutex`.
 
-    /// Routes the asset once (blocking; concurrent callers wait for the first).
+    /// Routes the asset (blocking; concurrent callers wait for the first). A definitive probe
+    /// error is remembered; a transient one (isTransient: a load timeout) is not, so the next
+    /// call probes again.
     Result<std::shared_ptr<const RoutedMediaInfo>> resolve(const BackendRouter &router) {
         std::lock_guard<std::mutex> lock(mutex);
         if (!resolved) {
             if (url.empty()) {
-                error = makeError(MediaErrorCode::InvalidArgument, "no media path registered for the asset");
-            } else {
-                auto r = router.probe(url);
-                if (r.ok()) {
-                    routed = std::make_shared<const RoutedMediaInfo>(std::move(r).value());
-                } else {
-                    error = std::move(r).error();
+                return makeError(MediaErrorCode::InvalidArgument, "no media path registered for the asset");
+            }
+            auto r = router.probe(url);
+            if (!r.ok()) {
+                if (isTransient(r.error().code)) {
+                    return std::move(r).error();
                 }
+                error = std::move(r).error();
+            } else {
+                routed = std::make_shared<const RoutedMediaInfo>(std::move(r).value());
             }
             resolved = true;
         }
@@ -88,10 +93,14 @@ struct DecodePool::Stream {
     bool busy = false;       ///< A worker is stepping this stream (it owns the fields below).
     bool idle = false;       ///< Settled at `generation`: nothing to do until the target moves.
     bool removed = false;
-    bool failed = false;     ///< Open failed; stays idle until reopened.
-    bool reopen = false;     ///< Drop the decoder before the next step.
+    bool failed = false;          ///< Open failed; stays idle until reopened (or, if transient, retargeted).
+    bool failedTransient = false; ///< The failure was transient (isTransient).
+    bool reopen = false;          ///< Drop the decoder before the next step.
     uint64_t lastServed = 0;
     StreamStats published;
+    /// Shared with the decoder (DecodeOptions::interrupt): setTargets() requests it when the
+    /// work in flight became useless; the worker clears it before every step.
+    const std::shared_ptr<DecodeInterrupt> interrupt = std::make_shared<DecodeInterrupt>();
 
     // Owned by the worker that set `busy` (no lock needed while busy).
     std::unique_ptr<IVideoDecoder> decoder;
@@ -104,19 +113,24 @@ struct DecodePool::Stream {
     bool continues = false;  ///< The decoder's next frame starts at rangeEnd.
     bool eof = false;        ///< rangeEnd is the end of the stream.
     bool firstAfterSeek = false;
-    bool repairUsed = false; ///< A lost frame was re-decoded since the last seek.
+    CMTime seekedTo = kCMTimeInvalid;  ///< Target of the last seek (frames after it cover back to it).
+    CMTime repairedAt = kCMTimeInvalid; ///< Target at which a lost frame was last re-decoded.
     bool extending = false;  ///< Backward: decoding [extendStart, extendUntil) below the range.
     CMTime extendStart = kCMTimeZero;
     CMTime extendUntil = kCMTimeZero;
     bool openFailed = false;
+    size_t frameBytes = 0;
+    CMTime window = kCMTimeInvalid;
     uint64_t framesDecoded = 0;
     uint64_t seeks = 0;
+    uint64_t interrupts = 0;
     std::optional<MediaError> error;
 };
 
 struct DecodePool::ScrubDecoder {
     std::unique_ptr<IVideoDecoder> decoder;
     std::shared_ptr<AssetSlot> slot;
+    std::shared_ptr<DecodeInterrupt> interrupt;
     uint64_t lastUse = 0;
 };
 
@@ -130,12 +144,17 @@ DecodePool::DecodePool(std::shared_ptr<BackendRouter> router, std::shared_ptr<Fr
           Config c = config;
           c.maxThreads = std::max(1, c.maxThreads);
           c.maxScrubDecoders = std::max(1, c.maxScrubDecoders);
+          c.minWindowFrames = std::max(1, c.minWindowFrames);
+          if (!(c.budgetFraction > 0 && c.budgetFraction <= 1)) {
+              c.budgetFraction = 0.75;
+          }
           if (!isPositive(c.lookahead)) {
               c.lookahead = CMTimeMake(1, 1);
           }
           if (!isNumeric(c.seekAheadThreshold) || c.seekAheadThreshold < kCMTimeZero) {
               c.seekAheadThreshold = kCMTimeZero;
           }
+          c.decodeOptions.interrupt.reset(); // Per decoder, set by the pool.
           return c;
       }()),
       lookahead_(config_.lookahead) {}
@@ -144,6 +163,12 @@ DecodePool::~DecodePool() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stopping_ = true;
+        for (auto &[key, stream] : streams_) {
+            stream->interrupt->request(); // Abandon long decodes: shutdown must not wait a GOP.
+        }
+        if (scrubInterrupt_) {
+            scrubInterrupt_->request();
+        }
     }
     workCv_.notify_all();
     scrubCv_.notify_all();
@@ -158,6 +183,7 @@ DecodePool::~DecodePool() {
     streams_.clear();
     retired_.clear();
     scrubDecoders_.clear();
+    cache_->setFocus({});
 }
 
 // MARK: - Assets
@@ -177,6 +203,7 @@ std::shared_ptr<DecodePool::AssetSlot> DecodePool::slotFor(AssetId asset, const 
                 stream->reopen = true;
                 stream->failed = false;
                 stream->idle = false;
+                stream->interrupt->request();
                 ++stream->generation;
             }
         }
@@ -197,10 +224,12 @@ void DecodePool::registerAsset(AssetId asset, std::string url, std::optional<Rou
         for (auto &[key, stream] : streams_) {
             if (key.asset == asset) {
                 stream->slot = slot;
-                if (!sameUrl) {
+                if (!sameUrl || stream->failed) {
+                    // A new path, or new routing for a stream that could not open: reopen.
                     stream->reopen = true;
                     stream->failed = false;
                     stream->idle = false;
+                    stream->interrupt->request();
                     ++stream->generation;
                 }
             }
@@ -224,6 +253,7 @@ void DecodePool::invalidate(AssetId asset) {
                 stream->reopen = true;
                 stream->failed = false;
                 stream->idle = false;
+                stream->interrupt->request();
                 ++stream->generation;
             }
         }
@@ -232,6 +262,32 @@ void DecodePool::invalidate(AssetId asset) {
 }
 
 // MARK: - Targets
+
+bool DecodePool::makesWorkInFlightUseless(const Stream &s, const DecodeTarget &next) const {
+    if (next.direction != s.target.direction) {
+        return true;
+    }
+    const StreamStats &p = s.published;
+    if (!isNumeric(p.rangeStart) || !isNumeric(p.rangeEnd)) {
+        return false; // Opening, or nothing decoded yet: the work in flight is the open itself.
+    }
+    const CMTime t = clampToZero(next.sourceTime);
+    if (next.direction == DecodeDirection::Forward) {
+        return t < p.rangeStart || t > p.rangeEnd + config_.seekAheadThreshold;
+    }
+    const CMTime window = isNumeric(p.window) ? p.window : lookahead_;
+    return t < p.rangeStart - window || t > p.rangeEnd + config_.seekAheadThreshold;
+}
+
+void DecodePool::updateFocus() {
+    std::vector<FrameCache::Focus> focus;
+    focus.reserve(streams_.size());
+    for (const auto &[key, stream] : streams_) {
+        focus.push_back(FrameCache::Focus{key.asset, clampToZero(stream->target.sourceTime),
+                                          stream->target.direction == DecodeDirection::Forward});
+    }
+    cache_->setFocus(std::move(focus));
+}
 
 void DecodePool::setTargets(std::vector<DecodeTarget> targets) {
     {
@@ -256,10 +312,15 @@ void DecodePool::setTargets(std::vector<DecodeTarget> targets) {
                 stream = it->second;
                 const bool moved =
                     t.sourceTime != stream->target.sourceTime || t.direction != stream->target.direction;
+                if (moved && stream->busy && !stream->failed && makesWorkInFlightUseless(*stream, t)) {
+                    stream->interrupt->request();
+                }
                 stream->target = std::move(t);
-                if (moved && !stream->failed) {
+                // Permanent failures wait for registerAsset()/invalidate(); transient ones retry.
+                if (moved && (!stream->failed || stream->failedTransient)) {
                     ++stream->generation;
                     stream->idle = false;
+                    stream->failed = false;
                 }
             } else {
                 stream = std::make_shared<Stream>();
@@ -275,12 +336,14 @@ void DecodePool::setTargets(std::vector<DecodeTarget> targets) {
         for (auto &[key, stream] : streams_) {
             if (next.count(key) == 0) {
                 stream->removed = true;
+                stream->interrupt->request();
                 if (!stream->busy) {
                     retired_.push_back(stream);
                 }
             }
         }
         streams_.swap(next);
+        updateFocus();
         ensureWorkers();
     }
     workCv_.notify_all();
@@ -341,8 +404,11 @@ void DecodePool::publish(Stream &s) {
     p.target = s.target.sourceTime;
     p.rangeStart = s.rangeValid ? s.rangeStart : kCMTimeInvalid;
     p.rangeEnd = s.rangeValid ? s.rangeEnd : kCMTimeInvalid;
+    p.window = s.window;
+    p.frameBytes = s.frameBytes;
     p.framesDecoded = s.framesDecoded;
     p.seeks = s.seeks;
+    p.interrupts = s.interrupts;
     p.error = s.error;
 }
 
@@ -371,22 +437,33 @@ void DecodePool::workerMain() {
         std::shared_ptr<Stream> keep = streams_.at(s->key);
         s->busy = true;
         s->lastServed = ++tick_;
+        s->interrupt->clear(); // Any request so far concerned the target read below or earlier.
         const DecodeTarget target = s->target;
         const uint64_t generation = s->generation;
         const std::shared_ptr<AssetSlot> slot = s->slot;
         const CMTime window = lookahead_;
+        const size_t streamCount = std::max<size_t>(1, streams_.size());
         const bool reopen = std::exchange(s->reopen, false);
         lock.unlock();
 
-        const StepResult result = step(*s, target, slot, window, reopen);
+        StepResult result = StepResult::Progress;
+        @autoreleasepool { // std::thread has no pool; decoders and probers autorelease.
+            result = step(*s, target, slot, window, streamCount, reopen);
+        }
 
         lock.lock();
         s->busy = false;
-        if (s->openFailed) {
-            s->failed = true;
-        }
-        if (result == StepResult::Settled && s->generation == generation) {
-            s->idle = true;
+        if (s->reopen) {
+            // registerAsset()/invalidate() during the step: whatever this step concluded
+            // (typically a failure of the old path) is stale; the next step reopens.
+            s->failed = false;
+            s->idle = false;
+        } else {
+            s->failed = s->openFailed;
+            s->failedTransient = s->openFailed && s->error && isTransient(s->error->code);
+            if (result == StepResult::Settled && s->generation == generation) {
+                s->idle = true;
+            }
         }
         publish(*s);
         if (s->removed) {
@@ -396,8 +473,20 @@ void DecodePool::workerMain() {
     }
 }
 
+CMTime DecodePool::effectiveWindow(const Stream &s, CMTime lookahead, size_t streamCount) const {
+    if (s.frameBytes == 0 || !isPositive(s.frameDuration)) {
+        return lookahead; // Size unknown until the first frame (or a still): nothing to limit yet.
+    }
+    const double share =
+        static_cast<double>(cache_->budget()) * config_.budgetFraction / static_cast<double>(streamCount);
+    const auto frames = std::max<int64_t>(config_.minWindowFrames,
+                                          static_cast<int64_t>(std::floor(share / static_cast<double>(s.frameBytes))));
+    const CMTime byBudget = timeForFrame(frames, s.frameDuration);
+    return minTime(lookahead, byBudget);
+}
+
 DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, const std::shared_ptr<AssetSlot> &slot,
-                                        CMTime window, bool reopen) {
+                                        CMTime lookahead, size_t streamCount, bool reopen) {
     const AssetId asset = s.key.asset;
     if (reopen) {
         s.decoder.reset();
@@ -407,6 +496,8 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
         s.openFailed = false;
     }
     if (!s.decoder) {
+        s.openFailed = false; // Recomputed by this attempt (a transient failure may be over).
+        s.error.reset();
         auto routed = slot->resolve(*router_);
         if (!routed.ok()) {
             s.error = routed.error();
@@ -414,12 +505,16 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
             return StepResult::Settled;
         }
         const RoutedMediaInfo &info = *routed.value();
-        auto opened = router_->makeVideoDecoder(info, target.trackIndex, config_.decodeOptions);
+        DecodeOptions options = config_.decodeOptions;
+        options.interrupt = s.interrupt;
+        auto opened = router_->makeVideoDecoder(info, target.trackIndex, options);
         if (!opened.ok()) {
             s.error = opened.error();
             s.openFailed = true;
-            os_log_error(poolLog(), "cannot open %{public}s: %{public}s", slot->url.c_str(),
-                         opened.error().description().c_str());
+            if (opened.error().code != MediaErrorCode::Cancelled) { // Cancelled: we interrupted it.
+                os_log_error(poolLog(), "cannot open %{public}s: %{public}s", slot->url.c_str(),
+                             opened.error().description().c_str());
+            }
             return StepResult::Settled;
         }
         s.decoder = std::move(opened.value().decoder);
@@ -437,13 +532,16 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
         s.continues = true;
         s.eof = false;
         s.firstAfterSeek = true;
-        s.repairUsed = false;
+        s.seekedTo = kCMTimeZero;
+        s.repairedAt = kCMTimeInvalid;
         s.extending = false;
         s.error.reset();
         return StepResult::Progress;
     }
 
     const CMTime t = clampToZero(target.sourceTime);
+    const CMTime window = effectiveWindow(s, lookahead, streamCount);
+    s.window = window;
 
     auto seekTo = [&](CMTime to) {
         ++s.seeks;
@@ -453,7 +551,7 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
         s.continues = true;
         s.eof = false;
         s.firstAfterSeek = true;
-        s.repairUsed = false;
+        s.seekedTo = to;
         s.extending = false;
         Status st = s.decoder->seek(to);
         if (!st.ok()) {
@@ -480,6 +578,13 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
     auto decodeOne = [&]() {
         auto r = s.decoder->next();
         if (!r.ok()) {
+            if (r.error().code == MediaErrorCode::Cancelled) {
+                // setTargets() moved the target away from this decode: nothing is lost (the
+                // decoder resumes where it was if the target comes back) and the next step
+                // re-reads the target.
+                ++s.interrupts;
+                return StepResult::Progress;
+            }
             s.error = r.error();
             s.rangeValid = false;
             os_log_error(poolLog(), "decode error in %{public}s: %{public}s", slot->url.c_str(),
@@ -499,8 +604,18 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
         const VideoFrame &f = *r.value();
         ++s.framesDecoded;
         s.hardware = f.wasHardwareDecoded;
+        if (const std::string active = s.decoder->activeBackend(); !active.empty()) {
+            s.backend = active; // The router's fallback decoder may have switched backends.
+        }
         s.error.reset();
-        cache_->put(asset, f, s.frameDuration);
+        if (s.frameBytes == 0) {
+            s.frameBytes = FrameCache::bufferBytes(f.image.get());
+        }
+        // The first frame after a seek is the frame containing the seek target or, if the
+        // target lies in a gap (before the first frame), the first frame after it: either way
+        // it is what shows from the target on.
+        const CMTime coverFrom = s.firstAfterSeek && isNumeric(s.seekedTo) && s.seekedTo < f.pts ? s.seekedTo : f.pts;
+        cache_->put(asset, f, s.frameDuration, coverFrom);
         const CMTime end = frameEnd(f, s.frameDuration);
         if (s.extending) {
             if (s.firstAfterSeek) {
@@ -521,9 +636,10 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
         s.rangeEnd = maxTime(s.rangeEnd, end);
         return StepResult::Progress;
     };
+    // The frame under the playhead is decoded but gone from the cache (memory pressure,
+    // purge): re-decode it, once per target position.
     auto lost = [&](CMTime at) {
-        return at < s.rangeEnd && !s.repairUsed &&
-               !cache_->contains(asset, FrameCache::frameIndex(at, s.frameDuration));
+        return at < s.rangeEnd && !(isNumeric(s.repairedAt) && s.repairedAt == at) && !cache_->contains(asset, at);
     };
 
     if (target.direction == DecodeDirection::Forward) {
@@ -536,7 +652,7 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
         }
         if (lost(t)) {
             const StepResult r = seekTo(t);
-            s.repairUsed = true;
+            s.repairedAt = t;
             return r;
         }
         if (s.eof || s.rangeEnd > t + window) {
@@ -556,7 +672,7 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
     }
     if (lost(t)) {
         const StepResult r = seekTo(lowest);
-        s.repairUsed = true;
+        s.repairedAt = t;
         return r;
     }
     if (s.rangeEnd <= t && !s.eof) {
@@ -575,6 +691,7 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
         s.extendUntil = s.rangeStart;
         s.extending = true;
         s.firstAfterSeek = true;
+        s.seekedTo = s.extendStart;
         s.continues = false;
         Status st = s.decoder->seek(s.extendStart);
         if (!st.ok()) {
@@ -590,7 +707,7 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
 
 // MARK: - Scrub
 
-void DecodePool::requestFrame(AssetId asset, CMTime time, ScrubCallback callback) {
+void DecodePool::requestFrame(AssetId asset, CMTime time, ScrubCallback callback, uint64_t lane) {
     if (!callback) {
         return;
     }
@@ -600,12 +717,16 @@ void DecodePool::requestFrame(AssetId asset, CMTime time, ScrubCallback callback
         if (!stopping_) {
             accepted = true;
             ++scrubRequests_;
-            auto it = scrubPending_.find(asset);
+            const ScrubKey key{asset, lane};
+            auto it = scrubPending_.find(key);
             if (it != scrubPending_.end()) {
                 scrubToCancel_.push_back(std::move(it->second.callback));
                 it->second = ScrubRequest{time, std::move(callback), ++scrubSequence_};
             } else {
-                scrubPending_.emplace(asset, ScrubRequest{time, std::move(callback), ++scrubSequence_});
+                scrubPending_.emplace(key, ScrubRequest{time, std::move(callback), ++scrubSequence_});
+            }
+            if (scrubBusy_ && scrubInFlight_ == key && scrubInterrupt_) {
+                scrubInterrupt_->request(); // The request being decoded is superseded.
             }
             if (!scrubThread_.joinable()) {
                 scrubThread_ = std::thread([this] { scrubMain(); });
@@ -623,7 +744,7 @@ void DecodePool::scrubMain() {
     std::unique_lock<std::mutex> lock(mutex_);
     for (;;) {
         if (stopping_) {
-            for (auto &[asset, request] : scrubPending_) {
+            for (auto &[key, request] : scrubPending_) {
                 scrubToCancel_.push_back(std::move(request.callback));
             }
             scrubPending_.clear();
@@ -651,31 +772,44 @@ void DecodePool::scrubMain() {
         auto oldest = std::min_element(scrubPending_.begin(), scrubPending_.end(), [](const auto &a, const auto &b) {
             return a.second.sequence < b.second.sequence;
         });
-        const AssetId asset = oldest->first;
+        const ScrubKey key = oldest->first;
         ScrubRequest request = std::move(oldest->second);
         scrubPending_.erase(oldest);
-        auto slotIt = assets_.find(asset);
+        auto slotIt = assets_.find(key.asset);
         std::shared_ptr<AssetSlot> slot = slotIt != assets_.end() ? slotIt->second : nullptr;
         scrubBusy_ = true;
+        scrubInFlight_ = key;
+        if (auto dec = scrubDecoders_.find(key); dec != scrubDecoders_.end()) {
+            scrubInterrupt_ = dec->second->interrupt;
+        } else {
+            scrubInterrupt_ = std::make_shared<DecodeInterrupt>();
+        }
+        scrubInterrupt_->clear();
         lock.unlock();
 
-        Result<ScrubFrame> result = slot ? serviceScrub(asset, slot, request.time)
-                                         : Result<ScrubFrame>(makeError(MediaErrorCode::InvalidArgument,
-                                                                        "requestFrame: unknown asset (no path)"));
-        const bool ok = result.ok();
-        request.callback(std::move(result));
-        request.callback = nullptr;
+        bool ok = false;
+        bool cancelled = false;
+        @autoreleasepool {
+            Result<ScrubFrame> result = slot ? serviceScrub(key, slot, request.time)
+                                             : Result<ScrubFrame>(makeError(MediaErrorCode::InvalidArgument,
+                                                                            "requestFrame: unknown asset (no path)"));
+            ok = result.ok();
+            cancelled = !ok && result.error().code == MediaErrorCode::Cancelled;
+            request.callback(cancelled ? Result<ScrubFrame>(cancelledError()) : std::move(result));
+            request.callback = nullptr;
+        }
 
         lock.lock();
         scrubBusy_ = false;
-        ++(ok ? scrubServiced_ : scrubFailed_);
+        scrubInterrupt_.reset();
+        ++(ok ? scrubServiced_ : cancelled ? scrubCancelled_ : scrubFailed_);
         progressCv_.notify_all();
     }
     lock.unlock();
     scrubDecoders_.clear();
 }
 
-Result<ScrubFrame> DecodePool::serviceScrub(AssetId asset, const std::shared_ptr<AssetSlot> &slot, CMTime time) {
+Result<ScrubFrame> DecodePool::serviceScrub(const ScrubKey &key, const std::shared_ptr<AssetSlot> &slot, CMTime time) {
     time = clampToZero(time);
     auto routed = slot->resolve(*router_);
     if (!routed.ok()) {
@@ -689,30 +823,40 @@ Result<ScrubFrame> DecodePool::serviceScrub(AssetId asset, const std::shared_ptr
     }
     const CMTime fd = track->kind == TrackKind::Still ? kCMTimeInvalid : track->frameDuration;
 
-    if (auto cached = cache_->get(asset, FrameCache::frameIndex(time, fd))) {
+    if (auto cached = cache_->get(key.asset, track->kind == TrackKind::Still ? kCMTimeZero : time)) {
         return ScrubFrame{cached->image, cached->pts, cached->duration, cached->index, true};
     }
 
-    auto &entry = scrubDecoders_[asset];
+    // The interrupt the scrub thread armed for this request (requestFrame() requests it when a
+    // newer request for the same key arrives).
+    std::shared_ptr<DecodeInterrupt> interrupt;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        interrupt = scrubInterrupt_;
+    }
+    auto &entry = scrubDecoders_[key];
     if (!entry || entry->slot != slot) {
         entry.reset();
-        auto opened = router_->makeVideoDecoder(info, route->trackIndex, config_.decodeOptions);
+        DecodeOptions options = config_.decodeOptions;
+        options.interrupt = interrupt;
+        auto opened = router_->makeVideoDecoder(info, route->trackIndex, options);
         if (!opened.ok()) {
-            scrubDecoders_.erase(asset);
+            scrubDecoders_.erase(key);
             return std::move(opened).error();
         }
         entry = std::make_unique<ScrubDecoder>();
         entry->decoder = std::move(opened.value().decoder);
         entry->slot = slot;
+        entry->interrupt = interrupt;
         while (scrubDecoders_.size() > static_cast<size_t>(config_.maxScrubDecoders)) {
             // Least recently used, never the one just opened.
-            auto age = [&](const auto &entry) { return entry.first == asset ? UINT64_MAX : entry.second->lastUse; };
+            auto age = [&](const auto &e) { return e.first == key ? UINT64_MAX : e.second->lastUse; };
             auto lru = std::min_element(scrubDecoders_.begin(), scrubDecoders_.end(),
                                         [&](const auto &a, const auto &b) { return age(a) < age(b); });
             scrubDecoders_.erase(lru);
         }
     }
-    ScrubDecoder &d = *scrubDecoders_.at(asset);
+    ScrubDecoder &d = *scrubDecoders_.at(key);
     d.lastUse = ++scrubUseCounter_;
 
     auto decodeAt = [&](CMTime at) -> Result<std::optional<VideoFrame>> {
@@ -734,7 +878,7 @@ Result<ScrubFrame> DecodePool::serviceScrub(AssetId asset, const std::shared_ptr
         return makeError(MediaErrorCode::InvalidArgument, "no frame at or after the requested time in " + slot->url);
     }
     const VideoFrame &f = *frame.value();
-    cache_->put(asset, f, fd);
+    cache_->put(key.asset, f, fd, time < f.pts ? time : f.pts);
     return ScrubFrame{f.image, f.pts, f.duration, FrameCache::frameIndex(f.pts, fd), false};
 }
 

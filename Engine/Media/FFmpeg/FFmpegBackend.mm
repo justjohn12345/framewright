@@ -76,7 +76,11 @@ bool FFmpegBackend::canHandle(const MediaInfo &info) const {
     if (!stillContainer && !avContainer) {
         return false; // Includes "heic" and "avif".
     }
+    const bool ownProbe = info.backend == "ffmpeg"; // Then TrackInfo::decodable is our measurement.
     for (const TrackInfo &t : info.tracks) {
+        if (ownProbe && !t.decodable) {
+            return false;
+        }
         switch (t.kind) {
         case TrackKind::Still:
             if (!stillContainer || !stillCodecSupported(t.codec.fourCC)) {

@@ -7,6 +7,7 @@
 #include "../../Engine/Media/Apple/AppleVideoDecoder.h"
 #include "../../Engine/Media/HardwareCaps.h"
 #include "BurnIn.h"
+#include "VideoToolboxProbe.h"
 
 using namespace ve::media;
 using namespace ve::test;
@@ -25,6 +26,59 @@ using namespace ve::test;
     XCTAssertEqual(self.backendUnderTest->makeVideoEncoder(), nullptr);
     XCTAssertEqual(self.backendUnderTest->makeAudioEncoder(), nullptr);
     XCTAssertEqual(self.backendUnderTest->makeMuxer(), nullptr);
+}
+
+/// The writer requires the hardware encoder first and, when VideoToolbox has none for the
+/// settings (H.264 beyond the hardware's size limit), creates the writer again with hardware
+/// disabled: usesHardwareVideoEncoder() then says false, matching what VideoToolbox allows.
+- (void)testWriterRequiresHardwareFirstThenUsesSoftware {
+    struct Case {
+        int width, height;
+    };
+    for (Case c : {Case{1280, 720}, Case{8192, 4320}}) {
+        const bool vtHardware = videoToolboxEncodesInHardware(kCMVideoCodecType_H264, c.width, c.height);
+        NSLog(@"VideoToolbox H.264 hardware encoder at %dx%d: %d", c.width, c.height, vtHardware);
+        const std::string path = scratchDirectory() + "/hw_" + std::to_string(c.width) + ".mov";
+        EncodeSettings settings;
+        settings.container = ContainerFormat::MOV;
+        VideoEncodeSettings v;
+        v.codec = VideoCodec::H264;
+        v.width = c.width;
+        v.height = c.height;
+        v.frameDuration = CMTimeMake(1, 30);
+        v.averageBitRate = 20'000'000;
+        settings.video = v;
+        auto writer = self.backendUnderTest->makeWriter();
+        Status opened = writer->open(path, settings);
+        XCTAssertTrue(opened.ok(), @"%dx%d: %s", c.width, c.height, opened.ok() ? "" : opened.error().description().c_str());
+        if (!opened.ok()) {
+            continue;
+        }
+        XCTAssertEqual(writer->usesHardwareVideoEncoder(), vtHardware, @"%dx%d", c.width, c.height);
+        for (int i = 0; i < 3; ++i) {
+            auto frame = writer->makePixelBuffer();
+            XCTAssertTrue(frame.ok());
+            if (!frame.ok()) {
+                break;
+            }
+            drawBurnIn(frame->get(), i);
+            XCTAssertTrue(writer->appendVideo(frame.value(), CMTimeMake(i, 30)).ok());
+        }
+        XCTAssertTrue(writer->finish().ok(), @"%dx%d", c.width, c.height);
+        auto decoder = self.backendUnderTest->makeVideoDecoder();
+        XCTAssertTrue(decoder->open(path, -1, {}).ok());
+        auto f = decoder->next();
+        XCTAssertTrue(f.ok() && f.value());
+        if (f.ok() && f.value()) {
+            XCTAssertEqual(readBurnIn(f.value()->image.get()), std::optional<int>(0), @"%dx%d", c.width, c.height);
+        }
+        if (!vtHardware) {
+            // Hardware demanded where there is none: refused, not silently software.
+            settings.video->requireHardware = true;
+            auto strict = self.backendUnderTest->makeWriter();
+            XCTAssertFalse(strict->open(scratchDirectory() + "/strict.mov", settings).ok());
+        }
+    }
 }
 
 - (void)testCanHandleItsOwnMediaAndRejectsForeignCodecs {

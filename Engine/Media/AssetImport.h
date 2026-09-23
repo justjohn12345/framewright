@@ -17,6 +17,9 @@ namespace ve::media {
 ///   numeric duration, the longest track end.
 /// - width/height: display size of the first video (or still) track: the storage size with
 ///   90/270 degree rotation applied (width and height swapped).
+/// - rotationDegrees: that video track's clockwise display rotation (0/90/180/270, from the
+///   prober: MP4 preferredTransform, Matroska display matrix); decoders return storage
+///   orientation, so the renderer applies it. 0 for stills (decoded already oriented).
 /// - frameDuration / isVFR from that track (invalid / false for stills).
 /// - audioSampleRate (rounded to Hz) / audioChannels from the first routable audio track.
 /// - backendHint / hardwareDecode from the visual track's route, else the audio route.

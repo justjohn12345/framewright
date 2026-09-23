@@ -6,9 +6,10 @@
 //   Matroska/WebM, AVI, MPEG-TS, FLV, Ogg, WAV/W64, AIFF, CAF, MP3, FLAC, ADTS AAC, MXF, and the
 //   PNG/JPEG/BMP/TIFF/WebP/GIF image pipes (stills).
 // - Video codecs with a decoder in this build: H.264, HEVC, ProRes, VP9, VP8, MPEG-4 Part 2,
-//   MPEG-2, DNxHD, Theora, MJPEG. Not AV1: the LGPL build has no software AV1 decoder (no
-//   libdav1d) and FFmpeg 7.1 has no VideoToolbox AV1 hwaccel, so AV1 goes to the Apple backend
-//   (hardware AV1 on M3 and later) or is unsupported.
+//   MPEG-2, DNxHD, Theora, MJPEG, and AV1 through libdav1d (software; FFmpeg 7.1 has no
+//   VideoToolbox AV1 hwaccel, so AV1 in ISO-BMFF on M3 and later goes to the Apple backend's
+//   hardware decoder instead). When the MediaInfo comes from this backend's prober, tracks it
+//   measured as undecodable (TrackInfo::decodable) are refused.
 // - Audio: AAC (incl. HE-AAC), MP3, Opus, Vorbis, FLAC, ALAC, AC-3, E-AC-3, linear PCM, u-law,
 //   a-law.
 // - Not HEIF/HEIC/AVIF stills: libavformat exposes their tiles as separate streams and the

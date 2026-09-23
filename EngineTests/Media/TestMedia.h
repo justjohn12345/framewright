@@ -32,9 +32,31 @@ struct TestClip {
     CMTime videoDuration() const { return CMTimeMultiply(frameDuration, frames); }
 };
 
-/// Every generated file, in generation order.
+/// The conformance clips (constant frame rate, unrotated), in generation order. The suite in
+/// MediaBackendConformanceTests runs over these.
 const std::vector<TestClip> &testClips();
+/// Any generated clip by file name: the conformance clips and the special-purpose ones below.
 const TestClip &testClip(const std::string &file);
+
+// Special-purpose clips (not in testClips()):
+//   vfr_h264.mp4            640x360 H.264 with B-frames, 150 frames whose durations cycle through
+//                           kVfrPattern600 (1/600 s units); keyframe every 30 frames.
+//   rotated90_h264.mp4      640x360 stored, displayed rotated 90 degrees clockwise; 30 frames 30 fps.
+//   gop5s_h264_1080p30.mp4  1920x1080 H.264, 300 frames, keyframe every 150 frames (5 s).
+//   leading_gap_h264.mov    640x360 H.264, 60 frames at 30 fps, the first presented at 0.5 s.
+//   prores4444_alpha.mov    576x324 ProRes 4444, 10 frames at 25 fps; the left half has alpha 128
+//                           with straight colour.
+//   audio_44k.m4a / .wav    44.1 kHz stereo AAC (880 Hz) / PCM (990 Hz), 6 s, beep at 2 s.
+//   audio_mono.m4a          48 kHz mono AAC, 660 Hz, 4 s.   audio_51.m4a  48 kHz 5.1 AAC, 520 Hz, 4 s.
+
+/// Durations of consecutive frames of vfr_h264.mp4 in 1/600 s, repeating (keep in sync with
+/// Scripts/make_test_media.swift).
+inline constexpr int64_t kVfrPattern600[] = {20, 20, 60, 20, 10, 10, 20, 100, 20, 30, 20, 15};
+inline constexpr int kVfrFrames = 150;
+/// Presentation time of frame `index` of vfr_h264.mp4 (index == kVfrFrames gives the end).
+CMTime vfrFrameTime(int index);
+/// Index of the vfr_h264.mp4 frame containing `t` (the frame with time(i) <= t < time(i + 1)).
+int vfrFrameAt(CMTime t);
 
 /// Directory holding the generated files. Generates them on first use by running
 /// `xcrun swift Scripts/make_test_media.swift` into <build dir>/VidEditTestMedia/<script hash>

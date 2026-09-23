@@ -1,6 +1,7 @@
 #include "FFFrameConverter.h"
 
 #include "../ColorTags.h"
+#include "../Interfaces.h"
 
 extern "C" {
 #include <libavutil/hwcontext_videotoolbox.h>
@@ -302,6 +303,9 @@ Result<PixelBuffer> FrameConverter::convertHardware(CVPixelBufferRef source, con
     const int width = width_ > 0 ? width_ : srcWidth;
     const int height = height_ > 0 ? height_ : srcHeight;
     if (CVPixelBufferGetPixelFormatType(source) == format_ && width == srcWidth && height == srcHeight) {
+        if (pixelFormatHasAlpha(format_)) {
+            setAlphaMode(source, false); // ProRes 4444 alpha is straight.
+        }
         return PixelBuffer::retain(source); // Zero copy: the decoder's IOSurface-backed buffer.
     }
     if (!transfer_) {
@@ -322,6 +326,9 @@ Result<PixelBuffer> FrameConverter::convertHardware(CVPixelBufferRef source, con
                          st);
     }
     attachColorInfo(out->get(), color);
+    if (pixelFormatHasAlpha(format_)) {
+        setAlphaMode(out->get(), false); // VTPixelTransferSession keeps ProRes 4444's straight alpha.
+    }
     return std::move(out).value();
 }
 
@@ -392,6 +399,9 @@ Result<PixelBuffer> FrameConverter::convertSoftware(const AVFrame *frame, const 
         }
     }
     attachColorInfo(buffer, color);
+    if (pixelFormatHasAlpha(format_)) {
+        setAlphaMode(buffer, false); // libswscale never premultiplies.
+    }
     return std::move(out).value();
 }
 

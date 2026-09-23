@@ -5,7 +5,6 @@
 #include <IOSurface/IOSurfaceRef.h>
 
 #include <limits>
-#include <list>
 #include <map>
 #include <mutex>
 #include <utility>
@@ -14,15 +13,11 @@ namespace ve::media {
 
 namespace {
 
-struct Key {
-    AssetId asset;
-    int64_t index = 0;
-    friend auto operator<=>(const Key &, const Key &) = default;
+/// Orders entries of one asset by exact presentation time (any timescale).
+struct TimeKey {
+    CMTime time;
+    friend bool operator<(const TimeKey &a, const TimeKey &b) { return CMTimeCompare(a.time, b.time) < 0; }
 };
-
-} // namespace
-
-namespace {
 
 /// Holds the cache mutex; on destruction hands the removed buffers to `dead` (declared by the
 /// caller before this object, so they are released after the mutex is unlocked).
@@ -37,48 +32,77 @@ class Locked {
     std::unique_lock<std::mutex> lock_;
 };
 
+double seconds(CMTime t) {
+    return CMTimeGetSeconds(t);
+}
+
 } // namespace
 
 struct FrameCache::State {
     struct Entry {
         Frame frame;
+        CMTime end = kCMTimeInvalid; ///< pts + duration (+infinity for stills).
         uint64_t serial = 0;
         int pins = 0;
-        std::list<Key>::iterator lru; ///< Position in `lru` (front = most recently used).
+        uint64_t lastUse = 0;
+    };
+    using Entries = std::map<TimeKey, Entry>;
+    struct Asset {
+        CMTime frameDuration = kCMTimeInvalid; ///< Of the most recent put: defines the slots.
+        Entries entries;
     };
 
     mutable std::mutex mutex;
-    std::map<Key, Entry> entries;
-    std::list<Key> lru;
+    std::map<AssetId, Asset> assets;
     size_t budget = kDefaultBudgetBytes;
     uint64_t nextSerial = 1;
+    uint64_t useTick = 0;
     Stats stats;
+    std::vector<Focus> focus;
     /// Buffers of removed entries, released after the mutex is dropped (destroying an
     /// IOSurface is a kernel call; keep it out of the critical section the render thread uses).
     std::vector<PixelBuffer> graveyard;
 
     // All below: mutex held.
 
-    std::map<Key, Entry>::iterator covering(AssetId asset, int64_t index) {
-        auto it = entries.upper_bound(Key{asset, index});
-        if (it == entries.begin()) {
-            return entries.end();
+    /// The entry showing at `t` in `a`: the last one starting at or before t if t is inside
+    /// it, else the next one if it covers a gap containing t.
+    Entry *find(Asset &a, CMTime t) {
+        if (!CMTIME_IS_NUMERIC(t)) {
+            return nullptr;
         }
-        --it;
-        if (it->first.asset != asset) {
-            return entries.end();
+        auto it = a.entries.upper_bound(TimeKey{t});
+        if (it != a.entries.begin()) {
+            Entry &prev = std::prev(it)->second;
+            if (CMTimeCompare(t, prev.end) < 0) {
+                return &prev;
+            }
         }
-        const Frame &f = it->second.frame;
-        // index - f.index < span, written to avoid overflow for huge spans.
-        if (index - f.index >= f.span) {
-            return entries.end();
+        if (it != a.entries.end() && CMTimeCompare(it->second.frame.coverFrom, t) <= 0) {
+            return &it->second;
         }
-        return it;
+        return nullptr;
     }
 
-    void touch(Entry &e) { lru.splice(lru.begin(), lru, e.lru); }
+    Entry *find(AssetId asset, CMTime t) {
+        auto it = assets.find(asset);
+        return it == assets.end() ? nullptr : find(it->second, t);
+    }
 
-    void erase(std::map<Key, Entry>::iterator it) {
+    /// Start time of slot `index` of `asset` (0 for stills or before any frame was put).
+    CMTime slotStart(AssetId asset, int64_t index) const {
+        auto it = assets.find(asset);
+        if (it == assets.end() || !isPositive(it->second.frameDuration)) {
+            return kCMTimeZero;
+        }
+        return timeForFrame(index, it->second.frameDuration);
+    }
+
+    Entry *findSlot(AssetId asset, int64_t index) { return find(asset, slotStart(asset, index)); }
+
+    void touch(Entry &e) { e.lastUse = ++useTick; }
+
+    void erase(AssetId asset, Entries::iterator it) {
         Entry &e = it->second;
         stats.bytes -= e.frame.bytes;
         --stats.count;
@@ -87,28 +111,94 @@ struct FrameCache::State {
             --stats.pinnedCount;
         }
         graveyard.push_back(std::move(e.frame.image));
-        lru.erase(e.lru);
-        entries.erase(it);
-    }
-
-    void evictTo(size_t limit) {
-        auto pos = lru.end();
-        while (stats.bytes > limit && pos != lru.begin()) {
-            --pos;
-            auto it = entries.find(*pos);
-            if (it->second.pins > 0) {
-                continue;
-            }
-            auto next = std::next(pos); // erase() invalidates `pos` only.
-            erase(it);
-            ++stats.evictions;
-            pos = next;
+        auto a = assets.find(asset);
+        a->second.entries.erase(it);
+        if (a->second.entries.empty()) {
+            assets.erase(a);
         }
     }
 
-    void unpin(AssetId asset, int64_t index, uint64_t serial) {
-        auto it = entries.find(Key{asset, index});
-        if (it == entries.end() || it->second.serial != serial || it->second.pins == 0) {
+    /// Eviction rank of an entry (see the header comment): lower tier goes first; within a
+    /// tier, the larger key goes first.
+    struct Rank {
+        int tier = 1;
+        double key = 0;
+        bool before(const Rank &o) const { return tier != o.tier ? tier < o.tier : key > o.key; }
+    };
+
+    Rank rank(AssetId asset, const Entry &e) const {
+        bool focused = false;
+        bool ahead = false;
+        double aheadDistance = std::numeric_limits<double>::infinity();
+        double behindDistance = std::numeric_limits<double>::infinity();
+        const double start = seconds(e.frame.coverFrom);
+        const double end = CMTIME_IS_POSITIVE_INFINITY(e.end) ? std::numeric_limits<double>::infinity() : seconds(e.end);
+        for (const Focus &f : focus) {
+            if (f.asset != asset || !CMTIME_IS_NUMERIC(f.time)) {
+                continue;
+            }
+            focused = true;
+            const double t = seconds(f.time);
+            if (f.forward) {
+                if (end <= t) {
+                    behindDistance = std::min(behindDistance, t - end);
+                } else {
+                    ahead = true;
+                    aheadDistance = std::min(aheadDistance, std::max(0.0, start - t));
+                }
+            } else {
+                if (start > t) {
+                    behindDistance = std::min(behindDistance, start - t);
+                } else {
+                    ahead = true;
+                    aheadDistance = std::min(aheadDistance, std::max(0.0, t - end));
+                }
+            }
+        }
+        if (!focused) {
+            return Rank{1, -static_cast<double>(e.lastUse)}; // Least recently used first.
+        }
+        if (ahead) {
+            return Rank{2, aheadDistance}; // Farthest ahead first; the playhead frame last.
+        }
+        return Rank{0, behindDistance}; // Farthest behind first.
+    }
+
+    void evictTo(size_t limit) {
+        while (stats.bytes > limit) {
+            AssetId victimAsset;
+            Entries::iterator victim;
+            Rank best;
+            bool found = false;
+            for (auto &[asset, a] : assets) {
+                for (auto it = a.entries.begin(); it != a.entries.end(); ++it) {
+                    if (it->second.pins > 0) {
+                        continue;
+                    }
+                    const Rank r = rank(asset, it->second);
+                    if (!found || r.before(best)) {
+                        found = true;
+                        best = r;
+                        victimAsset = asset;
+                        victim = it;
+                    }
+                }
+            }
+            if (!found) {
+                return; // Everything left is pinned.
+            }
+            erase(victimAsset, victim);
+            ++stats.evictions;
+        }
+    }
+
+    void unpin(AssetId asset, CMTime pts, uint64_t serial) {
+        auto a = assets.find(asset);
+        if (a == assets.end()) {
+            return;
+        }
+        auto it = a->second.entries.find(TimeKey{pts});
+        if (it == a->second.entries.end() || it->second.serial != serial || it->second.pins == 0) {
             return; // Purged or replaced meanwhile.
         }
         if (--it->second.pins == 0) {
@@ -116,6 +206,35 @@ struct FrameCache::State {
             --stats.pinnedCount;
             evictTo(budget);
         }
+    }
+
+    PinnedFrame pin(const std::shared_ptr<State> &self, AssetId asset, Entry *e) {
+        PinnedFrame pinned;
+        if (e == nullptr) {
+            ++stats.misses;
+            return pinned;
+        }
+        ++stats.hits;
+        touch(*e);
+        if (e->pins++ == 0) {
+            stats.pinnedBytes += e->frame.bytes;
+            ++stats.pinnedCount;
+        }
+        pinned.state_ = self;
+        pinned.asset_ = asset;
+        pinned.serial_ = e->serial;
+        pinned.frame_ = e->frame;
+        return pinned;
+    }
+
+    std::optional<Frame> lookup(Entry *e) {
+        if (e == nullptr) {
+            ++stats.misses;
+            return std::nullopt;
+        }
+        ++stats.hits;
+        touch(*e);
+        return e->frame;
     }
 };
 
@@ -137,21 +256,20 @@ FrameCache::FrameCache(size_t budgetBytes) : state_(std::make_shared<State>()) {
 
 FrameCache::~FrameCache() = default;
 
-// MARK: - Keys
+// MARK: - Slots
 
 int64_t FrameCache::frameIndex(CMTime t, CMTime frameDuration) {
     if (!isPositive(frameDuration) || !isNumeric(t)) {
         return 0;
     }
-    return frameIndexAt(t, frameDuration, SnapMode::Round);
+    return frameIndexAt(t, frameDuration, SnapMode::Floor);
 }
 
-int64_t FrameCache::frameSpan(CMTime duration, CMTime frameDuration) {
-    if (!isPositive(frameDuration) || !isNumeric(duration) || duration <= kCMTimeZero) {
+int64_t FrameCache::frameSpan(CMTime pts, CMTime duration, CMTime frameDuration) {
+    if (!isPositive(frameDuration) || !isNumeric(pts) || !isNumeric(duration) || duration <= kCMTimeZero) {
         return 1;
     }
-    const int64_t n = frameIndexAt(duration, frameDuration, SnapMode::Round);
-    return n < 1 ? 1 : n;
+    return frameIndex(pts + duration, frameDuration) - frameIndex(pts, frameDuration);
 }
 
 size_t FrameCache::bufferBytes(CVPixelBufferRef buffer) {
@@ -181,10 +299,28 @@ size_t FrameCache::bufferBytes(CVPixelBufferRef buffer) {
 
 // MARK: - Insert and look up
 
-bool FrameCache::put(AssetId asset, int64_t index, PixelBuffer image, int64_t span, CMTime pts, CMTime duration) {
-    if (!image || span < 1) {
+bool FrameCache::put(AssetId asset, const VideoFrame &frame, CMTime frameDuration, CMTime coverFrom) {
+    return put(asset, frame.image, frame.pts, frame.duration, frameDuration, coverFrom);
+}
+
+bool FrameCache::put(AssetId asset, PixelBuffer image, CMTime pts, CMTime duration, CMTime frameDuration,
+                     CMTime coverFrom) {
+    if (!image || !isNumeric(pts)) {
         return false;
     }
+    CMTime end;
+    if (CMTIME_IS_POSITIVE_INFINITY(duration)) {
+        end = kCMTimePositiveInfinity;
+    } else if (isNumeric(duration) && duration > kCMTimeZero) {
+        end = pts + duration;
+    } else if (isPositive(frameDuration)) {
+        duration = frameDuration;
+        end = pts + frameDuration;
+    } else {
+        duration = kCMTimePositiveInfinity; // A still.
+        end = kCMTimePositiveInfinity;
+    }
+    const CMTime cover = isNumeric(coverFrom) && coverFrom < pts ? coverFrom : pts;
     const size_t bytes = bufferBytes(image.get());
     State &s = *state_;
     std::vector<PixelBuffer> dead;
@@ -192,26 +328,33 @@ bool FrameCache::put(AssetId asset, int64_t index, PixelBuffer image, int64_t sp
     if (bytes > s.budget) {
         return false;
     }
-    const Key key{asset, index};
-    auto it = s.entries.find(key);
-    if (it != s.entries.end()) {
-        if (it->second.pins > 0 || it->second.frame.image == image) {
-            s.touch(it->second);
+    State::Asset &a = s.assets[asset];
+    a.frameDuration = frameDuration;
+    if (auto it = a.entries.find(TimeKey{pts}); it != a.entries.end()) {
+        State::Entry &existing = it->second;
+        if (existing.pins > 0 || existing.frame.image == image) {
+            s.touch(existing);
+            if (existing.frame.image == image && CMTimeCompare(cover, existing.frame.coverFrom) < 0) {
+                existing.frame.coverFrom = cover; // Learned about a gap before it.
+            }
             return true;
         }
-        s.erase(it);
+        s.erase(asset, it);
     }
+    State::Asset &target = s.assets[asset]; // erase() may have removed an emptied asset.
+    target.frameDuration = frameDuration;
     State::Entry entry;
     entry.frame.image = std::move(image);
-    entry.frame.index = index;
-    entry.frame.span = span;
     entry.frame.pts = pts;
     entry.frame.duration = duration;
+    entry.frame.coverFrom = cover;
+    entry.frame.index = frameIndex(pts, frameDuration);
+    entry.frame.span = frameSpan(pts, duration, frameDuration);
     entry.frame.bytes = bytes;
+    entry.end = end;
     entry.serial = s.nextSerial++;
-    s.lru.push_front(key);
-    entry.lru = s.lru.begin();
-    s.entries.emplace(key, std::move(entry));
+    entry.lastUse = ++s.useTick;
+    target.entries.emplace(TimeKey{pts}, std::move(entry));
     s.stats.bytes += bytes;
     ++s.stats.count;
     ++s.stats.insertions;
@@ -219,89 +362,108 @@ bool FrameCache::put(AssetId asset, int64_t index, PixelBuffer image, int64_t sp
     return true;
 }
 
-bool FrameCache::put(AssetId asset, const VideoFrame &frame, CMTime frameDuration) {
-    return put(asset, frameIndex(frame.pts, frameDuration), frame.image, frameSpan(frame.duration, frameDuration),
-               frame.pts, frame.duration);
+std::optional<FrameCache::Frame> FrameCache::get(AssetId asset, CMTime t) {
+    State &s = *state_;
+    std::vector<PixelBuffer> dead;
+    Locked lock(s, dead);
+    return s.lookup(s.find(asset, t));
 }
 
 std::optional<FrameCache::Frame> FrameCache::get(AssetId asset, int64_t index) {
     State &s = *state_;
     std::vector<PixelBuffer> dead;
     Locked lock(s, dead);
-    auto it = s.covering(asset, index);
-    if (it == s.entries.end()) {
-        ++s.stats.misses;
-        return std::nullopt;
-    }
-    ++s.stats.hits;
-    s.touch(it->second);
-    return it->second.frame;
+    return s.lookup(s.findSlot(asset, index));
 }
 
-FrameCache::PinnedFrame FrameCache::acquire(AssetId asset, int64_t index) {
-    PinnedFrame pinned;
+FrameCache::PinnedFrame FrameCache::acquire(AssetId asset, CMTime t) {
     State &s = *state_;
     std::vector<PixelBuffer> dead;
     Locked lock(s, dead);
-    auto it = s.covering(asset, index);
-    if (it == s.entries.end()) {
-        ++s.stats.misses;
-        return pinned;
-    }
-    ++s.stats.hits;
-    State::Entry &e = it->second;
-    s.touch(e);
-    if (e.pins++ == 0) {
-        s.stats.pinnedBytes += e.frame.bytes;
-        ++s.stats.pinnedCount;
-    }
-    pinned.state_ = state_;
-    pinned.asset_ = asset;
-    pinned.serial_ = e.serial;
-    pinned.frame_ = e.frame;
-    return pinned;
+    return s.pin(state_, asset, s.find(asset, t));
+}
+
+FrameCache::PinnedFrame FrameCache::acquire(AssetId asset, int64_t index) {
+    State &s = *state_;
+    std::vector<PixelBuffer> dead;
+    Locked lock(s, dead);
+    return s.pin(state_, asset, s.findSlot(asset, index));
+}
+
+bool FrameCache::contains(AssetId asset, CMTime t) const {
+    State &s = *state_;
+    std::lock_guard<std::mutex> lock(s.mutex);
+    return s.find(asset, t) != nullptr;
 }
 
 bool FrameCache::contains(AssetId asset, int64_t index) const {
     State &s = *state_;
     std::lock_guard<std::mutex> lock(s.mutex);
-    return s.covering(asset, index) != s.entries.end();
+    return s.findSlot(asset, index) != nullptr;
 }
 
 std::vector<int64_t> FrameCache::indices(AssetId asset) const {
     State &s = *state_;
     std::lock_guard<std::mutex> lock(s.mutex);
     std::vector<int64_t> out;
-    for (auto it = s.entries.lower_bound(Key{asset, std::numeric_limits<int64_t>::min()});
-         it != s.entries.end() && it->first.asset == asset; ++it) {
-        out.push_back(it->first.index);
+    if (auto it = s.assets.find(asset); it != s.assets.end()) {
+        for (const auto &[key, entry] : it->second.entries) {
+            out.push_back(entry.frame.index);
+        }
     }
     return out;
 }
 
-// MARK: - Removal and budget
+std::vector<CMTime> FrameCache::presentationTimes(AssetId asset) const {
+    State &s = *state_;
+    std::lock_guard<std::mutex> lock(s.mutex);
+    std::vector<CMTime> out;
+    if (auto it = s.assets.find(asset); it != s.assets.end()) {
+        for (const auto &[key, entry] : it->second.entries) {
+            out.push_back(key.time);
+        }
+    }
+    return out;
+}
+
+// MARK: - Eviction order, removal and budget
+
+void FrameCache::setFocus(std::vector<Focus> focus) {
+    State &s = *state_;
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.focus = std::move(focus);
+}
 
 void FrameCache::purge(AssetId asset) {
     State &s = *state_;
     std::vector<PixelBuffer> dead;
     Locked lock(s, dead);
-    auto it = s.entries.lower_bound(Key{asset, std::numeric_limits<int64_t>::min()});
-    while (it != s.entries.end() && it->first.asset == asset) {
-        auto next = std::next(it);
-        s.erase(it);
-        it = next;
+    auto a = s.assets.find(asset);
+    if (a == s.assets.end()) {
+        return;
     }
+    for (auto &[key, entry] : a->second.entries) {
+        s.stats.bytes -= entry.frame.bytes;
+        --s.stats.count;
+        if (entry.pins > 0) {
+            s.stats.pinnedBytes -= entry.frame.bytes;
+            --s.stats.pinnedCount;
+        }
+        s.graveyard.push_back(std::move(entry.frame.image));
+    }
+    s.assets.erase(a);
 }
 
 void FrameCache::purgeAll() {
     State &s = *state_;
     std::vector<PixelBuffer> dead;
     Locked lock(s, dead);
-    for (auto &[key, entry] : s.entries) {
-        s.graveyard.push_back(std::move(entry.frame.image));
+    for (auto &[asset, a] : s.assets) {
+        for (auto &[key, entry] : a.entries) {
+            s.graveyard.push_back(std::move(entry.frame.image));
+        }
     }
-    s.entries.clear();
-    s.lru.clear();
+    s.assets.clear();
     s.stats.bytes = 0;
     s.stats.count = 0;
     s.stats.pinnedBytes = 0;
@@ -387,7 +549,7 @@ void FrameCache::PinnedFrame::release() noexcept {
     if (auto state = state_.lock()) {
         std::vector<PixelBuffer> dead;
         Locked lock(*state, dead);
-        state->unpin(asset_, frame_.index, serial_);
+        state->unpin(asset_, frame_.pts, serial_);
     }
     state_.reset();
     serial_ = 0;

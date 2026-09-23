@@ -9,6 +9,8 @@
 #import <AVFoundation/AVFoundation.h>
 #import <VideoToolbox/VideoToolbox.h>
 
+#include <os/log.h>
+
 #include <algorithm>
 #include <mutex>
 #include <vector>
@@ -24,6 +26,21 @@ bool timeLess(CMTime a, CMTime b) {
 /// Reorder buffer bound for the random-access path: more pending frames than any real
 /// stream's reorder depth means the wanted frame was dropped by the decoder.
 constexpr size_t kMaxPendingFrames = 48;
+
+os_log_t decoderLog() {
+    static os_log_t log = os_log_create("ve.media.apple", "video-decode");
+    return log;
+}
+
+/// Tags a decoded buffer's alpha contract and returns it for VideoFrame::alphaIsPremultiplied.
+/// Video decoded by VideoToolbox with alpha (ProRes 4444) has straight alpha.
+bool tagVideoAlpha(const PixelBuffer &image) {
+    if (image && pixelFormatHasAlpha(image.pixelFormat())) {
+        setAlphaMode(image.get(), false);
+        return false;
+    }
+    return true;
+}
 
 Result<PixelBuffer> convertPixelFormat(const PixelBuffer &source, OSType format) {
     CFRef<VTPixelTransferSessionRef> session;
@@ -75,6 +92,9 @@ struct AppleVideoDecoder::Impl {
     PixelBuffer still;
     bool stillPending = false;
 
+    /// The frame open() decoded, returned by the first next() unless seek() comes first.
+    std::optional<VideoFrame> primed;
+
     // Position.
     Mode mode = Mode::Idle;
     CMTime position = kCMTimeZero;  ///< Time of the next frame the current stream should deliver.
@@ -87,6 +107,14 @@ struct AppleVideoDecoder::Impl {
     // Sequential path.
     AVAssetReader *reader = nil;
     AVAssetReaderTrackOutput *output = nil;
+    /// Read-ahead: the reader's decoded frames carry no duration, so each frame is held until
+    /// the next one's pts is known (see readSequential).
+    std::optional<VideoFrame> seqHeld;
+
+    /// Track-time ranges of empty edits. AVAssetReader emits a synthesized (black) frame for an
+    /// empty edit; the IVideoDecoder contract instead answers a time in a gap with the first real
+    /// frame after it (as the FFmpeg backend does), so those frames are dropped.
+    std::vector<CMTimeRange> emptyEdits;
 
     // Random-access path.
     bool randomAccess = false;
@@ -113,12 +141,35 @@ struct AppleVideoDecoder::Impl {
     CMTime toTrack(CMTime media) const { return CMTimeAdd(media, mediaToTrack); }
     CMTime toMedia(CMTime trackTime) const { return CMTimeSubtract(trackTime, mediaToTrack); }
 
+    bool interrupted() const { return options.interrupt && options.interrupt->requested(); }
+
+    bool inEmptyEdit(CMTime t) const {
+        return std::any_of(emptyEdits.begin(), emptyEdits.end(),
+                           [&](const CMTimeRange &r) { return CMTimeRangeContainsTime(r, t); });
+    }
+    static MediaError cancelled() {
+        return makeError(MediaErrorCode::Cancelled, "decode interrupted (DecodeOptions::interrupt)");
+    }
+
+    /// Duration of the last frame of the track: to the track end (edit lists make it exact).
+    CMTime lastFrameDuration(CMTime pts, CMTime sampleDuration) const {
+        const CMTime toEnd = CMTimeSubtract(trackEnd, pts);
+        if (CMTIME_IS_NUMERIC(toEnd) && CMTimeCompare(toEnd, kCMTimeZero) > 0) {
+            return toEnd;
+        }
+        if (CMTIME_IS_NUMERIC(sampleDuration) && CMTimeCompare(sampleDuration, kCMTimeZero) > 0) {
+            return sampleDuration;
+        }
+        return frameDuration;
+    }
+
     void stopReader() {
         if (reader != nil && reader.status == AVAssetReaderStatusReading) {
             [reader cancelReading];
         }
         reader = nil;
         output = nil;
+        seqHeld.reset();
     }
 
     void invalidateSession() {
@@ -169,8 +220,45 @@ struct AppleVideoDecoder::Impl {
         return okStatus();
     }
 
+    /// The next frame from the reader in presentation order with its real duration: the
+    /// reader's decoded sample buffers carry no duration (kCMTimeInvalid), and the nominal frame
+    /// duration is wrong for variable-rate video, so one frame is read ahead and the duration
+    /// is the difference of the timestamps (the last frame lasts until the track end).
     Result<std::optional<VideoFrame>> readSequential() {
+        if (!seqHeld) {
+            auto first = readSequentialRaw();
+            if (!first.ok()) {
+                return std::move(first).error();
+            }
+            if (!first.value()) {
+                return std::optional<VideoFrame>();
+            }
+            seqHeld = std::move(first).value();
+        }
+        auto following = readSequentialRaw();
+        if (!following.ok()) {
+            return std::move(following).error(); // seqHeld stays: a Cancelled call can be resumed.
+        }
+        VideoFrame out = std::move(*seqHeld);
+        seqHeld.reset();
+        if (following.value()) {
+            const CMTime interval = CMTimeSubtract(following.value()->pts, out.pts);
+            out.duration = CMTIME_IS_NUMERIC(interval) && CMTimeCompare(interval, kCMTimeZero) > 0
+                               ? interval
+                               : lastFrameDuration(out.pts, out.duration);
+            seqHeld = std::move(following).value();
+        } else {
+            out.duration = lastFrameDuration(out.pts, out.duration);
+        }
+        return std::optional<VideoFrame>(std::move(out));
+    }
+
+    /// One decoded frame from the reader; duration is the sample buffer's (usually invalid).
+    Result<std::optional<VideoFrame>> readSequentialRaw() {
         while (true) {
+            if (interrupted()) {
+                return cancelled();
+            }
             CMSampleBufferRef raw = nullptr;
             @try {
                 raw = [output copyNextSampleBuffer];
@@ -188,14 +276,16 @@ struct AppleVideoDecoder::Impl {
             if (!image) {
                 continue; // Marker buffers carry no image.
             }
-            VideoFrame frame;
-            frame.pts = CMSampleBufferGetPresentationTimeStamp(sample.get());
-            frame.duration = CMSampleBufferGetDuration(sample.get());
-            if (!CMTIME_IS_NUMERIC(frame.duration) || CMTimeCompare(frame.duration, kCMTimeZero) <= 0) {
-                frame.duration = frameDuration;
+            const CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample.get());
+            if (inEmptyEdit(pts)) {
+                continue; // AVFoundation's filler for an empty edit, not a frame of the file.
             }
+            VideoFrame frame;
+            frame.pts = pts;
+            frame.duration = CMSampleBufferGetDuration(sample.get());
             frame.image = std::move(image);
             frame.wasHardwareDecoded = expectHardware;
+            frame.alphaIsPremultiplied = tagVideoAlpha(frame.image);
             return std::optional<VideoFrame>(std::move(frame));
         }
     }
@@ -247,6 +337,7 @@ struct AppleVideoDecoder::Impl {
                              : self->frameDuration;
         frame.image = PixelBuffer::retainImageBuffer(image);
         frame.wasHardwareDecoded = self->sessionHardware;
+        frame.alphaIsPremultiplied = tagVideoAlpha(frame.image);
         if (frame.image) {
             self->pending.push_back(std::move(frame));
         }
@@ -410,6 +501,9 @@ struct AppleVideoDecoder::Impl {
 
     Result<std::optional<VideoFrame>> readRandomAccess() {
         while (true) {
+            if (interrupted()) {
+                return cancelled();
+            }
             if (presentCursor == nil) {
                 return std::optional<VideoFrame>();
             }
@@ -441,10 +535,25 @@ struct AppleVideoDecoder::Impl {
                 }
                 floorPts = presentCursor ? toTrack(presentCursor.presentationTimeStamp) : trackEnd;
                 if (!found) {
+                    os_log_error(decoderLog(),
+                                 "frame at %.6f s never came out of VideoToolbox (%zu frames pending, %{public}s); "
+                                 "skipped",
+                                 CMTimeGetSeconds(want), pendingCount,
+                                 decodeCursor == nil ? "no samples left to decode" : "reorder window exceeded");
                     if (decodeCursor == nil && pendingCount == 0 && presentCursor == nil) {
                         return std::optional<VideoFrame>();
                     }
                     continue;
+                }
+                // Display interval: up to the next frame in presentation order (the output
+                // callback's duration is the sample's decode-order duration), the last frame to
+                // the track end.
+                const CMTime nextPts = presentCursor ? floorPts : trackEnd;
+                const CMTime interval = CMTimeSubtract(nextPts, found->pts);
+                if (CMTIME_IS_NUMERIC(interval) && CMTimeCompare(interval, kCMTimeZero) > 0) {
+                    found->duration = interval;
+                } else {
+                    found->duration = lastFrameDuration(found->pts, found->duration);
                 }
                 maybeScheduleReaderHandOver();
                 return found;
@@ -466,23 +575,31 @@ struct AppleVideoDecoder::Impl {
 
     // MARK: Positioning
 
+    /// Positions either path at `at`. On failure nothing is left half-started: mode is Idle
+    /// (no reader, no cursors) and the target is `at`, so the next next() retries this seek
+    /// instead of reporting a silent end of stream from a stopped reader.
     Status startAt(CMTime at) {
         eos = false;
         switchToReaderAt = kCMTimeInvalid;
+        Status s = okStatus();
         if (randomAccess || forceRandomAccess) {
-            Status s = startRandomAccess(at);
-            if (s.ok() || forceRandomAccess) {
-                if (s.ok()) {
-                    target = at;
-                    position = at;
-                }
-                return s;
+            s = startRandomAccess(at);
+            if (!s.ok() && !forceRandomAccess) {
+                os_log_info(decoderLog(), "random-access start at %.6f s failed (%{public}s); using AVAssetReader",
+                            CMTimeGetSeconds(at), s.error().description().c_str());
+                s = startSequential(at);
             }
+        } else {
+            s = startSequential(at);
         }
-        VE_MEDIA_TRY(startSequential(at));
         target = at;
         position = at;
-        return okStatus();
+        if (!s.ok()) {
+            stopReader();
+            clearRandomAccess();
+            mode = Mode::Idle;
+        }
+        return s;
     }
 };
 
@@ -566,7 +683,27 @@ Status AppleVideoDecoder::open(const std::string &path, int trackIndex, const De
         if (!CMTIME_IS_NUMERIC(d.trackEnd) || CMTimeCompare(d.trackEnd, d.trackStart) <= 0) {
             return makeError(MediaErrorCode::CorruptData, "video track has no duration");
         }
-        d.expectHardware = options.allowHardware && HardwareCaps::get().hardwareDecode(d.info.codec.fourCC);
+        // Measured, not predicted: AVAssetReader does not say which decoder it uses, so ask
+        // VideoToolbox about a session for this exact format (AVAssetReader drives the same
+        // VideoToolbox with hardware preferred). A format VideoToolbox refuses fails here,
+        // where the router can still fall back to another backend.
+        // makeTrackInfo measured with hardware allowed; measure again only for a software-only
+        // decoder or to report why the format is refused.
+        if (!d.info.decodable || !options.allowHardware) {
+            auto measured =
+                measureHardwareDecode((__bridge CMFormatDescriptionRef)d.track.formatDescriptions.firstObject,
+                                      options.allowHardware);
+            if (!measured.ok()) {
+                return std::move(measured).error();
+            }
+            if (!d.info.decodable) {
+                return makeError(MediaErrorCode::UnsupportedCodec, "AVFoundation reports the video track of " + path +
+                                                                       " as not playable/decodable");
+            }
+            d.expectHardware = measured.value();
+        } else {
+            d.expectHardware = d.info.hardwareDecode;
+        }
         d.lastHardware = d.expectHardware;
 
         // Random access needs sample cursors and a single rate-1 media segment in the edit list.
@@ -574,12 +711,13 @@ Status AppleVideoDecoder::open(const std::string &path, int trackIndex, const De
         int mediaSegments = 0;
         for (AVAssetTrackSegment *segment in d.track.segments) {
             if (segment.empty) {
+                d.emptyEdits.push_back(segment.timeMapping.target);
                 continue;
             }
             const CMTimeMapping m = segment.timeMapping;
             if (++mediaSegments > 1 || CMTimeCompare(m.source.duration, m.target.duration) != 0) {
                 mappable = false;
-                break;
+                continue; // Keep collecting empty edits.
             }
             d.mediaToTrack = CMTimeSubtract(m.target.start, m.source.start);
         }
@@ -604,6 +742,16 @@ Status AppleVideoDecoder::open(const std::string &path, int trackIndex, const De
         d.position = d.trackStart;
         d.target = kCMTimeInvalid;
         d.opened = true;
+        // Decode the first frame now (kept for the first next()): streams VideoToolbox accepts
+        // at session creation but cannot decode fail here rather than in the first next().
+        auto first = next();
+        if (!first.ok()) {
+            d.opened = false;
+            d.stopReader();
+            d.clearRandomAccess();
+            return std::move(first).error();
+        }
+        d.primed = std::move(first).value();
         return okStatus();
     }
 }
@@ -621,6 +769,7 @@ Status AppleVideoDecoder::seek(CMTime t) {
         return okStatus();
     }
     @autoreleasepool {
+        d.primed.reset();
         d.repeatLast = false;
         if (timeLess(t, d.trackStart)) {
             t = d.trackStart;
@@ -645,7 +794,9 @@ Status AppleVideoDecoder::seek(CMTime t) {
         d.last.reset();
         Status s = d.startAt(t);
         if (!s.ok()) {
+            // The next next() retries the seek to t (not a stale earlier target).
             d.mode = Impl::Mode::Idle;
+            d.target = t;
             d.position = t;
         }
         return s;
@@ -667,7 +818,13 @@ Result<std::optional<VideoFrame>> AppleVideoDecoder::next() {
         frame.duration = kCMTimePositiveInfinity;
         frame.image = d.still;
         frame.wasHardwareDecoded = false;
+        frame.alphaIsPremultiplied = alphaIsPremultiplied(frame.image.get(), true);
         d.lastHardware = false;
+        return std::optional<VideoFrame>(std::move(frame));
+    }
+    if (d.primed) {
+        VideoFrame frame = std::move(*d.primed);
+        d.primed.reset();
         return std::optional<VideoFrame>(std::move(frame));
     }
     if (d.eos) {
@@ -681,13 +838,29 @@ Result<std::optional<VideoFrame>> AppleVideoDecoder::next() {
         if (CMTIME_IS_VALID(d.switchToReaderAt)) {
             const CMTime at = d.switchToReaderAt;
             d.switchToReaderAt = kCMTimeInvalid;
-            if (d.startSequential(at).ok()) {
+            Status reader = d.startSequential(at);
+            if (reader.ok()) {
                 if (!CMTIME_IS_VALID(d.target) || timeLess(d.target, at)) {
                     d.target = at;
                 }
             } else {
                 // Keep going on a fresh random-access decode from the same point.
-                VE_MEDIA_TRY(d.startRandomAccess(at));
+                os_log_info(decoderLog(), "hand-over to AVAssetReader at %.6f s failed (%{public}s); staying on "
+                                          "the random-access path", CMTimeGetSeconds(at),
+                            reader.error().description().c_str());
+                Status random = d.startRandomAccess(at);
+                if (!random.ok()) {
+                    // Neither path could start: leave no half-initialised cursors behind; the
+                    // next call starts over at the same point.
+                    d.clearRandomAccess();
+                    d.mode = Impl::Mode::Idle;
+                    d.target = at;
+                    d.position = at;
+                    return std::move(random).error();
+                }
+                if (!CMTIME_IS_VALID(d.target) || timeLess(d.target, at)) {
+                    d.target = at;
+                }
             }
         }
         if (d.mode == Impl::Mode::Idle) {
@@ -695,8 +868,14 @@ Result<std::optional<VideoFrame>> AppleVideoDecoder::next() {
             VE_MEDIA_TRY(d.startAt(resume));
         }
         while (true) {
+            if (d.interrupted()) {
+                return Impl::cancelled(); // State kept: the next call continues toward the target.
+            }
             auto r = d.mode == Impl::Mode::Sequential ? d.readSequential() : d.readRandomAccess();
             if (!r.ok()) {
+                if (r.error().code == MediaErrorCode::Cancelled) {
+                    return std::move(r).error(); // Resumable: nothing was lost.
+                }
                 d.stopReader();
                 d.clearRandomAccess();
                 d.mode = Impl::Mode::Idle;

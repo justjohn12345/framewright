@@ -2,6 +2,7 @@
 
 #include "../CFRef.h"
 #include "../ColorTags.h"
+#include "../Interfaces.h"
 #include "AppleSupport.h"
 
 #import <CoreGraphics/CoreGraphics.h>
@@ -135,7 +136,8 @@ Result<PixelBuffer> decodeStillImage(const std::string &path, int maxDimension) 
         }
         int width = header.value()->width;
         int height = header.value()->height;
-        fitDimensions(maxDimension, width, height);
+        fitDimensions(maxDimension > 0 ? std::min(maxDimension, kMaxImageDimension) : kMaxImageDimension, width,
+                      height);
         NSDictionary *options = @{
             (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways : @YES,
             (__bridge NSString *)kCGImageSourceCreateThumbnailWithTransform : @YES,
@@ -183,6 +185,7 @@ Result<PixelBuffer> decodeStillImage(const std::string &path, int maxDimension) 
             }
         }
         attachColorInfo(pb, {ColorPrimaries::BT709, TransferFunction::SRGB, YCbCrMatrix::Unknown, true});
+        setAlphaMode(pb, true); // CoreGraphics drew premultiplied (kCGImageAlphaPremultipliedFirst).
         return std::move(buffer).value();
     }
 }

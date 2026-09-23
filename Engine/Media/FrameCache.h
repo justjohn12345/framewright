@@ -1,17 +1,36 @@
-// FrameCache: byte-bounded LRU of decoded frames keyed by (asset, source frame index).
+// FrameCache: byte-bounded cache of decoded frames per asset, answering "which frame shows at
+// time t".
 //
-// Keys. A frame is stored under the index of the source frame grid (frame n covers
-// [n * frameDuration, (n + 1) * frameDuration), frameDuration = the asset's nominal
-// MediaAsset::frameDuration) nearest to its pts (TimeUtil frameIndexAt, SnapMode::Round, so
-// container timestamps that are a tick off the grid still land on the right slot). Each entry
-// also records how many grid slots it covers (`span`, from the frame's own duration), and
-// lookups return the entry covering the requested slot: a variable-frame-rate frame lasting
-// three nominal frames answers all three indices. Stills use index 0 (frameIndex() returns 0
-// for an invalid frame duration).
+// Keys and lookups. Entries are stored per asset by their exact pts and cover their display
+// interval [pts, pts + duration) (VideoFrame::duration: decoders report real display intervals,
+// see Interfaces.h). A lookup by time returns the entry whose interval contains t: the same
+// rule IVideoDecoder::seek() follows, so a warm lookup returns the frame a cold decode would
+// (also for variable-frame-rate and off-grid sources). An entry may additionally cover a gap
+// before it (`coverFrom`): the decoder returns the first frame after t when t lies before the
+// first frame, and the decode pool records that so the cache agrees.
+//
+// Slot lookups. The playback frame source addresses frames by grid slot: slot n of an asset is
+// [n * frameDuration, (n + 1) * frameDuration) with frameDuration = the asset's nominal
+// MediaAsset::frameDuration, and frameIndex(t) = floor(t / frameDuration) is the slot containing
+// t. get/acquire/contains(asset, n) answer with the entry containing the slot's start time
+// n * frameDuration: exact for sources on the grid, and on any source the frame a decoder
+// returns for seek(n * frameDuration). The frame duration used is the one the asset's frames
+// were put with. Stills use slot 0 (frameIndex() returns 0 for an invalid frame duration), and
+// their entry (pts 0, infinite duration) answers every time. Frame::index / Frame::span are the
+// slots an entry starts in and covers (frameIndex(pts + duration) - frameIndex(pts)), for
+// diagnostics.
 //
 // Budget. bytes = the frame's real allocation (IOSurfaceGetAllocSize for IOSurface-backed
-// buffers, else CVPixelBufferGetDataSize, else the sum of plane sizes). Inserting evicts least
-// recently used entries until the total is within the budget (default 512 MB).
+// buffers, else CVPixelBufferGetDataSize, else the sum of plane sizes). Inserting evicts until
+// the total is within the budget (default 512 MB). Eviction order ("distance from target"):
+// the decode pool declares where playback is (setFocus: per asset, the source time under the
+// playhead and the play direction). Unpinned entries are evicted
+//   1. behind the playhead of every focus on their asset (already shown), farthest behind first;
+//   2. of assets without a focus, least recently used first;
+//   3. ahead of a playhead, farthest ahead first,
+// so the frame under the playhead and the next ones go last. Pure LRU would evict the playhead
+// frame first whenever a lookahead window is larger than the budget (frames are inserted in
+// playback order). Without any focus (paused, scrubbing) the order is plain LRU.
 //
 // Pinning (why, and why not a generation counter). PixelBuffer is ref-counted, so eviction can
 // never free a buffer someone is still using: correctness does not need pins. What eviction
@@ -30,9 +49,9 @@
 // purge()/purgeAll() remove pinned entries from the index too (their asset is gone or stale);
 // the PinnedFrame keeps its buffer alive and releasing it later is a no-op.
 //
-// Threading: all methods are thread-safe (one internal mutex, held only for map/list updates:
-// no I/O, no callbacks, no Objective-C messaging under it). PinnedFrame may be destroyed on any
-// thread and may outlive the FrameCache.
+// Threading: all methods are thread-safe (one internal mutex, held only for map updates and
+// the eviction scan: no I/O, no callbacks, no Objective-C messaging under it). PinnedFrame may
+// be destroyed on any thread and may outlive the FrameCache.
 #pragma once
 
 #include "../Model/Ids.h"
@@ -58,11 +77,20 @@ class FrameCache {
 
     struct Frame {
         PixelBuffer image;
-        int64_t index = 0; ///< First grid slot covered.
-        int64_t span = 1;  ///< Grid slots covered (>= 1).
+        int64_t index = 0; ///< Slot containing pts (frameIndex(pts)).
+        int64_t span = 1;  ///< Slots whose start lies in the frame: frameIndex(end) - frameIndex(pts).
         CMTime pts = kCMTimeInvalid;
         CMTime duration = kCMTimeInvalid;
+        /// Earliest time the entry answers (pts, or earlier when it also covers a gap before it).
+        CMTime coverFrom = kCMTimeInvalid;
         size_t bytes = 0;
+    };
+
+    /// Where playback of one asset is, for the eviction order (see the header comment).
+    struct Focus {
+        AssetId asset;
+        CMTime time = kCMTimeInvalid; ///< Source time under the playhead.
+        bool forward = true;          ///< Play direction.
     };
 
     struct Stats {
@@ -84,47 +112,55 @@ class FrameCache {
     FrameCache(const FrameCache &) = delete;
     FrameCache &operator=(const FrameCache &) = delete;
 
-    // MARK: Keys
+    // MARK: Slots
 
-    /// Grid slot nearest to `t` (SnapMode::Round); 0 when frameDuration is not positive
+    /// Slot containing `t`: floor(t / frameDuration); 0 when frameDuration is not positive
     /// (stills) or t is not numeric.
     static int64_t frameIndex(CMTime t, CMTime frameDuration);
-    /// Grid slots covered by a frame of `duration` (rounded, at least 1; 1 for non-numeric or
-    /// infinite durations and for stills).
-    static int64_t frameSpan(CMTime duration, CMTime frameDuration);
+    /// Slots whose start lies in [pts, pts + duration): frameIndex(pts + duration) -
+    /// frameIndex(pts); 1 for stills, infinite and non-numeric durations.
+    static int64_t frameSpan(CMTime pts, CMTime duration, CMTime frameDuration);
     /// Memory held by a pixel buffer (see header comment).
     static size_t bufferBytes(CVPixelBufferRef buffer);
 
     // MARK: Insert and look up
 
-    /// Inserts (or refreshes) the frame for slot `index`. A different buffer under the same
-    /// slot replaces the old entry unless that entry is pinned (then the pinned entry is kept
-    /// and only marked recently used). Returns false if the frame was not retained: an empty
-    /// image, span < 1, or a frame larger than the whole budget.
-    bool put(AssetId asset, int64_t index, PixelBuffer image, int64_t span = 1, CMTime pts = kCMTimeInvalid,
-             CMTime duration = kCMTimeInvalid);
-    /// Inserts a decoded frame, deriving index and span from its pts/duration.
-    bool put(AssetId asset, const VideoFrame &frame, CMTime frameDuration);
+    /// Inserts a decoded frame of `asset`. `frameDuration` is the asset's nominal frame duration
+    /// (invalid for stills) and defines its slots. A frame without a numeric duration lasts one
+    /// frameDuration (a still: forever). `coverFrom` (<= pts) extends the entry backwards over a
+    /// gap in which no frame is shown (see header comment). A different buffer at the same pts
+    /// replaces the old entry unless that entry is pinned (then the pinned entry is kept and only
+    /// marked recently used). Returns false if the frame was not retained: an empty image, a
+    /// non-numeric pts, or a frame larger than the whole budget.
+    bool put(AssetId asset, const VideoFrame &frame, CMTime frameDuration, CMTime coverFrom = kCMTimeInvalid);
+    bool put(AssetId asset, PixelBuffer image, CMTime pts, CMTime duration, CMTime frameDuration,
+             CMTime coverFrom = kCMTimeInvalid);
 
-    /// The entry covering slot `index` (marked most recently used; counted as hit or miss).
+    /// The entry showing at time `t` (marked recently used; counted as hit or miss).
+    std::optional<Frame> get(AssetId asset, CMTime t);
+    /// The entry showing at the start of slot `index` (see header comment).
     std::optional<Frame> get(AssetId asset, int64_t index);
-    std::optional<Frame> get(AssetId asset, CMTime t, CMTime frameDuration) {
-        return get(asset, frameIndex(t, frameDuration));
-    }
     /// Like get() but pins the entry (see header comment). An empty PinnedFrame on a miss.
+    PinnedFrame acquire(AssetId asset, CMTime t);
     PinnedFrame acquire(AssetId asset, int64_t index);
 
-    /// Whether an entry covers slot `index`. Does not touch LRU order or statistics.
+    /// Whether an entry answers `t` / slot `index`. Does not touch LRU order or statistics.
+    bool contains(AssetId asset, CMTime t) const;
     bool contains(AssetId asset, int64_t index) const;
-    /// First slots of every entry of `asset`, ascending (diagnostics and tests).
+    /// Frame::index of every entry of `asset`, in pts order (diagnostics and tests).
     std::vector<int64_t> indices(AssetId asset) const;
+    /// pts of every entry of `asset`, ascending (diagnostics and tests).
+    std::vector<CMTime> presentationTimes(AssetId asset) const;
 
-    // MARK: Removal and budget
+    // MARK: Eviction order, removal and budget
 
+    /// Replaces the playhead positions the eviction order is based on (the decode pool calls it
+    /// with its targets; empty = plain LRU). Does not evict by itself.
+    void setFocus(std::vector<Focus> focus);
     /// Removes every entry of `asset` (pinned ones included; see header comment).
     void purge(AssetId asset);
     void purgeAll();
-    /// Evicts least recently used unpinned entries until bytes <= `bytes`.
+    /// Evicts unpinned entries (in eviction order) until bytes <= `bytes`.
     void trimTo(size_t bytes);
     /// Changes the budget and trims to it.
     void setBudget(size_t bytes);

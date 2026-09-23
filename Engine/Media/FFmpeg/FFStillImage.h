@@ -27,8 +27,9 @@ Result<DecodedStill> decodeStill(AVFormatContext *input);
 TrackInfo stillTrackInfo(const DecodedStill &still);
 
 /// Renders a decoded still, EXIF orientation applied and scaled to fit maxDimension (0 = full
-/// size), into an IOSurface-backed 32BGRA buffer with premultiplied alpha, tagged BT.709
-/// primaries / sRGB transfer: the same output as AppleVideoDecoder for stills.
+/// size, but never more than kMaxImageDimension per side), into an IOSurface-backed 32BGRA
+/// buffer with premultiplied alpha (tagged kCVImageBufferAlphaChannelMode_PremultipliedAlpha),
+/// tagged BT.709 primaries / sRGB transfer: the same output as AppleVideoDecoder for stills.
 Result<PixelBuffer> renderStill(const DecodedStill &still, int maxDimension);
 
 } // namespace ve::media::ffmpeg

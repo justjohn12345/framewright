@@ -2,11 +2,12 @@
 
 #include "../CFRef.h"
 #include "../ColorTags.h"
-#include "../HardwareCaps.h"
 #include "AppleSupport.h"
 
 #import <AVFoundation/AVFoundation.h>
 #import <VideoToolbox/VideoToolbox.h>
+
+#include <os/log.h>
 
 #include <atomic>
 #include <chrono>
@@ -41,6 +42,11 @@ namespace ve::media::apple {
 
 namespace {
 
+os_log_t writerLog() {
+    static os_log_t log = os_log_create("ve.media.apple", "writer");
+    return log;
+}
+
 NSString *const kReadyKeyPath = @"readyForMoreMediaData";
 constexpr int kPullAudioChunkFrames = 4096;
 
@@ -58,7 +64,9 @@ AVFileType fileType(ContainerFormat c) {
     return AVFileTypeQuickTimeMovie;
 }
 
-NSDictionary *videoOutputSettings(const VideoEncodeSettings &v) {
+/// `hardware`: require the hardware encoder (true) or forbid it (false). Never "either": the
+/// writer then knows which encoder runs (AVAssetWriter does not expose its session).
+NSDictionary *videoOutputSettings(const VideoEncodeSettings &v, bool hardware) {
     NSMutableDictionary *s = [NSMutableDictionary dictionary];
     switch (v.codec) {
     case VideoCodec::H264:
@@ -84,9 +92,8 @@ NSDictionary *videoOutputSettings(const VideoEncodeSettings &v) {
         };
     }
     s[AVVideoEncoderSpecificationKey] = @{
-        (__bridge NSString *)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder : @YES,
-        (__bridge NSString *)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder :
-            @(v.requireHardware),
+        (__bridge NSString *)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder : @(hardware),
+        (__bridge NSString *)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder : @(hardware),
     };
     if (v.codec != VideoCodec::ProRes422) {
         NSMutableDictionary *c = [NSMutableDictionary dictionary];
@@ -174,9 +181,14 @@ struct AppleWriter::Impl {
     bool pushed = false;
     bool pulled = false;
 
+    /// Readiness wake-ups. The KVO handler (on an AVFoundation thread) only bumps the counter
+    /// and notifies; waitUntilReady() never calls into AVFoundation while holding readyMutex,
+    /// so the two cannot deadlock on AVFoundation's internal locks.
     std::mutex readyMutex;
     std::condition_variable readyChanged;
+    std::atomic<uint64_t> readyGeneration{0};
     VEWriterReadyObserver *observer = nil;
+    bool hardwareEncoder = false; ///< The video input runs on the hardware encoder (required at open).
 
     ~Impl() {
         removeObservers();
@@ -224,8 +236,13 @@ struct AppleWriter::Impl {
     Status waitUntilReady(AVAssetWriterInput *input) {
         const auto deadline =
             std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int>(kStallTimeoutSeconds * 1000));
-        std::unique_lock<std::mutex> lock(readyMutex);
-        while (!input.readyForMoreMediaData) {
+        while (true) {
+            // Sample the generation before asking AVFoundation: a KVO change after the question
+            // bumps it, so the wait below cannot miss it. AVFoundation is only called unlocked.
+            const uint64_t seen = readyGeneration.load(std::memory_order_acquire);
+            if (input.readyForMoreMediaData) {
+                return okStatus();
+            }
             if (writer.status != AVAssetWriterStatusWriting) {
                 return writerError(MediaErrorCode::EncodeFailed, "AVAssetWriter");
             }
@@ -235,10 +252,13 @@ struct AppleWriter::Impl {
                                  "AVAssetWriter input not ready for 10 s (in push mode keep audio up to 2 s "
                                  "ahead of video and call endStream(), or use runPull())");
             }
-            // KVO wakes us promptly; the short timeout covers a change between check and wait.
-            readyChanged.wait_until(lock, std::min(deadline, now + std::chrono::milliseconds(20)));
+            std::unique_lock<std::mutex> lock(readyMutex);
+            // KVO wakes us promptly; the periodic timeout re-checks the writer status (a failure
+            // does not always change readyForMoreMediaData).
+            readyChanged.wait_until(lock, std::min(deadline, now + std::chrono::milliseconds(50)), [&] {
+                return readyGeneration.load(std::memory_order_acquire) != seen;
+            });
         }
-        return okStatus();
     }
 
     Result<CFRef<CMSampleBufferRef>> makeAudioSample(const float *data, int frames) {
@@ -301,6 +321,108 @@ struct AppleWriter::Impl {
             return writerError(MediaErrorCode::EncodeFailed, "appendPixelBuffer");
         }
         lastVideoPts = pts;
+        return okStatus();
+    }
+
+    bool createdWithHardware = false;
+
+    /// Creates the AVAssetWriter with its inputs and starts writing. `hardware` requires the
+    /// hardware video encoder (true) or forbids it (false). On failure nothing is left behind
+    /// (no writer, no inputs, no partial file).
+    Status createWriter(bool hardware) {
+        Status s = createWriterAttempt(hardware);
+        if (!s.ok()) {
+            if (writer != nil && writer.status == AVAssetWriterStatusWriting) {
+                [writer cancelWriting];
+            }
+            writer = nil;
+            videoInput = nil;
+            adaptor = nil;
+            audioInput = nil;
+            audioFormat.reset();
+            [NSFileManager.defaultManager removeItemAtPath:@(path.c_str()) error:nil];
+        }
+        createdWithHardware = s.ok() && hardware;
+        return s;
+    }
+
+    Status createWriterAttempt(bool hardware) {
+        NSError *error = nil;
+        AVAssetWriter *w = [[AVAssetWriter alloc] initWithURL:fileURL(path)
+                                                     fileType:fileType(settings.container)
+                                                        error:&error];
+        if (w == nil) {
+            return errorFromNSError(error, MediaErrorCode::WriteFailed, "AVAssetWriter init");
+        }
+        w.shouldOptimizeForNetworkUse = settings.container == ContainerFormat::MP4;
+        writer = w;
+        @try {
+            if (settings.video) {
+                const VideoEncodeSettings &v = *settings.video;
+                NSDictionary *out = videoOutputSettings(v, hardware);
+                if (![w canApplyOutputSettings:out forMediaType:AVMediaTypeVideo]) {
+                    return makeError(MediaErrorCode::UnsupportedCodec,
+                                     std::string("AVAssetWriter cannot apply the ") + toString(v.codec) + " settings");
+                }
+                AVAssetWriterInput *input = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeVideo
+                                                                           outputSettings:out];
+                input.expectsMediaDataInRealTime = NO;
+                int32_t timescale = v.frameDuration.timescale;
+                while (timescale < 600) {
+                    timescale *= 2;
+                }
+                input.mediaTimeScale = timescale;
+                NSDictionary *sourceAttributes = CFBridgingRelease(createPixelBufferAttributes(
+                    v.inputPixelFormat, static_cast<size_t>(v.width), static_cast<size_t>(v.height)));
+                adaptor = [[AVAssetWriterInputPixelBufferAdaptor alloc] initWithAssetWriterInput:input
+                                                                     sourcePixelBufferAttributes:sourceAttributes];
+                if (![w canAddInput:input]) {
+                    return makeError(MediaErrorCode::UnsupportedCodec, "AVAssetWriter cannot add the video input");
+                }
+                [w addInput:input];
+                videoInput = input;
+            }
+            if (settings.audio) {
+                const AudioEncodeSettings &a = *settings.audio;
+                NSDictionary *out = audioOutputSettings(a);
+                if (![w canApplyOutputSettings:out forMediaType:AVMediaTypeAudio]) {
+                    return makeError(MediaErrorCode::UnsupportedCodec,
+                                     std::string("AVAssetWriter cannot apply the ") + toString(a.codec) + " settings");
+                }
+                AVAssetWriterInput *input = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeAudio
+                                                                           outputSettings:out];
+                input.expectsMediaDataInRealTime = NO;
+                if (![w canAddInput:input]) {
+                    return makeError(MediaErrorCode::UnsupportedCodec, "AVAssetWriter cannot add the audio input");
+                }
+                [w addInput:input];
+                audioInput = input;
+
+                AudioStreamBasicDescription asbd{};
+                asbd.mSampleRate = a.sampleRate;
+                asbd.mFormatID = kAudioFormatLinearPCM;
+                asbd.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+                asbd.mBitsPerChannel = 32;
+                asbd.mChannelsPerFrame = static_cast<UInt32>(a.channels);
+                asbd.mFramesPerPacket = 1;
+                asbd.mBytesPerFrame = 4 * static_cast<UInt32>(a.channels);
+                asbd.mBytesPerPacket = asbd.mBytesPerFrame;
+                NSData *layout = channelLayoutData(a.channels);
+                const OSStatus st = CMAudioFormatDescriptionCreate(
+                    kCFAllocatorDefault, &asbd, layout.length, static_cast<const AudioChannelLayout *>(layout.bytes),
+                    0, nullptr, nullptr, audioFormat.outPtr());
+                if (st != noErr) {
+                    return errorFromOSStatus(st, MediaErrorCode::Internal, "CMAudioFormatDescriptionCreate");
+                }
+            }
+        } @catch (NSException *e) {
+            return makeError(MediaErrorCode::UnsupportedCodec, "AVAssetWriter rejected the settings: " +
+                                                                   toStdString(e.reason));
+        }
+        if (![w startWriting]) {
+            return errorFromNSError(w.error, MediaErrorCode::WriteFailed, "AVAssetWriter startWriting");
+        }
+        [w startSessionAtSourceTime:kCMTimeZero];
         return okStatus();
     }
 
@@ -379,88 +501,30 @@ Status AppleWriter::open(const std::string &path, const EncodeSettings &settings
                 return errorFromNSError(removeError, MediaErrorCode::PermissionDenied, "removing existing output");
             }
         }
-        NSError *error = nil;
-        AVAssetWriter *writer = [[AVAssetWriter alloc] initWithURL:fileURL(path)
-                                                          fileType:fileType(settings.container)
-                                                             error:&error];
-        if (writer == nil) {
-            return errorFromNSError(error, MediaErrorCode::WriteFailed, "AVAssetWriter init");
-        }
-        writer.shouldOptimizeForNetworkUse = settings.container == ContainerFormat::MP4;
-        d.writer = writer;
-
-        @try {
-            if (settings.video) {
-                const VideoEncodeSettings &v = *settings.video;
-                NSDictionary *out = videoOutputSettings(v);
-                if (![writer canApplyOutputSettings:out forMediaType:AVMediaTypeVideo]) {
-                    return makeError(MediaErrorCode::UnsupportedCodec,
-                                     std::string("AVAssetWriter cannot apply the ") + toString(v.codec) + " settings");
-                }
-                AVAssetWriterInput *input = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeVideo
-                                                                           outputSettings:out];
-                input.expectsMediaDataInRealTime = NO;
-                int32_t timescale = v.frameDuration.timescale;
-                while (timescale < 600) {
-                    timescale *= 2;
-                }
-                input.mediaTimeScale = timescale;
-                NSDictionary *sourceAttributes = CFBridgingRelease(createPixelBufferAttributes(
-                    v.inputPixelFormat, static_cast<size_t>(v.width), static_cast<size_t>(v.height)));
-                d.adaptor = [[AVAssetWriterInputPixelBufferAdaptor alloc] initWithAssetWriterInput:input
-                                                                       sourcePixelBufferAttributes:sourceAttributes];
-                if (![writer canAddInput:input]) {
-                    return makeError(MediaErrorCode::UnsupportedCodec, "AVAssetWriter cannot add the video input");
-                }
-                [writer addInput:input];
-                d.videoInput = input;
+        // Video: the hardware encoder first (required, so AVAssetWriter fails at startWriting
+        // when VideoToolbox has none for these settings, e.g. H.264 above 4096x2304), then, unless
+        // the caller required hardware, the software encoder explicitly. Either way the writer
+        // knows which encoder runs.
+        Status s = d.createWriter(true);
+        if (!s.ok() && settings.video && !settings.video->requireHardware) {
+            const MediaError hardwareError = s.error();
+            s = d.createWriter(false);
+            if (s.ok()) {
+                os_log_info(writerLog(), "%{public}s: no hardware %{public}s encoder for %dx%d (%{public}s); "
+                                         "encoding in software",
+                            path.c_str(), toString(settings.video->codec), settings.video->width,
+                            settings.video->height, hardwareError.description().c_str());
             }
-            if (settings.audio) {
-                const AudioEncodeSettings &a = *settings.audio;
-                NSDictionary *out = audioOutputSettings(a);
-                if (![writer canApplyOutputSettings:out forMediaType:AVMediaTypeAudio]) {
-                    return makeError(MediaErrorCode::UnsupportedCodec,
-                                     std::string("AVAssetWriter cannot apply the ") + toString(a.codec) + " settings");
-                }
-                AVAssetWriterInput *input = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeAudio
-                                                                           outputSettings:out];
-                input.expectsMediaDataInRealTime = NO;
-                if (![writer canAddInput:input]) {
-                    return makeError(MediaErrorCode::UnsupportedCodec, "AVAssetWriter cannot add the audio input");
-                }
-                [writer addInput:input];
-                d.audioInput = input;
-
-                AudioStreamBasicDescription asbd{};
-                asbd.mSampleRate = a.sampleRate;
-                asbd.mFormatID = kAudioFormatLinearPCM;
-                asbd.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
-                asbd.mBitsPerChannel = 32;
-                asbd.mChannelsPerFrame = static_cast<UInt32>(a.channels);
-                asbd.mFramesPerPacket = 1;
-                asbd.mBytesPerFrame = 4 * static_cast<UInt32>(a.channels);
-                asbd.mBytesPerPacket = asbd.mBytesPerFrame;
-                NSData *layout = channelLayoutData(a.channels);
-                const OSStatus st = CMAudioFormatDescriptionCreate(
-                    kCFAllocatorDefault, &asbd, layout.length, static_cast<const AudioChannelLayout *>(layout.bytes),
-                    0, nullptr, nullptr, d.audioFormat.outPtr());
-                if (st != noErr) {
-                    return errorFromOSStatus(st, MediaErrorCode::Internal, "CMAudioFormatDescriptionCreate");
-                }
-            }
-        } @catch (NSException *e) {
-            return makeError(MediaErrorCode::UnsupportedCodec, "AVAssetWriter rejected the settings: " +
-                                                                   toStdString(e.reason));
         }
-
-        if (![writer startWriting]) {
-            return errorFromNSError(writer.error, MediaErrorCode::WriteFailed, "AVAssetWriter startWriting");
+        if (!s.ok()) {
+            return s;
         }
-        [writer startSessionAtSourceTime:kCMTimeZero];
+        d.hardwareEncoder = settings.video.has_value() && d.createdWithHardware;
         d.state = Impl::State::Writing;
 
         Impl *impl = &d;
         d.observer = [[VEWriterReadyObserver alloc] initWithHandler:^{
+            impl->readyGeneration.fetch_add(1, std::memory_order_acq_rel);
             std::lock_guard<std::mutex> lock(impl->readyMutex);
             impl->readyChanged.notify_all();
         }];
@@ -683,9 +747,20 @@ Status AppleWriter::finish() {
     @autoreleasepool {
         d.markFinished(d.videoInput, d.videoMarkedFinished);
         d.markFinished(d.audioInput, d.audioMarkedFinished);
+        // The session ends where the longer stream ends: one frame duration after the last video
+        // frame (which makes that frame last exactly one frame) or at the end of the audio,
+        // whichever is later, so audio that runs past the video is kept (the video track still
+        // ends after its last frame).
+        CMTime end = kCMTimeInvalid;
         if (d.videoInput != nil && CMTIME_IS_NUMERIC(d.lastVideoPts)) {
-            // Makes the last frame last exactly one frame duration.
-            [d.writer endSessionAtSourceTime:CMTimeAdd(d.lastVideoPts, d.settings.video->frameDuration)];
+            end = CMTimeAdd(d.lastVideoPts, d.settings.video->frameDuration);
+        }
+        if (d.audioInput != nil && d.audioFramesWritten > 0) {
+            const CMTime audioEnd = CMTimeMake(d.audioFramesWritten, static_cast<int32_t>(d.settings.audio->sampleRate));
+            end = CMTIME_IS_NUMERIC(end) ? CMTimeMaximum(end, audioEnd) : audioEnd;
+        }
+        if (CMTIME_IS_NUMERIC(end)) {
+            [d.writer endSessionAtSourceTime:end];
         }
         dispatch_semaphore_t done = dispatch_semaphore_create(0);
         [d.writer finishWritingWithCompletionHandler:^{
@@ -720,11 +795,7 @@ void AppleWriter::cancel() {
 }
 
 bool AppleWriter::usesHardwareVideoEncoder() const {
-    const Impl &d = *impl_;
-    if (!d.settings.video) {
-        return false;
-    }
-    return d.settings.video->requireHardware || HardwareCaps::get().hardwareEncode(codecType(d.settings.video->codec));
+    return impl_->hardwareEncoder;
 }
 
 } // namespace ve::media::apple

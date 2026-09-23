@@ -15,11 +15,15 @@ namespace ve::media::ffmpeg {
 /// libavcodec), CodecDelay in Matroska (negative timestamps), Opus pre-skip. Samples before
 /// time 0 are dropped; leading gaps are silence. Consecutive frames are treated as contiguous
 /// when their timestamps agree within the time base's resolution; real gaps are filled with
-/// silence and overlaps trimmed. For containers whose time base is coarser than a sample
-/// (Matroska stores milliseconds), frames of fixed-frame-size codecs (AAC, AC-3, MP3) are
-/// snapped to the codec frame grid, which keeps seeking sample-accurate there too; for
-/// variable-frame-size codecs in such containers (Opus, Vorbis in MKV) placement after a seek is
-/// accurate to the time base (1 ms).
+/// silence (up to 1 s; a larger jump restarts the pipeline at the new timestamp and reads the gap
+/// as silence without buffering it) and overlaps trimmed. For containers whose time base is
+/// coarser than a sample (Matroska stores milliseconds), frames of fixed-frame-size codecs (AAC,
+/// AC-3, MP3) are snapped to the codec frame grid, which keeps seeking sample-accurate there too;
+/// for variable-frame-size codecs in such containers (Opus, Vorbis in Matroska/WebM) the first
+/// packet after a seek is placed from its rounded timestamp, so seeks are accurate to one
+/// time-base tick (seekTolerance(): 1 ms + 1 sample); sequential reads stay sample-exact
+/// (consecutive packets are treated as contiguous unless their timestamps disagree with the
+/// samples decoded by more than a tick).
 ///
 /// Length: ISO-BMFF tracks (edit list / media duration, or iTunSMPB) end exactly at the declared
 /// length; other containers end where the decoded data ends.
@@ -53,6 +57,7 @@ class FFAudioDecoder final : public IAudioDecoder {
     double sampleRate() const override;
     int channels() const override;
     int64_t lengthFrames() const override;
+    CMTime seekTolerance() const override;
 
   private:
     struct Impl;

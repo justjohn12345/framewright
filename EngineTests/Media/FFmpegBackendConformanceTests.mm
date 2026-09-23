@@ -12,6 +12,7 @@
 #include "../../Engine/Media/FFmpeg/FFVideoEncoder.h"
 #include "../../Engine/Media/FFmpeg/FFmpegBackend.h"
 #include "../../Engine/Media/HardwareCaps.h"
+#include "VideoToolboxProbe.h"
 #include "BurnIn.h"
 #include "FFmpegTestMedia.h"
 
@@ -232,7 +233,15 @@ double meanDifference(CVPixelBufferRef a, CVPixelBufferRef b) {
     XCTAssertTrue(backend->canHandle(make("ogg", {{TrackKind::Audio, fourcc::make("vorb")}})));
     XCTAssertTrue(backend->canHandle(make("mov", {{TrackKind::Video, fourcc::ProRes4444}})));
     XCTAssertTrue(backend->canHandle(make("jpeg", {{TrackKind::Still, fourcc::JPEG}})));
-    XCTAssertFalse(backend->canHandle(make("mkv", {{TrackKind::Video, fourcc::AV1}})), @"no AV1 decoder");
+    XCTAssertTrue(backend->canHandle(make("mkv", {{TrackKind::Video, fourcc::AV1}})), @"AV1 through libdav1d");
+    XCTAssertTrue(backend->canHandle(make("webm", {{TrackKind::Video, fourcc::AV1}})));
+    // Our own prober's measurement is evidence: a track it could not decode is refused.
+    MediaInfo refused = make("mkv", {{TrackKind::Video, fourcc::H264}});
+    refused.backend = "ffmpeg";
+    refused.tracks[0].decodable = false;
+    XCTAssertFalse(backend->canHandle(refused));
+    refused.backend = "apple"; // Another backend's verdict says nothing about FFmpeg.
+    XCTAssertTrue(backend->canHandle(refused));
     XCTAssertFalse(backend->canHandle(make("avif", {{TrackKind::Still, fourcc::AV1}})));
     XCTAssertFalse(backend->canHandle(make("mp4", {{TrackKind::Video, fourcc::make("zzzz")}})));
     XCTAssertFalse(backend->canHandle(make("mp4", {{TrackKind::Still, fourcc::PNG}})), @"still in a movie container");
@@ -264,7 +273,6 @@ double meanDifference(CVPixelBufferRef a, CVPixelBufferRef b) {
 }
 
 - (void)testEncoderSelection {
-    const HardwareCaps &caps = HardwareCaps::get();
     for (VideoCodec codec : {VideoCodec::H264, VideoCodec::HEVC, VideoCodec::ProRes422}) {
         ffmpeg::FFVideoEncoder encoder;
         VideoEncodeSettings v;
@@ -274,7 +282,8 @@ double meanDifference(CVPixelBufferRef a, CVPixelBufferRef b) {
         Status s = encoder.open(v);
         XCTAssertTrue(s.ok(), @"%s: %@", toString(codec), s.ok() ? @"" : describe(s.error()));
         NSLog(@"video %s -> %s (hardware %d)", toString(codec), encoder.encoderName().c_str(), encoder.usesHardware());
-        XCTAssertEqual(encoder.usesHardware(), caps.hardwareEncode(codecType(codec)), @"%s", toString(codec));
+        XCTAssertEqual(encoder.usesHardware(), videoToolboxEncodesInHardware(codecType(codec), 640, 360), @"%s",
+                       toString(codec));
         XCTAssertNotEqual(encoder.encoderName().find("videotoolbox"), std::string::npos, @"%s", toString(codec));
         auto format = encoder.outputFormat();
         XCTAssertTrue(format.ok() && format->codec == codecType(codec));
@@ -389,7 +398,8 @@ double meanDifference(CVPixelBufferRef a, CVPixelBufferRef b) {
 - (void)testSoftwareAndHardwareDecodeAgree {
     for (const char *file : {"h264_1080p30.mp4", "hevc_720p2997.mov", "prores_540p25.mov"}) {
         const TestClip &clip = testClip(file);
-        const bool hwExpected = HardwareCaps::get().hardwareDecode(clip.videoCodec);
+        // VideoToolbox's own answer for the stream (not HardwareCaps, which the decoder consults).
+        const bool hwExpected = [self videoToolboxAnswerForClip:clip].value_or(false);
         for (int start : {0, clip.frames / 2 + 1}) {
             std::unique_ptr<IVideoDecoder> hwDecoder;
             std::unique_ptr<IVideoDecoder> swDecoder;
@@ -563,8 +573,7 @@ double meanDifference(CVPixelBufferRef a, CVPixelBufferRef b) {
 - (void)testTenBitHEVCRoundTripKeepsX420 {
     const auto &caps = HardwareCaps::get();
     if (!caps.hevc.hardwareEncode && !caps.hevc.softwareEncode) {
-        NSLog(@"no HEVC encoder in VideoToolbox; 10-bit test skipped");
-        return;
+        XCTSkip(@"no HEVC encoder in VideoToolbox on this machine: the 10-bit round trip cannot be written");
     }
     constexpr int kFrames = 20;
     const std::string path = scratchDirectory() + "/hevc10.mov";
@@ -642,7 +651,7 @@ double meanDifference(CVPixelBufferRef a, CVPixelBufferRef b) {
             XCTAssertEqual(f.value()->image.pixelFormat(), (OSType)kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange);
             XCTAssertEqual(readBurnIn(f.value()->image.get()), std::optional<int>(i), @"hw %d", hardware);
             if (hardware) {
-                XCTAssertEqual(f.value()->wasHardwareDecoded, HardwareCaps::get().hevc.hardwareDecode);
+                XCTAssertEqual(f.value()->wasHardwareDecoded, videoToolboxDecodesInHardware(path).value_or(false));
             }
         }
     }

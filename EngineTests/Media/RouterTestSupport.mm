@@ -1,5 +1,6 @@
 #include "RouterTestSupport.h"
 
+#include "../../Engine/Media/HardwareCaps.h"
 #include "../../Engine/Model/TimeUtil.h"
 #include "BurnIn.h"
 
@@ -15,6 +16,7 @@ class FakeProber final : public IMediaProber {
   public:
     explicit FakeProber(std::shared_ptr<FakeBehavior> b) : b_(std::move(b)) {}
     Result<MediaInfo> probe(const std::string &path) override {
+        ++b_->probes;
         if (!b_->probe) {
             return makeError(MediaErrorCode::UnsupportedFormat, b_->name + " does not know " + path);
         }
@@ -37,10 +39,14 @@ class FakeVideoDecoder final : public IVideoDecoder {
             b_->openedTrackIndices.push_back(trackIndex);
             b_->openedAllowHardware.push_back(options.allowHardware);
         }
+        interrupt_ = options.interrupt;
+        if (b_->onOpen) {
+            b_->onOpen();
+        }
         if (b_->failOpen) {
             return makeError(MediaErrorCode::DecodeFailed, b_->name + ": scripted open failure");
         }
-        auto pool = PixelBufferPool::create(kCVPixelFormatType_32BGRA, b_->width, b_->height);
+        auto pool = PixelBufferPool::create(b_->pixelFormat, b_->width, b_->height);
         if (!pool.ok()) {
             return std::move(pool).error();
         }
@@ -63,18 +69,30 @@ class FakeVideoDecoder final : public IVideoDecoder {
         if (position_ >= b_->frames) {
             return std::optional<VideoFrame>();
         }
-        const int64_t index = position_++;
+        if (interrupted()) {
+            return cancelled();
+        }
+        const int64_t index = position_;
+        if (b_->failAtFrame >= 0 && index >= b_->failAtFrame) {
+            return makeError(b_->failCode, b_->name + ": scripted decode failure at frame " + std::to_string(index));
+        }
         if (b_->onDecode) {
             b_->onDecode(index);
         }
         if (b_->decodeDelay.count() > 0) {
             std::this_thread::sleep_for(b_->decodeDelay);
         }
+        if (interrupted()) {
+            return cancelled(); // Abandoned mid-decode: position unchanged, resumable.
+        }
+        ++position_;
         auto image = pool_.makeBuffer();
         if (!image.ok()) {
             return std::move(image).error();
         }
-        drawBurnIn(image->get(), static_cast<int>(index));
+        if (b_->pixelFormat == kCVPixelFormatType_32BGRA) {
+            drawBurnIn(image->get(), static_cast<int>(index));
+        }
         ++b_->framesDecoded;
         VideoFrame f;
         f.pts = timeForFrame(index, b_->frameDuration);
@@ -85,10 +103,17 @@ class FakeVideoDecoder final : public IVideoDecoder {
     CMTime frameDuration() const override { return b_->frameDuration; }
     bool supportsRandomAccess() const override { return true; }
     bool usedHardware() const override { return false; }
-    OSType outputPixelFormat() const override { return kCVPixelFormatType_32BGRA; }
+    OSType outputPixelFormat() const override { return b_->pixelFormat; }
 
   private:
+    bool interrupted() const { return b_->honorInterrupt && interrupt_ && interrupt_->requested(); }
+    Result<std::optional<VideoFrame>> cancelled() {
+        ++b_->interrupted;
+        return makeError(MediaErrorCode::Cancelled, b_->name + ": interrupted");
+    }
+
     std::shared_ptr<FakeBehavior> b_;
+    std::shared_ptr<DecodeInterrupt> interrupt_;
     PixelBufferPool pool_;
     bool opened_ = false;
     int64_t position_ = 0;
@@ -114,6 +139,9 @@ class FakeAudioDecoder final : public IAudioDecoder {
         return okStatus();
     }
     Result<int> read(float *interleaved, int frames) override {
+        if (b_->failAudioAtSample >= 0 && position_ >= b_->failAudioAtSample) {
+            return makeError(MediaErrorCode::DecodeFailed, b_->name + ": scripted audio failure");
+        }
         const int64_t left = std::max<int64_t>(0, lengthFrames() - position_);
         const int n = static_cast<int>(std::min<int64_t>(frames, left));
         std::fill(interleaved, interleaved + static_cast<size_t>(n) * options_.channels, 0.0f);
@@ -165,6 +193,8 @@ MediaInfo makeFakeInfo(const std::string &path, const std::string &container, ui
     v.frameDuration = CMTimeMake(1, 30);
     v.nominalFps = 30;
     v.duration = CMTimeMake(10, 1);
+    // What a real prober would measure on this machine for such a stream.
+    v.hardwareDecode = HardwareCaps::get().hardwareDecode(videoCodec);
     info.tracks.push_back(v);
     if (withAudio) {
         TrackInfo a;

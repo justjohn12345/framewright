@@ -292,7 +292,7 @@ const CodecEntry kCodecs[] = {
     {AV_CODEC_ID_MP3, fcc(".mp3")},
     {AV_CODEC_ID_OPUS, fcc("opus")},
     {AV_CODEC_ID_VORBIS, fcc("vorb")},
-    {AV_CODEC_ID_FLAC, fcc("fLaC")},
+    {AV_CODEC_ID_FLAC, fourcc::FLAC},
     {AV_CODEC_ID_ALAC, fcc("alac")},
     {AV_CODEC_ID_AC3, fcc("ac-3")},
     {AV_CODEC_ID_EAC3, fcc("ec-3")},
@@ -415,11 +415,18 @@ std::string codecName(uint32_t code, AVCodecID id) {
     return code != 0 ? fourCCToString(code) : "unknown";
 }
 
-bool canDecode(AVCodecID id) {
-    if (id == AV_CODEC_ID_NONE || id == AV_CODEC_ID_AV1) {
-        return false;
+const AVCodec *findDecoder(AVCodecID id) {
+    if (id == AV_CODEC_ID_NONE) {
+        return nullptr;
     }
-    return avcodec_find_decoder(id) != nullptr;
+    if (id == AV_CODEC_ID_AV1) {
+        return avcodec_find_decoder_by_name("libdav1d");
+    }
+    return avcodec_find_decoder(id);
+}
+
+bool canDecode(AVCodecID id) {
+    return findDecoder(id) != nullptr;
 }
 
 // MARK: - Colour
@@ -565,6 +572,83 @@ int rotationDegrees(const AVStream *stream) {
     }
     int r = static_cast<int>(std::lround(-counterClockwise / 90.0)) * 90;
     return ((r % 360) + 360) % 360;
+}
+
+std::map<int, FrameTiming> scanFrameTiming(AVFormatContext *ctx, const std::vector<int> &streams, int maxPackets,
+                                           double maxSeconds) {
+    std::map<int, std::vector<int64_t>> pts;
+    for (int s : streams) {
+        pts[s];
+    }
+    std::map<int, FrameTiming> result;
+    PacketPtr packet(av_packet_alloc());
+    if (!packet || streams.empty()) {
+        for (int s : streams) {
+            result[s];
+        }
+        return result;
+    }
+    auto done = [&] {
+        for (int s : streams) {
+            const std::vector<int64_t> &v = pts[s];
+            const AVStream *st = ctx->streams[s];
+            const bool enoughTime =
+                v.size() >= 2 && av_q2d(st->time_base) * static_cast<double>(v.back() - v.front()) >= maxSeconds;
+            if (static_cast<int>(v.size()) < maxPackets && !enoughTime) {
+                return false;
+            }
+        }
+        return true;
+    };
+    // Bounded by the packet count per stream; a demuxer that keeps producing packets of other
+    // streams only is cut off after a generous total.
+    const int64_t totalLimit = static_cast<int64_t>(maxPackets) * 64;
+    bool reachedEnd = false;
+    for (int64_t n = 0; n < totalLimit && !done(); ++n) {
+        if (av_read_frame(ctx, packet.get()) < 0) {
+            reachedEnd = true;
+            break;
+        }
+        auto it = pts.find(packet->stream_index);
+        const int64_t ts = packet->pts != AV_NOPTS_VALUE ? packet->pts : packet->dts;
+        if (it != pts.end() && ts != AV_NOPTS_VALUE && static_cast<int>(it->second.size()) < maxPackets) {
+            it->second.push_back(ts);
+        }
+        av_packet_unref(packet.get());
+    }
+    for (auto &[index, values] : pts) {
+        FrameTiming &t = result[index];
+        std::sort(values.begin(), values.end());
+        values.erase(std::unique(values.begin(), values.end()), values.end());
+        // Packets arrive in decode order: when the scan stopped early, frames presented before
+        // the last packets read (B-frames of the last reordering window) may not have been read
+        // yet, so the highest timestamps can have holes. Drop as many as the stream reorders.
+        if (!reachedEnd) {
+            const size_t unreliable = static_cast<size_t>(std::max(0, ctx->streams[index]->codecpar->video_delay)) + 1;
+            values.resize(values.size() > unreliable ? values.size() - unreliable : 0);
+        }
+        if (values.size() < 3) {
+            continue; // Too short to tell.
+        }
+        std::vector<int64_t> intervals;
+        for (size_t i = 1; i < values.size(); ++i) {
+            intervals.push_back(values[i] - values[i - 1]);
+        }
+        if (intervals.empty()) {
+            continue;
+        }
+        std::vector<int64_t> sorted = intervals;
+        std::sort(sorted.begin(), sorted.end());
+        const int64_t median = sorted[sorted.size() / 2];
+        const AVRational tb = ctx->streams[index]->time_base;
+        t.intervals = static_cast<int>(intervals.size());
+        t.minimum = toCMTime(sorted.front(), tb);
+        t.typical = toCMTime(median, tb);
+        const double tolerance = std::max(1.0, 0.01 * static_cast<double>(median));
+        t.variable = static_cast<double>(sorted.back() - median) > tolerance ||
+                     static_cast<double>(median - sorted.front()) > tolerance;
+    }
+    return result;
 }
 
 std::optional<std::string> metadataValue(const AVDictionary *dict, const char *key) {

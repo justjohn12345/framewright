@@ -4,9 +4,14 @@
 //  0. RoutingPolicy::preferBackendName, when that backend is registered and accepts the track
 //     (IMediaBackend::canHandle), wins. Otherwise the override is ignored and the reason says so.
 //  1. The Apple fast path: the backend named "apple" is chosen when its prober succeeded, it
-//     accepts the track, and the track is audio, a still, or video whose codec VideoToolbox
-//     decodes in hardware (HardwareCaps).
-//  2. Otherwise the first registered backend (registration order) that accepts the track.
+//     accepts the track, its prober found the track decodable, and the track is audio, a
+//     still, or video that its prober measured as hardware decoded (a VTDecompressionSession
+//     for the track's format reported UsingHardwareAcceleratedVideoDecoder).
+//  2. Otherwise the first registered backend (registration order) that accepts the track and
+//     whose own prober found it decodable (TrackInfo::decodable).
+// Every choice (including 0) requires the chosen backend's prober to report the track
+// decodable: AVFoundation, for one, loads MPEG-4 Part 2 ASP and calls it decodable, but
+// VideoToolbox refuses the stream, which the Apple prober detects and FFmpeg decodes.
 // A track no backend accepts is reported as unroutable (TrackRoute::backend empty); probe()
 // fails only when no backend can probe the file at all or no track is routable.
 //
@@ -52,8 +57,9 @@ struct TrackRoute {
     /// TrackInfo::index of this track in the chosen backend's numbering (== trackIndex when the
     /// chosen backend also produced `info`).
     int backendTrackIndex = -1;
-    /// Whether decoding is expected to run on VideoToolbox hardware (video only; audio and
-    /// stills decode on the CPU and report false).
+    /// Whether decoding runs on VideoToolbox hardware, as measured by the chosen backend's prober
+    /// (video only; audio and stills decode on the CPU and report false). False when the policy
+    /// disallows hardware.
     bool hardwareDecode = false;
     /// Other backends that accept the track, in the order decoders fall back to them.
     std::vector<std::string> fallbacks;
@@ -127,9 +133,16 @@ class BackendRouter {
     /// track, else the first still) through the routed backend. If open() fails the route's
     /// fallbacks are tried in order and the attempt is recorded in the returned reason. When
     /// routed.policy.allowHardware is false, options.allowHardware is forced false.
+    /// Run-time fallback: while untried fallbacks remain, the returned decoder is a wrapper that
+    /// switches to the next backend when seek()/next() fails with UnsupportedCodec,
+    /// UnsupportedFormat, DecodeFailed, CorruptData or Internal, re-seeking the new decoder to
+    /// where the caller was (the end of the last delivered frame, or the last seek target).
+    /// It is returned already open (calling open() on it is InvalidState);
+    /// IVideoDecoder::activeBackend() names the backend currently decoding.
     Result<RoutedVideoDecoder> makeVideoDecoder(const RoutedMediaInfo &routed, int trackIndex,
                                                 const DecodeOptions &options) const;
-    /// Same for audio (-1: the first audio track).
+    /// Same for audio (-1: the first audio track); the audio wrapper resumes at the sample
+    /// position read() had reached.
     Result<RoutedAudioDecoder> makeAudioDecoder(const RoutedMediaInfo &routed, int trackIndex,
                                                 const AudioOptions &options) const;
 

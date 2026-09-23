@@ -30,6 +30,12 @@ enum class MediaErrorCode {
 
 const char *toString(MediaErrorCode code) noexcept;
 
+/// Errors that say nothing lasting about the media (a load that timed out, an interrupted or
+/// cancelled operation): worth retrying later, not worth caching.
+inline bool isTransient(MediaErrorCode code) noexcept {
+    return code == MediaErrorCode::Timeout || code == MediaErrorCode::Cancelled;
+}
+
 struct MediaError {
     MediaErrorCode code = MediaErrorCode::Internal;
     std::string message;    ///< Human-readable context ("AVAssetReader startReading: ...").

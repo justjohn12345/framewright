@@ -105,14 +105,78 @@ const std::vector<TestClip> &testClips() {
     return clips;
 }
 
+namespace {
+
+const std::vector<TestClip> &specialClips() {
+    static const std::vector<TestClip> clips = [] {
+        std::vector<TestClip> c;
+        auto video = [&](const char *file, const char *container, uint32_t codec, int w, int h, CMTime fd,
+                         int frames, int gop) {
+            TestClip clip;
+            clip.file = file;
+            clip.container = container;
+            clip.videoCodec = codec;
+            clip.width = w;
+            clip.height = h;
+            clip.frameDuration = fd;
+            clip.frames = frames;
+            clip.gopFrames = gop;
+            c.push_back(clip);
+        };
+        // frameDuration of the VFR clip: its shortest frame (10/600 s), as TrackInfo reports it.
+        video("vfr_h264.mp4", "mp4", make("avc1"), 640, 360, CMTimeMake(10, 600), kVfrFrames, 30);
+        video("rotated90_h264.mp4", "mp4", make("avc1"), 640, 360, CMTimeMake(1, 30), 30, 30);
+        video("gop5s_h264_1080p30.mp4", "mp4", make("avc1"), 1920, 1080, CMTimeMake(1, 30), 300, 150);
+        video("leading_gap_h264.mov", "mov", make("avc1"), 640, 360, CMTimeMake(1, 30), 60, 30);
+        video("prores4444_alpha.mov", "mov", make("ap4h"), 576, 324, CMTimeMake(1, 25), 10, 0);
+        auto audio = [&](const char *file, const char *container, uint32_t codec, double hz, double seconds) {
+            TestClip clip;
+            clip.file = file;
+            clip.container = container;
+            clip.audioCodec = codec;
+            clip.toneHz = hz;
+            clip.audioSeconds = seconds;
+            c.push_back(clip);
+        };
+        audio("audio_44k.m4a", "m4a", make("aac "), 880, 6);
+        audio("audio_44k.wav", "wav", make("lpcm"), 990, 6);
+        audio("audio_mono.m4a", "m4a", make("aac "), 660, 4);
+        audio("audio_51.m4a", "m4a", make("aac "), 520, 4);
+        return c;
+    }();
+    return clips;
+}
+
+} // namespace
+
 const TestClip &testClip(const std::string &file) {
-    for (const TestClip &c : testClips()) {
-        if (c.file == file) {
-            return c;
+    for (const auto *list : {&testClips(), &specialClips()}) {
+        for (const TestClip &c : *list) {
+            if (c.file == file) {
+                return c;
+            }
         }
     }
     static const TestClip none;
     return none;
+}
+
+CMTime vfrFrameTime(int index) {
+    int64_t t = 0;
+    constexpr int n = static_cast<int>(sizeof kVfrPattern600 / sizeof kVfrPattern600[0]);
+    for (int i = 0; i < index; ++i) {
+        t += kVfrPattern600[i % n];
+    }
+    return CMTimeMake(t, 600);
+}
+
+int vfrFrameAt(CMTime t) {
+    for (int i = 0; i < kVfrFrames; ++i) {
+        if (CMTimeCompare(t, vfrFrameTime(i + 1)) < 0) {
+            return i;
+        }
+    }
+    return kVfrFrames; // At or past the end.
 }
 
 namespace {

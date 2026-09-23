@@ -91,6 +91,10 @@ struct FFVideoDecoder::Impl {
     CMTime fallbackDuration = CMTimeMake(1, 30);
     CMTime trackStart = kCMTimeZero;
     CMTime trackEnd = kCMTimeZero;
+    /// ISO-BMFF: the edit list defines the end exactly; frames at or after it are not shown.
+    bool exactEnd = false;
+    /// Seeks at or after this report end of stream (trackEnd, plus one frame without exactEnd).
+    CMTime seekEnd = kCMTimeZero;
     bool snapToGrid = false;
     bool expectHardware = false;
     bool lastHardware = false;
@@ -100,6 +104,11 @@ struct FFVideoDecoder::Impl {
     bool isStill = false;
     PixelBuffer still;
     bool stillPending = false;
+
+    // Hold-back: the last decoded frame, waiting for its successor's pts (its duration).
+    std::optional<VideoFrame> held;
+    /// The frame open() decoded, returned by the first next() unless seek() comes first.
+    std::optional<VideoFrame> primed;
 
     // Position.
     Mode mode = Mode::Idle;
@@ -147,6 +156,12 @@ struct FFVideoDecoder::Impl {
             }
         }
         return AV_PIX_FMT_NONE;
+    }
+
+    bool interrupted() const { return options.interrupt && options.interrupt->requested(); }
+
+    static MediaError cancelled() {
+        return makeError(MediaErrorCode::Cancelled, "decode interrupted (DecodeOptions::interrupt)");
     }
 
     // MARK: Time mapping
@@ -239,6 +254,7 @@ struct FFVideoDecoder::Impl {
 
     void resetDecoder() {
         avcodec_flush_buffers(codec.get());
+        held.reset();
         demuxEof = false;
         pendingReadError.reset();
         awaitingKeyframe = true;
@@ -279,18 +295,23 @@ struct FFVideoDecoder::Impl {
             return false;
         }
         // The keyframe is presented after the target: go further back.
+        const int64_t earliest = pkt->dts != AV_NOPTS_VALUE ? std::min(keyTs, pkt->dts) : keyTs;
+        VE_MEDIA_TRY(seekFurtherBack(std::min(seekTs, earliest)));
+        return true;
+    }
+
+    /// Re-seeks the demuxer before `from` (0.5 s, 1 s, 2 s, ... further back on each retry, then
+    /// from the start of the stream) and arms keyframe verification again.
+    Status seekFurtherBack(int64_t from) {
         resetDecoder();
         verifySeek = true;
         if (++seekRetries > kMaxSeekRetries) {
-            VE_MEDIA_TRY(rewind());
-            return true;
+            return rewind();
         }
         const int64_t back = av_rescale_q(static_cast<int64_t>(1) << (seekRetries - 1), AVRational{1, 2},
-                                          stream->time_base); // 0.5 s, 1 s, 2 s, ...
-        const int64_t earliest = pkt->dts != AV_NOPTS_VALUE ? std::min(keyTs, pkt->dts) : keyTs;
-        seekTs = std::min(seekTs, earliest) - std::max<int64_t>(back, 1);
-        VE_MEDIA_TRY(demuxSeek(seekTs));
-        return true;
+                                          stream->time_base);
+        seekTs = from - std::max<int64_t>(back, 1);
+        return demuxSeek(seekTs);
     }
 
     // MARK: Decoding
@@ -302,8 +323,17 @@ struct FFVideoDecoder::Impl {
             if (demuxEof) {
                 return makeError(MediaErrorCode::Internal, "feed() after end of input");
             }
+            if (interrupted()) {
+                return cancelled();
+            }
             const int rc = av_read_frame(input.get(), pkt);
             if (rc < 0) {
+                if (rc == AVERROR_EOF && awaitingKeyframe && verifySeek && !seekedFromStart) {
+                    // The seek landed after the last keyframe before the target (demuxers without
+                    // an index, e.g. MPEG-TS, seek by bitrate): no keyframe follows. Go further back.
+                    VE_MEDIA_TRY(seekFurtherBack(seekTs));
+                    continue;
+                }
                 if (rc != AVERROR_EOF) {
                     // Truncated or damaged container: decode what we have, then report it.
                     pendingReadError = ffError(rc, MediaErrorCode::CorruptData, "av_read_frame");
@@ -354,10 +384,54 @@ struct FFVideoDecoder::Impl {
         }
     }
 
-    /// The next decoded frame in presentation order, nullopt at the end of the track.
+    /// Duration of the last frame of the track (nothing follows it to measure against).
+    CMTime lastFrameDuration(CMTime pts) const {
+        const CMTime toEnd = CMTimeSubtract(trackEnd, pts);
+        if (CMTIME_IS_NUMERIC(toEnd) && CMTimeCompare(toEnd, kCMTimeZero) > 0) {
+            return toEnd;
+        }
+        return fallbackDuration;
+    }
+
+    /// The next frame in presentation order with its real duration (see the header): decodes
+    /// one frame ahead. nullopt at the end of the track.
     Result<std::optional<VideoFrame>> decode() {
+        while (true) {
+            auto r = decodeRaw();
+            if (!r.ok()) {
+                return std::move(r).error(); // `held` stays: a Cancelled call can be resumed.
+            }
+            if (!r.value()) {
+                if (!held) {
+                    return std::optional<VideoFrame>();
+                }
+                VideoFrame out = std::move(*held);
+                held.reset();
+                out.duration = lastFrameDuration(out.pts);
+                return std::optional<VideoFrame>(std::move(out));
+            }
+            if (!held) {
+                held = std::move(r).value();
+                continue;
+            }
+            VideoFrame out = std::move(*held);
+            held = std::move(r).value();
+            const CMTime interval = CMTimeSubtract(held->pts, out.pts);
+            // Non-increasing timestamps (damaged streams): fall back to the nominal duration.
+            out.duration =
+                CMTIME_IS_NUMERIC(interval) && CMTimeCompare(interval, kCMTimeZero) > 0 ? interval : fallbackDuration;
+            return std::optional<VideoFrame>(std::move(out));
+        }
+    }
+
+    /// The next decoded frame in presentation order (duration not yet known), nullopt at the
+    /// end of the track.
+    Result<std::optional<VideoFrame>> decodeRaw() {
         AVFrame *f = frame.get();
         while (true) {
+            if (interrupted()) {
+                return cancelled();
+            }
             const int rc = avcodec_receive_frame(codec.get(), f);
             if (rc == AVERROR(EAGAIN)) {
                 VE_MEDIA_TRY(feed());
@@ -395,15 +469,11 @@ struct FFVideoDecoder::Impl {
                 av_frame_unref(f); // Leading picture of an open GOP: references the previous GOP.
                 continue;
             }
-            if (CMTimeCompare(out.pts, trackEnd) >= 0) {
+            if (exactEnd && CMTimeCompare(out.pts, trackEnd) >= 0) {
                 av_frame_unref(f);
-                return std::optional<VideoFrame>();
+                return std::optional<VideoFrame>(); // Cut by the edit list.
             }
-            if (snapToGrid || f->duration <= 0) {
-                out.duration = fallbackDuration;
-            } else {
-                out.duration = toCMTime(f->duration, stream->time_base);
-            }
+            out.duration = kCMTimeInvalid; // Set by decode() from the next frame.
             out.wasHardwareDecoded = f->format == AV_PIX_FMT_VIDEOTOOLBOX;
             auto image = converter.convert(f, frameColor(f));
             av_frame_unref(f);
@@ -411,6 +481,7 @@ struct FFVideoDecoder::Impl {
                 return std::move(image).error();
             }
             out.image = std::move(image).value();
+            out.alphaIsPremultiplied = alphaIsPremultiplied(out.image.get(), false);
             return std::optional<VideoFrame>(std::move(out));
         }
     }
@@ -477,11 +548,11 @@ struct FFVideoDecoder::Impl {
 
     Status openCodec() {
         const AVCodecParameters *par = stream->codecpar;
-        if (!canDecode(par->codec_id)) {
+        const AVCodec *decoder = findDecoder(par->codec_id);
+        if (decoder == nullptr) {
             return makeError(MediaErrorCode::UnsupportedCodec,
                              std::string("no decoder for ") + avcodec_get_name(par->codec_id) + " in this build");
         }
-        const AVCodec *decoder = avcodec_find_decoder(par->codec_id);
         codec.reset(avcodec_alloc_context3(decoder));
         if (!codec) {
             return makeError(MediaErrorCode::Internal, "avcodec_alloc_context3 failed");
@@ -529,6 +600,15 @@ FFVideoDecoder::FFVideoDecoder() : impl_(std::make_unique<Impl>()) {}
 FFVideoDecoder::~FFVideoDecoder() = default;
 
 Status FFVideoDecoder::open(const std::string &path, int trackIndex, const DecodeOptions &options) {
+    return openImpl(path, trackIndex, options, nullptr);
+}
+
+Status FFVideoDecoder::openTrack(const std::string &path, const TrackInfo &track, const DecodeOptions &options) {
+    return openImpl(path, track.index, options, &track);
+}
+
+Status FFVideoDecoder::openImpl(const std::string &path, int trackIndex, const DecodeOptions &options,
+                                const TrackInfo *known) {
     Impl &d = *impl_;
     if (d.opened) {
         return makeError(MediaErrorCode::InvalidState, "open() called twice");
@@ -555,7 +635,28 @@ Status FFVideoDecoder::open(const std::string &path, int trackIndex, const Decod
     }
 
     VE_MEDIA_TRY(d.selectStream(trackIndex));
-    d.info = describeStream(d.input.get(), d.stream);
+    d.info = known != nullptr ? *known : describeStream(d.input.get(), d.stream);
+    d.frameDuration = d.info.frameDuration;
+    // Snap to the frame grid only for constant-rate tracks whose time base cannot express the
+    // frame duration. The declared rate is not evidence of a constant rate (a Matroska
+    // DefaultDuration is declared for variable-rate video too): confirm it from the timestamps.
+    auto wantsSnap = [&] {
+        if (d.info.isVFR || !CMTIME_IS_NUMERIC(d.frameDuration) || d.frameDuration.value <= 0) {
+            return false;
+        }
+        const AVRational tb = d.stream->time_base;
+        const int64_t num = d.frameDuration.value * tb.den;
+        const int64_t den = static_cast<int64_t>(d.frameDuration.timescale) * tb.num;
+        return den > 0 && num % den != 0;
+    };
+    if (known == nullptr && wantsSnap()) {
+        const std::map<int, FrameTiming> timing = scanFrameTiming(d.input.get(), {d.streamIndex});
+        d.info = describeStream(d.input.get(), d.stream, &timing.at(d.streamIndex));
+        d.frameDuration = d.info.frameDuration;
+        VE_MEDIA_TRY(d.rewind()); // The scan read packets; start over.
+        d.seekedFromStart = false;
+    }
+    d.snapToGrid = wantsSnap();
     VE_MEDIA_TRY(d.openCodec());
 
     const AVCodecParameters *par = d.stream->codecpar;
@@ -581,22 +682,21 @@ Status FFVideoDecoder::open(const std::string &path, int trackIndex, const Decod
     }
     VE_MEDIA_TRY(d.converter.configure(d.outFormat, width, height));
 
-    d.frameDuration = d.info.frameDuration;
     if (CMTIME_IS_NUMERIC(d.frameDuration) && CMTimeCompare(d.frameDuration, kCMTimeZero) > 0) {
         d.fallbackDuration = d.frameDuration;
     }
     d.trackStart = d.info.startTime;
+    d.exactEnd = isQuickTimeFamily(d.input.get());
     d.trackEnd = CMTimeAdd(d.info.startTime, d.info.duration);
     if (!CMTIME_IS_NUMERIC(d.trackEnd) || CMTimeCompare(d.trackEnd, d.trackStart) <= 0) {
-        return makeError(MediaErrorCode::CorruptData, "video track has no duration");
+        if (d.exactEnd) {
+            return makeError(MediaErrorCode::CorruptData, "video track has no duration");
+        }
+        // No stated duration (an unfinalised recording): the stream simply ends where the data
+        // does. (The prober measures a duration from the packets for the asset.)
+        d.trackEnd = kCMTimePositiveInfinity;
     }
-    // Snap to the frame grid only when the time base cannot express the frame duration.
-    if (!d.info.isVFR && CMTIME_IS_NUMERIC(d.frameDuration) && d.frameDuration.value > 0) {
-        const AVRational tb = d.stream->time_base;
-        const int64_t num = d.frameDuration.value * tb.den;
-        const int64_t den = static_cast<int64_t>(d.frameDuration.timescale) * tb.num;
-        d.snapToGrid = den > 0 && num % den != 0;
-    }
+    d.seekEnd = d.exactEnd || !CMTIME_IS_NUMERIC(d.trackEnd) ? d.trackEnd : CMTimeAdd(d.trackEnd, d.fallbackDuration);
     d.randomAccess = d.input->pb != nullptr && (d.input->pb->seekable & AVIO_SEEKABLE_NORMAL) &&
                      !(d.input->iformat->flags & AVFMT_NOTIMESTAMPS);
     d.expectHardware = d.hardwareRequested;
@@ -613,11 +713,20 @@ Status FFVideoDecoder::open(const std::string &path, int trackIndex, const Decod
     d.packet = std::move(packet).value();
     d.frame = std::move(frame).value();
 
-    // A freshly opened demuxer is at the start: decode from there without seeking.
+    // A freshly opened (or rewound) demuxer is at the start: decode from there without seeking.
     d.mode = Impl::Mode::Decoding;
     d.position = d.trackStart;
     d.target = kCMTimeInvalid;
     d.opened = true;
+
+    // Decode the first frame now: a stream this build cannot decode fails here, while the
+    // router can still fall back, and usedHardware() becomes a measurement.
+    auto first = next();
+    if (!first.ok()) {
+        d.opened = false;
+        return std::move(first).error();
+    }
+    d.primed = std::move(first).value();
     return okStatus();
 }
 
@@ -633,11 +742,12 @@ Status FFVideoDecoder::seek(CMTime t) {
         d.stillPending = true;
         return okStatus();
     }
+    d.primed.reset();
     d.repeatLast = false;
     if (timeLess(t, d.trackStart)) {
         t = d.trackStart;
     }
-    if (CMTimeCompare(t, d.trackEnd) >= 0) {
+    if (CMTimeCompare(t, d.seekEnd) >= 0) {
         d.eos = true;
         return okStatus();
     }
@@ -679,7 +789,13 @@ Result<std::optional<VideoFrame>> FFVideoDecoder::next() {
         frame.duration = kCMTimePositiveInfinity;
         frame.image = d.still;
         frame.wasHardwareDecoded = false;
+        frame.alphaIsPremultiplied = true;
         d.lastHardware = false;
+        return std::optional<VideoFrame>(std::move(frame));
+    }
+    if (d.primed) {
+        VideoFrame frame = std::move(*d.primed);
+        d.primed.reset();
         return std::optional<VideoFrame>(std::move(frame));
     }
     if (d.eos) {
@@ -694,10 +810,15 @@ Result<std::optional<VideoFrame>> FFVideoDecoder::next() {
         VE_MEDIA_TRY(d.startAt(resume));
     }
     while (true) {
+        if (d.interrupted()) {
+            return Impl::cancelled(); // State kept: the next call continues toward the target.
+        }
         auto r = d.decode();
         if (!r.ok()) {
-            d.mode = Impl::Mode::Idle; // The next call re-seeks to where we were ...
-            d.codecNeedsReset = true;  // ... with a fresh codec context.
+            if (r.error().code != MediaErrorCode::Cancelled) {
+                d.mode = Impl::Mode::Idle; // The next call re-seeks to where we were ...
+                d.codecNeedsReset = true;  // ... with a fresh codec context.
+            }
             return std::move(r).error();
         }
         if (!r.value()) {
