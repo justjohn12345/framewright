@@ -1,9 +1,8 @@
-# Integration notes for the next round (from the 2026-09-23 fix round)
+# Integration notes
 
-State after the fix round for `2026-09-23-full-review.md`: full Framewright scheme green with
-`-Wall -Wextra` and warnings as errors (C/ObjC/C++ and Swift); Audio, Playback, Facade, DecodePool
-and FrameCache suites clean under ThreadSanitizer. Unfixed items are in `open-findings.md`; this
-file lists what later phases (6: transitions/effects UI, 7: export, 8: persistence) must adopt.
+API changes and rules that other layers must adopt, collected from each implementation and fix round
+(oldest first). What is still open is in `open-findings.md`; the state of the tree after each round is
+in the history table of `README.md`.
 
 ## Edits and gestures (phase 6 inspector, transition handles)
 - Every continuous gesture: `beginCoalescingWithKey:`, then make each of its edits inside
@@ -24,11 +23,11 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
 - Asset ids restart per project. `FrameCache` has media epochs (`beginEpoch()`, `put(epoch, ...)`
   refuses older epochs); `DecodePool::beginEpoch(epoch)` forgets assets, targets, scrub requests
   and decoders; `PlaybackController::forgetMedia()` forgets registrations and routing. The facade
-  does all three in `forgetProjectMedia` (New/Open). An `ExportJob` (phase 7) that owns a pool on
-  the shared cache must register its assets itself and tag its puts with the current epoch.
+  does all three in `forgetProjectMedia` (New/Open). Anything that owns a pool on the shared cache
+  (`ExportJob` does) must register its assets itself and tag its puts with the current epoch.
 - Several pools share the cache: each has its own `FrameCache` focus client (merged for
-  eviction) and its own `Config::budgetFraction` (program 0.5, source 0.25). Give an export pool
-  its own share (the shares should add up to at most 1).
+  eviction) and its own `Config::budgetFraction` (program 0.5, source 0.25, export 0.25; the
+  shares should add up to at most 1).
 - A decoded frame is published only if its stream still exists and its asset slot was not
   replaced (relink, invalidate, epoch): after those calls return nothing older reaches the cache.
   `waitUntilIdle` now also waits for steps of removed streams and for scrub decoder cleanup.
@@ -50,8 +49,8 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
 - `VEEngine` and `VEPreviewView` are `NS_SWIFT_UI_ACTOR` (@MainActor in Swift); release the last
   reference on the main thread. `ProjectStore.init()` is a convenience init (default arguments
   are evaluated outside the main actor).
-- `KeyboardController` takes keys only from `ProjectStore.editorWindow` (set by `ContentView`);
-  new windows (export sheet, preferences) keep their own keys. Clicks in editor panels call
+- `KeyboardController` takes keys only from `ProjectStore.editorWindow` (set by `ContentView`) and
+  the transport keys from the output window; new windows (export sheet, preferences) keep their own keys. Clicks in editor panels call
   `store.reclaimKeyboardFocus()`; new panels with text fields should do the same on their
   background taps.
 - UI caches (`ThumbnailCache`, `WaveformCache`) have generations and ignore completions of a
@@ -71,13 +70,6 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
 - `App/Resources/Acknowledgements.md` and `COPYING.LGPLv2.1` ship in the app; update the notice
   when a dependency or its version changes (and `ThirdParty/VERSIONS.md`).
 
-## ExportJob (phase 7) notes carried over
-- Create the compositor with `Compositor::create(device, {MTLPixelFormatRGBA16Float})`; `renderAndWait` into a pooled
-  420v/BGRA `PixelBufferTarget`; `RenderResult` has `prescaledPlanes`, `gpuStartTime`, `gpuEndTime`, `skippedLayers`;
-  call `releaseScratchMemory()` under memory pressure. Use `IMediaWriter::runPull` (pull mode) rather than push mode;
-  `endStream(TrackKind)` when one stream ends early. Hardware encoders are size-dependent (H.264 hw not used at 8192x4320);
-  the writer reports which it used.
-
 ## Phase 6 (effects, transitions, inspector) additions
 - Facade: `beginCoalescingWithKey:mode:` (VECoalescingModeAccumulate for keyboard nudge bursts:
   each edit applies on top of the last and merges into one step; only SequenceCommands merge,
@@ -95,13 +87,13 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
 - `setSpeedNumerator:denominator:forClips:ripple:scope:`: several clips, explicit ripple choice.
 - App preferences (Settings > Editing, `EditingPreferences`): default transition duration,
   linked crossfade (always/never/ask), duration display (timecode/frames/seconds; also what
-  `DurationFormat.parseFrames` assumes for a bare number). Export (phase 7) should show
-  durations through `ProjectStore.durationString` for consistency.
+  `DurationFormat.parseFrames` assumes for a bare number). Show durations through
+  `ProjectStore.durationString` for consistency (the export sheet does).
 - In-app drag types: `com.justjohn12345.framewright.transition.cross-dissolve` and
   `...audio-crossfade` (declared in project.yml / Info.plist, like the asset reference). The
   timeline's drops go through `TimelineDropDelegate` (assets and transitions).
 
-## Phase 6 review fix round (`2026-09-23-phase6-review.md`)
+## Phase 6 review fix round (report in git history at f4a3b7f)
 - Linked transitions: with `FitToCut | IncludeLinked` each transition is fitted to its own cut
   (the dissolve and the crossfade can differ in length); the note names each shortening
   ("Shortened to …" for the requested one, "The linked clips' transition was shortened to …").
@@ -120,8 +112,8 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   redraw token) and its changes are forwarded to the store's `objectWillChange`. Read
   `store.editingPreferences` (a snapshot) and format with `durationString` /
   `shortDurationString`; a model object that shows durations outside a view observing the store
-  (like `SpeedDurationModel`) forwards `store.preferences.objectWillChange` itself. The export
-  sheet (phase 7) gets this for free if it observes the store.
+  (like `SpeedDurationModel`) forwards `store.preferences.objectWillChange` itself; a view that
+  observes the store (the export sheet) gets it for free.
 - The inspector sets the status line only for a note or a refusal (a plain success leaves it).
 - `VEClipParamsBatch` is `NS_SWIFT_UI_ACTOR` and asserts the main thread.
 - Removing a transition goes through `ProjectStore.removeTransition(_:)` (focus independent).
@@ -130,8 +122,9 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
 - Engine: `Engine/Export/ExportJob.{h,mm}` (one export: validate, then a private DecodePool on the
   shared FrameCache with its own 0.25 budget share and lanes = clip ids, a Compositor created for
   RGBA16Float, an `OfflineAudioRenderer`, a writer from `BackendRouter::makeWriter`, all driven by
-  `IMediaWriter::runPull`). Pictures are looked up with `playback::frameSlotFor` (shared with the
-  program monitor), so an export shows exactly what the monitor shows. A layer that cannot be
+  `IMediaWriter::runPull`). Pictures are looked up at `playback::pictureTimeFor` with the cache's
+  time lookup (shared with the program monitor), so an export shows exactly what the monitor shows.
+  Hardware encoders are size-dependent (H.264 hw not used at 8192x4320); the writer reports which it used. A layer that cannot be
   decoded fails the export ("Frame N (t s) cannot be exported: “name” could not be decoded ...");
   it is never drawn black or stale. Cancel completes in about 70 ms (measured), deleting the working
   file (see "Phase 7 review fix round" below: the output path is only written when complete).
@@ -174,12 +167,10 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   `confirmStoppingExport(because:)` runs before New, Open, window close and quit (Stop Export
   cancels and waits up to `DocumentController.exportStopTimeout`, 10 s, for the export to end). The sheet stays up (modal on the editor
   window) while exporting; Close is disabled and Escape cancels the export.
-- For the pending UX round (open findings 4-7): the sheet is 480 pt wide and self-contained; a
-  pop-out program monitor (finding 7) must be paused by `beginExport...` like the two monitors are
-  now (`_playback->pause()`, `_sourcePlayback->pause()`). WebM is not offered: the LGPL build's only
-  Opus/Vorbis encoders are FFmpeg's experimental ones (AV1 goes to MP4 or MKV with AAC).
+- WebM is not offered: the LGPL build's only Opus/Vorbis encoders are FFmpeg's experimental ones
+  (AV1 goes to MP4 or MKV with AAC).
 
-## Phase 7 review fix round (`2026-09-23-phase7-review.md`)
+## Phase 7 review fix round (report in git history at 2dde40e)
 - Atomic export. `ExportJob` renders into a working file: the output's name inside a fresh
   directory from `-[NSFileManager URLForDirectory:NSItemReplacementDirectory inDomain:NSUserDomainMask
   appropriateForURL:<output> create:YES error:]` (the output's volume; writable by the sandboxed app
@@ -205,8 +196,8 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   (`checkTransition`, so `transitionLimit` too), `Scheduler::sourceFrameTime` and the source
   monitor's project all use it. Linked A/V pairs placed over the whole media therefore get a video
   clip shorter than the audio; the facade adds a note (`VEEditResult.note`) when a placement is cut.
-  Schema 2 files are migrated with `videoDuration = duration`. Keyframes (open finding 8) are now
-  schema 4.
+  Schema 2 files are migrated with `videoDuration = duration`. The next schema (keyframes, open
+  finding 8) is 4.
 - End-of-video hold (`DecodePool.h`): at the end of a stream the last frame is put again with an
   infinite duration (`FrameCache::put` extends an entry re-put with a later end, pinned or not), so
   playback and export show the last picture past the end of the video instead of a missing layer; a
@@ -225,8 +216,8 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
 - Playback during an export: `play`, `togglePlay` (from paused), `setRate:` with a rate, the
   shuttles and the source monitor's equivalents do nothing while `isExporting`; the app disables the
   transport buttons and Playback menu items and `EnginePlaybackActions` sets the status line
-  (`EnginePlaybackActions.exportingMessage`). Pause, stepping and scrubbing still work. A pop-out
-  monitor (open finding 7) must refuse the same way.
+  (`EnginePlaybackActions.exportingMessage`). Pause, stepping and scrubbing still work; the output
+  view on a second display follows the same refusal.
 - Export sheet: a container change after a file was chosen clears the choice
   (`ExportModel.outputNotice` explains it, the panel reopens on the same folder and name with the
   new extension); the sandbox-granted URL is never renamed.
@@ -238,28 +229,24 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   `ExportJobTests` unless `FRAMEWRIGHT_ALLOW_MISSING_ENCODERS=1`.
 
 ## UX round (open findings 1-7 from hands-on testing)
-- Play start (finding 3). The cause of the lag on the iPhone clip was not the lookahead: on a
-  variable-frame-rate source a layer's picture is looked up by its nominal frame slot, whose start
-  can lie in the frame before the one containing the layer's source time, but the paused picture's
-  scrub request and the pool targets asked for the source time. The slot was never filled, the paused
-  picture kept its previous frame and `play()` waited for the first frame until the pre-roll timeout
-  (measured 1004.7 ms before the fix). Superseded by the UX round fixes below: pictures are now looked
-  up and requested at the layer's exact source time (`playback::pictureTimeFor`); `frameSlotFor` and
-  `frameSlotTimeFor` are gone.
+- Play start (finding 3). The lag on the iPhone clip (1004.7 ms measured) was a picture lookup and
+  its decode request disagreeing on a variable-frame-rate source, so `play()` waited for a frame
+  nobody decoded until the pre-roll timeout. Both now use the layer's exact source time
+  (`playback::pictureTimeFor`, see "UX round fixes").
 - Stopped lookahead (`PlaybackController.h`): while stopped and once the playhead has been still for
   `PlaybackConfig::idleLookaheadDelay` (100 ms), the tick thread retargets the pool at the paused
   frame with `stoppedLookahead` (0.5 s, forward) and warms the audio (`audioWarmDelay`, now 100 ms;
   the sources then buffer about 2 s). A moving playhead (step repeat, J/K/L taps, scrubbing, edit
   drags) never retargets the pool; the immediate stopped retarget (`pendingRetarget_`) is gone.
   `setIdleLookahead(false)` clears the targets while stopped; the facade does it while an export runs.
-  Any transport activity keeps the audio output warm for `outputIdleTimeout`, now 5 minutes (the old
-  10 s let the device stop between edits, so the next Space paid for AVAudioEngine's start).
+  Any transport activity keeps the audio output warm for the idle timeout (5 minutes on AC, 60 s on
+  battery; the old 10 s let the device stop between edits, so the next Space paid for AVAudioEngine's start).
 - Measured press-to-first-presented-frame (the start frame is already on screen, so the latency is
   the first new frame's presentation minus the playing time it stands for; three runs): controller
   with a null output 2-14 ms cached, 17-20 ms cold; the VFR source 9-12 ms (was up to 1004.7 ms);
   facade with the real AVAudioEngine output 17-27 ms cached, 37-49 ms cold. Tests assert < 50 ms
-  cached (`PlaybackLookaheadTests`; `VEEnginePlaybackTests.testPlayStartLatencyThroughTheFacade`: see
-  "UX round fixes" for its current bounds). `PresentedFrame::hostNanos` /
+  cached (`PlaybackLookaheadTests`; the facade test asserts the median, worst < 80 ms, and skips
+  under ThreadSanitizer). `PresentedFrame::hostNanos` /
   `VEPlaybackStats.presentedHostTime` report when a frame was handed out.
 - Frame sources: `PlaybackController::frameSource(SourceRole::Mirror)` shows the same frames as the
   primary one without touching the counters or `lastPresented()`. `VEEngine attachOutputView:` /
@@ -300,10 +287,7 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   bin's drop, test them with a `TimelineDropInfo` double whose providers carry the promise types;
   slow-motion and iPhone VFR media rely on `pictureTimeFor` (see "UX round fixes").
 
-## UX round fixes (2026-09-23 UX round review; report in git history at 95f445d)
-State: full Framewright scheme green (428 EngineTests, 115 AppTests, one known skip: gap 9 below in
-`open-findings.md`), zero warnings; all 428 EngineTests clean under ThreadSanitizer
-(`-enableThreadSanitizer YES`; three timing/allocation tests skip themselves there).
+## UX round fixes (report in git history at 95f445d)
 - Pictures by time (finding 1). `playback::pictureTimeFor(layer, asset)` (PlaybackController.h) is the
   source time of a layer's picture: the layer's source time (on the asset's grid for CFR media, exact for
   VFR), 0 for stills. Look it up with FrameCache's containment lookup (`acquire/get/contains(asset, CMTime)`:
@@ -313,12 +297,10 @@ State: full Framewright scheme green (428 EngineTests, 115 AppTests, one known s
   showed the frame under the nominal slot's start, up to one nominal frame early on VFR media). The slot
   API stays on FrameCache for diagnostics; do not use it for pictures. There is no separate CFR fast
   path: for CFR media the scheduler's source time already is the slot start, so the time lookup returns
-  the same frame, and it is cheaper (one map search instead of two; Debug build, 1M lookups over 4 assets
-  x 300 frames: `acquire` by time 669-672 ns vs by slot 774-778 ns, `contains` 275-291 vs 354 ns).
-  `PresentedLayer::wantedIndex` is the slot containing the picture time and `shownIndex` the slot the
-  shown frame starts in (they differ for VFR). VFR play-start latency after the change (controller, eight
-  off-grid starts on the Matroska VFR clip, three runs): median 4.3-6.3 ms, worst 11.0-13.2 ms (before,
-  same machine: median 4.9, worst 10.4 ms; 1004.7 ms before the original UX-round fix).
+  the same frame, and it is slightly cheaper (one map search instead of two). `PresentedLayer::wantedIndex`
+  is the slot containing the picture time and `shownIndex` the slot the shown frame starts in (they differ
+  for VFR). VFR play-start latency is unchanged by the fix (controller, off-grid starts: median about 5 ms,
+  worst about 12 ms).
 - Output window keys (finding 2). `KeyboardController.handle` takes only `Action.isTransportOrCancel`
   (Space, J/K/L, arrows, Home/End, Escape) from `store.outputDisplay.window`; everything else is passed on
   (the window ignores it). A new transport action must be added to `isTransportOrCancel`; any other new
@@ -352,5 +334,3 @@ State: full Framewright scheme green (428 EngineTests, 115 AppTests, one known s
 - Layout arithmetic (gap 4). `ContentView.sideWidths(windowWidth:binWidth:inspectorWidth:)` and
   `WindowLayoutModel.dragSourceMonitorDivider(from:by:areaWidth:)` are what the view uses; test layout
   changes there.
-- Latency test (finding 7). `testPlayStartLatencyThroughTheFacade` is skipped under ThreadSanitizer and
-  asserts the median of the cached starts < 50 ms and the worst < 80 ms (the values are logged).
