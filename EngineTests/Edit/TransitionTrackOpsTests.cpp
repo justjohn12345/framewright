@@ -288,3 +288,116 @@ TEST_CASE("SetTrackFlags works on locked tracks and unlocking re-enables edits")
     SetTrackFlags missing(fx.seq, TrackId{999}, TrackFlagsUpdate{});
     applyRefused(fx.project, missing, EditError::TrackNotFound);
 }
+
+namespace {
+
+// V1: A [0,60) source 30.., B [60,120) source 300..; A1: their linked audio (same times and
+// sources); a 10-frame dissolve on V1 and a 16-frame crossfade on A1.
+struct LinkedPairFixture : Fixture {
+    ClipId a, b, aa, ba;
+    TransitionId dissolve, crossfade;
+    LinkedPairFixture() {
+        a = addClip(v1, av30, 0, 60, 30);
+        b = addClip(v1, av30, 60, 60, 300);
+        aa = addClip(a1, av30, 0, 60, 30);
+        ba = addClip(a1, av30, 60, 60, 300);
+        link(a, aa);
+        link(b, ba);
+        dissolve = addTransition(v1, a, b, 10);
+        crossfade = addTransition(a1, aa, ba, 16);
+        requireValid();
+    }
+};
+
+} // namespace
+
+TEST_CASE("linkedTransition finds the transition on the linked partners' cut, either way round") {
+    LinkedPairFixture fx;
+    CHECK(linkedTransition(fx.sequence(), fx.dissolve) == fx.crossfade);
+    CHECK(linkedTransition(fx.sequence(), fx.crossfade) == fx.dissolve);
+    CHECK_FALSE(linkedTransition(fx.sequence(), TransitionId{999}).has_value());
+    SUBCASE("no transition on the partners' cut") {
+        std::erase_if(fx.sequence().transitions, [&](const Transition &t) { return t.id == fx.crossfade; });
+        CHECK_FALSE(linkedTransition(fx.sequence(), fx.dissolve).has_value());
+    }
+    SUBCASE("an unlinked clip") {
+        fx.sequence().findClip(fx.b)->linkedClipId.reset();
+        fx.sequence().findClip(fx.ba)->linkedClipId.reset();
+        CHECK_FALSE(linkedTransition(fx.sequence(), fx.dissolve).has_value());
+        CHECK_FALSE(linkedTransition(fx.sequence(), fx.crossfade).has_value());
+    }
+}
+
+TEST_CASE("RemoveTransitions removes a linked pair as one reversible step") {
+    LinkedPairFixture fx;
+    RemoveTransitions both(fx.seq, {fx.dissolve, fx.crossfade});
+    CHECK(both.name() == "Remove Transitions");
+    applyReversible(fx.project, both);
+    CHECK(fx.sequence().transitions.empty());
+    SUBCASE("refused as a whole") {
+        LinkedPairFixture other;
+        RemoveTransitions missing(other.seq, {other.dissolve, TransitionId{999}});
+        applyRefused(other.project, missing, EditError::TransitionNotFound);
+        lockTrack(other, other.a1);
+        RemoveTransitions locked(other.seq, {other.dissolve, other.crossfade});
+        applyRefused(other.project, locked, EditError::TrackLocked);
+        RemoveTransitions none(other.seq, {});
+        applyRefused(other.project, none, EditError::InvalidArgument);
+    }
+}
+
+TEST_CASE("SetTransitionDurations resizes a linked pair as one step and refuses it as a whole") {
+    LinkedPairFixture fx;
+    SetTransitionDurations both(fx.seq, {{fx.dissolve, f30(20)}, {fx.crossfade, f30(24)}});
+    CHECK(both.name() == "Change Transition Durations");
+    applyReversible(fx.project, both);
+    CHECK(fx.sequence().findTransition(fx.dissolve)->duration == f30(20));
+    CHECK(fx.sequence().findTransition(fx.crossfade)->duration == f30(24));
+
+    // One of them too long for its clips: nothing changes.
+    SetTransitionDurations tooLong(fx.seq, {{fx.dissolve, f30(30)}, {fx.crossfade, f30(122)}});
+    applyRefused(fx.project, tooLong, EditError::InvalidArgument);
+    CHECK(fx.sequence().findTransition(fx.dissolve)->duration == f30(20));
+
+    SUBCASE("successive steps merge (an Accumulate group of nudges)") {
+        SetTransitionDurations first(fx.seq, {{fx.dissolve, f30(22)}, {fx.crossfade, f30(22)}});
+        SetTransitionDurations second(fx.seq, {{fx.dissolve, f30(24)}, {fx.crossfade, f30(24)}});
+        REQUIRE(first.apply(fx.project));
+        REQUIRE(second.apply(fx.project));
+        CHECK(first.mergeWith(second));
+        first.revert(fx.project);
+        CHECK(fx.sequence().findTransition(fx.dissolve)->duration == f30(20));
+        CHECK(fx.sequence().findTransition(fx.crossfade)->duration == f30(24));
+    }
+}
+
+TEST_CASE("isThroughEdit: a plain split versus cuts between different media") {
+    Fixture fx;
+    // A [0,60) source 30.., B [60,120) source 90..: B continues where A stops.
+    const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
+    const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 90);
+    fx.requireValid();
+    CHECK(isThroughEdit(fx.sequence(), a, b));
+    CHECK_FALSE(isThroughEdit(fx.sequence(), b, a));
+    SUBCASE("a slipped side") {
+        fx.sequence().findClip(b)->sourceIn = f30(91);
+        CHECK_FALSE(isThroughEdit(fx.sequence(), a, b));
+    }
+    SUBCASE("different media") {
+        fx.sequence().findClip(b)->assetId = fx.av24;
+        CHECK_FALSE(isThroughEdit(fx.sequence(), a, b));
+    }
+    SUBCASE("a different speed") {
+        fx.sequence().findClip(b)->speed = Ratio{2, 1};
+        CHECK_FALSE(isThroughEdit(fx.sequence(), a, b));
+    }
+    SUBCASE("different picture parameters show through the dissolve") {
+        fx.sequence().findClip(b)->video.scale = 1.5;
+        CHECK_FALSE(isThroughEdit(fx.sequence(), a, b));
+    }
+    SUBCASE("two copies of one still") {
+        const ClipId s1 = fx.addClip(fx.v2, fx.still, 0, 60);
+        const ClipId s2 = fx.addClip(fx.v2, fx.still, 60, 60);
+        CHECK(isThroughEdit(fx.sequence(), s1, s2));
+    }
+}

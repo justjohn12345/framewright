@@ -425,6 +425,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 
     NSHashTable<id<VEEngineObserver>> *_observers;
     __weak VEPreviewView *_programView;
+    __weak VEPreviewView *_outputView; // mirrors the program (a second display)
     dispatch_queue_t _probeQueue;
     dispatch_source_t _memoryPressureSource;
     double _mainThreadImportSeconds;
@@ -549,6 +550,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     [_activeExport cancel]; // the job deletes its partial file on its own queue
     // The views may outlive the engine: they must stop calling into the controllers first.
     [_programView setFrameSource:ve::render::PreviewFrameSource{}];
+    [_outputView setFrameSource:ve::render::PreviewFrameSource{}];
     [_sourceView setFrameSource:ve::render::PreviewFrameSource{}];
     [self stopAccessingURLs];
 }
@@ -1364,6 +1366,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     VE_ASSERT_MAIN();
     _frameCache->handleMemoryPressure(critical ? media::MemoryPressure::Critical : media::MemoryPressure::Warning);
     [_programView handleMemoryPressure];
+    [_outputView handleMemoryPressure];
     [_sourceView handleMemoryPressure];
     if (auto job = exportJobOf(_activeExport)) {
         job->handleMemoryPressure(critical);
@@ -1953,6 +1956,13 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     } else {
         command = std::move(main);
     }
+    if (isThroughEdit(sequence, from, to)) {
+        // A plain split: both sides are the same media, so the transition changes nothing.
+        const Track *track = sequence.findTrack(sequence.findClip(from)->trackId);
+        [notes addObject:track != nullptr && track->kind == TrackKind::Audio
+                             ? @"Both sides play the same audio here; trim or move one side to hear the crossfade."
+                             : @"Both sides show the same frames here; trim or move one side to see the dissolve."];
+    }
     NSString *note = notes.count > 0 ? [notes componentsJoinedByString:@" "] : nil;
     return [self push:std::move(command)
               created:^NSArray<NSNumber *> * {
@@ -1994,11 +2004,88 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
               created:nil];
 }
 
+- (VETransitionID)linkedTransitionForTransition:(VETransitionID)transitionID {
+    VE_ASSERT_MAIN();
+    const auto partner =
+        linkedTransition([self activeSequence], TransitionId(static_cast<TransitionId::ValueType>(transitionID)));
+    return partner ? static_cast<VETransitionID>(partner->value()) : 0;
+}
+
+- (VEEditResult *)removeTransition:(VETransitionID)transitionID includingLinked:(BOOL)includingLinked {
+    VE_ASSERT_MAIN();
+    const TransitionId id(static_cast<TransitionId::ValueType>(transitionID));
+    const Sequence &sequence = [self activeSequence];
+    const auto partner = includingLinked ? linkedTransition(sequence, id) : std::nullopt;
+    if (!partner || sequence.findTransition(id) == nullptr) {
+        return [self removeTransition:transitionID];
+    }
+    const Transition *linked = sequence.findTransition(*partner);
+    const Track *linkedTrack = linked != nullptr ? sequence.findTrack(linked->trackId) : nullptr;
+    if (linkedTrack != nullptr && linkedTrack->locked) {
+        // The pair's other half is protected: remove the requested one and say why the other stays.
+        VEEditResult *result = [self push:std::make_unique<RemoveTransition>([self sequenceId], id)
+                                  created:nil
+                                     note:[NSString stringWithFormat:@"The linked transition on %@ was kept: the "
+                                                                     @"track is locked.",
+                                                                     toNS(linkedTrack->name)]];
+        return result;
+    }
+    return [self push:std::make_unique<RemoveTransitions>([self sequenceId], std::vector<TransitionId>{id, *partner})
+              created:nil];
+}
+
+- (VEEditResult *)setDuration:(CMTime)duration
+                forTransition:(VETransitionID)transitionID
+              includingLinked:(BOOL)includingLinked {
+    VE_ASSERT_MAIN();
+    const TransitionId id(static_cast<TransitionId::ValueType>(transitionID));
+    const Sequence &sequence = [self activeSequence];
+    const auto partner = includingLinked ? linkedTransition(sequence, id) : std::nullopt;
+    if (!partner || !CMTIME_IS_NUMERIC(duration)) {
+        return [self setDuration:duration forTransition:transitionID];
+    }
+    const CMTime frameDuration = sequence.frameDuration;
+    const int64_t frames =
+        frameIndexAt(snapToFrame(duration, frameDuration, SnapMode::Round), frameDuration, SnapMode::Round);
+    std::vector<SetTransitionDurations::Change> changes{{id, duration}};
+    NSString *note = nil;
+    const Transition *linked = sequence.findTransition(*partner);
+    const Track *linkedTrack = sequence.findTrack(linked->trackId);
+    if (linkedTrack != nullptr && linkedTrack->locked) {
+        note = [NSString stringWithFormat:@"The linked transition on %@ was not changed: the track is locked.",
+                                          toNS(linkedTrack->name)];
+    } else if (frames >= 1) {
+        // The linked transition gets the same length, fitted to its own cut.
+        const TransitionLimit limit =
+            transitionLimit(_project, [self sequenceId], linked->fromClipId, linked->toClipId, *partner);
+        if (limit.maximumFrames == 0) {
+            note = [NSString stringWithFormat:@"The linked transition was not changed: %@", toNS(limit.reason)];
+        } else {
+            int64_t linkedFrames = frames;
+            if (linkedFrames > limit.maximumFrames) {
+                linkedFrames = limit.maximumFrames;
+                note = [NSString stringWithFormat:@"The linked transition was limited to %@: %@",
+                                                  describeFrames(linkedFrames, frameDuration), toNS(limit.reason)];
+            }
+            changes.push_back({*partner, timeForFrame(linkedFrames, frameDuration)});
+        }
+    }
+    VEEditResult *result =
+        [self push:std::make_unique<SetTransitionDurations>([self sequenceId], std::move(changes)) created:nil note:note];
+    return [self explainDurationRefusal:result transition:id duration:duration];
+}
+
 - (VEEditResult *)setDuration:(CMTime)duration forTransition:(VETransitionID)transitionID {
     VE_ASSERT_MAIN();
     const TransitionId id(static_cast<TransitionId::ValueType>(transitionID));
     VEEditResult *result = [self push:std::make_unique<SetTransitionDuration>([self sequenceId], id, duration)
                               created:nil];
+    return [self explainDurationRefusal:result transition:id duration:duration];
+}
+
+/// A refused duration change of `id` that is about length gets the user-facing explanation of
+/// the cut's limit (as adding one does); anything else is returned as is.
+- (VEEditResult *)explainDurationRefusal:(VEEditResult *)result transition:(TransitionId)id duration:(CMTime)duration {
     const Sequence &sequence = [self activeSequence];
     const Transition *transition = sequence.findTransition(id);
     if (result.ok || transition == nullptr || !CMTIME_IS_NUMERIC(duration) ||
@@ -2189,6 +2276,10 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 
 // MARK: - Playback
 
+static bool isRunning(playback::PlaybackState state) {
+    return state == playback::PlaybackState::Playing || state == playback::PlaybackState::Prerolling;
+}
+
 /// Hands the controllers the model: the active sequence of a new project (setSequence, which
 /// stops and moves to frame 0), or the edited snapshot (modelChanged, which keeps playing).
 - (void)publishPlaybackSnapshot {
@@ -2232,12 +2323,21 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
             }
         } else {
             [strongSelf->_programView renderOnce];
+            [strongSelf->_outputView renderOnce];
         }
     };
     controller.setObserver(dispatch_get_main_queue(), std::move(observer));
 }
 
 - (void)notifyPlayback:(const playback::PlaybackStatus &)status {
+    if (VEPreviewView *output = _outputView) {
+        // The output view's render loop follows the program's transport (the owner of the
+        // program view does this for it).
+        const BOOL paused = !isRunning(status.state);
+        if (output.paused != paused) {
+            output.paused = paused;
+        }
+    }
     VEPlaybackStatus *info = makePlaybackStatus(status);
     [NSNotificationCenter.defaultCenter postNotificationName:VEEnginePlaybackDidChangeNotification
                                                       object:self
@@ -2285,13 +2385,36 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     return _programView;
 }
 
+- (void)attachOutputView:(VEPreviewView *)view {
+    VE_ASSERT_MAIN();
+    if (_outputView != nil && _outputView != view) {
+        [self detachOutputView];
+    }
+    _outputView = view;
+    // A mirror source: the same frames as the program view, without adding to its counters.
+    [view setFrameSource:_playback->frameSource(playback::PlaybackController::SourceRole::Mirror)];
+    view.paused = !isRunning(_playback->state());
+    [view renderOnce];
+}
+
+- (void)detachOutputView {
+    VE_ASSERT_MAIN();
+    VEPreviewView *view = _outputView;
+    _outputView = nil;
+    if (view != nil) {
+        [view setFrameSource:ve::render::PreviewFrameSource{}];
+        view.paused = YES;
+    }
+}
+
+- (nullable VEPreviewView *)outputView {
+    VE_ASSERT_MAIN();
+    return _outputView;
+}
+
 - (void)showProgramFrameAtTime:(CMTime)time {
     VE_ASSERT_MAIN();
     [self seekToTime:time];
-}
-
-static bool isRunning(playback::PlaybackState state) {
-    return state == playback::PlaybackState::Playing || state == playback::PlaybackState::Prerolling;
 }
 
 /// One monitor plays at a time (as in Premiere): starting the program pauses the source monitor.
@@ -2797,6 +2920,8 @@ static bool isRunning(playback::PlaybackState state) {
             if (strongSelf->_activeExport == weakHandle) {
                 strongSelf->_activeExport = nil;
                 [strongSelf stopAccessingExportURL];
+                // The program monitor's stopped lookahead resumes at the paused frame.
+                strongSelf->_playback->setIdleLookahead(true);
             }
             [NSNotificationCenter.defaultCenter
                 postNotificationName:VEEngineExportDidFinishNotification
@@ -2823,8 +2948,11 @@ static bool isRunning(playback::PlaybackState state) {
     attachExportJob(handle, std::move(started).value());
     _activeExport = handle;
     _exportAccessedURL = accessing ? outputURL : nil;
-    // The monitors pause (the export gets the decoders and the GPU); they keep their own pools.
+    // The monitors pause (the export gets the decoders and the GPU); they keep their own pools,
+    // and the program's stops decoding its stopped lookahead (its decoders are released) until
+    // the export ends. The paused pictures still come through the scrub path.
     _playback->pause();
+    _playback->setIdleLookahead(false);
     if (_sourcePlayback) {
         _sourcePlayback->pause();
     }

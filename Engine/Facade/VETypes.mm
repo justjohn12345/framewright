@@ -156,6 +156,7 @@ VEAudioParams VEAudioParamsDefault(void) {
 @property (nonatomic, readwrite) int64_t presentedFrameIndex;
 @property (nonatomic, readwrite) CMTime presentedTime;
 @property (nonatomic, readwrite) BOOL presentedClockDriven;
+@property (nonatomic, readwrite) double presentedHostTime;
 @property (nonatomic, readwrite) BOOL audioActive;
 @property (nonatomic, readwrite) BOOL outputRunning;
 @property (nonatomic, readwrite) double outputLatency;
@@ -680,6 +681,7 @@ VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats, const p
     info.presentedFrameIndex = presented.frameIndex;
     info.presentedTime = presented.time;
     info.presentedClockDriven = presented.clockDriven;
+    info.presentedHostTime = static_cast<double>(presented.hostNanos) * 1e-9;
     info.audioActive = stats.audioActive;
     info.outputRunning = stats.outputRunning;
     info.outputLatency = stats.outputLatency;

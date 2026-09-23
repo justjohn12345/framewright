@@ -314,6 +314,9 @@ typedef NS_ENUM(NSInteger, VEClockMode) {
 @property (nonatomic, readonly) CMTime presentedTime;
 /// The frame was chosen by the running clock (playing) rather than the paused position.
 @property (nonatomic, readonly) BOOL presentedClockDriven;
+/// When the program monitor's frame source handed that frame out, in seconds of the host time
+/// base (CACurrentMediaTime()); 0 before the first frame. Play-start latency diagnostics.
+@property (nonatomic, readonly) double presentedHostTime;
 @property (nonatomic, readonly) BOOL audioActive;
 @property (nonatomic, readonly) BOOL outputRunning;
 /// Output latency the clock subtracts, in seconds.

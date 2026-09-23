@@ -387,6 +387,55 @@ class SetTransitionDuration final : public SequenceCommand {
     CMTime duration_;
 };
 
+// Removes several transitions as one step (a dissolve and its linked audio crossfade).
+// Refused as a whole when one is missing or on a locked track.
+class RemoveTransitions final : public SequenceCommand {
+  public:
+    RemoveTransitions(SequenceId sequenceId, std::vector<TransitionId> transitionIds);
+    std::string name() const override {
+        return transitionIds_.size() == 1 ? "Remove Transition" : "Remove Transitions";
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    std::vector<TransitionId> transitionIds_;
+};
+
+// Sets the durations of several transitions as one step (a dissolve and its linked crossfade
+// resized together); each is checked like SetTransitionDuration, and the whole edit is refused
+// when one does not fit. One SequenceCommand (not a composite), so an Accumulate group (keyboard
+// nudges) merges successive steps.
+class SetTransitionDurations final : public SequenceCommand {
+  public:
+    struct Change {
+        TransitionId transitionId;
+        CMTime duration = kCMTimeZero;
+    };
+    SetTransitionDurations(SequenceId sequenceId, std::vector<Change> changes);
+    std::string name() const override {
+        return changes_.size() == 1 ? "Change Transition Duration" : "Change Transition Durations";
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    std::vector<Change> changes_;
+};
+
+// The transition linked to `transitionId`: the one on the cut between the linked partners of
+// its two clips (the audio crossfade under a video dissolve, and the other way round). Nullopt
+// when either clip is unlinked, the partners do not meet at a cut, or no transition joins them.
+std::optional<TransitionId> linkedTransition(const Sequence &sequence, TransitionId transitionId);
+
+// Whether the cut from `fromClipId` to `toClipId` is a through edit: both clips play the same
+// asset at the same speed with the same parameters, and the second continues exactly where the
+// first stops in the source (a plain split). Both sides of a transition there show (or play)
+// the same media, so it has no visible (audible) effect.
+bool isThroughEdit(const Sequence &sequence, ClipId fromClipId, ClipId toClipId);
+
 // The longest transition a cut can take, and what stops a longer one.
 struct TransitionLimit {
     // Whole sequence frames; zero when no transition fits the cut at all.

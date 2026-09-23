@@ -44,6 +44,13 @@ int64_t frameSlotFor(const VideoLayer &layer, const MediaAsset &asset) {
     return asset.isStill() ? 0 : FrameCache::frameIndex(layer.sourceTime, asset.frameDuration);
 }
 
+CMTime frameSlotTimeFor(const VideoLayer &layer, const MediaAsset &asset) {
+    if (asset.isStill() || !isPositive(asset.frameDuration) || !isNumeric(layer.sourceTime)) {
+        return layer.sourceTime;
+    }
+    return timeForFrame(frameSlotFor(layer, asset), asset.frameDuration);
+}
+
 namespace {
 
 /// Media paths are absolute POSIX paths; the model may hold file URLs.
@@ -85,6 +92,9 @@ struct PlaybackController::Core {
 
     /// Render-thread state of one frame source.
     struct RenderState {
+        /// The primary source keeps the shared counters and presentedInfo; a mirror does not.
+        bool primary = true;
+        uint64_t mirrorSerial = 0; // serials of a mirror's own frames
         std::shared_ptr<const Project> project;
         SequenceId sequenceId;
         uint64_t snapshotVersion = 0;
@@ -255,7 +265,9 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
             const bool behind = d.rate >= 0 ? t < rs.guardTime : t > rs.guardTime;
             if (behind) {
                 t = rs.guardTime;
-                monotonicHolds.fetch_add(1, std::memory_order_relaxed);
+                if (rs.primary) {
+                    monotonicHolds.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
         rs.guardEpoch = epoch;
@@ -303,7 +315,9 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
                     rs.nextTextures[i] = std::move(mapped).value();
                 } else {
                     // Decoded but not drawable: neither a hit nor exact; keep the old picture.
-                    mapFailures.fetch_add(1, std::memory_order_relaxed);
+                    if (rs.primary) {
+                        mapFailures.fetch_add(1, std::memory_order_relaxed);
+                    }
                     usable = false;
                     if (status.ok()) {
                         status = std::move(mapped).error();
@@ -311,11 +325,13 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
                 }
             }
             if (usable) {
-                hits.fetch_add(1, std::memory_order_relaxed);
+                if (rs.primary) {
+                    hits.fetch_add(1, std::memory_order_relaxed);
+                }
                 shownIndex = pin.frame().index;
                 shown.exact = true;
             } else {
-                if (!pin) {
+                if (!pin && rs.primary) {
                     misses.fetch_add(1, std::memory_order_relaxed);
                 }
                 pin = FrameCache::PinnedFrame{};
@@ -337,7 +353,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
         // above are released; the previous frame's stay.
         rs.nextPins.clear();
         rs.nextTextures.clear();
-        if (presentedMutex.try_lock()) { // diagnostics only: never wait for a reader
+        if (rs.primary && presentedMutex.try_lock()) { // diagnostics only: never wait for a reader
             presentedInfo.heldBackFrameIndex = index;
             presentedMutex.unlock();
         }
@@ -360,7 +376,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
     frame.textures.assign(rs.nextTextures.begin(), rs.nextTextures.end());
 
     const uint64_t nowNanos = clock.hostClock()->nowNanos();
-    if (d.clockDriven) {
+    if (d.clockDriven && rs.primary) {
         if (!complete) {
             late.fetch_add(1, std::memory_order_relaxed);
         }
@@ -398,14 +414,15 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
     rs.lastClockDriven = d.clockDriven;
     rs.lastEpoch = epoch;
     rs.lastPresentNanos = nowNanos;
-    const uint64_t serial = presented.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t serial = rs.primary ? presented.fetch_add(1, std::memory_order_relaxed) + 1 : ++rs.mirrorSerial;
 
     rs.info.serial = serial;
     rs.info.time = t;
     rs.info.frameIndex = index;
     rs.info.clockDriven = d.clockDriven;
+    rs.info.hostNanos = nowNanos;
     rs.info.heldBackFrameIndex = -1;
-    if (presentedMutex.try_lock()) { // diagnostics only: never wait for a reader
+    if (rs.primary && presentedMutex.try_lock()) { // diagnostics only: never wait for a reader
         std::swap(presentedInfo, rs.info);
         presentedMutex.unlock();
     }
@@ -608,6 +625,13 @@ void PlaybackController::registerAssetsLocked() {
 }
 
 void PlaybackController::retargetLocked(CMTime at, double rate) {
+    const double speed = std::clamp(absRate(rate), 1.0, 8.0);
+    // The pool's window is capped at 4x; the clips looked up span the whole shuttle distance.
+    retargetLocked(at, rate, CMTimeMultiplyByFloat64(config_.decodeLookahead, std::min(speed, 4.0)),
+                   CMTimeGetSeconds(config_.decodeLookahead) * speed);
+}
+
+void PlaybackController::retargetLocked(CMTime at, double rate, CMTime window, double spanSeconds) {
     lastRetarget_ = at;
     const Sequence *sequence = sequenceLocked();
     if (!pool_ || !sequence || !isPositive(sequence->frameDuration)) {
@@ -615,11 +639,12 @@ void PlaybackController::retargetLocked(CMTime at, double rate) {
     }
     const bool backward = rate < 0;
     const double speed = std::clamp(absRate(rate), 1.0, 8.0);
-    pool_->setLookahead(CMTimeMultiplyByFloat64(config_.decodeLookahead, std::min(speed, 4.0)));
+    pool_->setLookahead(window);
     const CMTime fd = sequence->frameDuration;
     const int64_t start = frameIndexAt(at, fd, SnapMode::Floor);
-    const int64_t span = std::max<int64_t>(
-        1, static_cast<int64_t>(std::ceil(CMTimeGetSeconds(config_.decodeLookahead) * speed / CMTimeGetSeconds(fd))));
+    // Every clip that enters within `spanSeconds` gets a stream.
+    const int64_t span =
+        std::max<int64_t>(1, static_cast<int64_t>(std::ceil(spanSeconds / CMTimeGetSeconds(fd))));
     const int64_t stride = std::max<int64_t>(1, static_cast<int64_t>(speed));
     const int64_t lastIndex = frameIndexAt(lastFrameStartOf(*sequence), fd, SnapMode::Floor);
 
@@ -640,7 +665,8 @@ void PlaybackController::retargetLocked(CMTime at, double rate) {
             media::DecodeTarget target;
             target.asset = layer.assetId;
             target.trackIndex = -1;
-            target.sourceTime = layer.sourceTime;
+            const MediaAsset *asset = project_->findAsset(layer.assetId);
+            target.sourceTime = asset ? frameSlotTimeFor(layer, *asset) : layer.sourceTime;
             target.direction = backward ? media::DecodeDirection::Backward : media::DecodeDirection::Forward;
             // Visible now first (upper layers first), then by proximity.
             target.priority = static_cast<int>(10000 - k * 10 + static_cast<int64_t>(i));
@@ -690,7 +716,8 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
         }
         const uint64_t lane = config_.scrubLaneBase + i;
         core_->displayRequestIssued(generation);
-        pool_->requestFrame(layer.assetId, layer.sourceTime,
+        // The picture of the slot the frame source looks up (see frameSlotTimeFor).
+        pool_->requestFrame(layer.assetId, frameSlotTimeFor(layer, *asset),
                             [weakCore, weakHub, generation](media::Result<media::ScrubFrame> r) {
                                 auto core = weakCore.lock();
                                 if (!core) {
@@ -751,6 +778,7 @@ void PlaybackController::beginPrerollLocked(CMTime at, double rate) {
     displayTime_ = at;
     state_ = PlaybackState::Prerolling;
     audioWarm_ = false;
+    stoppedLookaheadPending_ = false; // the pre-roll retargets for playing
     preroll_ = Preroll{};
     preroll_.serial = ++prerollSerial_;
     preroll_.at = at;
@@ -832,6 +860,34 @@ void PlaybackController::dropAudioLocked() {
 void PlaybackController::noteDisplayChangedLocked() {
     displayChangedAt_ = std::chrono::steady_clock::now();
     audioWarm_ = false;
+    stoppedLookaheadPending_ = true; // the lookahead follows once the playhead is still
+    touchIdleLocked();               // the user is working: keep the output warm
+}
+
+std::chrono::steady_clock::time_point PlaybackController::stoppedLookaheadDueLocked() const {
+    return displayChangedAt_ + config_.idleLookaheadDelay;
+}
+
+void PlaybackController::stoppedLookaheadTickLocked() {
+    if (state_ != PlaybackState::Stopped || !stoppedLookaheadPending_) {
+        return;
+    }
+    if (!idleLookahead_) {
+        // Another decoder user has the hardware: no stopped lookahead (the paused picture still
+        // comes through the scrub path).
+        stoppedLookaheadPending_ = false;
+        if (pool_) {
+            pool_->setTargets({});
+        }
+        lastRetarget_ = kCMTimeInvalid;
+        return;
+    }
+    if (std::chrono::steady_clock::now() < stoppedLookaheadDueLocked()) {
+        return;
+    }
+    stoppedLookaheadPending_ = false;
+    // Forward from the paused frame, the way play() goes.
+    retargetLocked(displayTime_, 1.0, config_.stoppedLookahead, CMTimeGetSeconds(config_.stoppedLookahead));
 }
 
 void PlaybackController::warmAudioLocked() {
@@ -937,7 +993,6 @@ void PlaybackController::pauseLocked(std::optional<CMTime> at) {
         if (state_ == PlaybackState::Scrubbing) {
             state_ = PlaybackState::Stopped;
             noteDisplayChangedLocked();
-            pendingRetarget_ = std::make_pair(displayTime_, 1.0);
             postStatusLocked();
             tickCv_.notify_all();
         }
@@ -959,7 +1014,6 @@ void PlaybackController::pauseLocked(std::optional<CMTime> at) {
     core_->resetFps();
     touchIdleLocked();
     publishDisplayLocked();
-    pendingRetarget_ = std::make_pair(t, 1.0);
     requestDisplayFramesLocked(t);
     postStatusLocked();
     tickCv_.notify_all();
@@ -1040,7 +1094,6 @@ void PlaybackController::setSequence(std::shared_ptr<const Project> project, Seq
     core_->clock.setTime(kCMTimeZero); // (pauseLocked stopped the mix if it was running)
     publishDisplayLocked();
     mixer_->clearGraph(); // dropped sources go to the reaper via the tick thread
-    pendingRetarget_ = std::make_pair(displayTime_, 1.0);
     touchIdleLocked(); // warm the output up for the first play
     requestDisplayFramesLocked(displayTime_);
     postStatusLocked();
@@ -1055,7 +1108,7 @@ void PlaybackController::modelChanged(std::shared_ptr<const Project> project) {
     if (!sequenceLocked()) {
         pauseLocked();
         mixer_->clearGraph();
-        pendingRetarget_.reset();
+        stoppedLookaheadPending_ = false;
         if (pool_) {
             pool_->setTargets({});
         }
@@ -1089,9 +1142,6 @@ void PlaybackController::modelChanged(std::shared_ptr<const Project> project) {
         displayTime_ = clamped;
         noteDisplayChangedLocked(); // the audio at the paused frame may have changed
         publishDisplayLocked();
-        if (state_ != PlaybackState::Scrubbing) {
-            pendingRetarget_ = std::make_pair(displayTime_, 1.0);
-        }
         requestDisplayFramesLocked(displayTime_);
         if (moved) {
             postStatusLocked(); // the edit moved the playhead (the sequence got shorter)
@@ -1154,7 +1204,6 @@ void PlaybackController::seek(CMTime time, SeekMode mode) {
     }
     if (mode == SeekMode::Exact) {
         state_ = PlaybackState::Stopped;
-        pendingRetarget_ = std::make_pair(t, 1.0);
     }
     displayTime_ = t;
     noteDisplayChangedLocked();
@@ -1253,7 +1302,6 @@ void PlaybackController::stepFrames(int frames) {
     noteDisplayChangedLocked();
     core_->clock.setTime(t);
     publishDisplayLocked();
-    pendingRetarget_ = std::make_pair(t, frames < 0 ? -1.0 : 1.0);
     requestDisplayFramesLocked(t);
     postStatusLocked();
     tickCv_.notify_all();
@@ -1289,7 +1337,6 @@ void PlaybackController::endScrub() {
     state_ = PlaybackState::Stopped;
     noteDisplayChangedLocked();
     publishDisplayLocked();
-    pendingRetarget_ = std::make_pair(displayTime_, 1.0);
     requestDisplayFramesLocked(displayTime_);
     postStatusLocked();
     tickCv_.notify_all();
@@ -1304,6 +1351,23 @@ void PlaybackController::setMuted(bool muted) {
 bool PlaybackController::isMuted() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return muted_;
+}
+
+void PlaybackController::setIdleLookahead(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (idleLookahead_ == enabled) {
+        return;
+    }
+    idleLookahead_ = enabled;
+    // Stopped: the tick thread clears the targets now (disabled) or retargets once the playhead
+    // has been still for the delay (enabled). Playing or pre-rolling: applied at the next stop.
+    stoppedLookaheadPending_ = true;
+    tickCv_.notify_all();
+}
+
+bool PlaybackController::idleLookahead() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return idleLookahead_;
 }
 
 // MARK: State
@@ -1419,9 +1483,10 @@ void PlaybackController::setObserver(dispatch_queue_t queue, PlaybackObserver ob
     hub_->observer = std::move(observer);
 }
 
-render::PreviewFrameSource PlaybackController::frameSource() {
+render::PreviewFrameSource PlaybackController::frameSource(SourceRole role) {
     auto core = core_;
     auto state = std::make_shared<Core::RenderState>();
+    state->primary = role == SourceRole::Primary;
     return [core, state](const render::PreviewFrameRequest &request, render::PreviewFrame &frame) {
         return core->renderFrame(*state, request, frame);
     };
@@ -1443,34 +1508,34 @@ void PlaybackController::tickMain() {
         if (manageOutput(lock)) {
             continue; // the lock was released: re-evaluate everything
         }
-        if (pendingRetarget_) {
-            const auto [at, rate] = *pendingRetarget_;
-            pendingRetarget_.reset();
-            retargetLocked(at, rate);
-        }
         if (state_ == PlaybackState::Prerolling) {
             advancePrerollLocked();
         } else if (state_ == PlaybackState::Playing) {
             playingTickLocked();
         } else {
+            stoppedLookaheadTickLocked();
             warmAudioLocked();
         }
-        if (stopTick_ || !outputEvents_.empty() || pendingRetarget_) {
+        if (stopTick_ || !outputEvents_.empty()) {
             continue;
         }
         if (state_ == PlaybackState::Prerolling || state_ == PlaybackState::Playing) {
             tickCv_.wait_for(lock, config_.tickInterval);
             continue;
         }
-        // Stopped or scrubbing: sleep until the audio should be warmed, the idle output
-        // stopped, or something happens.
-        const bool warmPending = state_ == PlaybackState::Stopped && !audioWarm_ && sequenceLocked();
+        // Stopped or scrubbing: sleep until the lookahead is due, the audio should be warmed,
+        // the idle output stopped, or something happens.
+        const bool stopped = state_ == PlaybackState::Stopped && sequenceLocked();
+        const bool warmPending = stopped && !audioWarm_;
         auto wake = std::chrono::steady_clock::time_point::max();
+        const auto now = std::chrono::steady_clock::now();
         if (warmPending) {
             const auto warmAt = displayChangedAt_ + config_.audioWarmDelay;
-            const auto now = std::chrono::steady_clock::now();
             // Still waiting for the previous run's fade: look again after a tick.
             wake = warmAt > now ? warmAt : now + config_.tickInterval;
+        }
+        if (stopped && stoppedLookaheadPending_) {
+            wake = std::min(wake, std::max(stoppedLookaheadDueLocked(), now));
         }
         if (outputStarted_) {
             wake = std::min(wake, idleDeadline_);

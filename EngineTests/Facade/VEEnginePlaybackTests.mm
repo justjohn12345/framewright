@@ -9,9 +9,11 @@
 #import <XCTest/XCTest.h>
 
 #include "../Media/BurnIn.h"
+#include "../Media/FFmpegTestMedia.h"
 #include "../Media/TestMedia.h"
 
 #include <algorithm>
+#include <ctime>
 #include <cmath>
 #include <functional>
 #include <map>
@@ -54,6 +56,30 @@ int shownIndex(VEPreviewView *view) {
     const int index = ve::test::readBurnIn(buffer).value_or(-1);
     CVPixelBufferRelease(buffer);
     return index;
+}
+
+/// The BGRA bytes of what `view` shows (empty if nothing was rendered).
+std::vector<uint8_t> pixelsOf(VEPreviewView *view, size_t *widthOut = nullptr, size_t *heightOut = nullptr) {
+    CGImageRef image = [view snapshot];
+    if (image == NULL) {
+        return {};
+    }
+    const size_t w = CGImageGetWidth(image);
+    const size_t h = CGImageGetHeight(image);
+    std::vector<uint8_t> bytes(w * h * 4);
+    CGContextRef ctx = CGBitmapContextCreate(bytes.data(), w, h, 8, w * 4, CGImageGetColorSpace(image),
+                                             CGBitmapInfo(kCGImageAlphaNoneSkipFirst) |
+                                                 CGBitmapInfo(kCGBitmapByteOrder32Little));
+    CGContextSetBlendMode(ctx, kCGBlendModeCopy);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, CGFloat(w), CGFloat(h)), image);
+    CGContextRelease(ctx);
+    if (widthOut != nullptr) {
+        *widthOut = w;
+    }
+    if (heightOut != nullptr) {
+        *heightOut = h;
+    }
+    return bytes;
 }
 
 } // namespace
@@ -683,6 +709,318 @@ static bool showsFrame(int shown, int64_t f) {
     XCTAssertTrue(critical);
     XCTAssertNil([engine cachedWaveformForAsset:asset.assetID], @"in-memory peaks were released");
     [NSNotificationCenter.defaultCenter removeObserver:token];
+    [engine attachProgramView:nil];
+}
+
+// MARK: - Play-start latency (open finding 3)
+
+/// Press-to-first-presented-frame through the facade, with the machine's real audio output (the
+/// clock starts when the first sample is audible, so the output latency is part of it): renders
+/// are requested every millisecond (a display link faster than any screen) and the host time
+/// at which the frame source handed out the first new clock-driven frame is read from the stats.
+/// The paused frame is already on screen, so that frame is a later one; the latency subtracts
+/// the playing time it stands for.
+- (void)testPlayStartLatencyThroughTheFacade {
+    VEPreviewView *view = [self makeView];
+    if (view == nil) {
+        XCTSkip(@"no Metal device");
+    }
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
+    [self buildSequence:engine asset:asset];
+    [engine attachProgramView:view];
+    XCTAssertEqual([self renderUntil:view shows:0 timeout:20], 0);
+
+    struct Start {
+        double latencyMs = -1;
+        double rawMs = -1;
+        int64_t frame = -1;
+    };
+    auto measure = [&](int64_t start) {
+        __block Start result;
+        // The host time base of presentedHostTime (mach absolute time, in seconds).
+        const double t0 = double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) * 1e-9;
+        [engine play];
+        [self spinUntil:^BOOL {
+            [view renderOnce];
+            VEPlaybackStats *stats = engine.playbackStats;
+            if (stats.presentedClockDriven && stats.presentedFrameIndex > start) {
+                result.frame = stats.presentedFrameIndex;
+                result.rawMs = (stats.presentedHostTime - t0) * 1000;
+                result.latencyMs = result.rawMs - double(result.frame - start) * 1000.0 / 30.0;
+                return YES;
+            }
+            return NO;
+        }
+                timeout:10];
+        [engine pause];
+        return result;
+    };
+
+    std::vector<double> cached;
+    for (int64_t frame : {15, 40, 90, 120}) {
+        [engine seekToTime:CMTimeMake(frame, 30)];
+        const int expected = expectedIndex(frame);
+        XCTAssertEqual([self renderUntil:view shows:expected timeout:20], expected);
+        // Still: the lookahead and the audio get ready.
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.4]];
+        const Start start = measure(frame);
+        XCTAssertGreaterThanOrEqual(start.rawMs, 0.0, @"playback from frame %lld presented a new frame", frame);
+        cached.push_back(start.latencyMs);
+    }
+    // Cold: every unpinned frame purged, a jump into media nothing decoded, play at once.
+    [engine handleMemoryPressure:YES];
+    [engine seekToTime:CMTimeMake(130, 30)];
+    const Start cold = measure(130);
+    XCTAssertGreaterThanOrEqual(cold.rawMs, 0.0);
+    std::sort(cached.begin(), cached.end());
+    VEPlaybackStats *stats = engine.playbackStats;
+    NSLog(@"PLAY START LATENCY (facade, %@ output, latency %.1f ms): cached %.1f / %.1f / %.1f / %.1f ms, cold %.1f ms "
+          @"(first new frame %lld after %.1f ms)",
+          stats.audioOutputKind, stats.outputLatency * 1000, cached[0], cached[1], cached[2], cached[3], cold.latencyMs,
+          cold.frame, cold.rawMs);
+    XCTAssertLessThan(cached.back(), 50.0, @"cached media starts within the 50 ms target");
+    [engine attachProgramView:nil];
+}
+
+// MARK: - Output view (program monitor on a second display, open finding 7)
+
+- (void)testAnOutputViewMirrorsTheProgramMonitor {
+    VEPreviewView *program = [self makeView];
+    VEPreviewView *output = [self makeView];
+    if (program == nil || output == nil) {
+        XCTSkip(@"no Metal device");
+    }
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
+    [self buildSequence:engine asset:asset];
+    [engine attachProgramView:program];
+    [engine attachOutputView:output];
+    XCTAssertEqual(engine.outputView, output);
+    XCTAssertTrue(output.isPaused, @"stopped: the engine keeps the output's render loop paused");
+
+    // Paused: both show the same frame.
+    [engine seekToTime:CMTimeMake(45, 30)];
+    XCTAssertEqual([self renderUntil:program shows:45 timeout:20], 45);
+    XCTAssertEqual([self renderUntil:output shows:45 timeout:20], 45);
+    const uint64_t presented = engine.playbackStats.presentedFrames;
+    for (int i = 0; i < 3; ++i) {
+        [engine stepFrames:1];
+        XCTAssertEqual([self renderUntil:output shows:46 + i timeout:20], 46 + i);
+    }
+    XCTAssertEqual([self renderUntil:program shows:48 timeout:20], 48);
+    XCTAssertGreaterThan(engine.playbackStats.presentedFrames, presented);
+
+    // Only the program view counts: with the program view detached, the output alone shows new
+    // frames and the counters stay put.
+    [engine attachProgramView:nil];
+    const uint64_t counted = engine.playbackStats.presentedFrames;
+    [engine seekToTime:CMTimeMake(20, 30)];
+    XCTAssertEqual([self renderUntil:output shows:20 timeout:20], 20);
+    [engine stepFrames:1];
+    XCTAssertEqual([self renderUntil:output shows:21 timeout:20], 21);
+    XCTAssertEqual(engine.playbackStats.presentedFrames, counted, @"the mirror's frames are not counted");
+    [engine attachProgramView:program];
+    XCTAssertEqual([self renderUntil:program shows:21 timeout:20], 21);
+
+    // Playing: the engine runs the output's render loop, and both show the frame at the clock.
+    [engine play];
+    XCTAssertTrue([self spinUntil:^BOOL {
+        return engine.playbackState == VEPlaybackStatePlaying && !output.isPaused;
+    }
+                          timeout:10]);
+    int compared = 0;
+    while (compared < 10 && engine.playbackState == VEPlaybackStatePlaying && CMTimeGetSeconds(engine.currentTime) < 1.7) {
+        [self renderAndWait:program];
+        [self renderAndWait:output];
+        const int a = shownIndex(program);
+        const int b = shownIndex(output);
+        if (a < 0 || b < 0) {
+            continue;
+        }
+        XCTAssertLessThanOrEqual(std::abs(a - b), 1, @"the two displays show the same moment (%d / %d)", a, b);
+        ++compared;
+    }
+    XCTAssertGreaterThanOrEqual(compared, 5);
+    [engine pause];
+    XCTAssertTrue([self spinUntil:^BOOL {
+        return output.isPaused;
+    }
+                          timeout:5],
+                  @"paused again with the transport");
+    const int pausedFrame = int(frameOf(engine.currentTime));
+    XCTAssertEqual([self renderUntil:program shows:pausedFrame timeout:20], pausedFrame);
+    XCTAssertEqual([self renderUntil:output shows:pausedFrame timeout:20], pausedFrame, @"the same paused frame");
+
+    // Exporting: playback is refused for the output as for the monitors.
+    NSURL *movie = [NSURL fileURLWithPath:[@(ve::test::scratchDirectory().c_str())
+                                              stringByAppendingPathComponent:@"output-view-export.mp4"]];
+    NSError *error = nil;
+    VEExportHandle *handle = [engine beginExportWithSettings:[VEExportSettings defaultSettingsForPreset:VEExportPresetH264]
+                                                   outputURL:movie
+                                                    progress:nil
+                                                  completion:^(VEExportSummary *, NSError *) {
+                                                  }
+                                                       error:&error];
+    XCTAssertNotNil(handle, @"%@", error);
+    if (handle != nil) {
+        [engine play];
+        XCTAssertEqual(engine.playbackState, VEPlaybackStateStopped, @"no playback while exporting");
+        XCTAssertTrue(output.isPaused);
+        XCTAssertTrue([handle cancelAndWaitWithTimeout:10]);
+    }
+
+    // Detached: the output keeps its last picture and follows nothing; the program goes on.
+    [engine detachOutputView];
+    XCTAssertNil(engine.outputView);
+    XCTAssertTrue(output.isPaused);
+    [engine seekToTime:CMTimeMake(30, 30)];
+    XCTAssertEqual([self renderUntil:program shows:30 timeout:20], 30);
+    [self renderAndWait:output];
+    XCTAssertEqual(shownIndex(output), pausedFrame, @"a detached output view is not driven any more");
+    [engine attachProgramView:nil];
+}
+
+// MARK: - VFR dissolve (open finding 1b)
+
+/// A dissolve between two different variable-frame-rate sources (vfr_h264.mp4 through the Apple
+/// backend and its Matroska remux vfr_h264_blockdur.mkv, whose irregular frame durations come
+/// from BlockDurations, through FFmpeg), shown through VEEngine and the program view: mid-transition
+/// each pixel is the mix of the two pictures at the frame centre's mix factor ((k + 0.5) / n for
+/// frame k of n), and each picture is the source frame the monitor shows for that clip alone.
+- (void)testADissolveBetweenTwoVFRSourcesMixesTheirPicturesAtTheFrameCentre {
+    VEPreviewView *view = [self makeView];
+    if (view == nil) {
+        XCTSkip(@"no Metal device");
+    }
+    std::string derivedError;
+    const std::string mkv = ve::test::derivedMediaPath("vfr_h264_blockdur.mkv", derivedError);
+    XCTAssertFalse(mkv.empty(), @"%s", derivedError.c_str());
+    if (mkv.empty()) {
+        return;
+    }
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *first = [self importOne:"vfr_h264.mp4" into:engine];
+    XCTestExpectation *done = [self expectationWithDescription:@"import mkv"];
+    __block VEAssetInfo *second = nil;
+    [engine importMediaAtURLs:@[ [NSURL fileURLWithPath:@(mkv.c_str())] ]
+                   completion:^(NSArray<VEAssetInfo *> *assets, NSArray<NSError *> *errors) {
+                       XCTAssertEqual(errors.count, 0u, @"%@", errors);
+                       second = assets.firstObject;
+                       [done fulfill];
+                   }];
+    [self waitForExpectations:@[ done ] timeout:60];
+    XCTAssertNotNil(first);
+    XCTAssertNotNil(second);
+    XCTAssertTrue(first.isVFR && second.isVFR, @"both sources are flagged VFR");
+    XCTAssertNotEqual(first.assetID, second.assetID);
+    const VETrackID v1 = engine.sequence.videoTrackIDs[0].longLongValue;
+    // A: frames [0, 60) from source 0; B: frames [60, 120) from source 3 s; 20-frame dissolve
+    // [50, 70) (A's source runs to 2.33 s, B's back to 2.67 s: both inside the media).
+    VEEditResult *a = [engine overwriteAsset:first.assetID
+                                      atTime:kCMTimeZero
+                                  videoTrack:v1
+                                  audioTrack:0
+                                    sourceIn:kCMTimeZero
+                                   sourceOut:CMTimeMake(60, 30)];
+    VEEditResult *b = [engine overwriteAsset:second.assetID
+                                      atTime:CMTimeMake(60, 30)
+                                  videoTrack:v1
+                                  audioTrack:0
+                                    sourceIn:CMTimeMake(3, 1)
+                                   sourceOut:CMTimeMake(5, 1)];
+    XCTAssertTrue(a.ok && b.ok, @"%@ %@", a.message, b.message);
+    const VEClipID clipA = a.createdIDs.firstObject.longLongValue;
+    const VEClipID clipB = b.createdIDs.firstObject.longLongValue;
+    VEEditResult *t = [engine addTransitionFromClip:clipA toClip:clipB duration:CMTimeMake(20, 30)];
+    XCTAssertTrue(t.ok, @"%@", t.message);
+    XCTAssertFalse([t.note containsString:@"Both sides"], @"different sources: no through-edit note");
+    [engine attachProgramView:view];
+
+    // What the view shows at `frame` once complete (every layer decoded).
+    auto capture = [&](int64_t frame) {
+        [engine seekToTime:CMTimeMake(frame, 30)];
+        [self spinUntil:^BOOL {
+            [self renderAndWait:view];
+            return engine.playbackStats.presentedFrameIndex == frame && view.missingLayerCount == 0 &&
+                   view.lastError == nil;
+        }
+                timeout:20];
+        XCTAssertEqual(engine.playbackStats.presentedFrameIndex, frame);
+        XCTAssertEqual(view.missingLayerCount, 0u);
+        return pixelsOf(view);
+    };
+    const std::vector<int64_t> frames{52, 56, 63, 68};
+    std::map<int64_t, std::vector<uint8_t>> mixed;
+    for (int64_t f : frames) {
+        mixed[f] = capture(f);
+    }
+    // The two pictures alone: A extended over the transition (B removed), then B (A removed).
+    XCTAssertTrue([engine undo]); // the transition
+    XCTAssertTrue([engine removeClips:@[ @(clipB) ]].ok);
+    XCTAssertTrue([engine trimClipTail:clipA toTime:CMTimeMake(70, 30) clamp:NO].ok);
+    std::map<int64_t, std::vector<uint8_t>> alone;
+    std::map<int64_t, int> burnA;
+    for (int64_t f : frames) {
+        alone[f] = capture(f);
+        burnA[f] = shownIndex(view);
+    }
+    XCTAssertTrue([engine undo]);
+    XCTAssertTrue([engine undo]);
+    XCTAssertTrue([engine removeClips:@[ @(clipA) ]].ok);
+    XCTAssertTrue([engine trimClipHead:clipB toTime:CMTimeMake(50, 30) clamp:NO].ok);
+    std::map<int64_t, std::vector<uint8_t>> incoming;
+    std::map<int64_t, int> burnB;
+    for (int64_t f : frames) {
+        incoming[f] = capture(f);
+        burnB[f] = shownIndex(view);
+    }
+    for (int64_t f : frames) {
+        // Each picture is the VFR source frame whose nominal slot holds the layer's source time.
+        const CMTime sourceA = CMTimeMake(f, 30);
+        const CMTime sourceB = CMTimeAdd(CMTimeMake(3, 1), CMTimeMake(f - 60, 30));
+        const auto slotStart = [](VEAssetInfo *asset, CMTime t) {
+            const int64_t slot = int64_t(std::floor(CMTimeGetSeconds(t) / CMTimeGetSeconds(asset.frameDuration) + 1e-9));
+            return CMTimeMultiply(asset.frameDuration, int32_t(slot));
+        };
+        XCTAssertEqual(burnA[f], ve::test::vfrFrameAt(slotStart(first, sourceA)), @"A's picture at frame %lld", f);
+        // (Matroska keeps millisecond timestamps: a slot within a millisecond of a frame boundary
+        // may land on either side of it.)
+        const CMTime slotB = slotStart(second, sourceB);
+        const int earlyB = ve::test::vfrFrameAt(CMTimeSubtract(slotB, CMTimeMake(1, 1000)));
+        const int lateB = ve::test::vfrFrameAt(CMTimeAdd(slotB, CMTimeMake(1, 1000)));
+        XCTAssertTrue(burnB[f] == earlyB || burnB[f] == lateB, @"B's picture at frame %lld: %d, expected %d..%d", f,
+                      burnB[f], earlyB, lateB);
+
+        const std::vector<uint8_t> &m = mixed[f];
+        const std::vector<uint8_t> &pa = alone[f];
+        const std::vector<uint8_t> &pb = incoming[f];
+        XCTAssertTrue(!m.empty() && m.size() == pa.size() && m.size() == pb.size());
+        if (m.empty() || m.size() != pa.size() || m.size() != pb.size()) {
+            continue;
+        }
+        const double mix = (double(f - 50) + 0.5) / 20.0;
+        int worst = 0;
+        size_t differing = 0;
+        double sumError = 0;
+        for (size_t i = 0; i < m.size(); ++i) {
+            if (i % 4 == 3) {
+                continue; // alpha (skipped)
+            }
+            const double expected = (1.0 - mix) * pa[i] + mix * pb[i];
+            const int error = int(std::lround(std::fabs(double(m[i]) - expected)));
+            worst = std::max(worst, error);
+            sumError += error;
+            differing += std::abs(int(pa[i]) - int(pb[i])) > 32 ? 1 : 0;
+        }
+        const double samples = double(m.size()) * 3 / 4;
+        XCTAssertGreaterThan(double(differing) / samples, 0.001,
+                             @"frame %lld: the two pictures differ (so a missing mix would show)", f);
+        XCTAssertLessThanOrEqual(worst, 3, @"frame %lld: mixed pixels match (1 - %.3f) A + %.3f B", f, mix, mix);
+        XCTAssertLessThan(sumError / samples, 1.0, @"frame %lld", f);
+        NSLog(@"VFR dissolve frame %lld: mix %.3f, A %d, B %d, worst error %d, mean %.3f, %.1f%% differ", f, mix,
+              burnA[f], burnB[f], worst, sumError / samples, 100.0 * double(differing) / samples);
+    }
     [engine attachProgramView:nil];
 }
 

@@ -386,6 +386,21 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)removeTransition:(VETransitionID)transitionID;
 /// Refused beyond the cut's limit with the same explanation as adding.
 - (VEEditResult *)setDuration:(CMTime)duration forTransition:(VETransitionID)transitionID;
+/// A dissolve and its linked audio crossfade: the transition on the cut between the linked
+/// partners of `transitionID`'s two clips (either way round), or 0 when there is none (a clip is
+/// unlinked, the partners do not meet at a cut, or no transition joins them).
+- (VETransitionID)linkedTransitionForTransition:(VETransitionID)transitionID;
+/// Removes the transition and, with `includingLinked`, its linked transition too, as one undo
+/// step ("Remove Transitions"). A linked transition on a locked track is kept (the note says so).
+- (VEEditResult *)removeTransition:(VETransitionID)transitionID includingLinked:(BOOL)includingLinked;
+/// Sets the transition's duration and, with `includingLinked`, gives its linked transition the
+/// same duration fitted to that transition's own cut (the note names a shortening, or why it was
+/// left alone: no room at all, a locked track), as one undo step. Refused like
+/// setDuration:forTransition: when the transition itself does not take the duration. Inside a
+/// coalescing group (a handle drag, inspector nudges) the steps coalesce like single changes.
+- (VEEditResult *)setDuration:(CMTime)duration
+                forTransition:(VETransitionID)transitionID
+              includingLinked:(BOOL)includingLinked;
 - (VEEditResult *)linkClip:(VEClipID)clipID withClip:(VEClipID)otherClipID;
 - (VEEditResult *)unlinkClip:(VEClipID)clipID;
 /// Adds a track on top of its kind (empty name: "V<n>"/"A<n>").
@@ -431,6 +446,18 @@ NS_SWIFT_UI_ACTOR
 - (void)attachProgramView:(nullable VEPreviewView *)view NS_SWIFT_NAME(attachProgramView(_:));
 /// The program monitor view, if attached.
 @property (nonatomic, readonly, weak, nullable) VEPreviewView *programView;
+/// Mirrors the program monitor in a second view (a full-screen output window on another
+/// display): the same playback controller drives both, the pictures are decoded once and each
+/// view maps them to its own textures, and both show the same frame of the same clock. Unlike
+/// the program view, the engine runs and pauses this view's render loop itself (running while
+/// the program plays or pre-rolls) and renders its paused picture; playback is refused while an
+/// export runs, as for the monitors. Replaces a previously attached output view. The view's
+/// playback counters are not added to playbackStats (the program view's are the HUD's).
+- (void)attachOutputView:(VEPreviewView *)view NS_SWIFT_NAME(attachOutputView(_:));
+/// Detaches the output view (it stops showing frames and its render loop is paused).
+- (void)detachOutputView;
+/// The attached output view, if any.
+@property (nonatomic, readonly, weak, nullable) VEPreviewView *outputView;
 /// Same as seekToTime: (kept for callers that only show stills).
 - (void)showProgramFrameAtTime:(CMTime)time;
 

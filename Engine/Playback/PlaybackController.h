@@ -26,9 +26,20 @@
 // positions its sources, starts the audio output if it is not running, and waits (bounded by
 // Config::prerollTimeout once the output is up) for the first video frames and
 // AudioMixer::isPrimed; then it starts the clock and the mixer together and publishes Playing.
-// A later transport call supersedes a pre-roll in progress. While stopped, the tick thread
-// positions the audio sources at the paused frame once it has been still for
-// Config::audioWarmDelay, so play() after a pause or a seek usually finds them primed.
+// A later transport call supersedes a pre-roll in progress.
+//
+// Stopped lookahead (so play() starts within a frame). While stopped (after a pause, a seek, a
+// frame step, the end of a scrub or an edit) and once the playhead has not moved for
+// Config::idleLookaheadDelay, the tick thread retargets the decode pool at the paused frame with
+// the short Config::stoppedLookahead window (forward, the way play() goes) and positions the audio
+// sources there (Config::audioWarmDelay; each source then decodes its own lookahead, about two
+// seconds, into its ring buffer). A playhead that keeps moving (arrow-key repeat, J/K/L taps, a
+// scrub) never retargets the pool: only the scrub path decodes the pictures it shows, so the
+// lookahead never competes with the scrub lane. setIdleLookahead(false) (an export running on
+// its own pool) clears the targets instead and keeps them clear until it is enabled again. The
+// windows stay within the pool's budget share (DecodePool::Config::budgetFraction). A pre-roll
+// then finds the first frames in the cache and the sources primed and completes on its first
+// tick; the clock starts when the first sample is audible (the output latency).
 //
 // Rate changes in the same direction do not pre-roll: 1x <-> 2x continue the audio seamlessly
 // (Clock::startContinuation + AudioMixer::changeRate), 2x -> 4x/8x switches the clock to host
@@ -41,8 +52,9 @@
 //
 // Audio output lifetime: the output (AVAudioEngine) is started by the tick thread when a sequence
 // is opened or a pre-roll needs it and keeps running (the mixer renders silence and the clock
-// ignores it while stopped) until Config::outputIdleTimeout passes without transport activity;
-// then the tick thread stops it. So play/pause/seek/JKL never start or stop the device on the
+// ignores it while stopped) until Config::outputIdleTimeout passes without transport activity
+// (playing, pausing, seeking, stepping, scrubbing, an edit while stopped); then the tick thread
+// stops it. So play/pause/seek/JKL never start or stop the device on the
 // caller's thread, and pausing does not rebuild the audio route. Device changes are reported by
 // the output as events; the controller applies them on its tick thread under its mutex (it is
 // the only writer of the Clock). If the device is lost during playback (the engine cannot
@@ -116,6 +128,14 @@ namespace ve::playback {
 /// layer's source time, 0 for stills. The program monitor looks pictures up by it, and export
 /// renders the same pictures.
 int64_t frameSlotFor(const VideoLayer &layer, const MediaAsset &asset);
+
+/// Source time whose picture that slot shows: the start of the slot (FrameCache answers a slot
+/// with the frame containing its start), or the layer's source time for stills and assets without
+/// a frame duration. Decode requests and targets for a layer use this time, not the layer's own
+/// source time: on a variable-frame-rate source the slot's start can lie in the frame before the
+/// one containing the source time (a short frame after a long one), and decoding the latter would
+/// never fill the slot.
+CMTime frameSlotTimeFor(const VideoLayer &layer, const MediaAsset &asset);
 
 /// Absolute POSIX path of a model media URL (the model may hold "file://" URLs or plain paths).
 std::string mediaPathForURL(const std::string &url);
@@ -213,6 +233,9 @@ struct PresentedFrame {
     CMTime time = kCMTimeInvalid; ///< Clock (or display) time the frame was chosen for.
     int64_t frameIndex = -1;      ///< Sequence frame index.
     bool clockDriven = false;
+    /// Host time (the clock's host time base, mach absolute nanoseconds for the system clock) at
+    /// which the frame source handed the frame out; 0 before the first frame.
+    uint64_t hostNanos = 0;
     std::vector<PresentedLayer> layers;
     /// Not playing: the frame the source holds back (keeping this one on screen) until its
     /// pictures are decoded (see frameSource()); -1 when the frame above is the current one.
@@ -234,12 +257,20 @@ struct PlaybackConfig {
     std::chrono::milliseconds prerollTimeout{1000};
     /// While stopped, the audio sources are positioned (and primed) at the paused frame once it
     /// has not moved for this long, so the next play() starts without opening decoders.
-    std::chrono::milliseconds audioWarmDelay{150};
+    std::chrono::milliseconds audioWarmDelay{100};
+    /// While stopped, the decode pool is retargeted at the paused frame (with stoppedLookahead)
+    /// once it has not moved for this long; a playhead still moving leaves the pool alone.
+    std::chrono::milliseconds idleLookaheadDelay{100};
+    /// Video lookahead decoded from a still playhead (forward), so play() finds its first frames.
+    CMTime stoppedLookahead = CMTimeMake(1, 2);
     /// Longest wait for the mixer to finish the previous run's fade-out before its sources are
     /// repositioned (it takes one output callback; this only matters if the device stalls).
     std::chrono::milliseconds stopFadeTimeout{50};
-    /// The output is stopped after this long without playback or a new sequence.
-    std::chrono::milliseconds outputIdleTimeout{10'000};
+    /// The output is stopped after this long without transport activity (playback, a seek, a
+    /// step, a scrub, an edit while stopped) or a new sequence. Long enough that editing between
+    /// playbacks never finds the device asleep; restarting it costs a play() tens to hundreds of
+    /// milliseconds (Bluetooth outputs the most).
+    std::chrono::milliseconds outputIdleTimeout{300'000};
     double audioHorizonSeconds = 5.0; ///< Audio plan window ahead of the playhead.
     double audioReplanSeconds = 1.0;  ///< Re-plan when the playhead moved this far.
     double retargetSeconds = 0.1;     ///< DecodePool retarget interval (sequence time).
@@ -299,6 +330,13 @@ class PlaybackController {
     /// never interrupt playback.
     void setMuted(bool muted);
     bool isMuted() const;
+    /// Enables (the default) or disables the stopped lookahead (see the header comment).
+    /// Disabling clears the decode pool's targets while stopped (their decoders are released),
+    /// so another decoder user (an export) has the hardware to itself; enabling retargets the
+    /// pool at the paused frame after idleLookaheadDelay. Pre-rolls and playback retarget as
+    /// usual either way.
+    void setIdleLookahead(bool enabled);
+    bool idleLookahead() const;
 
     // MARK: State
 
@@ -314,8 +352,16 @@ class PlaybackController {
 
     void setObserver(dispatch_queue_t queue, PlaybackObserver observer);
 
+    /// Who a frame source is for. The primary source (the program monitor) keeps the counters
+    /// (presented, dropped, late, hits, misses, fps) and lastPresented(); a mirror (a second
+    /// display showing the same program) shows the same frames without touching them, so the
+    /// HUD's numbers do not double.
+    enum class SourceRole { Primary, Mirror };
+
     /// The source to install with -[VEPreviewView setFrameSource:]. Each call returns an
-    /// independent source (its own pins and change tracking) over the same clock and model.
+    /// independent source (its own pins and change tracking) over the same clock and model, so
+    /// several views can show the program at once: the pictures are decoded once (the pool and
+    /// the cache are shared) and each view maps them to its own textures.
     ///
     /// Not playing (paused, stepping, scrubbing, pre-rolling): a frame with a layer whose picture
     /// is not decoded yet is not presented while the decode requested for it is in flight; the
@@ -324,7 +370,7 @@ class PlaybackController {
     /// picture (the first frame after setSequence), or once the request failed, the frame is
     /// presented with what is available (a layer keeps its clip's previous picture, else it is
     /// drawn without one). While playing, a late layer keeps its clip's previous picture.
-    render::PreviewFrameSource frameSource();
+    render::PreviewFrameSource frameSource(SourceRole role = SourceRole::Primary);
 
     // MARK: Components (tests, HUD)
 
@@ -368,7 +414,16 @@ class PlaybackController {
     void warmAudioLocked();
     bool firstFramesReadyLocked(CMTime at) const;
     void pauseLocked(std::optional<CMTime> at = std::nullopt);
+    /// Targets for playing from `at` at `rate` (decodeLookahead scaled by the speed).
     void retargetLocked(CMTime at, double rate);
+    /// Targets for the clips within `spanSeconds` of `at` in the direction of `rate`, the pool's
+    /// lookahead set to `window`.
+    void retargetLocked(CMTime at, double rate, CMTime window, double spanSeconds);
+    /// Stopped: the playhead moved (or became still); the lookahead follows once it is still.
+    void scheduleStoppedLookaheadLocked();
+    /// Tick thread, stopped: retargets the pool at the paused frame when the delay has passed.
+    void stoppedLookaheadTickLocked();
+    std::chrono::steady_clock::time_point stoppedLookaheadDueLocked() const;
     void planAudioLocked(CMTime at);
     void requestDisplayFramesLocked(CMTime at);
     void registerAssetsLocked();
@@ -406,7 +461,8 @@ class PlaybackController {
     CMTime displayTime_ = kCMTimeZero;
     CMTime lastRetarget_ = kCMTimeInvalid;
     CMTime audioPlannedAt_ = kCMTimeInvalid;
-    std::optional<std::pair<CMTime, double>> pendingRetarget_;
+    bool stoppedLookaheadPending_ = false; // stopped: retarget at displayTime_ once still
+    bool idleLookahead_ = true;
     bool replanAudio_ = false;
     int64_t lastPostedFrame_ = -1;
     uint64_t prerollSerial_ = 0;

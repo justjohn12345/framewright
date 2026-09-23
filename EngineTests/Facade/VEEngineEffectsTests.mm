@@ -400,4 +400,212 @@ CMTime frames30(int64_t n) {
     XCTAssertFalse([engine setSpeedNumerator:0 denominator:1 forClips:@[ @(a.first) ] ripple:NO scope:VERippleScopeAllTracks].ok);
 }
 
+// MARK: - Linked transitions (open finding 2) and through edits (finding 1a)
+
+/// A [0, 60) and B [60, 120) on V1 + A1 (linked), from separate source ranges, with a 30-frame
+/// dissolve and its linked crossfade added as one step. Returns (dissolve, crossfade).
+- (std::pair<VETransitionID, VETransitionID>)linkedPairIn:(VEEngine *)engine
+                                                    asset:(VEAssetInfo *)asset
+                                                    clips:(std::pair<VEClipID, VEClipID> *)clipsOut {
+    const auto a = [self place:engine asset:asset at:0 from:0 to:60];
+    const auto b = [self place:engine asset:asset at:60 from:90 to:150];
+    VEEditResult *r = [engine addTransitionFromClip:a.first
+                                             toClip:b.first
+                                           duration:frames30(30)
+                                            options:VETransitionOptionIncludeLinked | VETransitionOptionFitToCut];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqual(r.createdIDs.count, 2u);
+    if (clipsOut != nullptr) {
+        *clipsOut = {a.second, b.second};
+    }
+    return {r.createdIDs[0].longLongValue, r.createdIDs[1].longLongValue};
+}
+
+- (void)testLinkedTransitionsFindEachOther {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    std::pair<VEClipID, VEClipID> audio{};
+    const auto [dissolve, crossfade] = [self linkedPairIn:engine asset:asset clips:&audio];
+    XCTAssertEqual([engine linkedTransitionForTransition:dissolve], crossfade);
+    XCTAssertEqual([engine linkedTransitionForTransition:crossfade], dissolve);
+    XCTAssertEqual([engine linkedTransitionForTransition:12345], 0);
+    // Unlinking one side breaks the pair.
+    XCTAssertTrue([engine unlinkClip:audio.second].ok);
+    XCTAssertEqual([engine linkedTransitionForTransition:dissolve], 0);
+    XCTAssertEqual([engine linkedTransitionForTransition:crossfade], 0);
+}
+
+- (void)testRemovingALinkedPairIsOneUndoStepAndOptionRemovesOne {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    const auto [dissolve, crossfade] = [self linkedPairIn:engine asset:asset clips:nullptr];
+    const uint64_t before = engine.changeCount;
+
+    // Delete on the crossfade (either one) removes both, as one step.
+    VEEditResult *both = [engine removeTransition:crossfade includingLinked:YES];
+    XCTAssertTrue(both.ok, @"%@", both.message);
+    XCTAssertEqual(engine.sequence.transitions.count, 0u);
+    XCTAssertEqual(engine.changeCount, before + 1);
+    XCTAssertEqualObjects(engine.undoActionName, @"Remove Transitions");
+    XCTAssertTrue([engine undo]);
+    XCTAssertEqual(engine.sequence.transitions.count, 2u, @"one undo brings both back");
+    XCTAssertEqual([engine linkedTransitionForTransition:dissolve], crossfade);
+
+    // Option-Delete: only that one.
+    VEEditResult *one = [engine removeTransition:dissolve includingLinked:NO];
+    XCTAssertTrue(one.ok, @"%@", one.message);
+    XCTAssertNil([engine transitionInfo:dissolve]);
+    XCTAssertNotNil([engine transitionInfo:crossfade]);
+    XCTAssertEqualObjects(engine.undoActionName, @"Remove Transition");
+    XCTAssertTrue([engine undo]);
+
+    // Without a partner, includingLinked removes just the one.
+    VEEditResult *solo = [engine removeTransition:crossfade includingLinked:NO];
+    XCTAssertTrue(solo.ok);
+    VEEditResult *alone = [engine removeTransition:dissolve includingLinked:YES];
+    XCTAssertTrue(alone.ok, @"%@", alone.message);
+    XCTAssertEqual(engine.sequence.transitions.count, 0u);
+    XCTAssertFalse([engine removeTransition:dissolve includingLinked:YES].ok, @"already gone");
+}
+
+- (void)testALinkedTransitionOnALockedTrackIsKept {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    const auto [dissolve, crossfade] = [self linkedPairIn:engine asset:asset clips:nullptr];
+    const VETrackID a1 = engine.sequence.audioTrackIDs[0].longLongValue;
+    XCTAssertTrue([engine setTrack:a1 locked:YES].ok);
+    VEEditResult *r = [engine removeTransition:dissolve includingLinked:YES];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertNil([engine transitionInfo:dissolve]);
+    XCTAssertNotNil([engine transitionInfo:crossfade], @"the locked track's crossfade stays");
+    XCTAssertTrue([r.note containsString:@"locked"], @"%@", r.note);
+    XCTAssertTrue([engine undo]);
+    VEEditResult *resized = [engine setDuration:frames30(20) forTransition:dissolve includingLinked:YES];
+    XCTAssertTrue(resized.ok, @"%@", resized.message);
+    XCTAssertTrue([resized.note containsString:@"locked"], @"%@", resized.note);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:crossfade].duration, frames30(30)), 0);
+}
+
+- (void)testResizingALinkedPairIsOneStepAndFitsThePartnerToItsCut {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    const auto [dissolve, crossfade] = [self linkedPairIn:engine asset:asset clips:nullptr];
+    const uint64_t before = engine.changeCount;
+    VEEditResult *r = [engine setDuration:frames30(40) forTransition:dissolve includingLinked:YES];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(r.note, @"");
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:dissolve].duration, frames30(40)), 0);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:crossfade].duration, frames30(40)), 0);
+    XCTAssertEqual(engine.changeCount, before + 1);
+    XCTAssertEqualObjects(engine.undoActionName, @"Change Transition Durations");
+    XCTAssertTrue([engine undo]);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:dissolve].duration, frames30(30)), 0);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:crossfade].duration, frames30(30)), 0, @"one undo");
+
+    // Only this one.
+    XCTAssertTrue([engine setDuration:frames30(12) forTransition:crossfade includingLinked:NO].ok);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:dissolve].duration, frames30(30)), 0);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:crossfade].duration, frames30(12)), 0);
+
+    // The partner's cut is tighter: it is fitted and the note says so; the requested one gets
+    // the full length. A neighbouring crossfade on the audio B|C cut takes room from A|B.
+    const auto c = [self place:engine asset:asset at:120 from:200 to:260];
+    VETransitionInfo *crossInfo = [engine transitionInfo:crossfade];
+    VEEditResult *neighbour = [engine addTransitionFromClip:crossInfo.toClipID toClip:c.second duration:frames30(100)];
+    XCTAssertTrue(neighbour.ok, @"%@", neighbour.message);
+    const int64_t room = [engine transitionLimitForTransition:crossfade].maximumFrames;
+    XCTAssertLessThan(room, 50);
+    VEEditResult *fitted = [engine setDuration:frames30(50) forTransition:dissolve includingLinked:YES];
+    XCTAssertTrue(fitted.ok, @"%@", fitted.message);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:dissolve].duration, frames30(50)), 0);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:crossfade].duration, frames30(room)), 0);
+    XCTAssertTrue([fitted.note containsString:@"linked transition was limited to"], @"%@", fitted.note);
+
+    // Too long for the requested one itself: refused with the cut's explanation, nothing changes.
+    VEEditResult *refused = [engine setDuration:frames30(200) forTransition:dissolve includingLinked:YES];
+    XCTAssertFalse(refused.ok);
+    XCTAssertTrue([refused.message containsString:@"does not fit this cut"], @"%@", refused.message);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:dissolve].duration, frames30(50)), 0);
+}
+
+- (void)testAHandleDragOnALinkedPairIsOneUndoStep {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    const auto pair = [self linkedPairIn:engine asset:asset clips:nullptr];
+    const VETransitionID dissolve = pair.first;
+    const VETransitionID crossfade = pair.second;
+    const uint64_t before = engine.changeCount;
+    [engine beginCoalescingWithKey:@"drag"];
+    for (int64_t frames : {32, 36, 40, 34}) {
+        VEEditResult *step = [engine performInCoalescingGroup:@"drag"
+                                                         edit:^VEEditResult * {
+                                                             return [engine setDuration:frames30(frames)
+                                                                          forTransition:dissolve
+                                                                        includingLinked:YES];
+                                                         }];
+        XCTAssertTrue(step.ok, @"%@", step.message);
+    }
+    [engine endCoalescing];
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:dissolve].duration, frames30(34)), 0);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:crossfade].duration, frames30(34)), 0);
+    XCTAssertGreaterThan(engine.changeCount, before);
+    XCTAssertTrue([engine undo]);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:crossfade].duration, frames30(30)), 0);
+    XCTAssertEqualObjects(engine.undoActionName, @"Add Transitions", @"the whole drag was one step");
+
+    // Keyboard nudges (Accumulate) on a pair merge into one step too.
+    [engine beginCoalescingWithKey:@"nudge" mode:VECoalescingModeAccumulate];
+    for (int64_t frames : {31, 32, 33}) {
+        VEEditResult *step = [engine performInCoalescingGroup:@"nudge"
+                                                         edit:^VEEditResult * {
+                                                             return [engine setDuration:frames30(frames)
+                                                                          forTransition:dissolve
+                                                                        includingLinked:YES];
+                                                         }];
+        XCTAssertTrue(step.ok, @"%@", step.message);
+    }
+    [engine endCoalescing];
+    XCTAssertTrue([engine undo]);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:dissolve].duration, frames30(30)), 0, @"one step");
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:crossfade].duration, frames30(30)), 0);
+}
+
+- (void)testADissolveAtAThroughEditSaysBothSidesAreTheSame {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    // A clip split once: both halves continue the same source.
+    const auto whole = [self place:engine asset:asset at:0 from:0 to:120];
+    VEEditResult *split = [engine splitClips:@[ @(whole.first) ] atTime:frames30(60)];
+    XCTAssertTrue(split.ok, @"%@", split.message);
+    const VETrackID v1 = engine.sequence.videoTrackIDs[0].longLongValue;
+    NSArray<VEClipInfo *> *halves = [engine clipsOnTrack:v1];
+    XCTAssertEqual(halves.count, 2u);
+    VEEditResult *r = [engine addTransitionFromClip:halves[0].clipID
+                                             toClip:halves[1].clipID
+                                           duration:frames30(15)
+                                            options:VETransitionOptionIncludeLinked | VETransitionOptionFitToCut];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertTrue([r.note containsString:@"Both sides show the same frames here; trim or move one side to see the dissolve"],
+                  @"%@", r.note);
+    XCTAssertTrue([engine undo]);
+    // Only the audio crossfade: the audio wording.
+    const VETrackID a1 = engine.sequence.audioTrackIDs[0].longLongValue;
+    NSArray<VEClipInfo *> *audio = [engine clipsOnTrack:a1];
+    VEEditResult *fade = [engine addTransitionFromClip:audio[0].clipID toClip:audio[1].clipID duration:frames30(15)];
+    XCTAssertTrue(fade.ok, @"%@", fade.message);
+    XCTAssertTrue([fade.note containsString:@"Both sides play the same audio here"], @"%@", fade.note);
+    XCTAssertTrue([engine undo]);
+
+    // Trim one side and close the gap: the second half now starts 10 frames later in the source.
+    XCTAssertTrue([engine trimClipHead:halves[1].clipID toTime:frames30(70) clamp:NO].ok);
+    XCTAssertTrue([engine moveClip:halves[1].clipID toTrack:v1 start:frames30(60)].ok);
+    NSArray<VEClipInfo *> *trimmed = [engine clipsOnTrack:v1];
+    XCTAssertEqual(trimmed.count, 2u);
+    VEEditResult *visible = [engine addTransitionFromClip:trimmed[0].clipID
+                                                   toClip:trimmed[1].clipID
+                                                 duration:frames30(10)];
+    XCTAssertTrue(visible.ok, @"%@", visible.message);
+    XCTAssertFalse([visible.note containsString:@"Both sides"], @"%@", visible.note);
+}
+
 @end

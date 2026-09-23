@@ -1074,6 +1074,103 @@ EditResult SetTransitionDuration::perform(const Project &project, Sequence &sequ
     return EditResult::success();
 }
 
+RemoveTransitions::RemoveTransitions(SequenceId sequenceId, std::vector<TransitionId> transitionIds)
+    : SequenceCommand(sequenceId), transitionIds_(std::move(transitionIds)) {}
+
+EditResult RemoveTransitions::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    if (transitionIds_.empty()) {
+        return EditResult::failure(EditError::InvalidArgument, "no transitions to remove");
+    }
+    for (const TransitionId id : transitionIds_) {
+        const Transition *transition = sequence.findTransition(id);
+        if (!transition) {
+            return EditResult::failure(EditError::TransitionNotFound,
+                                       "transition " + idString(id.value()) + " does not exist");
+        }
+        if (EditResult r = requireEditableTrack(sequence.findTrack(transition->trackId), transition->trackId); !r) {
+            return r;
+        }
+    }
+    std::erase_if(sequence.transitions, [this](const Transition &t) {
+        return std::find(transitionIds_.begin(), transitionIds_.end(), t.id) != transitionIds_.end();
+    });
+    return EditResult::success();
+}
+
+SetTransitionDurations::SetTransitionDurations(SequenceId sequenceId, std::vector<Change> changes)
+    : SequenceCommand(sequenceId), changes_(std::move(changes)) {
+    std::string key = "transitionDurations:";
+    for (const Change &change : changes_) {
+        key += idString(change.transitionId.value()) + ",";
+    }
+    setCoalescingKey(key);
+}
+
+EditResult SetTransitionDurations::perform(const Project &project, Sequence &sequence, IdGenerator &) {
+    if (changes_.empty()) {
+        return EditResult::failure(EditError::InvalidArgument, "no transitions to change");
+    }
+    for (const Change &change : changes_) {
+        const Transition *existing = sequence.findTransition(change.transitionId);
+        if (!existing) {
+            return EditResult::failure(EditError::TransitionNotFound,
+                                       "transition " + idString(change.transitionId.value()) + " does not exist");
+        }
+        if (EditResult r = requireEditableTrack(sequence.findTrack(existing->trackId), existing->trackId); !r) {
+            return r;
+        }
+        Transition updated = *existing;
+        if (EditResult r = snapDuration(sequence, change.duration, updated.duration); !r) {
+            return r;
+        }
+        if (EditResult r = checkTransitionPlacement(sequence, project, updated, change.transitionId); !r) {
+            return r;
+        }
+        for (Transition &transition : sequence.transitions) {
+            if (transition.id == change.transitionId) {
+                transition = updated;
+            }
+        }
+    }
+    return EditResult::success();
+}
+
+std::optional<TransitionId> linkedTransition(const Sequence &sequence, TransitionId transitionId) {
+    const Transition *transition = sequence.findTransition(transitionId);
+    if (!transition) {
+        return std::nullopt;
+    }
+    const Clip *from = sequence.findClip(transition->fromClipId);
+    const Clip *to = sequence.findClip(transition->toClipId);
+    if (!from || !to || !from->linkedClipId || !to->linkedClipId) {
+        return std::nullopt;
+    }
+    const ClipId partnerFrom = *from->linkedClipId;
+    const ClipId partnerTo = *to->linkedClipId;
+    for (const Transition &candidate : sequence.transitions) {
+        if (candidate.id != transitionId && candidate.fromClipId == partnerFrom && candidate.toClipId == partnerTo) {
+            return candidate.id;
+        }
+    }
+    return std::nullopt;
+}
+
+bool isThroughEdit(const Sequence &sequence, ClipId fromClipId, ClipId toClipId) {
+    const Clip *from = sequence.findClip(fromClipId);
+    const Clip *to = sequence.findClip(toClipId);
+    if (!from || !to || from->assetId != to->assetId || from->trackId != to->trackId ||
+        CMTimeCompare(from->timelineEnd(), to->timelineStart) != 0 || from->isStill != to->isStill ||
+        !(from->speedRatio() == to->speedRatio()) || !(from->video == to->video) || !(from->audio.gainDb == to->audio.gainDb)) {
+        return false;
+    }
+    if (from->isStill) {
+        return true; // a still shows the same picture on both sides
+    }
+    const auto out = from->exactSourceOut();
+    const auto in = ExactTime::from(to->sourceIn);
+    return out && in && *out == *in;
+}
+
 // ----- Transition limits -----
 
 namespace {

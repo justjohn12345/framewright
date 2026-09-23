@@ -297,7 +297,9 @@ struct ExportJob::Run {
                 seen.push_back(layer.clipId);
                 media::DecodeTarget target;
                 target.asset = layer.assetId;
-                target.sourceTime = layer.sourceTime;
+                // The start of the slot the picture is looked up by (see frameSlotTimeFor).
+                const MediaAsset *asset = project.findAsset(layer.assetId);
+                target.sourceTime = asset ? playback::frameSlotTimeFor(layer, *asset) : layer.sourceTime;
                 target.priority = static_cast<int>(10000 - static_cast<int64_t>(k) * 10 + static_cast<int64_t>(i));
                 target.lane = layer.clipId.value();
                 targets.push_back(std::move(target));
