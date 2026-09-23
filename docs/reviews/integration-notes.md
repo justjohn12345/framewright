@@ -236,3 +236,65 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   source's frame (`PlaybackHarness::frame()` / `device()`) for pixel comparisons and compares the
   playback mix with `OfflineAudioRenderer` sample by sample (1.2e-7 measured). Missing encoders fail
   `ExportJobTests` unless `FRAMEWRIGHT_ALLOW_MISSING_ENCODERS=1`.
+
+## UX round (open findings 1-7 from hands-on testing)
+- Play start (finding 3). The cause of the lag on the iPhone clip was not the lookahead: on a
+  variable-frame-rate source a layer's picture is looked up by its nominal frame slot, whose start
+  can lie in the frame before the one containing the layer's source time, but the paused picture's
+  scrub request and the pool targets asked for the source time. The slot was never filled, the paused
+  picture kept its previous frame and `play()` waited for the first frame until the pre-roll timeout
+  (measured 1004.7 ms before the fix). `playback::frameSlotTimeFor(layer, asset)` (the slot's start)
+  is now what the controller requests and targets, and what `ExportJob` targets. Any new decode path
+  that looks pictures up by `frameSlotFor` must request `frameSlotTimeFor`.
+- Stopped lookahead (`PlaybackController.h`): while stopped and once the playhead has been still for
+  `PlaybackConfig::idleLookaheadDelay` (100 ms), the tick thread retargets the pool at the paused
+  frame with `stoppedLookahead` (0.5 s, forward) and warms the audio (`audioWarmDelay`, now 100 ms;
+  the sources then buffer about 2 s). A moving playhead (step repeat, J/K/L taps, scrubbing, edit
+  drags) never retargets the pool; the immediate stopped retarget (`pendingRetarget_`) is gone.
+  `setIdleLookahead(false)` clears the targets while stopped; the facade does it while an export runs.
+  Any transport activity keeps the audio output warm for `outputIdleTimeout`, now 5 minutes (the old
+  10 s let the device stop between edits, so the next Space paid for AVAudioEngine's start).
+- Measured press-to-first-presented-frame (the start frame is already on screen, so the latency is
+  the first new frame's presentation minus the playing time it stands for; three runs): controller
+  with a null output 2-14 ms cached, 17-20 ms cold; the VFR source 9-12 ms (was up to 1004.7 ms);
+  facade with the real AVAudioEngine output 17-27 ms cached, 37-49 ms cold. Tests assert < 50 ms
+  cached (`PlaybackLookaheadTests`, `VEEnginePlaybackTests.testPlayStartLatencyThroughTheFacade`). `PresentedFrame::hostNanos` /
+  `VEPlaybackStats.presentedHostTime` report when a frame was handed out.
+- Frame sources: `PlaybackController::frameSource(SourceRole::Mirror)` shows the same frames as the
+  primary one without touching the counters or `lastPresented()`. `VEEngine attachOutputView:` /
+  `detachOutputView` / `outputView` mirror the program in a second view (decoded once, textures per
+  view); unlike the program view the engine runs and pauses the output view's render loop from the
+  program's status and renders it on `needsDisplay`; it follows export refusal like the monitors.
+- Linked transitions (finding 2): `linkedTransitionForTransition:`, `removeTransition:includingLinked:`
+  (a locked partner is kept, with a note), `setDuration:forTransition:includingLinked:` (the partner
+  gets the same length fitted to its own cut; the note names a shortening). The engine commands are
+  `RemoveTransitions` and `SetTransitionDurations` (EditOps), single SequenceCommands rather than a
+  CompositeCommand so a keyboard-nudge Accumulate group merges them. `linkedTransition()` and
+  `isThroughEdit()` are plain functions in EditOps.
+- Through edits (finding 1a): `addTransition...` adds "Both sides show the same frames here; trim or
+  move one side to see the dissolve" (audio: "...play the same audio here...") to the note when both
+  clips play one asset contiguously with the same speed and parameters.
+- App: `WindowLayoutModel` (App/State/WindowLayout.swift, `store.layout`) owns the source monitor's
+  visibility, the right panel's tab (`InspectorTab`) and the split positions (UserDefaults keys
+  `layout.*`; a store made with `ProjectStore(engine:)` keeps them in memory so tests never touch the
+  app's saved layout; the app's `ProjectStore()` persists them). The splits are SwiftUI views with
+  `PaneDivider`, not NSSplitView. The timeline pane is `fittedTimelineHeight(contentHeight:)` until
+  the divider is dragged (double-click fits again). `store.collapsedTrackIDs` collapses empty tracks
+  (a track that gets a clip shows full height); the timeline model cache is keyed by it too.
+  `store.setSourceMonitorVisible(_:)` pauses source playback when hiding; `showInSourceMonitor` shows it.
+- App: Transitions live in `EffectsPanel` (the right panel's Effects tab); the "+" and the drag source
+  are unchanged. `TimelineDropDelegate`'s logic takes any `TimelineDropInfo` (DropInfo conforms), so
+  new drop kinds (Photos file promises, open finding 9) can be tested with a double. Right-clicks in
+  the track area go through `ContextMenuCatcher` + `TimelineGestureController.contextMenuItems(at:)`.
+  Delete on a transition removes its linked one; Option-Delete (`KeyboardController.Action
+  .deleteTransitionOnly`, Clip > Delete Transition Only) removes one. `store.resizesLinkedTransitions`
+  (Editing preference `resizeLinkedTransitions`, default on) drives the inspector and handle drags.
+- App: `OutputDisplayController` (`store.outputDisplay`, View > Program Monitor on Second Display) over
+  `ScreenProviding` (`SystemScreens`, or a test double); the output window is an `OutputWindow`
+  (borderless, can become key, Escape closes); `KeyboardController` takes transport keys from it too.
+- For keyframed Motion (finding 8): its controls belong in the Inspector tab (per clip, with the
+  playhead), presets in the Effects tab; evaluate it in the Scheduler so both frame sources, the
+  mirror and export share it; keyframe markers on collapsed rows need no room (only empty rows collapse).
+- For Photos drops (finding 9): accept file promises in `TimelineDropDelegate.types` and the media
+  bin's drop, test them with a `TimelineDropInfo` double whose providers carry the promise types;
+  slow-motion and iPhone VFR media rely on `frameSlotTimeFor` (above).

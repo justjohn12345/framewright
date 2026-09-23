@@ -23,10 +23,20 @@ audited the code line by line.
   undo/redo of every edit, and exact rational time math (29.97 fps and 44.1 kHz audio do not
   accumulate rounding).
 - Real-time playback with an audio-clocked Metal compositor, JKL shuttle, frame stepping and
-  scrubbing; measured A/V offset on the real output device is zero within a sample.
+  scrubbing; measured A/V offset on the real output device is zero within a sample. A still
+  playhead keeps a short lookahead decoded and the audio primed, so Space starts within a frame
+  (about 20-30 ms press to picture on cached media, variable-frame-rate phone footage included).
+- A window laid out for the program monitor: the source monitor appears beside it when media is
+  opened (View > Show Source Monitor, Shift+Cmd+2), the timeline is as tall as its tracks (empty
+  tracks collapse), the dividers can be dragged and are remembered, and the inspector has an
+  Effects tab with the transitions (drag onto a cut, or "+" at the playhead). View > Program
+  Monitor on Second Display shows the program full screen on another display, mirrored and in
+  sync with the in-window monitor.
 - Inspector for position, scale, rotation, opacity, gain, fades and exact speed; cross
-  dissolves and constant-power crossfades with duration handles; fade and gain handles on
-  audio clips; Speed/Duration sheet.
+  dissolves and constant-power crossfades with duration handles, kept together with their linked
+  partner (Delete removes both, Option-Delete one; a duration change also changes the linked one
+  unless turned off) and shown relative to their cut; a note when a dissolve sits on a plain split
+  (both sides show the same frames); fade and gain handles on audio clips; Speed/Duration sheet.
 - Project files in JSON with schema migration; security-scoped bookmarks for media.
 - Export (File > Export…): H.264, HEVC (8-bit and 10-bit Main10) and ProRes 422 on
   VideoToolbox (hardware where the Mac has it for the frame size) and software AV1 (SVT-AV1) to
