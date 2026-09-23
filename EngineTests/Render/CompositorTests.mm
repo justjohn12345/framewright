@@ -1061,7 +1061,7 @@ static Throughput runPipelined(Compositor &compositor, const RenderGraph &graph,
 }
 
 // (i) Steady state at 1080p, export and preview paths: frame time, GPU load, and no growth of
-// memory or pooled objects over 3000 frames.
+// memory or pooled objects over 6000 frames.
 - (void)testSteadyStatePerformanceAndMemory {
     const size_t w = 1920, h = 1080;
     media::PixelBuffer a = makeBurnIn420v(1, w, h);
@@ -1114,20 +1114,37 @@ static Throughput runPipelined(Compositor &compositor, const RenderGraph &graph,
     NSLog(@"Compositor 1080p preview synchronous latency: %.3f ms/frame", syncMs);
     XCTAssertLessThan(syncMs, 2.0);
 
-    // Memory: 3000 more frames through both paths leave the footprint and the compositor's
-    // pools where they were.
-    const uint64_t before = test::physicalFootprint();
-    const Compositor::Stats statsBefore = _compositor->stats();
-    for (int round = 0; round < 5; ++round) {
+    // Memory: 6000 more frames through both paths leave the footprint and the compositor's
+    // pools where they were. 3 MB over 6000 frames catches a leak of 0.5 KB per frame (the
+    // footprint also moves with unrelated activity in the process, e.g. other tests' threads
+    // winding down).
+    // A half-size preview as well, so minified layers go through the pre-scale pool.
+    std::vector<id<MTLTexture>> small{makeTargetTexture(960, 540), makeTargetTexture(960, 540),
+                                      makeTargetTexture(960, 540)};
+    size_t nextSmall = 0;
+    auto smallTarget = [&]() -> RenderTarget { return TextureTarget{small[nextSmall++ % small.size()], {}, nil}; };
+    // Warm up every path well past first use: Metal, MPS and the allocators keep growing their
+    // caches for the first thousand or so frames (measured: +111 MB on the first frame, +25 MB
+    // over the next 2000, then flat), which is not a leak.
+    for (int round = 0; round < 3; ++round) {
         runPipelined(*_compositor, g, {a, b}, exportTarget, 300);
         runPipelined(*_compositor, g, {a, b}, previewTarget, 300);
+        runPipelined(*_compositor, g, {a, b}, smallTarget, 300);
+    }
+    const uint64_t before = test::physicalFootprint();
+    const Compositor::Stats statsBefore = _compositor->stats();
+    XCTAssertGreaterThan(statsBefore.scratchTextures, 0u);
+    for (int round = 0; round < 10; ++round) {
+        runPipelined(*_compositor, g, {a, b}, exportTarget, 200);
+        runPipelined(*_compositor, g, {a, b}, previewTarget, 200);
+        runPipelined(*_compositor, g, {a, b}, smallTarget, 200);
     }
     const uint64_t after = test::physicalFootprint();
     const Compositor::Stats statsAfter = _compositor->stats();
     const double growthMB = (double(after) - double(before)) / (1024.0 * 1024.0);
-    NSLog(@"Compositor footprint over 3000 frames: %.1f MB -> %.1f MB (%+.2f MB); pooled textures %zu -> %zu",
+    NSLog(@"Compositor footprint over 6000 frames: %.1f MB -> %.1f MB (%+.2f MB); pooled textures %zu -> %zu",
           before / 1048576.0, after / 1048576.0, growthMB, statsBefore.scratchTextures, statsAfter.scratchTextures);
-    XCTAssertLessThan(growthMB, 2.0);
+    XCTAssertLessThan(growthMB, 3.0);
     XCTAssertEqual(statsAfter.scratchTextures, statsBefore.scratchTextures);
     XCTAssertEqual(statsAfter.freeSlots, Compositor::kFramesInFlight, @"every frame's slot came back");
 }
