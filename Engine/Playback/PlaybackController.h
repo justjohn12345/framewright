@@ -236,6 +236,10 @@ struct PlaybackConfig {
     /// seconds per unit of rate) ahead of the playhead.
     double audioJoinLeadSeconds = 0.3;
     std::chrono::milliseconds tickInterval{4};
+    /// DecodePool::requestFrame lane of the paused/scrubbed picture's layer i is scrubLaneBase + i,
+    /// so the layers of one frame (a dissolve between two clips of one asset) never supersede each
+    /// other, and two controllers or monitors sharing a pool stay apart when given distinct bases.
+    uint64_t scrubLaneBase = 0;
 };
 
 class PlaybackController {

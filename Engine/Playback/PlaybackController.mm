@@ -164,6 +164,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
         }
         frame.graph = RenderGraph{};
         frame.textures.clear();
+        frame.status = media::okStatus();
         rs.pins.clear();
         rs.lastClips.clear();
         rs.lastTextures.clear();
@@ -205,6 +206,9 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
 
     RenderGraph graph = Scheduler::renderGraphAt(*sequence, *rs.project, timeForFrame(index, fd));
     const size_t n = graph.layers.size();
+    // A fresh frame: its status reports only this frame's problems (the view clears lastError
+    // with the first frame whose status is ok).
+    media::Status status = media::okStatus();
     frame.textures.resize(n);
     rs.nextClips.clear();
     rs.nextShown.clear();
@@ -232,6 +236,9 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
                     // Decoded but not drawable: neither a hit nor exact; keep the old picture.
                     mapFailures.fetch_add(1, std::memory_order_relaxed);
                     usable = false;
+                    if (status.ok()) {
+                        status = std::move(mapped).error();
+                    }
                 }
             }
             if (usable) {
@@ -287,6 +294,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
     }
 
     frame.graph = std::move(graph);
+    frame.status = std::move(status);
     // Swap in the new pins; the previous frame's pins are released here, after the new ones
     // were taken (so a frame shown twice is never unpinned in between).
     std::swap(rs.pins, rs.nextPins);
@@ -584,11 +592,13 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
     const RenderGraph graph = Scheduler::renderGraphAt(*sequence, *project_, at);
     std::weak_ptr<Core> weakCore = core_;
     std::weak_ptr<ObserverHub> weakHub = hub_;
-    for (const VideoLayer &layer : graph.layers) {
+    for (size_t i = 0; i < graph.layers.size(); ++i) {
+        const VideoLayer &layer = graph.layers[i];
         const MediaAsset *asset = project_->findAsset(layer.assetId);
         if (!asset || cache_->contains(layer.assetId, slotFor(layer, *asset))) {
             continue;
         }
+        const uint64_t lane = config_.scrubLaneBase + i;
         pool_->requestFrame(layer.assetId, layer.sourceTime, [weakCore, weakHub](media::Result<media::ScrubFrame> r) {
             if (!r.ok()) {
                 return;
@@ -599,7 +609,7 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
             if (auto hub = weakHub.lock()) {
                 hub->postNeedsDisplay();
             }
-        });
+        }, lane);
     }
     postNeedsDisplay();
 }
