@@ -21,7 +21,7 @@ struct ProgramMonitorView: View {
 }
 
 /// The program monitor wired to a store: runs while the program plays, shows the debug HUD when
-/// enabled. Observes only the playhead's transport state, not the window's model. A click gives
+/// enabled and the Ken Burns helper while it is open. Observes only the playhead's transport state, not the window's model. A click gives
 /// the program (timeline) the transport keys and takes keyboard focus back from text fields.
 struct ProgramMonitorHost: View {
     let store: ProjectStore
@@ -37,6 +37,10 @@ struct ProgramMonitorHost: View {
                 PlaybackHUD(engine: store.engine)
                     .padding(6)
             }
+        }
+        .overlay {
+            // The Ken Burns helper covers the monitor while it edits a clip.
+            KenBurnsOverlayHost(store: store)
         }
         .contentShape(Rectangle())
         .onTapGesture {

@@ -9,7 +9,10 @@ import FramewrightEngine
 /// Every parameter can be dragged (slider: one undo step per drag), typed with or without its
 /// unit (Return applies it, clamped to the parameter's range) and nudged from its field with
 /// Up/Down (±1) and Shift+Up/Down (±10; a burst of nudges is one undo step). Each parameter and
-/// each section has a reset button. Refused edits show a message at the top (see
+/// each section has a reset button. With one video clip selected each Video parameter also has
+/// keyframe controls (previous keyframe, the keyframe toggle at the playhead, next keyframe, the
+/// interpolation menu) and the values shown are the ones at the playhead; "Ken Burns…" opens the
+/// start/end rectangles on the program monitor. Refused edits show a message at the top (see
 /// `InspectorModel`, which holds the logic).
 struct InspectorView: View {
     @ObservedObject var store: ProjectStore
@@ -52,7 +55,17 @@ struct InspectorView: View {
             }
             if inspector.isAvailable(.positionX) {
                 ParameterSection(store: store, inspector: inspector, section: .video,
-                                 subtitle: inspector.videoTargets.count > 1 ? "\(inspector.videoTargets.count) video clips" : nil)
+                                 subtitle: inspector.videoTargets.count > 1 ? "\(inspector.videoTargets.count) video clips" : nil) {
+                    if let clip = inspector.motionTarget {
+                        HStack {
+                            Button("Ken Burns…") { store.beginKenBurns(clip: clip.clipID) }
+                                .controlSize(.small)
+                                .help("Pan and zoom from a start framing to an end framing, drawn on the program monitor")
+                                .accessibilityIdentifier("KenBurns")
+                            Spacer()
+                        }
+                    }
+                }
             }
             if inspector.isAvailable(.gain) {
                 ParameterSection(store: store, inspector: inspector, section: .audio,
@@ -188,8 +201,13 @@ private struct ParameterSection<Extra: View>: View {
                     .help("Reset every \(section.title.lowercased()) setting of the selection")
                     .accessibilityIdentifier("Reset.\(section.rawValue)")
             }
-            ForEach(InspectorParameter.parameters(in: section)) { parameter in
-                ParameterRow(store: store, inspector: inspector, parameter: parameter)
+            if section == .video, let clip = inspector.motionTarget, clip.hasKeyframes {
+                // Animated values follow the playhead.
+                AnimatedParameterRows(store: store, inspector: inspector, playhead: store.playhead)
+            } else {
+                ForEach(InspectorParameter.parameters(in: section)) { parameter in
+                    ParameterRow(store: store, inspector: inspector, parameter: parameter)
+                }
             }
             extra
         }
@@ -203,12 +221,29 @@ extension ParameterSection where Extra == EmptyView {
     }
 }
 
-/// One parameter: label, typed field (with nudges), reset button and slider.
+/// The Video rows of an animated clip: they observe the playhead, since the values shown (and the
+/// keyframe under the playhead) change with it.
+private struct AnimatedParameterRows: View {
+    @ObservedObject var store: ProjectStore
+    let inspector: InspectorModel
+    @ObservedObject var playhead: PlayheadModel
+
+    var body: some View {
+        ForEach(InspectorParameter.parameters(in: .video)) { parameter in
+            ParameterRow(store: store, inspector: inspector, parameter: parameter, displayTime: playhead.time)
+        }
+    }
+}
+
+/// One parameter: label, typed field (with nudges), reset button and slider; Video parameters of a
+/// single clip also have the keyframe controls (see `KeyframeControls`).
 private struct ParameterRow: View {
     @ObservedObject var store: ProjectStore
     let inspector: InspectorModel
     let parameter: InspectorParameter
     var focusSerial = 0
+    /// The playhead the row was drawn for (a new time re-evaluates the row of an animated clip).
+    var displayTime: CMTime = .invalid
     @State private var dragging = false
 
     var body: some View {
@@ -234,18 +269,23 @@ private struct ParameterRow: View {
                 .help("Reset \(parameter.label)")
             }
             .font(.caption)
-            Slider(value: Binding(get: { inspector.value(parameter) ?? parameter.defaultValue },
-                                  set: { inspector.sliderChanged(parameter, $0) }),
-                   in: inspector.sliderRange(parameter)) { editing in
-                if editing {
-                    inspector.beginSliderDrag(parameter)
-                    dragging = true
-                } else {
-                    inspector.endSliderDrag()
-                    dragging = false
+            HStack(spacing: 4) {
+                Slider(value: Binding(get: { inspector.value(parameter) ?? parameter.defaultValue },
+                                      set: { inspector.sliderChanged(parameter, $0) }),
+                       in: inspector.sliderRange(parameter)) { editing in
+                    if editing {
+                        inspector.beginSliderDrag(parameter)
+                        dragging = true
+                    } else {
+                        inspector.endSliderDrag()
+                        dragging = false
+                    }
+                }
+                .controlSize(.mini)
+                if inspector.hasKeyframeControls(parameter) {
+                    KeyframeControls(inspector: inspector, parameter: parameter)
                 }
             }
-            .controlSize(.mini)
         }
         .onDisappear {
             // The selection changed mid-drag: commit what the drag did.
@@ -254,6 +294,78 @@ private struct ParameterRow: View {
                 inspector.endSliderDrag()
             }
         }
+    }
+}
+
+/// A Video parameter's keyframe controls (Premiere's Effect Controls): previous keyframe, the
+/// keyframe toggle at the playhead (filled when the frame under the playhead has one; adds or
+/// removes it), next keyframe, and, on a keyframe, its interpolation and "Remove All Keyframes".
+private struct KeyframeControls: View {
+    let inspector: InspectorModel
+    let parameter: InspectorParameter
+
+    var body: some View {
+        let keyframe = inspector.keyframeAtPlayhead(parameter)
+        let animated = inspector.isAnimated(parameter)
+        HStack(spacing: 1) {
+            Button {
+                inspector.goToKeyframe(parameter, forward: false)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .disabled(inspector.previousKeyframeTime(parameter) == nil)
+            .help("Previous \(parameter.label) keyframe")
+            .accessibilityIdentifier("PreviousKeyframe.\(parameter.rawValue)")
+            Button {
+                inspector.toggleKeyframe(parameter)
+            } label: {
+                Image(systemName: keyframe != nil ? "diamond.fill" : "diamond")
+                    .foregroundStyle(animated ? Color.accentColor : Color.secondary)
+            }
+            .help(keyframe != nil ? "Remove the \(parameter.label) keyframe at the playhead"
+                                  : "Add a \(parameter.label) keyframe at the playhead")
+            .accessibilityIdentifier("ToggleKeyframe.\(parameter.rawValue)")
+            Button {
+                inspector.goToKeyframe(parameter, forward: true)
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .disabled(inspector.nextKeyframeTime(parameter) == nil)
+            .help("Next \(parameter.label) keyframe")
+            .accessibilityIdentifier("NextKeyframe.\(parameter.rawValue)")
+            Menu {
+                ForEach(VEKeyframeInterpolation.choices, id: \.rawValue) { choice in
+                    Button {
+                        inspector.setInterpolation(choice, for: parameter)
+                    } label: {
+                        if keyframe?.interpolation == choice {
+                            Label(choice.title, systemImage: "checkmark")
+                        } else {
+                            Text(choice.title)
+                        }
+                    }
+                    .disabled(keyframe == nil)
+                    .help(choice.explanation)
+                }
+                if keyframe?.interpolation == .custom {
+                    Text(VEKeyframeInterpolation.custom.title)
+                }
+                Divider()
+                Button("Remove All \(parameter.label) Keyframes") { inspector.removeAnimation(parameter) }
+                    .disabled(!animated)
+            } label: {
+                Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(!animated)
+            .help(keyframe.map { "Interpolation: \($0.interpolation.title). \($0.interpolation.explanation)" }
+                ?? "Interpolation of the keyframe under the playhead")
+            .accessibilityIdentifier("KeyframeInterpolation.\(parameter.rawValue)")
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.mini)
     }
 }
 

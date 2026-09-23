@@ -190,6 +190,11 @@ final class TimelineGestureController: ObservableObject {
             if case let .clipBody(id) = hit, !extend, wasSelected {
                 store.select(clip: id, extend: false)
             }
+            // A click on a keyframe marker moves the playhead to the frame that shows it.
+            if case let .keyframe(id, seconds) = hit {
+                if !extend, wasSelected { store.select(clip: id, extend: false) }
+                store.setPlayhead(seconds: seconds)
+            }
         case .moving, .trimmingHead, .trimmingTail, .resizingTransition, .fading, .gain:
             endGroup()
         case .scrubbing:
@@ -287,7 +292,7 @@ final class TimelineGestureController: ObservableObject {
         }
         switch hit {
         case let .clipBody(id), let .clipHead(id), let .clipTail(id), let .fadeIn(id), let .fadeOut(id),
-             let .gainLine(id):
+             let .gainLine(id), let .keyframe(id, _):
             let wasSelected = store.selection.contains(id)
             if extend || !wasSelected {
                 store.select(clip: id, extend: extend)
@@ -320,8 +325,12 @@ final class TimelineGestureController: ObservableObject {
     }
 
     /// The pointer moved past the threshold: start moving or trimming.
-    private func startDrag(hit: TimelineViewModel.Hit, origin: CGPoint, extend _: Bool, model: TimelineViewModel) {
+    private func startDrag(hit: TimelineViewModel.Hit, origin: CGPoint, extend: Bool, model: TimelineViewModel) {
         switch hit {
+        case let .keyframe(id, _):
+            // Dragging from a keyframe marker moves the clip, like dragging its body.
+            startDrag(hit: .clipBody(id), origin: origin, extend: extend, model: model)
+            return
         case let .clipBody(id):
             guard store.selection.contains(id), let anchor = model.clip(id: id),
                   let row = model.layout(forTrack: anchor.trackID) else {
@@ -584,7 +593,7 @@ final class TimelineGestureController: ObservableObject {
             items.append(ContextMenuItem(title: "Transition Duration…") { store.editTransitionDuration() })
             return items
         case let .clipBody(id), let .clipHead(id), let .clipTail(id), let .fadeIn(id), let .fadeOut(id),
-             let .gainLine(id):
+             let .gainLine(id), let .keyframe(id, _):
             if !store.selection.contains(id) {
                 store.select(clip: id, extend: false)
             }

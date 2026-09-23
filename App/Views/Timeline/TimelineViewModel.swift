@@ -46,6 +46,10 @@ struct TimelineViewModel: Equatable {
         /// Fade durations in seconds.
         var fadeIn: Double = 0
         var fadeOut: Double = 0
+        /// On a video track: the starts (seconds) of the sequence frames that show a Motion
+        /// keyframe, sorted, one per frame (keyframes of every parameter; see
+        /// `VEKeyframe.frameTime`). Drawn as markers along the clip's bottom edge.
+        var keyframes: [Double] = []
     }
 
     struct Transition: Equatable, Identifiable {
@@ -82,6 +86,8 @@ struct TimelineViewModel: Equatable {
         case fadeOut(Int64)
         /// The horizontal gain line of an audio clip.
         case gainLine(Int64)
+        /// A keyframe marker of a video clip: the start (seconds) of the frame that shows it.
+        case keyframe(Int64, Double)
         /// Empty space on a track.
         case track(Int64)
         /// Below the last track.
@@ -128,6 +134,12 @@ struct TimelineViewModel: Equatable {
         guard let rect = rect(forClip: clip) else { return 0 }
         return rect.width < Self.narrowClipWidth ? Self.narrowFadeHandleZoneHeight : Self.fadeHandleZoneHeight
     }
+    /// Keyframe markers: diamonds this big along the bottom of a video clip, centred on the frame
+    /// that shows the keyframe, hit within `keyframeHitRadius` horizontally in the bottom
+    /// `keyframeZoneHeight` points of the row.
+    static let keyframeMarkerSize: CGFloat = 7
+    static let keyframeHitRadius: CGFloat = 5
+    static let keyframeZoneHeight: CGFloat = 11
     /// The gain line is hit within this many points vertically.
     static let gainLineHitDistance: CGFloat = 3
     /// Gain line mapping: the top of the content area is `gainMaxDb`, its bottom `gainMinDb`.
@@ -272,6 +284,15 @@ struct TimelineViewModel: Equatable {
         return CGPoint(x: x, y: rect.minY + 1 + inset)
     }
 
+    /// Centre of the marker of the keyframe shown by the frame starting at `time` (inside the
+    /// clip's rect, whatever the zoom).
+    func keyframeMarkerCenter(forClip clip: Clip, time: Double) -> CGPoint? {
+        guard !clip.isAudio, let rect = rect(forClip: clip) else { return nil }
+        let inset = min(Self.keyframeMarkerSize / 2 + 1, rect.width / 2)
+        let x = min(max(x(forTime: time + frameSeconds / 2), rect.minX + inset), rect.maxX - inset)
+        return CGPoint(x: x, y: rect.maxY - Self.keyframeMarkerSize / 2 - 2)
+    }
+
     /// Clips whose rect intersects the horizontal range [minX, maxX] (visible culling).
     func clips(visibleIn width: CGFloat) -> [Clip] {
         let start = time(forX: 0)
@@ -282,8 +303,8 @@ struct TimelineViewModel: Equatable {
     // MARK: Hit testing
 
     /// What a press at `point` grabs, by priority: a transition band (its edges resize it), an
-    /// audio clip's fade handle (top corner zone), a clip edge (trim), an audio clip's gain line,
-    /// a clip body, empty track space.
+    /// audio clip's fade handle (top corner zone), a video clip's keyframe marker (bottom zone), a
+    /// clip edge (trim), an audio clip's gain line, a clip body, empty track space.
     func hitTest(_ point: CGPoint) -> Hit {
         guard let layout = layout(atY: point.y) else { return .none }
         let rowTop = layout.y - scrollY
@@ -306,6 +327,21 @@ struct TimelineViewModel: Equatable {
                     let distance = abs(point.x - center.x)
                     if distance <= Self.fadeHandleHitRadius, best.map({ distance < $0.distance }) ?? true {
                         best = (fadeIn ? .fadeIn(clip.id) : .fadeOut(clip.id), distance)
+                    }
+                }
+            }
+            if let best { return best.hit }
+        }
+        if layout.track.kind == .video, point.y >= rowTop + layout.height - Self.keyframeZoneHeight {
+            var best: (hit: Hit, distance: CGFloat)?
+            for clip in clips where clip.trackID == layout.track.id && !clip.keyframes.isEmpty {
+                guard let r = rect(forClip: clip), point.x >= r.minX - Self.keyframeHitRadius,
+                      point.x <= r.maxX + Self.keyframeHitRadius else { continue }
+                for time in clip.keyframes {
+                    guard let center = keyframeMarkerCenter(forClip: clip, time: time) else { continue }
+                    let distance = abs(point.x - center.x)
+                    if distance <= Self.keyframeHitRadius, best.map({ distance < $0.distance }) ?? true {
+                        best = (.keyframe(clip.id, time), distance)
                     }
                 }
             }

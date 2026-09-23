@@ -39,6 +39,10 @@ import FramewrightEngine
 /// `narrowFadeHandleZoneHeight` points tall (hit testing only; the handles are drawn the same),
 /// so most of a small clip's label still selects and moves it.
 ///
+/// Video clips with Motion keyframes show a diamond along their bottom edge for every frame that
+/// shows a keyframe (where the keyframe plays with the clip's speed); clicking one moves the
+/// playhead to that frame (and selects the clip), dragging from it moves the clip.
+///
 /// Durations (transition labels, drop feedback) follow Settings > Editing > "Show durations as"
 /// and re-format as soon as it changes (`ProjectStore.preferences`).
 ///

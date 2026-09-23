@@ -79,7 +79,12 @@ final class ProjectStore: ObservableObject {
     }
 
     // UI state.
-    @Published var selection: Set<VEClipID> = []
+    @Published var selection: Set<VEClipID> = [] {
+        didSet {
+            // The Ken Burns helper edits one selected clip.
+            if let kenBurns, !selection.contains(kenBurns.clipID) { self.kenBurns = nil }
+        }
+    }
     @Published var selectedAssetID: VEAssetID?
     @Published var selectedTransitionID: VETransitionID?
     @Published private(set) var source = SourceMonitorState()
@@ -101,6 +106,8 @@ final class ProjectStore: ObservableObject {
     @Published var exportModel: ExportModel?
     /// An export is running (the engine's `isExporting`, republished).
     @Published private(set) var isExporting = false
+    /// The Ken Burns helper drawn on the program monitor while it edits a clip (nil otherwise).
+    @Published private(set) var kenBurns: KenBurnsModel?
     /// Asks the inspector to focus a field (double-clicking a transition focuses its duration).
     @Published private(set) var inspectorFocusRequest: InspectorFocusRequest?
     /// The coalescing group of the inspector's keyboard-nudge burst, while one is open. Unlike a
@@ -222,6 +229,9 @@ final class ProjectStore: ObservableObject {
         if let transition = selectedTransitionID, engine.transitionInfo(transition) == nil {
             selectedTransitionID = nil
         }
+        if let kenBurns, byID[kenBurns.clipID] == nil {
+            self.kenBurns = nil
+        }
         changeCount = engine.changeCount
         canUndo = engine.canUndo
         canRedo = engine.canRedo
@@ -303,7 +313,8 @@ final class ProjectStore: ObservableObject {
                                           linkedClipID: $0.linkedClipID, isStill: $0.isStill,
                                           isAudio: $0.trackKind == .audio, gainDb: audio.gainDb,
                                           fadeIn: audio.fadeInDuration.secondsOrZero,
-                                          fadeOut: audio.fadeOutDuration.secondsOrZero)
+                                          fadeOut: audio.fadeOutDuration.secondsOrZero,
+                                          keyframes: Self.keyframeFrames(of: $0))
         }.sorted { $0.start < $1.start }
         model.transitions = sequence.transitions.map {
             TimelineViewModel.Transition(id: $0.transitionID, trackID: $0.trackID, start: $0.start.secondsOrZero,
@@ -311,6 +322,17 @@ final class ProjectStore: ObservableObject {
         }
         cachedTimeline = (changeCount, collapsedTrackIDs, model)
         return model
+    }
+
+    /// The frames (seconds) of a video clip that show a Motion keyframe, one per frame, in order;
+    /// keyframes a trim cut off are left out.
+    static func keyframeFrames(of clip: VEClipInfo) -> [Double] {
+        guard clip.trackKind == .video, clip.hasKeyframes else { return [] }
+        var frames: [CMTime] = []
+        for keyframe in clip.allKeyframes where keyframe.isInsideClip {
+            if !frames.contains(keyframe.frameTime) { frames.append(keyframe.frameTime) }
+        }
+        return frames.sorted().map(\.secondsOrZero)
     }
 
     /// Converts seconds to a CMTime on the sequence frame grid.
@@ -752,6 +774,45 @@ final class ProjectStore: ObservableObject {
         requestInspectorFocus(.transitionDuration)
     }
 
+    // MARK: Ken Burns
+
+    /// The inspector's Ken Burns… button: shows the start and end rectangles of `clip` on the
+    /// program monitor (from its current position and scale at its first and last frames, or a
+    /// gentle push in when it has none). Nothing changes until `applyKenBurns()`.
+    func beginKenBurns(clip id: VEClipID) {
+        guard !isGestureActive else {
+            statusMessage = "Finish the current drag first."
+            return
+        }
+        guard let clip = clips[id], let info = asset(clip.assetID) else { return }
+        var reason = ""
+        guard let model = KenBurnsModel(clip: clip, asset: info, sequence: sequence, playhead: playheadTime,
+                                        reason: &reason) else {
+            statusMessage = reason
+            return
+        }
+        if !selection.contains(id) { selection = [id] }
+        engine.pause()
+        kenBurns = model
+    }
+
+    /// Applies the Ken Burns rectangles as position and scale keyframes (one undo step) and closes
+    /// the helper. Returns whether it was applied (a refusal is reported and the helper stays).
+    @discardableResult
+    func applyKenBurns() -> Bool {
+        guard let model = kenBurns, !isGestureActive else { return false }
+        let result = engine.applyKenBurns(clip: model.clipID, start: model.startFraming, end: model.endFraming,
+                                          interpolation: model.interpolation)
+        guard report(result) else { return false }
+        kenBurns = nil
+        return true
+    }
+
+    /// Closes the Ken Burns helper without changing anything.
+    func cancelKenBurns() {
+        kenBurns = nil
+    }
+
     // MARK: Speed
 
     /// Cmd+R: opens the Speed/Duration sheet for the selected clips (not stills).
@@ -972,6 +1033,7 @@ final class ProjectStore: ObservableObject {
     }
 
     private func resetUIState() {
+        kenBurns = nil
         thumbnails.removeAll()
         waveforms.removeAll()
         selection = []

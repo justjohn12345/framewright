@@ -130,6 +130,27 @@ struct TimelineRenderer {
         context.stroke(shape, with: .color(isSelected ? .white : Color.black.opacity(0.5)), lineWidth: isSelected ? 2 : 1)
         if isAudio {
             drawFadeHandles(clip, in: &context)
+        } else if !clip.keyframes.isEmpty {
+            drawKeyframeMarkers(clip, in: &context, size: size, selected: isSelected)
+        }
+    }
+
+    /// Keyframe markers: small diamonds along a video clip's bottom edge, one per frame that shows
+    /// a Motion keyframe (click one to move the playhead there).
+    private func drawKeyframeMarkers(_ clip: TimelineViewModel.Clip, in context: inout GraphicsContext, size: CGSize,
+                                     selected: Bool) {
+        let half = TimelineViewModel.keyframeMarkerSize / 2
+        for time in clip.keyframes {
+            guard let center = model.keyframeMarkerCenter(forClip: clip, time: time),
+                  center.x >= -half, center.x <= size.width + half else { continue }
+            var diamond = Path()
+            diamond.move(to: CGPoint(x: center.x, y: center.y - half))
+            diamond.addLine(to: CGPoint(x: center.x + half, y: center.y))
+            diamond.addLine(to: CGPoint(x: center.x, y: center.y + half))
+            diamond.addLine(to: CGPoint(x: center.x - half, y: center.y))
+            diamond.closeSubpath()
+            context.fill(diamond, with: .color(selected ? .yellow : Color.white.opacity(0.9)))
+            context.stroke(diamond, with: .color(.black.opacity(0.7)), lineWidth: 1)
         }
     }
 
