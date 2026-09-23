@@ -1,5 +1,11 @@
 # Open findings
 
+## Phase 7 export (2026-09-23 review, `2026-09-23-phase7-review.md`)
+Ten findings, two HIGH (verified): a cancelled/failed export deletes the user's pre-existing output file (no temp file /
+atomic replace); export fails when a video track is shorter than the asset's container duration. MEDIUM: mid-stream audio
+decode errors exported as silence and reported as success (verified); container change rewrites the sandbox-granted URL's
+extension. Plus six lows and eleven test gaps. All open.
+
 ## User feedback from hands-on testing (2026-09-23, iPhone 1280x720 VFR H.264 clip split once)
 
 Functional:
