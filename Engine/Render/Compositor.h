@@ -148,11 +148,38 @@ class Compositor {
     media::Result<RenderResult> renderAndWait(const RenderGraph &graph, TextureLookup lookup,
                                               const RenderTarget &target);
 
+    /// Frames that can be submitted right now without waiting (0 ... kFramesInFlight).
+    /// Thread-safe.
+    std::size_t freeSlotCount() const;
+
+    /// Waits up to `timeoutSeconds` (0: just checks) until a frame can be submitted without
+    /// waiting; does not take the slot. As only the thread calling render() takes slots, a
+    /// true result means that thread's next render() will not be Busy (unless slots are held
+    /// for testing). Thread-safe.
+    bool waitForFreeSlot(double timeoutSeconds) const;
+
     id<MTLDevice> device() const;
     id<MTLCommandQueue> commandQueue() const;
     /// The compositor's texture cache (also used for pixel-buffer targets); callers on the same
     /// device may share it for their sources.
     const TextureCache &textureCache() const;
+
+    // MARK: Testing
+
+    /// Failure points of render() after a slot was taken, for fault-injection tests.
+    enum class Fault : std::uint8_t {
+        None,
+        UniformBuffer, ///< The slot's uniform buffer cannot be (re)allocated.
+        CommandBuffer, ///< The queue returns no command buffer.
+        RenderEncoder, ///< The command buffer returns no render encoder.
+    };
+    /// Makes the next render() that reaches `fault` fail there (once). Thread-safe.
+    void injectFaultForTesting(Fault fault);
+    /// Takes up to `count` free slots (waiting up to `timeoutSeconds` for each), as if frames
+    /// were stuck on the GPU; returns how many were taken. Thread-safe.
+    std::size_t holdSlotsForTesting(std::size_t count, double timeoutSeconds);
+    /// Returns the slots taken by holdSlotsForTesting. Thread-safe.
+    void releaseHeldSlotsForTesting();
 
   private:
     struct Impl;

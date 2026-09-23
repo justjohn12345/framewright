@@ -5,8 +5,11 @@
 #include "ShaderTypes.h"
 
 #include <algorithm>
+#include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -147,8 +150,48 @@ struct Compositor::Impl {
 
     dispatch_semaphore_t freeSlots = nullptr;
     Slot slots[kFramesInFlight];
-    std::size_t nextSlot = 0;
+    // Free uniform slots: bit i set = slots[i] free. `freeSlots` counts the set bits, so a
+    // successful wait on it guarantees takeFreeSlot() finds one. Slots are returned in whatever
+    // order their frames complete.
+    std::atomic<std::uint32_t> freeMask{(1u << kFramesInFlight) - 1u};
     std::uint64_t frameCounter = 0;
+    std::atomic<Fault> injectedFault{Fault::None};
+    std::mutex heldMutex;
+    std::vector<std::size_t> heldSlots; // taken by holdSlotsForTesting
+
+    // Call only after a successful wait on freeSlots.
+    std::size_t takeFreeSlot() {
+        std::uint32_t mask = freeMask.load(std::memory_order_acquire);
+        for (;;) {
+            if (mask == 0) {
+                __builtin_trap(); // freeSlots and freeMask out of step: a slot was lost
+            }
+            const std::uint32_t lowest = mask & (~mask + 1u);
+            if (freeMask.compare_exchange_weak(mask, mask & ~lowest, std::memory_order_acq_rel,
+                                               std::memory_order_acquire)) {
+                return static_cast<std::size_t>(std::countr_zero(lowest));
+            }
+        }
+    }
+
+    // Any thread: the slot's contents are no longer used by anyone.
+    void returnSlot(std::size_t index) {
+        freeMask.fetch_or(1u << index, std::memory_order_release);
+        dispatch_semaphore_signal(freeSlots);
+    }
+
+    // Drops the per-frame references to source pictures (they live on in a slot if submitted).
+    void dropScratchReferences() {
+        for (TextureSet &t : resolved) {
+            t.reset();
+        }
+    }
+
+    bool consumeFault(Fault fault) {
+        Fault expected = fault;
+        return injectedFault.load(std::memory_order_relaxed) == fault &&
+               injectedFault.compare_exchange_strong(expected, Fault::None);
+    }
 
     id<MTLTexture> intermediate = nil;
 
@@ -478,42 +521,47 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
 
     const dispatch_time_t timeout = options.waitForFreeSlot ? DISPATCH_TIME_FOREVER : DISPATCH_TIME_NOW;
     if (dispatch_semaphore_wait(im.freeSlots, timeout) != 0) {
-        for (TextureSet &t : im.resolved) {
-            t.reset();
-        }
+        im.dropScratchReferences();
         return Submission::Busy;
     }
-    const std::size_t slotIndex = im.nextSlot;
-    im.nextSlot = (im.nextSlot + 1) % kFramesInFlight;
+    // From here on every failure must give the slot back (and drop what the frame referenced),
+    // or a later frame would find the free-slot count and the free slots out of step.
+    const std::size_t slotIndex = im.takeFreeSlot();
     Impl::Slot &slot = im.slots[slotIndex];
+    auto abandon = [&im, slotIndex](media::MediaError error) -> Result<Submission> {
+        Impl::Slot &s = im.slots[slotIndex];
+        s.retained.clear();
+        s.completion = nullptr;
+        im.dropScratchReferences();
+        im.returnSlot(slotIndex);
+        return error;
+    };
+    if (im.consumeFault(Fault::UniformBuffer)) {
+        return abandon(makeError(MediaErrorCode::Internal, "Compositor: cannot allocate the uniform buffer (injected)"));
+    }
     if (Status st = im.ensureCapacity(slot, im.items.size()); !st.ok()) {
-        dispatch_semaphore_signal(im.freeSlots);
-        return std::move(st).error();
+        return abandon(std::move(st).error());
     }
 
-    id<MTLCommandBuffer> commandBuffer = [im.queue commandBuffer];
+    id<MTLCommandBuffer> commandBuffer = im.consumeFault(Fault::CommandBuffer) ? nil : [im.queue commandBuffer];
     if (commandBuffer == nil) {
-        dispatch_semaphore_signal(im.freeSlots);
-        return makeError(MediaErrorCode::Internal, "Compositor: cannot create a command buffer");
+        return abandon(makeError(MediaErrorCode::Internal, "Compositor: cannot create a command buffer"));
     }
     commandBuffer.label = @"VidEdit frame";
 
-    // Fill the slot (it is ours until the completion handler signals it back).
-    slot.result.frameNumber = ++im.frameCounter;
-    slot.result.status = media::okStatus();
-    slot.result.skippedLayers.assign(im.skipped.begin(), im.skipped.end());
-    slot.result.drawnLayers = drawnLayers;
-    slot.result.gpuSeconds = 0;
-    slot.completion = std::move(completion);
     slot.retained.clear();
-
     auto *uniformBytes = static_cast<std::uint8_t *>(slot.uniforms.contents);
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = colorTexture;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
-    id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+    id<MTLRenderCommandEncoder> encoder =
+        im.consumeFault(Fault::RenderEncoder) ? nil : [commandBuffer renderCommandEncoderWithDescriptor:pass];
+    if (encoder == nil) {
+        // Nothing was committed: the command buffer is simply dropped.
+        return abandon(makeError(MediaErrorCode::Internal, "Compositor: cannot create a render command encoder"));
+    }
     encoder.label = @"VidEdit layers";
     if (!im.items.empty() && !viewport.isEmpty()) {
         [encoder setViewport:(MTLViewport){double(viewport.x), double(viewport.y), double(viewport.width),
@@ -589,6 +637,14 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         [commandBuffer presentDrawable:tt->drawable];
     }
 
+    // Fill the slot's result (the slot is ours until the completion handler gives it back).
+    slot.result.frameNumber = ++im.frameCounter;
+    slot.result.status = media::okStatus();
+    slot.result.skippedLayers.assign(im.skipped.begin(), im.skipped.end());
+    slot.result.drawnLayers = drawnLayers;
+    slot.result.gpuSeconds = 0;
+    slot.completion = std::move(completion);
+
     Impl *implPtr = impl_.get();
     [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> finished) {
         Impl::Slot &done = implPtr->slots[slotIndex];
@@ -603,14 +659,54 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         }
         done.completion = nullptr;
         done.retained.clear();
-        dispatch_semaphore_signal(implPtr->freeSlots);
+        implPtr->returnSlot(slotIndex);
     }];
     [commandBuffer commit];
     // The slot now holds what the GPU needs; drop the scratch references.
-    for (TextureSet &t : im.resolved) {
-        t.reset();
-    }
+    im.dropScratchReferences();
     return Submission::Submitted;
+}
+
+std::size_t Compositor::freeSlotCount() const {
+    return static_cast<std::size_t>(std::popcount(impl_->freeMask.load(std::memory_order_acquire)));
+}
+
+bool Compositor::waitForFreeSlot(double timeoutSeconds) const {
+    const dispatch_time_t deadline =
+        timeoutSeconds <= 0 ? DISPATCH_TIME_NOW
+                            : dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(timeoutSeconds * NSEC_PER_SEC));
+    if (dispatch_semaphore_wait(impl_->freeSlots, deadline) != 0) {
+        return false;
+    }
+    dispatch_semaphore_signal(impl_->freeSlots);
+    return true;
+}
+
+void Compositor::injectFaultForTesting(Fault fault) {
+    impl_->injectedFault.store(fault);
+}
+
+std::size_t Compositor::holdSlotsForTesting(std::size_t count, double timeoutSeconds) {
+    Impl &im = *impl_;
+    std::size_t taken = 0;
+    for (; taken < count; ++taken) {
+        const dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(timeoutSeconds * NSEC_PER_SEC));
+        if (dispatch_semaphore_wait(im.freeSlots, deadline) != 0) {
+            break;
+        }
+        std::lock_guard<std::mutex> lock(im.heldMutex);
+        im.heldSlots.push_back(im.takeFreeSlot());
+    }
+    return taken;
+}
+
+void Compositor::releaseHeldSlotsForTesting() {
+    Impl &im = *impl_;
+    std::lock_guard<std::mutex> lock(im.heldMutex);
+    for (std::size_t index : im.heldSlots) {
+        im.returnSlot(index);
+    }
+    im.heldSlots.clear();
 }
 
 Result<RenderResult> Compositor::renderAndWait(const RenderGraph &graph, TextureLookup lookup,

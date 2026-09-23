@@ -6,12 +6,16 @@
 #include "../../Engine/Media/ColorTags.h"
 #include "../../Engine/Render/Compositor.h"
 #include "../Media/BurnIn.h"
+#include "../Media/RouterTestSupport.h"
 #include "../Media/TestMedia.h"
 #include "CompositorTestSupport.h"
 
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -20,6 +24,35 @@ using namespace ve;
 using namespace ve::render;
 using namespace ve::rtest;
 using media::YCbCrMatrix;
+
+namespace {
+
+// Frame numbers of completed renders, in completion order.
+struct FrameLog {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::vector<uint64_t> frames;
+
+    void add(uint64_t frame) {
+        std::lock_guard<std::mutex> lock(mutex);
+        frames.push_back(frame);
+        changed.notify_all();
+    }
+    std::vector<uint64_t> snapshot() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return frames;
+    }
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex);
+        frames.clear();
+    }
+    bool waitFor(size_t count) {
+        std::unique_lock<std::mutex> lock(mutex);
+        return changed.wait_for(lock, std::chrono::seconds(10), [&] { return frames.size() >= count; });
+    }
+};
+
+} // namespace
 
 @interface CompositorTests : XCTestCase
 @end
@@ -352,6 +385,82 @@ using media::YCbCrMatrix;
         XCTAssertTrue((r.skippedLayers[1] == SkippedLayer{2, ClipId{13}}));
     }
     XCTAssertTrue(near(pixelAt(out, 20, 20), 0, 255, 0, 1));
+}
+
+// A render that fails after taking a uniform slot (uniform buffer, command buffer or render
+// encoder failure) gives the slot back: frames already on the GPU keep their slot, every
+// completion fires exactly once, in submission order, with its own result, and later frames
+// render correctly.
+- (void)testFailedSubmissionsKeepUniformSlotsConsistent {
+    auto log = std::make_shared<FrameLog>();
+    media::PixelBuffer red = makeBuffer(kCVPixelFormatType_32BGRA, 64, 36);
+    media::PixelBuffer green = makeBuffer(kCVPixelFormatType_32BGRA, 64, 36);
+    fillBGRA(red, {255, 0, 0, 255});
+    fillBGRA(green, {0, 255, 0, 255});
+    const TextureSet redSet = texturesFor(*_compositor, red);
+    const TextureSet greenSet = texturesFor(*_compositor, green);
+    RenderGraph g = makeGraph(64, 36);
+    g.layers.push_back(makeLayer(1));
+    auto lookupFor = [](const TextureSet &set) {
+        return [set](const VideoLayer &, std::size_t, TextureSet &out) {
+            out = set;
+            return true;
+        };
+    };
+
+    for (Compositor::Fault fault :
+         {Compositor::Fault::UniformBuffer, Compositor::Fault::CommandBuffer, Compositor::Fault::RenderEncoder}) {
+        log->clear();
+        // Frame 1 stays "in flight" (its completion blocks) while a failing render and two more
+        // frames are submitted: with kFramesInFlight == 3 the third one needs the slot the failed
+        // render took, not frame 1's.
+        auto gate = std::make_shared<test::Gate>();
+        media::PixelBuffer out1 = makeBuffer(kCVPixelFormatType_32BGRA, 64, 36);
+        media::PixelBuffer out2 = makeBuffer(kCVPixelFormatType_32BGRA, 64, 36);
+        media::PixelBuffer out3 = makeBuffer(kCVPixelFormatType_32BGRA, 64, 36);
+        auto record = [log](const RenderResult &r) { log->add(r.frameNumber); };
+        auto first = _compositor->render(g, lookupFor(redSet), PixelBufferTarget{out1},
+                                         [record, gate](const RenderResult &r) {
+                                             record(r);
+                                             gate->pass();
+                                         });
+        XCTAssertTrue(first.ok() && first.value() == Submission::Submitted);
+        XCTAssertTrue(log->waitFor(1));
+        const uint64_t firstFrame = log->snapshot().empty() ? 0 : log->snapshot()[0];
+
+        _compositor->injectFaultForTesting(fault);
+        auto failed = _compositor->render(g, lookupFor(greenSet), PixelBufferTarget{out2}, record);
+        XCTAssertFalse(failed.ok(), @"fault %d must fail the render", int(fault));
+
+        auto second = _compositor->render(g, lookupFor(greenSet), PixelBufferTarget{out2}, record);
+        auto third = _compositor->render(g, lookupFor(greenSet), PixelBufferTarget{out3}, record,
+                                         RenderOptions{false});
+        XCTAssertTrue(second.ok() && second.value() == Submission::Submitted);
+        XCTAssertTrue(third.ok() && third.value() == Submission::Submitted,
+                      @"a slot must be free: frame 1 holds one, frame 2 another");
+        gate->open();
+        XCTAssertTrue(log->waitFor(3));
+        const std::vector<uint64_t> frames = log->snapshot();
+        XCTAssertEqual(frames.size(), 3u, @"fault %d: every completion fires once", int(fault));
+        if (frames.size() == 3) {
+            XCTAssertEqual(frames[0], firstFrame);
+            XCTAssertEqual(frames[1], firstFrame + 1, @"fault %d", int(fault));
+            XCTAssertEqual(frames[2], firstFrame + 2, @"fault %d", int(fault));
+        }
+        XCTAssertTrue(near(pixelAt(out1, 10, 10), 255, 0, 0, 1));
+        XCTAssertTrue(near(pixelAt(out2, 10, 10), 0, 255, 0, 1));
+        XCTAssertTrue(near(pixelAt(out3, 10, 10), 0, 255, 0, 1));
+        XCTAssertEqual(_compositor->freeSlotCount(), Compositor::kFramesInFlight);
+    }
+
+    // Afterwards every slot is usable again: a long run of synchronous renders is correct.
+    for (int i = 0; i < 12; ++i) {
+        media::PixelBuffer out = makeBuffer(kCVPixelFormatType_32BGRA, 64, 36);
+        const bool useRed = (i % 2) == 0;
+        auto r = renderLayers(*_compositor, g, {useRed ? redSet : greenSet}, PixelBufferTarget{out});
+        XCTAssertTrue(r.ok() && r->status.ok());
+        XCTAssertTrue(near(pixelAt(out, 10, 10), useRed ? 255 : 0, useRed ? 0 : 255, 0, 1), @"frame %d", i);
+    }
 }
 
 // (i) 600 renders at 1080p: memory stays flat and the average frame time is under 4 ms.
