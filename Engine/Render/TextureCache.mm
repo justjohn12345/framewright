@@ -154,6 +154,24 @@ double secondsFromMachTicks(std::uint64_t ticks) {
 
 } // namespace
 
+AlphaMode alphaModeOf(CVPixelBufferRef buffer) {
+    if (buffer == nullptr) {
+        return AlphaMode::Unspecified;
+    }
+    CFRef<CFTypeRef> value =
+        CFRef<CFTypeRef>::adopt(CVBufferCopyAttachment(buffer, kCVImageBufferAlphaChannelModeKey, nullptr));
+    if (!value || CFGetTypeID(value.get()) != CFStringGetTypeID()) {
+        return AlphaMode::Unspecified;
+    }
+    if (CFEqual(value.get(), kCVImageBufferAlphaChannelMode_PremultipliedAlpha)) {
+        return AlphaMode::Premultiplied;
+    }
+    if (CFEqual(value.get(), kCVImageBufferAlphaChannelMode_StraightAlpha)) {
+        return AlphaMode::Straight;
+    }
+    return AlphaMode::Unspecified;
+}
+
 ChromaSiting chromaSitingOf(CVPixelBufferRef buffer, ChromaSiting fallback) {
     if (buffer == nullptr) {
         return fallback;
@@ -320,6 +338,7 @@ Result<TextureSet> TextureCache::textures(const PixelBuffer &buffer, TextureAcce
         }
     }
 
+    set.alphaMode_ = layout.sourceClass == SourceClass::RGBA ? alphaModeOf(pb) : AlphaMode::Premultiplied;
     if (layout.sourceClass == SourceClass::YCbCrBiPlanar) {
         YCbCrEncoding encoding;
         encoding.matrix = matrixOf(pb);

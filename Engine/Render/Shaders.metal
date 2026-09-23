@@ -85,9 +85,30 @@ static float4 sampleYCbCr(texture2d<float> luma, texture2d<float> chroma, float2
     return float4(rgb, 1.0);
 }
 
-static float4 sampleRGBA(texture2d<float> rgba, float2 uv) {
+// Premultiplied sources are filtered by the sampler. Straight-alpha sources are filtered by hand
+// (the same bilinear footprint, edges clamped) with every texel premultiplied first: filtering
+// straight colour and premultiplying afterwards would let the colour of fully transparent texels
+// bleed into the edge of the visible ones.
+static float4 sampleRGBA(texture2d<float> rgba, float2 uv, constant VESourceUniforms &source) {
     constexpr sampler bilinear(address::clamp_to_edge, filter::linear);
-    return rgba.sample(bilinear, uv); // premultiplied by convention (see TextureCache.h)
+    if (source.params.y < 0.5) {
+        return rgba.sample(bilinear, uv);
+    }
+    const int2 size = int2(rgba.get_width(), rgba.get_height());
+    const float2 p = uv * float2(size) - 0.5;
+    const float2 f = fract(p);
+    const int2 i0 = int2(floor(p));
+    const int2 lo = clamp(i0, int2(0), size - 1);
+    const int2 hi = clamp(i0 + 1, int2(0), size - 1);
+    float4 t00 = rgba.read(uint2(lo.x, lo.y));
+    float4 t10 = rgba.read(uint2(hi.x, lo.y));
+    float4 t01 = rgba.read(uint2(lo.x, hi.y));
+    float4 t11 = rgba.read(uint2(hi.x, hi.y));
+    t00.rgb *= t00.a;
+    t10.rgb *= t10.a;
+    t01.rgb *= t01.a;
+    t11.rgb *= t11.a;
+    return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
 }
 
 fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
@@ -102,7 +123,7 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     if (kSourceAIsYCbCr) {
         colorA = sampleYCbCr(a0, a1, uvA, uniforms.a);
     } else {
-        colorA = sampleRGBA(a0, uvA);
+        colorA = sampleRGBA(a0, uvA, uniforms.a);
     }
     colorA *= coverageA * uniforms.a.params.x;
     if (!kHasPartner) {
@@ -115,7 +136,7 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     if (kSourceBIsYCbCr) {
         colorB = sampleYCbCr(b0, b1, uvB, uniforms.b);
     } else {
-        colorB = sampleRGBA(b0, uvB);
+        colorB = sampleRGBA(b0, uvB, uniforms.b);
     }
     colorB *= coverageB * uniforms.b.params.x;
     return mix(colorA, colorB, uniforms.mix.x);

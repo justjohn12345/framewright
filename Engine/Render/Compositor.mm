@@ -143,12 +143,15 @@ Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegr
     return p;
 }
 
-void fillSource(VESourceUniforms &u, const TextureSet &textures, const Placement &placement, double weight) {
+void fillSource(VESourceUniforms &u, const VideoLayer &layer, const TextureSet &textures, const Placement &placement,
+                double weight) {
     u.colorMatrix = textures.colorMatrix();
     u.uvFromFrameX = placement.uvFromFrameX;
     u.uvFromFrameY = placement.uvFromFrameY;
     u.chromaTransform = textures.chromaTransform();
-    u.params = simd_make_float4(float(std::clamp(weight, 0.0, 1.0)), 0.0f, 0.0f, 0.0f);
+    const bool straight =
+        textures.sourceClass() == SourceClass::RGBA && !textures.alphaIsPremultiplied(layer.isStill);
+    u.params = simd_make_float4(float(std::clamp(weight, 0.0, 1.0)), straight ? 1.0f : 0.0f, 0.0f, 0.0f);
 }
 
 struct DrawItem {
@@ -363,7 +366,7 @@ struct Compositor::Impl {
                 if (!pl.visible || weight <= 0.0) {
                     continue;
                 }
-                fillSource(item.uniforms.a, t, pl, weight);
+                fillSource(item.uniforms.a, layer, t, pl, weight);
                 item.uniforms.quadRect = simd_make_float4(float(pl.x0), float(pl.y0), float(pl.x1), float(pl.y1));
                 item.layerA = item.layerB = i;
                 auto state = pipeline({t.sourceClass() == SourceClass::YCbCrBiPlanar, false, false, format});
@@ -388,8 +391,8 @@ struct Compositor::Impl {
                 if (!pa.visible && !pb.visible) {
                     continue;
                 }
-                fillSource(item.uniforms.a, ta, pa, pa.visible ? outLayer.opacity : 0.0);
-                fillSource(item.uniforms.b, tb, pb, pb.visible ? inLayer.opacity : 0.0);
+                fillSource(item.uniforms.a, outLayer, ta, pa, pa.visible ? outLayer.opacity : 0.0);
+                fillSource(item.uniforms.b, inLayer, tb, pb, pb.visible ? inLayer.opacity : 0.0);
                 double x0 = pa.visible ? pa.x0 : pb.x0, y0 = pa.visible ? pa.y0 : pb.y0;
                 double x1 = pa.visible ? pa.x1 : pb.x1, y1 = pa.visible ? pa.y1 : pb.y1;
                 if (pa.visible && pb.visible) {

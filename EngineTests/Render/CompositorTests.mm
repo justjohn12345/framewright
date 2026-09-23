@@ -464,6 +464,7 @@ struct FrameLog {
     // one-pass dissolve at 0.5 equals the single layer (64); layering them would give ~56.
     media::PixelBuffer translucent = makeBuffer(kCVPixelFormatType_32BGRA, 64, 36);
     fillBGRA(translucent, {64, 64, 64, 128});
+    tagAlpha(translucent, AlphaMode::Premultiplied);
     RenderGraph g = makeGraph(64, 36);
     [self addDissolvePairTo:g mix:0.5];
     TextureSet t = texturesFor(*_compositor, translucent);
@@ -478,6 +479,91 @@ struct FrameLog {
                            target:PixelBufferTarget{out}];
     XCTAssertEqual(r.skippedLayers.size(), 1u);
     XCTAssertTrue(near(pixelAt(out, 30, 20), 255 * 0.75, 0, 0, 1));
+}
+
+// Straight vs premultiplied alpha: a 50 %-alpha red layer over opaque blue gives half red,
+// half blue whichever way its colour is stored, as long as the compositor knows which. Tagged
+// buffers follow the tag; untagged ones are straight for video and premultiplied for stills.
+// Straight pictures are premultiplied per texel before filtering: magnifying one whose
+// transparent texels carry green shows no green fringe.
+- (void)testStraightAndPremultipliedAlpha {
+    media::PixelBuffer blue = makeBuffer(kCVPixelFormatType_32BGRA, 64, 36);
+    fillBGRA(blue, {0, 0, 255, 255});
+    media::PixelBuffer straight = makeBuffer(kCVPixelFormatType_32BGRA, 64, 36);
+    fillBGRA(straight, {255, 0, 0, 128}); // red at alpha 128/255, colour not multiplied
+    media::PixelBuffer premultiplied = makeBuffer(kCVPixelFormatType_32BGRA, 64, 36);
+    fillBGRA(premultiplied, {128, 0, 0, 128}); // the same pixel, premultiplied
+
+    const double a = 128.0 / 255.0;
+    const double expectedRed = 255.0 * a;       // 128
+    const double expectedBlue = 255.0 * (1 - a); // 127
+    struct Case {
+        const char *name;
+        const media::PixelBuffer *buffer;
+        AlphaMode tag;
+        bool isStill;
+    };
+    const Case cases[] = {
+        {"straight, tagged, video", &straight, AlphaMode::Straight, false},
+        {"straight, tagged, still", &straight, AlphaMode::Straight, true},
+        {"straight, untagged, video", &straight, AlphaMode::Unspecified, false},
+        {"premultiplied, tagged, video", &premultiplied, AlphaMode::Premultiplied, false},
+        {"premultiplied, untagged, still", &premultiplied, AlphaMode::Unspecified, true},
+    };
+    for (const Case &c : cases) {
+        tagAlpha(*c.buffer, c.tag);
+        const TextureSet top = texturesFor(*_compositor, *c.buffer);
+        XCTAssertEqual(top.alphaMode(), c.tag, @"%s", c.name);
+        XCTAssertEqual(top.alphaIsPremultiplied(c.isStill), c.buffer == &premultiplied, @"%s", c.name);
+        media::PixelBuffer out = makeBuffer(kCVPixelFormatType_32BGRA, 64, 36);
+        RenderGraph g = makeGraph(64, 36);
+        g.layers.push_back(makeLayer(1));
+        VideoLayer layer = makeLayer(2);
+        layer.isStill = c.isStill;
+        g.layers.push_back(layer);
+        [self render:g textures:{texturesFor(*_compositor, blue), top} target:PixelBufferTarget{out}];
+        const RGBA8 p = pixelAt(out, 30, 20);
+        XCTAssertTrue(near(p, expectedRed, 0, expectedBlue, 1.5), @"%s: got %d %d %d", c.name, p.r, p.g, p.b);
+    }
+
+    // setAlphaMode overrides the tag (for producers that cannot tag); YCbCr stays opaque.
+    tagAlpha(straight, AlphaMode::Premultiplied); // wrong tag
+    TextureSet corrected = texturesFor(*_compositor, straight);
+    corrected.setAlphaMode(AlphaMode::Straight);
+    XCTAssertFalse(corrected.alphaIsPremultiplied(true));
+    TextureSet yuv = texturesFor(*_compositor, makeBurnIn420v(1, 64, 36));
+    yuv.setAlphaMode(AlphaMode::Straight);
+    XCTAssertEqual(yuv.alphaMode(), AlphaMode::Premultiplied);
+
+    // No fringe: a 4x2 straight picture, left half transparent green (colour without coverage),
+    // right half opaque red, magnified 16x over black. Every output pixel is a shade of red.
+    media::PixelBuffer edge = makeBuffer(kCVPixelFormatType_32BGRA, 4, 2);
+    fillBGRARect(edge, 0, 0, 2, 2, {0, 255, 0, 0});
+    fillBGRARect(edge, 2, 0, 4, 2, {255, 0, 0, 255});
+    tagAlpha(edge, AlphaMode::Straight);
+    media::PixelBuffer out = makeBuffer(kCVPixelFormatType_32BGRA, 64, 32);
+    RenderGraph g = makeGraph(64, 32);
+    g.layers.push_back(makeLayer(3));
+    [self render:g textures:{texturesFor(*_compositor, edge)} target:PixelBufferTarget{out}];
+    int maxGreen = 0;
+    int minRedAtRight = 255;
+    for (size_t y = 0; y < 32; ++y) {
+        for (size_t x = 0; x < 64; ++x) {
+            const RGBA8 p = pixelAt(out, x, y);
+            maxGreen = std::max(maxGreen, int(p.g));
+            if (x >= 40) {
+                minRedAtRight = std::min(minRedAtRight, int(p.r));
+            }
+        }
+    }
+    XCTAssertLessThanOrEqual(maxGreen, 0, @"transparent texels bled their colour");
+    XCTAssertGreaterThanOrEqual(minRedAtRight, 254);
+    // Across the boundary (between output columns 31 and 32) coverage ramps linearly: pixel 32's
+    // centre is 0.53125 of the way from texel 1 to texel 2, pixel 31's 0.46875.
+    const RGBA8 right = pixelAt(out, 32, 16);
+    const RGBA8 left = pixelAt(out, 31, 16);
+    XCTAssertTrue(near(right, 0.53125 * 255, 0, 0, 1.5), @"%d %d %d", right.r, right.g, right.b);
+    XCTAssertTrue(near(left, 0.46875 * 255, 0, 0, 1.5), @"%d %d %d", left.r, left.g, left.b);
 }
 
 // (f) A 4:3 source in a 16:9 sequence is pillarboxed; the sequence is letterboxed in the target.

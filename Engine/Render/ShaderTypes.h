@@ -55,7 +55,8 @@ struct VESourceUniforms {
     // sizes; see TextureCache.h). Unused for RGBA sources.
     VEFloat4 chromaTransform;
     // x: weight (opacity; times the transition weight when drawn without its partner).
-    // y, z, w: unused.
+    // y: 1 when an RGBA source has straight (non-premultiplied) alpha, else 0.
+    // z, w: unused.
     VEFloat4 params;
 };
 

@@ -138,6 +138,22 @@ void tagYCbCr(const PixelBuffer &buffer, std::optional<media::YCbCrMatrix> matri
     }
 }
 
+void tagAlpha(const PixelBuffer &buffer, render::AlphaMode mode) {
+    switch (mode) {
+    case render::AlphaMode::Unspecified:
+        CVBufferRemoveAttachment(buffer.get(), kCVImageBufferAlphaChannelModeKey);
+        break;
+    case render::AlphaMode::Premultiplied:
+        CVBufferSetAttachment(buffer.get(), kCVImageBufferAlphaChannelModeKey,
+                              kCVImageBufferAlphaChannelMode_PremultipliedAlpha, kCVAttachmentMode_ShouldPropagate);
+        break;
+    case render::AlphaMode::Straight:
+        CVBufferSetAttachment(buffer.get(), kCVImageBufferAlphaChannelModeKey,
+                              kCVImageBufferAlphaChannelMode_StraightAlpha, kCVAttachmentMode_ShouldPropagate);
+        break;
+    }
+}
+
 void fillBGRARect(const PixelBuffer &buffer, size_t x0, size_t y0, size_t x1, size_t y1, RGBA8 c) {
     CVPixelBufferRef pb = buffer.get();
     media::PixelBufferLock lock(pb, false);

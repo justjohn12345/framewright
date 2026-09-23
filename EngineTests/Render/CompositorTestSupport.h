@@ -42,7 +42,11 @@ struct RGBA8 {
     uint8_t r = 0, g = 0, b = 0, a = 255;
 };
 
-/// Fills a BGRA buffer (premultiplied values as given).
+/// Tags a BGRA buffer's alpha convention (kCVImageBufferAlphaChannelModeKey); Unspecified
+/// removes the tag.
+void tagAlpha(const media::PixelBuffer &buffer, render::AlphaMode mode);
+
+/// Fills a BGRA buffer (values stored as given).
 void fillBGRA(const media::PixelBuffer &buffer, RGBA8 color);
 /// Fills [x0,x1) x [y0,y1) of a BGRA buffer.
 void fillBGRARect(const media::PixelBuffer &buffer, size_t x0, size_t y0, size_t x1, size_t y1, RGBA8 color);
