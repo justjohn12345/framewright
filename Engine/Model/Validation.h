@@ -38,6 +38,9 @@ enum class TransitionIssueKind {
 struct TransitionIssue {
     TransitionIssueKind kind = TransitionIssueKind::Structure;
     std::string message;
+    // For InsufficientHandles: the clip that lacks media (the outgoing clip lacks it after its
+    // out point, the incoming clip before its in point); otherwise invalid.
+    ClipId clip{};
 };
 
 // Why `transition` is not valid in `sequence`, or nullopt. Does not check overlap with other

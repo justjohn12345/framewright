@@ -238,15 +238,17 @@ std::optional<TransitionIssue> checkTransition(const Sequence &sequence, const P
         const MediaAsset *asset = project.findAsset(from->assetId);
         const auto sourceEnd = from->exactSourceTimeAt(range->end);
         if (!asset || !isNumeric(asset->duration) || !sourceEnd || sourceEnd->compare(asset->duration) > 0) {
-            return TransitionIssue{K::InsufficientHandles, where + ": " + clipName(from->id) +
-                                                               " lacks media after its out point for the transition"};
+            return TransitionIssue{K::InsufficientHandles,
+                                   where + ": " + clipName(from->id) + " lacks media after its out point for the transition",
+                                   from->id};
         }
     }
     if (!to->isStill) {
         const auto sourceStart = to->exactSourceTimeAt(range->start);
         if (!sourceStart || sourceStart->compare(kCMTimeZero) < 0) {
-            return TransitionIssue{K::InsufficientHandles, where + ": " + clipName(to->id) +
-                                                               " lacks media before its in point for the transition"};
+            return TransitionIssue{K::InsufficientHandles,
+                                   where + ": " + clipName(to->id) + " lacks media before its in point for the transition",
+                                   to->id};
         }
     }
     return std::nullopt;

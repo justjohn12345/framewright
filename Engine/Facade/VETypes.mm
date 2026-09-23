@@ -110,6 +110,15 @@ VEAudioParams VEAudioParamsDefault(void) {
                         note:(NSString *)note;
 @end
 
+@interface VETransitionLimit ()
+@property (nonatomic, readwrite) CMTime maximumDuration;
+@property (nonatomic, readwrite) int64_t maximumFrames;
+@property (nonatomic, readwrite) VEEditErrorCode limitingError;
+@property (nonatomic, readwrite, copy) NSString *reason;
+@property (nonatomic, readwrite) VEClipID limitingClipID;
+- (instancetype)initInternal;
+@end
+
 @interface VEPlaybackStatus ()
 @property (nonatomic, readwrite) VEPlaybackState state;
 @property (nonatomic, readwrite) CMTime time;
@@ -265,6 +274,15 @@ static NSString *describeTime(CMTime t) {
 }
 - (NSString *)description {
     return self.ok ? @"<VEEditResult ok>" : [NSString stringWithFormat:@"<VEEditResult failed: %@>", self.message];
+}
+@end
+
+@implementation VETransitionLimit
+- (instancetype)initInternal {
+    return [super init];
+}
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<VETransitionLimit %lld frames: %@>", (long long)self.maximumFrames, self.reason];
 }
 @end
 
@@ -603,6 +621,16 @@ VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *crea
                                    createdIDs:created ?: @[]
                                       dropped:dropped
                                          note:text];
+}
+
+VETransitionLimit *makeTransitionLimit(const TransitionLimit &limit) {
+    VETransitionLimit *info = [[VETransitionLimit alloc] initInternal];
+    info.maximumDuration = limit.maximum;
+    info.maximumFrames = limit.maximumFrames;
+    info.limitingError = limit.limitError == EditError::None ? VEEditErrorNone : toVE(limit.limitError);
+    info.reason = toNS(limit.reason);
+    info.limitingClipID = static_cast<VEClipID>(limit.limitingClip.value());
+    return info;
 }
 
 static VEPlaybackState toVE(playback::PlaybackState state) {

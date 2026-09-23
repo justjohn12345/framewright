@@ -287,6 +287,79 @@ struct ProbedFile {
 
 } // namespace
 
+@interface VEClipParamsBatch ()
+/// The batch as engine changes, in the order clips were first added.
+@property (nonatomic, readonly) std::vector<ClipParamsChange> changes;
+@end
+
+@implementation VEClipParamsBatch {
+    std::vector<ClipParamsChange> _changes;
+}
+
+- (ClipParamsChange &)entryForClip:(VEClipID)clipID {
+    const ClipId id(static_cast<ClipId::ValueType>(clipID));
+    for (ClipParamsChange &change : _changes) {
+        if (change.clipId == id) {
+            return change;
+        }
+    }
+    ClipParamsChange change;
+    change.clipId = id;
+    _changes.push_back(change);
+    return _changes.back();
+}
+
+- (void)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID {
+    [self entryForClip:clipID].video = fromVE(params);
+}
+
+- (void)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID {
+    [self entryForClip:clipID].audio = fromVE(params);
+}
+
+- (NSUInteger)count {
+    return _changes.size();
+}
+
+- (std::vector<ClipParamsChange>)changes {
+    return _changes;
+}
+
+@end
+
+namespace {
+
+/// "12 frames (0.40 s)".
+NSString *describeFrames(int64_t frames, CMTime frameDuration) {
+    const double seconds = static_cast<double>(frames) * CMTimeGetSeconds(frameDuration);
+    return [NSString stringWithFormat:@"%lld %@ (%.2f s)", (long long)frames, frames == 1 ? @"frame" : @"frames", seconds];
+}
+
+/// Whether a transition refusal is about length (media, clip length, neighbours) rather than
+/// structure (missing clips, no cut, locked track, a transition already there).
+bool isLengthLimit(EditError error) {
+    return error == EditError::InsufficientHandles || error == EditError::InvalidArgument ||
+           error == EditError::Overlap;
+}
+
+/// The user-facing refusal of a transition of `frames` on a cut limited by `limit`.
+NSString *transitionRefusal(const TransitionLimit &limit, int64_t frames, CMTime frameDuration) {
+    NSString *reason = toNS(limit.reason);
+    if (limit.maximumFrames == 0) {
+        return isLengthLimit(limit.limitError) ? [NSString stringWithFormat:@"No transition fits this cut: %@", reason]
+                                               : reason;
+    }
+    return [NSString stringWithFormat:@"A transition of %@ does not fit this cut: %@ The longest it allows is %@.",
+                                      describeFrames(frames, frameDuration), reason,
+                                      describeFrames(limit.maximumFrames, frameDuration)];
+}
+
+VEEditErrorCode refusalCode(const TransitionLimit &limit) {
+    return limit.limitError == EditError::None ? VEEditErrorInvalidArgument : ve::facade::toVE(limit.limitError);
+}
+
+} // namespace
+
 @implementation VEEngine {
     std::shared_ptr<media::BackendRouter> _router;
     std::shared_ptr<media::FrameCache> _frameCache;
@@ -1333,7 +1406,13 @@ struct ProbedFile {
 /// another track is in the way, retries on the synced tracks and says so.
 - (VEEditResult *)pushRipple:(std::unique_ptr<Command> (^)(RippleScope scope))make
                      created:(NSArray<NSNumber *> * (^_Nullable)(void))created {
-    if (_rippleScope == VERippleScopeSyncedTracks) {
+    return [self pushRipple:make scope:_rippleScope created:created];
+}
+
+- (VEEditResult *)pushRipple:(std::unique_ptr<Command> (^)(RippleScope scope))make
+                       scope:(VERippleScope)rippleScope
+                     created:(NSArray<NSNumber *> * (^_Nullable)(void))created {
+    if (rippleScope == VERippleScopeSyncedTracks) {
         return [self push:make(RippleScope::SyncedTracks) created:created];
     }
     EditResult result = [self pushCommand:make(RippleScope::AllUnlockedTracks)];
@@ -1645,6 +1724,14 @@ struct ProbedFile {
               created:nil];
 }
 
+- (VEEditResult *)applyClipParams:(VEClipParamsBatch *)batch {
+    VE_ASSERT_MAIN();
+    if (batch.count == 0) {
+        return [VEEditResult failureWithMessage:@"Nothing selected."];
+    }
+    return [self push:std::make_unique<SetClipsParams>([self sequenceId], batch.changes) created:nil];
+}
+
 - (VEEditResult *)setSpeed:(double)speed forClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
     if (!std::isfinite(speed) || speed <= 0) {
@@ -1676,16 +1763,174 @@ struct ProbedFile {
                     created:nil];
 }
 
+- (VEEditResult *)setSpeedNumerator:(int64_t)numerator
+                        denominator:(int64_t)denominator
+                           forClips:(NSArray<NSNumber *> *)clipIDs
+                             ripple:(BOOL)ripple
+                              scope:(VERippleScope)scope {
+    VE_ASSERT_MAIN();
+    const std::optional<Ratio> ratio = Ratio::reduced(numerator, denominator);
+    if (!ratio || !isValidSpeed(*ratio)) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"The speed must be between 1% and 10000% (a fraction between 1/100 "
+                                             @"and 100 with a denominator of at most 1000)."];
+    }
+    const Sequence &sequence = [self activeSequence];
+    std::vector<ClipId> targets;
+    std::set<ClipId> covered;
+    for (ClipId id : toClipIds(clipIDs)) {
+        const Clip *clip = sequence.findClip(id);
+        if (clip == nullptr) {
+            return [VEEditResult failureWithCode:VEEditErrorClipNotFound message:@"A selected clip no longer exists."];
+        }
+        if (clip->isStill) {
+            return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                         message:@"Still images have no playback speed; change their duration by "
+                                                 @"trimming instead."];
+        }
+        if (!covered.insert(id).second) {
+            continue;
+        }
+        if (clip->linkedClipId) {
+            covered.insert(*clip->linkedClipId); // SetClipSpeed changes the partner too
+        }
+        targets.push_back(id);
+    }
+    if (targets.empty()) {
+        return [VEEditResult failureWithMessage:@"Nothing selected."];
+    }
+    const SequenceId sequenceId = [self sequenceId];
+    const Ratio speed = *ratio;
+    const bool rippling = ripple;
+    auto make = ^std::unique_ptr<Command>(RippleScope rippleScope) {
+        std::vector<std::unique_ptr<Command>> children;
+        for (ClipId id : targets) {
+            SpeedOptions options;
+            options.ripple = rippling;
+            options.scope = rippleScope;
+            children.push_back(std::make_unique<SetClipSpeed>(sequenceId, id, speed, options));
+        }
+        if (children.size() == 1) {
+            return std::move(children.front());
+        }
+        return std::make_unique<CompositeCommand>("Change Speed", std::move(children));
+    };
+    if (!ripple) {
+        return [self push:make(RippleScope::SyncedTracks) created:nil];
+    }
+    return [self pushRipple:make scope:scope created:nil];
+}
+
 - (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID duration:(CMTime)duration {
     VE_ASSERT_MAIN();
-    auto command = std::make_unique<AddTransition>([self sequenceId],
-                                                   ClipId(static_cast<ClipId::ValueType>(fromClipID)),
-                                                   ClipId(static_cast<ClipId::ValueType>(toClipID)), duration);
-    AddTransition *raw = command.get();
+    return [self addTransitionFromClip:fromClipID toClip:toClipID duration:duration options:VETransitionOptionsNone];
+}
+
+- (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID
+                                 toClip:(VEClipID)toClipID
+                               duration:(CMTime)duration
+                                options:(VETransitionOptions)options {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    const CMTime frameDuration = sequence.frameDuration;
+    if (!CMTIME_IS_NUMERIC(duration)) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The transition duration is not a valid time."];
+    }
+    int64_t frames = frameIndexAt(snapToFrame(duration, frameDuration, SnapMode::Round), frameDuration, SnapMode::Round);
+    if (frames < 1) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"A transition must be at least one frame long."];
+    }
+    const SequenceId sequenceId = [self sequenceId];
+    const ClipId from(static_cast<ClipId::ValueType>(fromClipID));
+    const ClipId to(static_cast<ClipId::ValueType>(toClipID));
+    const TransitionLimit limit = transitionLimit(_project, sequenceId, from, to);
+    if (limit.maximumFrames == 0 || (frames > limit.maximumFrames && !(options & VETransitionOptionFitToCut))) {
+        return [VEEditResult failureWithCode:refusalCode(limit)
+                                     message:transitionRefusal(limit, frames, frameDuration)];
+    }
+    NSMutableArray<NSString *> *notes = [NSMutableArray array];
+    if (frames > limit.maximumFrames) {
+        frames = limit.maximumFrames;
+        [notes addObject:[NSString stringWithFormat:@"Shortened to %@: %@", describeFrames(frames, frameDuration),
+                                                    toNS(limit.reason)]];
+    }
+
+    // The linked partners' cut (the audio under a video dissolve).
+    std::optional<std::pair<ClipId, ClipId>> partners;
+    if (options & VETransitionOptionIncludeLinked) {
+        const Clip *fromClip = sequence.findClip(from);
+        const Clip *toClip = sequence.findClip(to);
+        if (fromClip && toClip && fromClip->linkedClipId && toClip->linkedClipId) {
+            const TransitionLimit linked =
+                transitionLimit(_project, sequenceId, *fromClip->linkedClipId, *toClip->linkedClipId);
+            if (linked.maximumFrames == 0) {
+                [notes addObject:[NSString stringWithFormat:@"The linked clips got no transition: %@",
+                                                            transitionRefusal(linked, frames, frameDuration)]];
+            } else if (frames > linked.maximumFrames && !(options & VETransitionOptionFitToCut)) {
+                [notes addObject:[NSString stringWithFormat:@"The linked clips got no transition: %@",
+                                                            transitionRefusal(linked, frames, frameDuration)]];
+            } else {
+                if (frames > linked.maximumFrames) {
+                    frames = linked.maximumFrames;
+                    [notes addObject:[NSString stringWithFormat:@"Shortened to %@ to fit the linked clips: %@",
+                                                                describeFrames(frames, frameDuration),
+                                                                toNS(linked.reason)]];
+                }
+                partners = std::make_pair(*fromClip->linkedClipId, *toClip->linkedClipId);
+            }
+        } else if (fromClip && toClip && (fromClip->linkedClipId || toClip->linkedClipId)) {
+            [notes addObject:@"The linked clips do not meet at a cut, so they got no transition."];
+        }
+    }
+
+    const CMTime length = timeForFrame(frames, frameDuration);
+    auto main = std::make_unique<AddTransition>(sequenceId, from, to, length);
+    AddTransition *mainRaw = main.get();
+    AddTransition *partnerRaw = nullptr;
+    std::unique_ptr<Command> command;
+    if (partners) {
+        auto partner = std::make_unique<AddTransition>(sequenceId, partners->first, partners->second, length);
+        partnerRaw = partner.get();
+        std::vector<std::unique_ptr<Command>> children;
+        children.push_back(std::move(main));
+        children.push_back(std::move(partner));
+        command = std::make_unique<CompositeCommand>("Add Transitions", std::move(children));
+    } else {
+        command = std::move(main);
+    }
+    NSString *note = notes.count > 0 ? [notes componentsJoinedByString:@" "] : nil;
     return [self push:std::move(command)
               created:^NSArray<NSNumber *> * {
-                  return @[ @(static_cast<int64_t>(raw->createdTransitionId().value())) ];
-              }];
+                  NSMutableArray<NSNumber *> *ids =
+                      [NSMutableArray arrayWithObject:@(static_cast<int64_t>(mainRaw->createdTransitionId().value()))];
+                  if (partnerRaw != nullptr) {
+                      [ids addObject:@(static_cast<int64_t>(partnerRaw->createdTransitionId().value()))];
+                  }
+                  return ids;
+              }
+                 note:note];
+}
+
+- (VETransitionLimit *)transitionLimitFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID {
+    VE_ASSERT_MAIN();
+    return makeTransitionLimit(transitionLimit(_project, [self sequenceId],
+                                               ClipId(static_cast<ClipId::ValueType>(fromClipID)),
+                                               ClipId(static_cast<ClipId::ValueType>(toClipID))));
+}
+
+- (VETransitionLimit *)transitionLimitForTransition:(VETransitionID)transitionID {
+    VE_ASSERT_MAIN();
+    const TransitionId id(static_cast<TransitionId::ValueType>(transitionID));
+    const Transition *transition = [self activeSequence].findTransition(id);
+    if (transition == nullptr) {
+        TransitionLimit none;
+        none.limitError = EditError::TransitionNotFound;
+        none.reason = "The transition no longer exists.";
+        return makeTransitionLimit(none);
+    }
+    return makeTransitionLimit(
+        transitionLimit(_project, [self sequenceId], transition->fromClipId, transition->toClipId, id));
 }
 
 - (VEEditResult *)removeTransition:(VETransitionID)transitionID {
@@ -1697,9 +1942,26 @@ struct ProbedFile {
 
 - (VEEditResult *)setDuration:(CMTime)duration forTransition:(VETransitionID)transitionID {
     VE_ASSERT_MAIN();
-    return [self push:std::make_unique<SetTransitionDuration>(
-                          [self sequenceId], TransitionId(static_cast<TransitionId::ValueType>(transitionID)), duration)
-              created:nil];
+    const TransitionId id(static_cast<TransitionId::ValueType>(transitionID));
+    VEEditResult *result = [self push:std::make_unique<SetTransitionDuration>([self sequenceId], id, duration)
+                              created:nil];
+    const Sequence &sequence = [self activeSequence];
+    const Transition *transition = sequence.findTransition(id);
+    if (result.ok || transition == nullptr || !CMTIME_IS_NUMERIC(duration) ||
+        !(result.errorCode == VEEditErrorInsufficientHandles || result.errorCode == VEEditErrorInvalidArgument ||
+          result.errorCode == VEEditErrorOverlap)) {
+        return result;
+    }
+    const TransitionLimit limit =
+        transitionLimit(_project, [self sequenceId], transition->fromClipId, transition->toClipId, id);
+    const int64_t frames =
+        frameIndexAt(snapToFrame(duration, sequence.frameDuration, SnapMode::Round), sequence.frameDuration,
+                     SnapMode::Round);
+    if (frames <= limit.maximumFrames) {
+        return result; // refused for another reason (e.g. shorter than a frame)
+    }
+    return [VEEditResult failureWithCode:result.errorCode
+                                 message:transitionRefusal(limit, frames, sequence.frameDuration)];
 }
 
 - (VEEditResult *)linkClip:(VEClipID)clipID withClip:(VEClipID)otherClipID {
@@ -1773,9 +2035,20 @@ struct ProbedFile {
 
 - (void)beginCoalescingWithKey:(NSString *)key {
     VE_ASSERT_MAIN();
+    [self beginCoalescingWithKey:key mode:VECoalescingModeReplace];
+}
+
+- (void)beginCoalescingWithKey:(NSString *)key mode:(VECoalescingMode)mode {
+    VE_ASSERT_MAIN();
     [self closeCoalescingIfOpen];
     _coalescingKey = [key copy];
-    _undo->beginCoalescing(toStd(_coalescingKey));
+    _undo->beginCoalescing(toStd(_coalescingKey), mode == VECoalescingModeAccumulate ? CoalesceMode::Accumulate
+                                                                                   : CoalesceMode::ReplacePrevious);
+}
+
+- (nullable NSString *)coalescingKey {
+    VE_ASSERT_MAIN();
+    return _coalescingKey;
 }
 
 - (VEEditResult *)performInCoalescingGroup:(NSString *)key edit:(NS_NOESCAPE VEEditResult * (^)(void))edit {

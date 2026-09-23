@@ -5,6 +5,7 @@
 
 #import "VETypes.h"
 
+#include "../Edit/EditOps.h"
 #include "../Edit/EditResult.h"
 #include "../Model/Project.h"
 #include "../Playback/PlaybackController.h"
@@ -41,6 +42,7 @@ VEEditErrorCode toVE(EditError error);
 /// listed and mentioned in the note.
 VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *created,
                              NSString *note);
+VETransitionLimit *makeTransitionLimit(const TransitionLimit &limit);
 VEPlaybackState playbackStateToVE(playback::PlaybackState state);
 VEPlaybackStatus *makePlaybackStatus(const playback::PlaybackStatus &status);
 VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats, const playback::PresentedFrame &presented);

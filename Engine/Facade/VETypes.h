@@ -226,6 +226,23 @@ typedef NS_ENUM(NSInteger, VEEditErrorCode) {
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
+/// The longest transition a cut can take (see VEEngine -transitionLimitFromClip:toClip:).
+@interface VETransitionLimit : NSObject
+/// Whole sequence frames; kCMTimeZero when no transition fits the cut.
+@property (nonatomic, readonly) CMTime maximumDuration;
+@property (nonatomic, readonly) int64_t maximumFrames;
+/// What stops a longer transition (VEEditErrorInsufficientHandles: media beyond the cut;
+/// VEEditErrorInvalidArgument: longer than the clips; VEEditErrorOverlap: a neighbouring
+/// transition; or, with maximumFrames 0, a structural reason such as VEEditErrorNotAdjacent,
+/// VEEditErrorAlreadyExists or VEEditErrorTrackLocked).
+@property (nonatomic, readonly) VEEditErrorCode limitingError;
+/// The same as a sentence for the user ("“a.mov” has no more media after its out point.").
+@property (nonatomic, readonly, copy) NSString *reason;
+/// For VEEditErrorInsufficientHandles: the clip that lacks media (else 0).
+@property (nonatomic, readonly) VEClipID limitingClipID;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
 // MARK: - Playback
 
 typedef NS_ENUM(NSInteger, VEPlaybackState) {

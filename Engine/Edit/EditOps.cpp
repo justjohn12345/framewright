@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -789,6 +790,66 @@ EditResult SetAudioParams::perform(const Project &, Sequence &sequence, IdGenera
     return EditResult::success();
 }
 
+SetClipsParams::SetClipsParams(SequenceId sequenceId, std::vector<ClipParamsChange> changes)
+    : SequenceCommand(sequenceId), changes_(std::move(changes)) {
+    std::string key = "clipsParams";
+    for (const ClipParamsChange &change : changes_) {
+        key += ":" + idString(change.clipId.value());
+    }
+    setCoalescingKey(std::move(key));
+}
+
+std::string SetClipsParams::name() const {
+    const bool video = std::any_of(changes_.begin(), changes_.end(), [](const auto &c) { return c.video.has_value(); });
+    const bool audio = std::any_of(changes_.begin(), changes_.end(), [](const auto &c) { return c.audio.has_value(); });
+    if (video && !audio) {
+        return "Change Video Settings";
+    }
+    if (audio && !video) {
+        return "Change Audio Settings";
+    }
+    return "Change Clip Settings";
+}
+
+EditResult SetClipsParams::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    if (changes_.empty()) {
+        return EditResult::failure(EditError::InvalidArgument, "no clips to change");
+    }
+    std::unordered_set<ClipId> seen;
+    for (const ClipParamsChange &change : changes_) {
+        if (!seen.insert(change.clipId).second) {
+            return EditResult::failure(EditError::InvalidArgument,
+                                       "clip " + idString(change.clipId.value()) + " is listed twice");
+        }
+        Track *track = nullptr;
+        Clip *clip = nullptr;
+        if (EditResult r = findEditableClip(sequence, change.clipId, track, clip); !r) {
+            return r;
+        }
+        if (change.video) {
+            if (track->kind != TrackKind::Video) {
+                return EditResult::failure(EditError::TrackKindMismatch,
+                                           "clip " + idString(change.clipId.value()) + " is not on a video track");
+            }
+            if (EditResult r = checkVideoParams(*change.video); !r) {
+                return r;
+            }
+            clip->video = *change.video;
+        }
+        if (change.audio) {
+            if (track->kind != TrackKind::Audio) {
+                return EditResult::failure(EditError::TrackKindMismatch,
+                                           "clip " + idString(change.clipId.value()) + " is not on an audio track");
+            }
+            if (EditResult r = checkAudioParams(*change.audio, clip->duration()); !r) {
+                return r;
+            }
+            clip->audio = *change.audio;
+        }
+    }
+    return EditResult::success();
+}
+
 SetClipSpeed::SetClipSpeed(SequenceId sequenceId, ClipId clipId, Ratio speed, SpeedOptions options)
     : SequenceCommand(sequenceId), clipId_(clipId), speed_(speed), options_(options) {
     setCoalescingKey("speed:" + idString(clipId.value()));
@@ -993,6 +1054,112 @@ EditResult SetTransitionDuration::perform(const Project &project, Sequence &sequ
         }
     }
     return EditResult::success();
+}
+
+// ----- Transition limits -----
+
+namespace {
+
+std::string quotedMediaName(const Project &project, const Clip &clip) {
+    const MediaAsset *asset = project.findAsset(clip.assetId);
+    const std::string name = asset && !asset->name.empty() ? asset->name : "clip " + idString(clip.id.value());
+    return "\u201C" + name + "\u201D";
+}
+
+TransitionLimit noTransition(EditError error, std::string reason) {
+    TransitionLimit limit;
+    limit.limitError = error;
+    limit.reason = std::move(reason);
+    return limit;
+}
+
+} // namespace
+
+TransitionLimit transitionLimit(const Project &project, SequenceId sequenceId, ClipId fromClipId, ClipId toClipId,
+                                TransitionId existing) {
+    const Sequence *sequence = project.findSequence(sequenceId);
+    if (!sequence || !isPositive(sequence->frameDuration)) {
+        return noTransition(EditError::SequenceNotFound, "The sequence no longer exists.");
+    }
+    const Track *track = sequence->trackOfClip(fromClipId);
+    const Clip *from = track ? track->find(fromClipId) : nullptr;
+    const Clip *to = track ? track->find(toClipId) : nullptr;
+    if (!from || !sequence->findClip(toClipId)) {
+        return noTransition(EditError::ClipNotFound, "The clips no longer exist.");
+    }
+    if (!to || from->timelineEnd() != to->timelineStart || fromClipId == toClipId) {
+        return noTransition(EditError::NotAdjacent, "The clips do not meet at a cut on one track.");
+    }
+    if (track->locked) {
+        return noTransition(EditError::TrackLocked, "Track \u201C" + track->name + "\u201D is locked.");
+    }
+    const Transition *onCut = sequence->transitionFrom(fromClipId);
+    if (!onCut) {
+        onCut = sequence->transitionTo(toClipId);
+    }
+    if (onCut && onCut->id != existing) {
+        return noTransition(EditError::AlreadyExists, "This cut already has a transition.");
+    }
+    if (existing && !onCut) {
+        return noTransition(EditError::TransitionNotFound, "The transition no longer exists.");
+    }
+
+    Transition probe;
+    probe.id = existing ? existing : TransitionId(std::numeric_limits<TransitionId::ValueType>::max());
+    probe.trackId = track->id;
+    probe.fromClipId = fromClipId;
+    probe.toClipId = toClipId;
+    auto check = [&](std::int64_t frames) {
+        probe.duration = timeForFrame(frames, sequence->frameDuration);
+        return checkTransitionPlacement(*sequence, project, probe, existing);
+    };
+    // A centred transition of n frames needs floor(n/2) frames of the outgoing clip and ceil(n/2)
+    // of the incoming one, so it can never exceed their combined length.
+    const std::int64_t upper = frameIndexAt(from->duration(), sequence->frameDuration, SnapMode::Floor) +
+                               frameIndexAt(to->duration(), sequence->frameDuration, SnapMode::Floor);
+    std::int64_t lo = 0;         // fits (0: none)
+    std::int64_t hi = upper + 1; // refused
+    while (hi - lo > 1) {
+        const std::int64_t mid = lo + (hi - lo) / 2;
+        if (check(mid)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    TransitionLimit limit;
+    limit.maximumFrames = lo;
+    limit.maximum = lo > 0 ? timeForFrame(lo, sequence->frameDuration) : kCMTimeZero;
+    // Why one frame more is refused.
+    probe.duration = timeForFrame(lo + 1, sequence->frameDuration);
+    if (auto issue = checkTransition(*sequence, project, probe)) {
+        switch (issue->kind) {
+        case TransitionIssueKind::InsufficientHandles: {
+            limit.limitError = EditError::InsufficientHandles;
+            limit.limitingClip = issue->clip;
+            const bool outgoing = issue->clip == fromClipId;
+            limit.reason = quotedMediaName(project, outgoing ? *from : *to) +
+                           (outgoing ? " has no more media after its out point." : " has no more media before its in point.");
+            break;
+        }
+        case TransitionIssueKind::TooLong:
+            limit.limitError = EditError::InvalidArgument;
+            limit.reason = "A transition cannot be longer than the clips it joins.";
+            break;
+        case TransitionIssueKind::NotAdjacent:
+        case TransitionIssueKind::BadDuration:
+        case TransitionIssueKind::Structure:
+            limit.limitError = EditError::InvalidArgument;
+            limit.reason = "The cut cannot take a longer transition.";
+            break;
+        }
+    } else {
+        const EditResult refusal = check(lo + 1);
+        limit.limitError = refusal ? EditError::InvalidArgument : refusal.error;
+        limit.reason = refusal.error == EditError::Overlap ? "It would overlap the neighbouring transition."
+                                                           : "The cut cannot take a longer transition.";
+    }
+    return limit;
 }
 
 // ----- Links -----

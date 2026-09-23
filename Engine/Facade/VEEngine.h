@@ -21,7 +21,9 @@
 //   every edit of the gesture inside performInCoalescingGroup:edit: with the same key, and call
 //   endCoalescing on release (one undo step) or cancelCoalescing on Escape (reverts the drag).
 //   Within the group each edit replaces the previous edit of the group, so express every step
-//   relative to the state before the gesture (e.g. "move clip 7 to 12 s"). Only those tagged
+//   relative to the state before the gesture (e.g. "move clip 7 to 12 s"); a group opened with
+//   VECoalescingModeAccumulate instead applies each edit on top of the previous one and merges
+//   them (a burst of keyboard nudges is one undo step). Only those tagged
 //   edits join the group. Any other edit made while it is open (a menu command, a key) first
 //   ends the group, committing the gesture as its own undo step, and then applies as a separate
 //   step; the gesture's later edits are refused with VEEditErrorBusy (its group has ended), so
@@ -96,6 +98,39 @@ typedef NS_ENUM(NSInteger, VERippleScope) {
     /// Only the edited clips' tracks and the tracks of their linked partners.
     VERippleScopeSyncedTracks = 1,
 };
+
+/// How the edits of a coalescing group combine into its one undo step.
+typedef NS_ENUM(NSInteger, VECoalescingMode) {
+    /// Each edit replaces the previous edit of the group (drags: express every step relative to
+    /// the state before the gesture).
+    VECoalescingModeReplace = 0,
+    /// Each edit applies on top of the previous one and their changes merge (repeated nudges:
+    /// "x + 1" ten times is one undo step of +10; changes that cancel out leave no step).
+    VECoalescingModeAccumulate = 1,
+};
+
+/// Options of -addTransitionFromClip:toClip:duration:options:.
+typedef NS_OPTIONS(NSUInteger, VETransitionOptions) {
+    VETransitionOptionsNone = 0,
+    /// Shorten the transition to what the cut allows (at least one frame) instead of refusing;
+    /// the result's note says so. Still refused when not even one frame fits.
+    VETransitionOptionFitToCut = 1 << 0,
+    /// Also add a transition on the cut between the two clips' linked partners (the audio
+    /// crossfade of a video dissolve), with the same duration, in the same undo step. When the
+    /// partners do not meet at a cut, or theirs cannot take the transition, only the requested
+    /// one is added and the note says why.
+    VETransitionOptionIncludeLinked = 1 << 1,
+};
+
+/// New parameters for several clips, applied by -applyClipParams: as one undo step.
+@interface VEClipParamsBatch : NSObject
+/// Sets the video parameters of a clip on a video track (replaces an earlier entry for it).
+- (void)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID;
+/// Sets the audio parameters of a clip on an audio track (replaces an earlier entry for it).
+- (void)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID;
+/// Number of clips in the batch.
+@property (nonatomic, readonly) NSUInteger count;
+@end
 
 /// Alternative to the notifications: register with -addObserver:. All methods are optional
 /// and called on the main thread.
@@ -285,11 +320,41 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID;
 /// Constant speed (0.01...100, approximated by a fraction with a denominator <= 1000); later
 /// clips ripple by the change in duration (see rippleScope).
+/// Sets the parameters of every clip in `batch` as one undo step (a multi-selection change).
+/// Video parameters apply to clips on video tracks and audio parameters to clips on audio
+/// tracks only (VEEditErrorTrackKindMismatch otherwise); refused as a whole when any clip is
+/// missing, locked or given invalid parameters. Inside an Accumulate group successive batches
+/// merge into one step.
+- (VEEditResult *)applyClipParams:(VEClipParamsBatch *)batch;
 - (VEEditResult *)setSpeed:(double)speed forClip:(VEClipID)clipID;
 /// Exact speed numerator / denominator (e.g. 1/3); refused unless it reduces to a valid speed.
 - (VEEditResult *)setSpeedNumerator:(int64_t)numerator denominator:(int64_t)denominator forClip:(VEClipID)clipID;
+/// Sets the exact speed of several clips (their linked partners follow) as one undo step. With
+/// `ripple`, later clips move by the change in duration on the tracks `scope` chooses (AllTracks
+/// falls back to the synced tracks when another track is in the way, and says so in the note);
+/// without it a clip that would run into the next one is refused. Stills are refused.
+- (VEEditResult *)setSpeedNumerator:(int64_t)numerator
+                        denominator:(int64_t)denominator
+                           forClips:(NSArray<NSNumber *> *)clipIDs
+                             ripple:(BOOL)ripple
+                              scope:(VERippleScope)scope;
+/// Adds a cross dissolve (video track) or constant-power crossfade (audio track), centred on the
+/// cut where `fromClipID` ends and `toClipID` starts. A refusal for lack of media or length says
+/// what limits the cut and the longest transition it allows.
 - (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID duration:(CMTime)duration;
+/// The same with options (fit to the cut, include the linked partners' cut). createdIDs lists
+/// the requested transition first, then the partners' one if it was added.
+- (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID
+                                 toClip:(VEClipID)toClipID
+                               duration:(CMTime)duration
+                                options:(VETransitionOptions)options;
+/// The longest transition the cut between the two clips can take and what stops a longer one
+/// (maximumFrames 0 with the reason when none fits, e.g. the cut already has a transition).
+- (VETransitionLimit *)transitionLimitFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID;
+/// The longest duration an existing transition can be given.
+- (VETransitionLimit *)transitionLimitForTransition:(VETransitionID)transitionID;
 - (VEEditResult *)removeTransition:(VETransitionID)transitionID;
+/// Refused beyond the cut's limit with the same explanation as adding.
 - (VEEditResult *)setDuration:(CMTime)duration forTransition:(VETransitionID)transitionID;
 - (VEEditResult *)linkClip:(VEClipID)clipID withClip:(VEClipID)otherClipID;
 - (VEEditResult *)unlinkClip:(VEClipID)clipID;
@@ -303,7 +368,12 @@ NS_SWIFT_UI_ACTOR
 
 // MARK: Undo
 
+/// Same as beginCoalescingWithKey:mode: with VECoalescingModeReplace.
 - (void)beginCoalescingWithKey:(NSString *)key;
+/// Opens a coalescing group (ending any open one first). See the rules at the top of this file.
+- (void)beginCoalescingWithKey:(NSString *)key mode:(VECoalescingMode)mode;
+/// Key of the open coalescing group, or nil.
+@property (nonatomic, readonly, copy, nullable) NSString *coalescingKey;
 /// Runs `edit` (which calls edit methods of this engine) as a step of the open coalescing group
 /// `key`: only edits made inside it join the group (see the rules above). Refused with
 /// VEEditErrorBusy, without running `edit`, when no group with that key is open (it was never

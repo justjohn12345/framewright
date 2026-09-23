@@ -26,6 +26,7 @@
 #include "Command.h"
 #include "EditPrimitives.h"
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -272,6 +273,30 @@ class SetAudioParams final : public SequenceCommand {
     AudioParams params_;
 };
 
+// One clip's new parameters in a SetClipsParams batch; parts left empty are unchanged.
+struct ClipParamsChange {
+    ClipId clipId{};
+    std::optional<VideoParams> video;
+    std::optional<AudioParams> audio;
+};
+
+// Sets the parameters of several clips as one edit (a multi-selection change in the inspector).
+// Video parameters apply only to clips on video tracks and audio parameters only to clips on
+// audio tracks (EditError::TrackKindMismatch otherwise). Refused as a whole when a clip is
+// missing, listed twice, on a locked track, or given invalid parameters (see SetVideoParams and
+// SetAudioParams). Under CoalesceMode::Accumulate successive batches merge into one undo step.
+class SetClipsParams final : public SequenceCommand {
+  public:
+    SetClipsParams(SequenceId sequenceId, std::vector<ClipParamsChange> changes);
+    std::string name() const override;
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    std::vector<ClipParamsChange> changes_;
+};
+
 struct SpeedOptions {
     bool includeLinked = true;
     // Shift later clips by the change in duration. Without it, a speed change that would make
@@ -357,6 +382,32 @@ class SetTransitionDuration final : public SequenceCommand {
     TransitionId transitionId_;
     CMTime duration_;
 };
+
+// The longest transition a cut can take, and what stops a longer one.
+struct TransitionLimit {
+    // Whole sequence frames; zero when no transition fits the cut at all.
+    CMTime maximum = kCMTimeZero;
+    std::int64_t maximumFrames = 0;
+    // Why a transition one frame longer than `maximum` is refused: InsufficientHandles (media
+    // beyond the cut), InvalidArgument (longer than the clips it joins), Overlap (a neighbouring
+    // transition), or a structural reason (ClipNotFound, NotAdjacent, AlreadyExists, TrackLocked,
+    // InvalidArgument) that allows no transition at all.
+    EditError limitError = EditError::None;
+    // The same as a sentence for the user, naming clips by their media ("“a.mov” has no more
+    // media after its out point.").
+    std::string reason;
+    // For InsufficientHandles: the clip that lacks the media.
+    ClipId limitingClip{};
+};
+
+// The longest transition (centred on the cut, see Sequence::transitionRange) that fits the cut
+// between `fromClipId` and `toClipId` of `sequenceId`: within both clips, with enough media
+// beyond the cut in each (stills have unlimited media), and clear of the clips' other
+// transitions. `existing` is the transition being resized, if any (ignored as a neighbour; any
+// other transition on the cut makes the limit zero with AlreadyExists). Validity grows
+// monotonically shorter-to-longer, so the maximum is found by bisection over whole frames.
+TransitionLimit transitionLimit(const Project &project, SequenceId sequenceId, ClipId fromClipId, ClipId toClipId,
+                                TransitionId existing = {});
 
 // Links two unlinked clips on different tracks so they move, trim and split together.
 class LinkClips final : public SequenceCommand {
