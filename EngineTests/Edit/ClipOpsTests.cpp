@@ -877,7 +877,7 @@ TEST_CASE("SetVideoParams and SetAudioParams validate and apply") {
     applyReversible(fx.project, setAudio);
     CHECK(fx.clip(a).audio == audio);
 
-    for (const VideoParams bad : {VideoParams{0, 0, 1, 0, 1.5}, VideoParams{NAN, 0, 1, 0, 1},
+    for (const VideoParams &bad : {VideoParams{0, 0, 1, 0, 1.5}, VideoParams{NAN, 0, 1, 0, 1},
                                   VideoParams{0, 0, -1, 0, 1}, VideoParams{0, 0, 1, INFINITY, 1}}) {
         SetVideoParams c(fx.seq, v, bad);
         applyRefused(fx.project, c, EditError::InvalidArgument);

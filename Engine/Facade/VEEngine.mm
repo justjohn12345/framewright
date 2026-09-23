@@ -303,12 +303,16 @@ struct ProbedFile {
 } // namespace
 
 @interface VEClipParamsBatch ()
-/// The batch as engine changes, in the order clips were first added.
+/// The batch as engine changes, in the order clips were first added (video parameters without
+/// keyframes: the engine command gets each clip's keyframes from -applyClipParams:).
 @property (nonatomic, readonly) std::vector<ClipParamsChange> changes;
+/// Whether the batch removes the clip's Motion keyframes (setVideoParams:clearingKeyframesForClip:).
+- (BOOL)clearsKeyframesOfClip:(ClipId)clipId;
 @end
 
 @implementation VEClipParamsBatch {
     std::vector<ClipParamsChange> _changes;
+    std::set<ClipId> _clearsKeyframes; // clips whose Motion keyframes the batch removes
 }
 
 - (ClipParamsChange &)entryForClip:(VEClipID)clipID {
@@ -327,6 +331,13 @@ struct ProbedFile {
 - (void)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
     [self entryForClip:clipID].video = fromVE(params);
+    _clearsKeyframes.erase(ClipId(static_cast<ClipId::ValueType>(clipID)));
+}
+
+- (void)setVideoParams:(VEVideoParams)params clearingKeyframesForClip:(VEClipID)clipID {
+    VE_ASSERT_MAIN();
+    [self entryForClip:clipID].video = fromVE(params);
+    _clearsKeyframes.insert(ClipId(static_cast<ClipId::ValueType>(clipID)));
 }
 
 - (void)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID {
@@ -341,6 +352,10 @@ struct ProbedFile {
 
 - (std::vector<ClipParamsChange>)changes {
     return _changes;
+}
+
+- (BOOL)clearsKeyframesOfClip:(ClipId)clipId {
+    return _clearsKeyframes.count(clipId) > 0;
 }
 
 @end
@@ -966,7 +981,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     const ClipId id(static_cast<ClipId::ValueType>(clipID));
     const Track *track = sequence.trackOfClip(id);
     const Clip *clip = track ? track->find(id) : nullptr;
-    return clip ? makeClipInfo(*clip, *track, _project) : nil;
+    return clip ? makeClipInfo(*clip, *track, _project, sequence.frameDuration) : nil;
 }
 
 - (nullable VETrackInfo *)trackInfo:(VETrackID)trackID {
@@ -1028,7 +1043,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     NSMutableArray<VEClipInfo *> *clips = [NSMutableArray array];
     if (track != nullptr) {
         for (const Clip &clip : track->clips) {
-            [clips addObject:makeClipInfo(clip, *track, _project)];
+            [clips addObject:makeClipInfo(clip, *track, _project, [self activeSequence].frameDuration)];
         }
     }
     return clips;
@@ -1041,7 +1056,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     for (const auto *list : {&sequence.videoTracks, &sequence.audioTracks}) {
         for (const Track &track : *list) {
             for (const Clip &clip : track.clips) {
-                [clips addObject:makeClipInfo(clip, track, _project)];
+                [clips addObject:makeClipInfo(clip, track, _project, sequence.frameDuration)];
             }
         }
     }
@@ -1767,9 +1782,12 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 
 - (VEEditResult *)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
-    return [self push:std::make_unique<SetVideoParams>([self sequenceId],
-                                                       ClipId(static_cast<ClipId::ValueType>(clipID)), fromVE(params))
-              created:nil];
+    const ClipId id(static_cast<ClipId::ValueType>(clipID));
+    VideoParams video = fromVE(params);
+    if (const Clip *clip = [self activeSequence].findClip(id)) {
+        video.keyframes = clip->video.keyframes; // static values only; the keyframes stay
+    }
+    return [self push:std::make_unique<SetVideoParams>([self sequenceId], id, std::move(video)) created:nil];
 }
 
 - (VEEditResult *)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID {
@@ -1784,7 +1802,267 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     if (batch.count == 0) {
         return [VEEditResult failureWithMessage:@"Nothing selected."];
     }
-    return [self push:std::make_unique<SetClipsParams>([self sequenceId], batch.changes) created:nil];
+    std::vector<ClipParamsChange> changes = batch.changes;
+    const Sequence &sequence = [self activeSequence];
+    for (ClipParamsChange &change : changes) {
+        const Clip *clip = sequence.findClip(change.clipId);
+        if (change.video && clip != nullptr && ![batch clearsKeyframesOfClip:change.clipId]) {
+            change.video->keyframes = clip->video.keyframes; // static values only; the keyframes stay
+        }
+    }
+    return [self push:std::make_unique<SetClipsParams>([self sequenceId], std::move(changes)) created:nil];
+}
+
+// MARK: - Keyframed Motion
+
+/// Refusal of a Motion edit of `clipID` at timeline time `time` (nil when allowed): the clip must
+/// exist on a video track and, with `needsFrame`, the sequence frame containing `time` must be one
+/// of its frames. Sets `clip` and `frame` (the frame's start) when allowed.
+- (nullable VEEditResult *)refuseMotionEditOfClip:(VEClipID)clipID
+                                           atTime:(CMTime)time
+                                       needsFrame:(BOOL)needsFrame
+                                             clip:(const Clip **)clip
+                                            frame:(CMTime *)frame {
+    const Sequence &sequence = [self activeSequence];
+    const ClipId id(static_cast<ClipId::ValueType>(clipID));
+    const Track *track = sequence.trackOfClip(id);
+    const Clip *found = track != nullptr ? track->find(id) : nullptr;
+    if (found == nullptr) {
+        return [VEEditResult failureWithCode:VEEditErrorClipNotFound message:@"The clip no longer exists."];
+    }
+    if (track->kind != TrackKind::Video) {
+        return [VEEditResult failureWithCode:VEEditErrorTrackKindMismatch
+                                     message:@"Audio clips have no Motion to animate."];
+    }
+    *clip = found;
+    *frame = CMTIME_IS_NUMERIC(time) ? snapToFrame(time, sequence.frameDuration, SnapMode::Floor) : kCMTimeInvalid;
+    if (needsFrame && (!CMTIME_IS_NUMERIC(*frame) || *frame < found->timelineStart || *frame >= found->timelineEnd())) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidTime
+                                     message:@"Move the playhead over the clip to work with its keyframes."];
+    }
+    return nil;
+}
+
+- (VEEditResult *)keyframeTimeRefusal:(const Clip &)clip {
+    return [VEEditResult failureWithCode:VEEditErrorNotRepresentable
+                                 message:[NSString stringWithFormat:@"The source time of clip %lld at the playhead "
+                                                                    @"cannot be represented.",
+                                                                    static_cast<long long>(clip.id.value())]];
+}
+
+- (VEEditResult *)addKeyframeToClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time {
+    VE_ASSERT_MAIN();
+    const Clip *clip = nullptr;
+    CMTime frame = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:time needsFrame:YES clip:&clip frame:&frame]) {
+        return refusal;
+    }
+    const MotionParameter p = fromVE(parameter);
+    if (keyframeIndexForFrame(*clip, p, frame, [self activeSequence].frameDuration)) {
+        return [VEEditResult failureWithCode:VEEditErrorAlreadyExists
+                                     message:[NSString stringWithFormat:@"%s already has a keyframe at the playhead.",
+                                                                        displayNameOf(p)]];
+    }
+    const std::optional<CMTime> at = keyframeTimeForFrame(*clip, frame);
+    if (!at) {
+        return [self keyframeTimeRefusal:*clip];
+    }
+    return [self push:std::make_unique<AddKeyframe>([self sequenceId], clip->id, p, *at) created:nil];
+}
+
+- (VEEditResult *)removeKeyframeFromClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time {
+    VE_ASSERT_MAIN();
+    const Clip *clip = nullptr;
+    CMTime frame = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:time needsFrame:YES clip:&clip frame:&frame]) {
+        return refusal;
+    }
+    const MotionParameter p = fromVE(parameter);
+    const auto index = keyframeIndexForFrame(*clip, p, frame, [self activeSequence].frameDuration);
+    if (!index) {
+        return [VEEditResult failureWithCode:VEEditErrorKeyframeNotFound
+                                     message:[NSString stringWithFormat:@"%s has no keyframe at the playhead.",
+                                                                        displayNameOf(p)]];
+    }
+    const CMTime at = clip->video.keyframes.track(p)[*index].time;
+    return [self push:std::make_unique<RemoveKeyframe>([self sequenceId], clip->id, p, at) created:nil];
+}
+
+- (VEEditResult *)setMotionValue:(double)value
+                       parameter:(VEMotionParameter)parameter
+                            clip:(VEClipID)clipID
+                          atTime:(CMTime)time {
+    VE_ASSERT_MAIN();
+    const Clip *clip = nullptr;
+    CMTime frame = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:time needsFrame:NO clip:&clip frame:&frame]) {
+        return refusal;
+    }
+    const MotionParameter p = fromVE(parameter);
+    std::optional<CMTime> keyframeTime;
+    if (clip->video.isAnimated(p)) {
+        // An animated parameter changes at the playhead: the keyframe there, or a new one.
+        if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
+                                                          atTime:time
+                                                      needsFrame:YES
+                                                            clip:&clip
+                                                           frame:&frame]) {
+            return refusal;
+        }
+        if (const auto index = keyframeIndexForFrame(*clip, p, frame, [self activeSequence].frameDuration)) {
+            keyframeTime = clip->video.keyframes.track(p)[*index].time;
+        } else {
+            keyframeTime = keyframeTimeForFrame(*clip, frame);
+            if (!keyframeTime) {
+                return [self keyframeTimeRefusal:*clip];
+            }
+        }
+    }
+    return [self push:std::make_unique<SetMotionValue>([self sequenceId], clip->id, p, keyframeTime, value) created:nil];
+}
+
+- (VEEditResult *)setKeyframeInterpolation:(VEKeyframeInterpolation)interpolation
+                                 parameter:(VEMotionParameter)parameter
+                                      clip:(VEClipID)clipID
+                                    atTime:(CMTime)time {
+    VE_ASSERT_MAIN();
+    const std::optional<KeyframeInterpolation> engineInterpolation = fromVE(interpolation);
+    if (!engineInterpolation || *engineInterpolation == KeyframeInterpolation::Bezier) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"Choose Hold, Linear or an ease (a custom curve comes only from a split)."];
+    }
+    const Clip *clip = nullptr;
+    CMTime frame = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:time needsFrame:YES clip:&clip frame:&frame]) {
+        return refusal;
+    }
+    const MotionParameter p = fromVE(parameter);
+    const auto index = keyframeIndexForFrame(*clip, p, frame, [self activeSequence].frameDuration);
+    if (!index) {
+        return [VEEditResult failureWithCode:VEEditErrorKeyframeNotFound
+                                     message:[NSString stringWithFormat:@"%s has no keyframe at the playhead.",
+                                                                        displayNameOf(p)]];
+    }
+    const CMTime at = clip->video.keyframes.track(p)[*index].time;
+    return [self push:std::make_unique<SetKeyframeInterpolation>([self sequenceId], clip->id, p, at,
+                                                                 *engineInterpolation)
+              created:nil];
+}
+
+- (VEEditResult *)moveKeyframeOfClip:(VEClipID)clipID
+                           parameter:(VEMotionParameter)parameter
+                            fromTime:(CMTime)from
+                              toTime:(CMTime)to {
+    VE_ASSERT_MAIN();
+    const Clip *clip = nullptr;
+    CMTime fromFrame = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
+                                                      atTime:from
+                                                  needsFrame:YES
+                                                        clip:&clip
+                                                       frame:&fromFrame]) {
+        return refusal;
+    }
+    CMTime toFrame = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:to needsFrame:YES clip:&clip frame:&toFrame]) {
+        return refusal;
+    }
+    const MotionParameter p = fromVE(parameter);
+    const auto index = keyframeIndexForFrame(*clip, p, fromFrame, [self activeSequence].frameDuration);
+    if (!index) {
+        return [VEEditResult failureWithCode:VEEditErrorKeyframeNotFound
+                                     message:[NSString stringWithFormat:@"%s has no keyframe there.", displayNameOf(p)]];
+    }
+    const std::optional<CMTime> destination = keyframeTimeForFrame(*clip, toFrame);
+    if (!destination) {
+        return [self keyframeTimeRefusal:*clip];
+    }
+    const CMTime at = clip->video.keyframes.track(p)[*index].time;
+    return [self push:std::make_unique<MoveKeyframe>([self sequenceId], clip->id, p, at, *destination) created:nil];
+}
+
+- (VEEditResult *)removeAnimationFromClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time {
+    VE_ASSERT_MAIN();
+    const Clip *clip = nullptr;
+    CMTime frame = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:time needsFrame:NO clip:&clip frame:&frame]) {
+        return refusal;
+    }
+    const MotionParameter p = fromVE(parameter);
+    if (!clip->video.isAnimated(p)) {
+        return [VEEditResult failureWithCode:VEEditErrorKeyframeNotFound
+                                     message:[NSString stringWithFormat:@"%s is not animated.", displayNameOf(p)]];
+    }
+    // The parameter keeps the value it has at the playhead (the clip's nearest frame when the
+    // playhead is elsewhere), like turning Premiere's animation stopwatch off.
+    const CMTime fd = [self activeSequence].frameDuration;
+    const CMTime last = checkedSubtract(clip->timelineEnd(), fd).value_or(clip->timelineStart);
+    const CMTime at = CMTIME_IS_NUMERIC(frame) ? clampTime(frame, clip->timelineStart, maxTime(last, clip->timelineStart))
+                                               : clip->timelineStart;
+    const auto source = clip->exactSourceTimeAt(at);
+    const double value = source ? clip->video.valueAt(p, *source) : clip->video.staticValue(p);
+    MotionTrackChange change;
+    change.parameter = p;
+    change.staticValue = value;
+    return [self push:std::make_unique<SetMotionTracks>([self sequenceId], clip->id,
+                                                        std::vector<MotionTrackChange>{change}, "Remove Animation")
+              created:nil];
+}
+
+- (VEEditResult *)applyKenBurnsToClip:(VEClipID)clipID
+                                start:(VEMotionFraming)start
+                                  end:(VEMotionFraming)end
+                        interpolation:(VEKeyframeInterpolation)interpolation {
+    VE_ASSERT_MAIN();
+    const std::optional<KeyframeInterpolation> engineInterpolation = fromVE(interpolation);
+    if (!engineInterpolation || *engineInterpolation == KeyframeInterpolation::Bezier) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"Choose Linear or an ease for the Ken Burns move."];
+    }
+    const Clip *clip = nullptr;
+    CMTime frame = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
+                                                      atTime:kCMTimeInvalid
+                                                  needsFrame:NO
+                                                        clip:&clip
+                                                       frame:&frame]) {
+        return refusal;
+    }
+    const CMTime fd = [self activeSequence].frameDuration;
+    const std::optional<CMTime> lastFrame = checkedSubtract(clip->timelineEnd(), fd);
+    if (!lastFrame || !(*lastFrame > clip->timelineStart)) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"The clip is one frame long: a Ken Burns move needs at least two frames."];
+    }
+    // Keyframes on the clip's first and last frames (FCP: the start framing at the clip's start,
+    // the end framing at its end).
+    const std::optional<CMTime> first = keyframeTimeForFrame(*clip, clip->timelineStart);
+    const std::optional<CMTime> last = keyframeTimeForFrame(*clip, *lastFrame);
+    if (!first || !last) {
+        return [self keyframeTimeRefusal:*clip];
+    }
+    std::vector<MotionTrackChange> changes;
+    const std::pair<MotionParameter, std::pair<double, double>> values[] = {
+        {MotionParameter::X, {start.x, end.x}},
+        {MotionParameter::Y, {start.y, end.y}},
+        {MotionParameter::Scale, {start.scale, end.scale}},
+    };
+    for (const auto &[parameter, pair] : values) {
+        MotionTrackChange change;
+        change.parameter = parameter;
+        change.staticValue = pair.first;
+        Keyframe from;
+        from.time = *first;
+        from.value = pair.first;
+        from.interpolation = *engineInterpolation;
+        Keyframe to;
+        to.time = *last;
+        to.value = pair.second;
+        change.keyframes = {from, to};
+        changes.push_back(std::move(change));
+    }
+    return [self push:std::make_unique<SetMotionTracks>([self sequenceId], clip->id, std::move(changes), "Ken Burns")
+              created:nil];
 }
 
 - (VEEditResult *)setSpeed:(double)speed forClip:(VEClipID)clipID {

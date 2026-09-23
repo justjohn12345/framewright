@@ -51,8 +51,9 @@ struct VideoLayer {
     // The asset's container rotation (MediaAsset::rotationDegrees): degrees clockwise to rotate
     // the decoded storage-orientation frame before the clip transform is applied.
     std::int32_t sourceRotationDegrees = 0;
+    // The clip's Motion at this frame (keyframes evaluated by Scheduler::motionAt; no keyframes).
     VideoParams transform;
-    double opacity = 1.0; // the clip's opacity (transition weight is separate)
+    double opacity = 1.0; // the clip's opacity at this frame (transition weight is separate)
     std::optional<LayerTransition> transition;
 };
 

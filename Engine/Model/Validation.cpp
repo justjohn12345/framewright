@@ -90,13 +90,11 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
     if (!isOnFrameGrid(clip.timelineDuration, sequence.frameDuration)) {
         return where + ": duration " + describe(clip.timelineDuration) + " is not a whole number of frames";
     }
-    const VideoParams &v = clip.video;
-    if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.scale) || !std::isfinite(v.rotationDegrees) ||
-        !std::isfinite(v.opacity)) {
-        return where + ": non-finite video parameter";
+    if (auto problem = videoParamsProblem(clip.video)) {
+        return where + ": " + *problem;
     }
-    if (v.scale < 0.0 || v.opacity < 0.0 || v.opacity > 1.0) {
-        return where + ": video scale must be >= 0 and opacity within [0, 1]";
+    if (track.kind != TrackKind::Video && clip.video.isAnimated()) {
+        return where + ": only clips on video tracks have Motion keyframes";
     }
     const AudioParams &a = clip.audio;
     if (!std::isfinite(a.gainDb)) {
@@ -151,6 +149,22 @@ std::optional<std::string> modelTimeProblem(CMTime t, const std::string &what) {
     }
     if (t.epoch != 0) {
         return what + " " + describe(t) + " has epoch " + std::to_string(t.epoch);
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> videoParamsProblem(const VideoParams &v) {
+    if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.scale) || !std::isfinite(v.rotationDegrees) ||
+        !std::isfinite(v.opacity)) {
+        return std::string("non-finite video parameter");
+    }
+    if (v.scale < 0.0 || v.opacity < 0.0 || v.opacity > 1.0) {
+        return std::string("video scale must be >= 0 and opacity within [0, 1]");
+    }
+    for (const MotionParameter parameter : kMotionParameters) {
+        if (auto problem = keyframeTrackProblem(v.keyframes.track(parameter), parameter)) {
+            return problem;
+        }
     }
     return std::nullopt;
 }

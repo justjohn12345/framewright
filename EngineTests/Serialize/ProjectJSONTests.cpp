@@ -126,6 +126,35 @@ Fixture migratedGoldenFixture() {
     return fx;
 }
 
+// The migrated golden project with Motion keyframes on its first V1 clip (every interpolation,
+// and the custom curve a split through an eased segment leaves) and a static scale track on the
+// NTSC sequence's clip: what version 4 adds.
+Fixture keyframedGoldenFixture() {
+    Fixture fx = migratedGoldenFixture();
+    Clip &clip = fx.sequence().videoTracks[0].clips[0]; // av30 from source frame 30, 60 frames
+    auto key = [](CMTime time, double value, KeyframeInterpolation interpolation) {
+        Keyframe k;
+        k.time = time;
+        k.value = value;
+        k.interpolation = interpolation;
+        return k;
+    };
+    clip.video.keyframes.x = {key(f30(30), -120.5, KeyframeInterpolation::EaseInOut),
+                              key(f30(90), 240, KeyframeInterpolation::Linear)};
+    const TrackSplit split = splitTrack(clip.video.keyframes.x, clip.video.x, f30(50));
+    clip.video.keyframes.x = {split.left.front(), split.right.front(), split.right.back()};
+    clip.video.keyframes.scale = {key(f30(30), 1, KeyframeInterpolation::Hold), key(f30(45), 1.25, KeyframeInterpolation::EaseOut),
+                                  key(f30(60), 2, KeyframeInterpolation::EaseIn)};
+    clip.video.keyframes.rotation = {key(CMTimeMake(1201, 600), 0, KeyframeInterpolation::Linear),
+                                     key(f30(89), 360, KeyframeInterpolation::Linear)};
+    clip.video.keyframes.opacity = {key(f30(30), 0, KeyframeInterpolation::Linear), key(f30(40), 1, KeyframeInterpolation::Linear)};
+    Sequence &ntsc = fx.project.sequences.back();
+    Clip &n = ntsc.videoTracks[0].clips[0];
+    n.video.keyframes.scale = {key(CMTimeMake(1001 * 5, 24000), 1.5, KeyframeInterpolation::Linear)};
+    fx.requireValid();
+    return fx;
+}
+
 // A minimal version 1 document with one clip on V1 of a 30 fps sequence; `clip` fields are
 // merged over the defaults.
 json v1Document(const json &clipFields, CMTime frameDuration = CMTimeMake(1, 30)) {
@@ -187,7 +216,7 @@ TEST_CASE("ProjectJSON: format details") {
     const Fixture fx = richFixture();
     const json j = projectToJson(fx.project);
     CHECK(j.at("schemaVersion") == kProjectSchemaVersion);
-    CHECK(kProjectSchemaVersion == 3);
+    CHECK(kProjectSchemaVersion == 4);
     CHECK(j.at("nextId") == fx.project.ids.nextValue());
     const json &clip = j.at("sequences")[0].at("videoTracks")[0].at("clips")[0];
     CHECK(clip.at("timelineStart") == json{{"value", 0}, {"timescale", 30}});
@@ -443,12 +472,95 @@ TEST_CASE("ProjectJSON: the checked-in version 2 project loads through the migra
     CHECK(*loaded.project == migratedGoldenFixture().project);
 }
 
-TEST_CASE("ProjectJSON: the checked-in version 3 project matches the current writer byte for byte") {
+TEST_CASE("ProjectJSON: the checked-in version 3 project loads unchanged") {
     const std::string text = readFile(goldenPath("project-v3.json"));
+    REQUIRE(json::parse(text).at("schemaVersion") == 3);
     const ProjectLoadResult loaded = parseProject(text);
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(loaded.warnings.empty());
     CHECK(*loaded.project == migratedGoldenFixture().project);
-    CHECK(serializeProject(*loaded.project) + "\n" == text);
+    // Written back, only the schema version differs: a version 3 clip has no keyframes, and a
+    // clip without keyframes is written exactly as version 3 wrote it.
+    std::string expected = text;
+    const std::string v3 = "\"schemaVersion\": 3";
+    REQUIRE(expected.find(v3) != std::string::npos);
+    expected.replace(expected.find(v3), v3.size(), "\"schemaVersion\": 4");
+    CHECK(serializeProject(*loaded.project) + "\n" == expected);
+    // The migration step itself changes nothing but the version.
+    json document = json::parse(text);
+    json upgraded = document;
+    std::vector<std::string> warnings;
+    REQUIRE_FALSE(migrateProjectJson(upgraded, 3, warnings).has_value());
+    CHECK(warnings.empty());
+    upgraded["schemaVersion"] = 3;
+    CHECK(upgraded == document);
+}
+
+TEST_CASE("ProjectJSON: the checked-in version 4 project (keyframes) matches the current writer byte for byte") {
+    const Fixture expected = keyframedGoldenFixture();
+    const std::string path = goldenPath("project-v4.json");
+    const std::string written = serializeProject(expected.project) + "\n";
+    if (!std::ifstream(path).good()) {
+        // First run after adding the fixture: write the golden file for review and fail.
+        std::ofstream(path, std::ios::binary) << written;
+        FAIL_CHECK("golden file " << path.c_str() << " was missing and has been written; review and re-run");
+        return;
+    }
+    const std::string text = readFile(path);
+    CHECK(text == written);
+    const ProjectLoadResult loaded = parseProject(text);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(loaded.warnings.empty());
+    CHECK(*loaded.project == expected.project);
+}
+
+TEST_CASE("ProjectJSON: keyframes round trip losslessly, custom curves included") {
+    const Fixture fx = keyframedGoldenFixture();
+    const std::string text = serializeProject(fx.project);
+    const ProjectLoadResult loaded = parseProject(text);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(*loaded.project == fx.project);
+    CHECK(serializeProject(*loaded.project) == text);
+    const json j = projectToJson(fx.project);
+    const json &video = j.at("sequences")[0].at("videoTracks")[0].at("clips")[0].at("video");
+    REQUIRE(video.contains("keyframes"));
+    CHECK(video.at("keyframes").at("x")[0].at("interpolation") == "bezier");
+    CHECK(video.at("keyframes").at("x")[1].at("interpolation") == "bezier");
+    CHECK(video.at("keyframes").at("x")[1].at("curve").size() == 4);
+    CHECK(video.at("keyframes").at("x")[2].at("interpolation") == "linear");
+    CHECK_FALSE(video.at("keyframes").at("x")[2].contains("curve"));
+    CHECK(video.at("keyframes").at("scale")[0].at("interpolation") == "hold");
+    CHECK(video.at("keyframes").at("scale")[1].at("interpolation") == "easeOut");
+    CHECK(video.at("keyframes").at("scale")[2].at("interpolation") == "easeIn");
+    CHECK_FALSE(video.at("keyframes").contains("y")); // parameters without keyframes are left out
+    // A clip without keyframes has no "keyframes" object at all.
+    CHECK_FALSE(j.at("sequences")[0].at("videoTracks")[0].at("clips")[1].at("video").contains("keyframes"));
+}
+
+TEST_CASE("ProjectJSON: keyframe errors and warnings") {
+    const Fixture fx = keyframedGoldenFixture();
+    json j = projectToJson(fx.project);
+    json &x = j["sequences"][0]["videoTracks"][0]["clips"][0]["video"]["keyframes"]["x"];
+    SUBCASE("an unknown interpolation (a newer version) becomes linear, with a warning") {
+        x[0]["interpolation"] = "springy";
+        const ProjectLoadResult r = projectFromJson(j);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(anyContains(r.warnings, "keyframes.x[0].interpolation: unknown keyframe interpolation"));
+        CHECK(r.project->sequences[0].videoTracks[0].clips[0].video.keyframes.x[0].interpolation ==
+              KeyframeInterpolation::Linear);
+    }
+    SUBCASE("a custom curve needs four numbers") {
+        x[1]["curve"] = json::array({0.1, 0.2});
+        CHECK(contains(loadError(j), "keyframes.x[1].curve: expected four numbers"));
+    }
+    SUBCASE("keyframes out of order fail validation") {
+        std::swap(x[0], x[1]);
+        CHECK(contains(loadError(j), "times must increase strictly"));
+    }
+    SUBCASE("a keyframe needs a time") {
+        x[0].erase("time");
+        CHECK(contains(loadError(j), "keyframes.x[0].time: missing required field"));
+    }
 }
 
 TEST_CASE("ProjectJSON: version 1 migration") {

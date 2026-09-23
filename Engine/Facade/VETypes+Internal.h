@@ -12,6 +12,7 @@
 #include "../Thumbs/WaveformService.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace ve::facade {
@@ -28,9 +29,15 @@ VEVideoParams toVE(const VideoParams &params);
 VideoParams fromVE(const VEVideoParams &params);
 VEAudioParams toVE(const AudioParams &params);
 AudioParams fromVE(const VEAudioParams &params);
+VEMotionParameter toVE(MotionParameter parameter);
+MotionParameter fromVE(VEMotionParameter parameter);
+VEKeyframeInterpolation toVE(KeyframeInterpolation interpolation);
+/// Nullopt for a value outside the enumeration.
+std::optional<KeyframeInterpolation> fromVE(VEKeyframeInterpolation interpolation);
 
 VEAssetInfo *makeAssetInfo(const MediaAsset &asset, const AssetDetails *details, bool missing, NSInteger useCount);
-VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project);
+/// `frameDuration`: the sequence's (keyframe queries map frames to source spans).
+VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project, CMTime frameDuration);
 VETrackInfo *makeTrackInfo(const Track &track, NSInteger index);
 VETransitionInfo *makeTransitionInfo(const Transition &transition, const Sequence &sequence);
 VESequenceInfo *makeSequenceInfo(const Sequence &sequence);

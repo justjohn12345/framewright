@@ -27,9 +27,32 @@ json optionalIdToJson(const std::optional<ClipId> &id) {
     return id ? json(id->value()) : json(nullptr);
 }
 
+json keyframeToJson(const Keyframe &k) {
+    json j{{"time", timeToJson(k.time)}, {"value", k.value}, {"interpolation", nameOf(k.interpolation)}};
+    if (k.interpolation == KeyframeInterpolation::Bezier) {
+        j["curve"] = json::array({k.curve.x1, k.curve.y1, k.curve.x2, k.curve.y2});
+    }
+    return j;
+}
+
 json videoParamsToJson(const VideoParams &v) {
-    return json{
-        {"x", v.x}, {"y", v.y}, {"scale", v.scale}, {"rotationDegrees", v.rotationDegrees}, {"opacity", v.opacity}};
+    json j{{"x", v.x}, {"y", v.y}, {"scale", v.scale}, {"rotationDegrees", v.rotationDegrees}, {"opacity", v.opacity}};
+    if (v.isAnimated()) {
+        json keyframes = json::object();
+        for (const MotionParameter parameter : kMotionParameters) {
+            const KeyframeTrack &track = v.keyframes.track(parameter);
+            if (track.empty()) {
+                continue;
+            }
+            json list = json::array();
+            for (const Keyframe &keyframe : track) {
+                list.push_back(keyframeToJson(keyframe));
+            }
+            keyframes[nameOf(parameter)] = std::move(list);
+        }
+        j["keyframes"] = std::move(keyframes);
+    }
+    return j;
 }
 
 json audioParamsToJson(const AudioParams &a) {
@@ -330,7 +353,40 @@ MediaAsset parseAsset(const Node &node) {
     return asset;
 }
 
-VideoParams parseVideoParams(const Node &node) {
+// Interpolations are not critical: an unknown one (from a newer version) becomes linear so the
+// rest of the file still loads.
+KeyframeInterpolation parseInterpolation(const Node &node, Warnings &warnings) {
+    const std::string s = node.asString();
+    for (const KeyframeInterpolation interpolation :
+         {KeyframeInterpolation::Hold, KeyframeInterpolation::Linear, KeyframeInterpolation::EaseOut,
+          KeyframeInterpolation::EaseIn, KeyframeInterpolation::EaseInOut, KeyframeInterpolation::Bezier}) {
+        if (s == nameOf(interpolation)) {
+            return interpolation;
+        }
+    }
+    warnings.push_back(node.path() + ": unknown keyframe interpolation \"" + s + "\"; using linear");
+    return KeyframeInterpolation::Linear;
+}
+
+Keyframe parseKeyframe(const Node &node, Warnings &warnings) {
+    node.requireObject();
+    Keyframe keyframe;
+    keyframe.time = node.field("time").asTime();
+    keyframe.value = node.field("value").asDouble();
+    keyframe.interpolation =
+        node.has("interpolation") ? parseInterpolation(node.field("interpolation"), warnings) : KeyframeInterpolation::Linear;
+    if (keyframe.interpolation == KeyframeInterpolation::Bezier) {
+        const Node curve = node.field("curve");
+        if (curve.arraySize() != 4) {
+            curve.fail("expected four numbers [x1, y1, x2, y2]");
+        }
+        keyframe.curve = TimingCurve{curve.element(0).asDouble(), curve.element(1).asDouble(),
+                                     curve.element(2).asDouble(), curve.element(3).asDouble()};
+    }
+    return keyframe;
+}
+
+VideoParams parseVideoParams(const Node &node, Warnings &warnings) {
     node.requireObject();
     VideoParams v;
     v.x = node.doubleOr("x", v.x);
@@ -338,6 +394,20 @@ VideoParams parseVideoParams(const Node &node) {
     v.scale = node.doubleOr("scale", v.scale);
     v.rotationDegrees = node.doubleOr("rotationDegrees", v.rotationDegrees);
     v.opacity = node.doubleOr("opacity", v.opacity);
+    if (node.has("keyframes")) {
+        const Node keyframes = node.field("keyframes");
+        keyframes.requireObject();
+        for (const MotionParameter parameter : kMotionParameters) {
+            if (!keyframes.has(nameOf(parameter))) {
+                continue;
+            }
+            const Node list = keyframes.field(nameOf(parameter));
+            KeyframeTrack &track = v.keyframes.track(parameter);
+            for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
+                track.push_back(parseKeyframe(list.element(i), warnings));
+            }
+        }
+    }
     return v;
 }
 
@@ -350,7 +420,7 @@ AudioParams parseAudioParams(const Node &node) {
     return a;
 }
 
-Clip parseClip(const Node &node) {
+Clip parseClip(const Node &node, Warnings &warnings) {
     node.requireObject();
     Clip clip;
     clip.id = node.field("id").asId<ClipId>();
@@ -374,7 +444,7 @@ Clip parseClip(const Node &node) {
         clip.linkedClipId = node.field("linkedClipId").asId<ClipId>();
     }
     if (node.has("video")) {
-        clip.video = parseVideoParams(node.field("video"));
+        clip.video = parseVideoParams(node.field("video"), warnings);
     }
     if (node.has("audio")) {
         clip.audio = parseAudioParams(node.field("audio"));
@@ -382,7 +452,7 @@ Clip parseClip(const Node &node) {
     return clip;
 }
 
-Track parseTrack(const Node &node) {
+Track parseTrack(const Node &node, Warnings &warnings) {
     node.requireObject();
     Track track;
     track.id = node.field("id").asId<TrackId>();
@@ -394,7 +464,7 @@ Track parseTrack(const Node &node) {
     if (node.has("clips")) {
         const Node clips = node.field("clips");
         for (std::size_t i = 0, n = clips.arraySize(); i < n; ++i) {
-            track.clips.push_back(parseClip(clips.element(i)));
+            track.clips.push_back(parseClip(clips.element(i), warnings));
         }
     }
     return track;
@@ -428,7 +498,7 @@ Sequence parseSequence(const Node &node, Warnings &warnings) {
         const Node list = node.field(key);
         std::vector<Track> &tracks = std::string(key) == "videoTracks" ? sequence.videoTracks : sequence.audioTracks;
         for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
-            tracks.push_back(parseTrack(list.element(i)));
+            tracks.push_back(parseTrack(list.element(i), warnings));
         }
     }
     if (node.has("transitions")) {
@@ -634,6 +704,13 @@ void migrateV2ToV3(json &document, Warnings &) {
     }
 }
 
+// Version 4 added Motion keyframes ("keyframes" in a clip's "video" object, absent when a clip has
+// none). A version 3 clip has none, so its document is already a valid version 4 document: the
+// step changes nothing but the version number.
+void migrateV3ToV4(json &document, Warnings &) {
+    Node(document, "").requireObject();
+}
+
 struct MigrationStep {
     int fromVersion;
     void (*apply)(json &document, Warnings &warnings);
@@ -643,6 +720,7 @@ struct MigrationStep {
 constexpr MigrationStep kMigrations[] = {
     {1, migrateV1ToV2},
     {2, migrateV2ToV3},
+    {3, migrateV3ToV4},
 };
 static_assert(sizeof(kMigrations) / sizeof(kMigrations[0]) == kProjectSchemaVersion - 1,
               "every schema version below the current one needs a migration step");

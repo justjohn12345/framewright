@@ -30,6 +30,7 @@ enum class EditError {
     AlreadyLinked,
     NotLinked,
     InsideTransition,    // the edit point lies inside a transition (see SplitOptions)
+    KeyframeNotFound,    // no keyframe of the parameter at the given time
     NotRepresentable,    // an exact result time has no CMTime form (timescale > 2^31 - 1); nothing is rounded
     InvariantViolation,  // the edit would break a model invariant (a bug guard; should not happen)
 };

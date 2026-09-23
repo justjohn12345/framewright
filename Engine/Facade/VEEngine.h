@@ -154,8 +154,12 @@ typedef NS_OPTIONS(NSUInteger, VETransitionOptions) {
 /// Main thread only, like VEEngine (Swift sees it as @MainActor): build it where the edit is made.
 NS_SWIFT_UI_ACTOR
 @interface VEClipParamsBatch : NSObject
-/// Sets the video parameters of a clip on a video track (replaces an earlier entry for it).
+/// Sets the static video parameters of a clip on a video track (replaces an earlier entry for it);
+/// the clip's Motion keyframes stay.
 - (void)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID;
+/// Sets the video parameters of a clip on a video track and removes its Motion keyframes (a
+/// reset of the whole Video section).
+- (void)setVideoParams:(VEVideoParams)params clearingKeyframesForClip:(VEClipID)clipID;
 /// Sets the audio parameters of a clip on an audio track (replaces an earlier entry for it).
 - (void)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID;
 /// Number of clips in the batch.
@@ -346,6 +350,8 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)rippleDeleteClips:(NSArray<NSNumber *> *)clipIDs;
 /// Tracks that move with ripple edits (ripple delete, speed changes, insert). Default AllTracks.
 @property (nonatomic) VERippleScope rippleScope;
+/// Sets the clip's static video parameters (VEClipInfo.videoParams); its Motion keyframes stay (a
+/// parameter with keyframes is changed with setMotionValue:parameter:clip:atTime:).
 - (VEEditResult *)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID;
 - (VEEditResult *)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID;
 /// Constant speed (0.01...100, approximated by a fraction with a denominator <= 1000); later
@@ -401,6 +407,63 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)setDuration:(CMTime)duration
                 forTransition:(VETransitionID)transitionID
               includingLinked:(BOOL)includingLinked;
+
+// MARK: Keyframed Motion
+//
+// A clip on a video track can animate its Motion (VEMotionParameter): each parameter has its
+// static value (VEClipInfo.videoParams) until it gets keyframes, and then follows them (before
+// the first keyframe it holds the first value, after the last the last one, as in Premiere Pro).
+// Keyframes live on the clip's source time, so trims, speed changes and splits keep them on the
+// pictures they were set on (a split interpolates the cut: neither piece's pictures change).
+// Playback, the output view and export evaluate them for every frame. Times passed here are
+// timeline times (the playhead); a keyframe "at" a time is the one the sequence frame containing
+// it shows (VEKeyframe.frameTime). Every call is one undo step and joins a coalescing group like
+// any other edit (slider drags, keyboard nudges). Refusals: VEEditErrorClipNotFound,
+// VEEditErrorTrackKindMismatch (an audio clip), VEEditErrorInvalidTime (the playhead is not over
+// the clip), VEEditErrorAlreadyExists, VEEditErrorKeyframeNotFound, VEEditErrorInvalidArgument
+// (a value out of range: scale below 0, opacity outside 0...1), VEEditErrorTrackLocked.
+
+/// Adds a keyframe to `parameter` on the frame at `time`, with the value the parameter has there
+/// (the picture does not change) and linear interpolation.
+- (VEEditResult *)addKeyframeToClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time
+    NS_SWIFT_NAME(addKeyframe(clip:parameter:at:));
+/// Removes the keyframe of `parameter` on the frame at `time`; the last one leaves its value as the
+/// static value.
+- (VEEditResult *)removeKeyframeFromClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time
+    NS_SWIFT_NAME(removeKeyframe(clip:parameter:at:));
+/// Sets `parameter` to `value` (VEVideoParams units): a parameter without keyframes gets a new
+/// static value (whatever `time`); an animated one changes the keyframe on the frame at `time`, or
+/// gets a new keyframe there (Premiere's behaviour while the animation stopwatch is on).
+- (VEEditResult *)setMotionValue:(double)value
+                       parameter:(VEMotionParameter)parameter
+                            clip:(VEClipID)clipID
+                          atTime:(CMTime)time NS_SWIFT_NAME(setMotionValue(_:parameter:clip:at:));
+/// Sets the interpolation of the segment starting at the keyframe on the frame at `time` (Custom
+/// cannot be set).
+- (VEEditResult *)setKeyframeInterpolation:(VEKeyframeInterpolation)interpolation
+                                 parameter:(VEMotionParameter)parameter
+                                      clip:(VEClipID)clipID
+                                    atTime:(CMTime)time
+    NS_SWIFT_NAME(setKeyframeInterpolation(_:parameter:clip:at:));
+/// Moves the keyframe on the frame at `from` to the frame at `to` (both frames of the clip).
+- (VEEditResult *)moveKeyframeOfClip:(VEClipID)clipID
+                           parameter:(VEMotionParameter)parameter
+                            fromTime:(CMTime)from
+                              toTime:(CMTime)to NS_SWIFT_NAME(moveKeyframe(clip:parameter:from:to:));
+/// Removes every keyframe of `parameter`; it keeps the value it has at `time` (the clip's nearest
+/// frame when `time` is outside it) as its static value.
+- (VEEditResult *)removeAnimationFromClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time
+    NS_SWIFT_NAME(removeAnimation(clip:parameter:at:));
+/// The Ken Burns move (Final Cut Pro): position and scale keyframes on the clip's first frame
+/// (`start`) and last frame (`end`), the segment between them with `interpolation` (Ease In and Out
+/// is FCP's default). Replaces the clip's position and scale keyframes; rotation and opacity are
+/// kept. Refused for a one-frame clip.
+- (VEEditResult *)applyKenBurnsToClip:(VEClipID)clipID
+                                start:(VEMotionFraming)start
+                                  end:(VEMotionFraming)end
+                        interpolation:(VEKeyframeInterpolation)interpolation
+    NS_SWIFT_NAME(applyKenBurns(clip:start:end:interpolation:));
+
 - (VEEditResult *)linkClip:(VEClipID)clipID withClip:(VEClipID)otherClipID;
 - (VEEditResult *)unlinkClip:(VEClipID)clipID;
 /// Adds a track on top of its kind (empty name: "V<n>"/"A<n>").

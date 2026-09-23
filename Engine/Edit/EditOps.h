@@ -246,6 +246,8 @@ class RippleDelete final : public SequenceCommand {
     RippleOptions options_;
 };
 
+// Sets a clip's video parameters, keyframes included (the facade keeps a clip's keyframes when
+// the inspector sets static values).
 class SetVideoParams final : public SequenceCommand {
   public:
     SetVideoParams(SequenceId sequenceId, ClipId clipId, VideoParams params);
@@ -299,6 +301,146 @@ class SetClipsParams final : public SequenceCommand {
 
   private:
     std::vector<ClipParamsChange> changes_;
+};
+
+// ----- Keyframed Motion (Keyframes.h) -----
+//
+// Keyframe times are source times of the clip (Clip::exactSourceTimeAt; for a still the time into
+// the clip) and must be exact model times. Keyframes are added and moved only within the clip's
+// used source range [sourceIn, source out] (a still's [0, duration]); keyframes a trim cut off
+// stay, hidden, and can still be changed or removed. Only clips on video tracks have Motion
+// (EditError::TrackKindMismatch otherwise). Every command is one SequenceCommand, so an
+// Accumulate coalescing group (keyboard nudges) merges successive steps into one undo step.
+
+// Adds a keyframe to `parameter` at `time` with `value` (default: the value the parameter has
+// there now, so the picture does not change) and `interpolation` (default Linear, Premiere's
+// default). Refused with AlreadyExists when the parameter has a keyframe at `time`.
+class AddKeyframe final : public SequenceCommand {
+  public:
+    AddKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime time,
+                std::optional<double> value = std::nullopt,
+                KeyframeInterpolation interpolation = KeyframeInterpolation::Linear);
+    std::string name() const override {
+        return "Add Keyframe";
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    ClipId clipId_;
+    MotionParameter parameter_;
+    CMTime time_;
+    std::optional<double> value_;
+    KeyframeInterpolation interpolation_;
+};
+
+// Sets a Motion value. With `keyframeTime` the keyframe at that time gets `value` (and
+// `interpolation`, when given), and when there is none one is added there (Linear unless
+// `interpolation` says otherwise): what the inspector does for an animated parameter. Without a
+// time the static value is set (the value of a parameter that has no keyframes).
+class SetMotionValue final : public SequenceCommand {
+  public:
+    SetMotionValue(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, std::optional<CMTime> keyframeTime,
+                   double value, std::optional<KeyframeInterpolation> interpolation = std::nullopt);
+    std::string name() const override;
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    ClipId clipId_;
+    MotionParameter parameter_;
+    std::optional<CMTime> keyframeTime_;
+    double value_;
+    std::optional<KeyframeInterpolation> interpolation_;
+    bool added_ = false;
+};
+
+// Removes the keyframe of `parameter` at `time` (KeyframeNotFound when there is none). Removing a
+// parameter's last keyframe makes its value static at that keyframe's value, so the picture does
+// not change.
+class RemoveKeyframe final : public SequenceCommand {
+  public:
+    RemoveKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime time);
+    std::string name() const override {
+        return "Delete Keyframe";
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    ClipId clipId_;
+    MotionParameter parameter_;
+    CMTime time_;
+};
+
+// Moves the keyframe of `parameter` at `from` to `to` (within the clip's used source range),
+// keeping its value and interpolation. Refused with AlreadyExists when another keyframe is at `to`.
+class MoveKeyframe final : public SequenceCommand {
+  public:
+    MoveKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime from, CMTime to);
+    std::string name() const override {
+        return "Move Keyframe";
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    ClipId clipId_;
+    MotionParameter parameter_;
+    CMTime from_;
+    CMTime to_;
+};
+
+// Sets the interpolation of the segment that starts at the keyframe of `parameter` at `time`.
+// Bezier (a custom curve, which only a split creates) cannot be set this way.
+class SetKeyframeInterpolation final : public SequenceCommand {
+  public:
+    SetKeyframeInterpolation(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime time,
+                             KeyframeInterpolation interpolation);
+    std::string name() const override {
+        return "Change Keyframe Interpolation";
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    ClipId clipId_;
+    MotionParameter parameter_;
+    CMTime time_;
+    KeyframeInterpolation interpolation_;
+};
+
+// One parameter's complete replacement in a SetMotionTracks edit.
+struct MotionTrackChange {
+    MotionParameter parameter = MotionParameter::X;
+    KeyframeTrack keyframes;   // may be empty (no animation)
+    double staticValue = 0.0;  // the value when `keyframes` is empty
+};
+
+// Replaces whole keyframe tracks (and static values) of one clip as one edit: the Ken Burns
+// helper (position and scale from a start and an end framing), and turning a parameter's
+// animation off. Each track is validated like the model (keyframeTrackProblem); keyframes of a
+// non-empty track must lie within the clip's used source range.
+class SetMotionTracks final : public SequenceCommand {
+  public:
+    SetMotionTracks(SequenceId sequenceId, ClipId clipId, std::vector<MotionTrackChange> changes,
+                    std::string name = "Change Animation");
+    std::string name() const override {
+        return name_;
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    ClipId clipId_;
+    std::vector<MotionTrackChange> changes_;
+    std::string name_;
 };
 
 struct SpeedOptions {

@@ -36,6 +36,11 @@ class Scheduler {
     // Clips covering `time` on every track, video tracks bottom to top then audio tracks.
     static std::vector<ClipId> clipsAt(const Sequence &sequence, CMTime time);
 
+    // The clip's Motion at sequence time `time`: its keyframes evaluated at the exact source time
+    // the frame maps to (Clip::exactSourceTimeAt, also in transition handles), or its static
+    // values. Without keyframes. Playback, the output view and export all get it from here.
+    static VideoParams motionAt(const Clip &clip, CMTime time);
+
     // Source frame time for `clip` at sequence time `time`: exact speed mapping, then the start
     // of the asset frame containing that time (Floor; skipped for VFR or unknown frame rate),
     // clamped to the media. Inside the clip it never reaches the clip's out point: at 0.5x the

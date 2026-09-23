@@ -48,7 +48,8 @@ EditResult notRepresentable(ClipId clipId, CMTime at);
 
 // Splits the clip at `index` at timeline time `at` (strictly inside it). The left piece keeps
 // the id, link and fade-in; the right piece gets a new id, no link and the fade-out (each fade
-// shortened to fit its piece); a transition at the clip's end moves to the right piece.
+// shortened to fit its piece); a transition at the clip's end moves to the right piece. Motion
+// keyframes are divided at the cut (splitTrack), so both pieces show exactly what the clip showed.
 // Stores the right piece's id in `rightId`. Fails (changing nothing) with NotRepresentable when
 // the right piece's source in point has no exact CMTime form.
 EditResult splitClipAt(Sequence &sequence, Track &track, std::size_t index, CMTime at, IdGenerator &ids,

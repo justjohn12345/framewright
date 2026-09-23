@@ -506,3 +506,57 @@ TEST_CASE("Scheduler: audio respects speed, mute and solo") {
     fx.track(fx.v1).muted = true; // video mute does not affect audio
     CHECK(audioFor(fx, 0, 30).segments.size() == 1);
 }
+
+TEST_CASE("Scheduler: layers carry the Motion keyframes evaluate to at each frame") {
+    Fixture fx;
+    // V1: a clip from source frame 30 at timeline 0 (60 frames) cutting to a second one at 60;
+    // a 10-frame dissolve on the cut shows the first clip's handle past its out point.
+    const ClipId first = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
+    const ClipId second = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
+    fx.addTransition(fx.v1, first, second, 10);
+    Clip &clip = *fx.sequence().findClip(first);
+    auto key = [](CMTime t, double v, KeyframeInterpolation i) {
+        Keyframe k;
+        k.time = t;
+        k.value = v;
+        k.interpolation = i;
+        return k;
+    };
+    // Source frames 30 and 90 (the out point): x linear 0 -> 600, scale holds 1 then 2 at 60,
+    // opacity eases out from 1 to 0 over [60, 90).
+    clip.video.keyframes.x = {key(f30(30), 0, KeyframeInterpolation::Linear), key(f30(90), 600, KeyframeInterpolation::Linear)};
+    clip.video.keyframes.scale = {key(f30(30), 1, KeyframeInterpolation::Hold), key(f30(60), 2, KeyframeInterpolation::Linear)};
+    clip.video.keyframes.opacity = {key(f30(60), 1, KeyframeInterpolation::EaseOut), key(f30(90), 0, KeyframeInterpolation::Linear)};
+    clip.video.y = 25;
+    fx.requireValid();
+
+    for (std::int64_t frame = 0; frame < 55; ++frame) {
+        CAPTURE(frame);
+        const RenderGraph graph = graphAt(fx, frame);
+        REQUIRE(graph.layers.size() == 1);
+        const VideoLayer &layer = graph.layers[0];
+        CHECK(layer.transform.x == doctest::Approx(10.0 * double(frame)).epsilon(1e-12));
+        CHECK(layer.transform.y == 25);
+        CHECK(layer.transform.scale == (frame < 30 ? 1.0 : 2.0));
+        CHECK(layer.transform.keyframes.empty());
+        const double u = frame < 30 ? 0.0 : double(frame - 30) / 30.0;
+        CHECK(layer.opacity == doctest::Approx(1.0 - timingCurveFor(KeyframeInterpolation::EaseOut).valueAt(u)).epsilon(1e-12));
+        CHECK(layer.opacity == layer.transform.opacity);
+    }
+    // In the dissolve, past the first clip's out point (its handle), x holds the last value.
+    const RenderGraph mixed = graphAt(fx, 63);
+    REQUIRE(mixed.layers.size() == 2);
+    CHECK(mixed.layers[0].clipId == first);
+    CHECK(mixed.layers[0].transform.x == 600);
+    CHECK(mixed.layers[0].opacity == 0);
+    CHECK(mixed.layers[1].transform == VideoParams{});
+
+    // The same evaluation for a still, on its time into the clip.
+    const ClipId still = fx.addClip(fx.v2, fx.still, 30, 30);
+    fx.sequence().findClip(still)->video.keyframes.rotation = {key(f30(0), 0, KeyframeInterpolation::Linear),
+                                                              key(f30(29), 290, KeyframeInterpolation::Linear)};
+    fx.requireValid();
+    const RenderGraph withStill = graphAt(fx, 40);
+    REQUIRE(withStill.layers.size() == 2);
+    CHECK(withStill.layers[1].transform.rotationDegrees == doctest::Approx(100).epsilon(1e-12));
+}

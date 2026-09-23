@@ -44,7 +44,22 @@ VEAudioParams VEAudioParamsDefault(void) {
 - (instancetype)initInternal;
 @end
 
-@interface VEClipInfo ()
+@interface VEKeyframe ()
+@property (nonatomic, readwrite) VEMotionParameter parameter;
+@property (nonatomic, readwrite) CMTime sourceTime;
+@property (nonatomic, readwrite) CMTime timelineTime;
+@property (nonatomic, readwrite) CMTime frameTime;
+@property (nonatomic, readwrite) BOOL isInsideClip;
+@property (nonatomic, readwrite) double value;
+@property (nonatomic, readwrite) VEKeyframeInterpolation interpolation;
+- (instancetype)initInternal;
+@end
+
+@interface VEClipInfo () {
+  @public
+    ve::Clip _clip;         // the clip as it was (for keyframe queries)
+    CMTime _frameDuration;  // the sequence's frame duration
+}
 @property (nonatomic, readwrite) VEClipID clipID;
 @property (nonatomic, readwrite) VEAssetID assetID;
 @property (nonatomic, readwrite) VETrackID trackID;
@@ -213,9 +228,92 @@ static NSString *describeTime(CMTime t) {
 }
 @end
 
+@implementation VEKeyframe
+- (instancetype)initInternal {
+    return [super init];
+}
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<VEKeyframe %ld at %@ (timeline %@) = %g>", (long)self.parameter,
+                                      describeTime(self.sourceTime), describeTime(self.timelineTime), self.value];
+}
+@end
+
+namespace {
+
+ve::MotionParameter motionParameterFrom(VEMotionParameter parameter) {
+    switch (parameter) {
+    case VEMotionParameterPositionX:
+        return ve::MotionParameter::X;
+    case VEMotionParameterPositionY:
+        return ve::MotionParameter::Y;
+    case VEMotionParameterScale:
+        return ve::MotionParameter::Scale;
+    case VEMotionParameterRotation:
+        return ve::MotionParameter::Rotation;
+    case VEMotionParameterOpacity:
+        return ve::MotionParameter::Opacity;
+    }
+    return ve::MotionParameter::X;
+}
+
+VEKeyframe *makeKeyframe(const ve::Clip &clip, ve::MotionParameter parameter, const ve::Keyframe &keyframe,
+                         CMTime frameDuration) {
+    VEKeyframe *info = [[VEKeyframe alloc] initInternal];
+    info.parameter = ve::facade::toVE(parameter);
+    info.sourceTime = keyframe.time;
+    info.timelineTime = clip.timelineTimeAt(keyframe.time);
+    const std::optional<CMTime> frame = ve::frameShowingSourceTime(clip, keyframe.time, frameDuration);
+    info.isInsideClip = frame.has_value();
+    info.frameTime = frame.value_or(ve::snapToFrame(info.timelineTime, frameDuration, ve::SnapMode::Floor));
+    info.value = keyframe.value;
+    info.interpolation = ve::facade::toVE(keyframe.interpolation);
+    return info;
+}
+
+} // namespace
+
 @implementation VEClipInfo
 - (instancetype)initInternal {
     return [super init];
+}
+- (BOOL)hasKeyframes {
+    return _clip.video.isAnimated();
+}
+- (BOOL)isAnimated:(VEMotionParameter)parameter {
+    return _clip.video.isAnimated(motionParameterFrom(parameter));
+}
+- (NSArray<VEKeyframe *> *)keyframesForParameter:(VEMotionParameter)parameter {
+    const ve::MotionParameter p = motionParameterFrom(parameter);
+    const ve::KeyframeTrack &track = _clip.video.keyframes.track(p);
+    NSMutableArray<VEKeyframe *> *keyframes = [NSMutableArray arrayWithCapacity:track.size()];
+    for (const ve::Keyframe &keyframe : track) {
+        [keyframes addObject:makeKeyframe(_clip, p, keyframe, _frameDuration)];
+    }
+    return keyframes;
+}
+- (NSArray<VEKeyframe *> *)allKeyframes {
+    NSMutableArray<VEKeyframe *> *all = [NSMutableArray array];
+    for (const ve::MotionParameter p : ve::kMotionParameters) {
+        for (const ve::Keyframe &keyframe : _clip.video.keyframes.track(p)) {
+            [all addObject:makeKeyframe(_clip, p, keyframe, _frameDuration)];
+        }
+    }
+    [all sortWithOptions:NSSortStable
+         usingComparator:^NSComparisonResult(VEKeyframe *a, VEKeyframe *b) {
+             const int32_t order = CMTimeCompare(a.sourceTime, b.sourceTime);
+             return order < 0 ? NSOrderedAscending : order > 0 ? NSOrderedDescending : NSOrderedSame;
+         }];
+    return all;
+}
+- (VEVideoParams)videoParamsAtTime:(CMTime)time {
+    const auto source = _clip.exactSourceTimeAt(time);
+    return ve::facade::toVE(source ? _clip.video.valuesAt(*source) : _clip.video.staticValues());
+}
+- (nullable VEKeyframe *)keyframeForParameter:(VEMotionParameter)parameter atTime:(CMTime)time {
+    const ve::MotionParameter p = motionParameterFrom(parameter);
+    const CMTime frame = ve::snapToFrame(time, _frameDuration, ve::SnapMode::Floor);
+    const auto index = ve::keyframeIndexForFrame(_clip, p, frame, _frameDuration);
+    return index ? makeKeyframe(_clip, p, _clip.video.keyframes.track(p)[*index], _frameDuration) : nil;
 }
 - (NSString *)description {
     return [NSString stringWithFormat:@"<VEClipInfo %lld asset %lld track %lld [%@, %@)>", self.clipID, self.assetID,
@@ -458,8 +556,66 @@ VEAssetInfo *makeAssetInfo(const MediaAsset &asset, const AssetDetails *details,
     return info;
 }
 
-VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project) {
+VEMotionParameter toVE(MotionParameter parameter) {
+    switch (parameter) {
+    case MotionParameter::X:
+        return VEMotionParameterPositionX;
+    case MotionParameter::Y:
+        return VEMotionParameterPositionY;
+    case MotionParameter::Scale:
+        return VEMotionParameterScale;
+    case MotionParameter::Rotation:
+        return VEMotionParameterRotation;
+    case MotionParameter::Opacity:
+        return VEMotionParameterOpacity;
+    }
+    return VEMotionParameterPositionX;
+}
+
+MotionParameter fromVE(VEMotionParameter parameter) {
+    return motionParameterFrom(parameter);
+}
+
+VEKeyframeInterpolation toVE(KeyframeInterpolation interpolation) {
+    switch (interpolation) {
+    case KeyframeInterpolation::Hold:
+        return VEKeyframeInterpolationHold;
+    case KeyframeInterpolation::Linear:
+        return VEKeyframeInterpolationLinear;
+    case KeyframeInterpolation::EaseOut:
+        return VEKeyframeInterpolationEaseOut;
+    case KeyframeInterpolation::EaseIn:
+        return VEKeyframeInterpolationEaseIn;
+    case KeyframeInterpolation::EaseInOut:
+        return VEKeyframeInterpolationEaseInOut;
+    case KeyframeInterpolation::Bezier:
+        return VEKeyframeInterpolationCustom;
+    }
+    return VEKeyframeInterpolationLinear;
+}
+
+std::optional<KeyframeInterpolation> fromVE(VEKeyframeInterpolation interpolation) {
+    switch (interpolation) {
+    case VEKeyframeInterpolationHold:
+        return KeyframeInterpolation::Hold;
+    case VEKeyframeInterpolationLinear:
+        return KeyframeInterpolation::Linear;
+    case VEKeyframeInterpolationEaseOut:
+        return KeyframeInterpolation::EaseOut;
+    case VEKeyframeInterpolationEaseIn:
+        return KeyframeInterpolation::EaseIn;
+    case VEKeyframeInterpolationEaseInOut:
+        return KeyframeInterpolation::EaseInOut;
+    case VEKeyframeInterpolationCustom:
+        return KeyframeInterpolation::Bezier;
+    }
+    return std::nullopt;
+}
+
+VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project, CMTime frameDuration) {
     VEClipInfo *info = [[VEClipInfo alloc] initInternal];
+    info->_clip = clip;
+    info->_frameDuration = frameDuration;
     info.clipID = static_cast<VEClipID>(clip.id.value());
     info.assetID = static_cast<VEAssetID>(clip.assetId.value());
     info.trackID = static_cast<VETrackID>(track.id.value());
@@ -595,6 +751,7 @@ VEEditErrorCode toVE(EditError error) {
     case EditError::InsideTransition: return VEEditErrorInsideTransition;
     case EditError::NotRepresentable: return VEEditErrorNotRepresentable;
     case EditError::InvariantViolation: return VEEditErrorInvariantViolation;
+    case EditError::KeyframeNotFound: return VEEditErrorKeyframeNotFound;
     }
     return VEEditErrorInvariantViolation;
 }

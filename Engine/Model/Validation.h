@@ -31,6 +31,10 @@ bool assetFitsTrack(const MediaAsset &asset, TrackKind kind);
 // video tracks (the video may end before the container's duration), duration on audio tracks.
 CMTime mediaEndFor(const MediaAsset &asset, TrackKind kind);
 
+// Why a clip's video parameters are invalid (non-finite values, scale below 0, opacity outside
+// [0, 1], or a keyframe track that keyframeTrackProblem rejects), or nullopt.
+std::optional<std::string> videoParamsProblem(const VideoParams &params);
+
 enum class TransitionIssueKind {
     Structure,           // unknown track, clips missing or not on that track, clip joined to itself
     NotAdjacent,         // outgoing clip does not end where the incoming clip starts

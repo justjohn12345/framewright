@@ -55,6 +55,22 @@ EditResult splitClipAt(Sequence &sequence, Track &track, std::size_t index, CMTi
                        ClipId &rightId) {
     Clip left = track.clips[index];
     Clip right = track.clips[index];
+    if (left.video.isAnimated()) {
+        // Each piece keeps the keyframes on its side of the cut (source time `cut`), the cut itself
+        // interpolated, so neither piece's pictures change (Keyframes.h, splitTrack).
+        const auto source = left.exactSourceTimeAt(at);
+        const auto cut = source ? source->toTime() : std::nullopt;
+        if (!cut) {
+            return notRepresentable(left.id, at);
+        }
+        for (const MotionParameter parameter : kMotionParameters) {
+            TrackSplit pieces = splitTrack(left.video.keyframes.track(parameter), left.video.staticValue(parameter), *cut);
+            left.video.keyframes.track(parameter) = std::move(pieces.left);
+            left.video.setStaticValue(parameter, pieces.leftStatic);
+            right.video.keyframes.track(parameter) = std::move(pieces.right);
+            right.video.setStaticValue(parameter, pieces.rightStatic);
+        }
+    }
     right.linkedClipId.reset();
     right.audio.fadeInDuration = kCMTimeZero;
     if (!right.setTimelineStartKeepingEnd(at)) {

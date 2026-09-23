@@ -20,8 +20,10 @@
 #pragma once
 
 #include "Ids.h"
+#include "Keyframes.h"
 #include "TimeUtil.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -46,16 +48,40 @@ inline CMTime defaultStillDuration() {
     return CMTimeMake(5, 1);
 }
 
-// Placement of a clip's picture in the sequence frame. x/y offset the clip's centre from the
-// frame centre in sequence pixels (+y is down); scale 1 draws the source at its fitted size.
+// Placement of a clip's picture in the sequence frame (its Motion). x/y offset the clip's centre
+// from the frame centre in sequence pixels (+y is down); scale 1 draws the source at its fitted
+// size. The five values are the static values; a parameter with keyframes is animated instead
+// (Keyframes.h: keyframe times are source times of the clip, and the static value of an animated
+// parameter is not used).
 struct VideoParams {
+    VideoParams() = default;
+    // Static values, no keyframes.
+    VideoParams(double x_, double y_, double scale_, double rotationDegrees_, double opacity_)
+        : x(x_), y(y_), scale(scale_), rotationDegrees(rotationDegrees_), opacity(opacity_) {}
+
     double x = 0.0;
     double y = 0.0;
     double scale = 1.0;
     double rotationDegrees = 0.0;
     double opacity = 1.0; // 0...1
+    MotionKeyframes keyframes;
 
     friend bool operator==(const VideoParams &, const VideoParams &) = default;
+
+    double staticValue(MotionParameter parameter) const;
+    void setStaticValue(MotionParameter parameter, double value);
+    bool isAnimated() const {
+        return !keyframes.empty();
+    }
+    bool isAnimated(MotionParameter parameter) const {
+        return !keyframes.track(parameter).empty();
+    }
+    // The value of `parameter` at source time `time`.
+    double valueAt(MotionParameter parameter, const ExactTime &time) const;
+    // The five values at source time `time`, without keyframes (what a render graph layer shows).
+    VideoParams valuesAt(const ExactTime &time) const;
+    // The static values without keyframes.
+    VideoParams staticValues() const;
 };
 
 // Fades are timeline durations. They may not overlap: fadeIn + fadeOut <= the clip's duration,
@@ -124,7 +150,9 @@ struct Clip {
     CMTime timelineTimeAt(CMTime s) const;
 
     // Moves the start to `newStart` keeping the end fixed; sourceIn moves by the change times
-    // speed. Returns false, leaving the clip unchanged, when the new sourceIn is not exactly
+    // speed. A still's keyframes move by the opposite of the change so they keep their timeline
+    // positions (a still's source time is measured from its start; see Keyframes.h). Returns false,
+    // leaving the clip unchanged, when the new sourceIn (or a moved keyframe time) is not exactly
     // representable. Fades are shortened to fit (the fade-in first).
     [[nodiscard]] bool setTimelineStartKeepingEnd(CMTime newStart);
 
@@ -140,5 +168,25 @@ struct Clip {
 
 // Bit-for-bit equality of every field.
 bool operator==(const Clip &a, const Clip &b);
+
+// ----- Keyframes and sequence frames -----
+// The sequence frame starting at timeline time F (frameDuration long) shows the clip's source span
+// [sourceTimeAt(F), sourceTimeAt(F + frameDuration)). A keyframe belongs to the frame whose span
+// contains its time; the clip's last frame also owns a keyframe exactly on the clip's out point
+// (where a split leaves the left piece's last keyframe).
+
+// The start of the clip's frame that shows source time `sourceTime`, or nullopt when no frame of
+// the clip does (a keyframe a trim cut off).
+std::optional<CMTime> frameShowingSourceTime(const Clip &clip, CMTime sourceTime, CMTime frameDuration);
+
+// Index of the keyframe of `parameter` that the frame starting at `frameStart` shows, or nullopt
+// (also when the frame is not one of the clip's).
+std::optional<std::size_t> keyframeIndexForFrame(const Clip &clip, MotionParameter parameter, CMTime frameStart,
+                                                 CMTime frameDuration);
+
+// The time a keyframe set on the frame starting at `frameStart` gets: the exact source time the
+// frame starts on, or, when that has no CMTime form, the first kPreciseTimescale tick after it
+// (under 1.5 ns later, well inside the frame's span). Nullopt only on overflow.
+std::optional<CMTime> keyframeTimeForFrame(const Clip &clip, CMTime frameStart);
 
 } // namespace ve

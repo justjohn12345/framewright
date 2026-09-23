@@ -55,6 +55,9 @@ EditResult checkVideoParams(const VideoParams &v) {
     if (v.opacity < 0.0 || v.opacity > 1.0) {
         return EditResult::failure(EditError::InvalidArgument, "opacity must be within [0, 1]");
     }
+    if (auto problem = videoParamsProblem(v)) {
+        return EditResult::failure(EditError::InvalidArgument, *problem);
+    }
     return EditResult::success();
 }
 
@@ -978,6 +981,280 @@ EditResult SetClipSpeed::perform(const Project &project, Sequence &sequence, IdG
     }
     if (rippling && delta < kCMTimeZero) {
         return closeTime(sequence, rippled, {TimeRange{changes.front().newEnd, oldEnd}});
+    }
+    return EditResult::success();
+}
+
+// ----- Keyframed Motion -----
+
+namespace {
+
+std::string motionKey(const char *op, ClipId clipId, MotionParameter parameter) {
+    return std::string(op) + ":" + idString(clipId.value()) + ":" + nameOf(parameter);
+}
+
+// The clip, on an editable video track.
+EditResult findMotionClip(Sequence &sequence, ClipId clipId, Clip *&clip) {
+    Track *track = nullptr;
+    if (EditResult r = findEditableClip(sequence, clipId, track, clip); !r) {
+        return r;
+    }
+    if (track->kind != TrackKind::Video) {
+        return EditResult::failure(EditError::TrackKindMismatch,
+                                   "clip " + idString(clipId.value()) + " is on an audio track, which has no Motion");
+    }
+    return EditResult::success();
+}
+
+EditResult checkMotionValue(MotionParameter parameter, double value) {
+    if (!isValidMotionValue(parameter, value)) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   std::string(displayNameOf(parameter)) + " cannot be " + std::to_string(value) +
+                                       (parameter == MotionParameter::Opacity ? " (it is within 0...1)"
+                                        : parameter == MotionParameter::Scale ? " (it is at least 0)"
+                                                                              : " (it must be finite)"));
+    }
+    return EditResult::success();
+}
+
+// Refusal unless `time` lies within the clip's used source range [in, out] (inclusive: a split
+// leaves a keyframe on a piece's out point).
+EditResult requireInsideClip(const Clip &clip, CMTime time) {
+    if (EditResult r = requireExact(time, "keyframe time"); !r) {
+        return r;
+    }
+    const auto in = ExactTime::from(clip.isStill ? kCMTimeZero : clip.sourceIn);
+    const auto out = clip.exactSourceOut();
+    if (!in || !out) {
+        return notRepresentable(clip.id, clip.timelineStart);
+    }
+    if (in->compare(time) > 0 || out->compare(time) < 0) {
+        return EditResult::failure(EditError::InvalidTime, "keyframe time " + describe(time) +
+                                                               " is outside the clip's source range (" +
+                                                               describe(in->toTimeRounded()) + " - " +
+                                                               describe(out->toTimeRounded()) + ")");
+    }
+    return EditResult::success();
+}
+
+EditResult keyframeNotFound(ClipId clipId, MotionParameter parameter, CMTime time) {
+    return EditResult::failure(EditError::KeyframeNotFound, std::string(displayNameOf(parameter)) +
+                                                                " of clip " + idString(clipId.value()) +
+                                                                " has no keyframe at " + describe(time));
+}
+
+EditResult checkInterpolation(KeyframeInterpolation interpolation) {
+    if (interpolation == KeyframeInterpolation::Bezier) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   "a custom curve comes only from splitting an eased segment; choose hold, linear or "
+                                   "an ease");
+    }
+    return EditResult::success();
+}
+
+} // namespace
+
+AddKeyframe::AddKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime time,
+                         std::optional<double> value, KeyframeInterpolation interpolation)
+    : SequenceCommand(sequenceId), clipId_(clipId), parameter_(parameter), time_(time), value_(value),
+      interpolation_(interpolation) {
+    setCoalescingKey(motionKey("addKeyframe", clipId, parameter));
+}
+
+EditResult AddKeyframe::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Clip *clip = nullptr;
+    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
+        return r;
+    }
+    if (EditResult r = requireInsideClip(*clip, time_); !r) {
+        return r;
+    }
+    if (EditResult r = checkInterpolation(interpolation_); !r) {
+        return r;
+    }
+    KeyframeTrack &track = clip->video.keyframes.track(parameter_);
+    if (keyframeIndexAt(track, time_)) {
+        return EditResult::failure(EditError::AlreadyExists, std::string(displayNameOf(parameter_)) +
+                                                                 " already has a keyframe at " + describe(time_));
+    }
+    Keyframe keyframe;
+    keyframe.time = time_;
+    keyframe.interpolation = interpolation_;
+    keyframe.value = value_.value_or(clip->video.valueAt(parameter_, *ExactTime::from(time_)));
+    if (EditResult r = checkMotionValue(parameter_, keyframe.value); !r) {
+        return r;
+    }
+    upsertKeyframe(track, keyframe);
+    return EditResult::success();
+}
+
+SetMotionValue::SetMotionValue(SequenceId sequenceId, ClipId clipId, MotionParameter parameter,
+                               std::optional<CMTime> keyframeTime, double value,
+                               std::optional<KeyframeInterpolation> interpolation)
+    : SequenceCommand(sequenceId), clipId_(clipId), parameter_(parameter), keyframeTime_(keyframeTime), value_(value),
+      interpolation_(interpolation) {
+    setCoalescingKey(motionKey("motionValue", clipId, parameter));
+}
+
+std::string SetMotionValue::name() const {
+    if (!keyframeTime_) {
+        return "Change Video Settings";
+    }
+    return added_ ? "Add Keyframe" : "Change Keyframe";
+}
+
+EditResult SetMotionValue::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Clip *clip = nullptr;
+    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
+        return r;
+    }
+    if (EditResult r = checkMotionValue(parameter_, value_); !r) {
+        return r;
+    }
+    if (!keyframeTime_) {
+        clip->video.setStaticValue(parameter_, value_);
+        return EditResult::success();
+    }
+    if (interpolation_) {
+        if (EditResult r = checkInterpolation(*interpolation_); !r) {
+            return r;
+        }
+    }
+    KeyframeTrack &track = clip->video.keyframes.track(parameter_);
+    if (const auto index = keyframeIndexAt(track, *keyframeTime_)) {
+        Keyframe &keyframe = track[*index];
+        keyframe.value = value_;
+        if (interpolation_) {
+            keyframe.interpolation = *interpolation_;
+            keyframe.curve = TimingCurve{};
+        }
+        added_ = false;
+        return EditResult::success();
+    }
+    if (EditResult r = requireInsideClip(*clip, *keyframeTime_); !r) {
+        return r;
+    }
+    Keyframe keyframe;
+    keyframe.time = *keyframeTime_;
+    keyframe.value = value_;
+    keyframe.interpolation = interpolation_.value_or(KeyframeInterpolation::Linear);
+    upsertKeyframe(track, keyframe);
+    added_ = true;
+    return EditResult::success();
+}
+
+RemoveKeyframe::RemoveKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime time)
+    : SequenceCommand(sequenceId), clipId_(clipId), parameter_(parameter), time_(time) {
+    setCoalescingKey(motionKey("removeKeyframe", clipId, parameter));
+}
+
+EditResult RemoveKeyframe::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Clip *clip = nullptr;
+    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
+        return r;
+    }
+    KeyframeTrack &track = clip->video.keyframes.track(parameter_);
+    const auto index = isNumeric(time_) ? keyframeIndexAt(track, time_) : std::nullopt;
+    if (!index) {
+        return keyframeNotFound(clipId_, parameter_, time_);
+    }
+    if (track.size() == 1) {
+        clip->video.setStaticValue(parameter_, track.front().value);
+    }
+    track.erase(track.begin() + static_cast<std::ptrdiff_t>(*index));
+    return EditResult::success();
+}
+
+MoveKeyframe::MoveKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime from, CMTime to)
+    : SequenceCommand(sequenceId), clipId_(clipId), parameter_(parameter), from_(from), to_(to) {
+    setCoalescingKey(motionKey("moveKeyframe", clipId, parameter));
+}
+
+EditResult MoveKeyframe::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Clip *clip = nullptr;
+    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
+        return r;
+    }
+    KeyframeTrack &track = clip->video.keyframes.track(parameter_);
+    const auto index = isNumeric(from_) ? keyframeIndexAt(track, from_) : std::nullopt;
+    if (!index) {
+        return keyframeNotFound(clipId_, parameter_, from_);
+    }
+    if (EditResult r = requireInsideClip(*clip, to_); !r) {
+        return r;
+    }
+    if (to_ == from_) {
+        return EditResult::success();
+    }
+    if (keyframeIndexAt(track, to_)) {
+        return EditResult::failure(EditError::AlreadyExists, std::string(displayNameOf(parameter_)) +
+                                                                 " already has a keyframe at " + describe(to_));
+    }
+    Keyframe moved = track[*index];
+    moved.time = to_;
+    track.erase(track.begin() + static_cast<std::ptrdiff_t>(*index));
+    upsertKeyframe(track, moved);
+    return EditResult::success();
+}
+
+SetKeyframeInterpolation::SetKeyframeInterpolation(SequenceId sequenceId, ClipId clipId, MotionParameter parameter,
+                                                   CMTime time, KeyframeInterpolation interpolation)
+    : SequenceCommand(sequenceId), clipId_(clipId), parameter_(parameter), time_(time),
+      interpolation_(interpolation) {
+    setCoalescingKey(motionKey("keyframeInterpolation", clipId, parameter));
+}
+
+EditResult SetKeyframeInterpolation::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Clip *clip = nullptr;
+    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
+        return r;
+    }
+    if (EditResult r = checkInterpolation(interpolation_); !r) {
+        return r;
+    }
+    KeyframeTrack &track = clip->video.keyframes.track(parameter_);
+    const auto index = isNumeric(time_) ? keyframeIndexAt(track, time_) : std::nullopt;
+    if (!index) {
+        return keyframeNotFound(clipId_, parameter_, time_);
+    }
+    track[*index].interpolation = interpolation_;
+    track[*index].curve = TimingCurve{};
+    return EditResult::success();
+}
+
+SetMotionTracks::SetMotionTracks(SequenceId sequenceId, ClipId clipId, std::vector<MotionTrackChange> changes,
+                                 std::string name)
+    : SequenceCommand(sequenceId), clipId_(clipId), changes_(std::move(changes)), name_(std::move(name)) {
+    setCoalescingKey("motionTracks:" + idString(clipId.value()));
+}
+
+EditResult SetMotionTracks::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    if (changes_.empty()) {
+        return EditResult::failure(EditError::InvalidArgument, "no parameters to change");
+    }
+    Clip *clip = nullptr;
+    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
+        return r;
+    }
+    std::unordered_set<int> seen;
+    for (const MotionTrackChange &change : changes_) {
+        if (!seen.insert(static_cast<int>(change.parameter)).second) {
+            return EditResult::failure(EditError::InvalidArgument,
+                                       std::string(displayNameOf(change.parameter)) + " is listed twice");
+        }
+        if (EditResult r = checkMotionValue(change.parameter, change.staticValue); !r) {
+            return r;
+        }
+        if (auto problem = keyframeTrackProblem(change.keyframes, change.parameter)) {
+            return EditResult::failure(EditError::InvalidArgument, *problem);
+        }
+        for (const Keyframe &keyframe : change.keyframes) {
+            if (EditResult r = requireInsideClip(*clip, keyframe.time); !r) {
+                return r;
+            }
+        }
+        clip->video.keyframes.track(change.parameter) = change.keyframes;
+        clip->video.setStaticValue(change.parameter, change.staticValue);
     }
     return EditResult::success();
 }

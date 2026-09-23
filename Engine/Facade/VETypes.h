@@ -44,6 +44,41 @@ typedef struct {
     double opacity;
 } VEVideoParams;
 
+/// A keyframeable Motion parameter (a field of VEVideoParams).
+typedef NS_ENUM(NSInteger, VEMotionParameter) {
+    VEMotionParameterPositionX = 0, ///< VEVideoParams.x (sequence pixels)
+    VEMotionParameterPositionY = 1, ///< VEVideoParams.y (sequence pixels, +y down)
+    VEMotionParameterScale = 2,     ///< VEVideoParams.scale (1 = fitted size)
+    VEMotionParameterRotation = 3,  ///< VEVideoParams.rotationDegrees (clockwise)
+    VEMotionParameterOpacity = 4,   ///< VEVideoParams.opacity (0...1)
+};
+
+/// How a parameter moves from a keyframe to the next one (the interpolation belongs to the
+/// segment that starts at the keyframe). The ease names follow Premiere Pro and Final Cut Pro.
+typedef NS_ENUM(NSInteger, VEKeyframeInterpolation) {
+    /// The value stays until the next keyframe, then jumps.
+    VEKeyframeInterpolationHold = 0,
+    /// Constant rate (the default for new keyframes).
+    VEKeyframeInterpolationLinear = 1,
+    /// Leaves the keyframe slowly, then speeds up.
+    VEKeyframeInterpolationEaseOut = 2,
+    /// Slows down to arrive at the next keyframe.
+    VEKeyframeInterpolationEaseIn = 3,
+    /// Both (the Ken Burns default).
+    VEKeyframeInterpolationEaseInOut = 4,
+    /// The exact part of an eased curve a split left on this segment (read only: set one of the
+    /// others to replace it).
+    VEKeyframeInterpolationCustom = 5,
+};
+
+/// A framing of the picture for the Ken Burns helper: the position and scale that make a chosen
+/// rectangle of the picture fill the frame.
+typedef struct {
+    double x;
+    double y;
+    double scale;
+} VEMotionFraming;
+
 /// Clip audio settings: gain in dB and linear fade durations at the clip's ends.
 typedef struct {
     double gainDb;
@@ -101,6 +136,28 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
+/// A Motion keyframe of a clip (a snapshot, like VEClipInfo).
+@interface VEKeyframe : NSObject
+@property (nonatomic, readonly) VEMotionParameter parameter;
+/// The keyframe's time: a source time of the clip (for a still, the time into the clip). Keyframes
+/// stay with the pictures they were set on when the clip is trimmed, its speed changes or it is
+/// split (see the engine's Keyframes.h).
+@property (nonatomic, readonly) CMTime sourceTime;
+/// Where it plays on the timeline with the clip's current start and speed (exact when
+/// representable, else rounded); may lie outside the clip when a trim cut it off.
+@property (nonatomic, readonly) CMTime timelineTime;
+/// The sequence frame that shows it: the frame whose source span contains the keyframe (the
+/// clip's last frame also owns a keyframe on the clip's out point, where a split leaves one).
+/// Meaningful when isInsideClip.
+@property (nonatomic, readonly) CMTime frameTime;
+/// A frame of the clip shows the keyframe (false for keyframes a trim cut off).
+@property (nonatomic, readonly) BOOL isInsideClip;
+/// In VEVideoParams units (pixels, scale factor, degrees, opacity 0...1).
+@property (nonatomic, readonly) double value;
+@property (nonatomic, readonly) VEKeyframeInterpolation interpolation;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
 /// A clip on a track of the active sequence.
 @interface VEClipInfo : NSObject
 @property (nonatomic, readonly) VEClipID clipID;
@@ -123,8 +180,24 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 @property (nonatomic, readonly) BOOL isStill;
 /// Linked partner, or 0.
 @property (nonatomic, readonly) VEClipID linkedClipID;
+/// The static Motion values: what a parameter without keyframes shows (an animated parameter's
+/// static value is not used; see videoParamsAtTime:).
 @property (nonatomic, readonly) VEVideoParams videoParams;
 @property (nonatomic, readonly) VEAudioParams audioParams;
+/// Whether any Motion parameter has keyframes.
+@property (nonatomic, readonly) BOOL hasKeyframes;
+/// Every keyframe of every parameter, in time order (then parameter order).
+@property (nonatomic, readonly, copy) NSArray<VEKeyframe *> *allKeyframes;
+/// Whether `parameter` has keyframes.
+- (BOOL)isAnimated:(VEMotionParameter)parameter;
+/// The keyframes of `parameter` in time order (keyframes a trim cut off included).
+- (NSArray<VEKeyframe *> *)keyframesForParameter:(VEMotionParameter)parameter;
+/// The Motion the picture has at timeline time `time` (keyframes evaluated at the exact source
+/// time; the static value where a parameter has none), as the monitors and export draw it.
+- (VEVideoParams)videoParamsAtTime:(CMTime)time NS_SWIFT_NAME(motion(at:));
+/// The keyframe of `parameter` shown by the sequence frame containing `time` (see
+/// VEKeyframe.frameTime), or nil.
+- (nullable VEKeyframe *)keyframeForParameter:(VEMotionParameter)parameter atTime:(CMTime)time;
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
@@ -203,6 +276,8 @@ typedef NS_ENUM(NSInteger, VEEditErrorCode) {
     VEEditErrorInvariantViolation,
     /// Refused by the facade itself (e.g. an edit while another gesture's edit is in progress).
     VEEditErrorBusy,
+    /// The parameter has no keyframe at that time.
+    VEEditErrorKeyframeNotFound,
 };
 
 /// Outcome of an edit. A refused edit changes nothing; `message` says why.

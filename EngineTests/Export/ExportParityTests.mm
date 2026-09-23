@@ -10,6 +10,10 @@
 // - Sound: the playback mixer's output (captured from a real-time NullAudioOutput) and the offline
 //   renderer's mix are compared sample by sample over a sequence with speed 3/2, a fade in, a
 //   constant-power crossfade, two tracks summed and a +12 dB clip that drives the sum into clipping.
+// - Keyframed Motion (open finding 8): a clip whose position, scale, rotation and opacity are
+//   animated (ease in and out, linear, hold) under a still whose scale is keyframed exports the
+//   pictures the program monitor shows frame by frame; the monitor's layers carry the values the
+//   keyframes give at each frame (so the comparison is over moving pictures).
 // - Variable frame rate (UX round review, test gap 1): a VFR clip through each backend exports the
 //   same source frames the monitor shows, and both are the frames containing the exact source time.
 
@@ -489,6 +493,130 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
           count, from, worst, worstAt, clipped);
     XCTAssertLessThan(worst, 1e-5, @"the export's mix differs from playback at sample %lld", worstAt);
     XCTAssertGreaterThan(clipped, 100, @"the +12 dB beep drove the sum into clipping");
+}
+
+- (void)testAnAnimatedClipExportsTheMonitorsPictures {
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    h.sequence().width = 640;
+    h.sequence().height = 360;
+    const AssetId movie = h.importAsset("h264_1080p30.mp4");
+    const std::string alphaPath = _dir + "/alpha-animated.png";
+    XCTAssertTrue(writeAlphaPNG(alphaPath));
+    const AssetId still = h.importAssetAtPath(alphaPath);
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    auto key = [](CMTime time, double value, KeyframeInterpolation interpolation) {
+        Keyframe k;
+        k.time = time;
+        k.value = value;
+        k.interpolation = interpolation;
+        return k;
+    };
+    // V1: the movie from 1 s for 40 frames, a Ken Burns-like push in with a turn and a fade.
+    const ClipId clip = h.addClip(h.v1, movie, 0, 40, CMTimeMake(1, 1));
+    VideoParams &motion = h.sequence().findClip(clip)->video;
+    motion.keyframes.scale = {key(frames30(30), 1, KeyframeInterpolation::EaseInOut), key(frames30(69), 2.2, KeyframeInterpolation::Linear)};
+    motion.keyframes.x = {key(frames30(30), 0, KeyframeInterpolation::EaseInOut), key(frames30(69), -150, KeyframeInterpolation::Linear)};
+    motion.keyframes.y = {key(frames30(30), 0, KeyframeInterpolation::Linear), key(frames30(69), 60, KeyframeInterpolation::Linear)};
+    motion.keyframes.rotation = {key(frames30(40), 0, KeyframeInterpolation::Linear), key(frames30(60), 25, KeyframeInterpolation::Linear)};
+    motion.keyframes.opacity = {key(frames30(30), 1, KeyframeInterpolation::Hold), key(frames30(50), 0.6, KeyframeInterpolation::Linear)};
+    // V2: the half-transparent still over it, growing in steps (hold).
+    const ClipId overlay = h.addClip(h.v2, still, 5, 30, kCMTimeZero);
+    Clip &overlayClip = *h.sequence().findClip(overlay);
+    overlayClip.isStill = true;
+    overlayClip.video.x = 150;
+    overlayClip.video.keyframes.scale = {key(frames30(0), 0.2, KeyframeInterpolation::Hold), key(frames30(10), 0.35, KeyframeInterpolation::Hold),
+                                         key(frames30(20), 0.5, KeyframeInterpolation::Linear)};
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+
+    ex::ExportRequest request;
+    request.project = std::make_shared<const Project>(h.project);
+    request.sequenceId = h.sequenceId;
+    request.encode.container = media::ContainerFormat::MOV;
+    media::VideoEncodeSettings v;
+    v.codec = media::VideoCodec::ProRes422;
+    v.width = 640;
+    v.height = 360;
+    request.encode.video = v;
+    request.outputPath = _dir + "/animated-parity.mov";
+    ex::ExportServices services;
+    services.router = h.router;
+    services.cache = std::make_shared<media::FrameCache>();
+    services.routing = routingOf(h.project, *h.router);
+    std::string error;
+    auto result = runExport(request, services, error);
+    XCTAssertTrue(result.has_value(), @"%s", error.c_str());
+    if (!result || !result->ok()) {
+        XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
+        return;
+    }
+    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
+    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, 640, 360);
+    auto routed = h.router->probe(request.outputPath);
+    XCTAssertTrue(created.ok() && pool.ok() && routed.ok());
+    if (!created.ok() || !pool.ok() || !routed.ok()) {
+        return;
+    }
+    media::DecodeOptions bgra;
+    bgra.pixelFormat = kCVPixelFormatType_32BGRA;
+    auto decoder = h.router->makeVideoDecoder(*routed, -1, bgra);
+    XCTAssertTrue(decoder.ok());
+    if (!decoder.ok()) {
+        return;
+    }
+    const Clip &animated = *h.sequence().findClip(clip);
+    std::vector<double> previous;
+    double smallestStep = 1e9;
+    for (int64_t f : {0, 4, 9, 14, 19, 24, 29, 34, 39}) {
+        h.controller->seek(frames30(f));
+        const PlaybackHarness::Sample sample = h.presentExact();
+        XCTAssertEqual(sample.presented.frameIndex, f);
+        const render::PreviewFrame &frame = h.frame();
+        // The monitor's layer shows the Motion the keyframes give this frame.
+        const VideoParams expected = animated.video.valuesAt(*animated.exactSourceTimeAt(frames30(f)));
+        XCTAssertFalse(frame.graph.layers.empty());
+        if (!frame.graph.layers.empty()) {
+            const VideoParams &shown = frame.graph.layers[0].transform;
+            XCTAssertEqualWithAccuracy(shown.scale, expected.scale, 1e-12, @"frame %lld", f);
+            XCTAssertEqualWithAccuracy(shown.x, expected.x, 1e-12, @"frame %lld", f);
+            XCTAssertEqualWithAccuracy(shown.rotationDegrees, expected.rotationDegrees, 1e-12, @"frame %lld", f);
+            XCTAssertEqualWithAccuracy(frame.graph.layers[0].opacity, expected.opacity, 1e-12, @"frame %lld", f);
+        }
+        auto buffer = pool->makeBuffer();
+        XCTAssertTrue(buffer.ok());
+        if (!buffer.ok()) {
+            continue;
+        }
+        auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &out) {
+            if (index >= frame.textures.size() || !frame.textures[index]) {
+                return false;
+            }
+            out = frame.textures[index];
+            return true;
+        };
+        auto rendered = created.value()->renderAndWait(frame.graph, lookup, render::PixelBufferTarget{buffer.value()});
+        XCTAssertTrue(rendered.ok() && rendered->status.ok() && rendered->skippedLayers.empty(), @"frame %lld", f);
+        const std::vector<double> monitor = blockMeans(buffer.value().get());
+        XCTAssertTrue(decoder->decoder->seek(frames30(f)).ok());
+        auto decoded = decoder->decoder->next();
+        XCTAssertTrue(decoded.ok() && decoded.value(), @"exported frame %lld", f);
+        if (!decoded.ok() || !decoded.value()) {
+            continue;
+        }
+        const Difference d = compare(monitor, blockMeans(decoded.value()->image.get()));
+        NSLog(@"PARITY animated frame %lld: blocks differ by at most %.2f, on average %.3f", f, d.maxBlock, d.meanBlock);
+        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
+        XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
+        if (!previous.empty()) {
+            smallestStep = std::min(smallestStep, compare(previous, monitor).maxBlock);
+        }
+        previous = monitor;
+    }
+    // Every compared frame moved visibly from the one before: the comparison was over motion.
+    XCTAssertGreaterThan(smallestStep, 40.0);
 }
 
 @end

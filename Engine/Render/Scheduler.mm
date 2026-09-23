@@ -25,8 +25,8 @@ VideoLayer makeLayer(const Clip &clip, const MediaAsset &asset, CMTime time) {
     layer.isStill = clip.isStill;
     layer.sourceRotationDegrees = asset.rotationDegrees;
     layer.sourceTime = Scheduler::sourceFrameTime(clip, asset, time);
-    layer.transform = clip.video;
-    layer.opacity = clip.video.opacity;
+    layer.transform = Scheduler::motionAt(clip, time);
+    layer.opacity = layer.transform.opacity;
     return layer;
 }
 
@@ -35,6 +35,16 @@ double dbToLinear(double db) {
 }
 
 } // namespace
+
+VideoParams Scheduler::motionAt(const Clip &clip, CMTime time) {
+    if (!clip.video.isAnimated()) {
+        return clip.video.staticValues();
+    }
+    // The exact source time the frame shows (not snapped to the asset's frame grid): animation
+    // moves at the sequence's frame rate, also over a slower source or a still.
+    const auto source = clip.exactSourceTimeAt(time);
+    return source ? clip.video.valuesAt(*source) : clip.video.staticValues();
+}
 
 bool Scheduler::isTrackActive(const Sequence &sequence, const Track &track) {
     return trackActive(track, anySolo(sequence.tracks(track.kind)));
