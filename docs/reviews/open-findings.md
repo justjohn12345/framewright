@@ -33,6 +33,16 @@ Feature request:
    timeline: keyframe markers on the clip; JSON schema v3 with migration; undo per keyframe edit; export renders the same
    evaluation. Implementer should read the FCP and Premiere docs on Ken Burns / Motion keyframes for behaviour details.
 
+9. MEDIUM (new capability): drag and drop clips from Photos.app (iPhoto's successor) into the media bin and the
+   timeline. Photos drags deliver file promises, not file URLs: the drop targets must accept `NSFilePromiseReceiver`
+   (`com.apple.NSFilePromiseItemMetaData` / `kPasteboardTypeFileURLPromise`) alongside file URLs, receive each promised
+   file into a per-project "Media" folder (project-relative, sandbox-writable; ask once where to keep imported media when
+   the project is untitled) with progress and cancellation, then import the received files through the normal path.
+   Also handle what Photos hands over: HEVC/HEIC, Live Photos (import the video part or the still, user choice), slow-mo
+   (VFR at 120/240 fps), portrait rotation, and iCloud items that download on demand (promise may take time). Add a
+   "Import from Photos…" menu item using `PHPickerViewController` (no Photos-library entitlement needed) for browsing
+   without drag. Tests: a fake promise provider in AppTests; an EngineTests import of an HEIC/HEVC sample.
+
 Layout / UX (redesign the default window):
 4. MEDIUM: the source monitor beside the program monitor is a poor use of space. Make the source monitor collapsible
    (View > Show Source Monitor, default hidden until an asset is double-clicked), or a single monitor with Source/Program
