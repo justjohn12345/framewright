@@ -225,7 +225,9 @@ std::string nsErrorText(NSError *error) {
 
 bool isSupportedTargetFormat(OSType f) {
     return f == kCVPixelFormatType_32BGRA || f == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
-           f == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+           f == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+           f == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+           f == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
 }
 
 } // namespace
@@ -749,7 +751,7 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         if (!isSupportedTargetFormat(targetBuffer->pixelFormat())) {
             return makeError(MediaErrorCode::UnsupportedFormat, "Compositor: unsupported target pixel format '" +
                                                                     fourCCString(targetBuffer->pixelFormat()) +
-                                                                    "' (use BGRA, 420v or 420f)");
+                                                                    "' (use BGRA, 420v, 420f, x420 or xf20)");
         }
         VE_MEDIA_TRY(im.ensureIntermediate(targetBuffer->width(), targetBuffer->height()));
         colorTexture = im.intermediate;
@@ -873,8 +875,12 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
                                   chromaLocationString(ChromaSiting::Left), kCVAttachmentMode_ShouldPropagate);
             CVBufferSetAttachment(targetRef, kCVImageBufferChromaLocationBottomFieldKey,
                                   chromaLocationString(ChromaSiting::Left), kCVAttachmentMode_ShouldPropagate);
-            tags.fullRange = format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
-            const RGBToYCbCrRows rows = rgbToYCbCr8Rows(media::YCbCrMatrix::BT709, tags.fullRange);
+            tags.fullRange = format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+                             format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
+            const bool tenBit = format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+                                format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
+            convert.size.z = tenBit ? 1u : 0u;
+            const RGBToYCbCrRows rows = rgbToYCbCrRows(media::YCbCrMatrix::BT709, tags.fullRange, tenBit ? 10 : 8);
             convert.yRow = rows.y;
             convert.cbRow = rows.cb;
             convert.crRow = rows.cr;

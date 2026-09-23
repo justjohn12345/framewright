@@ -36,13 +36,17 @@ struct YCbCrEncoding {
 /// Column-major matrix M with (R', G', B', _) = M * (Ysample, Cbsample, Crsample, 1).
 simd_float4x4 yCbCrToRGBMatrix(const YCbCrEncoding &encoding);
 
-/// Rows mapping (R', G', B', 1) to the unorm sample values an 8-bit plane stores for Y, Cb, Cr
-/// (the inverse of yCbCrToRGBMatrix for 8-bit planes).
+/// Rows mapping (R', G', B', 1) to the unorm sample values a plane stores for Y, Cb, Cr (the
+/// inverse of yCbCrToRGBMatrix).
 struct RGBToYCbCrRows {
     simd_float4 y;
     simd_float4 cb;
     simd_float4 cr;
 };
+/// For 8-bit planes (unorm = code / 255).
 RGBToYCbCrRows rgbToYCbCr8Rows(media::YCbCrMatrix matrix, bool fullRange);
+/// For `bitDepth` 8 (as above) or 10: 10-bit codes stored in the high bits of 16-bit words
+/// ('x420', 'xf20'), unorm = (code * 64) / 65535.
+RGBToYCbCrRows rgbToYCbCrRows(media::YCbCrMatrix matrix, bool fullRange, int bitDepth);
 
 } // namespace ve::render

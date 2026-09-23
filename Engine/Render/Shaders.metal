@@ -147,6 +147,17 @@ kernel void ve_convert_to_bgra(texture2d<float, access::read> composite [[textur
     output.write(float4(saturate(c.rgb), 1.0), gid);
 }
 
+// A plane value for the target: 8-bit planes round in the unorm write; 10-bit planes ('x420')
+// store the code in the high bits of a 16-bit word, so the value is rounded to a whole 10-bit
+// code first (otherwise the low 6 bits, which CoreVideo defines as zero, would carry noise).
+static inline float quantizePlane(float v, uint tenBit) {
+    if (tenBit == 0) {
+        return v;
+    }
+    const float code = clamp(rint(v * (65535.0 / 64.0)), 0.0, 1023.0);
+    return code * (64.0 / 65535.0);
+}
+
 // One thread per chroma sample (2x2 luma block, 4:2:0): writes the block's four luma samples and
 // one left-sited chroma sample (co-sited with the block's left column, vertically between its
 // rows: kCVImageBufferChromaLocation_Left, the H.264/HEVC default). Chroma is the target
@@ -175,15 +186,17 @@ kernel void ve_convert_to_420(texture2d<float, access::read> composite [[texture
         const float3 centre = saturate(composite.read(uint2(x0, y)).rgb);
         const float3 right = hasRight ? saturate(composite.read(uint2(x0 + 1, y)).rgb) : centre;
         const float3 left = x0 > 0 ? saturate(composite.read(uint2(x0 - 1, y)).rgb) : centre;
-        luma.write(float4(dot(uniforms.yRow.xyz, centre) + uniforms.yRow.w), uint2(x0, y));
+        const uint tenBit = uniforms.size.z;
+        luma.write(float4(quantizePlane(dot(uniforms.yRow.xyz, centre) + uniforms.yRow.w, tenBit)), uint2(x0, y));
         if (hasRight) {
-            luma.write(float4(dot(uniforms.yRow.xyz, right) + uniforms.yRow.w), uint2(x0 + 1, y));
+            luma.write(float4(quantizePlane(dot(uniforms.yRow.xyz, right) + uniforms.yRow.w, tenBit)),
+                       uint2(x0 + 1, y));
         }
         sum += 0.25 * left + 0.5 * centre + 0.25 * right;
         rows += 1.0;
     }
     const float3 filtered = sum / rows;
-    const float cb = dot(uniforms.cbRow.xyz, filtered) + uniforms.cbRow.w;
-    const float cr = dot(uniforms.crRow.xyz, filtered) + uniforms.crRow.w;
+    const float cb = quantizePlane(dot(uniforms.cbRow.xyz, filtered) + uniforms.cbRow.w, uniforms.size.z);
+    const float cr = quantizePlane(dot(uniforms.crRow.xyz, filtered) + uniforms.crRow.w, uniforms.size.z);
     chroma.write(float4(cb, cr, 0.0, 0.0), gid);
 }

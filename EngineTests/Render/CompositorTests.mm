@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -648,7 +649,7 @@ struct FrameLog {
     }
 
     // Unsupported target format is an error, not a silent no-op.
-    media::PixelBuffer bad = makeBuffer(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, 64, 64);
+    media::PixelBuffer bad = makeBuffer(kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange, 64, 64);
     auto result = renderLayers(*_compositor, g, {}, PixelBufferTarget{bad});
     XCTAssertFalse(result.ok());
     if (!result.ok()) {
@@ -656,12 +657,15 @@ struct FrameLog {
     }
 }
 
-// Export to 4:2:0 (video and full range, even and odd sizes): every luma sample and every
-// chroma sample is checked against a CPU reference of the left-sited filter (the [1 2 1] / 4
-// horizontal filter around the block's left column, averaged over its rows, edges repeated),
-// and the buffer is tagged BT.709 with left chroma siting. A BGRA target drops stale YCbCr tags.
+// Export to 4:2:0 (video and full range, 8 and 10 bits, even and odd sizes): every luma sample
+// and every chroma sample is checked against a CPU reference of the left-sited filter (the
+// [1 2 1] / 4 horizontal filter around the block's left column, averaged over its rows, edges
+// repeated), 10-bit samples are whole codes in the high bits (the low 6 bits zero), and the
+// buffer is tagged BT.709 with left chroma siting. A BGRA target drops stale YCbCr tags.
 - (void)testExport420ChromaIsLeftSitedFilteredAndTagged {
-    for (OSType format : {kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange}) {
+    for (OSType format : {kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                          kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                          kCVPixelFormatType_420YpCbCr10BiPlanarFullRange}) {
         for (const auto &[w, h] : {std::pair<size_t, size_t>{64, 36}, std::pair<size_t, size_t>{63, 35}}) {
             const std::string name = fourCCString(format) + " " + std::to_string(w) + "x" + std::to_string(h);
             media::PixelBuffer source = makeBuffer(kCVPixelFormatType_32BGRA, w, h);
@@ -684,9 +688,25 @@ struct FrameLog {
             g.layers.push_back(makeLayer(1));
             [self render:g textures:{texturesFor(*_compositor, source)} target:PixelBufferTarget{out}];
 
-            const bool full = format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+            const bool full = format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+                              format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
+            const bool ten = format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+                             format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
             const double kr = 0.2126, kb = 0.0722, kg = 1.0 - kr - kb;
-            const double ySpan = full ? 255.0 : 219.0, yBase = full ? 0.0 : 16.0, cSpan = full ? 255.0 : 224.0;
+            const double step = ten ? 4.0 : 1.0, maxCode = ten ? 1023.0 : 255.0;
+            const double ySpan = full ? maxCode : 219.0 * step, yBase = full ? 0.0 : 16.0 * step;
+            const double cSpan = full ? maxCode : 224.0 * step, cBase = 128.0 * step;
+            int lowBitsSet = 0;
+            // Sample `index` of a plane row as an integer code (counts 10-bit samples with low bits set).
+            auto code = [&](const uint8_t *row, size_t index) -> double {
+                if (!ten) {
+                    return row[index];
+                }
+                uint16_t v;
+                std::memcpy(&v, row + index * 2, 2);
+                lowBitsSet += (v & 0x3F) != 0;
+                return v >> 6;
+            };
             auto rgbAt = [&](size_t x, size_t y) {
                 const RGBA8 p = pixelAt(source, x, y);
                 return RGBd{p.r / 255.0, p.g / 255.0, p.b / 255.0};
@@ -701,7 +721,7 @@ struct FrameLog {
                 for (size_t x = 0; x < w; ++x) {
                     const RGBd c = rgbAt(x, y);
                     const double expected = yBase + ySpan * (kr * c.r + kg * c.g + kb * c.b);
-                    worstLuma = std::max(worstLuma, std::fabs(luma[y * lumaStride + x] - expected));
+                    worstLuma = std::max(worstLuma, std::fabs(code(luma + y * lumaStride, x) - expected));
                 }
             }
             for (size_t j = 0; j < (h + 1) / 2; ++j) {
@@ -720,14 +740,17 @@ struct FrameLog {
                     }
                     const double r = sum.r / rows, gg = sum.g / rows, b = sum.b / rows;
                     const double yy = kr * r + kg * gg + kb * b;
-                    const double cb = 128.0 + cSpan * (b - yy) / (2.0 * (1.0 - kb));
-                    const double cr = 128.0 + cSpan * (r - yy) / (2.0 * (1.0 - kr));
-                    const uint8_t *got = chroma + j * chromaStride + i * 2;
-                    worstChroma = std::max({worstChroma, std::fabs(got[0] - cb), std::fabs(got[1] - cr)});
+                    const double cb = cBase + cSpan * (b - yy) / (2.0 * (1.0 - kb));
+                    const double cr = cBase + cSpan * (r - yy) / (2.0 * (1.0 - kr));
+                    const uint8_t *row = chroma + j * chromaStride;
+                    worstChroma = std::max({worstChroma, std::fabs(code(row, i * 2) - cb),
+                                            std::fabs(code(row, i * 2 + 1) - cr)});
                 }
             }
-            XCTAssertLessThanOrEqual(worstLuma, 1.0, @"%s luma", name.c_str());
-            XCTAssertLessThanOrEqual(worstChroma, 1.0, @"%s chroma", name.c_str());
+            // Half-float intermediate: 10-bit codes may be off by one more step than 8-bit ones.
+            XCTAssertLessThanOrEqual(worstLuma, ten ? 1.5 : 1.0, @"%s luma", name.c_str());
+            XCTAssertLessThanOrEqual(worstChroma, ten ? 1.5 : 1.0, @"%s chroma", name.c_str());
+            XCTAssertEqual(lowBitsSet, 0, @"%s: 10-bit samples must be whole codes", name.c_str());
 
             auto attachment = [&](CFStringRef key) {
                 return media::CFRef<CFTypeRef>::adopt(CVBufferCopyAttachment(out.get(), key, nullptr));

@@ -76,5 +76,5 @@ struct VEConvertUniforms {
     VEFloat4 yRow;
     VEFloat4 cbRow;
     VEFloat4 crRow;
-    VEUInt4 size; // x, y: output luma size in pixels
+    VEUInt4 size; // x, y: output luma size in pixels; z: 1 = 10-bit codes in the high bits of 16-bit words
 };

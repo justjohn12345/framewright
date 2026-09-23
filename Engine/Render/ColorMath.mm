@@ -57,21 +57,29 @@ simd_float4x4 yCbCrToRGBMatrix(const YCbCrEncoding &e) {
 }
 
 RGBToYCbCrRows rgbToYCbCr8Rows(media::YCbCrMatrix matrix, bool fullRange) {
+    return rgbToYCbCrRows(matrix, fullRange, 8);
+}
+
+RGBToYCbCrRows rgbToYCbCrRows(media::YCbCrMatrix matrix, bool fullRange, int bitDepth) {
     const LumaCoefficients k = lumaCoefficients(matrix);
     const double kg = k.kg();
-    const double ySpan = fullRange ? 255.0 : 219.0;
-    const double yBase = fullRange ? 0.0 : 16.0;
-    const double cSpan = fullRange ? 255.0 : 224.0;
+    const bool ten = bitDepth >= 10;
+    const double maxCode = ten ? 1023.0 : 255.0;
+    const double step = ten ? 4.0 : 1.0; // 2^(n-8)
+    // Integer code -> stored unorm value.
+    const double unit = ten ? 64.0 / 65535.0 : 1.0 / 255.0;
+    const double ySpan = (fullRange ? maxCode : 219.0 * step) * unit;
+    const double yBase = (fullRange ? 0.0 : 16.0 * step) * unit;
+    const double cSpan = (fullRange ? maxCode : 224.0 * step) * unit;
+    const double cBase = 128.0 * step * unit;
     const double cb = 1.0 / (2.0 * (1.0 - k.kb));
     const double cr = 1.0 / (2.0 * (1.0 - k.kr));
-    const double ys = ySpan / 255.0;
-    const double cs = cSpan / 255.0;
     RGBToYCbCrRows rows;
-    rows.y = simd_make_float4(float(ys * k.kr), float(ys * kg), float(ys * k.kb), float(yBase / 255.0));
-    rows.cb = simd_make_float4(float(-cs * cb * k.kr), float(-cs * cb * kg), float(cs * cb * (1.0 - k.kb)),
-                               float(128.0 / 255.0));
-    rows.cr = simd_make_float4(float(cs * cr * (1.0 - k.kr)), float(-cs * cr * kg), float(-cs * cr * k.kb),
-                               float(128.0 / 255.0));
+    rows.y = simd_make_float4(float(ySpan * k.kr), float(ySpan * kg), float(ySpan * k.kb), float(yBase));
+    rows.cb = simd_make_float4(float(-cSpan * cb * k.kr), float(-cSpan * cb * kg), float(cSpan * cb * (1.0 - k.kb)),
+                               float(cBase));
+    rows.cr = simd_make_float4(float(cSpan * cr * (1.0 - k.kr)), float(-cSpan * cr * kg), float(-cSpan * cr * k.kb),
+                               float(cBase));
     return rows;
 }
 
