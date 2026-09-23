@@ -1,6 +1,8 @@
 // AudioMixer: sample-accurate gain, fades and constant-power crossfades against an independent
-// per-sample model; mute/solo; 2x; underruns under a starved producer; plan swaps and source
-// reuse; and no heap allocation on the render path.
+// per-sample model; mute/solo; 2x (with an anti-aliasing decimator) and seamless 1x <-> 2x;
+// underruns under a starved producer; plan swaps and source reuse (also across tracks);
+// repositioning reused sources after a seek; de-clicking (stop fade, gain-edit ramp, mute ramp);
+// source destruction off the caller's thread; and no heap allocation on the render path.
 
 #import <XCTest/XCTest.h>
 
@@ -85,6 +87,15 @@ struct MixFixture {
 
     void plan(CMTime from, CMTime to) {
         mixer->setGraph(Scheduler::audioGraphFor(sequence(), project, TimeRange{from, to}), from);
+    }
+
+    /// Output channel 0 of `frames` frames rendered in `block`-sized calls (no waiting).
+    static std::vector<float> left(const std::vector<float> &interleaved) {
+        std::vector<float> out(interleaved.size() / 2);
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] = interleaved[i * 2];
+        }
+        return out;
     }
 
     /// prime + start at `at`, returns the clock epoch.
@@ -363,6 +374,214 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
     XCTAssertEqual(fx.clock.samplesRendered(), 48000);
 }
 
+- (void)testReusedSourceIsMovedBackToItsHeadAfterASeek {
+    // The review's scenario: clip C on [1 s, 3 s) plays from 1 s to 2 s; the transport stops and
+    // restarts at 0.2 s. C's source (reused: same mapping) was consumed to 2 s; reaching 1 s
+    // again must play C from its first sample without an underrun.
+    MixFixture fx;
+    const AssetId c = fx.addTone("tone://c", constantSignal(0.5f, 0.5f));
+    fx.addClip(fx.a1, c, CMTimeMake(1, 1), CMTimeMake(2, 1), kCMTimeZero);
+    fx.plan(CMTimeMake(1, 1), CMTimeMake(5, 1));
+    fx.start(CMTimeMake(1, 1));
+    fx.render(48000); // 1 s -> 2 s
+    fx.mixer->stop();
+    fx.render(512); // the render thread finishes the fade-out
+    const uint64_t underruns = fx.mixer->stats().underruns;
+    fx.plan(CMTimeMakeWithSeconds(0.2, 30), CMTimeMake(5, 1));
+    XCTAssertEqual(fx.mixer->stats().sourcesCreated, 1u, @"the source is reused");
+    XCTAssertEqual(fx.mixer->stats().repositionsWhileStopped, 1u, @"and moved back to C's head");
+    fx.start(CMTimeMakeWithSeconds(0.2, 30));
+    const std::vector<float> out = MixFixture::left(fx.render(48000)); // 0.2 s -> 1.2 s
+    int64_t silentInC = 0;
+    for (int64_t n = 38400; n < 48000; ++n) { // sequence 1.0 s -> 1.2 s
+        silentInC += out[static_cast<size_t>(n)] == 0.0f ? 1 : 0;
+    }
+    XCTAssertEqual(silentInC, 0, @"C's head is audible");
+    XCTAssertEqual(out[38399], 0.0f, @"nothing before C");
+    XCTAssertEqual(out[38400], 0.5f, @"C from its first sample");
+    XCTAssertEqual(fx.mixer->stats().underruns, underruns, @"no underrun");
+}
+
+- (void)testStopFadesOutOverTheRamp {
+    MixFixture fx;
+    const AssetId a = fx.addTone("tone://a", constantSignal(0.5f, 0.5f));
+    fx.addClip(fx.a1, a, kCMTimeZero, CMTimeMake(5, 1), kCMTimeZero);
+    fx.plan(kCMTimeZero, CMTimeMake(5, 1));
+    fx.start(kCMTimeZero);
+    fx.render(4800);
+    const uint64_t serial = fx.mixer->stop();
+    XCTAssertFalse(fx.mixer->stopCompleted(serial));
+    const std::vector<float> out = MixFixture::left(fx.render(1024));
+    XCTAssertTrue(fx.mixer->stopCompleted(serial));
+    // 5 ms at 48 kHz: 240 samples from 0.5 down to 0, linearly; then silence.
+    for (int k = 0; k < 240; ++k) {
+        XCTAssertEqualWithAccuracy(out[static_cast<size_t>(k)], 0.5 * (1.0 - (k + 1) / 240.0), 1e-6, @"sample %d", k);
+    }
+    for (size_t k = 240; k < out.size(); ++k) {
+        XCTAssertEqual(out[k], 0.0f);
+    }
+    XCTAssertEqual(fx.mixer->stats().stopFades, 1u);
+    XCTAssertEqual(fx.clock.samplesRendered(), 4800, @"the fade does not advance the clock");
+}
+
+- (void)testGainEditRampsOverOneRampInsteadOfStepping {
+    MixFixture fx;
+    const AssetId a = fx.addTone("tone://a", constantSignal(0.5f, 0.5f));
+    const ClipId id = fx.addClip(fx.a1, a, kCMTimeZero, CMTimeMake(5, 1), kCMTimeZero).id;
+    fx.plan(kCMTimeZero, CMTimeMake(5, 1));
+    fx.start(kCMTimeZero);
+    fx.render(4800);
+    fx.sequence().findClip(id)->audio.gainDb = 20.0 * std::log10(0.5);
+    fx.plan(CMTimeMake(4800, 48000), CMTimeMake(5, 1)); // re-plan while running
+    const std::vector<float> out = MixFixture::left(fx.render(1024));
+    XCTAssertEqual(fx.mixer->stats().planBlends, 1u);
+    XCTAssertEqual(fx.mixer->stats().sourcesCreated, 1u);
+    for (int k = 0; k < 240; ++k) { // 0.5 -> 0.25 over 240 samples
+        XCTAssertEqualWithAccuracy(out[static_cast<size_t>(k)], 0.5 - 0.25 * (k + 1) / 240.0, 1e-6, @"sample %d", k);
+    }
+    for (size_t k = 240; k < out.size(); ++k) {
+        XCTAssertEqualWithAccuracy(out[k], 0.25f, 1e-6);
+    }
+}
+
+- (void)testMuteRampsTheOutputAndKeepsTheClock {
+    MixFixture fx;
+    const AssetId a = fx.addTone("tone://a", constantSignal(0.5f, 0.5f));
+    fx.addClip(fx.a1, a, kCMTimeZero, CMTimeMake(5, 1), kCMTimeZero);
+    fx.plan(kCMTimeZero, CMTimeMake(5, 1));
+    fx.start(kCMTimeZero);
+    fx.render(4800);
+    fx.mixer->setMuted(true);
+    std::vector<float> out = MixFixture::left(fx.render(512));
+    for (int k = 0; k < 240; ++k) {
+        XCTAssertEqualWithAccuracy(out[static_cast<size_t>(k)], 0.5 * (1.0 - (k + 1) / 240.0), 1e-6);
+    }
+    XCTAssertEqual(out[300], 0.0f);
+    XCTAssertEqual(fx.clock.samplesRendered(), 4800 + 512, @"muted audio still drives the clock");
+    fx.mixer->setMuted(false);
+    out = MixFixture::left(fx.render(512));
+    XCTAssertEqualWithAccuracy(out[119], 0.25, 1e-6, @"ramping back up");
+    XCTAssertEqual(out[400], 0.5f);
+}
+
+- (void)testChangeRateContinuesWithoutAGap {
+    MixFixture fx;
+    const AssetId a = fx.addTone("tone://a", sineSignal(300, 0.5));
+    fx.addClip(fx.a1, a, kCMTimeZero, CMTimeMake(10, 1), kCMTimeZero);
+    fx.plan(kCMTimeZero, CMTimeMake(10, 1));
+    const uint32_t first = fx.start(kCMTimeZero);
+    fx.render(24000);
+    XCTAssertEqual(fx.mixer->position(), 24000);
+    const uint32_t second = fx.clock.startContinuation(2.0);
+    XCTAssertNotEqual(second, first);
+    XCTAssertTrue(fx.mixer->changeRate(2, second));
+    fx.render(24000);
+    XCTAssertEqual(fx.mixer->position(), 24000 + 48000, @"continued from the render position at 2x");
+    XCTAssertEqual(fx.mixer->stats().underruns, 0u, @"no reposition, no gap");
+    XCTAssertEqual(fx.mixer->stats().sources[0].repositions, 1u);
+    XCTAssertEqual(fx.clock.samplesRendered(), 24000, @"the new epoch counts from the switch");
+    // The continuation's origin is the render position: at the last IO time the clock is there.
+    // (fx.render renders 512-frame blocks: the last of 24000 frames is 448 long.)
+    const int64_t lastBlock = 24000 % 512;
+    XCTAssertEqualWithAccuracy(CMTimeGetSeconds(fx.clock.timeAt(fx.clock.lastCallbackNanos())),
+                               (24000 + 2 * (24000 - lastBlock)) / kSr, 1e-9);
+    fx.mixer->stop();
+    XCTAssertFalse(fx.mixer->changeRate(1, fx.clock.startContinuation(1.0)), @"only while running");
+}
+
+- (void)testRateTwoFiltersWhatWouldAlias {
+    MixFixture fx;
+    // 16 kHz would fold to 16 kHz at 2x (32 kHz above a 24 kHz Nyquist); 2 kHz becomes 4 kHz.
+    const AssetId high = fx.addTone("tone://high", sineSignal(16000, 0.5));
+    const AssetId low = fx.addTone("tone://low", sineSignal(2000, 0.5));
+    fx.addClip(fx.a1, high, kCMTimeZero, CMTimeMake(5, 1), kCMTimeZero);
+    fx.addClip(fx.a2, low, kCMTimeZero, CMTimeMake(5, 1), kCMTimeZero);
+    fx.sequence().audioTracks[1].muted = true;
+    fx.plan(kCMTimeZero, CMTimeMake(5, 1));
+    fx.start(kCMTimeZero, 2);
+    const std::vector<float> aliased = MixFixture::left(fx.render(24000));
+    double rmsHigh = 0;
+    for (size_t k = 4800; k < aliased.size(); ++k) {
+        rmsHigh += aliased[k] * aliased[k];
+    }
+    rmsHigh = std::sqrt(rmsHigh / static_cast<double>(aliased.size() - 4800));
+    XCTAssertLessThan(rmsHigh, 0.5 / std::sqrt(2.0) * 0.001, @"more than 60 dB below the input (%.2e)", rmsHigh);
+
+    fx.mixer->stop();
+    fx.sequence().audioTracks[0].muted = true;
+    fx.sequence().audioTracks[1].muted = false;
+    fx.render(512);
+    fx.plan(kCMTimeZero, CMTimeMake(5, 1));
+    fx.start(kCMTimeZero, 2);
+    const std::vector<float> passed = MixFixture::left(fx.render(24000));
+    double rmsLow = 0;
+    for (size_t k = 4800; k < passed.size(); ++k) {
+        rmsLow += passed[k] * passed[k];
+    }
+    rmsLow = std::sqrt(rmsLow / static_cast<double>(passed.size() - 4800));
+    XCTAssertEqualWithAccuracy(rmsLow, 0.5 / std::sqrt(2.0), 0.005, @"the passband is flat");
+    XCTAssertEqualWithAccuracy(estimateFrequency(passed.data(), 4800, 24000, 1, kSr), 4000.0, 5.0);
+    XCTAssertGreaterThan(fx.mixer->processingLatency(2), 0.0);
+    XCTAssertEqual(fx.mixer->processingLatency(1), 0.0);
+    NSLog(@"2x decimation: 16 kHz input -> %.2e RMS (%.1f dB), 2 kHz -> %.4f RMS", rmsHigh,
+          20 * std::log10(rmsHigh / (0.5 / std::sqrt(2.0))), rmsLow);
+}
+
+- (void)testMovingAClipToAnotherTrackKeepsItsSource {
+    MixFixture fx;
+    const AssetId a = fx.addTone("tone://a", sineSignal(300, 0.5));
+    const ClipId id = fx.addClip(fx.a1, a, kCMTimeZero, CMTimeMake(5, 1), kCMTimeZero).id;
+    fx.plan(kCMTimeZero, CMTimeMake(5, 1));
+    fx.start(kCMTimeZero);
+    fx.render(9600);
+    Clip moved = *fx.sequence().findClip(id);
+    fx.sequence().audioTracks[0].clips.clear();
+    moved.trackId = fx.a2;
+    fx.sequence().audioTracks[1].clips.push_back(moved);
+    fx.plan(CMTimeMake(9600, 48000), CMTimeMake(5, 1));
+    XCTAssertEqual(fx.mixer->stats().sourcesCreated, 1u);
+    XCTAssertEqual(fx.mixer->stats().sources.size(), 1u);
+    XCTAssertEqual(fx.mixer->stats().sources[0].track, fx.a2);
+    const std::vector<float> out = MixFixture::left(fx.render(4800));
+    double worst = 0;
+    for (int64_t n = 0; n < 4800; ++n) {
+        const double e = 0.5 * std::sin(2 * M_PI * 300 * static_cast<double>(n + 9600) / kSr);
+        worst = std::max(worst, std::fabs(out[static_cast<size_t>(n)] - e));
+    }
+    XCTAssertLessThan(worst, 1e-6, @"continuous across the move");
+    XCTAssertEqual(fx.mixer->stats().underruns, 0u);
+}
+
+- (void)testDroppedSourcesAreDestroyedOffTheCallersThread {
+    MixFixture fx;
+    const AssetId a = fx.addTone("tone://a", constantSignal(0.5f, 0.5f));
+    fx.addClip(fx.a1, a, kCMTimeZero, CMTimeMake(5, 1), kCMTimeZero);
+    fx.plan(kCMTimeZero, CMTimeMake(5, 1));
+    fx.start(kCMTimeZero);
+    fx.render(4800);
+    // The decoder hangs; the producer blocks inside read() on its next refill.
+    fx.tones->setReadsBlocked(true);
+    std::vector<float> block(4096 * 2);
+    for (int i = 0; i < 100 && fx.tones->blockedReads.load() == 0; ++i) {
+        fx.mixer->render(block.data(), 4096, 2);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    XCTAssertGreaterThanOrEqual(fx.tones->blockedReads.load(), 1);
+    fx.mixer->stop();
+    fx.mixer->render(block.data(), 512, 2);
+    const auto t0 = std::chrono::steady_clock::now();
+    fx.mixer->clearGraph(); // drops the source
+    fx.mixer->render(block.data(), 512, 2); // the render thread retires the old plan
+    fx.mixer->collectGarbage();
+    fx.mixer->collectGarbage();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    XCTAssertLessThan(ms, 5.0, @"control calls never join a producer");
+    XCTAssertTrue(fx.mixer->stats().sources.empty());
+    XCTAssertGreaterThanOrEqual(fx.mixer->stats().garbageBatches, 1u);
+    fx.tones->setReadsBlocked(false); // the reaper can now finish destroying the source
+    NSLog(@"dropping a source whose decoder hangs: %.3f ms on the caller", ms);
+}
+
 - (void)testRenderPathDoesNotAllocate {
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
@@ -392,19 +611,43 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
     delete probe;
     XCTAssertGreaterThan(counter.stop(), 0u, @"allocation hook is not working");
 
-    // A new plan and a 2x transport are adopted inside the measured region.
-    fx.plan(CMTimeMake(5120, 48000), CMTimeMake(4, 1));
-    fx.mixer->start(CMTimeMake(5120, 48000), 2, fx.clock.epoch());
-    counter.start();
+    // Inside the measured region: a re-plan of the running transport (envelope crossfade), a
+    // switch to 2x (continuation, anti-aliasing filter), a gain edit, mute and unmute ramps, a
+    // stop (fade-out) and a new start.
     int64_t frames = 0;
-    for (int i = 0; i < 200; ++i) {
-        const int n = (i % 10 == 0) ? 2048 : 100 + i % 50; // odd sizes, some above the internal chunk
-        fx.mixer->render(buffer.data(), n, 2);
-        frames += n;
-    }
-    const uint64_t allocations = counter.stop();
+    auto renderSome = [&](int count) {
+        for (int i = 0; i < count; ++i) {
+            const int n = (i % 10 == 0) ? 2048 : 100 + i % 50; // odd sizes, some above the internal chunk
+            fx.mixer->render(buffer.data(), n, 2);
+            frames += n;
+        }
+    };
+    fx.plan(CMTimeMake(5120, 48000), CMTimeMake(4, 1));
+    counter.start();
+    renderSome(20);
+    uint64_t allocations = counter.stop();
+    fx.mixer->changeRate(2, fx.clock.startContinuation(2.0));
+    fx.mixer->setMuted(true);
+    counter.start();
+    renderSome(40);
+    allocations += counter.stop();
+    fx.mixer->setMuted(false);
+    fx.mixer->setMasterGain(0.5f);
+    counter.start();
+    renderSome(40);
+    allocations += counter.stop();
+    fx.mixer->stop();
+    counter.start();
+    renderSome(20);
+    allocations += counter.stop();
+    fx.mixer->start(CMTimeMake(1, 1), 1, fx.clock.start(CMTimeMake(1, 1), 1.0));
+    counter.start();
+    renderSome(80);
+    allocations += counter.stop();
     XCTAssertEqual(allocations, 0u, @"heap allocations on the render path");
-    XCTAssertGreaterThanOrEqual(fx.mixer->stats().planSwaps, 2u);
+    XCTAssertGreaterThanOrEqual(fx.mixer->stats().planSwaps, 4u);
+    XCTAssertGreaterThanOrEqual(fx.mixer->stats().planBlends, 2u);
+    XCTAssertGreaterThanOrEqual(fx.mixer->stats().stopFades, 1u);
     NSLog(@"render path: %lld frames rendered with %llu allocations", frames, allocations);
 }
 
