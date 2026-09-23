@@ -44,10 +44,18 @@ inline constexpr double kMediaBeepStart = 2.0; ///< Beep position in the generat
 std::vector<float> makeToneWithBeep(double toneHz, double rate, int channels, int64_t frames, double beepStart);
 
 /// Onset of the beep in seconds from the start of `interleaved` (channel 0): the first sample
-/// whose magnitude exceeds 0.3, which with the signal above lies within 0.1 ms after the true
-/// onset. Samples before `searchFromFrame` are ignored. nullopt if there is no beep.
+/// whose magnitude exceeds 0.3. With the signal above that sample follows the true onset by a
+/// fixed detection latency: the beep alone crosses 0.3 when sin(2 pi 1000 t) > 0.3 / 0.7, i.e.
+/// 3.39 samples in at 48 kHz, so the first sample above it is sample 4; the tone (amplitude
+/// 0.1) moves the crossing by at most one sample either way. So at 48 kHz the result is the
+/// true onset + kBeepDetectorLatencyFrames48k samples, within +-1 sample (at another rate or
+/// speed the latency scales with the beep's period in samples). Samples before
+/// `searchFromFrame` are ignored. nullopt if there is no beep.
 std::optional<double> findBeepOnset(const float *interleaved, int64_t frames, int channels, double rate,
                                     int64_t searchFromFrame = 0);
+
+/// findBeepOnset's detection latency at 48 kHz (see above), in samples.
+inline constexpr int kBeepDetectorLatencyFrames48k = 4;
 
 /// Frequency of channel 0 over [fromFrame, toFrame) from rising zero crossings.
 double estimateFrequency(const float *interleaved, int64_t fromFrame, int64_t toFrame, int channels, double rate);

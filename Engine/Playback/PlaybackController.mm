@@ -64,6 +64,7 @@ double absRate(double rate) {
 
 // MARK: - Shared core (control side + frame source)
 
+
 struct PlaybackController::Core {
     Core(std::shared_ptr<audio::HostClock> host, double sampleRate, std::shared_ptr<FrameCache> frameCache)
         : clock(std::move(host), sampleRate), cache(std::move(frameCache)) {}
@@ -89,6 +90,9 @@ struct PlaybackController::Core {
         bool lastClockDriven = false;
         uint32_t lastEpoch = 0; // clock epoch of the last presentation (a seek starts a new one)
         uint64_t lastPresentNanos = 0;
+        // Monotonic guard on the clock reads of one epoch (target timestamps can be jittered).
+        uint32_t guardEpoch = 0;
+        CMTime guardTime = kCMTimeInvalid;
         std::vector<ClipId> lastClips;
         std::vector<render::TextureSet> lastTextures;
         std::vector<int64_t> lastShown;
@@ -116,7 +120,10 @@ struct PlaybackController::Core {
     std::atomic<uint64_t> late{0};
     std::atomic<uint64_t> hits{0};
     std::atomic<uint64_t> misses{0};
+    std::atomic<uint64_t> mapFailures{0};
+    std::atomic<uint64_t> monotonicHolds{0};
     std::atomic<double> fps{0.0};
+    std::atomic<uint64_t> lastClockPresentNanos{0}; // host time of the last clock-driven presentation
 
     mutable std::mutex presentedMutex;
     PresentedFrame presentedInfo;
@@ -128,6 +135,11 @@ struct PlaybackController::Core {
             sequenceId = id;
         }
         snapshotVersion.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    void resetFps() {
+        fps.store(0.0, std::memory_order_relaxed);
+        lastClockPresentNanos.store(0, std::memory_order_relaxed);
     }
 
     bool renderFrame(RenderState &rs, const render::PreviewFrameRequest &request, render::PreviewFrame &frame);
@@ -165,8 +177,21 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
     const uint32_t epoch = clock.epoch();
     CMTime t;
     if (d.clockDriven) {
-        const bool useTarget = request.targetTimestamp > 0 && !clock.hostClock()->isVirtual();
-        t = useTarget ? clock.timeAt(audio::HostClock::secondsToNanos(request.targetTimestamp)) : clock.now();
+        // The time the frame will be on screen (the display link's target), in the clock's
+        // host time base; "now" for callers without one.
+        t = request.targetTimestamp > 0 ? clock.timeAt(audio::HostClock::secondsToNanos(request.targetTimestamp))
+                                        : clock.now();
+        // Never step backwards within one run of the clock (forwards when playing in reverse):
+        // a late audio callback or a jittered target must not show frame N after N + 1.
+        if (rs.guardEpoch == epoch && isNumeric(rs.guardTime)) {
+            const bool behind = d.rate >= 0 ? t < rs.guardTime : t > rs.guardTime;
+            if (behind) {
+                t = rs.guardTime;
+                monotonicHolds.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        rs.guardEpoch = epoch;
+        rs.guardTime = t;
     } else {
         t = CMTimeMake(d.value, d.timescale);
     }
@@ -199,18 +224,26 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
             const int64_t slot = slotFor(layer, *asset);
             shown.wantedIndex = slot;
             pin = cache->acquire(layer.assetId, slot);
-            if (pin) {
-                hits.fetch_add(1, std::memory_order_relaxed);
-                if (request.textureCache) {
-                    auto mapped = request.textureCache->textures(pin.image());
-                    if (mapped.ok()) {
-                        textures = std::move(mapped).value();
-                    }
+            bool usable = static_cast<bool>(pin);
+            if (usable && request.textureCache) {
+                auto mapped = request.textureCache->textures(pin.image());
+                if (mapped.ok()) {
+                    textures = std::move(mapped).value();
+                } else {
+                    // Decoded but not drawable: neither a hit nor exact; keep the old picture.
+                    mapFailures.fetch_add(1, std::memory_order_relaxed);
+                    usable = false;
                 }
+            }
+            if (usable) {
+                hits.fetch_add(1, std::memory_order_relaxed);
                 shownIndex = pin.frame().index;
                 shown.exact = true;
             } else {
-                misses.fetch_add(1, std::memory_order_relaxed);
+                if (!pin) {
+                    misses.fetch_add(1, std::memory_order_relaxed);
+                }
+                pin = FrameCache::PinnedFrame{};
                 complete = false;
                 // Keep the clip's previous picture up until its frame lands.
                 for (size_t j = 0; j < rs.lastClips.size(); ++j) {
@@ -251,6 +284,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
             const double previousFps = fps.load(std::memory_order_relaxed);
             fps.store(previousFps <= 0 ? instant : previousFps * 0.9 + instant * 0.1, std::memory_order_relaxed);
         }
+        lastClockPresentNanos.store(nowNanos, std::memory_order_relaxed);
     }
 
     frame.graph = std::move(graph);
@@ -347,20 +381,29 @@ PlaybackController::PlaybackController(std::shared_ptr<media::BackendRouter> rou
     hub_ = std::make_shared<ObserverHub>();
     mixer_ = std::make_unique<audio::AudioMixer>(router_, &core_->clock, config_.mixer);
     if (config_.makeOutput) {
-        output_ = config_.makeOutput(*mixer_, core_->clock);
+        output_ = config_.makeOutput(*mixer_);
     }
     if (!output_) {
-        output_ = std::make_unique<audio::AutomaticAudioOutput>(*mixer_, &core_->clock);
+        output_ = std::make_unique<audio::AutomaticAudioOutput>(*mixer_);
     }
+    // Events arrive on an output thread: queue them for the tick thread, which applies them
+    // under mutex_ (the Clock has a single control writer).
+    output_->setEventHandler([this](const audio::AudioOutputEvent &event) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            outputEvents_.push_back(event);
+        }
+        tickCv_.notify_all();
+    });
     publishDisplayLocked();
     tickThread_ = std::thread([this] { tickMain(); });
 }
 
 PlaybackController::~PlaybackController() {
+    output_->setEventHandler({}); // waits for an event handler in flight (it takes mutex_)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stopTick_ = true;
-        stopPipelineLocked();
     }
     tickCv_.notify_all();
     if (tickThread_.joinable()) {
@@ -407,6 +450,16 @@ CMTime PlaybackController::nowLocked() const {
     return displayTime_;
 }
 
+PlaybackStatus PlaybackController::statusLocked() const {
+    PlaybackStatus status;
+    status.time = nowLocked();
+    status.state = state_;
+    status.rate = rate_;
+    status.audioActive = audioActive_;
+    status.lastError = lastError_;
+    return status;
+}
+
 void PlaybackController::publishDisplayLocked() {
     Core::Display d;
     d.value = displayTime_.value;
@@ -417,15 +470,23 @@ void PlaybackController::publishDisplayLocked() {
 }
 
 void PlaybackController::postStatusLocked() {
-    const CMTime t = nowLocked();
+    const PlaybackStatus status = statusLocked();
     if (const Sequence *sequence = sequenceLocked(); sequence && isPositive(sequence->frameDuration)) {
-        lastPostedFrame_ = frameIndexAt(t, sequence->frameDuration, SnapMode::Floor);
+        lastPostedFrame_ = frameIndexAt(status.time, sequence->frameDuration, SnapMode::Floor);
     }
-    hub_->postStatus(PlaybackStatus{t, state_, rate_});
+    hub_->postStatus(status);
 }
 
 void PlaybackController::postNeedsDisplay() {
     hub_->postNeedsDisplay();
+}
+
+void PlaybackController::touchIdleLocked() {
+    idleDeadline_ = std::chrono::steady_clock::now() + config_.outputIdleTimeout;
+}
+
+double PlaybackController::audioLatencyLocked(double rate) const {
+    return output_->outputLatency() + mixer_->processingLatency(static_cast<int>(rate));
 }
 
 void PlaybackController::registerAssetsLocked() {
@@ -496,13 +557,15 @@ void PlaybackController::retargetLocked(CMTime at, double rate) {
 
 void PlaybackController::planAudioLocked(CMTime at) {
     audioPlannedAt_ = at;
+    replanAudio_ = false;
     const Sequence *sequence = sequenceLocked();
     if (!sequence) {
         mixer_->clearGraph();
         return;
     }
     const CMTime from = maxTime(kCMTimeZero, at - CMTimeMake(1, 10));
-    const CMTime to = at + CMTimeMakeWithSeconds(config_.audioHorizonSeconds, kPreciseTimescale);
+    const CMTime to = at + CMTimeMakeWithSeconds(config_.audioHorizonSeconds * std::max(1.0, absRate(rate_)),
+                                                 kPreciseTimescale);
     AudioGraph graph = Scheduler::audioGraphFor(*sequence, *project_, TimeRange{from, to});
     // Clips whose asset has no audio track contribute nothing.
     graph.segments.erase(std::remove_if(graph.segments.begin(), graph.segments.end(),
@@ -542,13 +605,21 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
     postNeedsDisplay();
 }
 
-void PlaybackController::stopPipelineLocked() {
-    mixer_->stop();
-    output_->stop();
-    audioActive_ = false;
+bool PlaybackController::firstFramesReadyLocked(CMTime at) const {
+    const Sequence *sequence = sequenceLocked();
+    if (!sequence) {
+        return true;
+    }
+    const RenderGraph graph = Scheduler::renderGraphAt(*sequence, *project_, at);
+    return std::all_of(graph.layers.begin(), graph.layers.end(), [&](const VideoLayer &layer) {
+        const MediaAsset *asset = project_->findAsset(layer.assetId);
+        return !asset || cache_->contains(layer.assetId, slotFor(layer, *asset));
+    });
 }
 
-void PlaybackController::startPlaybackLocked(CMTime at, double rate) {
+// MARK: Transport internals (mutex_ held)
+
+void PlaybackController::beginPrerollLocked(CMTime at, double rate) {
     const Sequence *sequence = sequenceLocked();
     if (!sequence || !(sequence->duration() > kCMTimeZero)) {
         return;
@@ -560,54 +631,195 @@ void PlaybackController::startPlaybackLocked(CMTime at, double rate) {
     } else if (rate < 0 && at <= kCMTimeZero) {
         at = last;
     }
+    const auto now = std::chrono::steady_clock::now();
+    core_->clock.setTime(at);
+    if (mixer_->isRunning()) {
+        lastStopSerial_ = mixer_->stop(); // fades out; the tick thread waits for it before repositioning
+        lastStopAt_ = now;
+    }
+    audioActive_ = false;
+    join_ = Join{};
     rate_ = rate;
     displayTime_ = at;
     state_ = PlaybackState::Prerolling;
+    audioWarm_ = false;
+    preroll_ = Preroll{};
+    preroll_.serial = ++prerollSerial_;
+    preroll_.at = at;
+    preroll_.rate = rate;
+    preroll_.wantAudio = wantsAudio(rate);
+    preroll_.stopSerial = lastStopSerial_;
+    preroll_.stopRequested = lastStopAt_;
+    outputFailed_ = false; // try the output again
+    core_->resetFps();
+    touchIdleLocked();
     publishDisplayLocked();
-    postStatusLocked();
-
-    const auto deadline = std::chrono::steady_clock::now() + config_.prerollTimeout;
-    const bool wantAudio = !muted_ && (rate == 1.0 || rate == 2.0);
-    retargetLocked(at, rate);
-    if (wantAudio) {
-        planAudioLocked(at);
-        mixer_->prime(at, config_.prerollTimeout);
-    }
-    // Wait (bounded) for the first frames.
-    const RenderGraph graph = Scheduler::renderGraphAt(*sequence, *project_, at);
-    for (;;) {
-        bool ready = true;
-        for (const VideoLayer &layer : graph.layers) {
-            const MediaAsset *asset = project_->findAsset(layer.assetId);
-            if (asset && !cache_->contains(layer.assetId, slotFor(layer, *asset))) {
-                ready = false;
-                break;
-            }
-        }
-        if (ready || std::chrono::steady_clock::now() >= deadline) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-
-    audioActive_ = false;
-    if (wantAudio) {
-        const uint32_t epoch = core_->clock.start(at, rate, ClockMode::AudioSamples);
-        mixer_->start(at, static_cast<int>(rate), epoch);
-        if (output_->start().ok()) {
-            audioActive_ = true;
-        } else {
-            mixer_->stop();
-        }
-    }
-    if (!audioActive_) {
-        core_->clock.start(at, rate, ClockMode::HostTime);
-    }
-    state_ = PlaybackState::Playing;
-    lastRetarget_ = at;
-    publishDisplayLocked();
+    requestDisplayFramesLocked(at); // the target picture while pre-rolling
     postStatusLocked();
     tickCv_.notify_all();
+}
+
+void PlaybackController::advancePrerollLocked() {
+    Preroll &p = preroll_;
+    const auto now = std::chrono::steady_clock::now();
+    if (!p.retargeted) {
+        retargetLocked(p.at, p.rate);
+        p.retargeted = true;
+    }
+    if (!p.planned) {
+        // Repositioning the sources while the previous run is still fading out would cut the
+        // fade short (a click): wait for the render thread (it needs one callback).
+        const bool faded = !outputStarted_ || mixer_->stopCompleted(p.stopSerial) ||
+                           now - p.stopRequested >= config_.stopFadeTimeout;
+        if (!faded) {
+            return;
+        }
+        if (p.wantAudio) {
+            planAudioLocked(p.at);
+            mixer_->prepare(p.at);
+        }
+        p.planned = true;
+    }
+    if (p.wantAudio && !outputStarted_ && !outputFailed_) {
+        return; // manageOutput() is starting it
+    }
+    if (!p.waiting) {
+        p.waiting = true;
+        p.deadline = now + config_.prerollTimeout;
+    }
+    const bool videoReady = firstFramesReadyLocked(p.at);
+    const bool audioReady = !p.wantAudio || outputFailed_ || mixer_->isPrimed(p.at);
+    if ((videoReady && audioReady) || now >= p.deadline) {
+        completePrerollLocked();
+    }
+}
+
+void PlaybackController::completePrerollLocked() {
+    const Preroll p = preroll_;
+    audioActive_ = false;
+    if (p.wantAudio && outputStarted_ && !outputFailed_) {
+        core_->clock.setOutputLatency(audioLatencyLocked(p.rate));
+        const uint32_t epoch = core_->clock.start(p.at, p.rate, ClockMode::AudioSamples);
+        mixer_->start(p.at, static_cast<int>(p.rate), epoch);
+        audioActive_ = true;
+        lastError_.reset();
+    } else {
+        core_->clock.start(p.at, p.rate, ClockMode::HostTime);
+    }
+    state_ = PlaybackState::Playing;
+    lastRetarget_ = p.at;
+    publishDisplayLocked();
+    postStatusLocked();
+}
+
+void PlaybackController::dropAudioLocked() {
+    const CMTime t = core_->clock.now();
+    core_->clock.start(t, rate_, ClockMode::HostTime);
+    lastStopSerial_ = mixer_->stop();
+    lastStopAt_ = std::chrono::steady_clock::now();
+    audioActive_ = false;
+    join_ = Join{};
+}
+
+void PlaybackController::noteDisplayChangedLocked() {
+    displayChangedAt_ = std::chrono::steady_clock::now();
+    audioWarm_ = false;
+}
+
+void PlaybackController::warmAudioLocked() {
+    if (state_ != PlaybackState::Stopped || audioWarm_ || !sequenceLocked()) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now < displayChangedAt_ + config_.audioWarmDelay) {
+        return;
+    }
+    const bool faded = !outputStarted_ || mixer_->stopCompleted(lastStopSerial_) || now - lastStopAt_ >= config_.stopFadeTimeout;
+    if (!faded) {
+        return;
+    }
+    planAudioLocked(displayTime_); // stopped: every source goes to where playback from here needs it
+    mixer_->prepare(displayTime_);
+    audioWarm_ = true;
+}
+
+void PlaybackController::advanceJoinLocked(CMTime t) {
+    const Sequence *sequence = sequenceLocked();
+    if (!sequence) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!join_.active) {
+        // Wait for the fade of the run that dropped the audio before repositioning sources.
+        if (outputStarted_ && !mixer_->stopCompleted(lastStopSerial_) && now - lastStopAt_ < config_.stopFadeTimeout) {
+            return;
+        }
+        const CMTime at = snapToFrame(t + CMTimeMakeWithSeconds(config_.audioJoinLeadSeconds * rate_, kPreciseTimescale),
+                                      sequence->frameDuration, SnapMode::Ceil);
+        if (at >= sequence->duration()) {
+            return; // too close to the end to bother
+        }
+        planAudioLocked(at);
+        mixer_->prepare(at);
+        join_.active = true;
+        join_.at = at;
+        return;
+    }
+    if (t > join_.at) {
+        join_ = Join{}; // missed it (slow decode): prime a new point on the next tick
+        return;
+    }
+    if (!mixer_->isPrimed(join_.at)) {
+        return;
+    }
+    // Start once the first sample rendered at join_.at would become audible about when the
+    // clock gets there: the output latency plus a couple of IO cycles ahead of it.
+    const double latency = audioLatencyLocked(rate_);
+    const CMTime lead = CMTimeMakeWithSeconds(rate_ * (latency + 0.025), kPreciseTimescale);
+    if (t < join_.at - lead) {
+        return;
+    }
+    core_->clock.setOutputLatency(latency);
+    const uint32_t epoch = core_->clock.startContinuation(rate_);
+    mixer_->start(join_.at, static_cast<int>(rate_), epoch);
+    audioActive_ = true;
+    join_ = Join{};
+    postStatusLocked();
+}
+
+void PlaybackController::playingTickLocked() {
+    const Sequence *sequence = sequenceLocked();
+    if (!sequence || !isPositive(sequence->frameDuration)) {
+        pauseLocked();
+        return;
+    }
+    touchIdleLocked();
+    const CMTime t = core_->clock.now();
+    if (rate_ > 0 && t >= sequence->duration()) {
+        pauseLocked(lastFrameStartLocked());
+        return;
+    }
+    if (rate_ < 0 && t <= kCMTimeZero) {
+        pauseLocked(kCMTimeZero);
+        return;
+    }
+    const double sinceRetarget = isNumeric(lastRetarget_) ? std::fabs(CMTimeGetSeconds(t - lastRetarget_)) : 1e9;
+    if (sinceRetarget >= config_.retargetSeconds) {
+        retargetLocked(t, rate_);
+    }
+    if (audioActive_) {
+        const double sincePlan =
+            isNumeric(audioPlannedAt_) ? CMTimeGetSeconds(t - audioPlannedAt_) : config_.audioReplanSeconds;
+        if (replanAudio_ || sincePlan >= config_.audioReplanSeconds * std::max(1.0, rate_) || sincePlan < 0) {
+            planAudioLocked(t);
+        }
+    } else if (wantsAudio(rate_) && outputStarted_ && !outputFailed_) {
+        advanceJoinLocked(t);
+    }
+    const int64_t frame = frameIndexAt(clampLocked(t), sequence->frameDuration, SnapMode::Floor);
+    if (frame != lastPostedFrame_) {
+        postStatusLocked();
+    }
 }
 
 void PlaybackController::pauseLocked(std::optional<CMTime> at) {
@@ -615,20 +827,93 @@ void PlaybackController::pauseLocked(std::optional<CMTime> at) {
     if (!wasPlaying) {
         if (state_ == PlaybackState::Scrubbing) {
             state_ = PlaybackState::Stopped;
-            retargetLocked(displayTime_, 1.0);
+            noteDisplayChangedLocked();
+            pendingRetarget_ = std::make_pair(displayTime_, 1.0);
             postStatusLocked();
+            tickCv_.notify_all();
         }
         return;
     }
-    const CMTime t = clampLocked(at ? *at : core_->clock.now());
+    const CMTime from = state_ == PlaybackState::Playing ? core_->clock.now() : displayTime_;
+    const CMTime t = clampLocked(at ? *at : from);
     core_->clock.setTime(t);
-    stopPipelineLocked();
+    if (mixer_->isRunning()) {
+        lastStopSerial_ = mixer_->stop();
+        lastStopAt_ = std::chrono::steady_clock::now();
+    }
+    audioActive_ = false;
+    join_ = Join{};
+    ++prerollSerial_;
     state_ = PlaybackState::Stopped;
     displayTime_ = t;
+    noteDisplayChangedLocked();
+    core_->resetFps();
+    touchIdleLocked();
     publishDisplayLocked();
-    retargetLocked(t, 1.0);
+    pendingRetarget_ = std::make_pair(t, 1.0);
     requestDisplayFramesLocked(t);
     postStatusLocked();
+    tickCv_.notify_all();
+}
+
+void PlaybackController::handleOutputEventsLocked() {
+    std::vector<audio::AudioOutputEvent> events;
+    events.swap(outputEvents_);
+    for (const audio::AudioOutputEvent &event : events) {
+        switch (event.kind) {
+        case audio::AudioOutputEvent::Kind::ConfigurationChanged:
+            outputStarted_ = event.running;
+            if (audioActive_) {
+                // New device, new latency: the clock re-reads it now (a small jump at most).
+                core_->clock.setOutputLatency(event.latency + mixer_->processingLatency(static_cast<int>(rate_)));
+            }
+            break;
+        case audio::AudioOutputEvent::Kind::RestartFailed:
+            outputStarted_ = false;
+            outputFailed_ = true;
+            lastError_ = PlaybackError{PlaybackErrorCode::AudioDeviceLost, event.message};
+            if (state_ == PlaybackState::Playing && audioActive_) {
+                dropAudioLocked(); // keep going on the host clock
+            }
+            postStatusLocked();
+            break;
+        }
+    }
+}
+
+bool PlaybackController::manageOutput(std::unique_lock<std::mutex> &lock) {
+    const auto now = std::chrono::steady_clock::now();
+    const bool transport = state_ == PlaybackState::Playing || state_ == PlaybackState::Prerolling;
+    const bool wanted = sequenceLocked() != nullptr && (transport || now < idleDeadline_);
+    // The output could do better (AutomaticAudioOutput on its fallback with a retry due, or after
+    // the device was lost): let it switch when audio is about to start or is missing, never
+    // under a running audio clock.
+    const bool audioPending = (state_ == PlaybackState::Prerolling && preroll_.wantAudio) ||
+                              (state_ == PlaybackState::Playing && wantsAudio(rate_) && outputFailed_);
+    const bool retry = audioPending && !audioActive_ && output_->wantsRestart();
+    if (wanted && (retry || (!outputStarted_ && !outputFailed_))) {
+        lock.unlock();
+        const media::Status status = output_->start(); // may take a while: never under mutex_
+        lock.lock();
+        if (status.ok()) {
+            outputStarted_ = true;
+            outputFailed_ = false;
+        } else {
+            outputStarted_ = false;
+            outputFailed_ = true;
+            lastError_ = PlaybackError{PlaybackErrorCode::AudioOutputUnavailable, status.error().description()};
+            postStatusLocked();
+        }
+        return true;
+    }
+    if (!wanted && outputStarted_) {
+        lock.unlock();
+        output_->stop();
+        lock.lock();
+        outputStarted_ = false;
+        return true;
+    }
+    return false;
 }
 
 // MARK: Model
@@ -642,12 +927,15 @@ void PlaybackController::setSequence(std::shared_ptr<const Project> project, Seq
     registerAssetsLocked();
     state_ = PlaybackState::Stopped;
     displayTime_ = kCMTimeZero;
-    core_->clock.setTime(kCMTimeZero);
+    noteDisplayChangedLocked();
+    core_->clock.setTime(kCMTimeZero); // (pauseLocked stopped the mix if it was running)
     publishDisplayLocked();
-    mixer_->clearGraph();
-    retargetLocked(displayTime_, 1.0);
+    mixer_->clearGraph(); // dropped sources go to the reaper via the tick thread
+    pendingRetarget_ = std::make_pair(displayTime_, 1.0);
+    touchIdleLocked(); // warm the output up for the first play
     requestDisplayFramesLocked(displayTime_);
     postStatusLocked();
+    tickCv_.notify_all();
 }
 
 void PlaybackController::modelChanged(std::shared_ptr<const Project> project) {
@@ -658,30 +946,45 @@ void PlaybackController::modelChanged(std::shared_ptr<const Project> project) {
     if (!sequenceLocked()) {
         pauseLocked();
         mixer_->clearGraph();
+        pendingRetarget_.reset();
         if (pool_) {
             pool_->setTargets({});
         }
         postNeedsDisplay();
+        tickCv_.notify_all();
         return;
     }
-    if (state_ == PlaybackState::Playing) {
+    switch (state_) {
+    case PlaybackState::Playing: {
         const CMTime t = core_->clock.now();
-        if (t >= sequenceLocked()->duration()) {
+        if (rate_ > 0 && t >= sequenceLocked()->duration()) {
             pauseLocked(lastFrameStartLocked());
             return;
         }
-        retargetLocked(t, rate_);
-        if (audioActive_) {
-            planAudioLocked(t);
+        // The tick thread re-plans within one tick (sources with unchanged mappings play on).
+        lastRetarget_ = kCMTimeInvalid;
+        replanAudio_ = audioActive_;
+        if (join_.active) {
+            join_ = Join{}; // re-prime against the new model
         }
-        return;
+        break;
     }
-    displayTime_ = clampLocked(displayTime_);
-    publishDisplayLocked();
-    if (state_ != PlaybackState::Scrubbing) {
-        retargetLocked(displayTime_, 1.0);
+    case PlaybackState::Prerolling:
+        preroll_.retargeted = false;
+        preroll_.planned = false;
+        break;
+    case PlaybackState::Stopped:
+    case PlaybackState::Scrubbing:
+        displayTime_ = clampLocked(displayTime_);
+        noteDisplayChangedLocked(); // the audio at the paused frame may have changed
+        publishDisplayLocked();
+        if (state_ != PlaybackState::Scrubbing) {
+            pendingRetarget_ = std::make_pair(displayTime_, 1.0);
+        }
+        requestDisplayFramesLocked(displayTime_);
+        break;
     }
-    requestDisplayFramesLocked(displayTime_);
+    tickCv_.notify_all();
 }
 
 void PlaybackController::setAssetRouting(AssetId asset, media::RoutedMediaInfo routed) {
@@ -701,7 +1004,7 @@ void PlaybackController::play() {
     if (rate_ == 0.0) {
         rate_ = 1.0;
     }
-    startPlaybackLocked(displayTime_, rate_);
+    beginPrerollLocked(displayTime_, rate_);
 }
 
 void PlaybackController::pause() {
@@ -710,14 +1013,14 @@ void PlaybackController::pause() {
 }
 
 void PlaybackController::togglePlay() {
-    std::unique_lock<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     if (state_ == PlaybackState::Playing || state_ == PlaybackState::Prerolling) {
         pauseLocked();
     } else {
         if (rate_ == 0.0) {
             rate_ = 1.0;
         }
-        startPlaybackLocked(displayTime_, rate_);
+        beginPrerollLocked(displayTime_, rate_);
     }
 }
 
@@ -725,19 +1028,20 @@ void PlaybackController::seek(CMTime time, SeekMode mode) {
     std::lock_guard<std::mutex> lock(mutex_);
     const CMTime t = clampLocked(time);
     if (state_ == PlaybackState::Playing || state_ == PlaybackState::Prerolling) {
-        stopPipelineLocked();
-        startPlaybackLocked(t, rate_);
+        beginPrerollLocked(t, rate_);
         return;
     }
     if (mode == SeekMode::Exact) {
         state_ = PlaybackState::Stopped;
-        retargetLocked(t, 1.0);
+        pendingRetarget_ = std::make_pair(t, 1.0);
     }
     displayTime_ = t;
+    noteDisplayChangedLocked();
     core_->clock.setTime(t);
     publishDisplayLocked();
     requestDisplayFramesLocked(t);
     postStatusLocked();
+    tickCv_.notify_all();
 }
 
 void PlaybackController::setRate(double rate) {
@@ -747,24 +1051,56 @@ void PlaybackController::setRate(double rate) {
         return;
     }
     rate = std::clamp(rate, -8.0, 8.0);
-    if (state_ == PlaybackState::Playing || state_ == PlaybackState::Prerolling) {
-        const CMTime t = clampLocked(core_->clock.now());
-        core_->clock.setTime(t);
-        stopPipelineLocked();
-        startPlaybackLocked(t, rate);
+    if (state_ == PlaybackState::Prerolling) {
+        beginPrerollLocked(preroll_.at, rate); // still cheap: the tick thread does the work
         return;
     }
-    if (state_ == PlaybackState::Scrubbing) {
-        state_ = PlaybackState::Stopped;
+    if (state_ != PlaybackState::Playing) {
+        if (state_ == PlaybackState::Scrubbing) {
+            state_ = PlaybackState::Stopped;
+        }
+        beginPrerollLocked(displayTime_, rate);
+        return;
     }
-    startPlaybackLocked(displayTime_, rate);
+    if (rate == rate_) {
+        return;
+    }
+    if ((rate > 0) != (rate_ > 0)) {
+        // Direction change: decoders run the other way; pre-roll from here.
+        beginPrerollLocked(clampLocked(core_->clock.now()), rate);
+        return;
+    }
+    // Same direction: no pre-roll.
+    const bool want = wantsAudio(rate);
+    if (audioActive_ && want) {
+        core_->clock.setOutputLatency(audioLatencyLocked(rate));
+        const uint32_t epoch = core_->clock.startContinuation(rate);
+        if (!mixer_->changeRate(static_cast<int>(rate), epoch)) {
+            beginPrerollLocked(clampLocked(core_->clock.now()), rate);
+            return;
+        }
+    } else if (audioActive_) {
+        rate_ = rate;
+        dropAudioLocked(); // 2x -> 4x/8x: video on the host clock, audio faded out
+    } else {
+        const CMTime t = core_->clock.now();
+        core_->clock.start(t, rate, ClockMode::HostTime);
+        join_ = Join{}; // re-armed by the tick thread for 1x/2x
+    }
+    rate_ = rate;
+    lastRetarget_ = kCMTimeInvalid;
+    core_->resetFps();
+    publishDisplayLocked();
+    postStatusLocked();
+    tickCv_.notify_all();
 }
 
 void PlaybackController::shuttleForward() {
     double next = 1.0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ == PlaybackState::Playing && rate_ > 0) {
+        const bool running = state_ == PlaybackState::Playing || state_ == PlaybackState::Prerolling;
+        if (running && rate_ > 0) {
             next = std::min(8.0, rate_ * 2.0);
         }
     }
@@ -775,7 +1111,8 @@ void PlaybackController::shuttleReverse() {
     double next = -1.0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ == PlaybackState::Playing && rate_ < 0) {
+        const bool running = state_ == PlaybackState::Playing || state_ == PlaybackState::Prerolling;
+        if (running && rate_ < 0) {
             next = std::max(-8.0, rate_ * 2.0);
         }
     }
@@ -792,22 +1129,31 @@ void PlaybackController::stepFrames(int frames) {
     state_ = PlaybackState::Stopped;
     const CMTime t = clampLocked(displayTime_ + CMTimeMultiply(sequence->frameDuration, frames));
     displayTime_ = t;
+    noteDisplayChangedLocked();
     core_->clock.setTime(t);
     publishDisplayLocked();
-    retargetLocked(t, frames < 0 ? -1.0 : 1.0);
+    pendingRetarget_ = std::make_pair(t, frames < 0 ? -1.0 : 1.0);
     requestDisplayFramesLocked(t);
     postStatusLocked();
+    tickCv_.notify_all();
 }
 
 void PlaybackController::scrubTo(CMTime time) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ == PlaybackState::Playing || state_ == PlaybackState::Prerolling) {
-        core_->clock.stop();
-        stopPipelineLocked();
+        if (mixer_->isRunning()) {
+            lastStopSerial_ = mixer_->stop();
+            lastStopAt_ = std::chrono::steady_clock::now();
+        }
+        audioActive_ = false;
+        join_ = Join{};
+        ++prerollSerial_;
+        core_->resetFps();
     }
     state_ = PlaybackState::Scrubbing;
     const CMTime t = clampLocked(time);
     displayTime_ = t;
+    noteDisplayChangedLocked();
     core_->clock.setTime(t);
     publishDisplayLocked();
     requestDisplayFramesLocked(t);
@@ -820,24 +1166,18 @@ void PlaybackController::endScrub() {
         return;
     }
     state_ = PlaybackState::Stopped;
+    noteDisplayChangedLocked();
     publishDisplayLocked();
-    retargetLocked(displayTime_, 1.0);
+    pendingRetarget_ = std::make_pair(displayTime_, 1.0);
     requestDisplayFramesLocked(displayTime_);
     postStatusLocked();
+    tickCv_.notify_all();
 }
 
 void PlaybackController::setMuted(bool muted) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (muted_ == muted) {
-        return;
-    }
     muted_ = muted;
-    if (state_ == PlaybackState::Playing) {
-        const CMTime t = clampLocked(core_->clock.now());
-        core_->clock.setTime(t);
-        stopPipelineLocked();
-        startPlaybackLocked(t, rate_);
-    }
+    mixer_->setMuted(muted);
 }
 
 bool PlaybackController::isMuted() const {
@@ -862,6 +1202,11 @@ double PlaybackController::rate() const {
     return rate_;
 }
 
+PlaybackStatus PlaybackController::status() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return statusLocked();
+}
+
 PresentedFrame PlaybackController::lastPresented() const {
     std::lock_guard<std::mutex> lock(core_->presentedMutex);
     return core_->presentedInfo;
@@ -874,17 +1219,24 @@ PlaybackStats PlaybackController::stats() const {
     s.lateFrames = core_->late.load(std::memory_order_relaxed);
     s.cacheHits = core_->hits.load(std::memory_order_relaxed);
     s.cacheMisses = core_->misses.load(std::memory_order_relaxed);
-    const uint64_t lookups = s.cacheHits + s.cacheMisses;
+    s.mapFailures = core_->mapFailures.load(std::memory_order_relaxed);
+    s.monotonicHolds = core_->monotonicHolds.load(std::memory_order_relaxed);
+    const uint64_t lookups = s.cacheHits + s.cacheMisses + s.mapFailures;
     s.cacheHitRate = lookups ? static_cast<double>(s.cacheHits) / static_cast<double>(lookups) : 0.0;
-    s.fps = core_->fps.load(std::memory_order_relaxed);
+    // The HUD rate decays to 0 once presentations stop (paused view, stalled display link).
+    const uint64_t lastPresent = core_->lastClockPresentNanos.load(std::memory_order_relaxed);
+    const uint64_t hostNow = core_->clock.hostClock()->nowNanos();
+    s.fps = lastPresent > 0 && hostNow - lastPresent < 500'000'000ull ? core_->fps.load(std::memory_order_relaxed) : 0.0;
     s.clockMode = core_->clock.mode();
     s.clockTime = core_->clock.now();
+    s.outputLatency = core_->clock.outputLatency();
     s.cacheBytes = cache_->stats().bytes;
 
     const audio::AudioMixer::Stats mixerStats = mixer_->stats();
     s.audioUnderruns = mixerStats.underruns;
     s.audioUnderrunFrames = mixerStats.underrunFrames;
     s.audioOutput = output_->kind();
+    s.outputRunning = output_->isRunning();
 
     media::DecodePool::Stats poolStats;
     if (pool_) {
@@ -899,6 +1251,7 @@ PlaybackStats PlaybackController::stats() const {
 
     std::lock_guard<std::mutex> lock(mutex_);
     s.audioActive = audioActive_;
+    s.lastError = lastError_;
     const Sequence *sequence = sequenceLocked();
     if (!sequence) {
         return s;
@@ -957,42 +1310,53 @@ render::PreviewFrameSource PlaybackController::frameSource() {
 void PlaybackController::tickMain() {
     std::unique_lock<std::mutex> lock(mutex_);
     while (!stopTick_) {
-        if (state_ != PlaybackState::Playing) {
-            tickCv_.wait(lock, [&] { return stopTick_ || state_ == PlaybackState::Playing; });
+        // Dropped audio sources are destroyed on the mixer's reaper queue, never here.
+        lock.unlock();
+        mixer_->collectGarbage();
+        lock.lock();
+        if (stopTick_) {
+            break;
+        }
+        handleOutputEventsLocked();
+        if (manageOutput(lock)) {
+            continue; // the lock was released: re-evaluate everything
+        }
+        if (pendingRetarget_) {
+            const auto [at, rate] = *pendingRetarget_;
+            pendingRetarget_.reset();
+            retargetLocked(at, rate);
+        }
+        if (state_ == PlaybackState::Prerolling) {
+            advancePrerollLocked();
+        } else if (state_ == PlaybackState::Playing) {
+            playingTickLocked();
+        } else {
+            warmAudioLocked();
+        }
+        if (stopTick_ || !outputEvents_.empty() || pendingRetarget_) {
             continue;
         }
-        tickCv_.wait_for(lock, config_.tickInterval);
-        if (stopTick_ || state_ != PlaybackState::Playing) {
+        if (state_ == PlaybackState::Prerolling || state_ == PlaybackState::Playing) {
+            tickCv_.wait_for(lock, config_.tickInterval);
             continue;
         }
-        const Sequence *sequence = sequenceLocked();
-        if (!sequence || !isPositive(sequence->frameDuration)) {
-            pauseLocked();
-            continue;
+        // Stopped or scrubbing: sleep until the audio should be warmed, the idle output
+        // stopped, or something happens.
+        const bool warmPending = state_ == PlaybackState::Stopped && !audioWarm_ && sequenceLocked();
+        auto wake = std::chrono::steady_clock::time_point::max();
+        if (warmPending) {
+            const auto warmAt = displayChangedAt_ + config_.audioWarmDelay;
+            const auto now = std::chrono::steady_clock::now();
+            // Still waiting for the previous run's fade: look again after a tick.
+            wake = warmAt > now ? warmAt : now + config_.tickInterval;
         }
-        const CMTime t = core_->clock.now();
-        if (rate_ > 0 && t >= sequence->duration()) {
-            pauseLocked(lastFrameStartLocked());
-            continue;
+        if (outputStarted_) {
+            wake = std::min(wake, idleDeadline_);
         }
-        if (rate_ < 0 && t <= kCMTimeZero) {
-            pauseLocked(kCMTimeZero);
-            continue;
-        }
-        const double sinceRetarget = isNumeric(lastRetarget_) ? std::fabs(CMTimeGetSeconds(t - lastRetarget_)) : 1e9;
-        if (sinceRetarget >= config_.retargetSeconds) {
-            retargetLocked(t, rate_);
-        }
-        if (audioActive_) {
-            const double sincePlan =
-                isNumeric(audioPlannedAt_) ? CMTimeGetSeconds(t - audioPlannedAt_) : config_.audioReplanSeconds;
-            if (sincePlan >= config_.audioReplanSeconds || sincePlan < 0) {
-                planAudioLocked(t);
-            }
-        }
-        const int64_t frame = frameIndexAt(clampLocked(t), sequence->frameDuration, SnapMode::Floor);
-        if (frame != lastPostedFrame_) {
-            postStatusLocked();
+        if (wake == std::chrono::steady_clock::time_point::max()) {
+            tickCv_.wait(lock);
+        } else {
+            tickCv_.wait_until(lock, wake);
         }
     }
 }

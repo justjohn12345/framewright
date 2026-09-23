@@ -1,15 +1,23 @@
-// 60 s of sequence time, played faster than real time: a manual NullAudioOutput renders audio
-// blocks against a virtual host clock and the frame source is sampled at a virtual 60 Hz. Six
-// back-to-back h264 clips (each with its linked audio and a beep 2 s in) make every beep and
-// every presented frame a sync check; the drift between the audio sample clock, the video
-// frames and the timeline must stay under one frame for the whole minute.
+// Long runs without drift, driven the way the real device and display drive playback:
+// - audio callbacks at the device's cadence (512-frame IO periods), each stamped with its IO time
+//   and entered up to 2 ms late, like AVAudioEngine's render callback;
+// - a 60 Hz display asking for the frame of each vsync's target time;
+// - both on a virtual host clock that advances with wall time at a fixed speed-up, with NO
+//   waiting for decoded frames or audio (the decoders and producers run on their own threads,
+//   at their own speed, exactly as in the app). Late frames, dropped frames and underruns are
+//   measured, not prevented; they must stay under small bounds.
+// Every presented frame index is checked against pure arithmetic on the callback schedule (not
+// against the Clock), every exact picture against its burn-in, and every beep (one per clip,
+// 2 s in) against its timeline position to the sample. One run on the Apple backend (h264 MP4,
+// 60 s) and one on the FFmpeg backend (the same media remuxed to MKV, 20 s).
 //
-// The harness waits for decoded frames/audio between steps (the frame source itself never
-// waits); that stands in for a machine fast enough to keep up at the accelerated speed.
+// Speed-up: 3x in normal builds; 1x (and 20 s instead of 60 s) under Thread Sanitizer, whose
+// instrumentation slows the frame source and the test's own burn-in reads.
 
 #import <XCTest/XCTest.h>
 
 #include "../Media/BurnIn.h"
+#include "../Media/FFmpegTestMedia.h"
 #include "PlaybackTestSupport.h"
 
 #include <chrono>
@@ -20,113 +28,220 @@ using namespace ve;
 using namespace ve::playback;
 using namespace ve::test;
 
+namespace {
+
+constexpr double kSr = 48000.0;
+constexpr uint64_t kNs = 1'000'000'000ull;
+
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+constexpr bool kSanitized = true;
+#else
+constexpr bool kSanitized = false;
+#endif
+#else
+constexpr bool kSanitized = false;
+#endif
+
+struct DriftResult {
+    bool ran = false;
+    std::string error;
+    double wallSeconds = 0;
+    int presentations = 0;
+    int boundarySkips = 0;     ///< vsyncs whose target sits within 1 us of a frame boundary
+    int indexErrors = 0;       ///< presented frame != arithmetic on the schedule
+    int64_t worstIndexError = 0;
+    int latePresentations = 0; ///< some layer not exact (previous picture held)
+    int burnInErrors = 0;      ///< exact layer whose burn-in is not the expected source frame
+    int beepsFound = 0;
+    int64_t worstBeepError = 0; ///< samples from timeline position + detector latency
+    uint64_t underruns = 0;
+    uint64_t underrunFrames = 0;
+    uint64_t dropped = 0;
+    int64_t positionError = 0; ///< mixer position vs frames rendered (samples)
+    std::vector<std::string> failures;
+};
+
+DriftResult runDrift(const std::string &path, int clips, double speedup) {
+    DriftResult r;
+    const int seconds = clips * 10;
+    PlaybackHarness h(PlaybackHarness::Mode::Scripted, seconds + 1.0);
+    const AssetId asset = h.importAssetAtPath(path);
+    if (!h.ok()) {
+        r.error = h.error();
+        return r;
+    }
+    std::vector<ClipId> videoClips;
+    for (int k = 0; k < clips; ++k) {
+        const ClipId v = h.addClip(h.v1, asset, k * 300, 300, kCMTimeZero);
+        const ClipId a = h.addClip(h.a1, asset, k * 300, 300, kCMTimeZero);
+        h.link(v, a);
+        videoClips.push_back(v);
+    }
+    if (auto problem = h.problem()) {
+        r.error = *problem;
+        return r;
+    }
+    h.load();
+    h.controller->play();
+    if (!h.waitForState(PlaybackState::Playing)) {
+        r.error = "never reached Playing";
+        return r;
+    }
+    r.ran = true;
+
+    // Exact schedule in integer nanoseconds (no accumulated rounding).
+    const uint64_t t0 = h.host->nowNanos();
+    auto ioTime = [&](int64_t k) { return t0 + static_cast<uint64_t>(std::llround((k + 1) * 512.0 * 1e9 / kSr)); };
+    auto vsyncTime = [&](int64_t j) { return t0 + static_cast<uint64_t>(std::llround(j * 1e9 / 60.0)); };
+    const uint64_t h0 = ioTime(0); // the first sample (sequence 0) reaches the device here
+    const uint64_t end = t0 + static_cast<uint64_t>(seconds) * kNs - 200'000'000ull;
+    uint64_t lcg = 0x2545F4914F6CDD1Dull;
+    auto jitter = [&] {
+        lcg = lcg * 6364136223846793005ull + 1442695040888963407ull;
+        return (lcg >> 33) % 2'000'000ull; // 0-2 ms late
+    };
+    int64_t k = 0;
+    int64_t j = 1;
+    uint64_t entry = ioTime(0) - (ioTime(1) - ioTime(0)) + jitter();
+    const auto wallStart = std::chrono::steady_clock::now();
+    auto pace = [&](uint64_t virtualTime) {
+        const auto due = wallStart + std::chrono::nanoseconds(
+                                         static_cast<int64_t>(static_cast<double>(virtualTime - t0) / speedup));
+        std::this_thread::sleep_until(due);
+    };
+    int64_t rendered = 0;
+    while (true) {
+        const uint64_t vsync = vsyncTime(j);
+        if (std::min(entry, vsync) >= end) {
+            break;
+        }
+        if (entry <= vsync) {
+            pace(entry);
+            h.host->set(entry);
+            rendered += h.scripted->renderAt(ioTime(k));
+            ++k;
+            const uint64_t nominal = ioTime(k) - (ioTime(k + 1) - ioTime(k));
+            entry = std::max(entry + 50'000, nominal + jitter());
+            continue;
+        }
+        pace(vsync);
+        h.host->set(vsync);
+        const uint64_t target = vsyncTime(j + 1);
+        ++j;
+        const PlaybackHarness::Sample s = h.presentAt(static_cast<double>(target) / 1e9);
+        ++r.presentations;
+        // What is audible at `target` according to the schedule: sequence time target - h0.
+        const double exact = target > h0 ? static_cast<double>(target - h0) * 30.0 / 1e9 : 0.0;
+        const auto expected = static_cast<int64_t>(std::floor(exact));
+        if (exact - std::floor(exact) < 1e-6 * 30 && exact > 0) {
+            ++r.boundarySkips; // within a microsecond of a frame edge: either frame is right
+        } else if (s.presented.frameIndex != expected) {
+            ++r.indexErrors;
+            r.worstIndexError = std::max(r.worstIndexError, std::llabs(s.presented.frameIndex - expected));
+            if (r.failures.size() < 5) {
+                r.failures.push_back("vsync " + std::to_string(j) + ": frame " + std::to_string(s.presented.frameIndex) +
+                                     ", schedule says " + std::to_string(expected));
+            }
+        }
+        bool late = s.presented.layers.empty();
+        for (size_t i = 0; i < s.presented.layers.size(); ++i) {
+            const PresentedLayer &layer = s.presented.layers[i];
+            if (!layer.exact) {
+                late = true;
+                continue;
+            }
+            const int64_t slot = h.expectedSlot(layer.clip, s.presented.frameIndex);
+            if (i >= s.burnIns.size() || !s.burnIns[i] || *s.burnIns[i] != slot) {
+                ++r.burnInErrors;
+                if (r.failures.size() < 5) {
+                    r.failures.push_back("frame " + std::to_string(s.presented.frameIndex) + ": burn-in " +
+                                         std::to_string(i < s.burnIns.size() ? s.burnIns[i].value_or(-1) : -1) +
+                                         " expected " + std::to_string(slot));
+                }
+            }
+        }
+        r.latePresentations += late ? 1 : 0;
+    }
+    r.wallSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart).count();
+    r.positionError = h.controller->mixer().position() - rendered; // started at sequence sample 0
+    const PlaybackStats stats = h.controller->stats();
+    r.underruns = stats.audioUnderruns;
+    r.underrunFrames = stats.audioUnderrunFrames;
+    r.dropped = stats.droppedFrames;
+    h.controller->pause();
+
+    const auto capture = h.scripted->capture();
+    const int64_t frames = static_cast<int64_t>(capture.samples.size()) / 2;
+    for (int c = 0; c < clips; ++c) {
+        const int64_t beep = std::llround((c * 10.0 + 2.0) * kSr);
+        const auto onset = findBeepOnset(capture.samples.data(), frames, 2, kSr, beep - capture.firstSequenceSample - 2400);
+        if (!onset) {
+            r.failures.push_back("no beep for clip " + std::to_string(c));
+            continue;
+        }
+        ++r.beepsFound;
+        const int64_t error = std::llround(*onset * kSr) + capture.firstSequenceSample - (beep + kBeepDetectorLatencyFrames48k);
+        r.worstBeepError = std::max(r.worstBeepError, std::llabs(error));
+    }
+    return r;
+}
+
+void report(XCTestCase *test, const char *label, const DriftResult &r, int clips) {
+    (void)test;
+    NSLog(@"%s: %d s of sequence in %.1f s wall; %d presentations, frame index vs schedule: %d errors (%d at a frame "
+          @"edge, skipped); burn-in errors %d; late %d (%.2f %%), dropped %llu; audio: %d/%d beeps, worst %lld samples "
+          @"from the timeline, underruns %llu (%llu frames), mixer position vs rendered %lld samples",
+          label, clips * 10, r.wallSeconds, r.presentations, r.indexErrors, r.boundarySkips, r.burnInErrors,
+          r.latePresentations, 100.0 * r.latePresentations / std::max(1, r.presentations), r.dropped, r.beepsFound, clips,
+          r.worstBeepError, r.underruns, r.underrunFrames, r.positionError);
+}
+
+} // namespace
+
 @interface PlaybackDriftTests : XCTestCase
 @end
 
 @implementation PlaybackDriftTests
 
-- (void)testSixtySecondsWithoutDrift {
-    PlaybackHarness h(PlaybackHarness::Mode::Manual, 61.0);
-    const AssetId h264 = h.importAsset("h264_1080p30.mp4");
-    if (!h.ok()) {
-        XCTFail(@"%s", h.error().c_str());
+- (void)checkDrift:(const DriftResult &)r clips:(int)clips {
+    XCTAssertTrue(r.ran, @"%s", r.error.c_str());
+    if (!r.ran) {
         return;
     }
-    std::vector<ClipId> clips;
-    for (int k = 0; k < 6; ++k) {
-        const ClipId v = h.addClip(h.v1, h264, k * 300, 300, kCMTimeZero);
-        const ClipId a = h.addClip(h.a1, h264, k * 300, 300, kCMTimeZero);
-        h.link(v, a);
-        clips.push_back(v);
-    }
-    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
-    h.load();
-    const auto wallStart = std::chrono::steady_clock::now();
-    h.controller->play();
-    XCTAssertEqual(h.controller->state(), PlaybackState::Playing);
-    XCTAssertEqual(h.output->kind(), "null-manual");
+    XCTAssertGreaterThan(r.presentations, clips * 10 * 60 - 60);
+    XCTAssertEqual(r.indexErrors, 0, @"%s", r.failures.empty() ? "" : r.failures.front().c_str());
+    XCTAssertEqual(r.burnInErrors, 0, @"%s", r.failures.empty() ? "" : r.failures.front().c_str());
+    XCTAssertEqual(r.beepsFound, clips);
+    XCTAssertLessThanOrEqual(r.worstBeepError, 1, @"audio drift");
+    XCTAssertEqual(r.positionError, 0, @"the mix advanced by exactly the samples rendered");
+    // Measured, not prevented: small bounds for a machine that keeps up in real time.
+    XCTAssertLessThanOrEqual(r.latePresentations, r.presentations / 50, @"late frames: %d", r.latePresentations);
+    XCTAssertLessThanOrEqual(r.dropped, 2u);
+    XCTAssertLessThanOrEqual(r.underruns, 2u, @"underrun callbacks");
+}
 
-    const double blockSeconds = 512.0 / 48000.0;
-    const double vsync = 1.0 / 60.0;
-    double nextVsync = 0.0;
-    int presentations = 0;
-    int64_t worstFrameError = 0;
-    int64_t worstClockLag = 0;
-    double worstClockDrift = 0.0;
-    int64_t rendered = 0;
-    std::vector<std::string> failures;
-    while (rendered * blockSeconds < 59.9) {
-        if (rendered % 20 == 0 && !h.controller->mixer().waitForBuffered(std::chrono::seconds(5))) {
-            failures.push_back("audio not buffered at block " + std::to_string(rendered));
-        }
-        if (h.output->renderBlocks(1) == 0) {
-            failures.push_back("output stopped early at " + std::to_string(rendered * blockSeconds));
-            break;
-        }
-        ++rendered;
-        // The clock equals the audio samples rendered (to the sample) at every block boundary.
-        const double audioTime = static_cast<double>(h.controller->mixer().position()) / 48000.0;
-        const double clockTime = CMTimeGetSeconds(h.controller->clock().now());
-        worstClockDrift = std::max(worstClockDrift, std::fabs(clockTime - audioTime));
-        const double t = rendered * blockSeconds;
-        while (nextVsync <= t) {
-            nextVsync += vsync;
-            const int64_t frame = static_cast<int64_t>(std::floor(clockTime * 30.0 + 1e-9));
-            const ClipId clip = clips[static_cast<size_t>(std::min<int64_t>(5, frame / 300))];
-            // Harness pacing: wait until the frame the clock wants is decoded.
-            const int64_t slot = h.expectedSlot(clip, frame);
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (!h.cache->contains(h264, slot) && std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::microseconds(200));
-            }
-            const PlaybackHarness::Sample s = h.present();
-            ++presentations;
-            worstClockLag = std::max(worstClockLag, std::llabs(s.presented.frameIndex - frame));
-            if (s.burnIns.size() != 1 || !s.burnIns[0]) {
-                failures.push_back("no picture at frame " + std::to_string(frame));
-                continue;
-            }
-            const int64_t error = std::llabs(*s.burnIns[0] - slot);
-            worstFrameError = std::max(worstFrameError, error);
-            if (error > 0 && failures.size() < 10) {
-                failures.push_back("frame " + std::to_string(frame) + ": burn-in " + std::to_string(*s.burnIns[0]) +
-                                   " expected " + std::to_string(slot));
-            }
-        }
-    }
-    h.controller->pause();
-    const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart).count();
+- (void)testSixtySecondsWithoutDriftOnTheAppleBackend {
+    std::string error;
+    const std::string path = testMediaPath("h264_1080p30.mp4", error);
+    XCTAssertFalse(path.empty(), @"%s", error.c_str());
+    const int clips = kSanitized ? 2 : 6;
+    const DriftResult r = runDrift(path, clips, kSanitized ? 1.0 : 3.0);
+    [self checkDrift:r clips:clips];
+    report(self, "Apple MP4 drift run", r, clips);
+}
 
-    // Audio: every beep exactly where its clip puts it.
-    const auto capture = h.output->capture();
-    XCTAssertEqual(capture.firstSequenceSample, 0);
-    const int64_t frames = static_cast<int64_t>(capture.samples.size()) / 2;
-    double worstBeep = 0.0;
-    int beeps = 0;
-    for (int k = 0; k < 6; ++k) {
-        const double expected = k * 10.0 + 2.0;
-        const auto onset = findBeepOnset(capture.samples.data(), frames, 2, 48000,
-                                         static_cast<int64_t>((expected - 0.5) * 48000));
-        XCTAssertTrue(onset.has_value(), @"beep %d", k);
-        if (onset) {
-            ++beeps;
-            worstBeep = std::max(worstBeep, std::fabs(*onset - expected));
-        }
+- (void)testTwentySecondsWithoutDriftOnTheFFmpegBackend {
+    std::string error;
+    const std::string dir = mkvTestMediaDirectory(error);
+    XCTAssertFalse(dir.empty(), @"%s", error.c_str());
+    if (dir.empty()) {
+        return;
     }
-    const PlaybackStats stats = h.controller->stats();
-    XCTAssertTrue(failures.empty(), @"%s", failures.empty() ? "" : failures.front().c_str());
-    XCTAssertEqual(beeps, 6);
-    XCTAssertLessThan(worstBeep, 0.001, @"audio drift");
-    XCTAssertEqual(worstFrameError, 0, @"video drift");
-    XCTAssertLessThanOrEqual(worstClockLag, 0);
-    XCTAssertLessThan(worstClockDrift, 1.0 / 30.0);
-    XCTAssertEqual(stats.audioUnderruns, 0u);
-    XCTAssertGreaterThan(presentations, 3500);
-    NSLog(@"60 s drift run (%.1f s wall, %.1fx real time): %d presentations, worst burn-in error %lld frames, worst "
-          @"presented-vs-clock %lld frames, worst beep error %.4f ms over %d beeps, clock vs audio samples %.4f ms, "
-          @"underruns %llu",
-          wall, 60.0 / wall, presentations, worstFrameError, worstClockLag, worstBeep * 1000, beeps,
-          worstClockDrift * 1000, stats.audioUnderruns);
+    const std::string path = dir + "/h264_1080p30.mkv";
+    const DriftResult r = runDrift(path, 2, kSanitized ? 1.0 : 3.0);
+    [self checkDrift:r clips:2];
+    report(self, "FFmpeg MKV drift run", r, 2);
 }
 
 @end
