@@ -1,10 +1,22 @@
 # Open findings
 
 ## Phase 7 export (2026-09-23 review, `2026-09-23-phase7-review.md`)
-Ten findings, two HIGH (verified): a cancelled/failed export deletes the user's pre-existing output file (no temp file /
-atomic replace); export fails when a video track is shorter than the asset's container duration. MEDIUM: mid-stream audio
-decode errors exported as silence and reported as success (verified); container change rewrites the sandbox-granted URL's
-extension. Plus six lows and eleven test gaps. All open.
+All ten findings are fixed (regression tests: `EngineTests/Export/ExportRegressionTests.mm` for P1/P2/P3, plus
+`ExportJobTests`, `ExportParityTests`, `VEEngineExportTests`, `VideoDurationEditTests.cpp`, `DecodePoolTests`,
+`FrameCacheTests`, `ClipAudioSourceTests`, `ExportModelTests`). Test gaps 1-6, 10 and 11 are covered. Still open:
+- Gap 7, sandbox-hosted UI test (choose a file in the real save panel, switch the container, export): needs a UI-test
+  target (XCUITest) driving the real NSSavePanel in the sandboxed app; the xctest host is not sandboxed and cannot show
+  the panel. The model side (container change clears the choice and asks again) is tested in `ExportModelTests`.
+- Gap 8, size estimate against a real export in quality mode: the estimate is a bits-per-pixel heuristic (labelled "≈");
+  the synthetic burn-in media compresses far better than camera footage, so a tolerance tight enough to mean something
+  would only hold for that media. Needs a set of representative camera clips (not in the repository) to calibrate.
+- Gap 9, multi-minute 4K export memory (at least 2 min at 4K): the test media has no 4K source, and such an export takes
+  minutes per run. `ExportJobTests` now checks 1800 frames at 720p with about 150 footprint samples and a per-frame
+  growth bound (20 KB/frame); a 4K soak belongs in a separate, opt-in performance scheme.
+- Not deterministic to unit-test: AVAssetWriter's cancel in the middle of `finishWritingWithCompletionHandler`
+  (`cancelWriting` while the MP4 index rewrite runs). The early check and the FFmpeg writer's per-packet check are tested
+  (`testFinishIsCancellableOnBothWriters`, `testCancelWhileFinishingKeepsTheExistingFile`); the 20 ms polling loop
+  around the completion is exercised only when finishing takes longer than one slice.
 
 ## User feedback from hands-on testing (2026-09-23, iPhone 1280x720 VFR H.264 clip split once)
 
@@ -36,7 +48,8 @@ Feature request:
    in point so trims keep them attached to the picture), interpolation per keyframe (hold, linear, ease-in/out), evaluated
    per frame by the Scheduler into the layer transform; inspector: a keyframe toggle per parameter at the playhead,
    next/previous keyframe, and an FCP-style "Ken Burns" helper (start/end rectangles drawn on the program monitor);
-   timeline: keyframe markers on the clip; JSON schema v3 with migration; undo per keyframe edit; export renders the same
+   timeline: keyframe markers on the clip; JSON schema v4 with migration (v3 added MediaAsset::videoDuration); undo per
+   keyframe edit; export renders the same
    evaluation. Implementer should read the FCP and Premiere docs on Ken Burns / Motion keyframes for behaviour details.
 
 9. MEDIUM (new capability): drag and drop clips from Photos.app (iPhoto's successor) into the media bin and the

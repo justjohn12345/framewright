@@ -31,7 +31,10 @@ audited the code line by line.
 - Export (File > Export…): H.264, HEVC (8-bit and 10-bit Main10) and ProRes 422 on
   VideoToolbox (hardware where the Mac has it for the frame size) and software AV1 (SVT-AV1) to
   MP4, MOV or MKV, with AAC or PCM audio, rendered by the same scheduler, compositor and mixer as
-  playback; progress, cancel and a hardware/software answer per format.
+  playback; progress, cancel and a hardware/software answer per format. The movie is written to a
+  temporary file and moved into place only when complete, so cancelling (or a failure, or a full
+  disk) never touches a file you chose to replace. Changing the container after choosing a file
+  asks for the file again; playback waits while an export runs.
 
 ## Architecture
 
