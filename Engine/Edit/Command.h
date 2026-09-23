@@ -119,6 +119,11 @@ bool applyPatch(Sequence &sequence, IdGenerator &ids, const SequencePatch &patch
 // patch.
 SequencePatch composePatches(const SequencePatch &first, const SequencePatch &second);
 
+// Runs an edit on a copy of one sequence and commits it only if the result is valid:
+// perform() edits the copy, normalizeSequence() tidies it, validateSequence() must pass, and the
+// edit may not change a locked track (its clips, its transitions, or remove it), except for
+// commands that exist to change track flags (mayEditLockedTracks()). Transitions dropped as a
+// side effect are reported in EditResult::droppedTransitionIds.
 class SequenceCommand : public Command {
   public:
     EditResult apply(Project &project) final;
@@ -143,9 +148,16 @@ class SequenceCommand : public Command {
     // refuse the edit; the copy is then discarded.
     virtual EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) = 0;
 
+    // True only for commands whose purpose is to change a locked track (SetTrackFlags, so a
+    // track can be unlocked). Every other command is refused if it would touch a locked track.
+    virtual bool mayEditLockedTracks() const {
+        return false;
+    }
+
   private:
     SequenceId sequenceId_;
     std::optional<SequencePatch> patch_;
+    std::vector<TransitionId> dropped_;
 };
 
 } // namespace ve

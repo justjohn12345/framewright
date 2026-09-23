@@ -4,8 +4,11 @@
 // floor(n/2) frames before the cut and ends ceil(n/2) frames after it (see
 // Sequence::transitionRange). Invariants (validateSequence): both clips are on `trackId`, the
 // outgoing clip ends exactly where the incoming clip starts, the duration is a positive whole
-// number of frames, the range lies inside the two clips, each clip has enough media beyond its
-// edge ("handles") to cover the range, and transitions on a clip do not overlap.
+// number of frames (an exact model time), the range lies inside the two clips, each clip has
+// enough media beyond its edge ("handles") to cover the range, and transitions on a clip do not
+// overlap. Edits never split a clip inside a transition range unless asked to (SplitClip's
+// allowBreakingTransitions); transitions an edit invalidates are removed and reported in
+// EditResult::droppedTransitionIds.
 
 #pragma once
 
@@ -15,7 +18,9 @@
 namespace ve {
 
 enum class TransitionKind {
-    CrossDissolve, // video dissolve / audio linear crossfade
+    // Video: a linear dissolve (see LayerTransition::mix). Audio: a constant-power crossfade
+    // (see AudioSegment::crossfade, whose linear progress the mixer shapes with sin(c * pi / 2)).
+    CrossDissolve,
 };
 
 const char *nameOf(TransitionKind kind);

@@ -45,6 +45,8 @@ Sequence *Project::activeSequence() {
 
 AssetId Project::addAsset(MediaAsset asset) {
     asset.id = ids.make<AssetId>();
+    asset.duration = canonicalProbedTime(asset.duration);
+    asset.frameDuration = canonicalProbedTime(asset.frameDuration);
     const AssetId assetId = asset.id;
     assets.push_back(std::move(asset));
     return assetId;

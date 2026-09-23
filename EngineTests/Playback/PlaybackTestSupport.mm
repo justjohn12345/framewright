@@ -86,7 +86,7 @@ ClipId PlaybackHarness::addClip(TrackId track, AssetId asset, int64_t startFrame
     clip.trackId = track;
     clip.timelineStart = frames30(startFrame);
     clip.sourceIn = sourceIn;
-    clip.sourceOut = sourceIn + frames30(durationFrames);
+    clip.timelineDuration = frames30(durationFrames);
     Track &t = *sequence().findTrack(track);
     t.clips.push_back(clip);
     t.sortClips();

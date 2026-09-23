@@ -18,6 +18,22 @@ struct ClipInfo {
     std::optional<ClipId> linkedClipId;
 };
 
+// Problem with a time that may be non-numeric: an invalid time must be the canonical
+// kCMTimeInvalid (it is saved as null), a numeric one must be an exact model time.
+std::optional<std::string> optionalTimeProblem(CMTime t, const std::string &what) {
+    if (CMTIME_IS_INVALID(t)) {
+        if (!identical(t, kCMTimeInvalid)) {
+            return what + " is an invalid time with non-zero fields";
+        }
+        return std::nullopt;
+    }
+    if (!isNumeric(t)) {
+        return t.epoch != 0 ? std::optional<std::string>(what + " has epoch " + std::to_string(t.epoch))
+                            : std::nullopt;
+    }
+    return modelTimeProblem(t, what);
+}
+
 std::optional<std::string> validateClip(const Clip &clip, const Track &track, const Sequence &sequence,
                                         const Project &project, const std::unordered_map<ClipId, ClipInfo> &clips) {
     const std::string where = clipName(clip.id);
@@ -33,30 +49,45 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
         return where +
                (shouldBeStill ? ": still asset but clip is not marked still" : ": marked still but asset is not");
     }
+    for (const auto &[time, what] : {std::pair{clip.timelineStart, "start"}, std::pair{clip.timelineDuration, "duration"},
+                                     std::pair{clip.sourceIn, "sourceIn"}}) {
+        if (auto problem = modelTimeProblem(time, what)) {
+            return where + ": " + *problem;
+        }
+    }
+    if (!isPositive(clip.timelineDuration)) {
+        return where + ": duration " + describe(clip.timelineDuration) + " is not positive";
+    }
     if (clip.isStill) {
-        if (clip.speed != 1.0) {
+        if (!(clip.speed == Ratio{1, 1})) {
             return where + ": still clips must have speed 1";
         }
         if (clip.sourceIn != kCMTimeZero) {
             return where + ": still clips must have sourceIn 0";
         }
     } else {
-        if (!std::isfinite(clip.speed) || clip.speed < kMinSpeed || clip.speed > kMaxSpeed) {
-            return where + ": speed " + std::to_string(clip.speed) + " outside [0.01, 100]";
+        if (!isValidSpeed(clip.speed)) {
+            return where + ": speed " + std::to_string(clip.speed.num) + "/" + std::to_string(clip.speed.den) +
+                   " is not a reduced ratio within [1/100, 100] with a denominator of at most " +
+                   std::to_string(kMaxSpeedDenominator);
         }
         if (clip.sourceIn < kCMTimeZero) {
             return where + ": sourceIn " + describe(clip.sourceIn) + " before the start of the media";
         }
-        if (!isNumeric(asset->duration) || clip.sourceOut > asset->duration) {
-            return where + ": sourceOut " + describe(clip.sourceOut) + " past the end of the media (" +
-                   describe(asset->duration) + ")";
+        const auto sourceOut = clip.exactSourceOut();
+        if (!sourceOut) {
+            return where + ": its source out point overflows exact arithmetic";
+        }
+        if (!isNumeric(asset->duration) || sourceOut->compare(asset->duration) > 0) {
+            return where + ": source out point " + describe(sourceOut->toTimeRounded()) +
+                   " past the end of the media (" + describe(asset->duration) + ")";
         }
     }
     if (!isOnFrameGrid(clip.timelineStart, sequence.frameDuration)) {
         return where + ": start " + describe(clip.timelineStart) + " is not on the sequence frame grid";
     }
-    if (!isOnFrameGrid(clip.timelineEnd(), sequence.frameDuration)) {
-        return where + ": end " + describe(clip.timelineEnd()) + " is not on the sequence frame grid";
+    if (!isOnFrameGrid(clip.timelineDuration, sequence.frameDuration)) {
+        return where + ": duration " + describe(clip.timelineDuration) + " is not a whole number of frames";
     }
     const VideoParams &v = clip.video;
     if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.scale) || !std::isfinite(v.rotationDegrees) ||
@@ -70,9 +101,24 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
     if (!std::isfinite(a.gainDb)) {
         return where + ": non-finite gain";
     }
-    if (!isNumeric(a.fadeInDuration) || !isNumeric(a.fadeOutDuration) || a.fadeInDuration < kCMTimeZero ||
-        a.fadeOutDuration < kCMTimeZero) {
-        return where + ": fade durations must be numeric and >= 0";
+    for (const auto &[fade, what] : {std::pair{a.fadeInDuration, "fade-in"}, std::pair{a.fadeOutDuration, "fade-out"}}) {
+        if (auto problem = modelTimeProblem(fade, what)) {
+            return where + ": " + *problem;
+        }
+        if (fade < kCMTimeZero) {
+            return where + ": " + what + " " + describe(fade) + " is negative";
+        }
+        if (fade > clip.timelineDuration) {
+            return where + ": " + what + " " + describe(fade) + " is longer than the clip (" +
+                   describe(clip.timelineDuration) + ")";
+        }
+    }
+    const auto fadeIn = ExactTime::from(a.fadeInDuration);
+    const auto fadeOut = ExactTime::from(a.fadeOutDuration);
+    const auto fades = fadeIn && fadeOut ? fadeIn->plus(*fadeOut) : std::nullopt;
+    if (!fades || fades->compare(clip.timelineDuration) > 0) {
+        return where + ": fade-in " + describe(a.fadeInDuration) + " and fade-out " + describe(a.fadeOutDuration) +
+               " overlap (together longer than the clip, " + describe(clip.timelineDuration) + ")";
     }
     if (clip.linkedClipId) {
         const ClipId partnerId = *clip.linkedClipId;
@@ -94,6 +140,59 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
 }
 
 } // namespace
+
+std::optional<std::string> modelTimeProblem(CMTime t, const std::string &what) {
+    if (!isNumeric(t) || t.timescale <= 0) {
+        return what + " " + describe(t) + " is not a numeric time";
+    }
+    if (isRounded(t)) {
+        return what + " " + describe(t) + " has been rounded";
+    }
+    if (t.epoch != 0) {
+        return what + " " + describe(t) + " has epoch " + std::to_string(t.epoch);
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> validateAsset(const MediaAsset &asset) {
+    const std::string what = "asset " + std::to_string(asset.id.value());
+    if (asset.url.empty()) {
+        return what + ": empty URL";
+    }
+    if (auto problem = optionalTimeProblem(asset.duration, "duration")) {
+        return what + ": " + *problem;
+    }
+    if (auto problem = optionalTimeProblem(asset.frameDuration, "frame duration")) {
+        return what + ": " + *problem;
+    }
+    if (asset.isStill()) {
+        if (isNumeric(asset.duration)) {
+            return what + ": a still has no duration, found " + describe(asset.duration);
+        }
+    } else if (!isPositive(asset.duration)) {
+        return what + ": duration " + describe(asset.duration) + " is not positive";
+    }
+    if (asset.hasVideo()) {
+        if (asset.width <= 0 || asset.height <= 0) {
+            return what + ": frame size " + std::to_string(asset.width) + "x" + std::to_string(asset.height) +
+                   " is not positive";
+        }
+        if (!isValidRotation(asset.rotationDegrees)) {
+            return what + ": rotation " + std::to_string(asset.rotationDegrees) + " is not 0, 90, 180 or 270";
+        }
+    }
+    if (asset.hasVideo() && !asset.isStill()) {
+        const bool missingAllowed = asset.isVFR && CMTIME_IS_INVALID(asset.frameDuration);
+        if (!missingAllowed && !isPositive(asset.frameDuration)) {
+            return what + ": frame duration " + describe(asset.frameDuration) + " is not positive";
+        }
+    }
+    if (asset.hasAudio() && (asset.audioSampleRate <= 0 || asset.audioChannels <= 0)) {
+        return what + ": audio needs a positive sample rate and channel count (" +
+               std::to_string(asset.audioSampleRate) + " Hz, " + std::to_string(asset.audioChannels) + " channels)";
+    }
+    return std::nullopt;
+}
 
 bool assetFitsTrack(const MediaAsset &asset, TrackKind kind) {
     return kind == TrackKind::Video ? asset.hasVideo() : asset.hasAudio();
@@ -123,7 +222,8 @@ std::optional<TransitionIssue> checkTransition(const Sequence &sequence, const P
         return TransitionIssue{K::NotAdjacent,
                                where + ": " + clipName(from->id) + " and " + clipName(to->id) + " are not adjacent"};
     }
-    if (!isPositive(transition.duration) || !isOnFrameGrid(transition.duration, sequence.frameDuration)) {
+    if (!isExactModelTime(transition.duration) || !isPositive(transition.duration) ||
+        !isOnFrameGrid(transition.duration, sequence.frameDuration)) {
         return TransitionIssue{K::BadDuration, where + ": duration " + describe(transition.duration) +
                                                    " is not a positive whole number of frames"};
     }
@@ -136,13 +236,15 @@ std::optional<TransitionIssue> checkTransition(const Sequence &sequence, const P
     }
     if (!from->isStill) {
         const MediaAsset *asset = project.findAsset(from->assetId);
-        if (!asset || from->sourceTimeAt(range->end) > asset->duration) {
+        const auto sourceEnd = from->exactSourceTimeAt(range->end);
+        if (!asset || !isNumeric(asset->duration) || !sourceEnd || sourceEnd->compare(asset->duration) > 0) {
             return TransitionIssue{K::InsufficientHandles, where + ": " + clipName(from->id) +
                                                                " lacks media after its out point for the transition"};
         }
     }
     if (!to->isStill) {
-        if (to->sourceTimeAt(range->start) < kCMTimeZero) {
+        const auto sourceStart = to->exactSourceTimeAt(range->start);
+        if (!sourceStart || sourceStart->compare(kCMTimeZero) < 0) {
             return TransitionIssue{K::InsufficientHandles, where + ": " + clipName(to->id) +
                                                                " lacks media before its in point for the transition"};
         }
@@ -154,6 +256,9 @@ std::optional<std::string> validateSequence(const Sequence &sequence, const Proj
     const std::string where = "sequence " + std::to_string(sequence.id.value());
     if (!sequence.id) {
         return where + ": invalid id";
+    }
+    if (auto problem = modelTimeProblem(sequence.frameDuration, "frame duration")) {
+        return where + ": " + *problem;
     }
     if (!isPositive(sequence.frameDuration)) {
         return where + ": frame duration " + describe(sequence.frameDuration) + " is not positive";
@@ -236,16 +341,11 @@ std::optional<std::string> validateProject(const Project &project) {
     };
 
     for (const MediaAsset &asset : project.assets) {
-        const std::string what = "asset " + std::to_string(asset.id.value());
-        if (auto problem = claim(asset.id.value(), what)) {
+        if (auto problem = claim(asset.id.value(), "asset " + std::to_string(asset.id.value()))) {
             return problem;
         }
-        if (!asset.isStill() && !isPositive(asset.duration)) {
-            return what + ": duration " + describe(asset.duration) + " is not positive";
-        }
-        if (asset.hasVideo() && !asset.isStill() && isNumeric(asset.frameDuration) &&
-            !isPositive(asset.frameDuration)) {
-            return what + ": frame duration is not positive";
+        if (auto problem = validateAsset(asset)) {
+            return problem;
         }
     }
     for (const Sequence &sequence : project.sequences) {

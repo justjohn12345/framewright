@@ -359,8 +359,8 @@ VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &pr
     info.duration = clip.duration();
     info.timelineEnd = clip.timelineEnd();
     info.sourceIn = clip.sourceIn;
-    info.sourceOut = clip.sourceOut;
-    info.speed = clip.speed;
+    info.sourceOut = clip.sourceOut();
+    info.speed = clip.speedValue();
     info.isStill = clip.isStill;
     info.linkedClipID = clip.linkedClipId ? static_cast<VEClipID>(clip.linkedClipId->value()) : 0;
     info.videoParams = toVE(clip.video);

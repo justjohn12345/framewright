@@ -1,8 +1,8 @@
 // A timeline track holding clips of one kind.
 //
 // Invariants (checkInvariants / validateSequence): `clips` is sorted by timelineStart, clips
-// never overlap (a clip's end <= the next clip's start; touching is allowed), and every clip's
-// trackId is this track's id.
+// never overlap (a clip's end <= the next clip's start; touching is allowed), every clip's
+// trackId is this track's id, and every clip has a positive duration and an exact end.
 
 #pragma once
 

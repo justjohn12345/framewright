@@ -30,7 +30,8 @@ struct Project {
     const Sequence *activeSequence() const;
     Sequence *activeSequence();
 
-    // Adds an asset under a newly generated id and returns that id.
+    // Adds an asset under a newly generated id and returns that id. Its times are passed through
+    // canonicalProbedTime.
     AssetId addAsset(MediaAsset asset);
 
     // Adds an empty sequence with `videoTrackCount` video tracks named V1, V2, ... and

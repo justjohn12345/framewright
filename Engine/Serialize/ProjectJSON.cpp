@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <utility>
+#include <vector>
 
 namespace ve {
 
@@ -47,6 +48,7 @@ json assetToJson(const MediaAsset &asset) {
                 {"height", asset.height},
                 {"frameDuration", timeToJson(asset.frameDuration)},
                 {"isVFR", asset.isVFR},
+                {"rotationDegrees", asset.rotationDegrees},
                 {"audioSampleRate", asset.audioSampleRate},
                 {"audioChannels", asset.audioChannels},
                 {"backendHint", asset.backendHint},
@@ -58,9 +60,9 @@ json clipToJson(const Clip &clip) {
                 {"assetId", idToJson(clip.assetId)},
                 {"trackId", idToJson(clip.trackId)},
                 {"timelineStart", timeToJson(clip.timelineStart)},
+                {"duration", timeToJson(clip.timelineDuration)},
                 {"sourceIn", timeToJson(clip.sourceIn)},
-                {"sourceOut", timeToJson(clip.sourceOut)},
-                {"speed", clip.speed},
+                {"speed", json{{"num", clip.speed.num}, {"den", clip.speed.den}}},
                 {"isStill", clip.isStill},
                 {"linkedClipId", optionalIdToJson(clip.linkedClipId)},
                 {"video", videoParamsToJson(clip.video)},
@@ -293,6 +295,8 @@ TrackKind parseTrackKind(const Node &node) {
     node.fail("unknown track kind \"" + s + "\"");
 }
 
+using Warnings = std::vector<std::string>;
+
 TransitionKind parseTransitionKind(const Node &node) {
     const std::string s = node.asString();
     if (s == nameOf(TransitionKind::CrossDissolve)) {
@@ -313,6 +317,7 @@ MediaAsset parseAsset(const Node &node) {
     asset.height = node.int32Or("height", 0);
     asset.frameDuration = node.timeOr("frameDuration", kCMTimeInvalid);
     asset.isVFR = node.boolOr("isVFR", false);
+    asset.rotationDegrees = node.int32Or("rotationDegrees", 0);
     asset.audioSampleRate = node.int32Or("audioSampleRate", 0);
     asset.audioChannels = node.int32Or("audioChannels", 0);
     asset.backendHint = node.stringOr("backendHint", "");
@@ -347,9 +352,18 @@ Clip parseClip(const Node &node) {
     clip.assetId = node.field("assetId").asId<AssetId>();
     clip.trackId = node.field("trackId").asId<TrackId>();
     clip.timelineStart = node.field("timelineStart").asTime();
+    clip.timelineDuration = node.field("duration").asTime();
     clip.sourceIn = node.field("sourceIn").asTime();
-    clip.sourceOut = node.field("sourceOut").asTime();
-    clip.speed = node.doubleOr("speed", 1.0);
+    if (node.has("speed")) {
+        const Node speed = node.field("speed");
+        speed.requireObject();
+        const std::int64_t num = speed.field("num").asInt64();
+        const std::int64_t den = speed.field("den").asInt64();
+        if (den <= 0) {
+            speed.field("den").fail("speed denominator must be positive");
+        }
+        clip.speed = Ratio{num, den};
+    }
     clip.isStill = node.boolOr("isStill", false);
     if (node.has("linkedClipId")) {
         clip.linkedClipId = node.field("linkedClipId").asId<ClipId>();
@@ -421,22 +435,200 @@ Sequence parseSequence(const Node &node) {
     return sequence;
 }
 
+// ----- Migrations -----
+
+// A stored time with the artefacts of the version 1 time math removed: the rounded flag is
+// dropped (the value is kept as exact) and the epoch reset. Records a warning when it changes.
+CMTime cleanedTime(CMTime t, const std::string &path, Warnings &warnings) {
+    if (!CMTIME_IS_NUMERIC(t) || (!isRounded(t) && t.epoch == 0)) {
+        return t;
+    }
+    warnings.push_back(path + ": " + describe(t) + " was stored rounded or with an epoch; adopted as exact");
+    t.flags &= ~kCMTimeFlags_HasBeenRounded;
+    t.epoch = 0;
+    return t;
+}
+
+void cleanTimeField(json &object, const Node &node, const char *key, Warnings &warnings) {
+    if (!node.has(key)) {
+        return;
+    }
+    const Node field = node.field(key);
+    const CMTime before = field.asTime();
+    const CMTime after = cleanedTime(before, field.path(), warnings);
+    if (!identical(before, after)) {
+        object[key] = timeToJson(after);
+    }
+}
+
+// Version 1 stored clips as sourceIn/sourceOut/double speed and allowed overlapping fades.
+void migrateClipV1(json &clip, const Node &node, CMTime frameDuration, Warnings &warnings) {
+    node.requireObject();
+    const bool isStill = node.boolOr("isStill", false);
+    const double speedValue = node.doubleOr("speed", 1.0);
+    // Version 1 applied a double speed as its best ratio with a denominator <= 1000.
+    const Ratio speed = isStill ? Ratio{1, 1} : approximateRatio(speedValue, kMaxSpeedDenominator);
+    if (!isStill && !isValidSpeed(speed)) {
+        node.field("speed").fail("speed " + std::to_string(speedValue) + " is outside [0.01, 100]");
+    }
+    cleanTimeField(clip, node, "timelineStart", warnings);
+    cleanTimeField(clip, node, "sourceIn", warnings);
+    const Node inNode = node.field("sourceIn");
+    const Node outNode = node.field("sourceOut");
+    const auto in = ExactTime::from(inNode.asTime());
+    const auto out = ExactTime::from(outNode.asTime());
+    if (!in) {
+        inNode.fail("expected a numeric time");
+    }
+    if (!out) {
+        outNode.fail("expected a numeric time");
+    }
+    const auto sourceLength = out->minus(*in);
+    const auto exactDuration = sourceLength ? sourceLength->dividedBy(speed) : std::nullopt;
+    if (!exactDuration) {
+        outNode.fail("the clip's duration overflows exact arithmetic");
+    }
+    // Version 1 kept the end on the frame grid, but its rounded source out points could leave
+    // the exact duration a few nanoseconds off it: snap back when within a microsecond.
+    CMTime duration = kCMTimeInvalid;
+    const auto frames = isPositive(frameDuration) ? exactDuration->frameIndex(frameDuration, SnapMode::Round)
+                                                  : std::nullopt;
+    if (frames) {
+        const auto snapped = checkedTimeForFrame(*frames, frameDuration);
+        const auto snappedExact = snapped ? ExactTime::from(*snapped) : std::nullopt;
+        const auto error = snappedExact ? exactDuration->minus(*snappedExact) : std::nullopt;
+        const auto tolerance = ExactTime::fraction(1, 1000000);
+        if (error && tolerance && error->compare(*tolerance) <= 0 && error->negated().compare(*tolerance) <= 0) {
+            duration = *snapped;
+            if (error->numerator() != 0) {
+                warnings.push_back(outNode.path() + ": the clip's duration was " + describe(exactDuration->toTimeRounded()) +
+                                   ", off the frame grid by rounding; snapped to " + describe(duration));
+            }
+        }
+    }
+    if (!isNumeric(duration)) {
+        const auto exact = exactDuration->toTime();
+        if (!exact) {
+            outNode.fail("the clip's duration has no exact time form");
+        }
+        duration = *exact; // validation reports it if it is off the frame grid
+    }
+    clip.erase("sourceOut");
+    clip["duration"] = timeToJson(duration);
+    clip["speed"] = json{{"num", speed.num}, {"den", speed.den}};
+
+    if (!node.has("audio") || !node.field("audio").value().is_object()) {
+        return;
+    }
+    json &audio = clip["audio"];
+    const Node audioNode = node.field("audio");
+    cleanTimeField(audio, audioNode, "fadeInDuration", warnings);
+    cleanTimeField(audio, audioNode, "fadeOutDuration", warnings);
+    const Node refreshed(audio, audioNode.path());
+    const CMTime fadeIn = refreshed.timeOr("fadeInDuration", kCMTimeZero);
+    const CMTime fadeOut = refreshed.timeOr("fadeOutDuration", kCMTimeZero);
+    const auto fadeInExact = ExactTime::from(fadeIn);
+    const auto fadeOutExact = ExactTime::from(fadeOut);
+    const auto total = fadeInExact && fadeOutExact ? fadeInExact->plus(*fadeOutExact) : std::nullopt;
+    if (total && total->compare(duration) > 0) {
+        // Version 1 allowed the fades to overlap; the fade-out gives way.
+        Clip fitted;
+        fitted.timelineDuration = duration;
+        fitted.audio.fadeInDuration = fadeIn;
+        fitted.audio.fadeOutDuration = fadeOut;
+        fitted.fitFades(ClipEdge::Tail);
+        warnings.push_back(audioNode.path() + ": fade-in " + describe(fadeIn) + " and fade-out " + describe(fadeOut) +
+                           " overlapped; now " + describe(fitted.audio.fadeInDuration) + " and " +
+                           describe(fitted.audio.fadeOutDuration));
+        audio["fadeInDuration"] = timeToJson(fitted.audio.fadeInDuration);
+        audio["fadeOutDuration"] = timeToJson(fitted.audio.fadeOutDuration);
+    }
+}
+
+void migrateV1ToV2(json &document, Warnings &warnings) {
+    const Node root(document, "");
+    root.requireObject();
+    if (root.has("assets")) {
+        const Node list = root.field("assets");
+        for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
+            const Node asset = list.element(i);
+            asset.requireObject();
+            for (const char *key : {"duration", "frameDuration"}) {
+                if (asset.has(key)) {
+                    const Node field = asset.field(key);
+                    const CMTime before = field.asTime();
+                    const CMTime after = canonicalProbedTime(before);
+                    if (!identical(before, after)) {
+                        warnings.push_back(field.path() + ": " + describe(before) + " adopted as exact");
+                        document["assets"][i][key] = timeToJson(after);
+                    }
+                }
+            }
+        }
+    }
+    if (!root.has("sequences")) {
+        return;
+    }
+    const Node sequences = root.field("sequences");
+    for (std::size_t s = 0, sn = sequences.arraySize(); s < sn; ++s) {
+        json &sequenceJson = document["sequences"][s];
+        const Node sequence(sequenceJson, sequences.element(s).path());
+        sequence.requireObject();
+        cleanTimeField(sequenceJson, sequence, "frameDuration", warnings);
+        const CMTime frameDuration = Node(sequenceJson, sequence.path()).timeOr("frameDuration", kCMTimeInvalid);
+        for (const char *key : {"videoTracks", "audioTracks"}) {
+            if (!sequence.has(key)) {
+                continue;
+            }
+            const Node tracks = sequence.field(key);
+            for (std::size_t t = 0, tn = tracks.arraySize(); t < tn; ++t) {
+                const Node track = tracks.element(t);
+                track.requireObject();
+                if (!track.has("clips")) {
+                    continue;
+                }
+                const Node clips = track.field("clips");
+                for (std::size_t c = 0, cn = clips.arraySize(); c < cn; ++c) {
+                    json &clipJson = sequenceJson[key][t]["clips"][c];
+                    migrateClipV1(clipJson, Node(clipJson, clips.element(c).path()), frameDuration, warnings);
+                }
+            }
+        }
+        if (sequence.has("transitions")) {
+            const Node transitions = sequence.field("transitions");
+            for (std::size_t i = 0, n = transitions.arraySize(); i < n; ++i) {
+                json &transitionJson = sequenceJson["transitions"][i];
+                const Node transition(transitionJson, transitions.element(i).path());
+                transition.requireObject();
+                cleanTimeField(transitionJson, transition, "duration", warnings);
+            }
+        }
+    }
+}
+
+struct MigrationStep {
+    int fromVersion;
+    void (*apply)(json &document, Warnings &warnings);
+};
+
+// One entry per schema version bump, in order: entry i upgrades fromVersion to fromVersion + 1.
+constexpr MigrationStep kMigrations[] = {
+    {1, migrateV1ToV2},
+};
+static_assert(sizeof(kMigrations) / sizeof(kMigrations[0]) == kProjectSchemaVersion - 1,
+              "every schema version below the current one needs a migration step");
+
+void runMigrations(json &document, int fromVersion, Warnings &warnings) {
+    for (const MigrationStep &step : kMigrations) {
+        if (step.fromVersion >= fromVersion) {
+            step.apply(document, warnings);
+            document["schemaVersion"] = step.fromVersion + 1;
+        }
+    }
+}
+
 Project parseProjectNode(const Node &root) {
     root.requireObject();
-    if (!root.value().contains("schemaVersion")) {
-        root.fail("missing \"schemaVersion\"; this is not a VidEdit project");
-    }
-    const Node versionNode = root.field("schemaVersion");
-    const std::int64_t version = versionNode.asInt64();
-    if (version > kProjectSchemaVersion) {
-        versionNode.fail("project uses schema version " + std::to_string(version) +
-                         ", newer than this version of VidEdit supports (" + std::to_string(kProjectSchemaVersion) +
-                         ")");
-    }
-    if (version < 1) {
-        versionNode.fail("invalid schema version " + std::to_string(version));
-    }
-
     Project project;
     project.name = root.stringOr("name", "");
     if (root.has("assets")) {
@@ -456,6 +648,25 @@ Project parseProjectNode(const Node &root) {
     }
     project.ids = IdGenerator(root.field("nextId").asUInt64());
     return project;
+}
+
+// The document's schema version, checked to be one this build can read.
+int schemaVersionOf(const Node &root) {
+    root.requireObject();
+    if (!root.value().contains("schemaVersion")) {
+        root.fail("missing \"schemaVersion\"; this is not a VidEdit project");
+    }
+    const Node versionNode = root.field("schemaVersion");
+    const std::int64_t version = versionNode.asInt64();
+    if (version > kProjectSchemaVersion) {
+        versionNode.fail("project uses schema version " + std::to_string(version) +
+                         ", newer than this version of VidEdit supports (" + std::to_string(kProjectSchemaVersion) +
+                         ")");
+    }
+    if (version < 1) {
+        versionNode.fail("invalid schema version " + std::to_string(version));
+    }
+    return static_cast<int>(version);
 }
 
 } // namespace
@@ -495,15 +706,39 @@ std::string serializeProject(const Project &project, int indent) {
     return projectToJson(project).dump(indent);
 }
 
+std::optional<std::string> migrateProjectJson(json &document, int fromVersion, std::vector<std::string> &warnings) {
+    if (fromVersion < 1 || fromVersion > kProjectSchemaVersion) {
+        return "cannot migrate from schema version " + std::to_string(fromVersion);
+    }
+    try {
+        runMigrations(document, fromVersion, warnings);
+    } catch (const ParseError &e) {
+        return e.message;
+    } catch (const json::exception &e) {
+        return std::string("malformed project: ") + e.what();
+    }
+    return std::nullopt;
+}
+
 ProjectLoadResult projectFromJson(const json &document) {
     ProjectLoadResult result;
     try {
-        Project project = parseProjectNode(Node(document, ""));
+        const int version = schemaVersionOf(Node(document, ""));
+        Warnings warnings;
+        Project project;
+        if (version < kProjectSchemaVersion) {
+            json upgraded = document;
+            runMigrations(upgraded, version, warnings);
+            project = parseProjectNode(Node(upgraded, ""));
+        } else {
+            project = parseProjectNode(Node(document, ""));
+        }
         if (auto problem = validateProject(project)) {
             result.error = "invalid project: " + *problem;
             return result;
         }
         result.project = std::move(project);
+        result.warnings = std::move(warnings);
     } catch (const ParseError &e) {
         result.error = e.message;
     } catch (const json::exception &e) {

@@ -20,6 +20,12 @@ template <> struct doctest::StringMaker<CMTime> {
     }
 };
 
+template <> struct doctest::StringMaker<ve::Ratio> {
+    static doctest::String convert(const ve::Ratio &r) {
+        return (std::to_string(r.num) + "/" + std::to_string(r.den)).c_str();
+    }
+};
+
 template <class Tag> struct doctest::StringMaker<ve::Id<Tag>> {
     static doctest::String convert(const ve::Id<Tag> &id) {
         return ("#" + std::to_string(id.value())).c_str();
@@ -41,6 +47,39 @@ inline std::string toJsonString(const Project &project) {
 
 inline std::string problemOf(const Project &project) {
     return validateProject(project).value_or("");
+}
+
+// True if any stored time of the project carries kCMTimeFlags_HasBeenRounded or an epoch.
+inline bool hasInexactTime(const Project &project) {
+    auto inexact = [](CMTime t) { return isRounded(t) || t.epoch != 0; };
+    for (const MediaAsset &asset : project.assets) {
+        if (inexact(asset.duration) || inexact(asset.frameDuration)) {
+            return true;
+        }
+    }
+    for (const Sequence &sequence : project.sequences) {
+        if (inexact(sequence.frameDuration)) {
+            return true;
+        }
+        for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
+            for (const Track &track : sequence.tracks(kind)) {
+                for (const Clip &clip : track.clips) {
+                    for (const CMTime t : {clip.timelineStart, clip.timelineDuration, clip.sourceIn,
+                                           clip.audio.fadeInDuration, clip.audio.fadeOutDuration}) {
+                        if (inexact(t)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        for (const Transition &transition : sequence.transitions) {
+            if (inexact(transition.duration)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 // A project with one 30 fps 1920x1080 sequence (V1, V2, A1, A2) and a set of assets.
@@ -146,9 +185,9 @@ struct Fixture {
         clip.trackId = trackId;
         clip.timelineStart = f30(startFrame);
         clip.isStill = asset.isStill();
-        clip.speed = clip.isStill ? 1.0 : speed;
+        clip.speed = clip.isStill ? Ratio{1, 1} : speedFromDouble(speed);
         clip.sourceIn = clip.isStill ? kCMTimeZero : f30(sourceInFrame);
-        clip.sourceOut = clip.sourceIn + scaleTime(f30(durationFrames), clip.speedRatio());
+        clip.timelineDuration = f30(durationFrames);
         Track &t = track(trackId);
         t.clips.push_back(clip);
         t.sortClips();
@@ -187,9 +226,10 @@ struct Fixture {
 };
 
 // Applies `command`, which must succeed, and checks that revert restores the previous project
-// bit for bit (structurally and as JSON) and that re-applying reproduces the edit exactly.
-// Leaves the project in the edited state.
-inline void applyReversible(Project &project, Command &command) {
+// bit for bit (structurally and as JSON) and that re-applying reproduces the edit exactly (and
+// reports the same dropped transitions). Leaves the project in the edited state and returns
+// the first apply's result.
+inline EditResult applyReversible(Project &project, Command &command) {
     const Project before = project;
     const std::string beforeJson = toJsonString(project);
     const EditResult result = command.apply(project);
@@ -197,16 +237,21 @@ inline void applyReversible(Project &project, Command &command) {
     REQUIRE_MESSAGE(result.ok(), doctest::String(refusal.c_str()));
     const auto problem = validateProject(project);
     REQUIRE_MESSAGE(!problem, doctest::String(problem.value_or("").c_str()));
+    CHECK_FALSE(hasInexactTime(project));
     const Project after = project;
     const std::string afterJson = toJsonString(project);
 
+    REQUIRE(command.canRevert(project));
     command.revert(project);
     CHECK(project == before);
     CHECK(toJsonString(project) == beforeJson);
 
-    REQUIRE(command.apply(project).ok());
+    const EditResult again = command.apply(project);
+    REQUIRE(again.ok());
+    CHECK(again.droppedTransitionIds == result.droppedTransitionIds);
     CHECK(project == after);
     CHECK(toJsonString(project) == afterJson);
+    return result;
 }
 
 // Applies `command`, which must be refused with `expected`, and checks nothing changed.

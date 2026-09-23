@@ -207,6 +207,38 @@ SequencePatch composePatches(const SequencePatch &first, const SequencePatch &se
     return result;
 }
 
+namespace {
+
+// Refusal if the change from `before` to `after` touches a locked track: its clips or
+// properties, its existence, or a transition on it.
+std::optional<EditResult> lockedTrackChange(const Sequence &before, const SequencePatch &patch) {
+    for (const TrackSnapshot &snapshot : patch.tracks) {
+        if (snapshot.before && snapshot.before->locked) {
+            return EditResult::failure(EditError::TrackLocked, "track \"" + snapshot.before->name + "\" is locked" +
+                                                                   (snapshot.after ? "" : " and cannot be removed"));
+        }
+    }
+    if (patch.transitionsChanged) {
+        auto onLocked = [&](const std::vector<Transition> &list) {
+            std::vector<Transition> result;
+            for (const Transition &transition : list) {
+                const Track *track = before.findTrack(transition.trackId);
+                if (track && track->locked) {
+                    result.push_back(transition);
+                }
+            }
+            return result;
+        };
+        const std::vector<Transition> lockedBefore = onLocked(patch.transitionsBefore);
+        if (!(lockedBefore == onLocked(patch.transitionsAfter))) {
+            return EditResult::failure(EditError::TrackLocked, "the edit would change a transition on a locked track");
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
 EditResult SequenceCommand::apply(Project &project) {
     Sequence *sequence = project.findSequence(sequenceId_);
     if (!sequence) {
@@ -218,7 +250,9 @@ EditResult SequenceCommand::apply(Project &project) {
             return EditResult::failure(EditError::InvariantViolation,
                                        name() + " cannot be redone: the sequence no longer matches its starting state");
         }
-        return EditResult::success();
+        EditResult redone = EditResult::success();
+        redone.droppedTransitionIds = dropped_;
+        return redone;
     }
 
     Sequence working = *sequence;
@@ -227,14 +261,31 @@ EditResult SequenceCommand::apply(Project &project) {
     if (!result) {
         return result;
     }
+    std::vector<TransitionId> beforeNormalize;
+    for (const Transition &transition : working.transitions) {
+        beforeNormalize.push_back(transition.id);
+    }
     normalizeSequence(working, project);
     if (auto problem = validateSequence(working, project)) {
         return EditResult::failure(EditError::InvariantViolation,
                                    name() + " would leave an invalid sequence: " + *problem);
     }
-    patch_ = diffSequences(*sequence, working, project.ids, ids);
+    SequencePatch patch = diffSequences(*sequence, working, project.ids, ids);
+    if (!mayEditLockedTracks()) {
+        if (auto refusal = lockedTrackChange(*sequence, patch)) {
+            return *refusal;
+        }
+    }
+    dropped_.clear();
+    for (const TransitionId transitionId : beforeNormalize) {
+        if (!working.findTransition(transitionId)) {
+            dropped_.push_back(transitionId);
+        }
+    }
+    patch_ = std::move(patch);
     *sequence = std::move(working);
     project.ids = ids;
+    result.droppedTransitionIds = dropped_;
     return result;
 }
 
@@ -261,6 +312,7 @@ bool SequenceCommand::mergeWith(const Command &next) {
         return false;
     }
     patch_ = composePatches(*patch_, *other->patch_);
+    dropped_.insert(dropped_.end(), other->dropped_.begin(), other->dropped_.end());
     return true;
 }
 

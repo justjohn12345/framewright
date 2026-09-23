@@ -38,6 +38,10 @@ const char *nameOf(EditError error) {
         return "already linked";
     case EditError::NotLinked:
         return "not linked";
+    case EditError::InsideTransition:
+        return "inside a transition";
+    case EditError::NotRepresentable:
+        return "not representable";
     case EditError::InvariantViolation:
         return "invariant violation";
     }

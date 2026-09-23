@@ -17,7 +17,7 @@ inline ClipPlacement place(TrackId track, AssetId asset, std::int64_t inFrame, s
     p.assetId = asset;
     p.sourceIn = f30(inFrame);
     p.sourceOut = f30(outFrame);
-    p.speed = speed;
+    p.speed = speedFromDouble(speed);
     return p;
 }
 

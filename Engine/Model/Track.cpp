@@ -1,6 +1,9 @@
 #include "Track.h"
 
+#include "Validation.h"
+
 #include <algorithm>
+#include <utility>
 
 namespace ve {
 
@@ -87,14 +90,22 @@ std::optional<std::string> Track::checkInvariants() const {
         if (clip.trackId != id) {
             return clipWhere + ": trackId is " + std::to_string(clip.trackId.value());
         }
-        if (!isNumeric(clip.timelineStart) || !isNumeric(clip.sourceIn) || !isNumeric(clip.sourceOut)) {
-            return clipWhere + ": non-numeric time";
+        for (const auto &[time, what] : {std::pair{clip.timelineStart, "start"},
+                                         std::pair{clip.timelineDuration, "duration"},
+                                         std::pair{clip.sourceIn, "sourceIn"}}) {
+            if (auto problem = modelTimeProblem(time, what)) {
+                return clipWhere + ": " + *problem;
+            }
         }
-        if (!(clip.sourceIn < clip.sourceOut)) {
-            return clipWhere + ": empty source range";
+        if (!(kCMTimeZero < clip.timelineDuration)) {
+            return clipWhere + ": duration " + describe(clip.timelineDuration) + " is not positive";
         }
         if (clip.timelineStart < kCMTimeZero) {
             return clipWhere + ": starts before zero at " + describe(clip.timelineStart);
+        }
+        if (!checkedAdd(clip.timelineStart, clip.timelineDuration)) {
+            return clipWhere + ": its end " + describe(clip.timelineStart) + " + " + describe(clip.timelineDuration) +
+                   " has no exact CMTime form";
         }
         if (i > 0) {
             const Clip &previous = clips[i - 1];

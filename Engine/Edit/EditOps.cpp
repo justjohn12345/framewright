@@ -24,10 +24,21 @@ EditResult requireNumeric(CMTime t, const char *what) {
     return EditResult::success();
 }
 
-EditResult checkSpeed(double speed) {
-    if (!std::isfinite(speed) || speed < kMinSpeed || speed > kMaxSpeed) {
+EditResult checkSpeed(Ratio speed) {
+    if (!isValidSpeed(speed)) {
         return EditResult::failure(EditError::InvalidArgument,
-                                   "speed " + std::to_string(speed) + " is outside [0.01, 100]");
+                                   "speed " + std::to_string(speed.num) + "/" + std::to_string(speed.den) +
+                                       " is not a reduced ratio within [1/100, 100] with a denominator of at most " +
+                                       std::to_string(kMaxSpeedDenominator));
+    }
+    return EditResult::success();
+}
+
+// Refusal unless `t` is an exact model time (numeric, not rounded, epoch 0).
+EditResult requireExact(CMTime t, const char *what) {
+    if (!isExactModelTime(t)) {
+        return EditResult::failure(EditError::InvalidTime, std::string(what) + " " + describe(t) +
+                                                               " is not an exact time (numeric, unrounded, epoch 0)");
     }
     return EditResult::success();
 }
@@ -51,13 +62,24 @@ EditResult checkAudioParams(const AudioParams &a, CMTime clipDuration) {
         return EditResult::failure(EditError::InvalidArgument, "gain must be finite");
     }
     for (const CMTime fade : {a.fadeInDuration, a.fadeOutDuration}) {
-        if (!isNumeric(fade) || fade < kCMTimeZero) {
-            return EditResult::failure(EditError::InvalidTime, "fade durations must be numeric and >= 0");
+        if (EditResult r = requireExact(fade, "fade duration"); !r) {
+            return r;
+        }
+        if (fade < kCMTimeZero) {
+            return EditResult::failure(EditError::InvalidTime, "fade durations must be >= 0");
         }
         if (fade > clipDuration) {
             return EditResult::failure(EditError::InvalidTime, "fade " + describe(fade) + " is longer than the clip (" +
                                                                    describe(clipDuration) + ")");
         }
+    }
+    const auto fadeIn = ExactTime::from(a.fadeInDuration);
+    const auto fadeOut = ExactTime::from(a.fadeOutDuration);
+    const auto total = fadeIn && fadeOut ? fadeIn->plus(*fadeOut) : std::nullopt;
+    if (!total || total->compare(clipDuration) > 0) {
+        return EditResult::failure(EditError::InvalidTime, "the fade-in and fade-out overlap: together they are longer "
+                                                           "than the clip (" +
+                                                               describe(clipDuration) + ")");
     }
     return EditResult::success();
 }
@@ -92,18 +114,24 @@ EditResult buildClip(const Project &project, const Sequence &sequence, const Tra
             length = placement.sourceOut - placement.sourceIn;
         }
         length = maxTime(snapToSequence(sequence, length), frame);
+        if (!isExactModelTime(length)) {
+            return EditResult::failure(EditError::InvalidTime, "the still's duration is not a usable time");
+        }
         clip.isStill = true;
-        clip.speed = 1.0;
+        clip.speed = Ratio{1, 1};
         clip.sourceIn = kCMTimeZero;
-        clip.sourceOut = length;
+        clip.timelineDuration = length;
     } else {
         if (EditResult r = checkSpeed(placement.speed); !r) {
             return r;
         }
-        if (EditResult r = requireNumeric(placement.sourceIn, "source in point"); !r) {
+        if (EditResult r = requireExact(placement.sourceIn, "source in point"); !r) {
             return r;
         }
         const CMTime sourceOut = isNumeric(placement.sourceOut) ? placement.sourceOut : asset->duration;
+        if (EditResult r = requireExact(sourceOut, "source out point"); !r) {
+            return r;
+        }
         if (placement.sourceIn < kCMTimeZero || sourceOut > asset->duration) {
             return EditResult::failure(EditError::OutOfSourceRange,
                                        "source range " + describe(placement.sourceIn) + " - " + describe(sourceOut) +
@@ -112,15 +140,23 @@ EditResult buildClip(const Project &project, const Sequence &sequence, const Tra
         if (!(placement.sourceIn < sourceOut)) {
             return EditResult::failure(EditError::InvalidArgument, "source range is empty");
         }
-        clip.speed = placement.speed;
-        const Ratio ratio = clip.speedRatio();
-        const CMTime length =
-            snapToSequence(sequence, scaleTime(sourceOut - placement.sourceIn, ratio.inverse()), SnapMode::Floor);
-        if (length < frame) {
+        // Whole frames of timeline that the source range fills at this speed, rounded down so the
+        // derived out point never passes the requested one.
+        const auto exactIn = ExactTime::from(placement.sourceIn);
+        const auto exactOut = ExactTime::from(sourceOut);
+        const auto sourceLength = exactIn && exactOut ? exactOut->minus(*exactIn) : std::nullopt;
+        const auto timelineLength = sourceLength ? sourceLength->dividedBy(placement.speed) : std::nullopt;
+        const auto frames = timelineLength ? timelineLength->frameIndex(frame, SnapMode::Floor) : std::nullopt;
+        const auto length = frames ? checkedTimeForFrame(*frames, frame) : std::nullopt;
+        if (!length) {
+            return EditResult::failure(EditError::InvalidArgument, "the source range is too long");
+        }
+        if (*length < frame) {
             return EditResult::failure(EditError::InvalidArgument, "source range is shorter than one frame");
         }
+        clip.speed = placement.speed;
         clip.sourceIn = placement.sourceIn;
-        clip.sourceOut = placement.sourceIn + scaleTime(length, ratio);
+        clip.timelineDuration = *length;
     }
     if (EditResult r = checkAudioParams(clip.audio, clip.duration()); !r) {
         return r;
@@ -233,17 +269,6 @@ std::vector<TimeRange> mergeRanges(std::vector<TimeRange> ranges) {
         }
     }
     return merged;
-}
-
-// Total length of the (merged) ranges that end at or before `t`.
-CMTime removedTimeBefore(const std::vector<TimeRange> &merged, CMTime t) {
-    CMTime total = kCMTimeZero;
-    for (const TimeRange &range : merged) {
-        if (range.end <= t) {
-            total = total + range.duration();
-        }
-    }
-    return total;
 }
 
 // Allowed trim delta, with the reason each bound exists.
@@ -361,7 +386,10 @@ ClipPlacement placementForAsset(const MediaAsset &asset, TrackId trackId) {
 // ----- InsertClip -----
 
 InsertClip::InsertClip(SequenceId sequenceId, CMTime at, std::vector<ClipPlacement> placements, bool linkPair)
-    : SequenceCommand(sequenceId), at_(at), placements_(std::move(placements)), linkPair_(linkPair) {}
+    : InsertClip(sequenceId, at, std::move(placements), InsertOptions{linkPair, RippleScope::AllUnlockedTracks}) {}
+
+InsertClip::InsertClip(SequenceId sequenceId, CMTime at, std::vector<ClipPlacement> placements, InsertOptions options)
+    : SequenceCommand(sequenceId), at_(at), placements_(std::move(placements)), options_(options) {}
 
 EditResult InsertClip::perform(const Project &project, Sequence &sequence, IdGenerator &ids) {
     CMTime at;
@@ -369,21 +397,29 @@ EditResult InsertClip::perform(const Project &project, Sequence &sequence, IdGen
     if (EditResult r = planPlacements(project, sequence, at_, placements_, at, plan); !r) {
         return r;
     }
-    created_.clear();
+    // Every rippled track moves by the longest new clip, so they all stay in sync.
+    CMTime length = kCMTimeZero;
+    std::vector<TrackId> targets;
+    for (const PlannedClip &planned : plan) {
+        length = maxTime(length, planned.clip.timelineDuration);
+        targets.push_back(planned.track->id);
+    }
+    std::unordered_set<TrackId> rippled;
+    if (EditResult r = rippleTracks(sequence, options_.ripple, targets, at, rippled); !r) {
+        return r;
+    }
     SplitList splits;
+    if (EditResult r = openTime(sequence, rippled, at, length, ids, splits); !r) {
+        return r;
+    }
+    created_.clear();
     for (PlannedClip &planned : plan) {
-        Track &track = *planned.track;
-        if (const auto index = track.clipIndexAt(at); index && track.clips[*index].timelineStart < at) {
-            const ClipId original = track.clips[*index].id;
-            splits.emplace_back(original, splitClipAt(sequence, track, *index, at, ids));
-        }
-        shiftClips(track, at, planned.clip.duration());
         planned.clip.id = ids.make<ClipId>();
         created_.push_back(planned.clip.id);
-        insertClipSorted(track, planned.clip);
+        insertClipSorted(*sequence.findTrack(planned.clip.trackId), planned.clip);
     }
     relinkSplitPieces(sequence, splits);
-    if (linkPair_ && created_.size() == 2) {
+    if (options_.linkPair && created_.size() == 2) {
         linkPair(sequence, created_[0], created_[1]);
     }
     return EditResult::success();
@@ -403,7 +439,9 @@ EditResult OverwriteClip::perform(const Project &project, Sequence &sequence, Id
     created_.clear();
     SplitList splits;
     for (PlannedClip &planned : plan) {
-        clearRange(sequence, *planned.track, planned.clip.timelineRange(), ids, splits);
+        if (EditResult r = clearRange(sequence, *planned.track, planned.clip.timelineRange(), ids, splits); !r) {
+            return r;
+        }
         planned.clip.id = ids.make<ClipId>();
         created_.push_back(planned.clip.id);
         insertClipSorted(*planned.track, planned.clip);
@@ -483,7 +521,9 @@ EditResult MoveClip::perform(const Project &, Sequence &sequence, IdGenerator &i
     SplitList splits;
     for (Clip &moved : lifted) {
         Track &target = *sequence.findTrack(moved.trackId);
-        clearRange(sequence, target, moved.timelineRange(), ids, splits);
+        if (EditResult r = clearRange(sequence, target, moved.timelineRange(), ids, splits); !r) {
+            return r;
+        }
         insertClipSorted(target, std::move(moved));
     }
     relinkSplitPieces(sequence, splits);
@@ -505,6 +545,7 @@ EditResult TrimClipHead::perform(const Project &, Sequence &sequence, IdGenerato
     if (EditResult r = requireNumeric(newStart_, "new start"); !r) {
         return r;
     }
+    const CMTime frame = sequence.frameDuration;
     const Clip &primary = *sequence.findClip(clipId_);
     CMTime delta = snapToSequence(sequence, newStart_) - primary.timelineStart;
 
@@ -520,11 +561,17 @@ EditResult TrimClipHead::perform(const Project &, Sequence &sequence, IdGenerato
                            "the previous clip" + which);
         }
         if (!clip.isStill) {
-            const CMTime mediaStart = snapToSequence(sequence, clip.timelineTimeAt(kCMTimeZero), SnapMode::Ceil);
-            limits.raiseLo(mediaStart - clip.timelineStart, EditError::OutOfSourceRange,
+            // The earliest whole frame at which the source media has started.
+            const auto mediaStart = clip.exactTimelineTimeAt(kCMTimeZero);
+            const auto frameIndex = mediaStart ? mediaStart->frameIndex(frame, SnapMode::Ceil) : std::nullopt;
+            const auto earliest = frameIndex ? checkedTimeForFrame(*frameIndex, frame) : std::nullopt;
+            if (!earliest) {
+                return notRepresentable(clip.id, kCMTimeZero);
+            }
+            limits.raiseLo(*earliest - clip.timelineStart, EditError::OutOfSourceRange,
                            "the start of the source media" + which);
         }
-        limits.lowerHi(clip.timelineEnd() - sequence.frameDuration - clip.timelineStart, EditError::InvalidTime,
+        limits.lowerHi(clip.timelineEnd() - frame - clip.timelineStart, EditError::InvalidTime,
                        "the minimum length of one frame" + which);
     }
     if (EditResult r = limits.resolve(delta, options_.clampToLimits); !r) {
@@ -535,7 +582,10 @@ EditResult TrimClipHead::perform(const Project &, Sequence &sequence, IdGenerato
     }
     for (const ClipId clipId : targets) {
         Clip &clip = *sequence.findClip(clipId);
-        clip.setTimelineStartKeepingEnd(clip.timelineStart + delta);
+        const CMTime newStart = clip.timelineStart + delta;
+        if (!clip.setTimelineStartKeepingEnd(newStart)) {
+            return notRepresentable(clip.id, newStart);
+        }
     }
     return EditResult::success();
 }
@@ -553,6 +603,7 @@ EditResult TrimClipTail::perform(const Project &project, Sequence &sequence, IdG
     if (EditResult r = requireNumeric(newEnd_, "new end"); !r) {
         return r;
     }
+    const CMTime frame = sequence.frameDuration;
     const Clip &primary = *sequence.findClip(clipId_);
     CMTime delta = snapToSequence(sequence, newEnd_) - primary.timelineEnd();
 
@@ -571,10 +622,16 @@ EditResult TrimClipTail::perform(const Project &project, Sequence &sequence, IdG
             if (!asset) {
                 return EditResult::failure(EditError::AssetNotFound, "the clip's asset is missing");
             }
-            const CMTime mediaEnd = snapToSequence(sequence, clip.timelineTimeAt(asset->duration), SnapMode::Floor);
-            limits.lowerHi(mediaEnd - end, EditError::OutOfSourceRange, "the end of the source media" + which);
+            // The last whole frame at which the source media still lasts.
+            const auto mediaEnd = clip.exactTimelineTimeAt(asset->duration);
+            const auto frameIndex = mediaEnd ? mediaEnd->frameIndex(frame, SnapMode::Floor) : std::nullopt;
+            const auto latest = frameIndex ? checkedTimeForFrame(*frameIndex, frame) : std::nullopt;
+            if (!latest) {
+                return notRepresentable(clip.id, asset->duration);
+            }
+            limits.lowerHi(*latest - end, EditError::OutOfSourceRange, "the end of the source media" + which);
         }
-        limits.raiseLo(clip.timelineStart + sequence.frameDuration - end, EditError::InvalidTime,
+        limits.raiseLo(clip.timelineStart + frame - end, EditError::InvalidTime,
                        "the minimum length of one frame" + which);
     }
     if (EditResult r = limits.resolve(delta, options_.clampToLimits); !r) {
@@ -585,7 +642,10 @@ EditResult TrimClipTail::perform(const Project &project, Sequence &sequence, IdG
     }
     for (const ClipId clipId : targets) {
         Clip &clip = *sequence.findClip(clipId);
-        clip.setTimelineEnd(clip.timelineEnd() + delta);
+        const CMTime newEnd = clip.timelineEnd() + delta;
+        if (!clip.setTimelineEnd(newEnd)) {
+            return notRepresentable(clip.id, newEnd);
+        }
     }
     return EditResult::success();
 }
@@ -593,11 +653,14 @@ EditResult TrimClipTail::perform(const Project &project, Sequence &sequence, IdG
 // ----- SplitClip -----
 
 SplitClip::SplitClip(SequenceId sequenceId, ClipId clipId, CMTime at, bool includeLinked)
-    : SequenceCommand(sequenceId), clipId_(clipId), at_(at), includeLinked_(includeLinked) {}
+    : SplitClip(sequenceId, clipId, at, SplitOptions{includeLinked, false}) {}
+
+SplitClip::SplitClip(SequenceId sequenceId, ClipId clipId, CMTime at, SplitOptions options)
+    : SequenceCommand(sequenceId), clipId_(clipId), at_(at), options_(options) {}
 
 EditResult SplitClip::perform(const Project &, Sequence &sequence, IdGenerator &ids) {
     std::vector<ClipId> targets;
-    if (EditResult r = clipAndPartner(sequence, clipId_, includeLinked_, targets); !r) {
+    if (EditResult r = clipAndPartner(sequence, clipId_, options_.includeLinked, targets); !r) {
         return r;
     }
     if (EditResult r = requireNumeric(at_, "split time"); !r) {
@@ -609,16 +672,36 @@ EditResult SplitClip::perform(const Project &, Sequence &sequence, IdGenerator &
         return EditResult::failure(EditError::InvalidTime,
                                    "split time " + describe(at) + " is not inside clip " + idString(clipId_.value()));
     }
+    // Clips that will be split (a linked clip that does not span the split time stays whole).
+    std::vector<ClipId> splitting;
+    for (const ClipId clipId : targets) {
+        const Clip &clip = *sequence.findClip(clipId);
+        if (clip.timelineStart < at && at < clip.timelineEnd()) {
+            splitting.push_back(clipId);
+        }
+    }
+    if (!options_.allowBreakingTransitions) {
+        for (const Transition &transition : sequence.transitions) {
+            const bool onSplitClip =
+                std::find(splitting.begin(), splitting.end(), transition.fromClipId) != splitting.end() ||
+                std::find(splitting.begin(), splitting.end(), transition.toClipId) != splitting.end();
+            const auto range = sequence.transitionRange(transition);
+            if (onSplitClip && range && range->start < at && at < range->end) {
+                return EditResult::failure(EditError::InsideTransition,
+                                           "split time " + describe(at) + " is inside transition " +
+                                               idString(transition.id.value()) + " (" + describe(range->start) +
+                                               " - " + describe(range->end) + "); remove or shorten it first");
+            }
+        }
+    }
     created_.clear();
     SplitList splits;
-    for (const ClipId clipId : targets) {
+    for (const ClipId clipId : splitting) {
         Track &track = *sequence.trackOfClip(clipId);
-        const std::size_t index = *track.indexOf(clipId);
-        const Clip &clip = track.clips[index];
-        if (!(clip.timelineStart < at && at < clip.timelineEnd())) {
-            continue; // a linked clip that does not span the split time stays whole
+        ClipId right;
+        if (EditResult r = splitClipAt(sequence, track, *track.indexOf(clipId), at, ids, right); !r) {
+            return r;
         }
-        const ClipId right = splitClipAt(sequence, track, index, at, ids);
         splits.emplace_back(clipId, right);
         created_.push_back(right);
     }
@@ -650,46 +733,22 @@ EditResult RippleDelete::perform(const Project &, Sequence &sequence, IdGenerato
     if (EditResult r = collectClips(sequence, clipIds_, options_.includeLinked, all); !r) {
         return r;
     }
-    std::unordered_map<TrackId, std::vector<TimeRange>> removed;
-    std::vector<TimeRange> everything;
+    std::vector<TimeRange> removed;
+    std::vector<TrackId> seeds;
     for (const ClipId clipId : all) {
         Track &track = *sequence.trackOfClip(clipId);
         const Clip clip = removeClip(track, clipId);
-        removed[track.id].push_back(clip.timelineRange());
-        everything.push_back(clip.timelineRange());
-    }
-
-    if (!options_.allTracks) {
-        for (auto &[trackId, ranges] : removed) {
-            const std::vector<TimeRange> merged = mergeRanges(ranges);
-            for (Clip &clip : sequence.findTrack(trackId)->clips) {
-                clip.timelineStart = clip.timelineStart - removedTimeBefore(merged, clip.timelineStart);
-            }
-        }
-        return EditResult::success();
-    }
-
-    const std::vector<TimeRange> merged = mergeRanges(everything);
-    for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
-        for (Track &track : *list) {
-            if (track.locked) {
-                continue;
-            }
-            for (const Clip &clip : track.clips) {
-                for (const TimeRange &range : merged) {
-                    if (clip.timelineRange().intersects(range)) {
-                        return EditResult::failure(EditError::Overlap,
-                                                   "clip " + idString(clip.id.value()) + " on track \"" + track.name +
-                                                       "\" overlaps the deleted time; cannot ripple all tracks");
-                    }
-                }
-            }
-            for (Clip &clip : track.clips) {
-                clip.timelineStart = clip.timelineStart - removedTimeBefore(merged, clip.timelineStart);
-            }
+        removed.push_back(clip.timelineRange());
+        if (std::find(seeds.begin(), seeds.end(), track.id) == seeds.end()) {
+            seeds.push_back(track.id);
         }
     }
-    return EditResult::success();
+    const std::vector<TimeRange> merged = mergeRanges(removed);
+    std::unordered_set<TrackId> tracks;
+    if (EditResult r = rippleTracks(sequence, options_.scope, seeds, merged.front().start, tracks); !r) {
+        return r;
+    }
+    return closeTime(sequence, tracks, merged);
 }
 
 // ----- Clip parameters -----
@@ -730,12 +789,15 @@ EditResult SetAudioParams::perform(const Project &, Sequence &sequence, IdGenera
     return EditResult::success();
 }
 
-SetClipSpeed::SetClipSpeed(SequenceId sequenceId, ClipId clipId, double speed, SpeedOptions options)
+SetClipSpeed::SetClipSpeed(SequenceId sequenceId, ClipId clipId, Ratio speed, SpeedOptions options)
     : SequenceCommand(sequenceId), clipId_(clipId), speed_(speed), options_(options) {
     setCoalescingKey("speed:" + idString(clipId.value()));
 }
 
-EditResult SetClipSpeed::perform(const Project &project, Sequence &sequence, IdGenerator &) {
+SetClipSpeed::SetClipSpeed(SequenceId sequenceId, ClipId clipId, double speed, SpeedOptions options)
+    : SetClipSpeed(sequenceId, clipId, speedFromDouble(speed), options) {}
+
+EditResult SetClipSpeed::perform(const Project &project, Sequence &sequence, IdGenerator &ids) {
     std::vector<ClipId> targets;
     if (EditResult r = clipAndPartner(sequence, clipId_, options_.includeLinked, targets); !r) {
         return r;
@@ -743,12 +805,11 @@ EditResult SetClipSpeed::perform(const Project &project, Sequence &sequence, IdG
     if (EditResult r = checkSpeed(speed_); !r) {
         return r;
     }
-    const Ratio ratio = approximateRatio(speed_, kMaxSpeedDenominator);
     const CMTime frame = sequence.frameDuration;
 
     struct Change {
         ClipId clipId;
-        CMTime newSourceOut;
+        CMTime newDuration;
         CMTime oldEnd;
         CMTime newEnd;
     };
@@ -764,32 +825,80 @@ EditResult SetClipSpeed::perform(const Project &project, Sequence &sequence, IdG
         if (!asset) {
             return EditResult::failure(EditError::AssetNotFound, "the clip's asset is missing");
         }
-        CMTime length = maxTime(snapToSequence(sequence, scaleTime(clip.sourceDuration(), ratio.inverse())), frame);
-        CMTime sourceOut = clip.sourceIn + scaleTime(length, ratio);
-        if (sourceOut > asset->duration) {
-            length =
-                snapToSequence(sequence, scaleTime(asset->duration - clip.sourceIn, ratio.inverse()), SnapMode::Floor);
-            if (length < frame) {
+        // Whole frames the clip's source range fills at the new speed, rounded down (so the out
+        // point never moves later), at least one frame, and never past the end of the media.
+        const auto in = ExactTime::from(clip.sourceIn);
+        const auto sourceOut = clip.exactSourceOut();
+        const auto mediaEnd = ExactTime::from(asset->duration);
+        if (!in || !sourceOut || !mediaEnd) {
+            return notRepresentable(clip.id, clip.timelineStart);
+        }
+        auto framesFor = [&](const ExactTime &sourceEnd) -> std::optional<std::int64_t> {
+            const auto length = sourceEnd.minus(*in);
+            const auto timeline = length ? length->dividedBy(speed_) : std::nullopt;
+            return timeline ? timeline->frameIndex(frame, SnapMode::Floor) : std::nullopt;
+        };
+        auto frames = framesFor(*sourceOut);
+        if (!frames) {
+            return notRepresentable(clip.id, clip.timelineStart);
+        }
+        if (*frames < 1) {
+            // One frame, if the media lasts that long at this speed.
+            frames = std::min<std::int64_t>(1, framesFor(*mediaEnd).value_or(0));
+            if (*frames < 1) {
                 return EditResult::failure(EditError::OutOfSourceRange,
                                            "not enough source media for one frame at this speed");
             }
-            sourceOut = clip.sourceIn + scaleTime(length, ratio);
         }
-        const CMTime newEnd = clip.timelineStart + length;
+        const auto newDuration = checkedTimeForFrame(*frames, frame);
+        if (!newDuration) {
+            return notRepresentable(clip.id, clip.timelineStart);
+        }
+        const CMTime newEnd = clip.timelineStart + *newDuration;
         if (!options_.ripple && index + 1 < track.clips.size() && newEnd > track.clips[index + 1].timelineStart) {
             return EditResult::failure(EditError::Overlap,
                                        "the clip would overlap the next clip; use ripple to push it along");
         }
-        changes.push_back({clipId, sourceOut, clip.timelineEnd(), newEnd});
+        changes.push_back({clipId, *newDuration, clip.timelineEnd(), newEnd});
+    }
+
+    const CMTime oldEnd = changes.front().oldEnd;
+    const CMTime delta = changes.front().newEnd - oldEnd;
+    if (options_.ripple) {
+        for (const Change &change : changes) {
+            if (change.oldEnd != oldEnd || change.newEnd != changes.front().newEnd) {
+                return EditResult::failure(EditError::InvalidArgument,
+                                           "the clip and its linked clip end at different times, so a ripple would "
+                                           "move their tracks by different amounts; unlink them or turn ripple off");
+            }
+        }
+    }
+    const bool rippling = options_.ripple && delta != kCMTimeZero;
+    std::unordered_set<TrackId> rippled;
+    if (rippling) {
+        std::vector<TrackId> seeds;
+        for (const Change &change : changes) {
+            seeds.push_back(sequence.trackOfClip(change.clipId)->id);
+        }
+        if (EditResult r = rippleTracks(sequence, options_.scope, seeds, oldEnd, rippled); !r) {
+            return r;
+        }
+        if (kCMTimeZero < delta) {
+            SplitList splits;
+            if (EditResult r = openTime(sequence, rippled, oldEnd, delta, ids, splits); !r) {
+                return r;
+            }
+            relinkSplitPieces(sequence, splits);
+        }
     }
     for (const Change &change : changes) {
-        Track &track = *sequence.trackOfClip(change.clipId);
-        Clip &clip = *track.find(change.clipId);
+        Clip &clip = *sequence.findClip(change.clipId);
         clip.speed = speed_;
-        clip.sourceOut = change.newSourceOut;
-        if (options_.ripple && change.newEnd != change.oldEnd) {
-            shiftClips(track, change.oldEnd, change.newEnd - change.oldEnd);
-        }
+        clip.timelineDuration = change.newDuration;
+        clip.fitFades(ClipEdge::Tail);
+    }
+    if (rippling && delta < kCMTimeZero) {
+        return closeTime(sequence, rippled, {TimeRange{changes.front().newEnd, oldEnd}});
     }
     return EditResult::success();
 }

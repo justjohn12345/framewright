@@ -45,23 +45,35 @@ Clip removeClip(Track &track, ClipId clipId) {
     return clip;
 }
 
-ClipId splitClipAt(Sequence &sequence, Track &track, std::size_t index, CMTime at, IdGenerator &ids) {
+EditResult notRepresentable(ClipId clipId, CMTime at) {
+    return EditResult::failure(EditError::NotRepresentable,
+                               "the exact source time of clip " + std::to_string(clipId.value()) + " at " +
+                                   describe(at) + " has no CMTime form (its timescale would exceed 2^31 - 1)");
+}
+
+EditResult splitClipAt(Sequence &sequence, Track &track, std::size_t index, CMTime at, IdGenerator &ids,
+                       ClipId &rightId) {
+    Clip left = track.clips[index];
     Clip right = track.clips[index];
-    Clip &left = track.clips[index];
-    right.id = ids.make<ClipId>();
     right.linkedClipId.reset();
-    right.setTimelineStartKeepingEnd(at);
     right.audio.fadeInDuration = kCMTimeZero;
-    left.setTimelineEnd(at);
+    if (!right.setTimelineStartKeepingEnd(at)) {
+        return notRepresentable(left.id, at);
+    }
     left.audio.fadeOutDuration = kCMTimeZero;
+    if (!left.setTimelineEnd(at)) {
+        return notRepresentable(left.id, at);
+    }
+    right.id = ids.make<ClipId>();
     for (Transition &transition : sequence.transitions) {
         if (transition.fromClipId == left.id) {
             transition.fromClipId = right.id;
         }
     }
-    const ClipId rightId = right.id;
+    rightId = right.id;
+    track.clips[index] = std::move(left);
     track.clips.insert(track.clips.begin() + static_cast<std::ptrdiff_t>(index) + 1, std::move(right));
-    return rightId;
+    return EditResult::success();
 }
 
 void relinkSplitPieces(Sequence &sequence, const SplitList &splits) {
@@ -84,9 +96,9 @@ void relinkSplitPieces(Sequence &sequence, const SplitList &splits) {
     }
 }
 
-void clearRange(Sequence &sequence, Track &track, const TimeRange &range, IdGenerator &ids, SplitList &splits) {
+EditResult clearRange(Sequence &sequence, Track &track, const TimeRange &range, IdGenerator &ids, SplitList &splits) {
     if (range.isEmpty()) {
-        return;
+        return EditResult::success();
     }
     std::size_t i = 0;
     while (i < track.clips.size()) {
@@ -103,20 +115,28 @@ void clearRange(Sequence &sequence, Track &track, const TimeRange &range, IdGene
         if (clipRange.start < range.start && range.end < clipRange.end) {
             // The range lands inside the clip: split at its end, then trim the left piece.
             const ClipId original = clip.id;
-            const ClipId right = splitClipAt(sequence, track, i, range.end, ids);
+            ClipId right;
+            if (EditResult r = splitClipAt(sequence, track, i, range.end, ids, right); !r) {
+                return r;
+            }
             splits.emplace_back(original, right);
-            track.clips[i].setTimelineEnd(range.start);
+            if (!track.clips[i].setTimelineEnd(range.start)) {
+                return notRepresentable(original, range.start);
+            }
             i += 2;
             continue;
         }
         if (clipRange.start < range.start) {
-            clip.setTimelineEnd(range.start);
-        } else {
-            clip.setTimelineStartKeepingEnd(range.end);
+            if (!clip.setTimelineEnd(range.start)) {
+                return notRepresentable(clip.id, range.start);
+            }
+        } else if (!clip.setTimelineStartKeepingEnd(range.end)) {
+            return notRepresentable(clip.id, range.end);
         }
         ++i;
     }
     track.sortClips();
+    return EditResult::success();
 }
 
 void shiftClips(Track &track, CMTime from, CMTime delta) {
@@ -126,6 +146,143 @@ void shiftClips(Track &track, CMTime from, CMTime delta) {
         }
     }
     track.sortClips();
+}
+
+EditResult rippleTracks(const Sequence &sequence, RippleScope scope, const std::vector<TrackId> &seeds, CMTime from,
+                        std::unordered_set<TrackId> &out) {
+    out.clear();
+    std::vector<TrackId> pending;
+    auto add = [&](const Track &track) {
+        if (out.insert(track.id).second) {
+            pending.push_back(track.id);
+        }
+    };
+    for (const TrackId trackId : seeds) {
+        const Track *track = sequence.findTrack(trackId);
+        if (EditResult r = requireEditableTrack(track, trackId); !r) {
+            return r;
+        }
+        add(*track);
+    }
+    if (scope == RippleScope::AllUnlockedTracks) {
+        for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
+            for (const Track &track : sequence.tracks(kind)) {
+                if (!track.locked) {
+                    add(track);
+                }
+            }
+        }
+    }
+    // A linked pair with material after `from` on both sides must ripple on both tracks.
+    while (!pending.empty()) {
+        const Track &track = *sequence.findTrack(pending.back());
+        pending.pop_back();
+        for (const Clip &clip : track.clips) {
+            if (!clip.linkedClipId || !(from < clip.timelineEnd())) {
+                continue;
+            }
+            const Track *partnerTrack = sequence.trackOfClip(*clip.linkedClipId);
+            const Clip *partner = partnerTrack ? partnerTrack->find(*clip.linkedClipId) : nullptr;
+            if (!partner || !(from < partner->timelineEnd()) || out.count(partnerTrack->id)) {
+                continue;
+            }
+            if (scope == RippleScope::AllUnlockedTracks || partnerTrack->locked) {
+                return EditResult::failure(EditError::TrackLocked,
+                                           "clip " + std::to_string(clip.id.value()) + " is linked to clip " +
+                                               std::to_string(partner->id.value()) + " on locked track \"" +
+                                               partnerTrack->name + "\", which cannot move with it");
+            }
+            add(*partnerTrack);
+        }
+    }
+    return EditResult::success();
+}
+
+EditResult openTime(Sequence &sequence, const std::unordered_set<TrackId> &tracks, CMTime at, CMTime delta,
+                    IdGenerator &ids, SplitList &splits) {
+    SplitList local;
+    for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (Track &track : *list) {
+            if (!tracks.count(track.id)) {
+                continue;
+            }
+            if (const auto index = track.clipIndexAt(at); index && track.clips[*index].timelineStart < at) {
+                const ClipId original = track.clips[*index].id;
+                ClipId right;
+                if (EditResult r = splitClipAt(sequence, track, *index, at, ids, right); !r) {
+                    return r;
+                }
+                local.emplace_back(original, right);
+            }
+        }
+    }
+    // A split clip whose partner lies wholly after `at` moves its link to the right piece, which
+    // moves with the partner. (Partners that were split too are paired by relinkSplitPieces.)
+    std::unordered_set<ClipId> splitOriginals;
+    for (const auto &[original, right] : local) {
+        splitOriginals.insert(original);
+    }
+    for (const auto &[original, right] : local) {
+        Clip *left = sequence.findClip(original);
+        if (!left->linkedClipId || splitOriginals.count(*left->linkedClipId)) {
+            continue;
+        }
+        Clip *partner = sequence.findClip(*left->linkedClipId);
+        if (partner && partner->timelineStart >= at) {
+            sequence.findClip(right)->linkedClipId = partner->id;
+            partner->linkedClipId = right;
+            left->linkedClipId.reset();
+        }
+    }
+    for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (Track &track : *list) {
+            if (tracks.count(track.id)) {
+                shiftClips(track, at, delta);
+            }
+        }
+    }
+    splits.insert(splits.end(), local.begin(), local.end());
+    return EditResult::success();
+}
+
+EditResult closeTime(Sequence &sequence, const std::unordered_set<TrackId> &tracks,
+                     const std::vector<TimeRange> &ranges) {
+    for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (Track &track : *list) {
+            if (!tracks.count(track.id)) {
+                continue;
+            }
+            for (const Clip &clip : track.clips) {
+                for (const TimeRange &range : ranges) {
+                    if (clip.timelineRange().intersects(range)) {
+                        return EditResult::failure(EditError::Overlap,
+                                                   "clip " + std::to_string(clip.id.value()) + " on track \"" +
+                                                       track.name + "\" overlaps the time the edit closes (" +
+                                                       describe(range.start) + " - " + describe(range.end) +
+                                                       "); ripple fewer tracks or clear that time first");
+                    }
+                }
+            }
+        }
+    }
+    for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (Track &track : *list) {
+            if (!tracks.count(track.id)) {
+                continue;
+            }
+            for (Clip &clip : track.clips) {
+                CMTime removed = kCMTimeZero;
+                for (const TimeRange &range : ranges) {
+                    if (range.end <= clip.timelineStart) {
+                        removed = removed + range.duration();
+                    }
+                }
+                clip.timelineStart = clip.timelineStart - removed;
+            }
+            track.sortClips();
+        }
+    }
+    return EditResult::success();
 }
 
 void normalizeSequence(Sequence &sequence, const Project &project) {

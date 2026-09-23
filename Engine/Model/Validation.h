@@ -13,6 +13,16 @@
 
 namespace ve {
 
+// Problem with a stored numeric model time (not numeric, kCMTimeFlags_HasBeenRounded, non-zero
+// epoch), phrased as "<what> <time> ...", or nullopt.
+std::optional<std::string> modelTimeProblem(CMTime t, const std::string &what);
+
+// First violated invariant of one asset (URL, times, per-kind frame size, frame duration,
+// rotation and audio format), or nullopt. Every stored time is either an exact model time
+// (numeric, not rounded, epoch 0) or, where the field allows it, non-numeric; an invalid time is
+// always the canonical kCMTimeInvalid.
+std::optional<std::string> validateAsset(const MediaAsset &asset);
+
 // True if clips of `asset` may live on tracks of `kind` (video: Video/AudioVideo/Still;
 // audio: Audio/AudioVideo).
 bool assetFitsTrack(const MediaAsset &asset, TrackKind kind);
@@ -35,7 +45,9 @@ struct TransitionIssue {
 std::optional<TransitionIssue> checkTransition(const Sequence &sequence, const Project &project,
                                                const Transition &transition);
 
-// First violated invariant of `sequence` (tracks, clips, links, transitions), or nullopt.
+// First violated invariant of `sequence` (tracks, clips, links, transitions), or nullopt. Every
+// clip and transition time must be an exact model time (numeric, no kCMTimeFlags_HasBeenRounded,
+// epoch 0).
 std::optional<std::string> validateSequence(const Sequence &sequence, const Project &project);
 
 // First violated invariant of `project` (assets, every sequence, id uniqueness, id generator

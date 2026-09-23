@@ -67,14 +67,14 @@ TEST_CASE("InsertClip refuses invalid requests without changing the project") {
     }
 }
 
-TEST_CASE("InsertClip ripples later clips and splits a clip spanning the insert point") {
+TEST_CASE("InsertClip on synced tracks ripples later clips and splits a clip spanning the insert point") {
     Fixture fx;
     const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 30);
     const ClipId b = fx.addClip(fx.v1, fx.av30, 30, 30, 100);
     const ClipId other = fx.addClip(fx.v2, fx.av30, 0, 60);
     fx.requireValid();
 
-    InsertClip insert(fx.seq, f30(10), {place(fx.v1, fx.av30, 500, 515)});
+    InsertClip insert(fx.seq, f30(10), {place(fx.v1, fx.av30, 500, 515)}, InsertOptions{true, RippleScope::SyncedTracks});
     applyReversible(fx.project, insert);
 
     REQUIRE(insert.createdClipIds().size() == 1);
@@ -89,11 +89,94 @@ TEST_CASE("InsertClip ripples later clips and splits a clip spanning the insert 
     CHECK(framesOf(fx.clip(inserted)) == span(10, 25));
     CHECK(framesOf(fx.clip(aRight)) == span(25, 45));
     CHECK(fx.clip(aRight).sourceIn == f30(10));
-    CHECK(fx.clip(aRight).sourceOut == f30(30));
+    CHECK(fx.clip(aRight).sourceOut() == f30(30));
     CHECK(framesOf(fx.clip(b)) == span(45, 75));
     CHECK(fx.clip(b).sourceIn == f30(100));
     CHECK(fx.clip(inserted).sourceIn == f30(500));
-    CHECK(framesOf(fx.clip(other)) == span(0, 60)); // other tracks do not ripple
+    CHECK(framesOf(fx.clip(other)) == span(0, 60)); // unlinked material on other tracks does not ripple
+}
+
+TEST_CASE("InsertClip ripples every unlocked track by default, splitting clips that span the insert point") {
+    Fixture fx;
+    const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 30);
+    const ClipId other = fx.addClip(fx.v2, fx.av30, 0, 60, 100);
+    const ClipId music = fx.addClip(fx.a2, fx.audioOnly, 20, 100);
+    const ClipId locked = fx.addClip(fx.a1, fx.audioOnly, 0, 90, 300);
+    lockTrack(fx, fx.a1);
+    fx.requireValid();
+
+    InsertClip insert(fx.seq, f30(10), {place(fx.v1, fx.av30, 500, 515)});
+    applyReversible(fx.project, insert);
+    const std::vector<ClipId> upper = clipIdsOn(fx, fx.v2);
+    REQUIRE(upper.size() == 2);
+    CHECK(framesOf(fx.clip(other)) == span(0, 10));
+    CHECK(framesOf(fx.clip(upper[1])) == span(25, 75));
+    CHECK(fx.clip(upper[1]).sourceIn == f30(110));
+    CHECK(framesOf(fx.clip(music)) == span(35, 135)); // starts after the insert point: moves whole
+    CHECK(framesOf(fx.clip(locked)) == span(0, 90));  // locked tracks stay put
+    CHECK(framesOf(fx.clip(a)) == span(0, 10));
+}
+
+TEST_CASE("InsertClip keeps downstream linked pairs in sync (review finding 4)") {
+    Fixture fx;
+    fx.addLinkedPair(0, 60);
+    const auto [v, a] = fx.addLinkedPair(60, 60, 300);
+    SUBCASE("default: all unlocked tracks") {
+        InsertClip insert(fx.seq, f30(10), {place(fx.v1, fx.video60, 0, 20)});
+        applyReversible(fx.project, insert);
+        CHECK(framesOf(fx.clip(v)) == span(80, 140));
+        CHECK(framesOf(fx.clip(a)) == span(80, 140));
+        // The split halves of the first pair are paired too.
+        const std::vector<ClipId> video = clipIdsOn(fx, fx.v1);
+        const std::vector<ClipId> audio = clipIdsOn(fx, fx.a1);
+        REQUIRE(video.size() == 4);
+        REQUIRE(audio.size() == 3);
+        CHECK(fx.clip(video[2]).linkedClipId == audio[1]);
+        CHECK(framesOf(fx.clip(audio[1])) == span(30, 80));
+    }
+    SUBCASE("synced tracks: the partners' track ripples with the target track") {
+        InsertClip insert(fx.seq, f30(10), {place(fx.v1, fx.video60, 0, 20)},
+                          InsertOptions{true, RippleScope::SyncedTracks});
+        applyReversible(fx.project, insert);
+        CHECK(framesOf(fx.clip(v)) == span(80, 140));
+        CHECK(framesOf(fx.clip(a)) == span(80, 140));
+    }
+    SUBCASE("a partner on a locked track refuses the insert rather than drift") {
+        lockTrack(fx, fx.a1);
+        InsertClip insert(fx.seq, f30(10), {place(fx.v1, fx.video60, 0, 20)});
+        const EditResult r = applyRefused(fx.project, insert, EditError::TrackLocked);
+        CHECK(r.message.find("linked") != std::string::npos);
+        InsertClip synced(fx.seq, f30(10), {place(fx.v1, fx.video60, 0, 20)},
+                          InsertOptions{true, RippleScope::SyncedTracks});
+        applyRefused(fx.project, synced, EditError::TrackLocked);
+        // Inserting after the pairs touches nothing linked.
+        InsertClip after(fx.seq, f30(120), {place(fx.v1, fx.video60, 0, 20)});
+        applyReversible(fx.project, after);
+    }
+    SUBCASE("a partner wholly after the insert point takes the link to the moving right piece") {
+        Fixture offset;
+        const ClipId video = offset.addClip(offset.v1, offset.av30, 0, 100);
+        const ClipId audio = offset.addClip(offset.a1, offset.av30, 50, 50, 50);
+        offset.link(video, audio);
+        InsertClip insert(offset.seq, f30(20), {place(offset.v1, offset.av30, 0, 10)});
+        applyReversible(offset.project, insert);
+        const ClipId right = clipIdsOn(offset, offset.v1)[2];
+        CHECK(framesOf(offset.clip(right)) == span(30, 110));
+        CHECK(framesOf(offset.clip(audio)) == span(60, 110));
+        CHECK(offset.clip(audio).linkedClipId == right);
+        CHECK_FALSE(offset.clip(video).linkedClipId.has_value());
+    }
+}
+
+TEST_CASE("InsertClip of placements of different lengths moves every rippled track by the longest") {
+    Fixture fx;
+    const auto [v, a] = fx.addLinkedPair(30, 30);
+    InsertClip insert(fx.seq, f30(0), {place(fx.v1, fx.av30, 0, 20), place(fx.a1, fx.av30, 0, 10)}, false);
+    applyReversible(fx.project, insert);
+    CHECK(framesOf(fx.clip(insert.createdClipIds()[0])) == span(0, 20));
+    CHECK(framesOf(fx.clip(insert.createdClipIds()[1])) == span(0, 10)); // a 10-frame gap follows
+    CHECK(framesOf(fx.clip(v)) == span(50, 80));
+    CHECK(framesOf(fx.clip(a)) == span(50, 80));
 }
 
 TEST_CASE("InsertClip at a cut ripples without splitting") {
@@ -161,7 +244,7 @@ TEST_CASE("InsertClip handles stills, speed, foreign frame rates and off-grid ti
         applyReversible(fx.project, insert);
         const Clip &clip = fx.clip(insert.createdClipIds()[0]);
         CHECK(framesOf(clip) == span(0, 150));
-        CHECK(clip.sourceOut == f30(300));
+        CHECK(clip.sourceOut() == f30(300));
     }
     SUBCASE("23.976 source on a 30 fps timeline rounds down to whole frames") {
         ClipPlacement p;
@@ -173,8 +256,8 @@ TEST_CASE("InsertClip handles stills, speed, foreign frame rates and off-grid ti
         applyReversible(fx.project, insert);
         const Clip &clip = fx.clip(insert.createdClipIds()[0]);
         CHECK(framesOf(clip) == span(0, 31));
-        CHECK(clip.sourceOut == f30(31));
-        CHECK(clip.sourceOut <= p.sourceOut);
+        CHECK(clip.sourceOut() == f30(31));
+        CHECK(clip.sourceOut() <= p.sourceOut);
     }
     SUBCASE("the insert time snaps to the nearest frame") {
         InsertClip insert(fx.seq, CMTimeMake(101, 300), {place(fx.v1, fx.av30, 0, 30)}); // 10.1 frames
@@ -209,11 +292,11 @@ TEST_CASE("OverwriteClip splits a clip it lands inside") {
     const ClipId right = ids[2];
     CHECK(right != a);
     CHECK(framesOf(fx.clip(a)) == span(0, 30));
-    CHECK(fx.clip(a).sourceOut == f30(30));
+    CHECK(fx.clip(a).sourceOut() == f30(30));
     CHECK(framesOf(fx.clip(ids[1])) == span(30, 45));
     CHECK(framesOf(fx.clip(right)) == span(45, 90));
     CHECK(fx.clip(right).sourceIn == f30(45));
-    CHECK(fx.clip(right).sourceOut == f30(90));
+    CHECK(fx.clip(right).sourceOut() == f30(90));
     // The fade-in stays with the left piece, the fade-out goes with the right piece.
     CHECK(fx.clip(a).audio.fadeInDuration == f30(5));
     CHECK(fx.clip(a).audio.fadeOutDuration == kCMTimeZero);
@@ -488,13 +571,13 @@ TEST_CASE("TrimClipTail is bounded by the next clip, source media and one frame"
         TrimClipTail clamped(fx.seq, c, f30(50), TrimOptions{true, true});
         applyReversible(p, clamped);
         CHECK(framesOf(fx.clip(c)) == span(0, 40));
-        CHECK(fx.clip(c).sourceOut == f30(1800));
+        CHECK(fx.clip(c).sourceOut() == f30(1800));
     }
     SUBCASE("shorten") {
         TrimClipTail trim(fx.seq, b, f30(40));
         applyReversible(p, trim);
         CHECK(framesOf(fx.clip(b)) == span(35, 40));
-        CHECK(fx.clip(b).sourceOut == f30(5));
+        CHECK(fx.clip(b).sourceOut() == f30(5));
     }
     SUBCASE("minimum length") {
         TrimClipTail trim(fx.seq, b, f30(35));
@@ -555,10 +638,10 @@ TEST_CASE("Trimming a speed-changed clip moves the source by speed x the timelin
     TrimClipHead head(fx.seq, c, f30(20));
     applyReversible(fx.project, head);
     CHECK(fx.clip(c).sourceIn == f30(40));
-    CHECK(fx.clip(c).sourceOut == f30(120));
+    CHECK(fx.clip(c).sourceOut() == f30(120));
     TrimClipTail tail(fx.seq, c, f30(40));
     applyReversible(fx.project, tail);
-    CHECK(fx.clip(c).sourceOut == f30(80));
+    CHECK(fx.clip(c).sourceOut() == f30(80));
     CHECK(framesOf(fx.clip(c)) == span(20, 40));
 }
 
@@ -575,10 +658,10 @@ TEST_CASE("SplitClip splits at a frame inside the clip") {
     const ClipId right = split.createdClipIds()[0];
     CHECK(framesOf(fx.clip(c)) == span(10, 30));
     CHECK(fx.clip(c).sourceIn == f30(100));
-    CHECK(fx.clip(c).sourceOut == f30(120));
+    CHECK(fx.clip(c).sourceOut() == f30(120));
     CHECK(framesOf(fx.clip(right)) == span(30, 70));
     CHECK(fx.clip(right).sourceIn == f30(120));
-    CHECK(fx.clip(right).sourceOut == f30(160));
+    CHECK(fx.clip(right).sourceOut() == f30(160));
     CHECK(fx.clip(c).audio.gainDb == -3.0);
     CHECK(fx.clip(right).audio.gainDb == -3.0);
     CHECK(fx.clip(c).audio.fadeInDuration == f30(3));
@@ -660,10 +743,10 @@ TEST_CASE("SplitClip on a speed-changed clip splits the source proportionally") 
     SplitClip split(fx.seq, c, f30(10));
     applyReversible(fx.project, split);
     const ClipId right = split.createdClipIds()[0];
-    CHECK(fx.clip(c).sourceOut == f30(20));
+    CHECK(fx.clip(c).sourceOut() == f30(20));
     CHECK(fx.clip(right).sourceIn == f30(20));
-    CHECK(fx.clip(right).sourceOut == f30(60));
-    CHECK(fx.clip(right).speed == 2.0);
+    CHECK(fx.clip(right).sourceOut() == f30(60));
+    CHECK(fx.clip(right).speed == Ratio{2, 1});
     CHECK(framesOf(fx.clip(right)) == span(10, 30));
 }
 
@@ -703,7 +786,7 @@ TEST_CASE("RemoveClips leaves a gap and removes linked partners") {
     }
 }
 
-TEST_CASE("RippleDelete closes the gap on the clip's track") {
+TEST_CASE("RippleDelete closes the gap on every unlocked track by default") {
     Fixture fx;
     const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 30);
     const ClipId b = fx.addClip(fx.v1, fx.av30, 30, 30);
@@ -714,30 +797,54 @@ TEST_CASE("RippleDelete closes the gap on the clip's track") {
         applyReversible(fx.project, ripple);
         CHECK(framesOf(fx.clip(a)) == span(0, 30));
         CHECK(framesOf(fx.clip(c)) == span(40, 70));
+        CHECK(framesOf(fx.clip(other)) == span(50, 80));
+    }
+    SUBCASE("synced tracks only") {
+        RippleDelete ripple(fx.seq, {b}, RippleOptions{true, RippleScope::SyncedTracks});
+        applyReversible(fx.project, ripple);
+        CHECK(framesOf(fx.clip(c)) == span(40, 70));
         CHECK(framesOf(fx.clip(other)) == span(80, 110));
     }
     SUBCASE("several clips") {
-        RippleDelete ripple(fx.seq, {a, c});
+        RippleDelete ripple(fx.seq, {a, c}, RippleOptions{true, RippleScope::SyncedTracks});
         applyReversible(fx.project, ripple);
         CHECK(framesOf(fx.clip(b)) == span(0, 30));
         CHECK(clipIdsOn(fx, fx.v1) == std::vector<ClipId>{b});
     }
-    SUBCASE("all tracks") {
-        RippleDelete ripple(fx.seq, {b}, RippleOptions{true, true});
-        applyReversible(fx.project, ripple);
-        CHECK(framesOf(fx.clip(c)) == span(40, 70));
-        CHECK(framesOf(fx.clip(other)) == span(50, 80));
+    SUBCASE("several clips on every track is refused when another track has a clip in the removed time") {
+        RippleDelete ripple(fx.seq, {a, c});
+        applyRefused(fx.project, ripple, EditError::Overlap);
     }
-    SUBCASE("all tracks skips locked tracks") {
+    SUBCASE("locked tracks stay put") {
         lockTrack(fx, fx.v2);
-        RippleDelete ripple(fx.seq, {b}, RippleOptions{true, true});
+        RippleDelete ripple(fx.seq, {b});
         applyReversible(fx.project, ripple);
         CHECK(framesOf(fx.clip(other)) == span(80, 110));
     }
-    SUBCASE("all tracks is refused when another track has a clip in the removed time") {
+    SUBCASE("refused when another track has a clip in the removed time") {
         fx.addClip(fx.a1, fx.audioOnly, 40, 5);
-        RippleDelete ripple(fx.seq, {b}, RippleOptions{true, true});
-        applyRefused(fx.project, ripple, EditError::Overlap);
+        RippleDelete ripple(fx.seq, {b});
+        const EditResult r = applyRefused(fx.project, ripple, EditError::Overlap);
+        CHECK(r.message.find("ripple fewer tracks") != std::string::npos);
+    }
+}
+
+TEST_CASE("RippleDelete keeps linked pairs in sync on synced tracks and refuses to strand a locked partner") {
+    Fixture fx;
+    const ClipId gone = fx.addClip(fx.v1, fx.av30, 0, 30);
+    const auto [v, a] = fx.addLinkedPair(30, 30, 300);
+    SUBCASE("synced: the partner's track closes the same time") {
+        RippleDelete ripple(fx.seq, {gone}, RippleOptions{true, RippleScope::SyncedTracks});
+        applyReversible(fx.project, ripple);
+        CHECK(framesOf(fx.clip(v)) == span(0, 30));
+        CHECK(framesOf(fx.clip(a)) == span(0, 30));
+    }
+    SUBCASE("a partner on a locked track refuses the delete") {
+        lockTrack(fx, fx.a1);
+        RippleDelete all(fx.seq, {gone});
+        applyRefused(fx.project, all, EditError::TrackLocked);
+        RippleDelete synced(fx.seq, {gone}, RippleOptions{true, RippleScope::SyncedTracks});
+        applyRefused(fx.project, synced, EditError::TrackLocked);
     }
 }
 
@@ -802,7 +909,7 @@ TEST_CASE("SetClipSpeed changes duration, respects neighbours and can ripple") {
         SetClipSpeed speed(fx.seq, c, 2.0);
         applyReversible(fx.project, speed);
         CHECK(framesOf(fx.clip(c)) == span(0, 30));
-        CHECK(fx.clip(c).sourceOut == f30(60));
+        CHECK(fx.clip(c).sourceOut() == f30(60));
         CHECK(framesOf(fx.clip(next)) == span(90, 120));
     }
     SUBCASE("slower overlaps the next clip") {
@@ -824,7 +931,7 @@ TEST_CASE("SetClipSpeed changes duration, respects neighbours and can ripple") {
         SetClipSpeed speed(fx.seq, c, 1.0 / 3.0, SpeedOptions{true, true});
         applyReversible(fx.project, speed);
         CHECK(framesOf(fx.clip(c)) == span(0, 180));
-        CHECK(fx.clip(c).sourceOut == f30(60));
+        CHECK(fx.clip(c).sourceOut() == f30(60));
     }
     SUBCASE("invalid speeds") {
         for (const double bad : {0.0, -1.0, double(NAN), double(INFINITY), 1000.0, 0.001}) {
@@ -840,7 +947,7 @@ TEST_CASE("SetClipSpeed near the end of the media shortens rather than overrun i
     SetClipSpeed speed(fx.seq, c, 1.5);
     applyReversible(fx.project, speed);
     CHECK(framesOf(fx.clip(c)) == span(0, 40)); // 61 / 1.5 = 40.67 would need media past the end
-    CHECK(fx.clip(c).sourceOut == f30(1799));
+    CHECK(fx.clip(c).sourceOut() == f30(1799));
 }
 
 TEST_CASE("SetClipSpeed applies to the linked clip and refuses stills") {
@@ -849,7 +956,7 @@ TEST_CASE("SetClipSpeed applies to the linked clip and refuses stills") {
     SetClipSpeed speed(fx.seq, v, 2.0);
     applyReversible(fx.project, speed);
     CHECK(framesOf(fx.clip(a)) == span(0, 30));
-    CHECK(fx.clip(a).speed == 2.0);
+    CHECK(fx.clip(a).speed == Ratio{2, 1});
 
     const ClipId s = fx.addClip(fx.v2, fx.still, 0, 60);
     SetClipSpeed still(fx.seq, s, 2.0);

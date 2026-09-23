@@ -2,12 +2,21 @@
 //
 // Common rules:
 // - Timeline times passed in are rounded to the sequence frame grid; negative results are
-//   refused. Every clip start and end stays on the frame grid.
-// - An edit is refused (EditError::TrackLocked) if any track it would modify is locked, including
-//   the track of a linked partner the edit would carry along.
+//   refused. Every clip start and duration stays a whole number of frames.
+// - Time math is exact (see TimeUtil.h). An edit whose exact result has no CMTime form (for
+//   example a split that would need a source in point with a timescale above 2^31 - 1) is
+//   refused with EditError::NotRepresentable; nothing is ever rounded.
+// - An edit is refused (EditError::TrackLocked) if it would change a locked track in any way:
+//   its clips (including clearing a link to a clip the edit removes), its transitions, or its
+//   existence. SetTrackFlags is the only exception.
 // - "includeLinked" options (default true) apply the edit to the clip's linked partner as well.
+// - Ripple edits (Insert, RippleDelete, SetClipSpeed with ripple) move the time after the edit
+//   point on the tracks chosen by a RippleScope (default AllUnlockedTracks) and never leave a
+//   linked pair out of sync: a partner that cannot move with its clip refuses the edit.
 // - Transitions whose clips stop being adjacent, or lose the media or length they need, are
-//   removed by the edit (and restored by undo).
+//   removed by the edit (and restored by undo) and listed in EditResult::droppedTransitionIds.
+//   Splitting inside a transition's range is refused unless SplitOptions allows it.
+// - Edits that shorten a clip shorten its fades to fit (fadeIn + fadeOut <= duration).
 // - Accessors like createdClipIds() are valid after the first successful apply() and stay
 //   valid through undo/redo (redo recreates the same ids).
 
@@ -15,6 +24,7 @@
 
 #include "../Model/Project.h"
 #include "Command.h"
+#include "EditPrimitives.h"
 
 #include <optional>
 #include <string>
@@ -29,8 +39,8 @@ struct ClipPlacement {
     // Used source range. For a still asset only the length (sourceOut - sourceIn) matters; if it
     // is not positive the still gets defaultStillDuration().
     CMTime sourceIn = kCMTimeZero;
-    CMTime sourceOut = kCMTimeInvalid;
-    double speed = 1.0;
+    CMTime sourceOut = kCMTimeInvalid; // invalid: to the end of the media
+    Ratio speed{1, 1};                 // see speedFromDouble(); ignored for stills
     VideoParams video;
     AudioParams audio;
 };
@@ -38,13 +48,22 @@ struct ClipPlacement {
 // Placement of the whole of `asset` on `trackId` (stills get the default duration).
 ClipPlacement placementForAsset(const MediaAsset &asset, TrackId trackId);
 
-// Adds clips at `at`, one per placement (each on a different track). On each target track a clip
-// spanning `at` is split and everything from `at` on ripples right by the new clip's duration.
-// With `linkPair` and exactly two placements the new clips are linked to each other.
-// The placed duration is the source duration / speed rounded down to whole frames.
+struct InsertOptions {
+    // With exactly two placements, link the new clips to each other.
+    bool linkPair = true;
+    // Which tracks make room for the new clips.
+    RippleScope ripple = RippleScope::AllUnlockedTracks;
+};
+
+// Adds clips at `at`, one per placement (each on a different track). Time opens at `at` on the
+// ripple tracks (the target tracks always included): a clip spanning `at` is split and
+// everything from `at` on moves right by the longest new clip's duration, so all rippled tracks
+// stay in sync. Shorter new clips leave a gap after them. The placed duration is the source
+// duration / speed rounded down to whole frames.
 class InsertClip final : public SequenceCommand {
   public:
     InsertClip(SequenceId sequenceId, CMTime at, std::vector<ClipPlacement> placements, bool linkPair = true);
+    InsertClip(SequenceId sequenceId, CMTime at, std::vector<ClipPlacement> placements, InsertOptions options);
     std::string name() const override {
         return "Insert";
     }
@@ -58,7 +77,7 @@ class InsertClip final : public SequenceCommand {
   private:
     CMTime at_;
     std::vector<ClipPlacement> placements_;
-    bool linkPair_;
+    InsertOptions options_;
     std::vector<ClipId> created_;
 };
 
@@ -146,11 +165,21 @@ class TrimClipTail final : public SequenceCommand {
     TrimOptions options_;
 };
 
+struct SplitOptions {
+    bool includeLinked = true;
+    // Splitting strictly inside a transition's range would leave a piece too short for it. By
+    // default such a split is refused (EditError::InsideTransition); with this set the
+    // transition is removed instead and reported in EditResult::droppedTransitionIds.
+    bool allowBreakingTransitions = false;
+};
+
 // Splits a clip at `at` (strictly inside it). The linked partner is split too when it spans
-// `at`, and the two right-hand pieces are linked to each other.
+// `at`, and the two right-hand pieces are linked to each other. Each piece keeps the fade on
+// its outer edge, shortened to fit.
 class SplitClip final : public SequenceCommand {
   public:
     SplitClip(SequenceId sequenceId, ClipId clipId, CMTime at, bool includeLinked = true);
+    SplitClip(SequenceId sequenceId, ClipId clipId, CMTime at, SplitOptions options);
     std::string name() const override {
         return "Split Clip";
     }
@@ -165,7 +194,7 @@ class SplitClip final : public SequenceCommand {
   private:
     ClipId clipId_;
     CMTime at_;
-    bool includeLinked_;
+    SplitOptions options_;
     std::vector<ClipId> created_;
 };
 
@@ -187,12 +216,16 @@ class RemoveClips final : public SequenceCommand {
 
 struct RippleOptions {
     bool includeLinked = true;
-    // Close the removed time on every unlocked track, not just the tracks the clips were on.
-    // Refused if a clip on another track overlaps the removed time.
-    bool allTracks = false;
+    // Tracks on which the removed time closes. The default (every unlocked track) mirrors
+    // InsertClip, so a delete undoes an insert and everything after the edit stays in sync; it
+    // is refused (EditError::Overlap) when another track has a clip in the removed time.
+    // SyncedTracks closes the time only on the clips' own tracks and the tracks of linked
+    // partners of clips that move.
+    RippleScope scope = RippleScope::AllUnlockedTracks;
 };
 
-// Removes clips and closes the gaps: later clips shift left by the removed time.
+// Removes clips and closes the gaps: the union of the removed clips' time ranges is removed
+// from every ripple track, so later clips shift left by the removed time before them.
 class RippleDelete final : public SequenceCommand {
   public:
     RippleDelete(SequenceId sequenceId, std::vector<ClipId> clipIds, RippleOptions options = {});
@@ -223,7 +256,7 @@ class SetVideoParams final : public SequenceCommand {
     VideoParams params_;
 };
 
-// Fades must be >= 0 and each at most the clip's duration.
+// Fades must be exact times >= 0 that together fit the clip (fadeIn + fadeOut <= duration).
 class SetAudioParams final : public SequenceCommand {
   public:
     SetAudioParams(SequenceId sequenceId, ClipId clipId, AudioParams params);
@@ -241,15 +274,23 @@ class SetAudioParams final : public SequenceCommand {
 
 struct SpeedOptions {
     bool includeLinked = true;
-    // Shift later clips on the affected tracks by the change in duration. Without it, a speed
-    // change that would make the clip overlap the next one is refused.
+    // Shift later clips by the change in duration. Without it, a speed change that would make
+    // the clip overlap the next one is refused.
     bool ripple = false;
+    // With ripple: the tracks that move. Slowing down opens time at the clip's old end on those
+    // tracks (splitting clips that span it); speeding up closes it (refused with Overlap if
+    // another of those tracks has a clip there).
+    RippleScope scope = RippleScope::AllUnlockedTracks;
 };
 
-// Changes playback speed keeping sourceIn and the start; the duration becomes source duration /
-// speed rounded to whole frames (the source out point is adjusted to match). Not for stills.
+// Changes playback speed keeping sourceIn and the start; the duration becomes the source
+// duration / speed rounded down to whole frames (at least one frame, and never past the end of
+// the media), so the source out point never moves later. Not for stills. With ripple, the clip
+// and its linked partner must end together before and after the change.
 class SetClipSpeed final : public SequenceCommand {
   public:
+    SetClipSpeed(SequenceId sequenceId, ClipId clipId, Ratio speed, SpeedOptions options = {});
+    // `speed` is converted with speedFromDouble().
     SetClipSpeed(SequenceId sequenceId, ClipId clipId, double speed, SpeedOptions options = {});
     std::string name() const override {
         return "Change Speed";
@@ -260,7 +301,7 @@ class SetClipSpeed final : public SequenceCommand {
 
   private:
     ClipId clipId_;
-    double speed_;
+    Ratio speed_;
     SpeedOptions options_;
 };
 
@@ -404,6 +445,9 @@ class SetTrackFlags final : public SequenceCommand {
 
   protected:
     EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+    bool mayEditLockedTracks() const override {
+        return true;
+    }
 
   private:
     TrackId trackId_;

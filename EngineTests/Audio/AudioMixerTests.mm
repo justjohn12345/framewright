@@ -65,8 +65,8 @@ struct MixFixture {
         clip.trackId = track;
         clip.timelineStart = start;
         clip.sourceIn = sourceIn;
-        clip.speed = speed;
-        clip.sourceOut = sourceIn + scaleTime(duration, clip.speedRatio());
+        clip.speed = speedFromDouble(speed);
+        clip.timelineDuration = duration;
         Track &t = *sequence().findTrack(track);
         t.clips.push_back(clip);
         t.sortClips();
@@ -306,22 +306,21 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
     // Gain change and a tail trim: same media mapping, same source.
     Clip *clip = fx.sequence().findClip(id);
     clip->audio.gainDb = -3;
-    clip->setTimelineEnd(CMTimeMake(120, 30));
+    XCTAssertTrue(clip->setTimelineEnd(CMTimeMake(120, 30)));
     fx.plan(kCMTimeZero, CMTimeMake(5, 1));
     XCTAssertEqual(fx.mixer->stats().sourcesCreated, 1u);
     // Split into two pieces: still continuous media on the same track.
     Clip right = *clip;
     right.id = fx.project.ids.make<ClipId>();
-    clip->setTimelineEnd(CMTimeMake(60, 30));
-    right.setTimelineStartKeepingEnd(CMTimeMake(60, 30));
+    XCTAssertTrue(clip->setTimelineEnd(CMTimeMake(60, 30)));
+    XCTAssertTrue(right.setTimelineStartKeepingEnd(CMTimeMake(60, 30)));
     fx.sequence().audioTracks[0].clips.push_back(right);
     fx.plan(kCMTimeZero, CMTimeMake(5, 1));
     XCTAssertEqual(fx.mixer->stats().sourcesCreated, 1u);
     XCTAssertEqual(fx.mixer->stats().sources.size(), 1u);
     // A slip (different source offset) needs new media.
     clip = fx.sequence().findClip(id);
-    clip->sourceIn = CMTimeMake(1, 1);
-    clip->sourceOut = clip->sourceIn + CMTimeMake(60, 30);
+    clip->sourceIn = CMTimeMake(1, 1); // keeps its 60-frame duration
     fx.plan(kCMTimeZero, CMTimeMake(5, 1));
     XCTAssertEqual(fx.mixer->stats().sourcesCreated, 2u);
 }

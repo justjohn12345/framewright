@@ -50,13 +50,14 @@ class RandomEditor {
             }
             const std::int64_t start = frameIndexAt(clip->timelineStart, f30(1), SnapMode::Round);
             const std::int64_t end = frameIndexAt(clip->timelineEnd(), f30(1), SnapMode::Round);
-            return std::make_unique<SplitClip>(fx_.seq, c, f30(start + frame(end - start + 1)), pick(4) != 0);
+            return std::make_unique<SplitClip>(fx_.seq, c, f30(start + frame(end - start + 1)),
+                                               SplitOptions{pick(4) != 0, pick(2) == 0});
         }
         case 10:
             return std::make_unique<RemoveClips>(fx_.seq, std::vector<ClipId>{anyClip()}, pick(2) == 0);
         case 11:
             return std::make_unique<RippleDelete>(fx_.seq, std::vector<ClipId>{anyClip()},
-                                                  RippleOptions{pick(2) == 0, pick(3) == 0});
+                                                  RippleOptions{pick(2) == 0, anyScope()});
         case 12:
             return std::make_unique<SetVideoParams>(fx_.seq, anyClip(),
                                                     VideoParams{double(frame(200)) - 100, double(frame(200)) - 100,
@@ -68,7 +69,7 @@ class RandomEditor {
         case 14: {
             static const double speeds[] = {0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 1.0 / 3.0};
             return std::make_unique<SetClipSpeed>(fx_.seq, anyClip(), speeds[pick(7)],
-                                                  SpeedOptions{pick(2) == 0, pick(2) == 0});
+                                                  SpeedOptions{pick(2) == 0, pick(2) == 0, anyScope()});
         }
         case 15: {
             // A transition on a random existing cut.
@@ -146,6 +147,10 @@ class RandomEditor {
         return ids.empty() ? ClipId{} : ids[pick(ids.size())];
     }
 
+    RippleScope anyScope() {
+        return pick(2) == 0 ? RippleScope::AllUnlockedTracks : RippleScope::SyncedTracks;
+    }
+
     TrackId anyTrack(TrackKind kind) {
         const auto &tracks = fx_.sequence().tracks(kind);
         return tracks.empty() ? TrackId{} : tracks[pick(tracks.size())].id;
@@ -173,7 +178,7 @@ class RandomEditor {
         }
         const CMTime at = f30(frame(300));
         if (insert) {
-            return std::make_unique<InsertClip>(fx_.seq, at, placements);
+            return std::make_unique<InsertClip>(fx_.seq, at, placements, InsertOptions{pick(3) != 0, anyScope()});
         }
         return std::make_unique<OverwriteClip>(fx_.seq, at, placements);
     }
@@ -211,6 +216,11 @@ void runRandomEdits(std::uint64_t seed, int steps) {
         ++applied;
         const auto problem = validateProject(fx.project);
         REQUIRE_MESSAGE(!problem, doctest::String((name + ": " + problem.value_or("")).c_str()));
+        CHECK_FALSE(hasInexactTime(fx.project));
+        for (const TransitionId dropped : result.droppedTransitionIds) {
+            CHECK(states.back().findSequence(fx.seq)->findTransition(dropped) != nullptr);
+            CHECK(fx.sequence().findTransition(dropped) == nullptr);
+        }
         states.push_back(fx.project);
         jsonStates.push_back(toJsonString(fx.project));
     }

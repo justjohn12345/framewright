@@ -28,9 +28,7 @@ Fixture richFixture() {
     MediaAsset &vfr = *fx.project.findAsset(fx.video60);
     vfr.isVFR = true;
     fx.project.findAsset(fx.audioOnly)->frameDuration = kCMTimeIndefinite; // non-numeric times survive too
-    MediaAsset &av = *fx.project.findAsset(fx.av30);
-    av.duration.flags |= kCMTimeFlags_HasBeenRounded;
-    av.duration.epoch = 3;
+    fx.project.findAsset(fx.av30)->rotationDegrees = 90;
 
     fx.project.addSequence("Second", CMTimeMake(1001, 30000), 1280, 720, 1, 0);
     fx.requireValid();
@@ -47,6 +45,48 @@ bool contains(const std::string &haystack, const std::string &needle) {
     return haystack.find(needle) != std::string::npos;
 }
 
+bool anyContains(const std::vector<std::string> &list, const std::string &needle) {
+    return std::any_of(list.begin(), list.end(), [&](const std::string &s) { return contains(s, needle); });
+}
+
+// A minimal version 1 document with one clip on V1 of a 30 fps sequence; `clip` fields are
+// merged over the defaults.
+json v1Document(const json &clipFields, CMTime frameDuration = CMTimeMake(1, 30)) {
+    json clip = {{"id", 4},
+                 {"assetId", 1},
+                 {"trackId", 3},
+                 {"timelineStart", timeToJson(CMTimeMake(0, 30))},
+                 {"sourceIn", timeToJson(CMTimeMake(0, 30))},
+                 {"sourceOut", timeToJson(CMTimeMake(30, 30))},
+                 {"speed", 1.0}};
+    for (auto it = clipFields.begin(); it != clipFields.end(); ++it) {
+        clip[it.key()] = it.value();
+    }
+    return json{{"schemaVersion", 1},
+                {"name", "v1"},
+                {"nextId", 5},
+                {"activeSequenceId", 2},
+                {"assets", json::array({json{{"id", 1},
+                                             {"name", "a.wav"},
+                                             {"url", "/a.wav"},
+                                             {"kind", "audio"},
+                                             {"duration", timeToJson(CMTimeMake(60 * 44100, 44100))},
+                                             {"audioSampleRate", 44100},
+                                             {"audioChannels", 2}}})},
+                {"sequences",
+                 json::array({json{{"id", 2},
+                                   {"name", "S"},
+                                   {"frameDuration", timeToJson(frameDuration)},
+                                   {"width", 1920},
+                                   {"height", 1080},
+                                   {"videoTracks", json::array()},
+                                   {"audioTracks", json::array({json{{"id", 3},
+                                                                     {"kind", "audio"},
+                                                                     {"name", "A1"},
+                                                                     {"clips", json::array({clip})}}})},
+                                   {"transitions", json::array()}}})}};
+}
+
 } // namespace
 
 TEST_CASE("ProjectJSON: round trip is lossless") {
@@ -54,6 +94,7 @@ TEST_CASE("ProjectJSON: round trip is lossless") {
     const std::string text = serializeProject(fx.project);
     const ProjectLoadResult loaded = parseProject(text);
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(loaded.warnings.empty());
     CHECK(*loaded.project == fx.project);
     CHECK(serializeProject(*loaded.project) == text);
     CHECK(projectToJson(*loaded.project) == projectToJson(fx.project));
@@ -69,11 +110,18 @@ TEST_CASE("ProjectJSON: format details") {
     const Fixture fx = richFixture();
     const json j = projectToJson(fx.project);
     CHECK(j.at("schemaVersion") == kProjectSchemaVersion);
+    CHECK(kProjectSchemaVersion == 2);
     CHECK(j.at("nextId") == fx.project.ids.nextValue());
     const json &clip = j.at("sequences")[0].at("videoTracks")[0].at("clips")[0];
     CHECK(clip.at("timelineStart") == json{{"value", 0}, {"timescale", 30}});
+    CHECK(clip.at("duration") == json{{"value", 60}, {"timescale", 30}});
     CHECK(clip.at("sourceIn") == json{{"value", 30}, {"timescale", 30}});
+    CHECK(clip.at("speed") == json{{"num", 1}, {"den", 1}});
+    CHECK_FALSE(clip.contains("sourceOut")); // derived, never stored
+    const json &music = j.at("sequences")[0].at("audioTracks")[1].at("clips")[0];
+    CHECK(music.at("speed") == json{{"num", 1}, {"den", 3}});
     CHECK(j.at("assets")[0].at("kind") == "av");
+    CHECK(j.at("assets")[0].at("rotationDegrees") == 90);
     CHECK(j.at("sequences")[0].at("transitions")[0].at("kind") == "crossDissolve");
 
     CHECK(timeToJson(kCMTimeInvalid).is_null());
@@ -81,8 +129,23 @@ TEST_CASE("ProjectJSON: format details") {
     CMTime rounded = CMTimeMake(5, 7);
     rounded.flags |= kCMTimeFlags_HasBeenRounded;
     CHECK(timeToJson(rounded).at("flags") == (kCMTimeFlags_Valid | kCMTimeFlags_HasBeenRounded));
+    CMTime epoch = CMTimeMake(5, 7);
+    epoch.epoch = 3;
+    CHECK(timeToJson(epoch).at("epoch") == 3);
     const json infinity = timeToJson(kCMTimePositiveInfinity);
     CHECK(infinity.contains("flags"));
+}
+
+TEST_CASE("ProjectJSON: rotation defaults to zero and round trips") {
+    Fixture fx = richFixture();
+    json j = projectToJson(fx.project);
+    j["assets"][0].erase("rotationDegrees");
+    const ProjectLoadResult loaded = projectFromJson(j);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(loaded.project->assets[0].rotationDegrees == 0);
+    CHECK_FALSE(*loaded.project == fx.project); // rotation takes part in equality
+    j["assets"][0]["rotationDegrees"] = 45;
+    CHECK(contains(loadError(j), "rotation 45"));
 }
 
 TEST_CASE("ProjectJSON: schema version checks") {
@@ -102,6 +165,13 @@ TEST_CASE("ProjectJSON: schema version checks") {
 
     j.erase("schemaVersion");
     CHECK(contains(loadError(j), "not a VidEdit project"));
+
+    std::vector<std::string> warnings;
+    json doc = projectToJson(fx.project);
+    CHECK(migrateProjectJson(doc, 0, warnings).has_value());
+    CHECK(migrateProjectJson(doc, kProjectSchemaVersion + 1, warnings).has_value());
+    CHECK_FALSE(migrateProjectJson(doc, kProjectSchemaVersion, warnings).has_value()); // nothing to do
+    CHECK(doc == projectToJson(fx.project));
 }
 
 TEST_CASE("ProjectJSON: malformed input yields clear errors, never exceptions") {
@@ -131,6 +201,18 @@ TEST_CASE("ProjectJSON: malformed input yields clear errors, never exceptions") 
         json j = good;
         j["sequences"][0]["audioTracks"][0]["clips"][0].erase("assetId");
         CHECK(contains(loadError(j), "sequences[0].audioTracks[0].clips[0].assetId: missing required field"));
+        j = good;
+        j["sequences"][0]["audioTracks"][0]["clips"][0].erase("duration");
+        CHECK(contains(loadError(j), "sequences[0].audioTracks[0].clips[0].duration: missing required field"));
+    }
+    SUBCASE("bad speed") {
+        json j = good;
+        j["sequences"][0]["videoTracks"][0]["clips"][0]["speed"] = json{{"num", 1}, {"den", 0}};
+        CHECK(contains(loadError(j), "speed.den: speed denominator must be positive"));
+        j["sequences"][0]["videoTracks"][0]["clips"][0]["speed"] = json{{"num", 2}, {"den", 4}};
+        CHECK(contains(loadError(j), "is not a reduced ratio"));
+        j["sequences"][0]["videoTracks"][0]["clips"][0]["speed"] = 1.5;
+        CHECK(contains(loadError(j), "speed: expected an object"));
     }
     SUBCASE("time object missing its timescale") {
         json j = good;
@@ -147,7 +229,26 @@ TEST_CASE("ProjectJSON: malformed input yields clear errors, never exceptions") 
         j["sequences"][0]["frameDuration"] = json{{"value", 1}, {"timescale", 30}, {"flags", 0}};
         CHECK(contains(loadError(j), "invalid time flags"));
     }
-    SUBCASE("unknown enum value") {
+    SUBCASE("rounded times and epochs are rejected") {
+        const json rounded = {{"value", 10}, {"timescale", 30}, {"flags", 3}};
+        const json epoch = {{"value", 10}, {"timescale", 30}, {"epoch", 1}};
+        json j = good;
+        j["sequences"][0]["videoTracks"][0]["clips"][1]["timelineStart"] = json{{"value", 60}, {"timescale", 30}, {"flags", 3}};
+        CHECK(contains(loadError(j), "has been rounded"));
+        j = good;
+        j["sequences"][0]["videoTracks"][0]["clips"][1]["timelineStart"] = json{{"value", 60}, {"timescale", 30}, {"epoch", 1}};
+        CHECK(contains(loadError(j), "has epoch 1"));
+        j = good;
+        j["sequences"][0]["audioTracks"][1]["clips"][0]["audio"]["fadeInDuration"] = rounded;
+        CHECK(contains(loadError(j), "fade-in"));
+        j = good;
+        j["sequences"][0]["transitions"][0]["duration"] = json{{"value", 12}, {"timescale", 30}, {"epoch", 1}};
+        CHECK(contains(loadError(j), "whole number of frames"));
+        j = good;
+        j["assets"][0]["duration"] = epoch;
+        CHECK(contains(loadError(j), "has epoch 1"));
+    }
+    SUBCASE("unknown enum values are errors") {
         json j = good;
         j["assets"][0]["kind"] = "hologram";
         CHECK(contains(loadError(j), "assets[0].kind: unknown asset kind \"hologram\""));
@@ -181,6 +282,11 @@ TEST_CASE("ProjectJSON: malformed input yields clear errors, never exceptions") 
         j["nextId"] = 1;
         CHECK(contains(loadError(j), "id generator"));
     }
+    SUBCASE("a transition referencing a missing clip") {
+        json j = good;
+        j["sequences"][0]["transitions"][0]["toClipId"] = 999;
+        CHECK(contains(loadError(j), "are not both on track"));
+    }
 }
 
 TEST_CASE("ProjectJSON: unknown fields are ignored and optional fields default") {
@@ -200,6 +306,7 @@ TEST_CASE("ProjectJSON: unknown fields are ignored and optional fields default")
     clip.erase("video");
     clip.erase("audio");
     clip.erase("linkedClipId");
+    clip.erase("speed");
     minimal["assets"][4].erase("backendHint");
     minimal["assets"][4].erase("frameDuration");
     const ProjectLoadResult loaded = projectFromJson(minimal);
@@ -208,4 +315,73 @@ TEST_CASE("ProjectJSON: unknown fields are ignored and optional fields default")
     REQUIRE(still != nullptr);
     CHECK(still->video == VideoParams{});
     CHECK(still->audio == AudioParams{});
+    CHECK(still->speed == Ratio{1, 1});
+}
+
+TEST_CASE("ProjectJSON: version 1 migration") {
+    SUBCASE("speed and source out point become an exact speed and a duration") {
+        // 44101/44100 + 30 frames * 999/1000 = 881569/441000 (exact in version 1 too).
+        const ProjectLoadResult r = projectFromJson(v1Document(json{{"speed", 0.999},
+                                                                  {"sourceIn", timeToJson(CMTimeMake(44101, 44100))},
+                                                                  {"sourceOut", timeToJson(CMTimeMake(881569, 441000))}}));
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        const Clip &clip = r.project->sequences[0].audioTracks[0].clips[0];
+        CHECK(clip.speed == Ratio{999, 1000});
+        CHECK(identical(clip.timelineDuration, CMTimeMake(30, 30)));
+        CHECK(r.warnings.empty());
+    }
+    SUBCASE("a rounded source out point is recovered: the duration snaps back to the grid") {
+        CMTime out = CMTimeMake(705600000 + 17, kPreciseTimescale); // 1 s + 24 ns, as v1 rounding left it
+        out.flags |= kCMTimeFlags_HasBeenRounded;
+        const ProjectLoadResult r = projectFromJson(v1Document(json{{"sourceOut", timeToJson(out)}}));
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(identical(r.project->sequences[0].audioTracks[0].clips[0].timelineDuration, CMTimeMake(30, 30)));
+        CHECK(anyContains(r.warnings, "snapped to"));
+    }
+    SUBCASE("rounded or epoch-carrying stored times are adopted as exact, with a warning") {
+        CMTime in = CMTimeMake(1, 30);
+        in.flags |= kCMTimeFlags_HasBeenRounded;
+        CMTime out = CMTimeMake(31, 30);
+        CMTime start = CMTimeMake(3, 30);
+        start.epoch = 4;
+        const ProjectLoadResult r = projectFromJson(v1Document(
+            json{{"sourceIn", timeToJson(in)}, {"sourceOut", timeToJson(out)}, {"timelineStart", timeToJson(start)}}));
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        const Clip &clip = r.project->sequences[0].audioTracks[0].clips[0];
+        CHECK(identical(clip.sourceIn, CMTimeMake(1, 30)));
+        CHECK(identical(clip.timelineStart, CMTimeMake(3, 30)));
+        CHECK(anyContains(r.warnings, "clips[0].sourceIn"));
+        CHECK(anyContains(r.warnings, "clips[0].timelineStart"));
+    }
+    SUBCASE("overlapping fades are shortened to fit, with a warning") {
+        const json audio = {{"gainDb", 0.0},
+                            {"fadeInDuration", timeToJson(CMTimeMake(20, 30))},
+                            {"fadeOutDuration", timeToJson(CMTimeMake(20, 30))}};
+        const ProjectLoadResult r = projectFromJson(v1Document(json{{"audio", audio}}));
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        const Clip &clip = r.project->sequences[0].audioTracks[0].clips[0];
+        CHECK(clip.audio.fadeInDuration == CMTimeMake(20, 30));
+        CHECK(clip.audio.fadeOutDuration == CMTimeMake(10, 30));
+        CHECK(anyContains(r.warnings, "overlapped"));
+    }
+    SUBCASE("unconvertible values report their path") {
+        CHECK(contains(loadError(v1Document(json{{"speed", 500.0}})), "clips[0].speed: speed 500"));
+        json noOut = v1Document(json::object());
+        noOut["sequences"][0]["audioTracks"][0]["clips"][0].erase("sourceOut");
+        CHECK(contains(loadError(noOut), "clips[0].sourceOut: missing required field"));
+        CHECK(contains(loadError(v1Document(json{{"sourceOut", timeToJson(CMTimeMake(31, 60))}})),
+                       "not a whole number of frames"));
+    }
+    SUBCASE("migrateProjectJson upgrades in place") {
+        json doc = v1Document(json::object());
+        std::vector<std::string> warnings;
+        REQUIRE_FALSE(migrateProjectJson(doc, 1, warnings).has_value());
+        CHECK(doc.at("schemaVersion") == kProjectSchemaVersion);
+        const json &clip = doc["sequences"][0]["audioTracks"][0]["clips"][0];
+        CHECK_FALSE(clip.contains("sourceOut"));
+        CHECK(clip.at("duration") == json{{"value", 30}, {"timescale", 30}});
+        CHECK(clip.at("speed") == json{{"num", 1}, {"den", 1}});
+        const ProjectLoadResult r = projectFromJson(doc);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+    }
 }

@@ -433,3 +433,14 @@ TEST_CASE("UndoStack: markClean mid-drag, then cancel") {
     CHECK(stack.isDirty());
     CHECK(framesOf(fx.clip(c)) == span(0, 30));
 }
+
+TEST_CASE("UndoStack: push reports the transitions an edit dropped") {
+    Fixture fx;
+    const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
+    const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
+    const TransitionId t = fx.addTransition(fx.v1, a, b, 10);
+    UndoStack stack;
+    const EditResult r = stack.push(fx.project, std::make_unique<TrimClipTail>(fx.seq, a, f30(50)));
+    REQUIRE(r.ok());
+    CHECK(r.droppedTransitionIds == std::vector<TransitionId>{t});
+}
