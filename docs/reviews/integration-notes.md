@@ -280,9 +280,6 @@ in the history table of `README.md`.
 - App: `OutputDisplayController` (`store.outputDisplay`, View > Program Monitor on Second Display) over
   `ScreenProviding` (`SystemScreens`, or a test double); the output window is an `OutputWindow`
   (borderless, can become key, Escape closes); `KeyboardController` takes transport keys from it too.
-- For Photos drops (finding 9): accept file promises in `TimelineDropDelegate.types` and the media
-  bin's drop, test them with a `TimelineDropInfo` double whose providers carry the promise types;
-  slow-motion and iPhone VFR media rely on `pictureTimeFor` (see "UX round fixes").
 
 ## UX round fixes (report in git history at 95f445d)
 - Pictures by time (finding 1). `playback::pictureTimeFor(layer, asset)` (PlaybackController.h) is the
@@ -385,3 +382,41 @@ in the history table of `README.md`.
   selection change, clip removal, New/Open), timeline markers (`TimelineViewModel.Clip.keyframes`,
   `Hit.keyframe`, a click seeks, a drag moves the clip). New edit commands that reach keyframes from
   keys or menus must keep the `isGestureActive` guard.
+
+## Photos drops (feature request 9)
+- Drop types: `MediaDrop.types` = public.file-url plus `UTType.filePromiseTypes` (every
+  `NSFilePromiseReceiver.readableDraggedTypes` entry and kPasteboardTypeFileURLPromise; the named ones
+  and `com.apple.live-photo-bundle` are UTImportedTypeDeclarations in project.yml / Info.plist).
+  `TimelineDropDelegate.types` adds them to the in-app types; the media bin uses
+  `MediaBinDropDelegate` (replacing `.dropDestination(for: URL.self)`). Both take any
+  `TimelineDropInfo`; `handlePerform(_:pasteboardPromises:)` gets the drag pasteboard's
+  `NSFilePromiseReceiver`s for a real drop (`PasteboardFilePromise.fromDragPasteboard`) and falls back
+  to item providers that carry promise types (`ItemProviderPromise`, what tests and PHPicker use).
+- `PromisedFile` (App/State/IncomingMedia.swift): `receive(into:completion:)` (main-actor completion
+  with the arrived files, never after `cancel()`), `onProgress`. `IncomingMedia` (`store.incoming`)
+  receives a batch into the Media folder, lists it in the bin (`IncomingMediaList`: progress, per-item
+  Cancel, Cancel All), imports the batch through `ProjectStore.importMedia` once every item has
+  settled, and for a timeline drop places the items where they were dropped, one after another in drop
+  order (`ProjectStore.place(imported:from:at:)`, skipped with a message while a gesture is active).
+  Receiving starts on the main-queue turn after the drop (the folder question is modal). New/Open
+  call `discardAll()` (nothing arriving late reaches the next project).
+- Media folder: `ImportedMediaFolder` (`store.mediaFolder`): the stored bookmark, else "Media" next to
+  the project file when the app can create it, else (and always for an untitled project) a folder
+  panel asked once (`chooseFolder`, injectable). The choice is `VEEngine.mediaFolderBookmark` (new
+  facade property, saved in the project file under "mediaFolderBookmark" beside "assetBookmarks";
+  setting a different value is an unsaved change, not an undo step; New/Open reset it).
+- Live Photos: `LivePhotos.pairs(in:)` (a still and a movie with one name, within an item, a PHPicker
+  bundle folder or across the items of a batch); the user picks video or still (`askLivePhoto`,
+  "Remember my choice" stored under `livePhotoImport` in the store's defaults); the other part, our own
+  copy, is deleted.
+- File > Import from Photos… (Shift-Cmd-I): `PhotosImportPicker` (`store.photosPicker`), a
+  `PHPickerViewController` sheet (no Photos library entitlement; selection unlimited, images, videos
+  and Live Photos, `.current` representation so HEIC/HEVC arrive as they are); results go through
+  `ItemProviderPromise` into `store.incoming` like a drop.
+- Finder file drops on the timeline are now imported and placed like a Photos drop (they used to be
+  refused); `TimelineGestureController.placement(at:insert:)` computes the row and time;
+  `TimelineGestureController.store` is no longer private.
+- Media: HEIC stills and HEVC video import through the existing Apple paths; slow motion (VFR) pictures
+  come from `playback::pictureTimeFor`. Test media gained `slowmo_hevc_portrait.mov` (HEVC, rotated 90,
+  30 fps around a 240 fps section; `slowmoFrameTime` / `slowmoFrameAt` in TestMedia.h), which
+  regenerates the generated test media once.

@@ -3,17 +3,6 @@
 Only what is still open. Fixed findings are in the history table of `README.md` (fix commits and regression tests);
 the full reports are in git history at the commits the table names.
 
-## Feature requests (from hands-on testing, 2026-09-23)
-9. MEDIUM (new capability): drag and drop clips from Photos.app (iPhoto's successor) into the media bin and the
-   timeline. Photos drags deliver file promises, not file URLs: the drop targets must accept `NSFilePromiseReceiver`
-   (`com.apple.NSFilePromiseItemMetaData` / `kPasteboardTypeFileURLPromise`) alongside file URLs, receive each promised
-   file into a per-project "Media" folder (project-relative, sandbox-writable; ask once where to keep imported media when
-   the project is untitled) with progress and cancellation, then import the received files through the normal path.
-   Also handle what Photos hands over: HEVC/HEIC, Live Photos (import the video part or the still, user choice), slow-mo
-   (VFR at 120/240 fps), portrait rotation, and iCloud items that download on demand (promise may take time). Add a
-   "Import from Photos…" menu item using `PHPickerViewController` (no Photos-library entitlement needed) for browsing
-   without drag. Tests: a fake promise provider in AppTests; an EngineTests import of an HEIC/HEVC sample.
-
 ## Test gaps that need a UI-test target (XCUITest) or a person
 The xctest host is not sandboxed and its synthesised NSEvents never reach SwiftUI's gesture system or the window
 server's drag session, so these are covered at the model level only:
@@ -35,6 +24,15 @@ server's drag session, so these are covered at the model level only:
   through `TimelineGestureController`) are tested at the model level; dragging the rectangles' bodies and corners on the
   real program monitor (`KenBurnsOverlay`'s SwiftUI gestures), the look of the keyframe controls and the markers, and
   watching an animated clip play are by hand.
+- Photos drops and Import from Photos (feature request 9): everything after a drop reaches the drop delegates
+  (`MediaBinDropDelegate`, `TimelineDropDelegate`, with a fake promise-carrying `NSItemProvider`), the promise receiving,
+  progress, cancellation, the Media folder (next to a saved project; asked once for an untitled one and kept with it),
+  Live Photo choice and timeline placement are tested (`PhotosDropTests`), and HEIC/HEVC/slow-motion media through the
+  engine (`PhotosMediaTests`). By hand: a real drag from Photos.app (the window server's promise session and
+  `NSFilePromiseReceiver` reading the drag pasteboard, which a test cannot produce), an iCloud original downloading
+  during a drop, what Photos hands over for a Live Photo and a slow-motion clip on a given macOS version, the
+  PHPicker sheet itself (`PhotosImportPicker.present`; its configuration and result handling are tested), and the
+  folder panel in the real sandbox (writing next to a project the sandbox granted only as a file falls back to it).
 
 ## Test gaps that need media or a performance scheme (phase 7)
 - Gap 8, size estimate against a real export in quality mode: the estimate is a bits-per-pixel heuristic (labelled "≈");

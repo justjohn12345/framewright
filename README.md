@@ -43,6 +43,10 @@ audited the code line by line.
   partner (Delete removes both, Option-Delete one; a duration change also changes the linked one
   unless turned off) and shown relative to their cut; a note when a dissolve sits on a plain split
   (both sides show the same frames); fade and gain handles on audio clips; Speed/Duration sheet.
+- Photos: drag photos and videos from Photos.app onto the media bin or the timeline (file promises
+  received into a Media folder next to the project, with progress and cancel; iCloud originals can
+  take their time), or File > Import from Photos… (the system photo picker). HEIC photos import as
+  stills, HEVC and slow-motion clips as video, Live Photos as the part you choose.
 - Project files in JSON with schema migration; security-scoped bookmarks for media.
 - Export (File > Export…): H.264, HEVC (8-bit and 10-bit Main10) and ProRes 422 on
   VideoToolbox (hardware where the Mac has it for the frame size) and software AV1 (SVT-AV1) to
