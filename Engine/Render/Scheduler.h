@@ -36,8 +36,11 @@ class Scheduler {
     // Clips covering `time` on every track, video tracks bottom to top then audio tracks.
     static std::vector<ClipId> clipsAt(const Sequence &sequence, CMTime time);
 
-    // Source frame time for `clip` at sequence time `time`: speed mapping, then snapping to the
-    // asset's frame grid (skipped for VFR or unknown frame rate), clamped to the media.
+    // Source frame time for `clip` at sequence time `time`: exact speed mapping, then the start
+    // of the asset frame containing that time (Floor; skipped for VFR or unknown frame rate),
+    // clamped to the media. Inside the clip it never reaches the clip's out point: at 0.5x the
+    // last timeline frame shows the last source frame that starts before sourceOut. Outside the
+    // clip (transition handles) the mapping continues past the in and out points.
     static CMTime sourceFrameTime(const Clip &clip, const MediaAsset &asset, CMTime time);
 };
 

@@ -9,6 +9,7 @@
 #include "../Model/TimeUtil.h"
 #include "../Model/Transition.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -21,7 +22,11 @@ namespace ve {
 struct LayerTransition {
     TransitionId transitionId;
     TransitionKind kind = TransitionKind::CrossDissolve;
-    // Linear progress through the transition: 0 at its first frame, approaching 1 at its end.
+    // Linear progress through the transition sampled at the centre of this output frame: frame
+    // k of an n-frame transition has mix (k + 0.5) / n, so the first frame already shows some of
+    // the incoming clip and the last some of the outgoing one, and a 1-frame dissolve is an even
+    // mix. This equals the audio crossfade's linear progress (AudioSegment::crossfade) at the
+    // frame's midpoint, so picture and sound cross over together.
     double mix = 0.0;
     bool isIncoming = false; // false: the outgoing clip (before the cut)
     ClipId partnerClipId;
@@ -38,8 +43,9 @@ struct VideoLayer {
     ClipId clipId;
     AssetId assetId;
     TrackId trackId;
-    // Source frame to show, already mapped through the clip's speed and snapped to the nearest
-    // frame of the asset's frame grid (unsnapped for VFR sources; zero for stills).
+    // Source frame to show, mapped exactly through the clip's speed and snapped down to the
+    // start of the asset frame containing it (unsnapped for VFR sources; zero for stills); see
+    // Scheduler::sourceFrameTime.
     CMTime sourceTime = kCMTimeZero;
     bool isStill = false;
     // The asset's container rotation (MediaAsset::rotationDegrees): degrees clockwise to rotate
@@ -61,7 +67,15 @@ struct RenderGraph {
     }
 };
 
-// A linear gain ramp across a segment: value at the segment start and at its end.
+// The constant-power crossfade law the audio mixer applies to a crossfade's linear progress c
+// (AudioSegment::crossfade): gain sin(c * pi / 2). The outgoing clip's progress runs 1 -> 0 and
+// the incoming clip's 0 -> 1, so their gains are cos(f pi/2) and sin(f pi/2) and their powers
+// always sum to 1.
+inline double constantPowerGain(double progress) {
+    return std::sin(progress * 1.57079632679489661923);
+}
+
+// A linear ramp across a segment: value at the segment start and at its end.
 struct GainRamp {
     double start = 1.0;
     double end = 1.0;
@@ -72,18 +86,28 @@ struct GainRamp {
 };
 
 // One clip's contribution over a sub-span of the requested range. Segments are split wherever
-// an envelope has a corner (fade or transition boundaries), so every ramp is exactly linear.
-// The sample gain at time t is gain * fade(t) * crossfade(t).
+// an envelope has a corner (fade or transition boundaries). A clip's fades never overlap
+// (validateSequence requires fadeIn + fadeOut <= duration), so within a segment the fade is one
+// linear ramp and `fade` is exact at every sample; the crossfade progress is linear too.
+// The sample gain at time t is
+//   gain * fade(t)                                  outside transitions (transitionId empty)
+//   gain * fade(t) * constantPowerGain(crossfade(t)) inside a transition
+// where fade(t) and crossfade(t) interpolate their ramps linearly. `crossfade` is therefore the
+// linear progress of the transition for this clip (outgoing 1 -> 0, incoming 0 -> 1), not a
+// gain; this is what AudioMixer implements.
 struct AudioSegment {
     ClipId clipId;
     AssetId assetId;
     TrackId trackId;
     TimeRange timelineRange; // part of the requested range this segment covers
-    TimeRange sourceRange;   // matching source media (speed applied; may extend into handles)
-    double speed = 1.0;
-    double gain = 1.0;  // linear, from the clip's gainDb
-    GainRamp fade;      // the clip's own fade in / fade out
-    GainRamp crossfade; // transition ramp; unity outside transitions
+    // Matching source media (speed applied; may extend into handles). Exact when the exact
+    // source times have a CMTime form, otherwise rounded to kPreciseTimescale (flagged).
+    TimeRange sourceRange;
+    double speed = 1.0;     // speedRatio as a double
+    Ratio speedRatio{1, 1}; // the clip's exact speed
+    double gain = 1.0;      // linear, from the clip's gainDb
+    GainRamp fade;          // the clip's own fade in / fade out (a gain)
+    GainRamp crossfade;     // transition progress (see above); unity outside transitions
     std::optional<TransitionId> transitionId;
     std::optional<ClipId> crossfadePartner;
 };

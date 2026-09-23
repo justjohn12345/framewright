@@ -75,7 +75,7 @@ TEST_CASE("Scheduler: times outside the sequence give empty graphs; times snap d
     CHECK(Scheduler::renderGraphAt(empty.sequence(), empty.project, kCMTimeZero).isEmpty());
 }
 
-TEST_CASE("Scheduler: cross dissolve emits both clips with a linear mix") {
+TEST_CASE("Scheduler: cross dissolve emits both clips with a linear mix sampled at frame centres") {
     Fixture fx;
     const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 30);   // source 30..90
     const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300); // source 300..360
@@ -88,9 +88,10 @@ TEST_CASE("Scheduler: cross dissolve emits both clips with a linear mix") {
     REQUIRE(layerClips(start) == std::vector<ClipId>{a, b});
     REQUIRE(start.layers[0].transition.has_value());
     REQUIRE(start.layers[1].transition.has_value());
-    CHECK(start.layers[0].transition->mix == 0.0);
-    CHECK(start.layers[0].transition->weight() == 1.0);
-    CHECK(start.layers[1].transition->weight() == 0.0);
+    // Frame 0 of 20 shows the mix at its centre: 0.5 / 20.
+    CHECK(start.layers[0].transition->mix == doctest::Approx(0.025));
+    CHECK(start.layers[0].transition->weight() == doctest::Approx(0.975));
+    CHECK(start.layers[1].transition->weight() == doctest::Approx(0.025));
     CHECK_FALSE(start.layers[0].transition->isIncoming);
     CHECK(start.layers[1].transition->isIncoming);
     CHECK(start.layers[0].transition->partnerLayerIndex == 1);
@@ -102,18 +103,54 @@ TEST_CASE("Scheduler: cross dissolve emits both clips with a linear mix") {
 
     const RenderGraph middle = graphAt(fx, 60);
     REQUIRE(middle.layers.size() == 2);
-    CHECK(middle.layers[0].transition->mix == doctest::Approx(0.5));
-    CHECK(middle.layers[1].transition->weight() == doctest::Approx(0.5));
+    CHECK(middle.layers[0].transition->mix == doctest::Approx(10.5 / 20.0));
+    CHECK(middle.layers[1].transition->weight() == doctest::Approx(10.5 / 20.0));
     CHECK(middle.layers[0].sourceTime == f30(90)); // outgoing handle past its out point
     CHECK(middle.layers[1].sourceTime == f30(300));
 
     const RenderGraph last = graphAt(fx, 69);
     REQUIRE(last.layers.size() == 2);
-    CHECK(last.layers[1].transition->mix == doctest::Approx(19.0 / 20.0));
+    CHECK(last.layers[1].transition->mix == doctest::Approx(19.5 / 20.0)); // the outgoing clip still shows
     CHECK(last.layers[0].sourceTime == f30(99));
 
     CHECK(layerClips(graphAt(fx, 70)) == std::vector<ClipId>{b});
     CHECK_FALSE(graphAt(fx, 70).layers[0].transition.has_value());
+}
+
+TEST_CASE("Scheduler: short dissolves are symmetric and match the audio crossfade at frame centres") {
+    for (const std::int64_t frames : {1, 2, 3}) {
+        CAPTURE(frames);
+        Fixture fx;
+        const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
+        const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
+        const ClipId aa = fx.addClip(fx.a1, fx.av30, 0, 60, 30);
+        const ClipId ab = fx.addClip(fx.a1, fx.av30, 60, 60, 300);
+        fx.addTransition(fx.v1, a, b, frames);
+        fx.addTransition(fx.a1, aa, ab, frames);
+        fx.requireValid();
+        const TimeRange range = *fx.sequence().transitionRange(fx.sequence().transitions[0]);
+        const std::int64_t first = frameIndexAt(range.start, f30(1), SnapMode::Floor);
+        for (std::int64_t k = 0; k < frames; ++k) {
+            const RenderGraph g = graphAt(fx, first + k);
+            REQUIRE(g.layers.size() == 2);
+            const double mix = g.layers[0].transition->mix;
+            CHECK(mix == doctest::Approx((static_cast<double>(k) + 0.5) / static_cast<double>(frames)));
+            // Mirror symmetry: frame k and frame n-1-k mix to complementary weights.
+            const RenderGraph mirror = graphAt(fx, first + frames - 1 - k);
+            CHECK(mirror.layers[0].transition->mix == doctest::Approx(1.0 - mix));
+            // The incoming clip's audio crossfade progress at the frame's midpoint equals the mix.
+            const AudioGraph audio = audioFor(fx, first + k, first + k + 1);
+            const auto incoming = segmentsOf(audio, ab);
+            REQUIRE(incoming.size() == 1);
+            const double midpoint = (incoming[0]->crossfade.start + incoming[0]->crossfade.end) / 2.0;
+            CHECK(midpoint == doctest::Approx(mix));
+        }
+        // A one-frame dissolve is an even mix and never shows the outgoing clip at its out point
+        // alone.
+        if (frames == 1) {
+            CHECK(graphAt(fx, first).layers[0].transition->weight() == doctest::Approx(0.5));
+        }
+    }
 }
 
 TEST_CASE("Scheduler: a transition under another track keeps layer order and partner indices") {
@@ -126,7 +163,7 @@ TEST_CASE("Scheduler: a transition under another track keeps layer order and par
     REQUIRE(layerClips(g) == std::vector<ClipId>{base, a, b});
     CHECK(g.layers[1].transition->partnerLayerIndex == 2);
     CHECK(g.layers[2].transition->partnerLayerIndex == 1);
-    CHECK(g.layers[1].transition->mix == doctest::Approx(0.3));
+    CHECK(g.layers[1].transition->mix == doctest::Approx(0.35)); // frame 3 of [55, 65): 3.5 / 10
 }
 
 TEST_CASE("Scheduler: clip speed maps timeline time to source time") {
@@ -139,20 +176,93 @@ TEST_CASE("Scheduler: clip speed maps timeline time to source time") {
     REQUIRE(layerClips(g) == std::vector<ClipId>{fast, slow});
     CHECK(g.layers[0].sourceTime == f30(20));            // 10 + 2 * 5
     CHECK(g.layers[1].sourceTime == CMTimeMake(25, 60)); // 20/60 + 0.5 * 10/60
-    // Half speed on a 30 fps source lands between frames 12 and 13: nearest (ties up) is 13.
-    CHECK(graphAt(fx, 65).layers[0].sourceTime == f30(13));
+    // Half speed on a 30 fps source lands between frames 12 and 13 at 12.5: frame 12 is on
+    // screen until 13 starts.
     CHECK(graphAt(fx, 64).layers[0].sourceTime == f30(12));
+    CHECK(graphAt(fx, 65).layers[0].sourceTime == f30(12));
+    CHECK(graphAt(fx, 66).layers[0].sourceTime == f30(13));
     CHECK(graphAt(fx, 65).layers[0].clipId == slow30);
 }
 
-TEST_CASE("Scheduler: source time snaps to the nearest frame of a 23.976 source") {
+TEST_CASE("Scheduler: source time snaps down to the frame of a 23.976 source that is on screen") {
     Fixture fx;
     fx.addClip(fx.v1, fx.av24, 0, 300);
     const CMTime k23976 = CMTimeMake(1001, 24000);
-    CHECK(identical(graphAt(fx, 30).layers[0].sourceTime, CMTimeMake(24 * 1001, 24000))); // 1 s -> frame 24
-    CHECK(identical(graphAt(fx, 45).layers[0].sourceTime, timeForFrame(36, k23976)));     // 1.5 s = 35.96
-    CHECK(identical(graphAt(fx, 1).layers[0].sourceTime, timeForFrame(1, k23976)));       // 0.8 frames
+    CHECK(identical(graphAt(fx, 30).layers[0].sourceTime, timeForFrame(23, k23976))); // 1 s = 23.976 frames
+    CHECK(identical(graphAt(fx, 45).layers[0].sourceTime, timeForFrame(35, k23976))); // 1.5 s = 35.96
+    CHECK(identical(graphAt(fx, 1).layers[0].sourceTime, timeForFrame(0, k23976)));   // 0.8 frames
     CHECK(graphAt(fx, 0).layers[0].sourceTime == kCMTimeZero);
+    // Every timeline frame shows the source frame whose display interval contains its time.
+    for (std::int64_t f = 0; f < 300; ++f) {
+        const CMTime shown = graphAt(fx, f).layers[0].sourceTime;
+        CHECK(shown <= f30(f));
+        CHECK(f30(f) < shown + k23976);
+    }
+}
+
+TEST_CASE("Scheduler: at slow speeds the last frame of a clip stays inside its source range (review finding 2)") {
+    for (const double speed : {0.5, 0.4, 0.999, 1.0 / 3.0}) {
+        CAPTURE(speed);
+        Fixture fx;
+        const Ratio ratio = speedFromDouble(speed);
+        // 30 source frames [0, 30) at this speed, rounded down to whole timeline frames.
+        const auto timeline = ExactTime::from(f30(30))->dividedBy(ratio);
+        const std::int64_t frames = *timeline->frameIndex(f30(1), SnapMode::Floor);
+        const ClipId c = fx.addClip(fx.v1, fx.av30, 0, frames, 0, speed);
+        fx.requireValid();
+        const CMTime out = fx.clip(c).sourceOut();
+        for (std::int64_t f = 0; f < frames; ++f) {
+            const CMTime shown = graphAt(fx, f).layers[0].sourceTime;
+            CHECK(shown < out);
+            CHECK(shown <= fx.clip(c).sourceTimeAt(f30(f)));
+        }
+        if (speed != 0.999) { // at 0.999 the last timeline frame samples source frame 28.97
+            CHECK(graphAt(fx, frames - 1).layers[0].sourceTime == f30(29));
+        }
+    }
+    // Directly: a source frame grid finer than the mapping still stops before the out point.
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.video60, 0, 30, 0, 0.5); // source [0, 0.5 s) at 60 fps
+    const MediaAsset &asset = *fx.project.findAsset(fx.video60);
+    const Clip &clip = fx.clip(c);
+    CHECK(Scheduler::sourceFrameTime(clip, asset, f30(29)) == CMTimeMake(29, 60));
+    // In a transition handle (outside the clip) the mapping may pass the out point.
+    CHECK(Scheduler::sourceFrameTime(clip, asset, f30(31)) == CMTimeMake(31, 60));
+}
+
+TEST_CASE("Scheduler: layers carry the asset's container rotation") {
+    Fixture fx;
+    fx.project.findAsset(fx.av30)->rotationDegrees = 90;
+    fx.addClip(fx.v1, fx.av30, 0, 30);
+    fx.addClip(fx.v2, fx.video60, 0, 30);
+    const RenderGraph g = graphAt(fx, 0);
+    REQUIRE(g.layers.size() == 2);
+    CHECK(g.layers[0].sourceRotationDegrees == 90);
+    CHECK(g.layers[1].sourceRotationDegrees == 0);
+}
+
+TEST_CASE("Scheduler: transitions on muted or non-solo tracks are not drawn or heard") {
+    Fixture fx;
+    const ClipId a = fx.addClip(fx.v2, fx.av30, 0, 60, 30);
+    const ClipId b = fx.addClip(fx.v2, fx.av30, 60, 60, 300);
+    const ClipId base = fx.addClip(fx.v1, fx.av30, 0, 120);
+    const ClipId aa = fx.addClip(fx.a1, fx.av30, 0, 60, 30);
+    const ClipId ab = fx.addClip(fx.a1, fx.av30, 60, 60, 300);
+    fx.addTransition(fx.v2, a, b, 10);
+    fx.addTransition(fx.a1, aa, ab, 10);
+    fx.requireValid();
+    fx.track(fx.v2).muted = true;
+    CHECK(layerClips(graphAt(fx, 58)) == std::vector<ClipId>{base});
+    fx.track(fx.v2).muted = false;
+    fx.track(fx.v1).solo = true;
+    CHECK(layerClips(graphAt(fx, 58)) == std::vector<ClipId>{base});
+    fx.track(fx.v2).solo = true;
+    CHECK(layerClips(graphAt(fx, 58)) == std::vector<ClipId>{base, a, b});
+    fx.track(fx.a1).muted = true;
+    CHECK(audioFor(fx, 50, 70).segments.empty());
+    fx.track(fx.a1).muted = false;
+    fx.track(fx.a2).solo = true;
+    CHECK(audioFor(fx, 50, 70).segments.empty());
 }
 
 TEST_CASE("Scheduler: VFR sources are not snapped; source time stays inside the media") {
@@ -291,11 +401,67 @@ TEST_CASE("Scheduler: audio crossfade ramps both clips linearly across the trans
     REQUIRE(segmentsOf(beforeCut, b).size() == 1);
     CHECK(segmentsOf(beforeCut, b)[0]->crossfade.end == doctest::Approx(0.25));
 
-    // Sum of the two ramps is 1 everywhere in the transition.
+    // The mixer applies the constant-power law to the linear progress (RenderGraph.h): the two
+    // clips' powers sum to 1 everywhere in the transition, including between segment edges
+    // where it interpolates the progress linearly.
     for (std::size_t i = 0; i < 2; ++i) {
-        CHECK(outgoing[i + 1]->crossfade.start + incoming[i]->crossfade.start == doctest::Approx(1.0));
-        CHECK(outgoing[i + 1]->crossfade.end + incoming[i]->crossfade.end == doctest::Approx(1.0));
+        const GainRamp out = outgoing[i + 1]->crossfade;
+        const GainRamp in = incoming[i]->crossfade;
+        for (const double u : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+            const double gOut = constantPowerGain(out.start + (out.end - out.start) * u);
+            const double gIn = constantPowerGain(in.start + (in.end - in.start) * u);
+            CHECK(gOut * gOut + gIn * gIn == doctest::Approx(1.0));
+        }
     }
+    // At the centre both clips play at -3 dB, not -6 dB.
+    CHECK(constantPowerGain(outgoing[1]->crossfade.end) == doctest::Approx(std::sqrt(0.5)));
+    CHECK(constantPowerGain(incoming[0]->crossfade.end) == doctest::Approx(std::sqrt(0.5)));
+}
+
+TEST_CASE("Scheduler: fade envelopes are exactly linear per segment because fades never overlap") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 0, 30);
+    // Overlapping fades (20 in + 20 out on 30 frames) are not a valid model: their product is
+    // not linear on [10, 20) (it peaks at 0.5625), so validation refuses them.
+    fx.sequence().findClip(c)->audio = AudioParams{0, f30(20), f30(20)};
+    CHECK(problemOf(fx.project).find("overlap") != std::string::npos);
+    SetAudioParams overlap(fx.seq, c, AudioParams{0, f30(20), f30(20)});
+    fx.sequence().findClip(c)->audio = AudioParams{};
+    applyRefused(fx.project, overlap, EditError::InvalidTime);
+
+    // Fades that meet exactly: every segment is one linear ramp of the true envelope.
+    fx.sequence().findClip(c)->audio = AudioParams{0, f30(20), f30(10)};
+    fx.requireValid();
+    const AudioGraph g = audioFor(fx, 0, 30);
+    const auto segments = segmentsOf(g, c);
+    REQUIRE(segments.size() == 2);
+    auto envelope = [](double frame) { return frame <= 20 ? frame / 20.0 : (30.0 - frame) / 10.0; };
+    for (const AudioSegment *segment : segments) {
+        const double s0 = CMTimeGetSeconds(segment->timelineRange.start) * 30;
+        const double s1 = CMTimeGetSeconds(segment->timelineRange.end) * 30;
+        for (const double u : {0.0, 0.3, 0.5, 0.9, 1.0}) {
+            const double linear = segment->fade.start + (segment->fade.end - segment->fade.start) * u;
+            CHECK(linear == doctest::Approx(envelope(s0 + (s1 - s0) * u)));
+        }
+    }
+}
+
+TEST_CASE("Scheduler: fades of split pieces fit their pieces") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 0, 300);
+    fx.sequence().findClip(c)->audio = AudioParams{0, f30(90), f30(60)};
+    fx.requireValid();
+    SplitClip split(fx.seq, c, f30(30));
+    applyReversible(fx.project, split);
+    const ClipId right = split.createdClipIds()[0];
+    CHECK(fx.clip(c).audio.fadeInDuration == f30(30)); // was 90 on a 30-frame piece
+    CHECK(fx.clip(right).audio.fadeOutDuration == f30(60));
+    // The left piece's gain ramps 0 -> 1 over its whole length and never jumps.
+    const AudioGraph g = audioFor(fx, 0, 30);
+    const auto segments = segmentsOf(g, c);
+    REQUIRE(segments.size() == 1);
+    CHECK(segments[0]->fade.start == 0.0);
+    CHECK(segments[0]->fade.end == doctest::Approx(1.0));
 }
 
 TEST_CASE("Scheduler: audio lookup finds a transition tail from two clips back") {

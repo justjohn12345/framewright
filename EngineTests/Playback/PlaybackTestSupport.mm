@@ -157,10 +157,11 @@ int64_t PlaybackHarness::expectedSlot(ClipId clipId, int64_t sequenceFrame) cons
     if (!clip || !asset) {
         return -1;
     }
-    // Exact rational arithmetic (speed 1): source = sourceIn + (t - start), nearest source frame.
+    // Exact rational arithmetic (speed 1): source = sourceIn + (t - start); the source frame on
+    // screen is the one that starts at or before it (Scheduler::sourceFrameTime).
     const CMTime source = clip->sourceIn + (frames30(sequenceFrame) - clip->timelineStart);
     const int64_t lastFrame = frameIndexAt(asset->duration, asset->frameDuration, SnapMode::Ceil) - 1;
-    return std::clamp<int64_t>(frameIndexAt(source, asset->frameDuration, SnapMode::Round), 0, lastFrame);
+    return std::clamp<int64_t>(frameIndexAt(source, asset->frameDuration, SnapMode::Floor), 0, lastFrame);
 }
 
 } // namespace ve::test

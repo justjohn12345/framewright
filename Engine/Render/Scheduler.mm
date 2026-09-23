@@ -17,18 +17,13 @@ bool trackActive(const Track &track, bool soloActive) {
     return !track.muted && (!soloActive || track.solo);
 }
 
-// Last frame start of an asset (frames start at 0).
-CMTime lastFrameStart(const MediaAsset &asset) {
-    const std::int64_t frames = frameIndexAt(asset.duration, asset.frameDuration, SnapMode::Ceil);
-    return timeForFrame(frames > 0 ? frames - 1 : 0, asset.frameDuration);
-}
-
 VideoLayer makeLayer(const Clip &clip, const MediaAsset &asset, CMTime time) {
     VideoLayer layer;
     layer.clipId = clip.id;
     layer.assetId = clip.assetId;
     layer.trackId = clip.trackId;
     layer.isStill = clip.isStill;
+    layer.sourceRotationDegrees = asset.rotationDegrees;
     layer.sourceTime = Scheduler::sourceFrameTime(clip, asset, time);
     layer.transform = clip.video;
     layer.opacity = clip.video.opacity;
@@ -49,17 +44,36 @@ CMTime Scheduler::sourceFrameTime(const Clip &clip, const MediaAsset &asset, CMT
     if (clip.isStill) {
         return kCMTimeZero;
     }
-    CMTime source = clip.sourceTimeAt(time);
-    if (!asset.isVFR && isPositive(asset.frameDuration)) {
-        source = snapToFrame(source, asset.frameDuration, SnapMode::Round);
-        if (isPositive(asset.duration)) {
-            source = minTime(source, lastFrameStart(asset));
-        }
-    } else if (isPositive(asset.duration) && source >= asset.duration) {
-        // No frame grid: stay strictly inside the media.
-        source = asset.duration - CMTimeMake(1, asset.duration.timescale);
+    const auto source = clip.exactSourceTimeAt(time);
+    if (!source) {
+        return clip.sourceIn; // only for a non-numeric time or 128-bit overflow
     }
-    return maxTime(source, kCMTimeZero);
+    const bool inBody = clip.timelineStart <= time && time < clip.timelineEnd();
+    const CMTime frame = asset.frameDuration;
+    if (!asset.isVFR && isPositive(frame)) {
+        // The source frame on screen at `source` is the one that starts at or before it.
+        std::int64_t index = source->frameIndex(frame, SnapMode::Floor).value_or(0);
+        if (inBody) {
+            // Inside the clip, never a frame that starts at or after the out point (transition
+            // handles, outside the body, may go past it).
+            if (const auto out = clip.exactSourceOut()) {
+                if (const auto firstPast = out->frameIndex(frame, SnapMode::Ceil)) {
+                    index = std::min(index, *firstPast - 1);
+                }
+            }
+        }
+        if (isPositive(asset.duration)) {
+            const std::int64_t frames = frameIndexAt(asset.duration, frame, SnapMode::Ceil);
+            index = std::min(index, frames > 0 ? frames - 1 : 0);
+        }
+        return timeForFrame(std::max<std::int64_t>(index, 0), frame);
+    }
+    // No frame grid: the mapped time itself, strictly inside the media.
+    CMTime exact = source->toTimeRounded();
+    if (isPositive(asset.duration) && exact >= asset.duration) {
+        exact = asset.duration - CMTimeMake(1, asset.duration.timescale);
+    }
+    return maxTime(exact, kCMTimeZero);
 }
 
 RenderGraph Scheduler::renderGraphAt(const Sequence &sequence, const Project &project, CMTime time) {
@@ -86,7 +100,12 @@ RenderGraph Scheduler::renderGraphAt(const Sequence &sequence, const Project &pr
             const MediaAsset *fromAsset = from ? project.findAsset(from->assetId) : nullptr;
             const MediaAsset *toAsset = to ? project.findAsset(to->assetId) : nullptr;
             if (fromAsset && toAsset) {
-                const double mix = fractionThrough(*sequence.transitionRange(*transition), t);
+                // Frame k of an n-frame transition shows the mix at its centre, (k + 1/2) / n: the
+                // value the audio crossfade's linear progress has at the middle of the frame.
+                const TimeRange range = *sequence.transitionRange(*transition);
+                const std::int64_t k = frameIndexAt(t - range.start, sequence.frameDuration, SnapMode::Floor);
+                const std::int64_t n = frameIndexAt(range.duration(), sequence.frameDuration, SnapMode::Round);
+                const double mix = n > 0 ? (static_cast<double>(k) + 0.5) / static_cast<double>(n) : 0.5;
                 const std::size_t outgoingIndex = graph.layers.size();
                 VideoLayer outgoing = makeLayer(*from, *fromAsset, t);
                 VideoLayer incoming = makeLayer(*to, *toAsset, t);
@@ -204,7 +223,8 @@ AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &pro
                 segment.trackId = track.id;
                 segment.timelineRange = piece;
                 segment.sourceRange = TimeRange{clip.sourceTimeAt(piece.start), clip.sourceTimeAt(piece.end)};
-                segment.speed = clip.speedRatio().toDouble();
+                segment.speed = clip.speedValue();
+                segment.speedRatio = clip.speedRatio();
                 segment.gain = gain;
                 segment.fade = GainRamp{fadeAt(piece.start), fadeAt(piece.end)};
                 if (headRange && headRange->contains(piece)) {
