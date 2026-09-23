@@ -71,7 +71,36 @@ SequencePatch diffSequences(const Sequence &before, const Sequence &after, const
     return patch;
 }
 
-void applyPatch(Sequence &sequence, IdGenerator &ids, const SequencePatch &patch, PatchDirection direction) {
+bool patchApplies(const Sequence &sequence, const IdGenerator &ids, const SequencePatch &patch,
+                  PatchDirection direction) {
+    const bool forward = direction == PatchDirection::Forward;
+    if (sequence.id != patch.sequenceId || !(ids == (forward ? patch.idsBefore : patch.idsAfter))) {
+        return false;
+    }
+    for (const TrackSnapshot &snapshot : patch.tracks) {
+        const std::optional<Track> &source = forward ? snapshot.before : snapshot.after;
+        const Track *current = sequence.findTrack(snapshot.trackId);
+        if (source.has_value() != (current != nullptr) || (current && !(*current == *source))) {
+            return false;
+        }
+    }
+    if (patch.trackOrderChanged) {
+        if (trackOrder(sequence.videoTracks) != (forward ? patch.videoOrderBefore : patch.videoOrderAfter) ||
+            trackOrder(sequence.audioTracks) != (forward ? patch.audioOrderBefore : patch.audioOrderAfter)) {
+            return false;
+        }
+    }
+    if (patch.transitionsChanged &&
+        !(sequence.transitions == (forward ? patch.transitionsBefore : patch.transitionsAfter))) {
+        return false;
+    }
+    return true;
+}
+
+bool applyPatch(Sequence &sequence, IdGenerator &ids, const SequencePatch &patch, PatchDirection direction) {
+    if (!patchApplies(sequence, ids, patch, direction)) {
+        return false;
+    }
     const bool forward = direction == PatchDirection::Forward;
     auto target = [forward](const TrackSnapshot &snapshot) -> const std::optional<Track> & {
         return forward ? snapshot.after : snapshot.before;
@@ -92,6 +121,7 @@ void applyPatch(Sequence &sequence, IdGenerator &ids, const SequencePatch &patch
                 pool.emplace(snapshot.trackId, *track);
             }
         }
+        // patchApplies() checked the source order, so every id of the target order is pooled.
         const auto &videoOrder = forward ? patch.videoOrderAfter : patch.videoOrderBefore;
         const auto &audioOrder = forward ? patch.audioOrderAfter : patch.audioOrderBefore;
         for (const TrackId trackId : videoOrder) {
@@ -114,6 +144,7 @@ void applyPatch(Sequence &sequence, IdGenerator &ids, const SequencePatch &patch
         sequence.transitions = forward ? patch.transitionsAfter : patch.transitionsBefore;
     }
     ids = forward ? patch.idsAfter : patch.idsBefore;
+    return true;
 }
 
 SequencePatch composePatches(const SequencePatch &first, const SequencePatch &second) {
@@ -130,7 +161,9 @@ SequencePatch composePatches(const SequencePatch &first, const SequencePatch &se
                 break;
             }
         }
-        result.tracks.push_back(std::move(combined));
+        if (combined.before != combined.after) { // a track changed and changed back is not in the patch
+            result.tracks.push_back(std::move(combined));
+        }
     }
     for (const TrackSnapshot &b : second.tracks) {
         bool inFirst = false;
@@ -153,11 +186,23 @@ SequencePatch composePatches(const SequencePatch &first, const SequencePatch &se
         result.audioOrderBefore = from.audioOrderBefore;
         result.videoOrderAfter = to.videoOrderAfter;
         result.audioOrderAfter = to.audioOrderAfter;
+        if (result.videoOrderBefore == result.videoOrderAfter && result.audioOrderBefore == result.audioOrderAfter) {
+            result.trackOrderChanged = false;
+            result.videoOrderBefore.clear();
+            result.videoOrderAfter.clear();
+            result.audioOrderBefore.clear();
+            result.audioOrderAfter.clear();
+        }
     }
     if (first.transitionsChanged || second.transitionsChanged) {
         result.transitionsChanged = true;
         result.transitionsBefore = first.transitionsChanged ? first.transitionsBefore : second.transitionsBefore;
         result.transitionsAfter = second.transitionsChanged ? second.transitionsAfter : first.transitionsAfter;
+        if (result.transitionsBefore == result.transitionsAfter) {
+            result.transitionsChanged = false;
+            result.transitionsBefore.clear();
+            result.transitionsAfter.clear();
+        }
     }
     return result;
 }
@@ -169,7 +214,10 @@ EditResult SequenceCommand::apply(Project &project) {
                                    "sequence " + std::to_string(sequenceId_.value()) + " does not exist");
     }
     if (patch_) {
-        applyPatch(*sequence, project.ids, *patch_, PatchDirection::Forward);
+        if (!applyPatch(*sequence, project.ids, *patch_, PatchDirection::Forward)) {
+            return EditResult::failure(EditError::InvariantViolation,
+                                       name() + " cannot be redone: the sequence no longer matches its starting state");
+        }
         return EditResult::success();
     }
 
@@ -195,7 +243,16 @@ void SequenceCommand::revert(Project &project) {
     if (!sequence || !patch_) {
         return;
     }
-    applyPatch(*sequence, project.ids, *patch_, PatchDirection::Backward);
+    (void)applyPatch(*sequence, project.ids, *patch_, PatchDirection::Backward);
+}
+
+bool SequenceCommand::canRevert(const Project &project) const {
+    const Sequence *sequence = project.findSequence(sequenceId_);
+    return sequence && patch_ && patchApplies(*sequence, project.ids, *patch_, PatchDirection::Backward);
+}
+
+bool SequenceCommand::isNoOp() const {
+    return patch_ && patch_->isEmpty();
 }
 
 bool SequenceCommand::mergeWith(const Command &next) {

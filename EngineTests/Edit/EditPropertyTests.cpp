@@ -197,10 +197,15 @@ void runRandomEdits(std::uint64_t seed, int steps) {
             continue;
         }
         const std::string name = command->name();
+        const std::size_t undoCountBefore = stack.undoCount();
         const EditResult result = stack.push(fx.project, std::move(command));
         if (!result) {
             CHECK_MESSAGE(result.error != EditError::InvariantViolation, doctest::String(result.message.c_str()));
             CHECK(fx.project == states.back()); // refused edits change nothing
+            continue;
+        }
+        if (fx.project == states.back()) {
+            CHECK(stack.undoCount() == undoCountBefore); // a no-op is not an undo step
             continue;
         }
         ++applied;

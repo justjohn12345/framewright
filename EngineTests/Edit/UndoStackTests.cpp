@@ -236,3 +236,200 @@ TEST_CASE("UndoStack: a coalesced change at the saved position makes the documen
     REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, 20)).ok());
     CHECK(stack.isDirty());
 }
+
+TEST_CASE("UndoStack: setMaxDepth with a redo tail keeps undo and redo on the right states (review finding 6)") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 0, 30);
+    UndoStack stack;
+    std::vector<Project> states{fx.project};
+    for (int i = 1; i <= 4; ++i) {
+        REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, i * 10)).ok());
+        states.push_back(fx.project);
+    }
+    for (int i = 0; i < 3; ++i) {
+        REQUIRE(stack.undo(fx.project)); // at states[1] with three redo steps
+    }
+    stack.setMaxDepth(2); // the redo steps go first: one undo and one redo step remain
+    CHECK(fx.project == states[1]);
+    CHECK(stack.undoCount() == 1);
+    CHECK(stack.redoCount() == 1);
+    REQUIRE(stack.redo(fx.project));
+    CHECK(fx.project == states[2]);
+    CHECK(framesOf(fx.clip(c)) == span(20, 50));
+    CHECK_FALSE(stack.redo(fx.project));
+    REQUIRE(stack.undo(fx.project));
+    REQUIRE(stack.undo(fx.project));
+    CHECK(fx.project == states[0]);
+
+    // With only applied steps, the oldest go.
+    while (stack.redo(fx.project)) {
+    }
+    stack.setMaxDepth(1);
+    CHECK(stack.undoCount() == 1);
+    CHECK(stack.redoCount() == 0);
+    REQUIRE(stack.undo(fx.project));
+    CHECK(fx.project == states[1]);
+}
+
+TEST_CASE("UndoStack: setMaxDepth drops a clean position that no longer exists") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 0, 30);
+    UndoStack stack;
+    for (int i = 1; i <= 3; ++i) {
+        REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, i * 10)).ok());
+    }
+    stack.markClean();
+    REQUIRE(stack.undo(fx.project));
+    REQUIRE(stack.undo(fx.project));
+    stack.setMaxDepth(2); // the saved state was the last redo step
+    CHECK(stack.isDirty());
+    CHECK_FALSE(stack.dirtyCount().has_value());
+}
+
+TEST_CASE("UndoStack: a failed redo drops the stale branch and its clean position (review finding 9)") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 0, 30);
+    UndoStack stack;
+    REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, 10)).ok());
+    REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, 20)).ok());
+    stack.markClean(); // saved with the clip at 20
+    REQUIRE(stack.undo(fx.project));
+    fx.sequence().findClip(c)->video.opacity = 0.5; // modified outside the stack
+    CHECK_FALSE(stack.redo(fx.project));
+    CHECK(stack.redoCount() == 0);
+    CHECK(fx.clip(c).video.opacity == 0.5); // the stale redo was not forced onto the project
+    CHECK(framesOf(fx.clip(c)) == span(10, 40));
+    REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, 50)).ok());
+    CHECK(stack.isDirty()); // back at position 2, but not the saved state
+    REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, 60)).ok());
+    CHECK(stack.isDirty());
+}
+
+TEST_CASE("UndoStack: undo against a project changed behind its back fails cleanly") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 0, 30);
+    UndoStack stack;
+    REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, 10)).ok());
+    REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, 20)).ok());
+    fx.sequence().findClip(c)->timelineStart = f30(25);
+    const Project changed = fx.project;
+    CHECK_FALSE(stack.undo(fx.project));
+    CHECK(fx.project == changed);
+    CHECK_FALSE(stack.canUndo());
+    CHECK(stack.isDirty());
+}
+
+TEST_CASE("applyPatch refuses a sequence that is not in the patch's source state") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 0, 30);
+    AddTrack add(fx.seq, TrackKind::Video);
+    REQUIRE(add.apply(fx.project).ok());
+    MoveClip move(fx.seq, c, fx.v1, f30(40));
+    REQUIRE(move.apply(fx.project).ok());
+    const SequencePatch trackPatch = *add.patch();
+    // Going forward again from the edited state: the new track already exists.
+    Sequence sequence = fx.sequence();
+    IdGenerator ids = fx.project.ids;
+    CHECK_FALSE(patchApplies(sequence, ids, trackPatch, PatchDirection::Forward));
+    CHECK_FALSE(applyPatch(sequence, ids, trackPatch, PatchDirection::Forward)); // no throw, no change
+    CHECK(sequence == fx.sequence());
+    // Backward over a sequence missing the track the patch would remove.
+    move.revert(fx.project);
+    add.revert(fx.project);
+    sequence = fx.sequence();
+    ids = fx.project.ids;
+    CHECK_FALSE(applyPatch(sequence, ids, trackPatch, PatchDirection::Backward));
+    CHECK(sequence == fx.sequence());
+    CHECK(applyPatch(sequence, ids, trackPatch, PatchDirection::Forward));
+    CHECK(sequence.videoTracks.size() == 3);
+    // A command refuses to redo onto the wrong base.
+    fx.sequence().findClip(c)->timelineStart = f30(5);
+    REQUIRE(add.apply(fx.project).ok());
+    CHECK(move.apply(fx.project).error == EditError::InvariantViolation);
+    CHECK_FALSE(move.canRevert(fx.project));
+}
+
+TEST_CASE("UndoStack: commands that change nothing are not recorded (review finding 8)") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 0, 30);
+    UndoStack stack;
+    const std::uint64_t version = stack.changeCount();
+    const EditResult r = stack.push(fx.project, moveTo(fx, c, fx.v1, 0));
+    CHECK(r.ok());
+    CHECK(stack.undoCount() == 0);
+    CHECK_FALSE(stack.isDirty());
+    CHECK(stack.changeCount() == version);
+    REQUIRE(stack.push(fx.project, std::make_unique<SetVideoParams>(fx.seq, c, VideoParams{})).ok());
+    CHECK(stack.undoCount() == 0); // same parameters as before
+    REQUIRE(stack.push(fx.project, std::make_unique<TrimClipTail>(fx.seq, c, f30(30))).ok());
+    CHECK(stack.undoCount() == 0);
+}
+
+TEST_CASE("UndoStack: a drag that returns to its start leaves no undo step") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 0, 30);
+    const Project start = fx.project;
+    UndoStack stack;
+    stack.beginCoalescing(moveTo(fx, c, fx.v1, 0)->coalescingKey());
+    for (const std::int64_t frame : {10, 20, 5, 0}) {
+        REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, frame)).ok());
+    }
+    CHECK(stack.undoCount() == 0);
+    CHECK_FALSE(stack.isDirty());
+    CHECK(fx.project == start);
+    // The gesture continues after passing through its start.
+    REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, 15)).ok());
+    stack.endCoalescing();
+    CHECK(stack.undoCount() == 1);
+    REQUIRE(stack.undo(fx.project));
+    CHECK(fx.project == start);
+}
+
+TEST_CASE("UndoStack: accumulated changes that cancel out leave no undo step; accumulate then cancel") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 0, 30);
+    const Project start = fx.project;
+    UndoStack stack;
+    SetVideoParams probe(fx.seq, c, VideoParams{});
+    stack.beginCoalescing(probe.coalescingKey(), CoalesceMode::Accumulate);
+    REQUIRE(stack.push(fx.project, std::make_unique<SetVideoParams>(fx.seq, c, VideoParams{5, 0, 1, 0, 1})).ok());
+    REQUIRE(stack.push(fx.project, std::make_unique<SetVideoParams>(fx.seq, c, VideoParams{})).ok());
+    CHECK(stack.undoCount() == 0);
+    CHECK(fx.project == start);
+    REQUIRE(stack.push(fx.project, std::make_unique<SetVideoParams>(fx.seq, c, VideoParams{7, 0, 1, 0, 1})).ok());
+    REQUIRE(stack.push(fx.project, std::make_unique<SetVideoParams>(fx.seq, c, VideoParams{9, 0, 1, 0, 1})).ok());
+    CHECK(stack.undoCount() == 1);
+    CHECK(stack.cancelCoalescing(fx.project));
+    CHECK(fx.project == start);
+    CHECK(stack.undoCount() == 0);
+    CHECK_FALSE(stack.canRedo());
+}
+
+TEST_CASE("UndoStack: a group whose first push is refused starts with the next good one") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 30, 30);
+    const Project start = fx.project;
+    UndoStack stack;
+    stack.beginCoalescing(moveTo(fx, c, fx.v1, 0)->coalescingKey());
+    CHECK(stack.push(fx.project, moveTo(fx, c, fx.v1, -10)).error == EditError::InvalidTime);
+    CHECK(stack.undoCount() == 0);
+    REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, 40)).ok());
+    REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, 50)).ok());
+    stack.endCoalescing();
+    CHECK(stack.undoCount() == 1);
+    REQUIRE(stack.undo(fx.project));
+    CHECK(fx.project == start);
+}
+
+TEST_CASE("UndoStack: markClean mid-drag, then cancel") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 0, 30);
+    UndoStack stack;
+    stack.beginCoalescing(moveTo(fx, c, fx.v1, 0)->coalescingKey());
+    REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, 10)).ok());
+    stack.markClean(); // saved mid-gesture with the clip at 10
+    CHECK_FALSE(stack.isDirty());
+    CHECK(stack.cancelCoalescing(fx.project)); // back at 0: not what was saved
+    CHECK(stack.isDirty());
+    CHECK(framesOf(fx.clip(c)) == span(0, 30));
+}

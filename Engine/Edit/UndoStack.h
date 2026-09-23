@@ -1,16 +1,22 @@
 // Linear undo history of applied Commands.
 //
-// push() executes a command and records it; a refused command is not recorded. Undo/redo
-// replay the commands' recorded patches. Pushing after an undo discards the redo tail.
+// push() executes a command and records it; a refused command is not recorded, and neither is
+// one that changed nothing (Command::isNoOp). Undo/redo replay the commands' recorded patches.
+// Pushing after an undo discards the redo tail.
 //
 // Coalescing: between beginCoalescing(key) and endCoalescing(), commands whose coalescingKey()
 // equals `key` collapse into a single undo step:
 //   - CoalesceMode::ReplacePrevious (default, for drags): each new command replaces the
 //     previous one of the group. The previous command is reverted first, so every command is
-//     expressed against the state before the gesture (e.g. "move clip 7 to 12 s").
+//     expressed against the state before the gesture (e.g. "move clip 7 to 12 s"). A drag that
+//     returns to where it started leaves no undo step.
 //   - CoalesceMode::Accumulate (for repeated nudges): each command applies on top of the last
-//     and their changes are merged.
+//     and their changes are merged; changes that cancel out leave no undo step.
 // A command with a different key ends the group and is pushed normally.
+//
+// History that no longer matches the project (only possible if the project is modified outside
+// the stack) is never replayed onto the wrong state: undo() drops the undo side and redo() the
+// redo side, and both return false.
 //
 // Document-modified tracking: markClean() records the current position; isDirty() reports
 // whether the project differs from that position. changeCount() increases on every change
@@ -42,9 +48,9 @@ class UndoStack {
 
     explicit UndoStack(std::size_t maxDepth = kDefaultMaxDepth);
 
-    // Applies `command` to `project` and records it. Returns the command's result; on failure
-    // nothing is recorded and the project is unchanged (during ReplacePrevious coalescing the
-    // group's previous command stays applied).
+    // Applies `command` to `project` and records it. Returns the command's result (including
+    // droppedTransitionIds); on failure nothing is recorded and the project is unchanged (during
+    // ReplacePrevious coalescing the group's previous command stays applied).
     EditResult push(Project &project, std::unique_ptr<Command> command);
 
     bool canUndo() const {
@@ -73,7 +79,8 @@ class UndoStack {
     std::size_t maxDepth() const {
         return maxDepth_;
     }
-    // Drops the oldest steps if the history is longer than `maxDepth` (minimum 1).
+    // Shortens the history to at most `maxDepth` steps (minimum 1): redo steps are dropped first
+    // (newest first), then the oldest undo steps. The project is not modified.
     void setMaxDepth(std::size_t maxDepth);
 
     std::size_t undoCount() const {
@@ -105,6 +112,8 @@ class UndoStack {
 
     void record(std::unique_ptr<Command> command);
     void trimToMaxDepth();
+    void dropRedo();
+    void dropUndo();
 
     std::vector<std::unique_ptr<Command>> commands_;
     std::size_t index_ = 0; // number of applied commands

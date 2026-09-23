@@ -13,36 +13,58 @@ EditResult UndoStack::push(Project &project, std::unique_ptr<Command> command) {
     if (group_ && command->coalescingKey() != group_->key) {
         endCoalescing();
     }
+    if (group_ && group_->hasCommand && index_ > 0 && !commands_[index_ - 1]->canRevert(project)) {
+        endCoalescing(); // the project changed behind the group's back; start a new step
+    }
 
     if (group_ && group_->hasCommand && index_ > 0) {
         Command &previous = *commands_[index_ - 1];
+        EditResult result;
+        bool stepRemoved = false;
         if (group_->mode == CoalesceMode::ReplacePrevious) {
             previous.revert(project);
-            EditResult result = command->apply(project);
+            result = command->apply(project);
             if (!result) {
                 previous.apply(project); // restore the gesture's last good state
                 return result;
             }
-            commands_[index_ - 1] = std::move(command);
+            if (command->isNoOp()) {
+                // Back where the gesture started: the gesture no longer changes anything.
+                commands_.erase(commands_.begin() + static_cast<std::ptrdiff_t>(index_ - 1));
+                --index_;
+                stepRemoved = true;
+            } else {
+                commands_[index_ - 1] = std::move(command);
+            }
         } else {
-            EditResult result = command->apply(project);
-            if (!result) {
+            result = command->apply(project);
+            if (!result || command->isNoOp()) {
                 return result;
             }
             if (!previous.mergeWith(*command)) {
                 record(std::move(command));
+            } else if (previous.isNoOp()) {
+                // The accumulated changes cancel out.
+                commands_.erase(commands_.begin() + static_cast<std::ptrdiff_t>(index_ - 1));
+                --index_;
+                stepRemoved = true;
             }
         }
-        if (cleanIndex_ && *cleanIndex_ >= static_cast<std::int64_t>(index_)) {
+        if (stepRemoved) {
+            group_->hasCommand = false;
+            if (cleanIndex_ && *cleanIndex_ > static_cast<std::int64_t>(index_)) {
+                cleanIndex_.reset(); // the saved state was the removed step
+            }
+        } else if (cleanIndex_ && *cleanIndex_ >= static_cast<std::int64_t>(index_)) {
             cleanIndex_.reset(); // the step at the clean position changed
         }
         ++changeCount_;
-        return EditResult::success();
+        return result;
     }
 
     EditResult result = command->apply(project);
-    if (!result) {
-        return result;
+    if (!result || command->isNoOp()) {
+        return result; // refused, or nothing changed: nothing to record
     }
     record(std::move(command));
     if (group_) {
@@ -53,24 +75,42 @@ EditResult UndoStack::push(Project &project, std::unique_ptr<Command> command) {
 }
 
 void UndoStack::record(std::unique_ptr<Command> command) {
+    dropRedo();
+    commands_.push_back(std::move(command));
+    ++index_;
+    trimToMaxDepth();
+}
+
+void UndoStack::dropRedo() {
     if (index_ < commands_.size()) {
         commands_.erase(commands_.begin() + static_cast<std::ptrdiff_t>(index_), commands_.end());
         if (cleanIndex_ && *cleanIndex_ > static_cast<std::int64_t>(index_)) {
             cleanIndex_.reset(); // the saved state was on the discarded redo branch
         }
     }
-    commands_.push_back(std::move(command));
-    ++index_;
-    trimToMaxDepth();
+}
+
+void UndoStack::dropUndo() {
+    commands_.erase(commands_.begin(), commands_.begin() + static_cast<std::ptrdiff_t>(index_));
+    index_ = 0;
+    cleanIndex_.reset(); // the history no longer describes the project
+    group_.reset();
 }
 
 void UndoStack::trimToMaxDepth() {
+    // Redo steps go first, then the oldest undo steps; the current state never moves.
+    while (commands_.size() > maxDepth_ && commands_.size() > index_) {
+        commands_.pop_back();
+    }
+    if (cleanIndex_ && *cleanIndex_ > static_cast<std::int64_t>(commands_.size())) {
+        cleanIndex_.reset(); // the saved state was on a dropped redo step
+    }
     if (commands_.size() <= maxDepth_) {
         return;
     }
-    const std::size_t excess = commands_.size() - maxDepth_;
+    const std::size_t excess = commands_.size() - maxDepth_; // all applied: index_ == size()
     commands_.erase(commands_.begin(), commands_.begin() + static_cast<std::ptrdiff_t>(excess));
-    index_ = index_ >= excess ? index_ - excess : 0;
+    index_ -= excess;
     if (cleanIndex_) {
         *cleanIndex_ -= static_cast<std::int64_t>(excess);
         if (*cleanIndex_ < 0) {
@@ -87,8 +127,13 @@ bool UndoStack::undo(Project &project) {
     if (!canUndo()) {
         return false;
     }
+    Command &command = *commands_[index_ - 1];
+    if (!command.canRevert(project)) {
+        dropUndo(); // only possible if the project was modified outside the stack
+        return false;
+    }
     --index_;
-    commands_[index_]->revert(project);
+    command.revert(project);
     ++changeCount_;
     return true;
 }
@@ -100,8 +145,7 @@ bool UndoStack::redo(Project &project) {
     }
     const EditResult result = commands_[index_]->apply(project);
     if (!result) {
-        // Only possible if the project was modified outside the stack; drop the stale branch.
-        commands_.erase(commands_.begin() + static_cast<std::ptrdiff_t>(index_), commands_.end());
+        dropRedo(); // only possible if the project was modified outside the stack
         return false;
     }
     ++index_;
@@ -132,8 +176,13 @@ bool UndoStack::cancelCoalescing(Project &project) {
     if (!hadCommand) {
         return false;
     }
+    Command &command = *commands_[index_ - 1];
+    if (!command.canRevert(project)) {
+        dropUndo();
+        return false;
+    }
     --index_;
-    commands_[index_]->revert(project);
+    command.revert(project);
     commands_.erase(commands_.begin() + static_cast<std::ptrdiff_t>(index_), commands_.end());
     if (cleanIndex_ && *cleanIndex_ > static_cast<std::int64_t>(index_)) {
         cleanIndex_.reset();

@@ -28,8 +28,23 @@ class Command {
     // After revert(): re-applies exactly the same change.
     virtual EditResult apply(Project &project) = 0;
 
-    // Undoes a successful apply(). Precondition: `project` is in the state apply() left it in.
+    // Undoes a successful apply(). Precondition: `project` is in the state apply() left it in
+    // (check with canRevert()); otherwise the project is left unchanged.
     virtual void revert(Project &project) = 0;
+
+    // Whether revert() can undo this command on `project` (it is in the state apply() left it
+    // in). UndoStack checks this before undoing so a history that no longer matches the project
+    // (the project was changed outside the stack) is dropped instead of corrupting it.
+    virtual bool canRevert(const Project &project) const {
+        (void)project;
+        return true;
+    }
+
+    // True when the applied command changed nothing (e.g. a move to where the clip already is).
+    // UndoStack does not record such commands.
+    virtual bool isNoOp() const {
+        return false;
+    }
 
     // Human-readable name for the Undo/Redo menu items ("Move Clip").
     virtual std::string name() const = 0;
@@ -88,16 +103,28 @@ enum class PatchDirection {
     Backward, // after -> before (undo)
 };
 
-// Moves `sequence` and `ids` across the patch. Precondition: they are in the patch's source state.
-void applyPatch(Sequence &sequence, IdGenerator &ids, const SequencePatch &patch, PatchDirection direction);
+// Whether `sequence` and `ids` are exactly in the patch's source state for `direction` (the
+// "before" state going forward, the "after" state going backward): every recorded track equal
+// to its snapshot (or absent where it did not exist), the track order, the transitions and the
+// id generator as recorded.
+bool patchApplies(const Sequence &sequence, const IdGenerator &ids, const SequencePatch &patch,
+                  PatchDirection direction);
 
-// The single patch equivalent to applying `first` then `second`.
+// Moves `sequence` and `ids` across the patch. Returns false, changing nothing, unless
+// patchApplies() (so a mismatched base can never throw or corrupt the sequence).
+bool applyPatch(Sequence &sequence, IdGenerator &ids, const SequencePatch &patch, PatchDirection direction);
+
+// The single patch equivalent to applying `first` then `second`. Parts that end where they
+// started (a track changed and changed back) are left out, so a round trip composes to an empty
+// patch.
 SequencePatch composePatches(const SequencePatch &first, const SequencePatch &second);
 
 class SequenceCommand : public Command {
   public:
     EditResult apply(Project &project) final;
     void revert(Project &project) final;
+    bool canRevert(const Project &project) const final;
+    bool isNoOp() const final;
     bool mergeWith(const Command &next) final;
 
     SequenceId sequenceId() const {
