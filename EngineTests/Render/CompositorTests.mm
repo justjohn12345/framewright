@@ -601,6 +601,31 @@ struct FrameLog {
     XCTAssertTrue(near(texturePixel(square, 500, 781), 0, 0, 0, 0));
 }
 
+// A caller's viewport may reach outside the texture: it is clipped (the scissor rectangle must
+// lie inside the render target) and the frame is still mapped through the whole viewport.
+- (void)testViewportOutsideTheTextureIsClipped {
+    media::PixelBuffer source = makeBuffer(kCVPixelFormatType_32BGRA, 256, 144);
+    fillBGRARect(source, 0, 0, 128, 144, {255, 0, 0, 255});
+    fillBGRARect(source, 128, 0, 256, 144, {0, 255, 0, 255});
+    RenderGraph g = makeGraph(256, 144);
+    g.layers.push_back(makeLayer(1));
+    const TextureSet set = texturesFor(*_compositor, source);
+    id<MTLTexture> target = makeTargetTexture(256, 144);
+    // Shifted half a frame left: the texture shows the green right half, then black.
+    [self render:g textures:{set} target:TextureTarget{target, PixelRect{-128, 0, 256, 144}, nil}];
+    XCTAssertTrue(near(texturePixel(target, 5, 70), 0, 255, 0, 1));
+    XCTAssertTrue(near(texturePixel(target, 120, 70), 0, 255, 0, 1));
+    XCTAssertTrue(near(texturePixel(target, 130, 70), 0, 0, 0, 0));
+    XCTAssertTrue(near(texturePixel(target, 250, 70), 0, 0, 0, 0));
+    // Larger than the texture on every side: the middle of the frame fills it.
+    [self render:g textures:{set} target:TextureTarget{target, PixelRect{-256, -144, 768, 432}, nil}];
+    XCTAssertTrue(near(texturePixel(target, 60, 70), 255, 0, 0, 1));
+    XCTAssertTrue(near(texturePixel(target, 200, 70), 0, 255, 0, 1));
+    // Entirely outside: nothing drawn, the texture is cleared.
+    [self render:g textures:{set} target:TextureTarget{target, PixelRect{300, 0, 256, 144}, nil}];
+    XCTAssertTrue(near(texturePixel(target, 128, 70), 0, 0, 0, 0));
+}
+
 // (g) Export targets: the burn-in survives 420v -> composite -> 420v (and -> BGRA).
 - (void)testExportTargetsPreserveBurnIn {
     const int index = 1234;

@@ -110,8 +110,9 @@ PixelRect fitRect(double sourceWidth, double sourceHeight, std::int32_t destWidt
 
 /// Render into an existing texture (must have MTLTextureUsageRenderTarget, any
 /// colour-renderable pixel format). The sequence frame is drawn into `viewport` (an empty
-/// viewport means "fit the sequence aspect into the whole texture"); the rest of the texture is
-/// cleared to black. If `drawable` is set it is presented when the frame completes.
+/// viewport means "fit the sequence aspect into the whole texture"; a viewport reaching outside
+/// the texture is clipped to it); the rest of the texture is cleared to black. If `drawable` is
+/// set it is presented when the frame completes.
 struct TextureTarget {
     id<MTLTexture> texture = nil;
     PixelRect viewport;

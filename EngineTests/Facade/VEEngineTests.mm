@@ -113,21 +113,40 @@ NSURL *scratchURL() {
     XCTAssertFalse([VEEngine.ffmpegLicense containsString:@"nonfree"], @"%@", VEEngine.ffmpegLicense);
 }
 
-- (void)testPassthroughShadersAreInFrameworkLibrary {
+- (void)testCompositorShadersAreInFrameworkLibrary {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     XCTAssertNotNil(device);
     NSError *error = nil;
     id<MTLLibrary> library = [device newDefaultLibraryWithBundle:[NSBundle bundleForClass:VEEngine.class] error:&error];
     XCTAssertNotNil(library, @"%@", error);
 
+    // The layer pipeline: vertex function plus the fragment function specialised by its three
+    // function constants (source A is YCbCr, has a dissolve partner, partner is YCbCr).
     MTLRenderPipelineDescriptor *desc = [MTLRenderPipelineDescriptor new];
-    desc.vertexFunction = [library newFunctionWithName:@"ve_passthrough_vertex"];
-    desc.fragmentFunction = [library newFunctionWithName:@"ve_passthrough_fragment"];
+    desc.vertexFunction = [library newFunctionWithName:@"ve_layer_vertex"];
     XCTAssertNotNil(desc.vertexFunction);
-    XCTAssertNotNil(desc.fragmentFunction);
+    MTLFunctionConstantValues *constants = [MTLFunctionConstantValues new];
+    const bool yes = true;
+    [constants setConstantValue:&yes type:MTLDataTypeBool atIndex:0];
+    [constants setConstantValue:&yes type:MTLDataTypeBool atIndex:1];
+    [constants setConstantValue:&yes type:MTLDataTypeBool atIndex:2];
+    desc.fragmentFunction = [library newFunctionWithName:@"ve_layer_fragment" constantValues:constants error:&error];
+    XCTAssertNotNil(desc.fragmentFunction, @"%@", error);
     desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
     id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
     XCTAssertNotNil(pipeline, @"%@", error);
+
+    // The compute kernels: export conversions and the minification premultiply.
+    for (NSString *name in @[ @"ve_convert_to_bgra", @"ve_convert_to_420", @"ve_premultiply" ]) {
+        id<MTLFunction> kernel = [library newFunctionWithName:name];
+        XCTAssertNotNil(kernel, @"%@", name);
+        if (kernel != nil) {
+            XCTAssertNotNil([device newComputePipelineStateWithFunction:kernel error:&error], @"%@: %@", name, error);
+        }
+    }
+    // The phase-0 passthrough shaders are gone.
+    XCTAssertNil([library newFunctionWithName:@"ve_passthrough_vertex"]);
+    XCTAssertNil([library newFunctionWithName:@"ve_passthrough_fragment"]);
 }
 
 // MARK: - Project

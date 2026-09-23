@@ -48,6 +48,18 @@ PixelRect fitRect(double sourceWidth, double sourceHeight, std::int32_t destWidt
 
 namespace {
 
+// The part of `r` inside [0, width) x [0, height).
+PixelRect clipRect(const PixelRect &r, std::int32_t width, std::int32_t height) {
+    const std::int64_t x0 = std::max<std::int64_t>(r.x, 0);
+    const std::int64_t y0 = std::max<std::int64_t>(r.y, 0);
+    const std::int64_t x1 = std::min<std::int64_t>(std::int64_t(r.x) + r.width, width);
+    const std::int64_t y1 = std::min<std::int64_t>(std::int64_t(r.y) + r.height, height);
+    if (x1 <= x0 || y1 <= y0) {
+        return {};
+    }
+    return {std::int32_t(x0), std::int32_t(y0), std::int32_t(x1 - x0), std::int32_t(y1 - y0)};
+}
+
 constexpr std::size_t kUniformAlignment = 256; // constant-buffer offset alignment (macOS)
 constexpr std::size_t kInitialDrawCapacity = 64;
 constexpr MTLPixelFormat kIntermediateFormat = MTLPixelFormatRGBA16Float;
@@ -811,11 +823,15 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         return abandon(makeError(MediaErrorCode::Internal, "Compositor: cannot create a render command encoder"));
     }
     encoder.label = @"VidEdit layers";
-    if (!im.items.empty() && !viewport.isEmpty()) {
+    // The viewport may reach outside the texture (a caller's viewport); the scissor rectangle
+    // must not, so it is the part of the viewport inside the texture.
+    const PixelRect scissor = clipRect(viewport, static_cast<std::int32_t>(colorTexture.width),
+                                       static_cast<std::int32_t>(colorTexture.height));
+    if (!im.items.empty() && !scissor.isEmpty()) {
         [encoder setViewport:(MTLViewport){double(viewport.x), double(viewport.y), double(viewport.width),
                                            double(viewport.height), 0.0, 1.0}];
-        [encoder setScissorRect:(MTLScissorRect){NSUInteger(viewport.x), NSUInteger(viewport.y),
-                                                 NSUInteger(viewport.width), NSUInteger(viewport.height)}];
+        [encoder setScissorRect:(MTLScissorRect){NSUInteger(scissor.x), NSUInteger(scissor.y),
+                                                 NSUInteger(scissor.width), NSUInteger(scissor.height)}];
         id<MTLRenderPipelineState> current = nil;
         for (std::size_t k = 0; k < im.items.size(); ++k) {
             const DrawItem &item = im.items[k];
