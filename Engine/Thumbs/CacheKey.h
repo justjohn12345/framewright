@@ -5,6 +5,7 @@
 #include "../Media/Result.h"
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <string_view>
 
@@ -38,5 +39,36 @@ media::Status ensureDirectory(const std::string &directory);
 
 /// Writes `bytes` to `path` atomically (temporary file in the same directory, then rename).
 media::Status writeFileAtomically(const std::string &path, const void *bytes, size_t size);
+
+/// Size bound for a directory of cache files with one extension (".png", ".vewf"), evicting the
+/// least recently used: hits refresh a file's modification time (touch), and when a write takes
+/// the total over the budget the oldest files are deleted until it is back under 90 % of it (so
+/// eviction does not run on every write). The total is learned by scanning the directory once,
+/// lazily, then maintained incrementally; files written by other processes are picked up at the
+/// next trim scan. Thread-safe. A budget of 0 means unbounded.
+class DiskCacheBudget {
+  public:
+    DiskCacheBudget(std::string directory, std::string extension, uint64_t budgetBytes);
+
+    /// A cache hit: marks `path` most recently used.
+    void touch(const std::string &path);
+    /// `bytes` were written to a cache file; trims if the budget is exceeded.
+    void added(uint64_t bytes);
+    /// Scans the directory and deletes least recently used files until the total is at most
+    /// `targetBytes`. Returns the number of files deleted.
+    int trimTo(uint64_t targetBytes);
+    /// Current total (after the first scan; scans if needed).
+    uint64_t totalBytes();
+
+  private:
+    void scanLocked();
+
+    const std::string directory_;
+    const std::string extension_;
+    const uint64_t budget_;
+    std::mutex mutex_;
+    bool scanned_ = false;
+    uint64_t total_ = 0;
+};
 
 } // namespace ve::thumbs

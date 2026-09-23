@@ -149,7 +149,7 @@ Result<ThumbnailImage> readPNG(const std::string &path) {
     return image;
 }
 
-Status writePNG(const std::string &path, CGImageRef image) {
+Status writePNG(const std::string &path, CGImageRef image, uint64_t &written) {
     CFRef<CFMutableDataRef> data = CFRef<CFMutableDataRef>::adopt(CFDataCreateMutable(kCFAllocatorDefault, 0));
     CFRef<CGImageDestinationRef> dest =
         CFRef<CGImageDestinationRef>::adopt(CGImageDestinationCreateWithData(data.get(), CFSTR("public.png"), 1,
@@ -161,6 +161,7 @@ Status writePNG(const std::string &path, CGImageRef image) {
     if (!CGImageDestinationFinalize(dest.get())) {
         return makeError(MediaErrorCode::EncodeFailed, "PNG encoding failed");
     }
+    written = static_cast<uint64_t>(CFDataGetLength(data.get()));
     return writeFileAtomically(path, CFDataGetBytePtr(data.get()), static_cast<size_t>(CFDataGetLength(data.get())));
 }
 
@@ -226,6 +227,9 @@ struct ThumbnailService::DecoderSlot {
 
 ThumbnailService::ThumbnailService(std::shared_ptr<BackendRouter> router, Config config)
     : router_(std::move(router)), config_(std::move(config)) {
+    if (!config_.diskCacheDirectory.empty()) {
+        disk_ = std::make_unique<DiskCacheBudget>(config_.diskCacheDirectory, ".png", config_.diskBudgetBytes);
+    }
     const int n = std::max(1, config_.threads);
     for (int i = 0; i < n; ++i) {
         threads_.emplace_back([this] { workerMain(); });
@@ -257,7 +261,9 @@ ThumbnailService::~ThumbnailService() {
 // MARK: - Requests
 
 ThumbnailService::Key ThumbnailService::keyFor(const ThumbnailRequest &request) {
-    return Key{request.asset, toMicros(request.time), request.maxDimension, request.trackIndex};
+    const FileIdentity id = fileIdentity(request.url);
+    return Key{request.asset, toMicros(request.time), request.maxDimension, request.trackIndex, id.size,
+               id.modifiedNanoseconds};
 }
 
 std::string ThumbnailService::diskFileName(const ThumbnailRequest &request) {
@@ -373,6 +379,7 @@ ThumbnailService::Stats ThumbnailService::stats() const {
     Stats s = stats_;
     s.memoryBytes = memoryBytes_;
     s.memoryCount = memory_.size();
+    s.routeCount = routes_.size();
     return s;
 }
 
@@ -411,20 +418,24 @@ void ThumbnailService::workerMain() {
         queue_.pop_front(); // Running jobs stay in jobs_ (for coalescing) but leave queue_.
         lock.unlock();
 
-        bool fromDisk = false;
-        Result<ThumbnailImage> result = produce(job->request, worker, fromDisk);
+        // std::thread workers have no autorelease pool: drain the Objective-C objects that
+        // decoding, ImageIO and AVFoundation autorelease after every job.
+        @autoreleasepool {
+            bool fromDisk = false;
+            Result<ThumbnailImage> result = produce(job->request, worker, fromDisk);
 
-        lock.lock();
-        jobs_.erase(job->key);
-        std::vector<Waiter> waiters = std::move(job->waiters);
-        if (result.ok()) {
-            insertMemory(job->key, result.value());
-            ++(fromDisk ? stats_.diskHits : stats_.decodes);
-        } else {
-            ++stats_.failures;
+            lock.lock();
+            jobs_.erase(job->key);
+            std::vector<Waiter> waiters = std::move(job->waiters);
+            if (result.ok()) {
+                insertMemory(job->key, result.value());
+                ++(fromDisk ? stats_.diskHits : stats_.decodes);
+            } else {
+                ++stats_.failures;
+            }
+            lock.unlock();
+            deliver(std::move(waiters), result);
         }
-        lock.unlock();
-        deliver(std::move(waiters), result);
         lock.lock();
     }
 }
@@ -436,14 +447,20 @@ Result<ThumbnailImage> ThumbnailService::produce(const ThumbnailRequest &request
         auto cached = readPNG(diskPath);
         if (cached.ok()) {
             fromDisk = true;
+            disk_->touch(diskPath);
             return cached;
         }
+        // Missing, or unreadable (truncated/corrupt): decode and overwrite it below.
     }
     auto image = decode(request, worker);
     if (image.ok() && !diskPath.empty()) {
         Status st = ensureDirectory(config_.diskCacheDirectory);
+        uint64_t written = 0;
         if (st.ok()) {
-            st = writePNG(diskPath, image.value().get());
+            st = writePNG(diskPath, image.value().get(), written);
+        }
+        if (st.ok()) {
+            disk_->added(written);
         }
         if (!st.ok()) {
             // The thumbnail itself is fine; the disk cache is an optimisation. Count and log.
@@ -461,16 +478,25 @@ Result<std::shared_ptr<const RoutedMediaInfo>> ThumbnailService::route(const std
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (auto it = routes_.find(key); it != routes_.end()) {
-            return it->second;
+            routeLru_.splice(routeLru_.begin(), routeLru_, it->second.lru);
+            return it->second.routed;
         }
     }
-    auto routed = router_->probe(url, config_.routing);
+    auto routed = router_->probe(url, config_.routing); // Errors are not remembered.
     if (!routed.ok()) {
         return std::move(routed).error();
     }
     auto shared = std::make_shared<const RoutedMediaInfo>(std::move(routed).value());
     std::lock_guard<std::mutex> lock(mutex_);
-    routes_[key] = shared;
+    if (auto it = routes_.find(key); it != routes_.end()) {
+        return it->second.routed; // Another worker routed it meanwhile.
+    }
+    routeLru_.push_front(key);
+    routes_[key] = RouteEntry{shared, routeLru_.begin()};
+    while (routes_.size() > std::max<size_t>(1, config_.maxRoutes)) {
+        routes_.erase(routeLru_.back());
+        routeLru_.pop_back();
+    }
     return shared;
 }
 

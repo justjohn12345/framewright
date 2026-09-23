@@ -7,16 +7,19 @@
 // average, so it stays within [-1, 1]). Bucket i covers [i, i + 1) / bucketsPerSecond seconds;
 // the last bucket may be partial.
 //
-// Caching: in memory per (asset, track) and on disk under Config::diskCacheDirectory as
-// "<hash>.vewf", a little-endian binary file:
+// Caching: in memory per (asset, track), valid only while the source file keeps the size and
+// modification time it had when the peaks were computed (a replaced file is recomputed), and on
+// disk under Config::diskCacheDirectory as "<hash>.vewf" (bounded by Config::diskBudgetBytes,
+// least recently used files deleted), a little-endian binary file:
 //   magic "VEWF", u32 version, u64 source size, i64 source mtime (ns), f64 sample rate,
 //   u32 bucketsPerSecond, u32 channels, u64 bucketCount, then bucketCount x (min f32, max f32)
 //   for the mono mix followed by the same for each channel.
 // The hash covers the path, file size, mtime, track, resolution and format version, and the
 // header is re-validated on load, so an edited source is recomputed.
 //
-// Threading: public methods are thread-safe and non-blocking. Computation runs on
-// Config::threads worker threads (std::thread). Requests for the same (asset, track) share one
+// Threading: public methods are thread-safe and non-blocking (request() and cached() stat the
+// source file). Computation runs on Config::threads worker threads (std::thread, each job in its
+// own autorelease pool). Requests for the same (asset, track) share one
 // computation. Progress and completion callbacks are dispatch_async'ed onto the queue passed
 // with the request (never inline); every completion runs exactly once, with the peaks, an
 // error, or MediaErrorCode::Cancelled (cancel(), or destruction before completion). A
@@ -41,6 +44,8 @@
 #include <vector>
 
 namespace ve::thumbs {
+
+class DiskCacheBudget; // CacheKey.h
 
 struct PeakBucket {
     float min = 0;
@@ -94,6 +99,8 @@ class WaveformService {
     struct Config {
         /// Directory for .vewf files; created on demand. Empty disables the disk cache.
         std::string diskCacheDirectory;
+        /// Disk cache bound (0 = unbounded).
+        uint64_t diskBudgetBytes = uint64_t(256) << 20;
         uint32_t bucketsPerSecond = 100;
         /// Analysis sample rate; must be a multiple of bucketsPerSecond.
         double sampleRate = 48000;
@@ -127,7 +134,7 @@ class WaveformService {
     /// already completed. Returns false if the id is unknown or already finished.
     bool cancel(RequestId id);
 
-    /// Peaks already in memory, or nullptr.
+    /// Peaks already in memory for the asset's file as it is now, or nullptr.
     std::shared_ptr<const WaveformPeaks> cached(AssetId asset, int trackIndex = -1) const;
     /// Forgets the in-memory peaks of `asset`.
     void purge(AssetId asset);
@@ -172,7 +179,14 @@ class WaveformService {
     RequestId nextId_ = 1;
     std::deque<std::shared_ptr<Job>> queue_;
     std::map<Key, std::shared_ptr<Job>> jobs_; ///< Pending and running.
-    std::map<Key, std::shared_ptr<const WaveformPeaks>> memory_;
+    struct MemoryEntry {
+        std::shared_ptr<const WaveformPeaks> peaks;
+        std::string url;
+        uint64_t fileSize = 0;
+        int64_t fileModified = 0;
+    };
+    std::map<Key, MemoryEntry> memory_;
+    std::unique_ptr<DiskCacheBudget> disk_;
     Stats stats_;
     std::vector<std::thread> threads_;
 };

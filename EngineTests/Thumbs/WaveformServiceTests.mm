@@ -216,6 +216,66 @@ long firstLoudBucket(const WaveformPeaks &p, float threshold) {
     XCTAssertTrue(*fromDisk.value() == *computed, @"the disk copy is bit-identical");
 }
 
+/// The in-memory peaks are tied to the file as it was: replacing the file behind the same
+/// asset (a relink, or an edit saved over it) makes cached() return nothing and a request
+/// recompute, instead of serving the old waveform.
+- (void)testReplacedSourceFileIsRecomputed {
+    const std::string original = [self mediaPath:"audio_only.wav"];
+    const std::string other = [self mediaPath:"audio_44k.wav"];
+    if (original.empty() || other.empty()) {
+        return;
+    }
+    const std::string path = scratchDirectory() + "/replaced.wav";
+    std::filesystem::copy_file(original, path);
+    WaveformService service(BackendRouter::makeDefault(), {});
+    const WaveformRequest request{AssetId(9), path};
+    auto first = [self peaksFrom:service request:request];
+    XCTAssertTrue(first.ok());
+    XCTAssertTrue(service.cached(AssetId(9)) != nullptr);
+    std::filesystem::copy_file(other, path, std::filesystem::copy_options::overwrite_existing);
+    XCTAssertEqual(service.cached(AssetId(9)), nullptr, @"stale peaks are not offered");
+    auto second = [self peaksFrom:service request:request];
+    XCTAssertTrue(second.ok());
+    XCTAssertEqual(service.stats().computed, uint64_t(2));
+    XCTAssertEqual(service.stats().memoryHits, uint64_t(0));
+    if (first.ok() && second.ok()) {
+        XCTAssertNotEqual(first.value()->bucketCount(), second.value()->bucketCount(), @"10 s vs 6 s of audio");
+    }
+}
+
+/// The .vewf disk cache stays within Config::diskBudgetBytes.
+- (void)testDiskCacheIsBounded {
+    std::vector<std::string> files;
+    for (const char *f : {"audio_only.wav", "audio_only.m4a", "audio_44k.wav", "audio_44k.m4a", "audio_mono.m4a"}) {
+        files.push_back([self mediaPath:f]);
+    }
+    uint64_t one = 0;
+    {
+        WaveformService service(BackendRouter::makeDefault(), {_dir});
+        const WaveformRequest first{AssetId(1), files[0]};
+        XCTAssertTrue([self peaksFrom:service request:first].ok());
+        for (const auto &entry : std::filesystem::directory_iterator(_dir)) {
+            one = std::max<uint64_t>(one, entry.file_size());
+        }
+    }
+    WaveformService::Config config;
+    config.diskCacheDirectory = _dir;
+    config.diskBudgetBytes = one * 2 + one / 2;
+    WaveformService service(BackendRouter::makeDefault(), config);
+    for (size_t i = 0; i < files.size(); ++i) {
+        const WaveformRequest request{AssetId(10 + static_cast<int>(i)), files[i]};
+        XCTAssertTrue([self peaksFrom:service request:request].ok());
+    }
+    uint64_t total = 0;
+    for (const auto &entry : std::filesystem::directory_iterator(_dir)) {
+        if (entry.path().extension() == ".vewf") {
+            total += entry.file_size();
+        }
+    }
+    XCTAssertLessThanOrEqual(total, config.diskBudgetBytes);
+    XCTAssertEqual(service.stats().diskWriteFailures, uint64_t(0));
+}
+
 - (void)testCoalescingProgressAndCancellation {
     const std::string path = [self mediaPath:"hevc_720p2997.mov"];
     if (path.empty()) {

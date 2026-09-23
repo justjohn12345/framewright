@@ -7,7 +7,10 @@
 #include "../Media/RouterTestSupport.h"
 #include "../Media/TestMedia.h"
 
+#include <sys/time.h>
+
 #include <filesystem>
+#include <fstream>
 #include <map>
 
 using namespace ve;
@@ -280,6 +283,157 @@ static char kQueueKey;
     auto missing = [self thumbnailFrom:service request:missingRequest];
     XCTAssertEqual(missing.error().code, MediaErrorCode::FileNotFound);
     XCTAssertEqual(service.stats().failures, uint64_t(1));
+}
+
+/// Copies a generated file into a fresh scratch directory under `name` (for tests that modify
+/// or rename the source).
+- (std::string)copyOf:(const std::string &)file named:(const std::string &)name {
+    const std::string source = [self mediaPath:file];
+    const std::string dest = scratchDirectory() + "/" + name;
+    std::error_code ec;
+    std::filesystem::copy_file(source, dest, std::filesystem::copy_options::overwrite_existing, ec);
+    XCTAssertFalse(ec, @"copy %s: %s", file.c_str(), ec.message().c_str());
+    return dest;
+}
+
+/// A cached PNG that is corrupt (truncated write, disk error) is decoded afresh and replaced.
+- (void)testCorruptDiskCacheFileIsRegenerated {
+    const std::string path = [self mediaPath:"h264_1080p30.mp4"];
+    if (path.empty()) {
+        return;
+    }
+    ThumbnailRequest request{AssetId(1), path, CMTimeMake(1, 1), 160};
+    ThumbnailService::Config config;
+    config.diskCacheDirectory = _dir;
+    {
+        ThumbnailService service(BackendRouter::makeDefault(), config);
+        XCTAssertTrue([self thumbnailFrom:service request:request].ok());
+    }
+    const std::string png = _dir + "/" + ThumbnailService::diskFileName(request);
+    XCTAssertTrue(std::filesystem::exists(png));
+    {
+        std::ofstream garbage(png, std::ios::binary | std::ios::trunc);
+        garbage << "not a PNG at all";
+    }
+    ThumbnailService service(BackendRouter::makeDefault(), config);
+    auto image = [self thumbnailFrom:service request:request];
+    XCTAssertTrue(image.ok());
+    if (image.ok()) {
+        XCTAssertEqual(readBurnIn(toPixelBuffer(image->get()).get()), std::optional<int>(30));
+    }
+    const auto stats = service.stats();
+    XCTAssertEqual(stats.diskHits, uint64_t(0), @"the corrupt file is not used");
+    XCTAssertEqual(stats.decodes, uint64_t(1));
+    XCTAssertGreaterThan(std::filesystem::file_size(png), uint64_t(100), @"rewritten with a real PNG");
+    ThumbnailService again(BackendRouter::makeDefault(), config);
+    XCTAssertTrue([self thumbnailFrom:again request:request].ok());
+    XCTAssertEqual(again.stats().diskHits, uint64_t(1), @"and used from then on");
+}
+
+/// A source file that changed on disk (new modification time) is decoded again: neither the
+/// memory cache (keyed by file identity too) nor the disk cache returns the old thumbnail.
+- (void)testChangedSourceFileForcesANewDecode {
+    const std::string path = [self copyOf:"h264_1080p30.mp4" named:"changing.mp4"];
+    ThumbnailService::Config config;
+    config.diskCacheDirectory = _dir;
+    ThumbnailService service(BackendRouter::makeDefault(), config);
+    const ThumbnailRequest request{AssetId(1), path, CMTimeMake(2, 1), 160};
+    XCTAssertTrue([self thumbnailFrom:service request:request].ok());
+    XCTAssertTrue([self thumbnailFrom:service request:request].ok());
+    XCTAssertEqual(service.stats().decodes, uint64_t(1));
+    XCTAssertEqual(service.stats().memoryHits, uint64_t(1));
+    // Touch the file: same content, new modification time (what an editor or a re-copy does).
+    struct timeval times[2];
+    gettimeofday(&times[0], nullptr);
+    times[0].tv_sec += 10;
+    times[1] = times[0];
+    XCTAssertEqual(utimes(path.c_str(), times), 0);
+    XCTAssertTrue([self thumbnailFrom:service request:request].ok());
+    const auto stats = service.stats();
+    XCTAssertEqual(stats.decodes, uint64_t(2), @"the changed file was decoded again");
+    XCTAssertEqual(stats.memoryHits, uint64_t(1));
+    XCTAssertEqual(stats.diskHits, uint64_t(0));
+}
+
+/// Non-ASCII paths (accents, CJK, emoji, spaces) work through probing, decoding and the disk cache.
+- (void)testUnicodePaths {
+    const std::string path = [self copyOf:"h264_1080p30.mp4" named:"Clip \u00fc \u65e5\u672c\u8a9e \U0001F3AC.mp4"];
+    ThumbnailService::Config config;
+    config.diskCacheDirectory = _dir + "/d\u00e9j\u00e0 vu";
+    const ThumbnailRequest request{AssetId(1), path, CMTimeMake(1, 1), 320};
+    {
+        ThumbnailService service(BackendRouter::makeDefault(), config);
+        auto image = [self thumbnailFrom:service request:request];
+        XCTAssertTrue(image.ok(), @"%s", image.ok() ? "" : image.error().description().c_str());
+        if (image.ok()) {
+            XCTAssertEqual(readBurnIn(toPixelBuffer(image->get()).get()), std::optional<int>(30));
+        }
+    }
+    ThumbnailService service(BackendRouter::makeDefault(), config);
+    XCTAssertTrue([self thumbnailFrom:service request:request].ok());
+    XCTAssertEqual(service.stats().diskHits, uint64_t(1));
+}
+
+/// The disk cache stays within Config::diskBudgetBytes (least recently used files deleted), and
+/// the routing memo within Config::maxRoutes.
+- (void)testDiskCacheAndRoutesAreBounded {
+    const std::string h264 = [self mediaPath:"h264_1080p30.mp4"];
+    const std::string hevc = [self mediaPath:"hevc_720p2997.mov"];
+    const std::string prores = [self mediaPath:"prores_540p25.mov"];
+    if (h264.empty() || hevc.empty() || prores.empty()) {
+        return;
+    }
+    ThumbnailService::Config config;
+    config.diskCacheDirectory = _dir;
+    config.maxRoutes = 2;
+    // Measure one thumbnail, then allow about three.
+    uint64_t one = 0;
+    {
+        ThumbnailService probe(BackendRouter::makeDefault(), config);
+        const ThumbnailRequest first{AssetId(1), h264, kCMTimeZero, 320};
+        XCTAssertTrue([self thumbnailFrom:probe request:first].ok());
+        for (const auto &entry : std::filesystem::directory_iterator(_dir)) {
+            one = std::max<uint64_t>(one, entry.file_size());
+        }
+    }
+    config.diskBudgetBytes = one * 3 + one / 2;
+    ThumbnailService service(BackendRouter::makeDefault(), config);
+    int index = 1;
+    for (const std::string &file : {h264, hevc, prores}) {
+        for (int second = 0; second < 3; ++second) {
+            const ThumbnailRequest request{AssetId(index), file, CMTimeMake(second, 1), 320};
+            XCTAssertTrue([self thumbnailFrom:service request:request].ok());
+        }
+        ++index;
+    }
+    uint64_t total = 0;
+    int files = 0;
+    for (const auto &entry : std::filesystem::directory_iterator(_dir)) {
+        if (entry.path().extension() == ".png") {
+            total += entry.file_size();
+            ++files;
+        }
+    }
+    NSLog(@"thumbnail disk cache: %d files, %llu bytes, budget %llu", files, total, config.diskBudgetBytes);
+    XCTAssertLessThanOrEqual(total, config.diskBudgetBytes);
+    XCTAssertGreaterThan(files, 0);
+    XCTAssertEqual(service.stats().diskWriteFailures, uint64_t(0));
+    XCTAssertLessThanOrEqual(service.stats().routeCount, size_t(2));
+}
+
+/// A portrait (90-degree) clip gives a portrait thumbnail.
+- (void)testRotatedClipThumbnailIsUpright {
+    const std::string path = [self mediaPath:"rotated90_h264.mp4"];
+    if (path.empty()) {
+        return;
+    }
+    ThumbnailService service(BackendRouter::makeDefault(), ThumbnailService::Config{});
+    auto image = [self thumbnailFrom:service request:ThumbnailRequest{AssetId(1), path, kCMTimeZero, 160}];
+    XCTAssertTrue(image.ok());
+    if (image.ok()) {
+        XCTAssertEqual(CGImageGetWidth(image->get()), size_t(90));
+        XCTAssertEqual(CGImageGetHeight(image->get()), size_t(160));
+    }
 }
 
 - (void)testRenderThumbnailScalesConvertsAndRotates {

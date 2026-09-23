@@ -196,6 +196,9 @@ Result<WaveformPeaks> readWaveformFile(const std::string &path, const WaveformSo
 
 WaveformService::WaveformService(std::shared_ptr<BackendRouter> router, Config config)
     : router_(std::move(router)), config_(std::move(config)) {
+    if (!config_.diskCacheDirectory.empty()) {
+        disk_ = std::make_unique<DiskCacheBudget>(config_.diskCacheDirectory, ".vewf", config_.diskBudgetBytes);
+    }
     const int n = std::max(1, config_.threads);
     for (int i = 0; i < n; ++i) {
         threads_.emplace_back([this] { workerMain(); });
@@ -267,6 +270,7 @@ WaveformService::RequestId WaveformService::request(const WaveformRequest &reque
         return 0;
     }
     const Key key{request.asset, request.trackIndex};
+    const FileIdentity identity = fileIdentity(request.url);
     std::unique_lock<std::mutex> lock(mutex_);
     ++stats_.requests;
     const RequestId id = nextId_++;
@@ -277,11 +281,15 @@ WaveformService::RequestId WaveformService::request(const WaveformRequest &reque
         return id;
     }
     if (auto it = memory_.find(key); it != memory_.end()) {
-        ++stats_.memoryHits;
-        auto peaks = it->second;
-        lock.unlock();
-        complete({Listener{id, queue, std::move(completion), {}}}, peaks);
-        return id;
+        const MemoryEntry &e = it->second;
+        if (e.url == request.url && e.fileSize == identity.size && e.fileModified == identity.modifiedNanoseconds) {
+            ++stats_.memoryHits;
+            auto peaks = e.peaks;
+            lock.unlock();
+            complete({Listener{id, queue, std::move(completion), {}}}, peaks);
+            return id;
+        }
+        memory_.erase(it); // Relinked or changed on disk: recompute.
     }
     Listener listener{id, queue, std::move(completion), std::move(progress)};
     if (auto it = jobs_.find(key); it != jobs_.end() && !it->second->cancelled) {
@@ -331,9 +339,23 @@ bool WaveformService::cancel(RequestId id) {
 }
 
 std::shared_ptr<const WaveformPeaks> WaveformService::cached(AssetId asset, int trackIndex) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = memory_.find(Key{asset, trackIndex});
-    return it == memory_.end() ? nullptr : it->second;
+    std::string url;
+    uint64_t size = 0;
+    int64_t modified = 0;
+    std::shared_ptr<const WaveformPeaks> peaks;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = memory_.find(Key{asset, trackIndex});
+        if (it == memory_.end()) {
+            return nullptr;
+        }
+        url = it->second.url;
+        size = it->second.fileSize;
+        modified = it->second.fileModified;
+        peaks = it->second.peaks;
+    }
+    const FileIdentity now = fileIdentity(url); // Outside the lock: a stat.
+    return now.size == size && now.modifiedNanoseconds == modified ? peaks : nullptr;
 }
 
 void WaveformService::purge(AssetId asset) {
@@ -360,24 +382,29 @@ void WaveformService::workerMain() {
         job->started = true;
         lock.unlock();
 
-        bool fromDisk = false;
-        WaveformResult result = produce(*job, fromDisk);
+        // std::thread workers have no autorelease pool: drain what decoding autoreleases.
+        @autoreleasepool {
+            const FileIdentity identity = fileIdentity(job->request.url);
+            bool fromDisk = false;
+            WaveformResult result = produce(*job, fromDisk);
 
-        lock.lock();
-        auto it = jobs_.find(job->key);
-        if (it != jobs_.end() && it->second == job) {
-            jobs_.erase(it);
+            lock.lock();
+            auto it = jobs_.find(job->key);
+            if (it != jobs_.end() && it->second == job) {
+                jobs_.erase(it);
+            }
+            std::vector<Listener> listeners = std::move(job->listeners);
+            job->listeners.clear();
+            if (result.ok()) {
+                memory_[job->key] =
+                    MemoryEntry{result.value(), job->request.url, identity.size, identity.modifiedNanoseconds};
+                ++(fromDisk ? stats_.diskHits : stats_.computed);
+            } else if (result.error().code != MediaErrorCode::Cancelled) {
+                ++stats_.failures;
+            }
+            lock.unlock();
+            complete(std::move(listeners), result);
         }
-        std::vector<Listener> listeners = std::move(job->listeners);
-        job->listeners.clear();
-        if (result.ok()) {
-            memory_[job->key] = result.value();
-            ++(fromDisk ? stats_.diskHits : stats_.computed);
-        } else if (result.error().code != MediaErrorCode::Cancelled) {
-            ++stats_.failures;
-        }
-        lock.unlock();
-        complete(std::move(listeners), result);
         lock.lock();
     }
 }
@@ -392,6 +419,7 @@ WaveformResult WaveformService::produce(Job &job, bool &fromDisk) {
         if (cachedFile.ok() && cachedFile->bucketsPerSecond == config_.bucketsPerSecond &&
             cachedFile->sampleRate == config_.sampleRate) {
             fromDisk = true;
+            disk_->touch(diskPath);
             reportProgress(job, 1.0);
             return std::make_shared<const WaveformPeaks>(std::move(cachedFile).value());
         }
@@ -401,6 +429,9 @@ WaveformResult WaveformService::produce(Job &job, bool &fromDisk) {
         Status st = ensureDirectory(config_.diskCacheDirectory);
         if (st.ok()) {
             st = writeWaveformFile(diskPath, *result.value(), source);
+        }
+        if (st.ok()) {
+            disk_->added(fileIdentity(diskPath).size);
         }
         if (!st.ok()) {
             std::lock_guard<std::mutex> lock(mutex_);
