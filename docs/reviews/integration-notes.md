@@ -100,3 +100,28 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
 - In-app drag types: `com.justjohn12345.videdit.transition.cross-dissolve` and
   `...audio-crossfade` (declared in project.yml / Info.plist, like the asset reference). The
   timeline's drops go through `TimelineDropDelegate` (assets and transitions).
+
+## Phase 6 review fix round (`2026-09-23-phase6-review.md`)
+- Linked transitions: with `FitToCut | IncludeLinked` each transition is fitted to its own cut
+  (the dissolve and the crossfade can differ in length); the note names each shortening
+  ("Shortened to …" for the requested one, "The linked clips' transition was shortened to …").
+  `ProjectStore.addTransition` always passes IncludeLinked for "Always" (and for "Ask" when there
+  is nothing to ask) and shows the engine's note, e.g. why the audio got no crossfade.
+- Paused/stepping/scrubbing monitors (`PlaybackController::frameSource`): a frame whose pictures
+  are still being decoded is held back ("unchanged") while the display's scrub request is in
+  flight, so the previous complete picture stays up; the first frame after `setSequence`, or a
+  frame whose request failed, is presented with what is available. `PresentedFrame` has
+  `heldBackFrameIndex`; test harnesses that wait for "exact" must also wait for it to be -1.
+  `VEPreviewView.missingLayerCount` is now set when a render takes a frame (it always describes
+  the frame `-snapshot` composites). `ProgramFrameProvider` (source monitor scrubbing) already
+  published only complete frames.
+- Editing preferences are observable: `ProjectStore.preferences` (`EditingPreferencesModel`,
+  mirrors of the three keys, re-read on `UserDefaults.didChangeNotification`; `revision` is a
+  redraw token) and its changes are forwarded to the store's `objectWillChange`. Read
+  `store.editingPreferences` (a snapshot) and format with `durationString` /
+  `shortDurationString`; a model object that shows durations outside a view observing the store
+  (like `SpeedDurationModel`) forwards `store.preferences.objectWillChange` itself. The export
+  sheet (phase 7) gets this for free if it observes the store.
+- The inspector sets the status line only for a note or a refusal (a plain success leaves it).
+- `VEClipParamsBatch` is `NS_SWIFT_UI_ACTOR` and asserts the main thread.
+- Removing a transition goes through `ProjectStore.removeTransition(_:)` (focus independent).
