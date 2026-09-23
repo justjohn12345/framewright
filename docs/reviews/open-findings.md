@@ -57,7 +57,7 @@ Layout / UX (redesign the default window):
    frame source to feed two `VEPreviewView`s (fan-out or a second source over the same clock) without double decoding.
 
 The 2026-09-23 full review's twelve facade/app findings and four scaffold items are fixed (see
-the history table in `README.md`; the 2026-09-23 full review (git history, commit 75d5e35) keeps the evidence, and the
+the history table in `README.md`; the 2026-09-23 full review (git history, commit f5190ea) keeps the evidence, and the
 regression tests are in `EngineTests/Facade/VEEngineReviewRegressionTests.mm`,
 `EngineTests/Media/DecodePoolTests.mm`, `EngineTests/Media/FrameCacheTests.mm`,
 `EngineTests/Facade/FacadeCommandsTests.cpp`, `AppTests/ReviewRegressionTests.swift` and
