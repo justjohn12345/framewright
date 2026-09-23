@@ -77,3 +77,26 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   call `releaseScratchMemory()` under memory pressure. Use `IMediaWriter::runPull` (pull mode) rather than push mode;
   `endStream(TrackKind)` when one stream ends early. Hardware encoders are size-dependent (H.264 hw not used at 8192x4320);
   the writer reports which it used.
+
+## Phase 6 (effects, transitions, inspector) additions
+- Facade: `beginCoalescingWithKey:mode:` (VECoalescingModeAccumulate for keyboard nudge bursts:
+  each edit applies on top of the last and merges into one step; only SequenceCommands merge,
+  so a CompositeCommand, e.g. a multi-clip speed change, is a step of its own even inside an
+  Accumulate group) and `coalescingKey` (end only your own group: check it before
+  `endCoalescing`). `ProjectStore.nudgeGroup` marks an open nudge burst, which
+  `isGestureActive` does not count as a gesture (the next command commits it first).
+- `VEClipParamsBatch` + `applyClipParams:` set several clips' parameters in one step (video
+  parameters only on video tracks, audio only on audio tracks; refused as a whole).
+- `transitionLimitFromClip:toClip:` / `transitionLimitForTransition:` (VETransitionLimit): the
+  longest centred transition a cut takes and a user-facing reason; transition add/resize
+  refusals now carry that reason and the longest allowed duration.
+  `addTransitionFromClip:toClip:duration:options:` fits to the cut and/or adds the linked
+  partners' transition in the same undo step.
+- `setSpeedNumerator:denominator:forClips:ripple:scope:`: several clips, explicit ripple choice.
+- App preferences (Settings > Editing, `EditingPreferences`): default transition duration,
+  linked crossfade (always/never/ask), duration display (timecode/frames/seconds; also what
+  `DurationFormat.parseFrames` assumes for a bare number). Export (phase 7) should show
+  durations through `ProjectStore.durationString` for consistency.
+- In-app drag types: `com.justjohn12345.videdit.transition.cross-dissolve` and
+  `...audio-crossfade` (declared in project.yml / Info.plist, like the asset reference). The
+  timeline's drops go through `TimelineDropDelegate` (assets and transitions).

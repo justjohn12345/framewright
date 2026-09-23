@@ -148,7 +148,8 @@ final class TimelineRedrawTests: XCTestCase {
         // Right end of the label band (no text there): the clip body colour.
         let videoBody = pixel(videoRect.maxX - 6, videoRect.minY + 4)
         XCTAssertGreaterThan(videoBody.b, videoBody.r + 0.2, "video clip body is painted blue: \(videoBody)")
-        let audioBody = pixel(audioRect.maxX - 6, audioRect.minY + 4)
+        // (Left of the fade-out handle, which sits in the top-right corner of audio clips.)
+        let audioBody = pixel(audioRect.maxX - 14, audioRect.minY + 4)
         XCTAssertGreaterThan(audioBody.g, audioBody.r + 0.15, "audio clip body is painted green: \(audioBody)")
         // Empty track space before the video clip is not.
         let empty = pixel(videoRect.minX - 20, videoRect.midY)
