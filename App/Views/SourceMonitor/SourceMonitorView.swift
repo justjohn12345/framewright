@@ -2,18 +2,18 @@ import CoreMedia
 import SwiftUI
 import VidEditEngine
 
-/// Source monitor: scrub the asset opened from the media bin, mark in/out (I/O keys or the
-/// buttons) and place it at the playhead with Insert or Overwrite.
-///
-/// The picture is a thumbnail at the scrub time sized to the monitor (good enough until the
-/// playback phase gives the source monitor its own frame source).
+/// Source monitor: the asset opened from the media bin in the engine's own Metal preview
+/// (decoded on the source monitor's lanes, nothing written to disk while scrubbing). Scrub with
+/// the slider, play with Space/J/K/L while the monitor has focus (click it), mark in/out
+/// (I/O keys or the buttons; snapped to the asset's frames) and place the marked range at the
+/// playhead with Insert or Overwrite. Times show at the asset's own frame rate.
 struct SourceMonitorView: View {
     @ObservedObject var store: ProjectStore
-    @ObservedObject var thumbnails: ThumbnailCache
+    @ObservedObject var playhead: PlayheadModel
 
     init(store: ProjectStore) {
         self.store = store
-        thumbnails = store.thumbnails
+        playhead = store.sourcePlayhead
     }
 
     var body: some View {
@@ -28,13 +28,25 @@ struct SourceMonitorView: View {
                         .truncationMode(.middle)
                 }
                 Spacer()
+                if store.focusArea == .sourceMonitor, currentAsset != nil {
+                    Text("Space/J/K/L play the source")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
-            GeometryReader { geometry in
-                picture(size: geometry.size)
-                    .frame(width: geometry.size.width, height: geometry.size.height)
+            ZStack {
+                PreviewViewRepresentable(isPlaying: playhead.isRunning,
+                                         configurationID: ObjectIdentifier(store)) { view in
+                    store.attachSourceView(view)
+                }
+                overlay
             }
             .background(Color.black)
             .clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay(RoundedRectangle(cornerRadius: 3)
+                .stroke(store.focusArea == .sourceMonitor ? Color.accentColor : .clear, lineWidth: 1.5))
+            .contentShape(Rectangle())
+            .onTapGesture { store.focusArea = .sourceMonitor }
             scrubber
             controls
         }
@@ -46,29 +58,10 @@ struct SourceMonitorView: View {
         store.source.assetID.flatMap { store.asset($0) }
     }
 
-    /// Scrub times are quantized to the asset's frames (or 1/30 s) so repeated scrubbing hits
-    /// the cache.
-    private var frameSeconds: Double {
-        let fd = currentAsset?.frameDuration.secondsOrZero ?? 0
-        return fd > 0 ? fd : 1.0 / 30.0
-    }
-
     @ViewBuilder
-    private func picture(size: CGSize) -> some View {
+    private var overlay: some View {
         if let asset = currentAsset {
-            if asset.hasVideo {
-                let _ = thumbnails.version
-                let maxDimension = min(1920, max(64, Int(max(size.width, size.height) * 2)))
-                let seconds = asset.isStill ? 0 : (store.source.time.secondsOrZero / frameSeconds).rounded() * frameSeconds
-                if let image = thumbnails.image(asset: asset.assetID, seconds: seconds, maxDimension: maxDimension)
-                    ?? thumbnails.anyImage(asset: asset.assetID, maxDimension: maxDimension) {
-                    Image(decorative: image, scale: 1)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                } else {
-                    ProgressView()
-                }
-            } else {
+            if !asset.hasVideo {
                 Image(systemName: "waveform")
                     .font(.system(size: 40))
                     .foregroundStyle(.green)
@@ -83,8 +76,11 @@ struct SourceMonitorView: View {
     private var scrubber: some View {
         let duration = max(store.sourceDuration.secondsOrZero, 0.001)
         let binding = Binding<Double>(
-            get: { store.source.time.secondsOrZero },
-            set: { store.source.time = CMTime(seconds: $0, preferredTimescale: 600) }
+            get: { playhead.time.secondsOrZero },
+            set: { seconds in
+                store.focusArea = .sourceMonitor
+                store.scrubSource(to: CMTime(seconds: seconds, preferredTimescale: 600_000))
+            }
         )
         return VStack(spacing: 2) {
             GeometryReader { geometry in
@@ -111,13 +107,21 @@ struct SourceMonitorView: View {
     }
 
     private var controls: some View {
-        VStack(spacing: 4) {
+        let frameDuration = store.sourceFrameDuration
+        return VStack(spacing: 4) {
             HStack(spacing: 8) {
-                Text(Timecode.string(store.source.time, frameDuration: store.frameDuration))
+                Text(Timecode.string(playhead.time, frameDuration: frameDuration))
                     .font(.caption.monospacedDigit())
                     .fixedSize()
+                    .accessibilityIdentifier("SourceTimecode")
+                Button { store.focusArea = .sourceMonitor; store.playbackActions.togglePlay() } label: {
+                    Image(systemName: playhead.isRunning ? "pause.fill" : "play.fill")
+                }
+                .buttonStyle(.borderless)
+                .disabled(currentAsset == nil || currentAsset?.isStill == true)
+                .help("Play/Pause the source (Space while the source monitor has focus)")
                 Spacer(minLength: 4)
-                Text("Marked \(markedDuration)")
+                Text("Marked \(markedDuration(frameDuration: frameDuration))")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .fixedSize()
@@ -142,9 +146,9 @@ struct SourceMonitorView: View {
         .disabled(currentAsset == nil)
     }
 
-    private var markedDuration: String {
-        let start = store.source.inPoint?.secondsOrZero ?? 0
-        let end = store.source.outPoint?.secondsOrZero ?? store.sourceDuration.secondsOrZero
-        return Timecode.duration(CMTime(seconds: max(0, end - start), preferredTimescale: 600))
+    private func markedDuration(frameDuration: CMTime) -> String {
+        let start = store.source.inPoint ?? .zero
+        let end = store.source.outPoint ?? store.sourceDuration
+        return Timecode.string(CMTimeMaximum(.zero, CMTimeSubtract(end, start)), frameDuration: frameDuration)
     }
 }

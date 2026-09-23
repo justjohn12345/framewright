@@ -33,12 +33,13 @@ struct VidEditApp: App {
     }
 }
 
-/// Menu bar commands. Bare-key shortcuts (Space, J/K/L, arrows, Delete, I/O) are handled by
-/// `KeyboardController` so they never steal keys from text fields; the menu items below show
-/// them for discoverability.
+/// Menu bar commands. Bare-key shortcuts (Space, J/K/L, arrows, Home/End, Delete, I/O) are
+/// handled by `KeyboardController` so they never steal keys from text fields; the menu items
+/// below show them for discoverability.
 struct AppCommands: Commands {
     @ObservedObject var store: ProjectStore
     @ObservedObject var documents: DocumentController
+    @AppStorage(PlaybackHUD.defaultsKey) private var showPlaybackHUD = false
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -79,6 +80,8 @@ struct AppCommands: Commands {
         CommandMenu("Clip") {
             Button("Split at Playhead") { store.splitAtPlayhead() }
                 .keyboardShortcut("k")
+            Button("Split at Playhead, Removing Transitions") { store.splitAtPlayhead(breakingTransitions: true) }
+                .keyboardShortcut("k", modifiers: [.command, .option])
             Button("Delete  ⌫") { store.deleteSelection(ripple: false) }
                 .disabled(store.selection.isEmpty && store.selectedTransitionID == nil)
             Button("Ripple Delete  ⇧⌫") { store.deleteSelection(ripple: true) }
@@ -95,12 +98,22 @@ struct AppCommands: Commands {
         }
         CommandMenu("Playback") {
             Button("Play / Pause  Space") { store.playbackActions.togglePlay() }
-            Button("Previous Frame  ←") { store.stepFrames(-1) }
-            Button("Next Frame  →") { store.stepFrames(1) }
-            Button("Go to Start") { store.playheadTime = .zero }
-            Button("Go to End") { store.playheadTime = store.sequence.duration }
+            Button("Play Backwards  J") { store.playbackActions.shuttleReverse() }
+            Button("Stop  K") { store.playbackActions.shuttleStop() }
+            Button("Play Forwards  L") { store.playbackActions.shuttleForward() }
+            Divider()
+            Button("Previous Frame  ←") { store.playbackActions.stepFrames(-1) }
+            Button("Next Frame  →") { store.playbackActions.stepFrames(1) }
+            Button("Go to Start  Home") { store.playbackActions.goToStart() }
+            Button("Go to End  End") { store.playbackActions.goToEnd() }
+            Divider()
+            Button("Mute Audio") { store.engine.isMuted.toggle() }
+                .keyboardShortcut("m", modifiers: [.command, .option])
         }
         CommandGroup(after: .toolbar) {
+            Toggle("Show Playback HUD", isOn: $showPlaybackHUD)
+                .keyboardShortcut("h", modifiers: [.command, .option])
+            Divider()
             Button("Zoom In") { store.zoomIn() }
                 .keyboardShortcut("=")
             Button("Zoom Out") { store.zoomOut() }

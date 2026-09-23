@@ -6,6 +6,9 @@ enum Preferences {
     static let preferredBackendKey = "preferredBackend"
     static let frameCacheMegabytesKey = "frameCacheMegabytes"
     static let defaultFrameCacheMegabytes = 512
+    /// "all" (every unlocked track, falling back to the synced tracks when another track is in
+    /// the way) or "synced" (only the edited clips' tracks and their linked partners').
+    static let rippleScopeKey = "rippleScope"
 
     @MainActor
     static func apply(to engine: VEEngine, defaults: UserDefaults = .standard) {
@@ -13,6 +16,7 @@ enum Preferences {
         engine.preferredBackend = backend.isEmpty ? nil : backend
         let megabytes = defaults.integer(forKey: frameCacheMegabytesKey)
         engine.frameCacheBudgetBytes = UInt(megabytes > 0 ? megabytes : defaultFrameCacheMegabytes) << 20
+        engine.rippleScope = defaults.string(forKey: rippleScopeKey) == "synced" ? .syncedTracks : .allTracks
     }
 }
 
@@ -21,6 +25,7 @@ struct PreferencesView: View {
     let engine: VEEngine
     @AppStorage(Preferences.preferredBackendKey) private var preferredBackend = ""
     @AppStorage(Preferences.frameCacheMegabytesKey) private var frameCacheMegabytes = Preferences.defaultFrameCacheMegabytes
+    @AppStorage(Preferences.rippleScopeKey) private var rippleScope = "all"
 
     var body: some View {
         TabView {
@@ -28,6 +33,8 @@ struct PreferencesView: View {
                 .tabItem { Label("Hardware", systemImage: "cpu") }
             mediaTab
                 .tabItem { Label("Media", systemImage: "film") }
+            editingTab
+                .tabItem { Label("Editing", systemImage: "scissors") }
         }
         .frame(width: 560, height: 360)
         .padding()
@@ -66,6 +73,23 @@ struct PreferencesView: View {
                 }
             }
             .onChange(of: frameCacheMegabytes) { _, _ in Preferences.apply(to: engine) }
+        }
+    }
+}
+
+extension PreferencesView {
+    fileprivate var editingTab: some View {
+        Form {
+            Picker("Ripple edits move", selection: $rippleScope) {
+                Text("All tracks (keeps everything in sync)").tag("all")
+                Text("Only the edited clips’ tracks").tag("synced")
+            }
+            .onChange(of: rippleScope) { _, _ in Preferences.apply(to: engine) }
+            Text("Ripple delete, speed changes and inserts shift later clips. With All tracks, when another "
+                + "track has a clip in the way the edit ripples only the edited clips’ tracks and says so.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

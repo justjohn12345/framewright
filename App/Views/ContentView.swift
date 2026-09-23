@@ -44,7 +44,7 @@ struct ContentView: View {
         .frame(minWidth: 1100, minHeight: 640)
         .background(
             WindowAccessor(title: store.projectName, representedURL: store.projectURL, isEdited: store.isDirty,
-                           shouldClose: { documents.confirmDiscardingChanges() })
+                           shouldClose: { documents.confirmClosingWindow() })
         )
     }
 
@@ -60,11 +60,9 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            ProgramMonitorView { view in
-                store.attachProgramView(view)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 3))
-            .accessibilityIdentifier("ProgramMonitor")
+            ProgramMonitorHost(store: store, playhead: store.playhead)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+                .accessibilityIdentifier("ProgramMonitor")
         }
         .padding(8)
     }

@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Combine
 import VidEditEngine
@@ -58,9 +59,9 @@ final class ProjectStoreTests: XCTestCase {
 
         // Source monitor: mark 0.5...1.5 s and insert at the playhead on V1.
         store.showInSourceMonitor(movie.assetID)
-        store.source.time = CMTime(value: 15, timescale: 30)
+        store.sourceTime = CMTime(value: 15, timescale: 30)
         store.markSourceIn()
-        store.source.time = CMTime(value: 45, timescale: 30)
+        store.sourceTime = CMTime(value: 45, timescale: 30)
         store.markSourceOut()
         store.placeSource(overwrite: false)
         XCTAssertNil(store.statusMessage)
@@ -193,13 +194,100 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertNil(KeyboardController.action(keyCode: 6, characters: "z", modifiers: .command))
     }
 
-    func testPlaybackHookReceivesTransportRequests() {
+    func testKeyboardFocusRulesAndTransportKeys() {
+        XCTAssertEqual(KeyboardController.action(keyCode: 115, characters: "", modifiers: []), .goToStart)
+        XCTAssertEqual(KeyboardController.action(keyCode: 119, characters: "", modifiers: []), .goToEnd)
+        XCTAssertNil(KeyboardController.action(keyCode: 123, characters: "", modifiers: .shift))
+        XCTAssertTrue(KeyboardController.shouldHandleKeys(firstResponder: nil))
+        XCTAssertTrue(KeyboardController.shouldHandleKeys(firstResponder: NSView()))
+        XCTAssertTrue(KeyboardController.shouldHandleKeys(firstResponder: NSWindow()))
+        XCTAssertFalse(KeyboardController.shouldHandleKeys(firstResponder: NSTextView()), "text being edited")
+        XCTAssertFalse(KeyboardController.shouldHandleKeys(firstResponder: NSSlider()),
+                       "a focused slider uses the arrows")
+        XCTAssertFalse(KeyboardController.shouldHandleKeys(firstResponder: NSButton()), "a focused button uses Space")
+        XCTAssertFalse(KeyboardController.shouldHandleKeys(firstResponder: NSTableView()))
+        XCTAssertFalse(KeyboardController.shouldHandleKeys(firstResponder: NSCollectionView()))
+    }
+
+    func testPlaybackStateTransitionsThroughTheStore() async throws {
         let store = makeStore()
-        let keyboard = KeyboardController(store: store)
-        keyboard.perform(.togglePlay, on: store)
-        keyboard.perform(.shuttleForward, on: store)
-        let placeholder = store.playbackActions as? PlaybackActionsPlaceholder
-        XCTAssertEqual(placeholder?.requests, ["toggle", "forward"])
+        _ = await importAll(store)
+        let movie = try XCTUnwrap(store.assets.first { $0.hasVideo })
+        let tone = try XCTUnwrap(store.assets.first { $0.name == "tone.wav" })
+        XCTAssertTrue(store.place(asset: movie.assetID, at: .zero, videoTrack: store.targetVideoTrackID,
+                                  audioTrack: 0, overwrite: true))
+        XCTAssertTrue(store.place(asset: tone.assetID, at: .zero, videoTrack: 0,
+                                  audioTrack: store.targetAudioTrackID, overwrite: true))
+        let actions = store.playbackActions
+        XCTAssertFalse(actions.isPlaying)
+
+        // Space: pre-roll, then playing; the playhead follows the engine.
+        store.focusArea = .timeline
+        actions.togglePlay()
+        do {
+            let reached = await StoreFixture.wait(until: { store.playhead.state == .playing }, timeout: 10)
+            XCTAssertTrue(reached, "\(store.playhead.state)")
+        }
+        XCTAssertTrue(actions.isPlaying)
+        do {
+            let reached = await StoreFixture.wait(until: { store.playhead.time.seconds > 0.3 }, timeout: 5)
+            XCTAssertTrue(reached)
+        }
+        XCTAssertGreaterThan(store.playhead.timeUpdates, 3)
+        // L doubles, J turns around, K stops.
+        actions.shuttleForward()
+        XCTAssertEqual(store.engine.playbackRate, 2, "L while playing forward at 1x")
+        actions.shuttleForward()
+        XCTAssertEqual(store.engine.playbackRate, 4)
+        actions.shuttleReverse()
+        XCTAssertEqual(store.engine.playbackRate, -1)
+        actions.shuttleStop()
+        XCTAssertEqual(store.engine.playbackState, .stopped)
+        do {
+            let reached = await StoreFixture.wait(until: { store.playhead.state == .stopped }, timeout: 5)
+            XCTAssertTrue(reached)
+        }
+        XCTAssertFalse(actions.isPlaying)
+
+        // Setting the playhead while stopped seeks.
+        store.playheadTime = CMTime(value: 1, timescale: 1)
+        XCTAssertEqual(store.engine.currentTime, CMTime(value: 30, timescale: 30))
+        XCTAssertEqual(store.playheadTime, CMTime(value: 1, timescale: 1))
+        // Arrows step frames; Home/End go to the ends (End: the last frame).
+        actions.stepFrames(1)
+        XCTAssertEqual(store.playheadTime, CMTime(value: 31, timescale: 30))
+        actions.goToEnd()
+        XCTAssertEqual(store.engine.currentTime, CMTimeSubtract(store.sequence.duration, store.frameDuration))
+        actions.goToStart()
+        XCTAssertEqual(store.engine.currentTime, .zero)
+        // Ruler scrub: silent frames, stopped again on release.
+        store.scrub(toSeconds: 0.5)
+        XCTAssertEqual(store.engine.playbackState, .scrubbing)
+        store.endScrub()
+        XCTAssertEqual(store.engine.playbackState, .stopped)
+        XCTAssertEqual(store.playheadTime, CMTime(value: 15, timescale: 30))
+
+        // The source monitor: its own transport while it has focus; in/out on the asset's frames.
+        store.showInSourceMonitor(movie.assetID)
+        XCTAssertEqual(store.focusArea, .sourceMonitor)
+        store.sourceTime = CMTime(seconds: 0.51, preferredTimescale: 600)
+        XCTAssertEqual(store.sourceTime, CMTime(value: 15, timescale: 30), "snapped down to the asset's frame grid")
+        store.markSourceIn()
+        XCTAssertEqual(store.source.inPoint, CMTime(value: 15, timescale: 30))
+        actions.togglePlay()
+        do {
+            let reached = await StoreFixture.wait(until: { store.sourcePlayhead.state == .playing }, timeout: 10)
+            XCTAssertTrue(reached)
+        }
+        XCTAssertEqual(store.playhead.state, .stopped, "the program monitor does not play")
+        XCTAssertTrue(actions.isPlaying)
+        actions.shuttleStop()
+        do {
+            let reached = await StoreFixture.wait(until: { store.sourcePlayhead.state == .stopped }, timeout: 5)
+            XCTAssertTrue(reached)
+        }
+        store.focusArea = .timeline
+        XCTAssertFalse(actions.isPlaying)
     }
 
     func testTimecodeFormatting() {

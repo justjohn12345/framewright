@@ -58,8 +58,14 @@ private struct ClipInspector: View {
                 if !clip.isStill {
                     row("Source In", Timecode.duration(clip.sourceIn))
                     row("Source Out", Timecode.duration(clip.sourceOut))
-                    NumberField(label: "Speed %", value: clip.speed * 100, range: 1 ... 10000) { percent in
-                        store.report(store.engine.setSpeed(percent / 100, forClip: clip.clipID))
+                    SpeedField(numerator: clip.speedNumerator, denominator: clip.speedDenominator) { parsed in
+                        switch parsed {
+                        case let .fraction(numerator, denominator):
+                            store.report(store.engine.setSpeedNumerator(numerator, denominator: denominator,
+                                                                        forClip: clip.clipID))
+                        case let .decimal(value):
+                            store.report(store.engine.setSpeed(value, forClip: clip.clipID))
+                        }
                     }
                 }
                 HStack {
@@ -227,6 +233,50 @@ struct AssetDetailsView: View {
         case .audioVideo: return "Video + audio"
         @unknown default: return "Media"
         }
+    }
+}
+
+/// Clip speed as a multiplier: shows the exact value ("0.5", "2", "1/3") and accepts a decimal
+/// (approximated by the engine to a fraction with a denominator up to 1000) or a fraction.
+struct SpeedField: View {
+    let numerator: Int64
+    let denominator: Int64
+    let commit: (SpeedFormat.Parsed) -> Void
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    private var formatted: String {
+        SpeedFormat.multiplier(numerator: numerator, denominator: denominator)
+    }
+
+    var body: some View {
+        HStack {
+            Text("Speed ×")
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(SpeedFormat.percent(Double(numerator) / Double(max(denominator, 1))))
+                .foregroundStyle(.tertiary)
+            TextField("Speed", text: $text)
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 80)
+                .focused($focused)
+                .onSubmit {
+                    if let parsed = SpeedFormat.parseMultiplier(text) {
+                        commit(parsed)
+                    }
+                    text = formatted
+                }
+                .onAppear { text = formatted }
+                .onChange(of: formatted) { _, newValue in
+                    if !focused { text = newValue }
+                }
+                .onChange(of: focused) { _, isFocused in
+                    if !isFocused { text = formatted }
+                }
+                .help("A multiplier: 0.5 plays at half speed, 2 at double; fractions like 1/3 are exact")
+        }
+        .font(.caption)
     }
 }
 

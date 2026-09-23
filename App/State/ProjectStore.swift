@@ -4,45 +4,48 @@ import CoreMedia
 import Foundation
 import VidEditEngine
 
-/// Source monitor state: the asset shown, the scrub position and the in/out marks.
+/// Source monitor state: the asset shown and the in/out marks (on the asset's frame grid). The
+/// position lives in `ProjectStore.sourcePlayhead`.
 struct SourceMonitorState: Equatable {
     var assetID: VEAssetID?
-    var time: CMTime = .zero
     var inPoint: CMTime?
     var outPoint: CMTime?
 }
 
-/// Which panel the user worked in last (decides what Delete removes).
+/// Which panel the user worked in last (decides what Delete removes and which monitor the
+/// transport keys drive).
 enum FocusArea {
     case timeline
     case mediaBin
+    case sourceMonitor
 }
 
 /// The app's single source of truth over the engine (`VEEngine`).
 ///
 /// It republishes engine snapshots (sequence, tracks, clips, assets, undo state) whenever the
-/// engine's model changes, and owns UI state: selection, playhead, zoom/scroll, the source
-/// monitor and track targeting. Every edit goes through the engine; a refused edit leaves a
-/// message in `statusMessage`.
-///
-/// PLAYBACK INTEGRATION POINTS
-/// - `playheadTime` is owned and published here. The playback controller should drive it while
-///   playing (and observe it for seeks when stopped).
-/// - `playbackActions` receives play/pause/J/K/L; replace the placeholder with the controller.
-/// - `attachProgramView(_:)` hands the program monitor's `VEPreviewView` to the engine, which
-///   installs the still-frame source; the playback controller installs its own source there.
+/// engine's model changes, and owns UI state: selection, the source monitor and track
+/// targeting. State that changes at the display rate is published by separate objects so it
+/// never invalidates views that do not show it: `playhead` / `sourcePlayhead` (position and
+/// transport state, driven by the engine's playback notifications) and `viewport` (timeline
+/// zoom and scroll). Every edit goes through the engine; a refused edit leaves a message in
+/// `statusMessage`.
 @MainActor
 final class ProjectStore: ObservableObject {
     let engine: VEEngine
     let thumbnails: ThumbnailCache
     let waveforms: WaveformCache
-    var playbackActions: PlaybackActions = PlaybackActionsPlaceholder()
+    let playhead = PlayheadModel()
+    let sourcePlayhead = PlayheadModel()
+    let viewport = TimelineViewport()
+    private(set) lazy var playbackActions: PlaybackActions = EnginePlaybackActions(store: self)
 
     // Engine snapshots.
     @Published private(set) var sequence: VESequenceInfo
     @Published private(set) var tracks: [VETrackInfo] = []
     @Published private(set) var clips: [VEClipID: VEClipInfo] = [:]
     @Published private(set) var assets: [VEAssetInfo] = []
+    /// `assets` by id (rebuilt with `assets`).
+    private(set) var assetsByID: [VEAssetID: VEAssetInfo] = [:]
     @Published private(set) var changeCount: UInt64 = 0
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
@@ -57,22 +60,11 @@ final class ProjectStore: ObservableObject {
     @Published var selection: Set<VEClipID> = []
     @Published var selectedAssetID: VEAssetID?
     @Published var selectedTransitionID: VETransitionID?
-    @Published var playheadTime: CMTime = .zero {
-        didSet {
-            if playheadTime != oldValue {
-                engine.showProgramFrame(at: playheadTime)
-            }
-        }
-    }
-
-    @Published var pixelsPerSecond: Double = 50
-    @Published var scrollX: CGFloat = 0
-    @Published var scrollY: CGFloat = 0
-    @Published var source = SourceMonitorState()
+    @Published private(set) var source = SourceMonitorState()
     @Published var targetVideoTrackID: VETrackID = 0
     @Published var targetAudioTrackID: VETrackID = 0
     @Published var focusArea: FocusArea = .timeline
-    /// Last refused edit or import problem, shown in the transport bar.
+    /// Last refused edit, edit note or import problem, shown in the transport bar.
     @Published var statusMessage: String?
     /// The snap line shown while dragging (seconds), or nil.
     @Published var snapIndicator: Double?
@@ -83,6 +75,10 @@ final class ProjectStore: ObservableObject {
     /// Cancels the timeline gesture in progress (set by the timeline while dragging).
     var cancelActiveGesture: (() -> Void)?
 
+    /// Number of times the timeline's content model was rebuilt (once per model change;
+    /// diagnostics and tests).
+    private(set) var timelineBuildCount = 0
+    private var cachedTimeline: (changeCount: UInt64, model: TimelineViewModel)?
     private var observers: [NSObjectProtocol] = []
 
     init(engine: VEEngine = VEEngine()) {
@@ -91,14 +87,35 @@ final class ProjectStore: ObservableObject {
         waveforms = WaveformCache(engine: engine)
         sequence = engine.sequence
         let center = NotificationCenter.default
-        observers.append(center.addObserver(forName: .VEEngineModelDidChange, object: engine, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshModel() }
-        })
-        observers.append(center.addObserver(forName: .VEEngineAssetsDidChange, object: engine, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshAssets() }
-        })
+        func observe(_ name: Notification.Name, _ handler: @escaping @MainActor (ProjectStore, Notification) -> Void) {
+            observers.append(center.addObserver(forName: name, object: engine, queue: .main) { [weak self] note in
+                // Delivered on the main queue.
+                nonisolated(unsafe) let received = note
+                MainActor.assumeIsolated {
+                    if let self { handler(self, received) }
+                }
+            })
+        }
+        observe(.VEEngineModelDidChange) { store, _ in store.refreshModel() }
+        observe(.VEEngineAssetsDidChange) { store, _ in store.refreshAssets() }
+        observe(.VEEnginePlaybackDidChange) { store, note in
+            if let status = note.userInfo?[VEEnginePlaybackStatusKey] as? VEPlaybackStatus {
+                store.playhead.apply(status)
+            }
+        }
+        observe(.VEEngineSourcePlaybackDidChange) { store, note in
+            if let status = note.userInfo?[VEEnginePlaybackStatusKey] as? VEPlaybackStatus {
+                store.sourcePlayhead.apply(status)
+            }
+        }
+        observe(.VEEngineMemoryPressure) { store, note in
+            let critical = (note.userInfo?[VEEngineCriticalKey] as? NSNumber)?.boolValue ?? false
+            store.thumbnails.handleMemoryPressure(critical: critical)
+            store.waveforms.handleMemoryPressure(critical: critical)
+        }
         refreshAssets()
         refreshModel()
+        playhead.apply(engine.playbackStatus)
     }
 
     deinit {
@@ -118,7 +135,8 @@ final class ProjectStore: ObservableObject {
             byID[clip.clipID] = clip
         }
         clips = byID
-        selection = selection.filter { byID[$0] != nil }
+        let kept = selection.filter { byID[$0] != nil }
+        if kept != selection { selection = kept }
         if let transition = selectedTransitionID, engine.transitionInfo(transition) == nil {
             selectedTransitionID = nil
         }
@@ -137,14 +155,19 @@ final class ProjectStore: ObservableObject {
     }
 
     func refreshAssets() {
-        assets = engine.allAssets
-        let ids = Set(assets.map(\.assetID))
+        let fresh = engine.allAssets
+        assetsByID = Dictionary(fresh.map { ($0.assetID, $0) }, uniquingKeysWith: { first, _ in first })
+        assets = fresh
+        let ids = Set(assetsByID.keys)
         if let selected = selectedAssetID, !ids.contains(selected) { selectedAssetID = nil }
-        if let shown = source.assetID, !ids.contains(shown) { source = SourceMonitorState() }
+        if let shown = source.assetID, !ids.contains(shown) {
+            source = SourceMonitorState()
+            sourcePlayhead.reset()
+        }
     }
 
     func asset(_ id: VEAssetID) -> VEAssetInfo? {
-        assets.first { $0.assetID == id }
+        assetsByID[id]
     }
 
     func track(_ id: VETrackID) -> VETrackInfo? {
@@ -160,14 +183,24 @@ final class ProjectStore: ObservableObject {
         selection.compactMap { clips[$0] }.sorted { $0.timelineStart < $1.timelineStart }
     }
 
-    /// The geometry model for the timeline at the current zoom and scroll.
+    /// The geometry model for the timeline at the current zoom, scroll and playhead. Its content
+    /// (tracks, clips, transitions) is built once per model change and reused.
     var timelineModel: TimelineViewModel {
+        var model = timelineContent
+        model.pixelsPerSecond = viewport.pixelsPerSecond
+        model.scrollX = viewport.scrollX
+        model.scrollY = viewport.scrollY
+        model.playhead = playhead.time.secondsOrZero
+        return model
+    }
+
+    private var timelineContent: TimelineViewModel {
+        if let cached = cachedTimeline, cached.changeCount == changeCount {
+            return cached.model
+        }
+        timelineBuildCount += 1
         var model = TimelineViewModel()
-        model.pixelsPerSecond = pixelsPerSecond
-        model.scrollX = scrollX
-        model.scrollY = scrollY
         model.frameSeconds = frameDuration.secondsOrZero
-        model.playhead = playheadTime.secondsOrZero
         model.tracks = tracks.map {
             TimelineViewModel.Track(id: $0.trackID, kind: $0.kind == .video ? .video : .audio, index: $0.index,
                                     name: $0.name, muted: $0.muted, solo: $0.solo, locked: $0.locked)
@@ -182,6 +215,7 @@ final class ProjectStore: ObservableObject {
             TimelineViewModel.Transition(id: $0.transitionID, trackID: $0.trackID, start: $0.start.secondsOrZero,
                                          end: $0.end.secondsOrZero)
         }
+        cachedTimeline = (changeCount, model)
         return model
     }
 
@@ -192,39 +226,95 @@ final class ProjectStore: ObservableObject {
 
     // MARK: Edit helpers
 
-    /// Reports a refused edit; returns whether it succeeded.
+    /// Reports a refused edit (or a successful edit's note); returns whether it succeeded.
     @discardableResult
     func report(_ result: VEEditResult) -> Bool {
-        statusMessage = result.ok ? nil : result.message
+        if result.ok {
+            statusMessage = result.note.isEmpty ? nil : result.note
+        } else {
+            statusMessage = result.message
+        }
         return result.ok
     }
 
+    /// Cmd+Z: during a drag it only cancels the drag (the drag was never committed, so there is
+    /// nothing else to undo).
     func undo() {
-        cancelActiveGesture?()
+        if let cancel = cancelActiveGesture {
+            cancel()
+            return
+        }
         _ = engine.undo()
     }
 
     func redo() {
-        cancelActiveGesture?()
+        if let cancel = cancelActiveGesture {
+            cancel()
+            return
+        }
         _ = engine.redo()
     }
 
-    // MARK: Program monitor
+    // MARK: Monitors
 
     func attachProgramView(_ view: VEPreviewView) {
         engine.attachProgramView(view)
-        engine.showProgramFrame(at: playheadTime)
+    }
+
+    func attachSourceView(_ view: VEPreviewView) {
+        engine.attachSourceView(view)
+        if let id = source.assetID {
+            engine.sourceMonitorShowAsset(id, at: sourcePlayhead.time)
+        }
     }
 
     // MARK: Playhead and zoom
 
+    /// The program playhead. Setting it seeks (while stopped the monitor shows that frame; while
+    /// playing, playback continues from there).
+    var playheadTime: CMTime {
+        get { playhead.time }
+        set {
+            let time = CMTimeMaximum(.zero, newValue.isNumeric ? newValue : .zero)
+            playhead.setTime(time)
+            engine.seek(to: time)
+        }
+    }
+
     func stepFrames(_ count: Int) {
-        let target = CMTimeAdd(playheadTime, CMTimeMultiply(frameDuration, multiplier: Int32(count)))
-        playheadTime = CMTimeMaximum(.zero, target)
+        engine.stepFrames(count)
+        playhead.setTime(engine.currentTime)
     }
 
     func setPlayhead(seconds: Double) {
         playheadTime = frameTime(seconds)
+    }
+
+    /// Ruler drag: shows frames as fast as they decode, silently; `endScrub()` on release.
+    func scrub(toSeconds seconds: Double) {
+        let time = frameTime(seconds)
+        playhead.setTime(time)
+        engine.scrub(to: time)
+    }
+
+    func endScrub() {
+        engine.endScrub()
+        playhead.setTime(engine.currentTime)
+    }
+
+    var pixelsPerSecond: Double {
+        get { viewport.pixelsPerSecond }
+        set { viewport.pixelsPerSecond = newValue }
+    }
+
+    var scrollX: CGFloat {
+        get { viewport.scrollX }
+        set { viewport.scrollX = newValue }
+    }
+
+    var scrollY: CGFloat {
+        get { viewport.scrollY }
+        set { viewport.scrollY = newValue }
     }
 
     func zoom(by factor: Double, anchorX: CGFloat = 0) {
@@ -269,12 +359,19 @@ final class ProjectStore: ObservableObject {
     // MARK: Timeline edits
 
     /// Cmd+K: splits the selected clips at the playhead, or every clip under it on unlocked
-    /// tracks when nothing selected spans the playhead.
-    func splitAtPlayhead() {
+    /// tracks when nothing selected spans the playhead. `breakingTransitions` removes a
+    /// transition around the playhead instead of refusing.
+    func splitAtPlayhead(breakingTransitions: Bool = false) {
         let t = playheadTime
         let spanning = selectedClips.filter { $0.timelineStart < t && t < $0.timelineEnd }
         let ids = spanning.map { NSNumber(value: $0.clipID) }
-        report(engine.splitClips(ids, at: t))
+        let result = engine.splitClips(ids, at: t, breakingTransitions: breakingTransitions)
+        if !result.ok, result.errorCode == .insideTransition {
+            statusMessage = "The playhead is inside a transition. "
+                + "Use Split at Playhead, Removing Transitions (⌥⌘K) to split it anyway."
+            return
+        }
+        report(result)
     }
 
     func deleteSelection(ripple: Bool) {
@@ -300,11 +397,11 @@ final class ProjectStore: ObservableObject {
     func addCrossDissolveAtPlayhead() {
         let trackID = selectedClips.first?.trackID ?? targetVideoTrackID
         let onTrack = clips.values.filter { $0.trackID == trackID }.sorted { $0.timelineStart < $1.timelineStart }
-        let playhead = playheadTime.secondsOrZero
+        let playheadSeconds = playheadTime.secondsOrZero
         var best: (VEClipInfo, VEClipInfo)?
         var bestDistance = Double.infinity
         for (from, to) in zip(onTrack, onTrack.dropFirst()) where from.timelineEnd == to.timelineStart {
-            let distance = abs(from.timelineEnd.secondsOrZero - playhead)
+            let distance = abs(from.timelineEnd.secondsOrZero - playheadSeconds)
             if distance < bestDistance {
                 best = (from, to)
                 bestDistance = distance
@@ -378,8 +475,19 @@ final class ProjectStore: ObservableObject {
         guard asset(id) != nil else { return }
         if source.assetID != id {
             source = SourceMonitorState(assetID: id)
+            sourcePlayhead.reset()
+            engine.sourceMonitorShowAsset(id, at: .zero)
         }
         selectedAssetID = id
+        focusArea = .sourceMonitor
+    }
+
+    /// The source monitor's frame duration: the asset's nominal one (the sequence's for stills
+    /// and audio).
+    var sourceFrameDuration: CMTime {
+        guard let id = source.assetID, let info = asset(id), info.hasVideo, !info.isStill,
+              info.frameDuration.isNumeric, info.frameDuration.seconds > 0 else { return frameDuration }
+        return info.frameDuration
     }
 
     /// Length of the source monitor's asset (stills: the default still duration).
@@ -388,16 +496,32 @@ final class ProjectStore: ObservableObject {
         return info.isStill ? CMTime(value: 5, timescale: 1) : info.duration
     }
 
+    /// The source monitor's position (on the asset's frame grid). Setting it scrubs.
+    var sourceTime: CMTime {
+        get { sourcePlayhead.time }
+        set { scrubSource(to: newValue) }
+    }
+
+    /// Shows the source asset at `time`, snapped down to its frame grid.
+    func scrubSource(to time: CMTime) {
+        guard let id = source.assetID else { return }
+        let snapped = engine.frameTime(forAsset: id, at: CMTimeMaximum(.zero, time))
+        sourcePlayhead.setTime(snapped)
+        engine.sourceMonitorShowAsset(id, at: snapped)
+    }
+
     func markSourceIn() {
-        guard source.assetID != nil else { return }
-        source.inPoint = source.time
-        if let out = source.outPoint, out <= source.time { source.outPoint = nil }
+        guard let id = source.assetID else { return }
+        let time = engine.frameTime(forAsset: id, at: engine.sourceMonitorTime)
+        source.inPoint = time
+        if let out = source.outPoint, out <= time { source.outPoint = nil }
     }
 
     func markSourceOut() {
-        guard source.assetID != nil else { return }
-        source.outPoint = source.time
-        if let inPoint = source.inPoint, inPoint >= source.time { source.inPoint = nil }
+        guard let id = source.assetID else { return }
+        let time = engine.frameTime(forAsset: id, at: engine.sourceMonitorTime)
+        source.outPoint = time
+        if let inPoint = source.inPoint, inPoint >= time { source.inPoint = nil }
     }
 
     /// Insert / Overwrite from the source monitor at the playhead on the target tracks.
@@ -457,6 +581,8 @@ final class ProjectStore: ObservableObject {
         let missing = engine.missingAssetIDs.count
         if missing > 0 {
             statusMessage = missing == 1 ? "1 media file could not be found." : "\(missing) media files could not be found."
+        } else if !engine.loadWarnings.isEmpty {
+            statusMessage = "The project was adjusted to load: " + engine.loadWarnings.joined(separator: "; ")
         }
     }
 
@@ -472,7 +598,8 @@ final class ProjectStore: ObservableObject {
         selection = []
         selectedAssetID = nil
         source = SourceMonitorState()
-        playheadTime = .zero
+        sourcePlayhead.reset()
+        playhead.apply(engine.playbackStatus)
         scrollX = 0
         scrollY = 0
         statusMessage = nil

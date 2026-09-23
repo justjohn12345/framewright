@@ -92,23 +92,36 @@ struct TimelineViewModel: Equatable {
     /// Sequence frame duration in seconds (for snapping to the frame grid).
     var frameSeconds: Double = 1.0 / 30.0
     var playhead: Double = 0
-    var tracks: [Track] = []
-    var clips: [Clip] = []
+    var tracks: [Track] = [] {
+        didSet { trackLayouts = Self.layouts(for: tracks) }
+    }
+
+    var clips: [Clip] = [] {
+        didSet {
+            clipIndex = Dictionary(clips.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        }
+    }
+
     var transitions: [Transition] = []
+
+    /// Rows in display order with their geometry (derived from `tracks`, computed once per change).
+    private(set) var trackLayouts: [TrackLayout] = []
+    /// Index of each clip in `clips` (derived).
+    private var clipIndex: [Int64: Int] = [:]
 
     // MARK: Layout
 
     /// Rows in display order (top-most video track first, then audio tracks).
     var rowOrder: [Track] {
-        let video = tracks.filter { $0.kind == .video }.sorted { $0.index > $1.index }
-        let audio = tracks.filter { $0.kind == .audio }.sorted { $0.index < $1.index }
-        return video + audio
+        trackLayouts.map(\.track)
     }
 
-    var trackLayouts: [TrackLayout] {
+    private static func layouts(for tracks: [Track]) -> [TrackLayout] {
+        let video = tracks.filter { $0.kind == .video }.sorted { $0.index > $1.index }
+        let audio = tracks.filter { $0.kind == .audio }.sorted { $0.index < $1.index }
         var y: CGFloat = 0
         var layouts: [TrackLayout] = []
-        for track in rowOrder {
+        for track in video + audio {
             let height = track.kind == .video ? Self.videoTrackHeight : Self.audioTrackHeight
             layouts.append(TrackLayout(track: track, y: y, height: height))
             y += height + Self.trackSpacing
@@ -146,7 +159,7 @@ struct TimelineViewModel: Equatable {
     }
 
     func layout(forTrack id: Int64) -> TrackLayout? {
-        trackLayouts.first { $0.track.id == id }
+        trackLayouts.first { $0.track.id == id } // a handful of rows: a scan beats hashing
     }
 
     /// Row under a y coordinate (visible space).
@@ -170,7 +183,7 @@ struct TimelineViewModel: Equatable {
     }
 
     func clip(id: Int64) -> Clip? {
-        clips.first { $0.id == id }
+        clipIndex[id].map { clips[$0] }
     }
 
     /// Clips whose rect intersects the horizontal range [minX, maxX] (visible culling).
@@ -243,10 +256,15 @@ struct TimelineViewModel: Equatable {
 
     // MARK: Snapping
 
-    /// Snap candidates in seconds: the sequence start, the playhead and every clip edge except
-    /// those of `excluding`.
-    func snapCandidates(excluding: Set<Int64> = []) -> [(time: Double, target: SnapTarget)] {
-        var result: [(Double, SnapTarget)] = [(0, .sequenceStart), (playhead, .playhead)]
+    /// Snap candidates in seconds: the sequence start, the playhead (unless `includePlayhead` is
+    /// false, e.g. while the playhead itself is dragged) and every clip edge except those of
+    /// `excluding`.
+    func snapCandidates(excluding: Set<Int64> = [],
+                        includePlayhead: Bool = true) -> [(time: Double, target: SnapTarget)] {
+        var result: [(Double, SnapTarget)] = [(0, .sequenceStart)]
+        if includePlayhead {
+            result.append((playhead, .playhead))
+        }
         for clip in clips where !excluding.contains(clip.id) {
             result.append((clip.start, .clipStart(clip.id)))
             result.append((clip.end, .clipEnd(clip.id)))
@@ -255,11 +273,12 @@ struct TimelineViewModel: Equatable {
     }
 
     /// The candidate nearest to `seconds` within the snap threshold (in points), if any.
-    func snap(_ seconds: Double, excluding: Set<Int64> = [], thresholdPoints: CGFloat = snapThreshold) -> Snap? {
+    func snap(_ seconds: Double, excluding: Set<Int64> = [], includePlayhead: Bool = true,
+              thresholdPoints: CGFloat = snapThreshold) -> Snap? {
         let threshold = Double(thresholdPoints) / pixelsPerSecond
         var best: Snap?
         var bestDistance = Double.infinity
-        for candidate in snapCandidates(excluding: excluding) {
+        for candidate in snapCandidates(excluding: excluding, includePlayhead: includePlayhead) {
             let distance = abs(candidate.time - seconds)
             if distance <= threshold, distance < bestDistance {
                 best = Snap(time: candidate.time, target: candidate.target)

@@ -5,46 +5,43 @@ import VidEditEngine
 
 /// The timeline: ruler, track headers and the track area drawn in a `Canvas`.
 ///
-/// Gestures on the track area: click selects (shift-click toggles; linked partners come along),
-/// dragging on empty space draws a marquee, dragging a clip body moves the selection (snapping
-/// to clip edges, the playhead and the sequence start; vertical movement changes tracks within
-/// the same kind; the engine applies overwrite semantics), dragging within 8 pt of a clip edge
-/// trims it. Every drag is one coalesced undo step, committed on release; Escape cancels it.
-/// Dragging in the ruler scrubs the playhead. Media dropped from the bin lands at the drop
-/// position and row (overwrite; hold Command to insert). Scroll to pan, Option/Command-scroll to zoom.
+/// Gestures on the track area (see `TimelineGestureController`): click selects (shift-click
+/// toggles; linked partners come along), dragging on empty space draws a marquee, dragging a
+/// clip body moves the selection (snapping to clip edges, the playhead and the sequence start;
+/// vertical movement changes tracks within the same kind; the engine applies overwrite
+/// semantics), dragging within 8 pt of a clip edge trims it. Every drag is one coalesced undo
+/// step, committed on release; Escape cancels it. Dragging in the ruler scrubs the program
+/// monitor (silently; the frame shows as soon as it decodes). Media dropped from the bin lands
+/// at the drop position and row (overwrite; hold Command to insert). Scroll to pan,
+/// Option/Command-scroll to zoom.
+///
+/// Redraw budget: the canvas depends on the model (`ProjectStore`, rebuilt once per model change)
+/// and the viewport, never on the playhead. The playhead line, the ruler marker and the
+/// timecode are overlays observing `PlayheadModel` alone, so playback at the display rate does
+/// not redraw the clips.
 struct TimelineView: View {
     @ObservedObject var store: ProjectStore
+    @ObservedObject var viewport: TimelineViewport
     @ObservedObject var thumbnails: ThumbnailCache
     @ObservedObject var waveforms: WaveformCache
+    @StateObject private var gestures: TimelineGestureController
 
-    @State private var drag: DragState = .idle
-    @State private var marquee: CGRect?
     @State private var canvasSize: CGSize = .zero
     @State private var isDropTargeted = false
+    /// True while the track-area drag gesture is active; reset by SwiftUI when the gesture ends
+    /// or is cancelled, which catches gestures that end without onEnded.
+    @GestureState private var trackGestureActive = false
 
     static let headerWidth: CGFloat = 170
     static let rulerHeight: CGFloat = 26
     static let scrollBarHeight: CGFloat = 12
-    /// Distance the pointer must travel before a press becomes a drag.
-    static let dragThreshold: CGFloat = 3
 
     init(store: ProjectStore) {
         self.store = store
+        viewport = store.viewport
         thumbnails = store.thumbnails
         waveforms = store.waveforms
-    }
-
-    enum DragState: Equatable {
-        case idle
-        /// Pressed, not moved far enough yet.
-        case pending(hit: TimelineViewModel.Hit, origin: CGPoint, extend: Bool, wasSelected: Bool)
-        case moving(ids: [Int64], origin: CGPoint, start: Double, end: Double, excluded: Set<Int64>,
-                    originKind: TimelineViewModel.TrackKind, originIndex: Int)
-        case trimmingHead(clip: Int64, origin: CGPoint, edge: Double, excluded: Set<Int64>)
-        case trimmingTail(clip: Int64, origin: CGPoint, edge: Double, excluded: Set<Int64>)
-        case marquee(origin: CGPoint, base: Set<Int64>)
-        /// Escape pressed: ignore the rest of the gesture.
-        case cancelled
+        _gestures = StateObject(wrappedValue: TimelineGestureController(store: store))
     }
 
     var body: some View {
@@ -68,7 +65,7 @@ struct TimelineView: View {
             }
             .frame(height: Self.scrollBarHeight)
         }
-        .background(ScrollWheelCatcher { handleScroll($0, model: model) })
+        .background(ScrollWheelCatcher { handleScroll($0) })
         .accessibilityIdentifier("Timeline")
     }
 
@@ -86,7 +83,7 @@ struct TimelineView: View {
             .fixedSize()
             .help("Add a track")
             Spacer()
-            Text(Timecode.string(store.playheadTime, frameDuration: store.frameDuration))
+            PlayheadTimecode(playhead: store.playhead, frameDuration: store.frameDuration)
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.red)
         }
@@ -120,25 +117,24 @@ struct TimelineView: View {
                 t += minor
                 count += 1
             }
-            let px = model.x(forTime: model.playhead)
-            var marker = Path()
-            marker.move(to: CGPoint(x: px - 6, y: size.height - 12))
-            marker.addLine(to: CGPoint(x: px + 6, y: size.height - 12))
-            marker.addLine(to: CGPoint(x: px, y: size.height))
-            marker.closeSubpath()
-            context.fill(marker, with: .color(.red))
         }
         .frame(height: Self.rulerHeight)
+        .overlay(alignment: .topLeading) {
+            PlayheadMarker(playhead: store.playhead, viewport: viewport, style: .rulerMarker)
+        }
         .contentShape(Rectangle())
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { value in
-                    var seconds = model.time(forX: value.location.x)
-                    if let snap = model.snap(seconds, excluding: []), snap.target != .playhead {
+                    let current = store.timelineModel
+                    var seconds = current.time(forX: value.location.x)
+                    // The playhead is what moves: it is never its own snap target.
+                    if let snap = current.snap(seconds, excluding: [], includePlayhead: false) {
                         seconds = snap.time
                     }
-                    store.setPlayhead(seconds: seconds)
+                    store.scrub(toSeconds: max(0, seconds))
                 }
+                .onEnded { _ in store.endScrub() }
         )
         .clipped()
     }
@@ -159,20 +155,23 @@ struct TimelineView: View {
     // MARK: Track area
 
     private func trackArea(_ model: TimelineViewModel) -> some View {
-        let assetsByID = Dictionary(store.assets.map { ($0.assetID, $0) }, uniquingKeysWith: { first, _ in first })
         let renderer = TimelineRenderer(
-            model: model, size: canvasSize, selection: store.selection,
+            model: model, selection: store.selection,
             selectedTransitionID: store.selectedTransitionID,
-            targetTrackIDs: [store.targetVideoTrackID, store.targetAudioTrackID], assets: assetsByID,
-            thumbnails: thumbnails, waveforms: waveforms, snapTime: store.snapIndicator, marquee: marquee
+            targetTrackIDs: [store.targetVideoTrackID, store.targetAudioTrackID], assets: store.assetsByID,
+            thumbnails: thumbnails, waveforms: waveforms, snapTime: store.snapIndicator, marquee: gestures.marquee
         )
         // Reading the caches' versions makes new thumbnails and waveforms redraw the canvas.
         let redrawToken = thumbnails.version &+ waveforms.version
-        return Canvas { context, _ in
+        return Canvas { context, size in
             _ = redrawToken
-            renderer.draw(in: &context)
+            renderer.draw(in: &context, size: size)
         }
         .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
+        .overlay(alignment: .topLeading) {
+            PlayheadMarker(playhead: store.playhead, viewport: viewport, style: .line)
+                .allowsHitTesting(false)
+        }
         .overlay(isDropTargeted ? RoundedRectangle(cornerRadius: 2).stroke(Color.accentColor, lineWidth: 2) : nil)
         .background(GeometryReader { geometry in
             Color.clear
@@ -188,11 +187,22 @@ struct TimelineView: View {
         .contentShape(Rectangle())
         .gesture(
             DragGesture(minimumDistance: 0)
-                .onChanged { dragChanged($0) }
-                .onEnded { dragEnded($0) }
+                .updating($trackGestureActive) { _, active, _ in active = true }
+                .onChanged { value in
+                    gestures.changed(location: value.location, startLocation: value.startLocation,
+                                     modifiers: NSEvent.modifierFlags)
+                }
+                .onEnded { _ in gestures.ended() }
         )
+        .onChange(of: trackGestureActive) { _, active in
+            if !active {
+                // onEnded runs first for a normal release (the controller is idle by now).
+                gestures.abandon()
+            }
+        }
         .dropDestination(for: AssetReference.self) { items, location in
-            drop(items, at: location)
+            guard let item = items.first else { return false }
+            return gestures.drop(assetID: item.assetID, at: location, insert: NSEvent.modifierFlags.contains(.command))
         } isTargeted: { isDropTargeted = $0 }
         .clipped()
     }
@@ -210,7 +220,8 @@ struct TimelineView: View {
         store.scrollY = min(max(0, store.scrollY), maxY)
     }
 
-    private func handleScroll(_ scroll: ScrollWheelCatcher.Scroll, model: TimelineViewModel) {
+    private func handleScroll(_ scroll: ScrollWheelCatcher.Scroll) {
+        let model = store.timelineModel
         if scroll.modifiers.contains(.option) || scroll.modifiers.contains(.command) {
             let anchor = scroll.location.x - Self.headerWidth
             store.zoom(by: exp(Double(scroll.deltaY) * 0.01), anchorX: max(0, anchor))
@@ -251,157 +262,51 @@ struct TimelineView: View {
             })
         }
     }
+}
 
-    // MARK: Gestures
+/// The playhead drawn over the timeline: a line through the track area, or the triangle in
+/// the ruler. It observes only the playhead and the viewport.
+struct PlayheadMarker: View {
+    enum Style {
+        case line
+        case rulerMarker
+    }
 
-    private func dragChanged(_ value: DragGesture.Value) {
-        let model = store.timelineModel
-        switch drag {
-        case .idle:
-            begin(at: value.startLocation, model: model)
-            dragChanged(value)
-        case let .pending(hit, origin, extend, _):
-            guard hypot(value.location.x - origin.x, value.location.y - origin.y) >= Self.dragThreshold else { return }
-            startDrag(hit: hit, origin: origin, extend: extend, model: model)
-            if drag != .idle { dragChanged(value) }
-        case let .moving(ids, origin, start, end, excluded, originKind, originIndex):
-            var delta = model.time(forX: value.location.x) - model.time(forX: origin.x)
-            let snapped = model.snapMove(start: start, end: end, delta: delta, excluding: excluded)
-            delta = snapped.delta
-            delta = model.snapToFrame(start + delta) - start
-            if start + delta < 0 { delta = -start }
-            var trackOffset = 0
-            if let row = model.layout(atY: value.location.y), row.track.kind == originKind {
-                trackOffset = row.track.index - originIndex
+    @ObservedObject var playhead: PlayheadModel
+    @ObservedObject var viewport: TimelineViewport
+    let style: Style
+
+    var body: some View {
+        let _ = TimelineDiagnostics.playheadUpdates += 1
+        let x = CGFloat(playhead.time.secondsOrZero * viewport.pixelsPerSecond) - viewport.scrollX
+        GeometryReader { geometry in
+            switch style {
+            case .line:
+                Rectangle()
+                    .fill(Color.red)
+                    .frame(width: 1.5, height: geometry.size.height)
+                    .offset(x: x - 0.75)
+            case .rulerMarker:
+                Path { path in
+                    let bottom = geometry.size.height
+                    path.move(to: CGPoint(x: x - 6, y: bottom - 12))
+                    path.addLine(to: CGPoint(x: x + 6, y: bottom - 12))
+                    path.addLine(to: CGPoint(x: x, y: bottom))
+                    path.closeSubpath()
+                }
+                .fill(Color.red)
             }
-            store.snapIndicator = snapped.snap?.time
-            let frames = Int64((delta / max(model.frameSeconds, 1e-9)).rounded())
-            let deltaTime = CMTimeMultiply(store.frameDuration, multiplier: Int32(clamping: frames))
-            let result = store.engine.moveClips(ids.map { NSNumber(value: $0) }, by: deltaTime,
-                                                trackOffset: trackOffset)
-            if !result.ok { store.statusMessage = result.message }
-        case let .trimmingHead(clip, origin, edge, excluded):
-            let time = trimTime(edge: edge, origin: origin, location: value.location, excluded: excluded, model: model)
-            store.report(store.engine.trimClipHead(clip, to: store.frameTime(time), clamp: true))
-        case let .trimmingTail(clip, origin, edge, excluded):
-            let time = trimTime(edge: edge, origin: origin, location: value.location, excluded: excluded, model: model)
-            store.report(store.engine.trimClipTail(clip, to: store.frameTime(time), clamp: true))
-        case let .marquee(origin, base):
-            let rect = CGRect(x: origin.x, y: origin.y, width: value.location.x - origin.x,
-                              height: value.location.y - origin.y).standardized
-            marquee = rect
-            store.selection = base.union(model.expandingLinks(model.clipIDs(intersecting: rect)))
-        case .cancelled:
-            break
         }
+        .allowsHitTesting(false)
     }
+}
 
-    private func trimTime(edge: Double, origin: CGPoint, location: CGPoint, excluded: Set<Int64>,
-                          model: TimelineViewModel) -> Double {
-        var time = edge + model.time(forX: location.x) - model.time(forX: origin.x)
-        let snap = model.snap(time, excluding: excluded)
-        if let snap { time = snap.time }
-        store.snapIndicator = snap?.time
-        return max(0, time)
-    }
+/// "HH:MM:SS:FF" of a playhead; observes only the playhead.
+struct PlayheadTimecode: View {
+    @ObservedObject var playhead: PlayheadModel
+    let frameDuration: CMTime
 
-    /// Press: select according to what was hit.
-    private func begin(at point: CGPoint, model: TimelineViewModel) {
-        let extend = NSEvent.modifierFlags.contains(.shift)
-        let hit = model.hitTest(point)
-        store.focusArea = .timeline
-        store.statusMessage = nil
-        switch hit {
-        case let .clipBody(id), let .clipHead(id), let .clipTail(id):
-            let wasSelected = store.selection.contains(id)
-            if extend || !wasSelected {
-                store.select(clip: id, extend: extend)
-            }
-            store.selectedTransitionID = nil
-            drag = .pending(hit: hit, origin: point, extend: extend, wasSelected: wasSelected)
-        case let .transition(id):
-            store.selection = []
-            store.selectedTransitionID = id
-            drag = .pending(hit: hit, origin: point, extend: extend, wasSelected: false)
-        case let .track(id):
-            if let track = model.tracks.first(where: { $0.id == id }) {
-                if track.kind == .video { store.targetVideoTrackID = id } else { store.targetAudioTrackID = id }
-            }
-            startMarquee(at: point, extend: extend)
-        case .none:
-            startMarquee(at: point, extend: extend)
-        }
-    }
-
-    private func startMarquee(at point: CGPoint, extend: Bool) {
-        if !extend { store.selection = [] }
-        store.selectedTransitionID = nil
-        drag = .marquee(origin: point, base: store.selection)
-    }
-
-    /// The pointer moved past the threshold: start moving or trimming.
-    private func startDrag(hit: TimelineViewModel.Hit, origin: CGPoint, extend: Bool, model: TimelineViewModel) {
-        switch hit {
-        case let .clipBody(id):
-            guard store.selection.contains(id), let anchor = model.clip(id: id),
-                  let row = model.layout(forTrack: anchor.trackID) else {
-                drag = .cancelled
-                return
-            }
-            let ids = Array(store.selection)
-            let moving = model.clips.filter { store.selection.contains($0.id) }
-            let start = moving.map(\.start).min() ?? anchor.start
-            let end = moving.map(\.end).max() ?? anchor.end
-            store.engine.beginCoalescing(withKey: "timeline.move")
-            drag = .moving(ids: ids, origin: origin, start: start, end: end,
-                           excluded: model.expandingLinks(Set(ids)), originKind: row.track.kind,
-                           originIndex: row.track.index)
-        case let .clipHead(id):
-            guard let clip = model.clip(id: id) else { drag = .cancelled; return }
-            store.engine.beginCoalescing(withKey: "timeline.trim")
-            drag = .trimmingHead(clip: id, origin: origin, edge: clip.start, excluded: model.expandingLinks([id]))
-        case let .clipTail(id):
-            guard let clip = model.clip(id: id) else { drag = .cancelled; return }
-            store.engine.beginCoalescing(withKey: "timeline.trim")
-            drag = .trimmingTail(clip: id, origin: origin, edge: clip.end, excluded: model.expandingLinks([id]))
-        default:
-            drag = .cancelled
-            return
-        }
-        store.cancelActiveGesture = {
-            store.engine.cancelCoalescing()
-            store.snapIndicator = nil
-            drag = .cancelled
-            store.cancelActiveGesture = nil
-        }
-    }
-
-    private func dragEnded(_ value: DragGesture.Value) {
-        switch drag {
-        case let .pending(hit, _, extend, wasSelected):
-            // A plain click on a clip that was part of a multi-selection selects just that clip.
-            if case let .clipBody(id) = hit, !extend, wasSelected {
-                store.select(clip: id, extend: false)
-            }
-        case .moving, .trimmingHead, .trimmingTail:
-            store.engine.endCoalescing()
-        default:
-            break
-        }
-        store.snapIndicator = nil
-        store.cancelActiveGesture = nil
-        marquee = nil
-        drag = .idle
-    }
-
-    // MARK: Drop
-
-    private func drop(_ items: [AssetReference], at location: CGPoint) -> Bool {
-        let model = store.timelineModel
-        guard let item = items.first, let row = model.layout(atY: location.y) else { return false }
-        var seconds = model.time(forX: location.x)
-        if let snap = model.snap(seconds) { seconds = snap.time }
-        let insert = NSEvent.modifierFlags.contains(.command)
-        return store.dropAsset(item.assetID, onTrack: row.track.id, at: seconds, overwrite: !insert)
+    var body: some View {
+        Text(Timecode.string(playhead.time, frameDuration: frameDuration))
     }
 }

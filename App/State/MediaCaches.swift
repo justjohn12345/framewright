@@ -8,6 +8,8 @@ import VidEditEngine
 ///
 /// `image(...)` returns what is cached and starts a fetch for a miss; when images arrive the
 /// cache bumps `version` (coalesced to one change per run loop turn) so observing views redraw.
+/// A failed fetch is not retried for `retryInterval` (a file that comes back, or a transient
+/// decoder error, is picked up again afterwards).
 @MainActor
 final class ThumbnailCache: ObservableObject {
     struct Key: Hashable {
@@ -23,13 +25,17 @@ final class ThumbnailCache: ObservableObject {
     private var images: [Key: CGImage] = [:]
     private var order: [Key] = []
     private var inFlight: Set<Key> = []
-    private var failed: Set<Key> = []
+    private var failed: [Key: Date] = [:]
     private var flushScheduled = false
     private let capacity: Int
+    private let retryInterval: TimeInterval
+    /// Fetches started (diagnostics and tests).
+    private(set) var requestsStarted = 0
 
-    init(engine: VEEngine, capacity: Int = 600) {
+    init(engine: VEEngine, capacity: Int = 600, retryInterval: TimeInterval = 30) {
         self.engine = engine
         self.capacity = capacity
+        self.retryInterval = retryInterval
     }
 
     /// The thumbnail if cached, else nil (and a fetch is started).
@@ -60,9 +66,28 @@ final class ThumbnailCache: ObservableObject {
         bump()
     }
 
+    /// Memory pressure: drops the older half of the images (all of them when critical).
+    func handleMemoryPressure(critical: Bool) {
+        let drop = critical ? order.count : order.count / 2
+        for key in order.prefix(drop) {
+            images[key] = nil
+        }
+        order.removeFirst(drop)
+        bump()
+    }
+
+    /// Whether `key` failed recently (an expired failure is forgotten).
+    private func recentlyFailed(_ key: Key) -> Bool {
+        guard let when = failed[key] else { return false }
+        if Date().timeIntervalSince(when) < retryInterval { return true }
+        failed[key] = nil
+        return false
+    }
+
     private func request(_ key: Key) {
-        guard let engine, !inFlight.contains(key), !failed.contains(key) else { return }
+        guard let engine, !inFlight.contains(key), !recentlyFailed(key) else { return }
         inFlight.insert(key)
+        requestsStarted += 1
         let time = CMTime(value: key.millis, timescale: 1000)
         engine.thumbnail(forAsset: key.assetID, at: time, maxDimension: key.maxDimension) { [weak self] image, _ in
             MainActor.assumeIsolated {
@@ -70,7 +95,7 @@ final class ThumbnailCache: ObservableObject {
                 if let image {
                     self.store(image, for: key)
                 } else {
-                    self.failed.insert(key)
+                    self.failed[key] = Date()
                 }
             }
         }
@@ -99,18 +124,40 @@ final class ThumbnailCache: ObservableObject {
     }
 }
 
-/// Main-thread cache of waveform peaks per asset.
+/// Main-thread cache of waveform peaks per asset, and of the timeline's pre-rendered waveform
+/// strips: images of an asset's peaks at a power-of-two zoom level, cut into fixed-width tiles,
+/// so drawing an audio clip costs a few image draws instead of a peak query every 2 points.
+/// A failed load is retried after `retryInterval`.
 @MainActor
 final class WaveformCache: ObservableObject {
     @Published private(set) var version = 0
 
+    /// Tile geometry: `tileWidth` pixels per tile, drawn `tileHeight` pixels tall.
+    static let tileWidth = 512
+    static let tileHeight = 64
+
+    struct StripKey: Hashable {
+        let assetID: VEAssetID
+        /// Pixels per second of source time (a power of two).
+        let level: Int
+        let index: Int
+    }
+
     private weak var engine: VEEngine?
     private var waveforms: [VEAssetID: VEWaveform] = [:]
     private var inFlight: Set<VEAssetID> = []
-    private var failed: Set<VEAssetID> = []
+    private var failed: [VEAssetID: Date] = [:]
+    private var strips: [StripKey: CGImage] = [:]
+    private var stripOrder: [StripKey] = []
+    private let stripCapacity: Int
+    private let retryInterval: TimeInterval
+    /// Tiles rendered so far (diagnostics and tests).
+    private(set) var stripsRendered = 0
 
-    init(engine: VEEngine) {
+    init(engine: VEEngine, stripCapacity: Int = 240, retryInterval: TimeInterval = 30) {
         self.engine = engine
+        self.stripCapacity = stripCapacity
+        self.retryInterval = retryInterval
     }
 
     /// The peaks if loaded, else nil (and loading starts).
@@ -118,7 +165,11 @@ final class WaveformCache: ObservableObject {
         if let waveform = waveforms[asset] {
             return waveform
         }
-        guard let engine, !inFlight.contains(asset), !failed.contains(asset) else { return nil }
+        guard let engine, !inFlight.contains(asset) else { return nil }
+        if let when = failed[asset] {
+            if Date().timeIntervalSince(when) < retryInterval { return nil }
+            failed[asset] = nil
+        }
         if let cached = engine.cachedWaveform(forAsset: asset) {
             waveforms[asset] = cached
             return cached
@@ -131,17 +182,81 @@ final class WaveformCache: ObservableObject {
                     self.waveforms[asset] = waveform
                     self.version &+= 1
                 } else {
-                    self.failed.insert(asset)
+                    self.failed[asset] = Date()
                 }
             }
         }
         return nil
     }
 
+    /// The zoom level (source pixels per second, a power of two) for drawing at
+    /// `pointsPerSourceSecond`: the next level up, so tiles are drawn at most 2x downscaled.
+    static func level(forPointsPerSecond pointsPerSourceSecond: Double) -> Int {
+        let clamped = min(max(pointsPerSourceSecond, 1), 65536)
+        return Int(pow(2, ceil(log2(clamped))))
+    }
+
+    /// Source seconds covered by one tile at `level`.
+    static func tileSeconds(level: Int) -> Double {
+        Double(tileWidth) / Double(level)
+    }
+
+    /// Tile `index` of `asset`'s waveform at `level` (rendered on first use), or nil while the
+    /// peaks are not loaded.
+    func strip(asset: VEAssetID, level: Int, index: Int) -> CGImage? {
+        let key = StripKey(assetID: asset, level: level, index: index)
+        if let image = strips[key] {
+            return image
+        }
+        guard let waveform = waveform(asset: asset),
+              let image = Self.render(waveform, level: level, index: index) else { return nil }
+        strips[key] = image
+        stripOrder.append(key)
+        stripsRendered += 1
+        if stripOrder.count > stripCapacity {
+            strips[stripOrder.removeFirst()] = nil
+        }
+        return image
+    }
+
+    private static func render(_ waveform: VEWaveform, level: Int, index: Int) -> CGImage? {
+        let width = tileWidth
+        let height = tileHeight
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.setFillColor(CGColor(red: 0.55, green: 0.95, blue: 0.65, alpha: 0.9))
+        let secondsPerPixel = 1.0 / Double(level)
+        let start = Double(index) * tileSeconds(level: level)
+        let mid = CGFloat(height) / 2
+        let half = CGFloat(height) / 2 - 1
+        for x in 0 ..< width {
+            let t0 = start + Double(x) * secondsPerPixel
+            let peak = waveform.peakRange(fromSeconds: t0, toSeconds: t0 + secondsPerPixel)
+            // CoreGraphics' origin is bottom-left: maximum is up.
+            let top = mid + CGFloat(max(0, peak.maximum)) * half
+            let bottom = mid + CGFloat(min(0, peak.minimum)) * half
+            context.fill(CGRect(x: CGFloat(x), y: bottom, width: 1, height: max(0.5, top - bottom)))
+        }
+        return context.makeImage()
+    }
+
+    /// Memory pressure: drops the rendered strips (and the peaks too when critical).
+    func handleMemoryPressure(critical: Bool) {
+        strips.removeAll()
+        stripOrder.removeAll()
+        if critical {
+            waveforms.removeAll()
+        }
+        version &+= 1
+    }
+
     func removeAll() {
         waveforms.removeAll()
         inFlight.removeAll()
         failed.removeAll()
+        strips.removeAll()
+        stripOrder.removeAll()
         version &+= 1
     }
 }

@@ -3,10 +3,13 @@ import Foundation
 import UniformTypeIdentifiers
 
 /// File menu behaviour for the single-window app: New / Open / Open Recent / Save / Save As,
-/// unsaved-changes confirmation and the recent projects list.
+/// unsaved-changes confirmation (once per close: closing the window with unsaved changes asks,
+/// and the app quitting because its last window closed does not ask again) and the recent
+/// projects list.
 ///
 /// Recent projects are kept as security-scoped bookmarks in UserDefaults so they can be
-/// reopened from inside the App Sandbox.
+/// reopened from inside the App Sandbox. Alerts and the save panel go through `runAlert` and
+/// `chooseSaveURL`, which tests replace.
 @MainActor
 final class DocumentController: ObservableObject {
     static let recentsKey = "recentProjectBookmarks"
@@ -17,6 +20,20 @@ final class DocumentController: ObservableObject {
     /// Security-scoped access to the open project file (opened from recents).
     private var accessedProjectURL: URL?
     private let defaults: UserDefaults
+    /// The model version the user last answered the unsaved-changes question for when closing
+    /// the window (Save or Don't Save); quitting at that version does not ask again.
+    private var closeConfirmedAtChange: UInt64?
+
+    /// Runs an alert modally and returns the button chosen.
+    var runAlert: (NSAlert) -> NSApplication.ModalResponse = { $0.runModal() }
+    /// Asks where to save (the suggested file name is given); nil when cancelled.
+    var chooseSaveURL: (String) -> URL? = { suggestedName in
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.videditProject]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = suggestedName
+        return panel.runModal() == .OK ? panel.url : nil
+    }
 
     init(store: ProjectStore, defaults: UserDefaults = .standard) {
         self.store = store
@@ -47,7 +64,8 @@ final class DocumentController: ObservableObject {
         open(url)
     }
 
-    /// Opens `url` (no confirmation); reports errors in an alert.
+    /// Opens `url` (no confirmation); reports errors in an alert, and what had to be adjusted to
+    /// load the file in an informational one.
     func open(_ url: URL) {
         let accessing = url.startAccessingSecurityScopedResource()
         do {
@@ -55,6 +73,14 @@ final class DocumentController: ObservableObject {
             stopAccessingProject()
             if accessing { accessedProjectURL = url }
             noteRecent(url)
+            let warnings = store.engine.loadWarnings
+            if !warnings.isEmpty {
+                let alert = NSAlert()
+                alert.alertStyle = .informational
+                alert.messageText = "“\(store.projectName)” was adjusted to open in this version."
+                alert.informativeText = warnings.joined(separator: "\n")
+                _ = runAlert(alert)
+            }
         } catch {
             if accessing { url.stopAccessingSecurityScopedResource() }
             presentError(error, title: "The project could not be opened.")
@@ -72,11 +98,7 @@ final class DocumentController: ObservableObject {
 
     @discardableResult
     func saveAs() -> Bool {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.videditProject]
-        panel.canCreateDirectories = true
-        panel.nameFieldStringValue = store.projectName + ".videdit"
-        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        guard let url = chooseSaveURL(store.projectName + ".videdit") else { return false }
         return save(to: url)
     }
 
@@ -101,7 +123,7 @@ final class DocumentController: ObservableObject {
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Don’t Save")
-        switch alert.runModal() {
+        switch runAlert(alert) {
         case .alertFirstButtonReturn:
             return save()
         case .alertThirdButtonReturn:
@@ -109,6 +131,23 @@ final class DocumentController: ObservableObject {
         default:
             return false
         }
+    }
+
+    /// The window is closing: asks about unsaved changes; the answer also covers the app
+    /// quitting right after (the last window closed).
+    func confirmClosingWindow() -> Bool {
+        guard confirmDiscardingChanges() else { return false }
+        closeConfirmedAtChange = store.changeCount
+        return true
+    }
+
+    /// The app is quitting: asks about unsaved changes unless the user just answered for this
+    /// exact state when closing the window.
+    func shouldTerminate() -> Bool {
+        if let confirmed = closeConfirmedAtChange, confirmed == store.changeCount {
+            return true
+        }
+        return confirmDiscardingChanges()
     }
 
     // MARK: Recents
@@ -155,6 +194,6 @@ final class DocumentController: ObservableObject {
         alert.alertStyle = .warning
         alert.messageText = title
         alert.informativeText = error.localizedDescription
-        alert.runModal()
+        _ = runAlert(alert)
     }
 }
