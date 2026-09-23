@@ -51,14 +51,30 @@ final class ThumbnailCache: ObservableObject {
     /// Whether a fetch is running (diagnostics and tests).
     var isFetching: Bool { !inFlight.isEmpty }
 
+    /// The cache key of a thumbnail request (the time rounded to a millisecond).
+    static func key(asset: VEAssetID, seconds: Double, maxDimension: Int) -> Key {
+        Key(assetID: asset, millis: Int64((max(0, seconds.isFinite ? seconds : 0) * 1000).rounded()),
+            maxDimension: maxDimension)
+    }
+
     /// The thumbnail if cached, else nil (and a fetch is started).
     func image(asset: VEAssetID, seconds: Double, maxDimension: Int) -> CGImage? {
-        let key = Key(assetID: asset, millis: Int64((max(0, seconds) * 1000).rounded()), maxDimension: maxDimension)
+        let key = Self.key(asset: asset, seconds: seconds, maxDimension: maxDimension)
         if let image = images[key] {
             return image
         }
         request(key)
         return nil
+    }
+
+    /// The thumbnail if cached, else nil; never starts a fetch (for callers that pace their own).
+    func cachedImage(asset: VEAssetID, seconds: Double, maxDimension: Int) -> CGImage? {
+        images[Self.key(asset: asset, seconds: seconds, maxDimension: maxDimension)]
+    }
+
+    /// Whether the thumbnail is being fetched.
+    func isFetching(asset: VEAssetID, seconds: Double, maxDimension: Int) -> Bool {
+        inFlight.contains(Self.key(asset: asset, seconds: seconds, maxDimension: maxDimension))
     }
 
     /// The closest cached image of `asset` at `maxDimension` (any time), for showing something

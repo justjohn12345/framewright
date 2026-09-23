@@ -5,18 +5,32 @@ import FramewrightEngine
 
 /// The Ken Burns helper (Final Cut Pro's "Ken Burns" crop mode): a start rectangle (green) and an
 /// end rectangle (red) drawn over the whole picture on the program monitor. Each rectangle is the
-/// part of the picture that fills the frame at that end of the clip; the move between them becomes
-/// position and scale keyframes on the clip's first and last frames
-/// (`VEEngine.applyKenBurns(clip:start:end:interpolation:)`), smoothed with Ease In and Out by
-/// default as in FCP (Linear, Ease Out and Ease In can be chosen). Swap exchanges the two
-/// framings, like FCP's swap button.
+/// part of the picture that fills the frame at that end of the move; the move between them becomes
+/// position and scale keyframes on the first and last frames of its range
+/// (`VEEngine.applyKenBurns(clip:start:end:interpolation:from:duration:)`), smoothed with Ease In
+/// and Out by default as in FCP (Linear, Ease Out and Ease In can be chosen). Swap exchanges the
+/// two framings, like FCP's swap button.
+///
+/// Range (`MoveRange`): the whole clip (the default, FCP's behaviour), or `durationFrames` from the
+/// playhead or from the clip's start, 5 s by default (clamped to what is left of the clip). Before
+/// the move the picture holds the start framing and after it the end framing, so a 5 s push in at
+/// the head of a 30 s clip holds its end framing for the other 25 s.
+///
+/// The picture under the rectangles follows the playhead, as in FCP: the clip's unanimated frame at
+/// the playhead, or at its first or last frame while the playhead is before or after it
+/// (`pictureSeconds`, loaded and paced by `KenBurnsPictureLoader`).
+///
+/// Default rectangles: when the clip is placed (position or scale animated, or not at the identity)
+/// they show the framing the clip has at the range's first and last frames; otherwise the whole
+/// picture pushing in gently. A rectangle the user moved or resized keeps its place when the range
+/// changes; the others follow the range.
 ///
 /// Geometry, in sequence pixels (origin at the frame's top-left corner, +y down): the picture is
 /// shown as the compositor fits it at scale 1 and no offset (`pictureBounds`). A rectangle keeps
 /// the sequence's aspect ratio (FCP locks it too), stays inside the picture (so the frame never
 /// shows past the picture's edge) and is at least a tenth of the frame wide (a 1000 % zoom). The
 /// clip's rotation is kept: a rectangle frames the unrotated picture and the frame shows it turned
-/// by the clip's rotation at that end.
+/// by the clip's rotation at that end of the move.
 @MainActor
 final class KenBurnsModel: ObservableObject {
     enum Framing: CaseIterable {
@@ -28,31 +42,80 @@ final class KenBurnsModel: ObservableObject {
         case topLeft, topRight, bottomLeft, bottomRight
     }
 
+    /// The part of the clip the move covers.
+    enum MoveRange: String, CaseIterable, Identifiable {
+        /// From the clip's first frame to its last (FCP's Ken Burns).
+        case wholeClip
+        /// `durationFrames` from the frame under the playhead.
+        case fromPlayhead
+        /// `durationFrames` from the clip's first frame.
+        case fromClipStart
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .wholeClip: return "Whole clip"
+            case .fromPlayhead: return "From playhead"
+            case .fromClipStart: return "From clip start"
+            }
+        }
+    }
+
     /// The interpolations the helper offers (FCP's smoothing choices).
     static let interpolations: [VEKeyframeInterpolation] = [.easeInOut, .easeOut, .easeIn, .linear]
     /// The smallest rectangle, as a fraction of the frame's width (a 1000 % zoom).
     static let minimumWidthFraction = 0.1
     /// The default end framing, as a fraction of the largest one (a gentle push in).
     static let defaultEndFraction = 0.8
+    /// The default length of a move that does not cover the whole clip.
+    static let defaultRangeSeconds = 5.0
+    /// The caption shown while the move ends before the clip does.
+    static let holdCaption = "Holds the end framing until the clip ends"
 
-    let clipID: VEClipID
+    /// The clip as it is now (the store passes every change through `update(clip:)`).
+    private(set) var clip: VEClipInfo
     let assetID: VEAssetID
     let sequenceSize: CGSize
+    let frameDuration: CMTime
+    /// How durations are shown and what a bare typed number means (Settings > Editing).
+    let durationDisplay: DurationDisplay
     /// The picture as the compositor fits it into the frame at scale 1, no offset.
     let pictureBounds: CGRect
-    /// The clip's rotation at its first and last frames (kept by the move).
-    let startRotation: Double
-    let endRotation: Double
-    /// Source seconds of the picture to show under the rectangles.
-    let pictureSeconds: Double
+    /// Loads the picture under the rectangles (the store gives the helper one over its thumbnails).
+    let picture: KenBurnsPictureLoader?
 
     @Published var start: CGRect
     @Published var end: CGRect
     @Published var interpolation: VEKeyframeInterpolation = .easeInOut
+    /// The part of the clip the move covers (a change resets the duration to its default).
+    @Published var range: MoveRange = .wholeClip {
+        didSet {
+            guard range != oldValue else { return }
+            requestedFrames = nil
+            durationNote = nil
+            rangeChanged()
+        }
+    }
+    /// The Duration field's text (committed by `commitDuration()`).
+    @Published var durationText = ""
+    /// Why the last typed duration was refused or limited (nil when it was taken as typed).
+    @Published private(set) var durationNote: String?
+    /// The program playhead (where "From playhead" starts).
+    @Published private(set) var playhead: CMTime
+
+    /// The duration typed for a partial range (frames, at least 2), or nil for the default.
+    private var requestedFrames: Int64?
+    /// Rectangles the user moved or resized (they keep their place when the range changes).
+    private var editedStart = false
+    private var editedEnd = false
+
+    var clipID: VEClipID { clip.clipID }
 
     /// Nil when the clip cannot take a Ken Burns move (not a single video clip with a picture, or
     /// one frame long); `reason` says why.
     init?(clip: VEClipInfo, asset: VEAssetInfo, sequence: VESequenceInfo, playhead: CMTime,
+          durationDisplay: DurationDisplay = .timecode, picture: KenBurnsPictureLoader? = nil,
           reason: inout String) {
         guard clip.trackKind == .video, asset.hasVideo, asset.width > 0, asset.height > 0 else {
             reason = "Ken Burns works on a clip with a picture."
@@ -60,40 +123,205 @@ final class KenBurnsModel: ObservableObject {
         }
         let frame = sequence.frameDuration
         let lastFrame = CMTimeSubtract(clip.timelineEnd, frame)
-        guard sequence.width > 0, sequence.height > 0, frame.isNumeric, lastFrame > clip.timelineStart else {
+        guard sequence.width > 0, sequence.height > 0, frame.isNumeric, frame.secondsOrZero > 0,
+              lastFrame > clip.timelineStart else {
             reason = "The clip is one frame long: a Ken Burns move needs at least two frames."
             return nil
         }
-        clipID = clip.clipID
+        self.clip = clip
         assetID = asset.assetID
         sequenceSize = CGSize(width: sequence.width, height: sequence.height)
+        frameDuration = frame
+        self.durationDisplay = durationDisplay
+        self.picture = picture
+        self.playhead = playhead
         pictureBounds = Self.fittedPicture(width: Double(asset.width), height: Double(asset.height),
                                            in: sequenceSize)
-        let first = clip.motion(at: clip.timelineStart)
-        let last = clip.motion(at: lastFrame)
-        startRotation = first.rotationDegrees
-        endRotation = last.rotationDegrees
-        let inside = clip.timelineStart <= playhead && playhead < clip.timelineEnd
-        if clip.isStill {
-            pictureSeconds = 0
-        } else {
-            let offset = inside ? CMTimeSubtract(playhead, clip.timelineStart) : .zero
-            pictureSeconds = clip.sourceIn.secondsOrZero + offset.secondsOrZero * clip.speed
+        start = .zero
+        end = .zero
+        rangeChanged()
+    }
+
+    // MARK: Range
+
+    /// Frames of `time` from zero on the sequence's frame grid (the frame containing it).
+    private func frameIndex(_ time: CMTime) -> Int64 {
+        let frame = frameDuration.secondsOrZero
+        guard frame > 0 else { return 0 }
+        return Int64((time.secondsOrZero / frame + 1e-6).rounded(.down))
+    }
+
+    private func time(frames: Int64) -> CMTime {
+        CMTimeMultiply(frameDuration, multiplier: Int32(clamping: frames))
+    }
+
+    /// The clip's length in frames.
+    var clipFrames: Int64 { max(0, frameIndex(clip.duration)) }
+
+    /// The range's first frame, counted from the clip's first frame; nil when "From playhead" has
+    /// the playhead outside the clip.
+    var rangeOffset: Int64? {
+        switch range {
+        case .wholeClip, .fromClipStart:
+            return 0
+        case .fromPlayhead:
+            let offset = frameIndex(playhead) - frameIndex(clip.timelineStart)
+            return offset >= 0 && offset < clipFrames ? offset : nil
         }
-        let largest = Self.largestRect(in: pictureBounds, aspect: sequenceSize.width / sequenceSize.height)
+    }
+
+    /// Frames of the clip from the range's first frame to its end.
+    var remainingFrames: Int64 { rangeOffset.map { clipFrames - $0 } ?? 0 }
+
+    /// The default duration of a partial range: 5 s, or what is left of the clip.
+    var defaultFrames: Int64 {
+        let seconds = frameDuration.secondsOrZero
+        let fiveSeconds = seconds > 0 ? Int64((Self.defaultRangeSeconds / seconds).rounded()) : 0
+        return min(fiveSeconds, remainingFrames)
+    }
+
+    /// The move's length in frames: the clip's for the whole clip, else the typed or default
+    /// duration clamped to what is left of the clip.
+    var durationFrames: Int64 {
+        switch range {
+        case .wholeClip:
+            return clipFrames
+        case .fromPlayhead, .fromClipStart:
+            return min(requestedFrames ?? defaultFrames, remainingFrames)
+        }
+    }
+
+    /// Why the move cannot be applied with this range (nil when it can).
+    var rangeProblem: String? {
+        guard let offset = rangeOffset else {
+            return "Move the playhead over the clip to start the move there."
+        }
+        if clipFrames - offset < 2 {
+            return "Less than two frames of the clip are left after the playhead: a move needs at least two."
+        }
+        return nil
+    }
+
+    /// The timeline time of the range's first frame (the clip's start while `rangeProblem` is set).
+    var rangeStart: CMTime {
+        CMTimeAdd(clip.timelineStart, time(frames: rangeOffset ?? 0))
+    }
+
+    /// The range's length on the timeline.
+    var rangeDuration: CMTime { time(frames: durationFrames) }
+
+    /// The timeline time of the range's last frame (where the end keyframes go).
+    var rangeLastFrame: CMTime {
+        CMTimeAdd(rangeStart, time(frames: max(0, durationFrames - 1)))
+    }
+
+    /// Where the move starts and ends ("00:00:02:00 – 00:00:06:29"): the frames of its keyframes.
+    var rangeTimecodes: String {
+        "\(Timecode.string(rangeStart, frameDuration: frameDuration)) – "
+            + "\(Timecode.string(rangeLastFrame, frameDuration: frameDuration))"
+    }
+
+    /// The caption under the range: why it cannot be applied, or that the end framing holds.
+    var rangeCaption: String? {
+        if let rangeProblem { return rangeProblem }
+        return durationFrames < remainingFrames ? Self.holdCaption : nil
+    }
+
+    /// Whether the Duration field can be edited (not for the whole clip).
+    var isDurationEditable: Bool { range != .wholeClip }
+
+    /// `frames` in the user's duration format.
+    func durationString(frames: Int64) -> String {
+        DurationFormat.string(frames: frames, frameDuration: frameDuration, display: durationDisplay)
+    }
+
+    /// Takes the Duration field's text: parsed like every duration field
+    /// (`DurationFormat.parseFrames`), at least two frames and at most what is left of the clip
+    /// (`durationNote` says when it was limited). Returns false for text that is not a duration
+    /// (`durationNote` says why; the duration stays). The whole clip has no duration to type.
+    @discardableResult
+    func commitDuration() -> Bool {
+        guard isDurationEditable else {
+            durationText = durationString(frames: durationFrames)
+            return true
+        }
+        let typed = durationText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard typed != durationString(frames: durationFrames) else { return true }
+        guard let frames = DurationFormat.parseFrames(typed, frameDuration: frameDuration, display: durationDisplay)
+        else {
+            durationNote = "“\(typed)” is not a duration (use frames like 45f, seconds like 2.5s, or timecode)."
+            return false
+        }
+        var taken = frames
+        var note: String?
+        if taken < 2 {
+            taken = 2
+            note = "A move is at least two frames long."
+        }
+        if taken > remainingFrames {
+            taken = remainingFrames
+            note = "Limited to the \(durationString(frames: remainingFrames)) left in the clip."
+        }
+        requestedFrames = taken
+        durationNote = note
+        rangeChanged()
+        return true
+    }
+
+    /// The program playhead moved: the picture follows it, and so does a "From playhead" range.
+    func setPlayhead(_ time: CMTime) {
+        guard time != playhead else { return }
+        playhead = time
+        if range == .fromPlayhead { rangeChanged() }
+    }
+
+    /// The clip changed while the helper is open (a trim, an undo): the range and the rectangles
+    /// the user has not moved follow it.
+    func update(clip: VEClipInfo) {
+        guard clip.clipID == self.clip.clipID else { return }
+        self.clip = clip
+        rangeChanged()
+    }
+
+    /// The range, the playhead or the clip changed: reformat the duration and move the rectangles
+    /// the user has not touched to their defaults.
+    private func rangeChanged() {
+        durationText = durationString(frames: durationFrames)
+        if !editedStart { start = defaultRect(.start) }
+        if !editedEnd { end = defaultRect(.end) }
+    }
+
+    /// The rectangle `which` has before the user moves it: the clip's framing at that end of the
+    /// range when the clip is placed, else the whole picture (start) pushing in gently (end).
+    func defaultRect(_ which: Framing) -> CGRect {
+        let first = clip.motion(at: rangeStart)
         let placed = clip.isAnimated(.positionX) || clip.isAnimated(.positionY) || clip.isAnimated(.scale)
             || first.scale != 1 || first.x != 0 || first.y != 0
-        if placed {
-            start = largest
-            end = largest
-            start = constrained(Self.rect(for: VEMotionFraming(x: first.x, y: first.y, scale: first.scale),
-                                          sequence: sequenceSize, rotationDegrees: startRotation))
-            end = constrained(Self.rect(for: VEMotionFraming(x: last.x, y: last.y, scale: last.scale),
-                                        sequence: sequenceSize, rotationDegrees: endRotation))
-        } else {
-            start = largest
-            end = Self.scaled(largest, by: Self.defaultEndFraction)
+        let largest = Self.largestRect(in: pictureBounds, aspect: aspect)
+        guard placed else {
+            return which == .start ? largest : Self.scaled(largest, by: Self.defaultEndFraction)
         }
+        let motion = which == .start ? first : clip.motion(at: rangeLastFrame)
+        return constrained(Self.rect(for: VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale),
+                                     sequence: sequenceSize, rotationDegrees: motion.rotationDegrees))
+    }
+
+    /// The clip's rotation at the range's first and last frames (kept by the move).
+    var startRotation: Double { clip.motion(at: rangeStart).rotationDegrees }
+    var endRotation: Double { clip.motion(at: rangeLastFrame).rotationDegrees }
+
+    /// The clip's frame the picture under the rectangles shows: the one under the playhead, or the
+    /// clip's first or last frame while the playhead is before or after the clip (timeline time).
+    var pictureFrame: CMTime {
+        let offset = min(max(0, frameIndex(playhead) - frameIndex(clip.timelineStart)), max(0, clipFrames - 1))
+        return CMTimeAdd(clip.timelineStart, time(frames: offset))
+    }
+
+    /// Source seconds of that frame's picture, through the clip's speed (a still has one picture).
+    var pictureSeconds: Double {
+        guard !clip.isStill else { return 0 }
+        let offset = CMTimeSubtract(pictureFrame, clip.timelineStart)
+        return clip.sourceIn.secondsOrZero + offset.secondsOrZero * clip.speed
     }
 
     // MARK: Geometry
@@ -167,7 +395,13 @@ final class KenBurnsModel: ObservableObject {
     }
 
     private func set(_ which: Framing, _ rect: CGRect) {
-        if which == .start { start = rect } else { end = rect }
+        if which == .start {
+            start = rect
+            editedStart = true
+        } else {
+            end = rect
+            editedEnd = true
+        }
     }
 
     /// Moves a rectangle from `original` by `delta` (sequence pixels), kept inside the picture.
@@ -213,6 +447,8 @@ final class KenBurnsModel: ObservableObject {
     /// Exchanges the start and end framings (FCP's swap button).
     func swap() {
         (start, end) = (end, start)
+        editedStart = true
+        editedEnd = true
     }
 
     /// The keyframe values the two rectangles give.
@@ -222,5 +458,65 @@ final class KenBurnsModel: ObservableObject {
 
     var endFraming: VEMotionFraming {
         Self.framing(for: end, sequence: sequenceSize, rotationDegrees: endRotation)
+    }
+}
+
+/// Loads the Ken Burns helper's picture through the thumbnail cache, paced for scrubbing: at most one
+/// fetch of its own is in flight, and when it lands the latest wanted time is fetched next (the
+/// times in between are skipped, like the program monitor's scrub coalescing). Until the wanted
+/// picture arrives the last one shown stays up, so the picture never goes blank while scrubbing.
+/// Pictures come from the cache (the whole, unanimated source frame), never from the program view.
+@MainActor
+final class KenBurnsPictureLoader: ObservableObject {
+    /// The largest side of the fetched picture (enough for a monitor-sized overlay).
+    static let maxDimension = 1280
+
+    let assetID: VEAssetID
+    private let cache: ThumbnailCache
+    /// The picture to draw: the wanted one once it is cached, else the last one shown.
+    @Published private(set) var image: CGImage?
+    /// The source seconds last asked for.
+    private(set) var wantedSeconds: Double?
+    /// The source seconds of this loader's fetch in flight (nil when none).
+    private(set) var pendingSeconds: Double?
+    /// Fetches this loader started (diagnostics and tests).
+    private(set) var fetchesStarted = 0
+
+    init(assetID: VEAssetID, cache: ThumbnailCache) {
+        self.assetID = assetID
+        self.cache = cache
+    }
+
+    /// The picture at `seconds` (source time) is wanted now.
+    func want(seconds: Double) {
+        wantedSeconds = seconds
+        update()
+    }
+
+    /// The cache changed (a fetch landed): show what is there and fetch the latest wanted time.
+    func update() {
+        guard let wanted = wantedSeconds else { return }
+        let size = Self.maxDimension
+        if let cached = cache.cachedImage(asset: assetID, seconds: wanted, maxDimension: size) {
+            if image !== cached { image = cached }
+            pendingSeconds = nil
+            return
+        }
+        if image == nil, let any = cache.anyImage(asset: assetID, maxDimension: size) {
+            image = any // something of this clip while the first picture loads
+        }
+        if let pending = pendingSeconds, cache.isFetching(asset: assetID, seconds: pending, maxDimension: size) {
+            return // one at a time: the latest wanted time follows when this one lands
+        }
+        pendingSeconds = wanted
+        _ = cache.image(asset: assetID, seconds: wanted, maxDimension: size) // starts the fetch
+        if cache.isFetching(asset: assetID, seconds: wanted, maxDimension: size) {
+            fetchesStarted += 1
+        } else if let arrived = cache.cachedImage(asset: assetID, seconds: wanted, maxDimension: size) {
+            image = arrived
+            pendingSeconds = nil
+        } else {
+            pendingSeconds = nil // failed recently: the cache retries later; keep the last picture
+        }
     }
 }

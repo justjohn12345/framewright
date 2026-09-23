@@ -294,6 +294,253 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(store.statusMessage?.contains("two frames"), true)
     }
 
+    // MARK: Ken Burns range
+
+    /// A 10 s movie (300 frames) on V1 at 0 s, selected alone.
+    private func longClip() async throws -> VEClipID {
+        let url = fixture.directory.appendingPathComponent("long.mov")
+        try TestMediaFactory.writeMovie(to: url, frames: 300)
+        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([url]) { continuation.resume(returning: $0) }
+        }
+        let movie = try XCTUnwrap(imported.first)
+        let id = try fixture.placeMovie(movie, at: 0)
+        store.selection = [id]
+        XCTAssertEqual(try clip(id).duration, frames(300))
+        return id
+    }
+
+    func testKenBurnsRangeDefaultsTimecodesAndThePicture() async throws {
+        let id = try await longClip()
+        store.playheadTime = frames(200)
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+
+        // Whole clip (the default): the clip's length, not editable, no caption.
+        XCTAssertEqual(model.range, .wholeClip)
+        XCTAssertEqual(model.durationFrames, 300)
+        XCTAssertEqual(model.durationText, "00:00:10:00")
+        XCTAssertFalse(model.isDurationEditable)
+        XCTAssertEqual(model.rangeTimecodes, "00:00:00:00 – 00:00:09:29")
+        XCTAssertNil(model.rangeCaption)
+        XCTAssertEqual(model.pictureSeconds, 200.0 / 30.0, accuracy: 1e-9, "the picture follows the playhead")
+
+        // From clip start: 5 s, and the end framing holds for the rest of the clip.
+        model.range = .fromClipStart
+        XCTAssertEqual(model.durationFrames, 150)
+        XCTAssertEqual(model.durationText, "00:00:05:00")
+        XCTAssertTrue(model.isDurationEditable)
+        XCTAssertEqual(model.rangeTimecodes, "00:00:00:00 – 00:00:04:29")
+        XCTAssertEqual(model.rangeCaption, KenBurnsModel.holdCaption)
+
+        // From playhead: 5 s clamped to the 100 frames left after frame 200; it reaches the end.
+        model.range = .fromPlayhead
+        XCTAssertEqual(model.durationFrames, 100)
+        XCTAssertEqual(model.rangeTimecodes, "00:00:06:20 – 00:00:09:29")
+        XCTAssertNil(model.rangeCaption)
+        XCTAssertEqual(model.pictureSeconds, 200.0 / 30.0, accuracy: 1e-9)
+        XCTAssertEqual(model.rangeStart, frames(200))
+        // The playhead moves: the range follows, and the 5 s default fits again.
+        store.playheadTime = frames(60)
+        model.setPlayhead(store.playheadTime) // what the overlay does on every playhead change
+        XCTAssertEqual(model.durationFrames, 150)
+        XCTAssertEqual(model.rangeTimecodes, "00:00:02:00 – 00:00:06:29")
+        XCTAssertEqual(model.pictureSeconds, 2, accuracy: 1e-9)
+        XCTAssertEqual(model.rangeCaption, KenBurnsModel.holdCaption)
+        // Off the clip, or on its last frame: nothing to apply, and the caption says why.
+        model.setPlayhead(frames(299))
+        XCTAssertNotNil(model.rangeProblem)
+        model.setPlayhead(frames(400))
+        XCTAssertEqual(model.rangeProblem, "Move the playhead over the clip to start the move there.")
+        XCTAssertEqual(model.rangeCaption, model.rangeProblem)
+        XCTAssertFalse(store.applyKenBurns())
+        XCTAssertEqual(store.statusMessage, model.rangeProblem)
+        XCTAssertFalse(try clip(id).hasKeyframes)
+        // Changing the range resets the duration to its default.
+        model.range = .fromClipStart
+        XCTAssertNil(model.rangeProblem)
+        XCTAssertEqual(model.durationFrames, 150)
+    }
+
+    func testKenBurnsPictureFollowsThePlayheadThroughSpeedAndClampsToTheClip() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let id = try fixture.placeMovie(movie, at: 1) // timeline frames [30, 90)
+        store.selection = [id]
+        store.playheadTime = frames(45)
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.pictureFrame, frames(45))
+        XCTAssertEqual(model.pictureSeconds, 0.5, accuracy: 1e-9)
+        // Every range shows the picture under the playhead.
+        model.range = .fromClipStart
+        XCTAssertEqual(model.pictureSeconds, 0.5, accuracy: 1e-9)
+        // Before and after the clip: its first and last frames.
+        model.setPlayhead(frames(10))
+        XCTAssertEqual(model.pictureFrame, frames(30))
+        XCTAssertEqual(model.pictureSeconds, 0, accuracy: 1e-9)
+        model.setPlayhead(frames(200))
+        XCTAssertEqual(model.pictureFrame, frames(89))
+        XCTAssertEqual(model.pictureSeconds, 59.0 / 30.0, accuracy: 1e-9)
+        // At half speed the clip is 120 frames long and timeline frame 70 (40 into the clip) shows
+        // source second 40 / 30 / 2; the helper follows the changed clip.
+        XCTAssertTrue(store.engine.setSpeedNumerator(1, denominator: 2, forClip: id).ok)
+        XCTAssertTrue(store.kenBurns === model, "still open")
+        XCTAssertEqual(model.clip.duration, frames(120))
+        model.setPlayhead(frames(70))
+        XCTAssertEqual(model.pictureSeconds, 40.0 / 30.0 / 2, accuracy: 1e-9)
+        model.setPlayhead(frames(400))
+        XCTAssertEqual(model.pictureFrame, frames(149))
+        XCTAssertEqual(model.pictureSeconds, 119.0 / 30.0 / 2, accuracy: 1e-9)
+        store.cancelKenBurns()
+
+        // A still has one picture, wherever the playhead is.
+        let heic = fixture.directory.appendingPathComponent("still.heic")
+        try TestMediaFactory.writeHEIC(to: heic)
+        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([heic]) { continuation.resume(returning: $0) }
+        }
+        let still = try fixture.placeMovie(try XCTUnwrap(imported.first), at: 10)
+        store.selection = [still]
+        store.playheadTime = frames(320)
+        store.beginKenBurns(clip: still)
+        let stillModel = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(stillModel.pictureSeconds, 0)
+        stillModel.setPlayhead(frames(700))
+        XCTAssertEqual(stillModel.pictureSeconds, 0)
+    }
+
+    func testKenBurnsPictureLoaderFetchesOneAtATimeAndEndsOnTheLatestTime() async throws {
+        let id = try await placedClip()
+        store.beginKenBurns(clip: id)
+        let loader = try XCTUnwrap(store.kenBurns?.picture)
+        let thumbnails = store.thumbnails
+        // A scrub: many times in a row while nothing has landed yet starts one fetch.
+        for frame in stride(from: 0, through: 45, by: 3) {
+            loader.want(seconds: Double(frame) / 30)
+        }
+        XCTAssertEqual(loader.fetchesStarted, 1)
+        XCTAssertEqual(loader.pendingSeconds, 0)
+        XCTAssertNil(loader.image)
+        // The first lands; the update fetches the latest wanted time (the ones between are skipped).
+        let landed = await StoreFixture.wait(until: { !thumbnails.isFetching }, timeout: 20)
+        XCTAssertTrue(landed)
+        loader.update()
+        XCTAssertNotNil(loader.image, "the first picture shows while the latest loads")
+        XCTAssertEqual(loader.fetchesStarted, 2)
+        XCTAssertEqual(loader.pendingSeconds, 1.5)
+        let second = await StoreFixture.wait(until: { !thumbnails.isFetching }, timeout: 20)
+        XCTAssertTrue(second)
+        loader.update()
+        let latest = try XCTUnwrap(thumbnails.cachedImage(asset: loader.assetID, seconds: 1.5,
+                                                          maxDimension: KenBurnsPictureLoader.maxDimension))
+        XCTAssertTrue(loader.image === latest)
+        XCTAssertNil(loader.pendingSeconds)
+        XCTAssertEqual(loader.fetchesStarted, 2)
+        // A time already cached shows at once, without a fetch.
+        loader.want(seconds: 0)
+        XCTAssertTrue(loader.image === thumbnails.cachedImage(asset: loader.assetID, seconds: 0,
+                                                             maxDimension: KenBurnsPictureLoader.maxDimension))
+        XCTAssertEqual(loader.fetchesStarted, 2)
+    }
+
+    func testKenBurnsDurationFieldParsesAndClamps() async throws {
+        let id = try await longClip()
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        model.range = .fromClipStart
+        for (typed, expected) in [("2s", Int64(60)), ("45f", 45), ("1:10", 40), ("00:00:03:15", 105), ("2.5 sec", 75)] {
+            model.durationText = typed
+            XCTAssertTrue(model.commitDuration(), typed)
+            XCTAssertEqual(model.durationFrames, expected, typed)
+            XCTAssertNil(model.durationNote, typed)
+            XCTAssertEqual(model.durationText, store.durationString(frames: expected), "shown in the project's format")
+        }
+        model.durationText = "soon"
+        XCTAssertFalse(model.commitDuration())
+        XCTAssertEqual(model.durationNote?.contains("not a duration"), true)
+        XCTAssertEqual(model.durationFrames, 75, "unchanged")
+        model.durationText = "1f"
+        XCTAssertTrue(model.commitDuration())
+        XCTAssertEqual(model.durationFrames, 2)
+        XCTAssertEqual(model.durationNote, "A move is at least two frames long.")
+        model.durationText = "20s"
+        XCTAssertTrue(model.commitDuration())
+        XCTAssertEqual(model.durationFrames, 300)
+        XCTAssertEqual(model.durationNote, "Limited to the 00:00:10:00 left in the clip.")
+        // Apply takes a duration still being typed (Return also presses Apply).
+        model.durationText = "3s"
+        XCTAssertTrue(store.applyKenBurns())
+        XCTAssertEqual(try clip(id).keyframes(for: .scale).map(\.frameTime), [frames(0), frames(89)])
+        // Invalid text refuses Apply and keeps the helper open.
+        store.beginKenBurns(clip: id)
+        let again = try XCTUnwrap(store.kenBurns)
+        again.range = .fromPlayhead
+        again.durationText = "later"
+        XCTAssertFalse(store.applyKenBurns())
+        XCTAssertNotNil(store.kenBurns)
+        XCTAssertEqual(store.statusMessage?.contains("not a duration"), true)
+
+        // A bare number means the display's unit (frames here).
+        var reason = ""
+        let framesModel = try XCTUnwrap(KenBurnsModel(clip: try clip(id), asset: try XCTUnwrap(store.asset(try clip(id).assetID)),
+                                                      sequence: store.sequence, playhead: .zero,
+                                                      durationDisplay: .frames, reason: &reason))
+        framesModel.range = .fromClipStart
+        XCTAssertEqual(framesModel.durationText, "150f")
+        framesModel.durationText = "90"
+        XCTAssertTrue(framesModel.commitDuration())
+        XCTAssertEqual(framesModel.durationFrames, 90)
+    }
+
+    func testAKenBurnsMoveOverTheFirstSecondsHoldsItsEndFramingAndStartsFromTheCurrentFraming() async throws {
+        let id = try await longClip()
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        model.range = .fromClipStart
+        model.durationText = "5s"
+        XCTAssertTrue(model.commitDuration())
+        XCTAssertEqual(model.start, CGRect(x: 0, y: 0, width: 1920, height: 1080), "an unplaced clip: the push in")
+        model.end = CGRect(x: 960, y: 540, width: 960, height: 540) // the bottom-right quarter
+        XCTAssertTrue(store.applyKenBurns())
+        XCTAssertEqual(store.undoActionName, "Ken Burns")
+        let info = try clip(id)
+        for parameter: VEMotionParameter in [.positionX, .positionY, .scale] {
+            XCTAssertEqual(info.keyframes(for: parameter).map(\.frameTime), [frames(0), frames(149)])
+        }
+        for frame: Int64 in [149, 150, 220, 299] {
+            let shown = info.motion(at: frames(frame))
+            XCTAssertEqual(shown.scale, 2, accuracy: 1e-12, "frame \(frame) holds the end framing")
+            XCTAssertEqual(shown.x, -960, accuracy: 1e-9)
+            XCTAssertEqual(shown.y, -540, accuracy: 1e-9)
+        }
+
+        // The clip is animated now: the rectangles start from its framing at the range's ends.
+        store.playheadTime = frames(200)
+        store.beginKenBurns(clip: id)
+        let second = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(second.end.minX, 960, accuracy: 1e-6, "whole clip: the framing on the last frame")
+        XCTAssertEqual(second.start.width, 1920, accuracy: 1e-6, "and on the first")
+        second.range = .fromPlayhead
+        XCTAssertEqual(second.start.minX, 960, accuracy: 1e-6, "the framing held at the playhead")
+        XCTAssertEqual(second.start.width, 960, accuracy: 1e-6)
+        XCTAssertEqual(second.end.width, 960, accuracy: 1e-6)
+        // A rectangle the user moved keeps its place when the range changes; the other follows.
+        second.move(.end, from: second.end, by: CGSize(width: -500, height: -300))
+        let moved = second.end
+        second.range = .fromClipStart
+        XCTAssertEqual(second.end, moved)
+        XCTAssertEqual(second.start.width, 1920, accuracy: 1e-6, "the framing on the clip's first frame")
+
+        // A second move later in the clip keeps the first one; one undo step takes it back.
+        second.range = .fromPlayhead
+        XCTAssertTrue(store.applyKenBurns())
+        XCTAssertEqual(try clip(id).keyframes(for: .scale).map(\.frameTime),
+                       [frames(0), frames(149), frames(200), frames(299)])
+        XCTAssertEqual(try clip(id).motion(at: frames(180)).scale, 2, accuracy: 1e-12, "held between the moves")
+        store.undo()
+        XCTAssertEqual(try clip(id).keyframes(for: .scale).map(\.frameTime), [frames(0), frames(149)])
+    }
+
     // MARK: Timeline markers
 
     func testTimelineMarkersFollowSpeedAndAClickMovesThePlayhead() async throws {

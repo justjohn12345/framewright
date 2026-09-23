@@ -4,17 +4,25 @@ import FramewrightEngine
 
 /// The Ken Burns helper over the program monitor (see `KenBurnsModel`): the whole picture of the
 /// clip, unanimated, with the start rectangle (green) and the end rectangle (red), an arrow showing
-/// the direction of travel (as in FCP), and a bar with the smoothing, Swap, Cancel and Apply. Drag a
-/// rectangle to pan, drag a corner to zoom (the aspect ratio stays the frame's). The picture is the
-/// clip's frame at the playhead (at its first frame when the playhead is elsewhere).
+/// the direction of travel (as in FCP), and a bar with the move's range (Whole clip, From playhead,
+/// From clip start, a Duration field and the range as timecodes), the smoothing, Swap, Cancel and
+/// Apply. Drag a rectangle to pan, drag a corner to zoom (the aspect ratio stays the frame's). The
+/// picture is the clip's unanimated frame at the playhead (its first or last frame while the
+/// playhead is outside it) and follows every playhead change, loaded through the thumbnail cache by
+/// `KenBurnsPictureLoader` (one fetch at a time, the latest time next), never from the program view.
+///
+/// Everything drawn comes from observed objects (the model, the playhead, the picture loader), so a
+/// change of any of them redraws the overlay.
 struct KenBurnsOverlay: View {
     let store: ProjectStore
     @ObservedObject var model: KenBurnsModel
-    @ObservedObject var thumbnails: ThumbnailCache
+    @ObservedObject var playhead: PlayheadModel
+    @ObservedObject var picture: KenBurnsPictureLoader
+    let thumbnails: ThumbnailCache
     /// The rectangle as it was when the current drag started.
     @State private var dragOrigin: CGRect?
+    @FocusState private var durationFocused: Bool
 
-    static let pictureMaxDimension = 1280
     static let handleSize: CGFloat = 9
 
     var body: some View {
@@ -32,10 +40,15 @@ struct KenBurnsOverlay: View {
                 }
                 .clipped()
             }
+            rangeControls
             controls
         }
         .background(Color.black)
         .accessibilityIdentifier("KenBurnsOverlay")
+        // The picture and a "From playhead" range follow the playhead while the helper is open.
+        .onChange(of: playhead.time, initial: true) { _, time in model.setPlayhead(time) }
+        .onChange(of: model.pictureSeconds, initial: true) { _, seconds in picture.want(seconds: seconds) }
+        .onReceive(thumbnails.$version) { _ in picture.update() }
     }
 
     /// Sequence pixels to view points: the frame letterboxed into the view.
@@ -69,9 +82,7 @@ struct KenBurnsOverlay: View {
     @ViewBuilder
     private func picture(_ mapping: Mapping) -> some View {
         let bounds = mapping.view(model.pictureBounds)
-        if let image = thumbnails.image(asset: model.assetID, seconds: model.pictureSeconds,
-                                        maxDimension: Self.pictureMaxDimension)
-            ?? thumbnails.anyImage(asset: model.assetID, maxDimension: Self.pictureMaxDimension) {
+        if let image = picture.image {
             Image(decorative: image, scale: 1)
                 .resizable()
                 .frame(width: bounds.width, height: bounds.height)
@@ -167,6 +178,53 @@ struct KenBurnsOverlay: View {
         }
     }
 
+    /// The move's range: which part of the clip, its duration and where it starts and ends.
+    private var rangeControls: some View {
+        HStack(spacing: 8) {
+            Picker("Move", selection: $model.range) {
+                ForEach(KenBurnsModel.MoveRange.allCases) { choice in
+                    Text(choice.title).tag(choice)
+                }
+            }
+            .fixedSize()
+            .help("The part of the clip the move covers; before and after it the framing holds")
+            .accessibilityIdentifier("KenBurnsRange")
+            Text("Duration")
+                .foregroundStyle(model.isDurationEditable ? .primary : .secondary)
+            TextField("Duration", text: $model.durationText)
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 92)
+                .disabled(!model.isDurationEditable)
+                .focused($durationFocused)
+                .onSubmit { model.commitDuration() }
+                .onChange(of: durationFocused) { _, focused in
+                    if !focused { model.commitDuration() }
+                }
+                .help("How long the move lasts: frames (45f), seconds (2.5s) or timecode")
+                .accessibilityIdentifier("KenBurnsDuration")
+            Text(model.rangeTimecodes)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .help("The frames of the start and end keyframes")
+                .accessibilityIdentifier("KenBurnsRangeTimecodes")
+            if let note = model.durationNote ?? model.rangeCaption {
+                Text(note)
+                    .foregroundStyle(model.rangeProblem != nil || model.durationNote != nil ? .orange : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(note)
+                    .accessibilityIdentifier("KenBurnsRangeCaption")
+            }
+            Spacer(minLength: 0)
+        }
+        .font(.caption)
+        .controlSize(.small)
+        .padding(.horizontal, 8)
+        .padding(.top, 5)
+        .background(.bar)
+    }
+
     private var controls: some View {
         HStack(spacing: 8) {
             Label("Start", systemImage: "square").foregroundStyle(.green)
@@ -191,6 +249,7 @@ struct KenBurnsOverlay: View {
                 .keyboardShortcut(.cancelAction)
             Button("Apply") { store.applyKenBurns() }
                 .keyboardShortcut(.defaultAction)
+                .disabled(model.rangeProblem != nil)
                 .accessibilityIdentifier("KenBurnsApply")
         }
         .font(.caption)
@@ -207,8 +266,9 @@ struct KenBurnsOverlayHost: View {
     @ObservedObject var store: ProjectStore
 
     var body: some View {
-        if let model = store.kenBurns {
-            KenBurnsOverlay(store: store, model: model, thumbnails: store.thumbnails)
+        if let model = store.kenBurns, let picture = model.picture {
+            KenBurnsOverlay(store: store, model: model, playhead: store.playhead, picture: picture,
+                            thumbnails: store.thumbnails)
         }
     }
 }

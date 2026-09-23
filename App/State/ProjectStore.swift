@@ -235,8 +235,12 @@ final class ProjectStore: ObservableObject {
         if let transition = selectedTransitionID, engine.transitionInfo(transition) == nil {
             selectedTransitionID = nil
         }
-        if let kenBurns, byID[kenBurns.clipID] == nil {
-            self.kenBurns = nil
+        if let kenBurns {
+            if let clip = byID[kenBurns.clipID] {
+                kenBurns.update(clip: clip)
+            } else {
+                self.kenBurns = nil
+            }
         }
         changeCount = engine.changeCount
         canUndo = engine.canUndo
@@ -784,7 +788,8 @@ final class ProjectStore: ObservableObject {
 
     /// The inspector's Ken Burns… button: shows the start and end rectangles of `clip` on the
     /// program monitor (from its current position and scale at its first and last frames, or a
-    /// gentle push in when it has none). Nothing changes until `applyKenBurns()`.
+    /// gentle push in when it has none), over the whole clip until another range is chosen.
+    /// Nothing changes until `applyKenBurns()`.
     func beginKenBurns(clip id: VEClipID) {
         guard !isGestureActive else {
             statusMessage = "Finish the current drag first."
@@ -792,7 +797,9 @@ final class ProjectStore: ObservableObject {
         }
         guard let clip = clips[id], let info = asset(clip.assetID) else { return }
         var reason = ""
+        let picture = KenBurnsPictureLoader(assetID: info.assetID, cache: thumbnails)
         guard let model = KenBurnsModel(clip: clip, asset: info, sequence: sequence, playhead: playheadTime,
+                                        durationDisplay: editingPreferences.durationDisplay, picture: picture,
                                         reason: &reason) else {
             statusMessage = reason
             return
@@ -802,13 +809,27 @@ final class ProjectStore: ObservableObject {
         kenBurns = model
     }
 
-    /// Applies the Ken Burns rectangles as position and scale keyframes (one undo step) and closes
-    /// the helper. Returns whether it was applied (a refusal is reported and the helper stays).
+    /// Applies the Ken Burns rectangles as position and scale keyframes on the first and last frames
+    /// of the helper's range (one undo step) and closes the helper. A duration still being typed is
+    /// taken first. Returns whether it was applied (a refusal is reported and the helper stays).
     @discardableResult
     func applyKenBurns() -> Bool {
-        guard let model = kenBurns, !isGestureActive else { return false }
+        guard let model = kenBurns else { return false }
+        guard !isGestureActive else {
+            statusMessage = "Finish the current drag first."
+            return false
+        }
+        guard model.commitDuration() else {
+            statusMessage = model.durationNote
+            return false
+        }
+        if let problem = model.rangeProblem {
+            statusMessage = problem
+            return false
+        }
         let result = engine.applyKenBurns(clip: model.clipID, start: model.startFraming, end: model.endFraming,
-                                          interpolation: model.interpolation)
+                                          interpolation: model.interpolation, from: model.rangeStart,
+                                          duration: model.rangeDuration)
         guard report(result) else { return false }
         kenBurns = nil
         return true
