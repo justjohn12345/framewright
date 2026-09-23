@@ -1,5 +1,11 @@
 # Open findings
 
+## UX round (2026-09-23 review, `2026-09-23-ux-round-review.md`)
+Eight findings, none above MEDIUM: VFR pictures chosen by nominal slot start (up to one frame early; the cache's time-based
+lookup removes it), every editing key active in the output window, output window edge cases, the source controller's
+lookahead while hidden/exporting, the 5-minute audio idle timeout on battery, divider cursor handling, a timing-sensitive
+latency assertion, and the context-menu monitor's filtering. Plus five test gaps. All open.
+
 ## Phase 7 export (2026-09-23 review; report in git history at 2dde40e)
 All ten findings are fixed (regression tests: `EngineTests/Export/ExportRegressionTests.mm` for P1/P2/P3, plus
 `ExportJobTests`, `ExportParityTests`, `VEEngineExportTests`, `VideoDurationEditTests.cpp`, `DecodePoolTests`,
