@@ -26,6 +26,7 @@ audited the code line by line.
   scrubbing; measured A/V offset on the real output device is zero within a sample. A still
   playhead keeps a short lookahead decoded and the audio primed, so Space starts within a frame
   (about 20-30 ms press to picture on cached media, variable-frame-rate phone footage included).
+  The audio output stays on for 5 minutes after the last transport action (1 minute on battery).
 - A window laid out for the program monitor: the source monitor appears beside it when media is
   opened (View > Show Source Monitor, Shift+Cmd+2), the timeline is as tall as its tracks (empty
   tracks collapse), the dividers can be dragged and are remembered, and the inspector has an

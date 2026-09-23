@@ -243,9 +243,9 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   can lie in the frame before the one containing the layer's source time, but the paused picture's
   scrub request and the pool targets asked for the source time. The slot was never filled, the paused
   picture kept its previous frame and `play()` waited for the first frame until the pre-roll timeout
-  (measured 1004.7 ms before the fix). `playback::frameSlotTimeFor(layer, asset)` (the slot's start)
-  is now what the controller requests and targets, and what `ExportJob` targets. Any new decode path
-  that looks pictures up by `frameSlotFor` must request `frameSlotTimeFor`.
+  (measured 1004.7 ms before the fix). Superseded by the UX round fixes below: pictures are now looked
+  up and requested at the layer's exact source time (`playback::pictureTimeFor`); `frameSlotFor` and
+  `frameSlotTimeFor` are gone.
 - Stopped lookahead (`PlaybackController.h`): while stopped and once the playhead has been still for
   `PlaybackConfig::idleLookaheadDelay` (100 ms), the tick thread retargets the pool at the paused
   frame with `stoppedLookahead` (0.5 s, forward) and warms the audio (`audioWarmDelay`, now 100 ms;
@@ -258,7 +258,8 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   the first new frame's presentation minus the playing time it stands for; three runs): controller
   with a null output 2-14 ms cached, 17-20 ms cold; the VFR source 9-12 ms (was up to 1004.7 ms);
   facade with the real AVAudioEngine output 17-27 ms cached, 37-49 ms cold. Tests assert < 50 ms
-  cached (`PlaybackLookaheadTests`, `VEEnginePlaybackTests.testPlayStartLatencyThroughTheFacade`). `PresentedFrame::hostNanos` /
+  cached (`PlaybackLookaheadTests`; `VEEnginePlaybackTests.testPlayStartLatencyThroughTheFacade`: see
+  "UX round fixes" for its current bounds). `PresentedFrame::hostNanos` /
   `VEPlaybackStats.presentedHostTime` report when a frame was handed out.
 - Frame sources: `PlaybackController::frameSource(SourceRole::Mirror)` shows the same frames as the
   primary one without touching the counters or `lastPresented()`. `VEEngine attachOutputView:` /
@@ -297,4 +298,59 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
   mirror and export share it; keyframe markers on collapsed rows need no room (only empty rows collapse).
 - For Photos drops (finding 9): accept file promises in `TimelineDropDelegate.types` and the media
   bin's drop, test them with a `TimelineDropInfo` double whose providers carry the promise types;
-  slow-motion and iPhone VFR media rely on `frameSlotTimeFor` (above).
+  slow-motion and iPhone VFR media rely on `pictureTimeFor` (see "UX round fixes").
+
+## UX round fixes (`2026-09-23-ux-round-review.md`)
+State: full Framewright scheme green (428 EngineTests, 115 AppTests, one known skip: gap 9 below in
+`open-findings.md`), zero warnings; all 428 EngineTests clean under ThreadSanitizer
+(`-enableThreadSanitizer YES`; three timing/allocation tests skip themselves there).
+- Pictures by time (finding 1). `playback::pictureTimeFor(layer, asset)` (PlaybackController.h) is the
+  source time of a layer's picture: the layer's source time (on the asset's grid for CFR media, exact for
+  VFR), 0 for stills. Look it up with FrameCache's containment lookup (`acquire/get/contains(asset, CMTime)`:
+  the frame whose display interval contains it, the frame a decoder's `seek()` returns) and request decodes
+  and pool targets at the same time. The frame source, the paused picture's request, the pool targets,
+  `firstFramesReadyLocked` and `ExportJob` all do; `frameSlotFor`/`frameSlotTimeFor` are removed (they
+  showed the frame under the nominal slot's start, up to one nominal frame early on VFR media). The slot
+  API stays on FrameCache for diagnostics; do not use it for pictures. There is no separate CFR fast
+  path: for CFR media the scheduler's source time already is the slot start, so the time lookup returns
+  the same frame, and it is cheaper (one map search instead of two; Debug build, 1M lookups over 4 assets
+  x 300 frames: `acquire` by time 669-672 ns vs by slot 774-778 ns, `contains` 275-291 vs 354 ns).
+  `PresentedLayer::wantedIndex` is the slot containing the picture time and `shownIndex` the slot the
+  shown frame starts in (they differ for VFR). VFR play-start latency after the change (controller, eight
+  off-grid starts on the Matroska VFR clip, three runs): median 4.3-6.3 ms, worst 11.0-13.2 ms (before,
+  same machine: median 4.9, worst 10.4 ms; 1004.7 ms before the original UX-round fix).
+- Output window keys (finding 2). `KeyboardController.handle` takes only `Action.isTransportOrCancel`
+  (Space, J/K/L, arrows, Home/End, Escape) from `store.outputDisplay.window`; everything else is passed on
+  (the window ignores it). A new transport action must be added to `isTransportOrCancel`; any other new
+  action is editor-only automatically.
+- Output window edges (finding 3). `OutputDisplayController` hides on
+  `NSApplication.didResignActiveNotification` (detached from the engine, `resumesOnActivation` set) and
+  shows again on `didBecomeActiveNotification`, only if it was up; if its display went away meanwhile the
+  status line says so. Both come through the injected `center`. `targetScreen` is nil (not available, `show()`
+  refused) while the editor window's display is unknown; `ProjectStore.editorWindow`'s didSet calls
+  `outputDisplay.screensChanged()` so availability follows the editor window.
+- Source monitor lookahead (finding 4). `VEEngine.sourceMonitorVisible` (default YES): the source controller
+  keeps its stopped lookahead only while visible and no export runs (`setIdleLookahead` is re-applied on
+  change, on export start/end and when the controller is created). `ProjectStore` forwards
+  `layout.$showsSourceMonitor` to it (so every path: menu, bin double-click, Reset Window Layout, the saved
+  layout at launch). New diagnostics: `VEEngine.sourceMonitorPlaybackStats`, `VEPlaybackStats.decodeStreams`
+  / `PlaybackStats::decodeStreams` (streams the pool keeps, busy or idle).
+- Power-aware audio idle (finding 5). `audio::PowerSource` (Engine/Audio/PowerSource.h): `onBattery()`,
+  `observe()` (RAII `Observation`), `systemPowerSource()` (IOKit `IOPSGetProvidingPowerSourceType`, refreshed
+  on `kIOPSNotifyPowerSource`; process-lifetime) and `ManualPowerSource`. `PlaybackConfig::outputIdleTimeout`
+  (AC, 5 min), `outputIdleTimeoutOnBattery` (60 s), `powerSource` (default: the system's);
+  `PlaybackController::outputIdleTimeout()` is the one that applies now; a power change re-evaluates the
+  deadline at once (measured from the last transport activity). `PlaybackHarness` and `ToneRig` inject
+  `ManualPowerSource(false)` so tests never depend on the machine's power; do the same in new harnesses that
+  rely on idle timing. IOKit is linked into the engine and EngineTests (project.yml). Preferences > Media
+  and the README state the behaviour.
+- Dividers and the context menu (findings 6, 8). `DividerCursor` (PaneDivider.swift) owns a divider's
+  cursor like `TimelineGestureController` does (set, change detection, arrow on leave or on a drag ending
+  outside the divider's global frame; `apply` injectable). `ContextMenuCatcher.CatcherView` filters on the
+  button and Control before any coordinate work (`isContextClick`, `handle(_:window:)`), installs its monitor
+  exactly while in a window (`isMonitoring`) and shows the menu through an injectable `popUp`.
+- Layout arithmetic (gap 4). `ContentView.sideWidths(windowWidth:binWidth:inspectorWidth:)` and
+  `WindowLayoutModel.dragSourceMonitorDivider(from:by:areaWidth:)` are what the view uses; test layout
+  changes there.
+- Latency test (finding 7). `testPlayStartLatencyThroughTheFacade` is skipped under ThreadSanitizer and
+  asserts the median of the cached starts < 50 ms and the worst < 80 ms (the values are logged).

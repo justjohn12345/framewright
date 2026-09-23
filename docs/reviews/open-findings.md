@@ -1,10 +1,36 @@
 # Open findings
 
 ## UX round (2026-09-23 review, `2026-09-23-ux-round-review.md`)
-Eight findings, none above MEDIUM: VFR pictures chosen by nominal slot start (up to one frame early; the cache's time-based
-lookup removes it), every editing key active in the output window, output window edge cases, the source controller's
-lookahead while hidden/exporting, the 5-minute audio idle timeout on battery, divider cursor handling, a timing-sensitive
-latency assertion, and the context-menu monitor's filtering. Plus five test gaps. All open.
+All eight findings are fixed and test gaps 1-5 are covered (see `integration-notes.md`, "UX round fixes"):
+1. VFR pictures are the frame containing the exact source time (`playback::pictureTimeFor`, FrameCache's time
+   lookup; the slot lookup is gone from playback and export): `VariableFrameRatePictureTests` (both backends, paused
+   and playing), `ExportParityTests.testAVariableFrameRateSourceExportsTheMonitorsPictures` (gap 1),
+   `PlaybackLookaheadTests.testPlayStartsPromptlyOnAVariableFrameRateSource`,
+   `VEEnginePlaybackTests.testADissolveBetweenTwoVFRSourcesMixesTheirPicturesAtTheFrameCentre`,
+   `ExportJobTests.testVariableFrameRateSourceExportsTheMonitorsFrames`.
+2. Only transport keys and Escape in the output window: `OutputDisplayTests.testOnlyTheTransportKeysWorkInTheOutputWindow`.
+3. Output window hidden while the app is inactive and refused without the editor's display:
+   `OutputDisplayTests.testTheOutputGoesAwayWhileTheAppIsInTheBackground`, `testTheOutputNeedsToKnowTheEditorsDisplay`.
+4. No source-monitor lookahead while hidden or exporting (`VEEngine.sourceMonitorVisible`):
+   `VEEngineExportTests.testTheSourceMonitorKeepsNoLookaheadWhileHiddenOrExporting` (gap 3),
+   `WindowLayoutTests.testTheSourceMonitorIsHiddenUntilMediaIsOpenedInIt`.
+5. Audio idle timeout 60 s on battery, 5 min on AC (`audio::PowerSource`):
+   `PlaybackControllerTests.testTheIdleTimeoutIsFiveMinutesOnACAndOneMinuteOnBattery`,
+   `testTheIdleOutputFollowsThePowerSource`, `testTheSystemPowerSourceIsIOKits`.
+6. Divider cursor set with change detection, reset when a drag ends outside (`DividerCursor`):
+   `PointerHandlingTests.testTheDividerSetsItsCursorOnlyWhenTheShapeChanges`,
+   `testADragEndingOutsideTheDividerRestoresTheArrow`.
+7. `VEEnginePlaybackTests.testPlayStartLatencyThroughTheFacade` is skipped under ThreadSanitizer; median of the cached
+   starts < 50 ms, worst < 80 ms, values logged.
+8. Context-menu monitor filtered on the button and Control first, installed exactly while in a window:
+   `PointerHandlingTests.testTheContextMenuMonitorIsInstalledExactlyWhileTheViewIsInAWindow`,
+   `testOnlyContextClicksInsideTheViewAskForAMenu`.
+Gap 4: `WindowLayoutTests.testTheSidePanelsNarrowInspectorFirstAtTheMinimumWindowWidth`,
+`testDraggingTheSourceMonitorDividerPastItsBoundsClamps` (the view's arithmetic, `ContentView.sideWidths` and
+`WindowLayoutModel.dragSourceMonitorDivider`; SwiftUI's layout of the panes itself is not inspected). Gap 5:
+`TimelineDropTests.testADissolveDroppedOnAThroughEditSaysSoInTheStatusLine`.
+Still by hand: the cursor's look over a real divider (the tests observe `DividerCursor.apply`), and the output window
+following a real Cmd-Tab on a physical second display (the tests post the activation notifications).
 
 ## Phase 7 export (2026-09-23 review; report in git history at 2dde40e)
 All ten findings are fixed (regression tests: `EngineTests/Export/ExportRegressionTests.mm` for P1/P2/P3, plus
