@@ -375,7 +375,10 @@ PlaybackHarness::Sample PlaybackHarness::presentExact(std::chrono::milliseconds 
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     Sample s = present();
     for (;;) {
-        const bool exact = std::all_of(s.presented.layers.begin(), s.presented.layers.end(),
+        // A frame held back while its pictures decode (not playing) is not presented yet: the
+        // sample still shows the previous frame.
+        const bool exact = s.presented.heldBackFrameIndex < 0 &&
+                           std::all_of(s.presented.layers.begin(), s.presented.layers.end(),
                                        [](const PresentedLayer &l) { return l.exact; });
         if (exact || std::chrono::steady_clock::now() >= deadline) {
             return s;

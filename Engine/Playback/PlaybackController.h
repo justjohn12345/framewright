@@ -206,6 +206,9 @@ struct PresentedFrame {
     int64_t frameIndex = -1;      ///< Sequence frame index.
     bool clockDriven = false;
     std::vector<PresentedLayer> layers;
+    /// Not playing: the frame the source holds back (keeping this one on screen) until its
+    /// pictures are decoded (see frameSource()); -1 when the frame above is the current one.
+    int64_t heldBackFrameIndex = -1;
 };
 
 struct PlaybackConfig {
@@ -305,6 +308,14 @@ class PlaybackController {
 
     /// The source to install with -[VEPreviewView setFrameSource:]. Each call returns an
     /// independent source (its own pins and change tracking) over the same clock and model.
+    ///
+    /// Not playing (paused, stepping, scrubbing, pre-rolling): a frame with a layer whose picture
+    /// is not decoded yet is not presented while the decode requested for it is in flight; the
+    /// source reports "unchanged", so the view keeps showing the previous complete picture, and
+    /// the request's completion asks for a redraw (needsDisplay). Without a previous complete
+    /// picture (the first frame after setSequence), or once the request failed, the frame is
+    /// presented with what is available (a layer keeps its clip's previous picture, else it is
+    /// drawn without one). While playing, a late layer keeps its clip's previous picture.
     render::PreviewFrameSource frameSource();
 
     // MARK: Components (tests, HUD)

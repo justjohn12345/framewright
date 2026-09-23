@@ -68,9 +68,11 @@ NS_SWIFT_UI_ACTOR
 /// debug HUD and tests).
 @property (atomic, readonly) NSUInteger renderCount;
 
-/// Layers drawn without their picture (not decoded yet, or failed), summed over every
-/// completed frame; `missingLayerCount` is the number in the most recently completed frame.
-/// For the debug HUD and tests.
+/// Layers drawn without their picture (not decoded yet, or failed): `skippedLayerCount` sums
+/// them over every completed frame; `missingLayerCount` is the number in the frame the view
+/// shows (set when a render takes the frame, so it always matches what -snapshot composites).
+/// A frame source that keeps the previous picture while a layer decodes (the program monitor
+/// while paused) keeps it 0. For the debug HUD and tests.
 @property (atomic, readonly) NSUInteger skippedLayerCount;
 @property (atomic, readonly) NSUInteger missingLayerCount;
 

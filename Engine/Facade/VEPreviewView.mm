@@ -96,6 +96,17 @@ struct PreviewState {
     }
 };
 
+/// Layers of `frame` without a picture (the compositor leaves them out).
+NSUInteger missingLayersOf(const PreviewFrame &frame) {
+    NSUInteger missing = 0;
+    for (std::size_t i = 0; i < frame.graph.layers.size(); ++i) {
+        if (i >= frame.textures.size() || !frame.textures[i]) {
+            ++missing;
+        }
+    }
+    return missing;
+}
+
 bool lookupFromFrame(const PreviewFrame &frame, std::size_t index, TextureSet &out) {
     if (index < frame.textures.size() && frame.textures[index]) {
         out = frame.textures[index];
@@ -176,6 +187,9 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
     if (!fresh && !once && !pending) {
         return;
     }
+    // Set with the frame it describes, under the lock -snapshot takes: the count always matches
+    // the picture the view shows (or is about to present), never an earlier render's.
+    st.missingLayers.store(missingLayersOf(st.frame), std::memory_order_relaxed);
     if (st.drawableWidth.load() < 1 || st.drawableHeight.load() < 1) {
         finish(nil); // nothing visible to draw into; a size change requests a redraw
         return;
@@ -213,7 +227,6 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
         st.frame.graph, lookup, target,
         [raw, completion, sourceError](const RenderResult &result) {
             raw->skippedLayers.fetch_add(result.skippedLayers.size(), std::memory_order_relaxed);
-            raw->missingLayers.store(result.skippedLayers.size(), std::memory_order_relaxed);
             NSError *error = result.status.ok() ? sourceError : makeNSError(result.status.error());
             raw->setError(error); // nil: the frame on screen is complete, clear the last error
             raw->renderCount.fetch_add(1, std::memory_order_release);

@@ -133,7 +133,8 @@ class PlaybackHarness {
     /// Calls the frame source for a vsync presented at host time `targetSeconds` (the clock's
     /// host time base, like CADisplayLink.targetTimestamp).
     Sample presentAt(double targetSeconds);
-    /// Presents until every layer shows its exact frame (or `timeout`); returns the last sample.
+    /// Presents until the current frame is presented (not held back while it decodes) with every
+    /// layer showing its exact frame (or `timeout`); returns the last sample.
     Sample presentExact(std::chrono::milliseconds timeout = std::chrono::seconds(5));
 
     /// Expected source frame slot of `clip` at sequence frame `index` (independent of the

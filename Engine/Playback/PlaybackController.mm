@@ -101,6 +101,8 @@ struct PlaybackController::Core {
         std::vector<ClipId> nextClips;
         std::vector<int64_t> nextShown;
         std::vector<FrameCache::PinnedFrame> nextPins;
+        std::vector<render::TextureSet> nextTextures;
+        std::vector<size_t> nextMissing; // layers of the next frame without their exact picture
         PresentedFrame info;
     };
 
@@ -128,6 +130,45 @@ struct PlaybackController::Core {
 
     mutable std::mutex presentedMutex;
     PresentedFrame presentedInfo;
+
+    // Scrub requests for the paused/scrubbed picture (requestDisplayFramesLocked). While a
+    // request of the current display is in flight, the frame source keeps presenting the
+    // previous complete picture rather than a frame with a layer drawn without its picture.
+    // Held only for a few integer operations (the render thread takes it too).
+    std::mutex displayRequestMutex;
+    uint64_t displayRequestGeneration = 0; // displayRequestMutex
+    int displayRequestsInFlight = 0;       // displayRequestMutex
+
+    /// A new display target: forgets the previous target's requests (they no longer hold the
+    /// picture). Returns the generation to tag this target's requests with.
+    uint64_t beginDisplayRequests() {
+        std::lock_guard<std::mutex> lock(displayRequestMutex);
+        displayRequestsInFlight = 0;
+        return ++displayRequestGeneration;
+    }
+    /// Called before each request of `generation` is issued (so its completion never precedes it).
+    void displayRequestIssued(uint64_t generation) {
+        std::lock_guard<std::mutex> lock(displayRequestMutex);
+        if (generation == displayRequestGeneration) {
+            ++displayRequestsInFlight;
+        }
+    }
+    /// A request of `generation` completed (with a frame, an error or Cancelled). Returns
+    /// whether it belonged to the current display target.
+    bool displayRequestDone(uint64_t generation) {
+        std::lock_guard<std::mutex> lock(displayRequestMutex);
+        if (generation != displayRequestGeneration) {
+            return false;
+        }
+        if (displayRequestsInFlight > 0) {
+            --displayRequestsInFlight;
+        }
+        return true;
+    }
+    bool displayRequestsPending() {
+        std::lock_guard<std::mutex> lock(displayRequestMutex);
+        return displayRequestsInFlight > 0;
+    }
 
     /// `newSequence`: another sequence (or project) replaces the old one, whose clip ids may be
     /// reused: the frame sources drop the pictures they hold instead of showing them for clips
@@ -228,18 +269,19 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
     // A fresh frame: its status reports only this frame's problems (the view clears lastError
     // with the first frame whose status is ok).
     media::Status status = media::okStatus();
-    frame.textures.resize(n);
+    // Built aside: `frame` (the view's current picture) is only replaced once this frame is
+    // presented, so holding the previous picture below leaves it intact.
+    rs.nextTextures.assign(n, render::TextureSet{});
     rs.nextClips.clear();
     rs.nextShown.clear();
     rs.nextPins.clear();
+    rs.nextMissing.clear();
     rs.info.layers.clear();
-    bool complete = true;
     for (size_t i = 0; i < n; ++i) {
         const VideoLayer &layer = graph.layers[i];
         PresentedLayer shown;
         shown.clip = layer.clipId;
         shown.asset = layer.assetId;
-        render::TextureSet textures;
         FrameCache::PinnedFrame pin;
         int64_t shownIndex = -1;
         if (const MediaAsset *asset = rs.project->findAsset(layer.assetId)) {
@@ -250,7 +292,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
             if (usable && request.textureCache) {
                 auto mapped = request.textureCache->textures(pin.image());
                 if (mapped.ok()) {
-                    textures = std::move(mapped).value();
+                    rs.nextTextures[i] = std::move(mapped).value();
                 } else {
                     // Decoded but not drawable: neither a hit nor exact; keep the old picture.
                     mapFailures.fetch_add(1, std::memory_order_relaxed);
@@ -269,26 +311,45 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
                     misses.fetch_add(1, std::memory_order_relaxed);
                 }
                 pin = FrameCache::PinnedFrame{};
-                complete = false;
-                // Keep the clip's previous picture up until its frame lands.
-                for (size_t j = 0; j < rs.lastClips.size(); ++j) {
-                    if (rs.lastClips[j] == layer.clipId) {
-                        textures = rs.lastTextures[j];
-                        pin = std::move(rs.pins[j]);
-                        shownIndex = rs.lastShown[j];
-                        rs.lastClips[j] = ClipId{};
-                        break;
-                    }
-                }
+                rs.nextMissing.push_back(i);
             }
         }
         shown.shownIndex = shownIndex;
-        frame.textures[i] = std::move(textures);
         rs.nextClips.push_back(layer.clipId);
         rs.nextShown.push_back(shownIndex);
         rs.nextPins.push_back(std::move(pin));
         rs.info.layers.push_back(shown);
     }
+    const bool complete = rs.nextMissing.empty();
+
+    if (!complete && !d.clockDriven && rs.hasFrame && rs.lastComplete && displayRequestsPending()) {
+        // Paused, stepping or scrubbing, and a picture of this frame is still being decoded:
+        // keep the previous complete picture on screen (unchanged) instead of presenting this
+        // frame with a layer missing; the request's completion asks for a redraw. The pins taken
+        // above are released; the previous frame's stay.
+        rs.nextPins.clear();
+        rs.nextTextures.clear();
+        if (presentedMutex.try_lock()) { // diagnostics only: never wait for a reader
+            presentedInfo.heldBackFrameIndex = index;
+            presentedMutex.unlock();
+        }
+        return false;
+    }
+    for (size_t i : rs.nextMissing) {
+        // Keep the clip's previous picture up until its frame lands.
+        const ClipId clip = graph.layers[i].clipId;
+        for (size_t j = 0; j < rs.lastClips.size(); ++j) {
+            if (rs.lastClips[j] == clip) {
+                rs.nextTextures[i] = rs.lastTextures[j];
+                rs.nextPins[i] = std::move(rs.pins[j]);
+                rs.nextShown[i] = rs.lastShown[j];
+                rs.info.layers[i].shownIndex = rs.lastShown[j];
+                rs.lastClips[j] = ClipId{};
+                break;
+            }
+        }
+    }
+    frame.textures.assign(rs.nextTextures.begin(), rs.nextTextures.end());
 
     const uint64_t nowNanos = clock.hostClock()->nowNanos();
     if (d.clockDriven) {
@@ -335,6 +396,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
     rs.info.time = t;
     rs.info.frameIndex = index;
     rs.info.clockDriven = d.clockDriven;
+    rs.info.heldBackFrameIndex = -1;
     if (presentedMutex.try_lock()) { // diagnostics only: never wait for a reader
         std::swap(presentedInfo, rs.info);
         presentedMutex.unlock();
@@ -611,6 +673,7 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
     const RenderGraph graph = Scheduler::renderGraphAt(*sequence, *project_, at);
     std::weak_ptr<Core> weakCore = core_;
     std::weak_ptr<ObserverHub> weakHub = hub_;
+    const uint64_t generation = core_->beginDisplayRequests();
     for (size_t i = 0; i < graph.layers.size(); ++i) {
         const VideoLayer &layer = graph.layers[i];
         const MediaAsset *asset = project_->findAsset(layer.assetId);
@@ -618,17 +681,26 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
             continue;
         }
         const uint64_t lane = config_.scrubLaneBase + i;
-        pool_->requestFrame(layer.assetId, layer.sourceTime, [weakCore, weakHub](media::Result<media::ScrubFrame> r) {
-            if (!r.ok()) {
-                return;
-            }
-            if (auto core = weakCore.lock()) {
-                core->frameVersion.fetch_add(1, std::memory_order_acq_rel);
-            }
-            if (auto hub = weakHub.lock()) {
-                hub->postNeedsDisplay();
-            }
-        }, lane);
+        core_->displayRequestIssued(generation);
+        pool_->requestFrame(layer.assetId, layer.sourceTime,
+                            [weakCore, weakHub, generation](media::Result<media::ScrubFrame> r) {
+                                auto core = weakCore.lock();
+                                if (!core) {
+                                    return;
+                                }
+                                const bool current = core->displayRequestDone(generation);
+                                if (!r.ok() && !current) {
+                                    return; // superseded by a newer display target
+                                }
+                                // A picture landed, or the current target's request ended
+                                // without one (failed or cancelled): either way the frame source
+                                // re-evaluates (and stops holding the previous picture).
+                                core->frameVersion.fetch_add(1, std::memory_order_acq_rel);
+                                if (auto hub = weakHub.lock()) {
+                                    hub->postNeedsDisplay();
+                                }
+                            },
+                            lane);
     }
     postNeedsDisplay();
 }

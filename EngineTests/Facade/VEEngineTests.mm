@@ -22,6 +22,33 @@ NSURL *scratchURL() {
     return [NSURL fileURLWithPath:@(ve::test::scratchDirectory().c_str()) isDirectory:YES];
 }
 
+/// The burn-in frame index of what `view` shows now (-1 if nothing readable: black or no frame).
+int shownBurnIn(VEPreviewView *view) {
+    CGImageRef image = [view snapshot];
+    if (image == NULL) {
+        return -1;
+    }
+    const size_t w = CGImageGetWidth(image);
+    const size_t h = CGImageGetHeight(image);
+    CVPixelBufferRef buffer = nullptr;
+    if (CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA, nullptr, &buffer) != kCVReturnSuccess) {
+        return -1;
+    }
+    CVPixelBufferLockBaseAddress(buffer, 0);
+    // Same colour space as the image, so the pixels are copied, not colour matched.
+    CGContextRef ctx = CGBitmapContextCreate(CVPixelBufferGetBaseAddress(buffer), w, h, 8,
+                                             CVPixelBufferGetBytesPerRow(buffer), CGImageGetColorSpace(image),
+                                             CGBitmapInfo(kCGImageAlphaNoneSkipFirst) |
+                                                 CGBitmapInfo(kCGBitmapByteOrder32Little));
+    CGContextSetBlendMode(ctx, kCGBlendModeCopy);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, CGFloat(w), CGFloat(h)), image);
+    CGContextRelease(ctx);
+    CVPixelBufferUnlockBaseAddress(buffer, 0);
+    const int index = ve::test::readBurnIn(buffer).value_or(-1);
+    CVPixelBufferRelease(buffer);
+    return index;
+}
+
 } // namespace
 
 @interface VEEngineTestObserver : NSObject <VEEngineObserver>
@@ -822,33 +849,7 @@ NSURL *scratchURL() {
                                 sourceOut:kCMTimeInvalid];
     XCTAssertTrue(r.ok, @"%@", r.message);
 
-    // Reads the burn-in frame index of what the view shows now (-1 if unreadable).
-    auto shownIndex = [view]() -> int {
-        CGImageRef image = [view snapshot];
-        if (image == NULL) {
-            return -1;
-        }
-        const size_t w = CGImageGetWidth(image);
-        const size_t h = CGImageGetHeight(image);
-        CVPixelBufferRef buffer = nullptr;
-        if (CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA, nullptr, &buffer) !=
-            kCVReturnSuccess) {
-            return -1;
-        }
-        CVPixelBufferLockBaseAddress(buffer, 0);
-        // Same colour space as the image, so the pixels are copied, not colour matched.
-        CGContextRef ctx = CGBitmapContextCreate(CVPixelBufferGetBaseAddress(buffer), w, h, 8,
-                                                 CVPixelBufferGetBytesPerRow(buffer), CGImageGetColorSpace(image),
-                                                 CGBitmapInfo(kCGImageAlphaNoneSkipFirst) |
-                                                     CGBitmapInfo(kCGBitmapByteOrder32Little));
-        CGContextSetBlendMode(ctx, kCGBlendModeCopy);
-        CGContextDrawImage(ctx, CGRectMake(0, 0, CGFloat(w), CGFloat(h)), image);
-        CGContextRelease(ctx);
-        CVPixelBufferUnlockBaseAddress(buffer, 0);
-        const int index = ve::test::readBurnIn(buffer).value_or(-1);
-        CVPixelBufferRelease(buffer);
-        return index;
-    };
+    auto shownIndex = [view]() { return shownBurnIn(view); };
 
     for (const auto &[atSeconds, expectedFrame] : {std::pair<double, int>{1.0, 30}, std::pair<double, int>{2.5, 75}}) {
         [engine showProgramFrameAtTime:CMTimeMake(expectedFrame, 30)];
@@ -867,17 +868,91 @@ NSURL *scratchURL() {
             XCTAssertTrue(shown <= expectedFrame, @"showed frame %d past the requested %d", shown, expectedFrame);
         }
         XCTAssertEqual(shown, expectedFrame, @"at %.1f s", atSeconds);
-        // -snapshot re-composites the current frame, so it can show the picture that landed
-        // after the last completed render drew the layer without it (missingLayerCount counts
-        // that render). Render once more: now nothing may be missing.
-        XCTestExpectation *settled = [self expectationWithDescription:@"settled"];
-        [view renderOnceWithCompletion:^(NSError *) {
-            [settled fulfill];
-        }];
-        [self waitForExpectations:@[ settled ] timeout:5];
         XCTAssertNil(view.lastError);
         XCTAssertEqual(view.missingLayerCount, 0u);
     }
+    [engine attachProgramView:nil];
+}
+
+/// Review 2026-09-23 (phase 6, finding 2): stepping the paused program monitor through frames
+/// that are not decoded yet never presents a frame with its layer missing. While a frame
+/// decodes, the view keeps the previous complete picture (not black), then shows the new one.
+/// The file has a keyframe every 150 frames, so each target costs a long decode from its
+/// keyframe; the timeline cuts the file into two clips at 150 (A = [0, 150), B = [150, 300),
+/// burn-in = sequence frame) and every step lands on the other clip, whose picture the monitor
+/// has never held for that position.
+- (void)testSteppingThroughUncachedFramesKeepsThePreviousPictureUntilTheNewOneLands {
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil) {
+        XCTSkip(@"no Metal device");
+    }
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *clip = [self importOne:"gop5s_h264_1080p30.mp4" into:engine];
+    VEPreviewView *view = [[VEPreviewView alloc] initWithFrame:NSMakeRect(0, 0, 480, 270) device:device error:nil];
+    XCTAssertNotNil(view);
+    [engine attachProgramView:view];
+    const VETrackID v1 = [self videoTrack:engine index:0];
+    XCTAssertTrue([engine insertAsset:clip.assetID
+                               atTime:kCMTimeZero
+                           videoTrack:v1
+                           audioTrack:0
+                             sourceIn:kCMTimeZero
+                            sourceOut:CMTimeMake(150, 30)]
+                      .ok);
+    XCTAssertTrue([engine insertAsset:clip.assetID
+                               atTime:CMTimeMake(150, 30)
+                           videoTrack:v1
+                           audioTrack:0
+                             sourceIn:CMTimeMake(150, 30)
+                            sourceOut:kCMTimeInvalid]
+                      .ok);
+    XCTAssertEqual(engine.allClips.count, 2u);
+
+    auto render = [&] {
+        XCTestExpectation *rendered = [self expectationWithDescription:@"rendered"];
+        [view renderOnceWithCompletion:^(NSError *) {
+            [rendered fulfill];
+        }];
+        [self waitForExpectations:@[ rendered ] timeout:5];
+    };
+    // The first frame: nothing was on screen before, so it may show without its picture first.
+    [engine showProgramFrameAtTime:CMTimeMake(10, 30)];
+    NSDate *firstDeadline = [NSDate dateWithTimeIntervalSinceNow:20];
+    int previous = -1;
+    while (previous != 10 && firstDeadline.timeIntervalSinceNow > 0) {
+        render();
+        previous = shownBurnIn(view);
+    }
+    XCTAssertEqual(previous, 10);
+    XCTAssertEqual(view.missingLayerCount, 0u);
+
+    const int targets[] = {295, 145, 290, 140, 285, 135, 280, 130, 275, 125};
+    int waitingRenders = 0;
+    for (const int target : targets) {
+        [engine showProgramFrameAtTime:CMTimeMake(target, 30)];
+        int shown = -1;
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
+        while (deadline.timeIntervalSinceNow > 0) {
+            render();
+            shown = shownBurnIn(view);
+            XCTAssertEqual(view.missingLayerCount, 0u, @"stepping to %d presented a frame without its picture",
+                           target);
+            if (shown == target) {
+                break;
+            }
+            XCTAssertEqual(shown, previous, @"while %d decodes the previous picture stays up (-1: black)", target);
+            if (shown != previous) {
+                break;
+            }
+            ++waitingRenders;
+        }
+        XCTAssertEqual(shown, target);
+        XCTAssertNil(view.lastError);
+        previous = target;
+    }
+    NSLog(@"stepping through 10 uncached frames: %d renders showed the previous picture while decoding",
+          waitingRenders);
+    XCTAssertGreaterThan(waitingRenders, 0, @"some render ran while a frame was still decoding");
     [engine attachProgramView:nil];
 }
 
