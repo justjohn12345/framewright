@@ -2,6 +2,8 @@
 
 #import "VEPreviewView.h"
 
+#import "VEExport+Internal.h"
+
 #import "../Render/VEPreviewView+Internal.h"
 #import "VEFacadeCommands+Internal.h"
 #import "VEProgramFrameProvider+Internal.h"
@@ -9,6 +11,7 @@
 
 #include "../Edit/EditOps.h"
 #include "../Edit/UndoStack.h"
+#include "../Export/ExportJob.h"
 #include "../Media/AssetImport.h"
 #include "../Media/BackendRouter.h"
 #include "../Media/DecodePool.h"
@@ -53,6 +56,11 @@ NSNotificationName const VEEngineWaveformDidBecomeAvailableNotification =
 NSNotificationName const VEEnginePlaybackDidChangeNotification = @"VEEnginePlaybackDidChangeNotification";
 NSNotificationName const VEEngineSourcePlaybackDidChangeNotification = @"VEEngineSourcePlaybackDidChangeNotification";
 NSNotificationName const VEEngineMemoryPressureNotification = @"VEEngineMemoryPressureNotification";
+NSNotificationName const VEEngineExportDidProgressNotification = @"VEEngineExportDidProgressNotification";
+NSNotificationName const VEEngineExportDidFinishNotification = @"VEEngineExportDidFinishNotification";
+NSString *const VEEngineExportProgressKey = @"exportProgress";
+NSString *const VEEngineExportSummaryKey = @"exportSummary";
+NSString *const VEEngineExportErrorKey = @"exportError";
 NSString *const VEEngineChangeCountKey = @"changeCount";
 NSString *const VEEngineAssetIDKey = @"assetID";
 NSString *const VEEnginePlaybackStatusKey = @"playbackStatus";
@@ -103,6 +111,8 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created = @[],
 /// the program monitor gets the larger share (it plays multi-layer sequences).
 constexpr double kProgramPoolBudgetShare = 0.5;
 constexpr double kSourcePoolBudgetShare = 0.25;
+/// An export's decode pool (the program and source shares plus this add up to 1).
+constexpr double kExportPoolBudgetShare = 0.25;
 /// Longest the main thread waits for the bookmarks of a project being opened (they resolve in
 /// parallel, never mounting volumes or showing UI); an asset whose bookmark is not resolved in
 /// time keeps its stored path.
@@ -414,6 +424,9 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     dispatch_source_t _memoryPressureSource;
     double _mainThreadImportSeconds;
     os_log_t _log;
+
+    VEExportHandle *_activeExport;
+    NSURL *_exportAccessedURL; // security-scoped output URL accessed for the running export
 }
 
 // MARK: - Versions
@@ -528,6 +541,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     if (_memoryPressureSource != nil) {
         dispatch_source_cancel(_memoryPressureSource);
     }
+    [_activeExport cancel]; // the job deletes its partial file on its own queue
     // The views may outlive the engine: they must stop calling into the controllers first.
     [_programView setFrameSource:ve::render::PreviewFrameSource{}];
     [_sourceView setFrameSource:ve::render::PreviewFrameSource{}];
@@ -631,6 +645,8 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 
 /// Forgets everything cached for the current project's assets (ids restart in every project).
 - (void)forgetProjectMedia {
+    // A running export renders the old project, whose ids are about to name other media.
+    [_activeExport cancel];
     // The controllers stop using the old assets first (their ids will name other files).
     _playback->setSequence(std::make_shared<const Project>(), SequenceId{});
     _playbackPublished = false;
@@ -1344,6 +1360,9 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     _frameCache->handleMemoryPressure(critical ? media::MemoryPressure::Critical : media::MemoryPressure::Warning);
     [_programView handleMemoryPressure];
     [_sourceView handleMemoryPressure];
+    if (auto job = exportJobOf(_activeExport)) {
+        job->handleMemoryPressure(critical);
+    }
     for (const MediaAsset &asset : _project.assets) {
         _thumbnails->purge(asset.id);
         _waveforms->purge(asset.id);
@@ -2587,6 +2606,170 @@ static bool isRunning(playback::PlaybackState state) {
     const CMTime t = std::max(kCMTimeZero, _sourceTime + CMTimeMultiply(fd, static_cast<int32_t>(std::clamp<NSInteger>(
                                                                                  frames, INT32_MIN, INT32_MAX))));
     [self sourceMonitorShowAsset:static_cast<VEAssetID>(_sourceAsset.value()) atTime:t];
+}
+
+
+// MARK: - Export
+
+- (NSArray<VEExportFormat *> *)exportFormatsForWidth:(NSInteger)width height:(NSInteger)height {
+    VE_ASSERT_MAIN();
+    return makeExportFormats(width, height);
+}
+
+- (void)exportFormatsForWidth:(NSInteger)width
+                       height:(NSInteger)height
+                   completion:(void (^)(NSArray<VEExportFormat *> *formats))completion {
+    VE_ASSERT_MAIN();
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      NSArray<VEExportFormat *> *formats = makeExportFormats(width, height);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        completion(formats);
+      });
+    });
+}
+
+- (CGSize)exportSizeForSettings:(VEExportSettings *)settings {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    return [settings outputSizeForSequenceWidth:sequence.width height:sequence.height];
+}
+
+- (int64_t)estimatedFileSizeForSettings:(VEExportSettings *)settings {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    const CMTime duration = sequence.duration();
+    if (!(duration > kCMTimeZero) || !isPositive(sequence.frameDuration)) {
+        return 0;
+    }
+    const CGSize size = [settings outputSizeForSequenceWidth:sequence.width height:sequence.height];
+    return estimatedExportBytes(settings, size, 1.0 / CMTimeGetSeconds(sequence.frameDuration),
+                                CMTimeGetSeconds(duration));
+}
+
+- (nullable VEExportHandle *)activeExport {
+    VE_ASSERT_MAIN();
+    return _activeExport;
+}
+
+- (BOOL)isExporting {
+    VE_ASSERT_MAIN();
+    return _activeExport != nil;
+}
+
+- (void)stopAccessingExportURL {
+    [_exportAccessedURL stopAccessingSecurityScopedResource];
+    _exportAccessedURL = nil;
+}
+
+- (nullable VEExportHandle *)beginExportWithSettings:(VEExportSettings *)settings
+                                           outputURL:(NSURL *)outputURL
+                                            progress:(nullable void (^)(VEExportProgress *progress))progress
+                                          completion:(void (^)(VEExportSummary *_Nullable summary,
+                                                               NSError *_Nullable error))completion
+                                               error:(NSError *_Nullable *_Nullable)error {
+    VE_ASSERT_MAIN();
+    auto refuse = [&](VEEngineErrorCode code, NSString *message) -> VEExportHandle * {
+        if (error != nullptr) {
+            *error = makeError(code, message);
+        }
+        return nil;
+    };
+    if (_activeExport != nil) {
+        return refuse(VEEngineErrorBusy, @"An export is already running.");
+    }
+    if (_coalescingKey != nil) {
+        return refuse(VEEngineErrorBusy, @"Finish the current edit (a drag or slider) before exporting.");
+    }
+    if (NSString *invalid = settings.validationMessage) {
+        return refuse(VEEngineErrorExportUnsupported, invalid);
+    }
+    if (!outputURL.isFileURL) {
+        return refuse(VEEngineErrorOutputNotWritable, @"The export needs a file location.");
+    }
+    const Sequence &sequence = [self activeSequence];
+    const CGSize size = [settings outputSizeForSequenceWidth:sequence.width height:sequence.height];
+    if (size.width < 2 || size.height < 2) {
+        return refuse(VEEngineErrorExportUnsupported, @"The export frame size is not usable.");
+    }
+    exporting::ExportRequest request;
+    request.project = std::make_shared<const Project>(_project);
+    request.sequenceId = _project.activeSequenceId;
+    request.encode = makeEncodeSettings(settings, size, request.videoBitDepth);
+    request.outputPath = outputURL.path.fileSystemRepresentation ?: "";
+    exporting::ExportServices services;
+    services.router = _router;
+    services.cache = _frameCache;
+    services.epoch = _mediaEpoch;
+    services.routing = _routing;
+    exporting::ExportOptions options;
+    options.poolBudgetFraction = kExportPoolBudgetShare;
+
+    const BOOL accessing = [outputURL startAccessingSecurityScopedResource];
+    VEExportHandle *handle = makeExportHandle(outputURL, settings);
+    __weak VEEngine *weakSelf = self;
+    __weak VEExportHandle *weakHandle = handle;
+    void (^progressBlock)(VEExportProgress *) = [progress copy];
+    void (^completionBlock)(VEExportSummary *, NSError *) = [completion copy];
+    auto onProgress = [weakSelf, progressBlock](const exporting::ExportProgress &p) {
+        VEEngine *strongSelf = weakSelf;
+        VEExportProgress *report = makeExportProgress(p);
+        if (strongSelf != nil) {
+            [NSNotificationCenter.defaultCenter postNotificationName:VEEngineExportDidProgressNotification
+                                                              object:strongSelf
+                                                            userInfo:@{VEEngineExportProgressKey : report}];
+        }
+        if (progressBlock) {
+            progressBlock(report);
+        }
+    };
+    auto onCompletion = [weakSelf, weakHandle, completionBlock](media::Result<exporting::ExportSummary> result) {
+        VEEngine *strongSelf = weakSelf;
+        VEExportSummary *summary = nil;
+        NSError *failure = nil;
+        if (result.ok()) {
+            summary = makeExportSummary(result.value());
+        } else {
+            const media::MediaError &e = result.error();
+            failure = makeError(e.code == media::MediaErrorCode::Cancelled ? VEEngineErrorExportCancelled
+                                                                           : VEEngineErrorExportFailed,
+                                toNS(e.message.empty() ? e.description() : e.message));
+        }
+        if (strongSelf != nil) {
+            if (strongSelf->_activeExport == weakHandle) {
+                strongSelf->_activeExport = nil;
+                [strongSelf stopAccessingExportURL];
+            }
+            [NSNotificationCenter.defaultCenter
+                postNotificationName:VEEngineExportDidFinishNotification
+                              object:strongSelf
+                            userInfo:summary ? @{VEEngineExportSummaryKey : summary} : @{VEEngineExportErrorKey : failure}];
+        }
+        completionBlock(summary, failure);
+    };
+    auto started = exporting::ExportJob::start(std::move(request), std::move(services), options,
+                                               dispatch_get_main_queue(), onProgress, onCompletion);
+    if (!started.ok()) {
+        if (accessing) {
+            [outputURL stopAccessingSecurityScopedResource];
+        }
+        const media::MediaError &e = started.error();
+        VEEngineErrorCode code = VEEngineErrorExportUnsupported;
+        if (e.code == media::MediaErrorCode::FileNotFound) {
+            code = VEEngineErrorMissingMedia;
+        } else if (e.code == media::MediaErrorCode::PermissionDenied) {
+            code = VEEngineErrorOutputNotWritable;
+        }
+        return refuse(code, toNS(e.message));
+    }
+    attachExportJob(handle, std::move(started).value());
+    _activeExport = handle;
+    _exportAccessedURL = accessing ? outputURL : nil;
+    // The monitors pause (the export gets the decoders and the GPU); they keep their own pools.
+    _playback->pause();
+    if (_sourcePlayback) {
+        _sourcePlayback->pause();
+    }
+    return handle;
 }
 
 @end

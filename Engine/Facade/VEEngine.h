@@ -44,6 +44,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import <Foundation/Foundation.h>
 
+#import <VidEditEngine/VEExport.h>
 #import <VidEditEngine/VETypes.h>
 
 @class VEEngine;
@@ -72,6 +73,16 @@ FOUNDATION_EXPORT NSNotificationName const VEEngineSourcePlaybackDidChangeNotifi
 /// NSNumber (BOOL).
 FOUNDATION_EXPORT NSNotificationName const VEEngineMemoryPressureNotification;
 
+/// Posted (at most 10 times a second) while an export runs. userInfo[VEEngineExportProgressKey]:
+/// VEExportProgress.
+FOUNDATION_EXPORT NSNotificationName const VEEngineExportDidProgressNotification;
+/// Posted when an export ends, right before its completion runs. userInfo[VEEngineExportSummaryKey]:
+/// VEExportSummary on success, else userInfo[VEEngineExportErrorKey]: NSError.
+FOUNDATION_EXPORT NSNotificationName const VEEngineExportDidFinishNotification;
+
+FOUNDATION_EXPORT NSString *const VEEngineExportProgressKey;
+FOUNDATION_EXPORT NSString *const VEEngineExportSummaryKey;
+FOUNDATION_EXPORT NSString *const VEEngineExportErrorKey;
 FOUNDATION_EXPORT NSString *const VEEngineChangeCountKey;
 FOUNDATION_EXPORT NSString *const VEEngineAssetIDKey;
 FOUNDATION_EXPORT NSString *const VEEnginePlaybackStatusKey;
@@ -87,6 +98,19 @@ typedef NS_ERROR_ENUM(VEEngineErrorDomain, VEEngineErrorCode) {
     VEEngineErrorImportFailed = 4,
     /// The project was replaced (New, Open) before an import finished; nothing was added.
     VEEngineErrorProjectClosed = 5,
+    /// An export failed while running (decode, encode, write or GPU error; see the description).
+    VEEngineErrorExportFailed = 6,
+    /// An export was cancelled (its partial file is deleted).
+    VEEngineErrorExportCancelled = 7,
+    /// An export was refused: media used by the sequence is missing or unreadable.
+    VEEngineErrorMissingMedia = 8,
+    /// An export was refused: the output file cannot be written.
+    VEEngineErrorOutputNotWritable = 9,
+    /// Refused because something else is in progress (an edit gesture, another export).
+    VEEngineErrorBusy = 10,
+    /// An export was refused: the settings are invalid or no encoder can write them (or the
+    /// sequence is empty).
+    VEEngineErrorExportUnsupported = 11,
 };
 
 /// Which tracks close or open time when an edit ripples (ripple delete, speed change, insert).
@@ -436,6 +460,43 @@ NS_SWIFT_UI_ACTOR
 @property (nonatomic, readonly, copy) NSString *playbackError;
 @property (nonatomic, readonly) VEPlaybackStatus *playbackStatus;
 @property (nonatomic, readonly) VEPlaybackStats *playbackStats;
+
+// MARK: Export
+
+/// Which presets can be exported at `width` x `height` on this machine and whether their encoder
+/// runs in hardware (VideoToolbox asked at that size; hardware encoders are size dependent).
+/// The answer is cached per size; the first query of a size takes a few milliseconds, which
+/// exportFormatsForWidth:height:completion: spends off the main thread.
+- (NSArray<VEExportFormat *> *)exportFormatsForWidth:(NSInteger)width height:(NSInteger)height;
+- (void)exportFormatsForWidth:(NSInteger)width
+                       height:(NSInteger)height
+                   completion:(void (^)(NSArray<VEExportFormat *> *formats))completion;
+/// The output size `settings` give the active sequence.
+- (CGSize)exportSizeForSettings:(VEExportSettings *)settings;
+/// Approximate size in bytes of an export of the active sequence with `settings` (from the bit
+/// rate, or for quality settings a typical bits-per-pixel figure; 0 for an empty sequence).
+- (int64_t)estimatedFileSizeForSettings:(VEExportSettings *)settings;
+/// Starts exporting the active sequence to `outputURL` (replaced if it exists; security-scoped
+/// URLs from a save panel are accessed for the export's lifetime). Refused, returning nil with
+/// an error and without creating any file, when: a coalescing group is open or another export
+/// runs (VEEngineErrorBusy), the settings are invalid, no encoder takes them or the sequence is
+/// empty (VEEngineErrorExportUnsupported), media a playing clip uses is missing
+/// (VEEngineErrorMissingMedia), or the output cannot be written (VEEngineErrorOutputNotWritable).
+/// Otherwise both monitors pause and the export runs in the background with its own decoders
+/// (the monitors keep theirs); edits made meanwhile do not affect it (it renders the sequence as
+/// it was when it started). `progress` (at most 10 Hz) and `completion` (once) run on the main
+/// thread; the completion gets the summary, or an error (VEEngineErrorExportCancelled after
+/// -[VEExportHandle cancel], VEEngineErrorExportFailed with the reason otherwise), and the partial
+/// file is deleted on failure. New/Open cancels a running export.
+- (nullable VEExportHandle *)beginExportWithSettings:(VEExportSettings *)settings
+                                           outputURL:(NSURL *)outputURL
+                                            progress:(nullable void (^)(VEExportProgress *progress))progress
+                                          completion:(void (^)(VEExportSummary *_Nullable summary,
+                                                               NSError *_Nullable error))completion
+                                               error:(NSError *_Nullable *_Nullable)error;
+/// The running export, or nil.
+@property (nonatomic, readonly, nullable) VEExportHandle *activeExport;
+@property (nonatomic, readonly) BOOL isExporting;
 
 // MARK: Source monitor
 
