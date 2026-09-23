@@ -28,8 +28,10 @@ audited the code line by line.
   dissolves and constant-power crossfades with duration handles; fade and gain handles on
   audio clips; Speed/Duration sheet.
 - Project files in JSON with schema migration; security-scoped bookmarks for media.
-- Export (in progress): hardware H.264/HEVC/ProRes and software AV1 through the same
-  compositor and mixer as playback.
+- Export (File > Export…): H.264, HEVC (8-bit and 10-bit Main10) and ProRes 422 on
+  VideoToolbox (hardware where the Mac has it for the frame size) and software AV1 (SVT-AV1) to
+  MP4, MOV or MKV, with AAC or PCM audio, rendered by the same scheduler, compositor and mixer as
+  playback; progress, cancel and a hardware/software answer per format.
 
 ## Architecture
 

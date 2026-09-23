@@ -125,3 +125,55 @@ file lists what later phases (6: transitions/effects UI, 7: export, 8: persisten
 - The inspector sets the status line only for a note or a refusal (a plain success leaves it).
 - `VEClipParamsBatch` is `NS_SWIFT_UI_ACTOR` and asserts the main thread.
 - Removing a transition goes through `ProjectStore.removeTransition(_:)` (focus independent).
+
+## Phase 7 (export) additions
+- Engine: `Engine/Export/ExportJob.{h,mm}` (one export: validate, then a private DecodePool on the
+  shared FrameCache with its own 0.25 budget share and lanes = clip ids, a Compositor created for
+  RGBA16Float, an `OfflineAudioRenderer`, a writer from `BackendRouter::makeWriter`, all driven by
+  `IMediaWriter::runPull`). Pictures are looked up with `playback::frameSlotFor` (shared with the
+  program monitor), so an export shows exactly what the monitor shows. A layer that cannot be
+  decoded fails the export ("Frame N (t s) cannot be exported: “name” could not be decoded ...");
+  it is never drawn black or stale. Cancel completes in about 70 ms (measured), deleting the file.
+- Audio: `Engine/Audio/OfflineAudioRenderer.{h,mm}` is the render thread of a private AudioMixer
+  (same plans, envelopes, crossfade law, speed resampling and clipping as playback); it waits with
+  `AudioMixer::isRangeReady` before each block, turns a failed source into an error
+  (`failedSourceIn`) and treats any underrun as an error. Keyframed Motion (open finding 8) must be
+  evaluated in the Scheduler / RenderGraph so export and playback keep sharing one path.
+- Media: `VideoCodec::AV1` (FFmpeg writer only: libsvtav1 preset 8, CRF from quality, VBR from a bit
+  rate; 8-bit input to yuv420p, 10-bit to yuv420p10le) and `ContainerFormat::MKV` (FFmpeg only);
+  `BackendRouter::writerBackendFor/makeWriter` ("apple" first); `IMediaWriter::videoEncoderName()`;
+  `HardwareCaps::encoderAvailability(codec, w, h, tenBit)` (VideoToolbox asked at the frame size,
+  cached). AppleWriter encodes HEVC Main10 from 'x420' input; the compositor renders 'x420'/'xf20'
+  targets (whole 10-bit codes). ProRes is fed 32BGRA (8-bit): a 10-bit 4:2:2 target ('x422' or
+  'v210') is a phase 8 candidate for 10-bit sources.
+- Fixed on the FFmpeg writer path: `ComposedMediaWriter::runPull` now ends (flushes) a stream as
+  soon as its callback reports the end (the muxer no longer holds the other stream back), and
+  `FFAudioEncoder` trims the silence that padded the last AAC frame (aac_at has no small last
+  frame): packets are shortened/dropped at the real end, which ends the MP4 edit list exactly and
+  becomes Matroska DiscardPadding (`EncodedPacket::trailingDiscard`). Before, an FFmpeg-written
+  file's audio ran up to 1023 samples long.
+- `DecodePool::waitForProgress(timeout)` (block until a step finished, instead of polling) and
+  `refresh()` (restep settled streams: re-decodes a target frame evicted by memory pressure,
+  retries a failed decode).
+- Progress `bytesWritten` is the output file's size; AVAssetWriter stages MP4 (index up front)
+  elsewhere, so it stays 0 for Apple MP4 until the end (MOV and FFmpeg files grow as they go).
+- Facade: `VEExport.h` (VEExportPreset/Container/Resolution/RateControl/AudioCodec with explicit
+  Swift names, `VEExportSettings` value object with `validationMessage` and
+  `outputSizeForSequenceWidth:height:`, `VEExportFormat`, `VEExportProgress`, `VEExportSummary`,
+  `VEExportHandle` with `cancel` / `cancelAndWaitWithTimeout:`); on VEEngine
+  `exportFormatsForWidth:height:[completion:]`, `exportSizeForSettings:`,
+  `estimatedFileSizeForSettings:` (bit rate, or a bits-per-pixel heuristic for quality mode: an
+  estimate, labelled "≈" in the UI), `beginExportWithSettings:outputURL:progress:completion:error:`,
+  `activeExport`, `isExporting`, `VEEngineExportDidProgressNotification` /
+  `VEEngineExportDidFinishNotification`, error codes 6-11. New/Open cancels a running export (its
+  asset ids are about to name other media); memory pressure is forwarded to the job.
+- App: `App/Views/Export/ExportSheet.swift` (`ExportModel` + `ExportSheet`, `ExportFolderMemory`,
+  `ProgressThrottle`); File > Export… (Cmd+E) via `ProjectStore.showExportSheet()`; the store
+  republishes `isExporting` (also on `VEEngineExportDidFinish`); `DocumentController`
+  `confirmStoppingExport(because:)` runs before New, Open, window close and quit (Stop Export
+  cancels and waits up to 2 s for the file to be removed). The sheet stays up (modal on the editor
+  window) while exporting; Close is disabled and Escape cancels the export.
+- For the pending UX round (open findings 4-7): the sheet is 480 pt wide and self-contained; a
+  pop-out program monitor (finding 7) must be paused by `beginExport...` like the two monitors are
+  now (`_playback->pause()`, `_sourcePlayback->pause()`). WebM is not offered: the LGPL build's only
+  Opus/Vorbis encoders are FFmpeg's experimental ones (AV1 goes to MP4 or MKV with AAC).
