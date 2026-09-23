@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#29216b"/><stop offset="1" stop-color="#140f38"/>
+    </linearGradient>
+    <linearGradient id="hl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/><stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <!-- squircle background (macOS icon grid) -->
+  <rect x="92" y="92" width="840" height="840" rx="189" fill="url(#bg)"/>
+  <rect x="92" y="92" width="840" height="840" rx="189" fill="url(#hl)"/>
+  <!-- viewfinder brackets -->
+  <g fill="none" stroke="#f7f7ff" stroke-width="52" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M260 412 V292 H380"/>
+    <path d="M644 292 H764 V412"/>
+    <path d="M764 612 V732 H644"/>
+    <path d="M380 732 H260 V612"/>
+  </g>
+  <!-- razor cut -->
+  <path d="M371 644 L653 380" stroke="#ffffff" stroke-opacity="0.55" stroke-width="16" stroke-linecap="round"/>
+  <!-- amber playhead -->
+  <path d="M462 282 V779" stroke="#ffb829" stroke-width="34" stroke-linecap="round"/>
+  <path d="M414 222 H510 L462 292 Z" fill="#ffb829"/>
+</svg>

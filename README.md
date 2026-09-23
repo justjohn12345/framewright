@@ -1,4 +1,9 @@
-# VidEdit
+# Framewright (code name VidEdit)
+
+<img src="docs/logo/framewright-icon.png" width="128" alt="Framewright icon">
+
+A simple Premiere-style video editor for macOS. The product is called Framewright; targets, bundle identifiers and
+source use the code name VidEdit.
 
 A native macOS non-linear video editor: an Objective-C++ engine framework
 (`VidEditEngine`) with a Swift/SwiftUI app on top. See [PLAN.md](PLAN.md) for the

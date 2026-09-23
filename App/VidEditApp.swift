@@ -17,7 +17,7 @@ struct VidEditApp: App {
     }
 
     var body: some Scene {
-        Window("VidEdit", id: "main") {
+        Window("Framewright", id: "main") {
             ContentView(store: store, documents: documents)
                 .onAppear {
                     appDelegate.documents = documents

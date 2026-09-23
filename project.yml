@@ -185,8 +185,8 @@ targets:
     info:
       path: App/Resources/Info.plist
       properties:
-        CFBundleDisplayName: VidEdit
-        CFBundleName: VidEdit
+        CFBundleDisplayName: Framewright
+        CFBundleName: Framewright
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSApplicationCategoryType: public.app-category.video
