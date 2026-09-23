@@ -236,6 +236,156 @@ final class InspectorModelTests: XCTestCase {
         store.cancelActiveGesture = nil
     }
 
+    /// Review finding 4: a successful inspector edit leaves another component's status message
+    /// alone; an inspector note or refusal still shows there.
+    func testAPlainInspectorEditKeepsTheStatusLine() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let clip = try fixture.placeMovie(movie, at: 0)
+        store.selection = [clip]
+        store.statusMessage = "Transition: 12f"
+        inspector.setValue(.opacity, 50)
+        XCTAssertEqual(video(clip).opacity, 0.5, accuracy: 1e-9)
+        XCTAssertNil(inspector.message)
+        XCTAssertEqual(store.statusMessage, "Transition: 12f", "a plain success does not clear it")
+        inspector.nudge(.opacity, steps: 1)
+        inspector.endNudgeBurst()
+        XCTAssertEqual(store.statusMessage, "Transition: 12f")
+        inspector.commitText(.opacity, "150")
+        XCTAssertTrue(store.statusMessage?.contains("limited") == true, store.statusMessage ?? "nil")
+        XCTAssertEqual(store.statusMessage, inspector.message)
+    }
+
+    /// Review finding 8: a typed speed the engine stores as a nearby fraction says so.
+    func testATypedSpeedThatIsAdjustedSaysSo() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let clip = try fixture.placeMovie(movie, at: 0)
+        store.selection = [clip]
+        inspector.commitText(.speed, "33.33")
+        XCTAssertEqual(store.clips[clip]?.speedNumerator, 1)
+        XCTAssertEqual(store.clips[clip]?.speedDenominator, 3)
+        XCTAssertEqual(inspector.message, "Applied as 1/3 (33.33 %)")
+        XCTAssertEqual(store.statusMessage, "Applied as 1/3 (33.33 %)")
+        inspector.commitText(.speed, "50")
+        XCTAssertNil(inspector.message, "an exact value needs no note")
+        inspector.commitText(.speed, "1/3")
+        XCTAssertNil(inspector.message, "a fraction is exact")
+        inspector.commitText(.speed, "33.3")
+        XCTAssertNil(inspector.message, "one decimal is exact (333/1000)")
+        XCTAssertEqual(store.clips[clip]?.speedDenominator, 1000)
+
+        // The Speed/Duration sheet: percent and ratio entries.
+        store.statusMessage = nil
+        let sheet = SpeedDurationModel(store: store, clipIDs: [clip])
+        sheet.entry = .percent
+        sheet.text = "12.345"
+        XCTAssertTrue(sheet.apply())
+        let applied = try XCTUnwrap(store.clips[clip])
+        let ratio = SpeedRatio(numerator: applied.speedNumerator, denominator: applied.speedDenominator)
+        XCTAssertLessThanOrEqual(applied.speedDenominator, 1000)
+        XCTAssertEqual(store.statusMessage, String(format: "Applied as %lld/%lld (%.2f %%)", ratio.numerator,
+                                                   ratio.denominator, ratio.percent))
+        let exact = SpeedDurationModel(store: store, clipIDs: [clip])
+        exact.entry = .ratio
+        exact.text = "0.5"
+        store.statusMessage = nil
+        XCTAssertTrue(exact.apply())
+        XCTAssertNil(exact.message)
+        XCTAssertNil(store.statusMessage)
+    }
+
+    /// Test gap 1: the transition duration field against the cut's limit (typed, nudged, reset
+    /// to the preference) and the Delete Transition button whatever panel has the focus.
+    func testTransitionDurationFieldAndDeleteButton() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        // A: source [0, 1) at 0; B: source [1, 2) at 1: at most 60 frames on the cut.
+        let v1 = try XCTUnwrap(store.videoTracks.first).trackID
+        XCTAssertTrue(store.place(asset: movie.assetID, at: .zero, videoTrack: v1, audioTrack: 0,
+                                  sourceIn: .zero, sourceOut: store.frameTime(1), overwrite: true))
+        let a = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.place(asset: movie.assetID, at: store.frameTime(1), videoTrack: v1, audioTrack: 0,
+                                  sourceIn: store.frameTime(1), sourceOut: store.frameTime(2), overwrite: true))
+        let b = try XCTUnwrap(store.selection.first)
+        let added = store.engine.addTransition(fromClip: a, toClip: b, duration: store.time(frames: 10))
+        XCTAssertTrue(added.ok, added.message)
+        let id = try XCTUnwrap(added.createdIDs.first?.int64Value)
+        func frames() -> Int64 { store.frames(store.engine.transitionInfo(id)?.duration ?? .zero) }
+        store.selection = []
+        store.selectedTransitionID = id
+        XCTAssertTrue(inspector.isAvailable(.transitionDuration))
+        XCTAssertEqual(inspector.transitionLimit?.maximumFrames, 60)
+        XCTAssertEqual(inspector.text(.transitionDuration), "00:00:00:10")
+
+        // Typed beyond the limit: applied at the limit, with the reason.
+        inspector.commitText(.transitionDuration, "90f")
+        XCTAssertEqual(frames(), 60)
+        XCTAssertTrue(inspector.message?.hasPrefix("Limited to 00:00:02:00") == true, inspector.message ?? "nil")
+        inspector.commitText(.transitionDuration, "0f")
+        XCTAssertEqual(frames(), 1, "at least one frame")
+        inspector.commitText(.transitionDuration, "50f")
+        XCTAssertEqual(frames(), 50)
+        XCTAssertNil(inspector.message)
+
+        // Nudges accumulate up to the limit and are one undo step.
+        for _ in 0 ..< 3 {
+            inspector.nudge(.transitionDuration, steps: InspectorModel.bigStep)
+        }
+        XCTAssertEqual(frames(), 60)
+        XCTAssertTrue(inspector.message?.hasPrefix("Limited to") == true, inspector.message ?? "nil")
+        inspector.endNudgeBurst()
+        XCTAssertEqual(store.undoActionName, "Change Transition Duration")
+        store.undo()
+        XCTAssertEqual(frames(), 50, "the burst was one undo step")
+
+        // Reset: the default duration (Settings > Editing).
+        store.defaults.set(0.5, forKey: EditingPreferences.defaultTransitionSecondsKey)
+        inspector.reset(.transition)
+        XCTAssertEqual(frames(), 15)
+
+        // Delete Transition removes the transition even while the media bin has the focus (where
+        // Delete would remove the selected asset).
+        store.selectedAssetID = movie.assetID
+        store.focusArea = .mediaBin
+        inspector.deleteTransition()
+        XCTAssertNil(store.engine.transitionInfo(id))
+        XCTAssertNil(store.selectedTransitionID)
+        XCTAssertNotNil(store.asset(movie.assetID), "the asset is untouched")
+        XCTAssertEqual(store.undoActionName, "Remove Transition")
+    }
+
+    /// Test gap 6: a speed slider drag with ripple is one undo step; undo puts the later clips
+    /// back.
+    func testASpeedSliderDragWithRippleIsOneUndoStep() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let v1 = try XCTUnwrap(store.videoTracks.first).trackID
+        var ids: [VEClipID] = []
+        for index in 0 ..< 3 {
+            XCTAssertTrue(store.place(asset: movie.assetID, at: store.frameTime(Double(index)), videoTrack: v1,
+                                      audioTrack: 0, sourceIn: .zero, sourceOut: store.frameTime(1), overwrite: true))
+            ids.append(try XCTUnwrap(store.selection.first))
+        }
+        func start(_ id: VEClipID) -> Double { store.clips[id]?.timelineStart.secondsOrZero ?? -1 }
+        store.selection = [ids[0]]
+        inspector.beginSliderDrag(.speed)
+        for percent in [90.0, 75, 60, 50] {
+            inspector.sliderChanged(.speed, percent)
+        }
+        inspector.endSliderDrag()
+        XCTAssertFalse(store.engine.isCoalescing)
+        XCTAssertEqual(store.clips[ids[0]]?.speedDenominator, 2, "50 %")
+        XCTAssertEqual(store.frames(store.clips[ids[0]]?.duration ?? .zero), 60)
+        XCTAssertEqual(start(ids[1]), 2, accuracy: 1e-9, "later clips rippled")
+        XCTAssertEqual(start(ids[2]), 3, accuracy: 1e-9)
+        XCTAssertEqual(store.undoActionName, "Change Speed")
+        store.undo()
+        XCTAssertEqual(store.clips[ids[0]]?.speedDenominator, 1)
+        XCTAssertEqual(start(ids[1]), 1, accuracy: 1e-9, "undo restored the later clips")
+        XCTAssertEqual(start(ids[2]), 2, accuracy: 1e-9)
+        XCTAssertEqual(store.undoActionName, "Overwrite", "the whole drag was one undo step")
+        store.redo()
+        XCTAssertEqual(start(ids[2]), 3, accuracy: 1e-9, "redo applies the drag's final state at once")
+        XCTAssertEqual(store.clips[ids[0]]?.speedDenominator, 2)
+    }
+
     func testDurationAndSpeedParsing() {
         let fd = CMTime(value: 1, timescale: 30)
         XCTAssertEqual(DurationFormat.parseFrames("12f", frameDuration: fd, display: .timecode), 12)

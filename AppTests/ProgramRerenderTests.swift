@@ -111,4 +111,63 @@ final class ProgramRerenderTests: XCTestCase {
         XCTAssertTrue(store.engine.playbackStats.presentedClockDriven, "the picture was chosen by the running clock")
         store.engine.pause()
     }
+
+    /// Test gap 3: changing a transition's duration re-renders the paused frame inside the
+    /// dissolve. The movie's blue channel rises 3 levels per frame; A = source [0, 1) at 0 and
+    /// B = source [1.5, 2) at 1 s, so B's picture is 15 frames (45 levels) ahead of A's. At frame
+    /// 22 a 10-frame dissolve [25, 35) shows A alone; lengthened to 30 frames [15, 45) it mixes in
+    /// about a quarter of B.
+    func testATransitionDurationChangeReRendersTheFrameInsideTheDissolve() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        let view = VEPreviewView(frame: NSRect(x: 0, y: 0, width: 480, height: 270))
+        store.attachProgramView(view)
+        let (movie, _) = try await fixture.importMedia()
+        let v1 = try XCTUnwrap(store.videoTracks.first).trackID
+        XCTAssertTrue(store.place(asset: movie.assetID, at: .zero, videoTrack: v1, audioTrack: 0, sourceIn: .zero,
+                                  sourceOut: CMTime(value: 30, timescale: 30), overwrite: true))
+        let a = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.place(asset: movie.assetID, at: CMTime(value: 30, timescale: 30), videoTrack: v1,
+                                  audioTrack: 0, sourceIn: CMTime(value: 45, timescale: 30),
+                                  sourceOut: CMTime(value: 60, timescale: 30), overwrite: true))
+        let b = try XCTUnwrap(store.selection.first)
+        let added = store.engine.addTransition(fromClip: a, toClip: b, duration: CMTime(value: 10, timescale: 30))
+        XCTAssertTrue(added.ok, added.message)
+        let transition = try XCTUnwrap(added.createdIDs.first?.int64Value)
+        store.selection = []
+        store.selectedTransitionID = transition
+        store.playheadTime = CMTime(value: 22, timescale: 30)
+
+        // A's frame 22 appears once decoded (blue 40 + 66).
+        var outside: (r: Int, g: Int, b: Int)?
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            await renderOnce(view)
+            if let pixel = centre(view), pixel.g > 40, abs(pixel.b - 106) <= 12 {
+                outside = pixel
+                break
+            }
+        }
+        let alone = try XCTUnwrap(outside, "A's picture at frame 22 never appeared: \(String(describing: centre(view)))")
+        XCTAssertEqual(view.missingLayerCount, 0)
+
+        // Paused: the engine re-renders by itself after the edit (no renderOnce from the test).
+        let rendersBefore = view.renderCount
+        store.inspector.setValue(.transitionDuration, 30)
+        XCTAssertEqual(store.frames(store.engine.transitionInfo(transition)?.duration ?? .zero), 30)
+        let mixed = await StoreFixture.wait(until: {
+            guard view.renderCount > rendersBefore, let pixel = self.centre(view) else { return false }
+            return pixel.b >= alone.b + 5
+        }, timeout: 10)
+        XCTAssertTrue(mixed, "inside the longer dissolve B shows through: \(String(describing: centre(view))) vs \(alone)")
+        XCTAssertEqual(view.missingLayerCount, 0, "both layers of the dissolve are drawn")
+        XCTAssertNil(view.lastError)
+
+        // Undo: back to A alone.
+        store.undo()
+        let restored = await StoreFixture.wait(until: {
+            guard let pixel = self.centre(view) else { return false }
+            return abs(pixel.b - alone.b) <= 2
+        }, timeout: 10)
+        XCTAssertTrue(restored, "undo re-renders too: \(String(describing: centre(view)))")
+    }
 }

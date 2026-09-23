@@ -98,6 +98,58 @@ final class TimelineEffectsTests: XCTestCase {
         XCTAssertEqual(model.hitTest(CGPoint(x: 200, y: v1Top + 20)), .clipBody(1))
     }
 
+    /// Review finding 10: on a clip narrower than 40 pt the fade handle is hit only within its
+    /// drawn square, so the rest of the label selects the clip.
+    func testANarrowAudioClipKeepsMostOfItsLabelForSelecting() throws {
+        var model = TimelineViewModel()
+        model.pixelsPerSecond = 100
+        model.frameSeconds = 1.0 / 30.0
+        model.tracks = [.init(id: 20, kind: .audio, index: 0, name: "A1")]
+        model.clips = [
+            .init(id: 1, trackID: 20, start: 0, end: 0.3, isAudio: true), // 30 pt wide
+            .init(id: 2, trackID: 20, start: 1, end: 3, isAudio: true), // 200 pt wide
+        ]
+        let narrow = try XCTUnwrap(model.clip(id: 1))
+        let wide = try XCTUnwrap(model.clip(id: 2))
+        XCTAssertEqual(model.fadeHandleZoneHeight(forClip: narrow), TimelineViewModel.narrowFadeHandleZoneHeight)
+        XCTAssertEqual(model.fadeHandleZoneHeight(forClip: wide), TimelineViewModel.fadeHandleZoneHeight)
+        XCTAssertEqual(model.hitTest(CGPoint(x: 5, y: 4)), .fadeIn(1), "on the drawn handle")
+        XCTAssertEqual(model.hitTest(CGPoint(x: 15, y: 10)), .clipBody(1), "the label below the handle selects")
+        XCTAssertEqual(model.hitTest(CGPoint(x: 105, y: 10)), .fadeIn(2), "a wide clip keeps the taller zone")
+    }
+
+    // MARK: Hover
+
+    /// Review finding 7: the cursor is set when the hovered kind of thing changes, not on every
+    /// pointer event, and leaving the track area restores the arrow.
+    func testHoverSetsTheCursorOnlyWhenItsShapeChanges() async throws {
+        let (_, tone) = try await fixture.importMedia()
+        let clip = try place(tone, at: 0, from: 0, to: 3, audio: a1) // x 0...150 on A1 (y 132...180)
+        let gestures = TimelineGestureController(store: store)
+        var applied: [TimelineGestureController.PointerCursor] = []
+        gestures.applyCursor = { applied.append($0) }
+        let model = store.timelineModel
+        let content = try XCTUnwrap(model.contentRect(forClip: try XCTUnwrap(model.clip(id: clip))))
+        let lineY = TimelineViewModel.gainY(0, in: content)
+        // Twenty moves over the body, then twenty along the gain line, then twenty over the body.
+        for x in stride(from: 40.0, to: 60.0, by: 1) { gestures.hover(at: CGPoint(x: x, y: lineY + 10)) }
+        for x in stride(from: 40.0, to: 60.0, by: 1) { gestures.hover(at: CGPoint(x: x, y: lineY)) }
+        for x in stride(from: 40.0, to: 60.0, by: 1) { gestures.hover(at: CGPoint(x: x, y: lineY + 10)) }
+        XCTAssertEqual(applied, [.arrow, .resizeUpDown, .arrow], "one change per shape, not per event")
+        XCTAssertEqual(gestures.cursorChanges, 3)
+        // Onto the clip's tail edge and out of the area: the arrow comes back once.
+        gestures.hover(at: CGPoint(x: 148, y: lineY + 10))
+        gestures.hover(at: CGPoint(x: 149, y: lineY + 10))
+        gestures.hover(at: nil)
+        XCTAssertEqual(applied, [.arrow, .resizeUpDown, .arrow, .resizeLeftRight, .arrow])
+        XCTAssertNil(gestures.cursor)
+        // Leaving while the arrow is up changes nothing (another view's cursor is not fought).
+        gestures.hover(at: CGPoint(x: 50, y: lineY + 10))
+        gestures.hover(at: nil)
+        XCTAssertEqual(applied.count, 6)
+        XCTAssertEqual(applied.last, .arrow)
+    }
+
     // MARK: Drags
 
     func testTransitionEdgeDragIsSymmetricSnappedBoundedAndOneStep() async throws {
@@ -316,6 +368,83 @@ final class TimelineEffectsTests: XCTestCase {
         store.addTransitionAtPlayhead(.audioCrossfade)
         XCTAssertEqual(store.sequence.transitions.count, 1)
         XCTAssertEqual(store.sequence.transitions.first?.trackID, a1)
+    }
+
+    /// Review finding 1 through the store: the dissolve is fitted to its own cut and the linked
+    /// crossfade to its (tighter) one, in one undo step; the status line names the shortening.
+    func testALinkedCrossfadeIsFittedToItsOwnCut() async throws {
+        let (movie, tone) = try await fixture.importMedia()
+        let va = try place(movie, at: 0, from: 0, to: 1, video: v1)
+        let aa = try place(tone, at: 0, from: 0, to: 1, audio: a1)
+        let vb = try place(movie, at: 1, from: 1, to: 2, video: v1)
+        // The incoming sound starts 0.1 s into the file: 3 frames of media before its in point.
+        let ab = try place(tone, at: 1, from: 0.1, to: 1.1, audio: a1)
+        XCTAssertTrue(store.engine.linkClip(va, withClip: aa).ok)
+        XCTAssertTrue(store.engine.linkClip(vb, withClip: ab).ok)
+        let audioLimit = store.engine.transitionLimit(fromClip: aa, toClip: ab).maximumFrames
+        XCTAssertGreaterThan(audioLimit, 0)
+        XCTAssertLessThan(audioLimit, 30)
+        XCTAssertGreaterThanOrEqual(store.engine.transitionLimit(fromClip: va, toClip: vb).maximumFrames, 30)
+        let before = store.changeCount
+        XCTAssertTrue(store.addTransition(.crossDissolve, from: va, to: vb), store.statusMessage ?? "")
+        XCTAssertEqual(store.changeCount, before + 1, "one undo step")
+        func frames(onTrack track: VETrackID) -> Int64? {
+            store.sequence.transitions.first { $0.trackID == track }.map { store.frames($0.duration) }
+        }
+        XCTAssertEqual(frames(onTrack: v1), 30, "the dissolve keeps the default 1 s: its cut has the media")
+        XCTAssertEqual(frames(onTrack: a1), audioLimit, "the crossfade is as long as its own cut allows")
+        XCTAssertTrue(store.statusMessage?.contains("linked clips' transition was shortened") == true,
+                      store.statusMessage ?? "nil")
+        store.undo()
+        XCTAssertTrue(store.sequence.transitions.isEmpty, "both came off in one undo")
+    }
+
+    /// Review finding 5: when the linked audio's cut cannot take a crossfade, the dissolve is
+    /// added alone and the status line says why.
+    func testASkippedLinkedCrossfadeIsExplained() async throws {
+        let (movie, tone) = try await fixture.importMedia()
+        let va = try place(movie, at: 0, from: 0, to: 1, video: v1)
+        let aa = try place(tone, at: 0, from: 2, to: 3, audio: a1) // ends where the file ends
+        let vb = try place(movie, at: 1, from: 1, to: 2, video: v1)
+        let ab = try place(tone, at: 1, from: 0, to: 1, audio: a1) // starts where the file starts
+        XCTAssertTrue(store.engine.linkClip(va, withClip: aa).ok)
+        XCTAssertTrue(store.engine.linkClip(vb, withClip: ab).ok)
+        XCTAssertEqual(store.engine.transitionLimit(fromClip: aa, toClip: ab).maximumFrames, 0)
+        XCTAssertTrue(store.addTransition(.crossDissolve, from: va, to: vb), store.statusMessage ?? "")
+        XCTAssertEqual(store.sequence.transitions.count, 1)
+        XCTAssertEqual(store.sequence.transitions.first?.trackID, v1)
+        XCTAssertTrue(store.statusMessage?.contains("The linked clips got no transition") == true,
+                      store.statusMessage ?? "nil")
+        XCTAssertTrue(store.statusMessage?.contains("tone.wav") == true, store.statusMessage ?? "nil")
+    }
+
+    /// Review finding 6: Add Cross Dissolve picks a cut at an edge of the clip under the playhead,
+    /// else the nearest cut within 2 s, else refuses.
+    func testTheCutAtThePlayheadPrefersTheClipUnderIt() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        // A [0, 1) | B [1, 3), a gap, D [3.2, 4.2) | E [4.2, 5.2), a gap, F [8, 9) on its own.
+        let a = try place(movie, at: 0, from: 0, to: 1, video: v1)
+        let b = try place(movie, at: 1, from: 0, to: 2, video: v1)
+        let d = try place(movie, at: 3.2, from: 0, to: 1, video: v1)
+        let e = try place(movie, at: 4.2, from: 1, to: 2, video: v1)
+        try place(movie, at: 8, from: 0, to: 1, video: v1)
+        func cut(at seconds: Double) -> [VEClipID]? {
+            store.nearestCut(onTrack: v1, toSeconds: seconds).map { [$0.0, $0.1] }
+        }
+        XCTAssertEqual(cut(at: 2.9), [a, b], "B is under the playhead: its own cut, although D|E is nearer")
+        XCTAssertEqual(cut(at: 1.0), [a, b], "on the cut itself")
+        XCTAssertEqual(cut(at: 3.1), [d, e], "in the gap: the nearest cut within 2 s")
+        XCTAssertEqual(cut(at: 4.6), [d, e])
+        XCTAssertNil(cut(at: 6.5), "no cut within 2 s")
+        XCTAssertNil(cut(at: 8.5), "F is under the playhead but meets no other clip, and no cut is near")
+
+        store.targetVideoTrackID = v1
+        store.selection = []
+        store.playheadTime = store.frameTime(6.5)
+        store.addTransitionAtPlayhead(.crossDissolve)
+        XCTAssertTrue(store.sequence.transitions.isEmpty)
+        XCTAssertTrue(store.statusMessage?.hasPrefix("Move the playhead near a cut") == true, store.statusMessage ?? "nil")
+        XCTAssertNil(store.selectedTransitionID)
     }
 
     func testCommandsDoNothingDuringAGestureAndReportRefusals() async throws {
