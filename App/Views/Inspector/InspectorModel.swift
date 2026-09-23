@@ -305,7 +305,11 @@ final class InspectorModel: ObservableObject {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         if parameter == .speed, let ratio = SpeedRatio.parse(trimmed) {
-            applySpeed(ratio, mode: .single)
+            // "33.33" cannot be stored exactly: say what was applied instead.
+            let adjusted = SpeedRatio.typedMultiplier(trimmed).flatMap {
+                SpeedRatio.adjustmentNote(typed: $0, applied: ratio)
+            }
+            applySpeed(ratio, mode: .single, clampNote: adjusted)
             return
         }
         guard let value = parse(parameter, trimmed) else {
@@ -418,6 +422,16 @@ final class InspectorModel: ObservableObject {
 
     func clearMessage() {
         message = nil
+    }
+
+    /// The Transition section's Delete Transition button: removes the selected transition
+    /// whichever panel has the focus (Delete in the media bin removes an asset instead).
+    func deleteTransition() {
+        guard let transition else { return }
+        endNudgeBurst()
+        if !store.removeTransition(transition.transitionID) {
+            message = store.statusMessage
+        }
     }
 
     // MARK: Implementation
@@ -553,11 +567,16 @@ final class InspectorModel: ObservableObject {
         }
     }
 
+    /// Shows the outcome: a refusal or note in `message` and the status line. A plain success
+    /// clears the inspector's own message but leaves the status line alone (it may show another
+    /// component's message, such as a timeline drag's).
     private func handle(_ result: VEEditResult, mode: Mode, clampNote: String?) {
         if result.ok {
             let note = [clampNote, result.note.isEmpty ? nil : result.note].compactMap { $0 }.joined(separator: " ")
             message = note.isEmpty ? nil : note
-            store.statusMessage = message
+            if let message {
+                store.statusMessage = message
+            }
             return
         }
         if result.errorCode == .busy {

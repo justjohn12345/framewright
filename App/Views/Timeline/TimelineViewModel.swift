@@ -111,6 +111,17 @@ struct TimelineViewModel: Equatable {
     static let fadeHandleSize: CGFloat = 7
     static let fadeHandleHitRadius: CGFloat = 6
     static let fadeHandleZoneHeight: CGFloat = 12
+    /// On a clip narrower than `narrowClipWidth` points the handles are hit only within the
+    /// drawn square (the top `narrowFadeHandleZoneHeight` points), leaving most of its label to
+    /// select and move it.
+    static let narrowClipWidth: CGFloat = 40
+    static let narrowFadeHandleZoneHeight: CGFloat = 1 + fadeHandleSize
+
+    /// Height of the top zone of `clip`'s row in which its fade handles are hit.
+    func fadeHandleZoneHeight(forClip clip: Clip) -> CGFloat {
+        guard let rect = rect(forClip: clip) else { return 0 }
+        return rect.width < Self.narrowClipWidth ? Self.narrowFadeHandleZoneHeight : Self.fadeHandleZoneHeight
+    }
     /// The gain line is hit within this many points vertically.
     static let gainLineHitDistance: CGFloat = 3
     /// Gain line mapping: the top of the content area is `gainMaxDb`, its bottom `gainMinDb`.
@@ -282,6 +293,7 @@ struct TimelineViewModel: Equatable {
         if layout.track.kind == .audio, point.y - rowTop < Self.fadeHandleZoneHeight {
             var best: (hit: Hit, distance: CGFloat)?
             for clip in clips where clip.trackID == layout.track.id && clip.isAudio {
+                guard point.y - rowTop < fadeHandleZoneHeight(forClip: clip) else { continue }
                 for fadeIn in [true, false] {
                     guard let center = fadeHandleCenter(forClip: clip, fadeIn: fadeIn) else { continue }
                     let distance = abs(point.x - center.x)

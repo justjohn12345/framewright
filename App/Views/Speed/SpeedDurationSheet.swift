@@ -1,3 +1,4 @@
+import Combine
 import CoreMedia
 import SwiftUI
 import VidEditEngine
@@ -48,8 +49,10 @@ final class SpeedDurationModel: ObservableObject {
 
     @Published var text: String
     @Published var ripple: SpeedRipple
-    /// Why the last Apply was refused, or why the text is not a speed.
+    /// Why the last Apply was refused, or why the text is not a speed; after a successful
+    /// Apply, how the typed speed was adjusted to one the engine can store (if it was).
     @Published private(set) var message: String?
+    private var preferencesForwarding: AnyCancellable?
 
     init(store: ProjectStore, clipIDs: [VEClipID]) {
         self.store = store
@@ -62,6 +65,10 @@ final class SpeedDurationModel: ObservableObject {
         let initialEntry: Entry = exactPercent ? .percent : .ratio
         entry = initialEntry
         text = Self.text(for: speed, entry: initialEntry)
+        // The durations shown follow the duration display preference while the sheet is open.
+        preferencesForwarding = store.preferences.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
     }
 
     var clips: [VEClipInfo] { clipIDs.compactMap { store.clips[$0] } }
@@ -94,6 +101,15 @@ final class SpeedDurationModel: ObservableObject {
             return SpeedRatio.approximating(value)
         }
         return SpeedRatio.parse(trimmed)
+    }
+
+    /// The typed speed as a multiplier (nil for a fraction, which is exact).
+    static func typedMultiplier(_ text: String, entry: Entry) -> Double? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
+        if entry == .ratio, let value = Double(trimmed) {
+            return value
+        }
+        return SpeedRatio.typedMultiplier(trimmed)
     }
 
     /// The first clip's duration now and (approximately: the engine also stops at the end of
@@ -137,7 +153,15 @@ final class SpeedDurationModel: ObservableObject {
             message = result.message
             return false
         }
-        message = nil
+        // "33.33" is applied as 1/3: say so (the sheet closes, so in the status line too).
+        let adjusted = Self.typedMultiplier(text, entry: entry).flatMap {
+            SpeedRatio.adjustmentNote(typed: $0, applied: speed)
+        }
+        message = adjusted
+        if let adjusted {
+            store.statusMessage = [adjusted, result.note.isEmpty ? nil : result.note].compactMap { $0 }
+                .joined(separator: " ")
+        }
         store.speedSheetClipIDs = nil
         return true
     }

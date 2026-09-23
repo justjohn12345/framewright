@@ -286,9 +286,10 @@ private struct TransitionInspector: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Button("Delete Transition") {
-                store.deleteSelection(ripple: false)
+                inspector.deleteTransition()
             }
             .controlSize(.small)
+            .accessibilityIdentifier("DeleteTransition")
         }
         Divider()
     }

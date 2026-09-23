@@ -38,27 +38,28 @@ enum LinkedCrossfadeMode: String, CaseIterable, Identifiable {
     }
 }
 
-/// The Editing preferences (Settings > Editing), read from a `UserDefaults`.
-struct EditingPreferences {
+/// The Editing preferences (Settings > Editing): a snapshot of their values.
+struct EditingPreferences: Equatable {
     static let defaultTransitionSecondsKey = "defaultTransitionSeconds"
     static let linkedCrossfadeKey = "linkedCrossfade"
     static let durationDisplayKey = "durationDisplay"
     static let defaultTransitionSeconds = 1.0
 
-    let defaults: UserDefaults
-
     /// Default length of new transitions in seconds (the Transitions panel, Add Cross Dissolve).
-    var transitionSeconds: Double {
-        let value = defaults.double(forKey: Self.defaultTransitionSecondsKey)
-        return value > 0 && value.isFinite ? value : Self.defaultTransitionSeconds
-    }
+    var transitionSeconds = Self.defaultTransitionSeconds
+    var linkedCrossfade = LinkedCrossfadeMode.always
+    var durationDisplay = DurationDisplay.timecode
 
-    var linkedCrossfade: LinkedCrossfadeMode {
-        defaults.string(forKey: Self.linkedCrossfadeKey).flatMap(LinkedCrossfadeMode.init(rawValue:)) ?? .always
-    }
+    init() {}
 
-    var durationDisplay: DurationDisplay {
-        defaults.string(forKey: Self.durationDisplayKey).flatMap(DurationDisplay.init(rawValue:)) ?? .timecode
+    /// The values stored in `defaults` (a missing or invalid value reads as its default).
+    init(defaults: UserDefaults) {
+        let seconds = defaults.double(forKey: Self.defaultTransitionSecondsKey)
+        transitionSeconds = seconds > 0 && seconds.isFinite ? seconds : Self.defaultTransitionSeconds
+        linkedCrossfade = defaults.string(forKey: Self.linkedCrossfadeKey).flatMap(LinkedCrossfadeMode.init(rawValue:))
+            ?? .always
+        durationDisplay = defaults.string(forKey: Self.durationDisplayKey).flatMap(DurationDisplay.init(rawValue:))
+            ?? .timecode
     }
 
     /// The default transition length in whole frames of `frameDuration` (at least one).
@@ -66,6 +67,57 @@ struct EditingPreferences {
         let frame = frameDuration.secondsOrZero
         guard frame > 0 else { return 30 }
         return max(1, Int64((transitionSeconds / frame).rounded()))
+    }
+}
+
+/// The Editing preferences as observable state, so open views re-format when they change.
+///
+/// Mirrors the three keys of `defaults` in `current`, re-read whenever any user default changes
+/// in this process (`UserDefaults.didChangeNotification`: the Settings window's `@AppStorage`
+/// writes, or a test writing its own suite); a change posted on the main thread is applied before
+/// the write returns. `revision` changes with every change of `current` (a redraw token for
+/// canvases). Owned by `ProjectStore`, which forwards the changes to its own observers.
+@MainActor
+final class EditingPreferencesModel: ObservableObject {
+    @Published private(set) var current: EditingPreferences
+    @Published private(set) var revision = 0
+    /// Where the preferences are read from (tests use their own suite); replacing it re-reads.
+    var defaults: UserDefaults {
+        didSet {
+            if defaults !== oldValue { reload() }
+        }
+    }
+
+    private var observer: NSObjectProtocol?
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        current = EditingPreferences(defaults: defaults)
+        observer = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil,
+                                                          queue: nil) { [weak self] _ in
+            // Delivered on the thread that wrote the default.
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { self?.reload() }
+            } else {
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self?.reload() }
+                }
+            }
+        }
+    }
+
+    deinit {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    /// Re-reads the preferences; publishes only when a value changed.
+    func reload() {
+        let fresh = EditingPreferences(defaults: defaults)
+        guard fresh != current else { return }
+        current = fresh
+        revision &+= 1
     }
 }
 
@@ -229,5 +281,26 @@ struct SpeedRatio: Equatable {
         default:
             return nil
         }
+    }
+
+    /// The speed typed for `parse`, as a multiplier ("33.33" or "33.33 %" -> 0.3333, "0.5x" ->
+    /// 0.5). Nil for a fraction ("1/3", exact by construction) and for text that is not a speed.
+    static func typedMultiplier(_ text: String) -> Double? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
+        guard !trimmed.contains("/") else { return nil }
+        let (number, unit) = DurationFormat.splitNumber(trimmed)
+        guard let value = Double(number), value.isFinite, value > 0 else { return nil }
+        switch unit {
+        case "", "%": return value / 100
+        case "x", "×": return value
+        default: return nil
+        }
+    }
+
+    /// Why an applied speed is not exactly the typed one (the engine stores fractions with a
+    /// denominator of at most 1000): "Applied as 1/3 (33.33 %)". Nil when they agree.
+    static func adjustmentNote(typed: Double, applied: SpeedRatio) -> String? {
+        guard abs(applied.value - typed) > 1e-9 else { return nil }
+        return String(format: "Applied as %lld/%lld (%.2f %%)", applied.numerator, applied.denominator, applied.percent)
     }
 }

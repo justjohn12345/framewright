@@ -28,10 +28,22 @@ import VidEditEngine
 /// corner (drag to set the fade, never overlapping the other) and the gain line (drag vertically;
 /// Option for fine steps; the value shows next to the pointer). Every such drag is one undo step.
 ///
-/// Redraw budget: the canvas depends on the model (`ProjectStore`, rebuilt once per model change)
-/// and the viewport, never on the playhead. The playhead line, the ruler marker and the
-/// timecode are overlays observing `PlayheadModel` alone, so playback at the display rate does
-/// not redraw the clips.
+/// Corner zones of audio clips: the top 16 pt of a row hold the transition strip, the clip's name
+/// label and the fade handles at once. Priority is transition band, then fade handle, then clip
+/// edge, gain line and body, so a press within `fadeHandleHitRadius` of a handle in the top
+/// `fadeHandleZoneHeight` points grabs the handle (dragging the first points of a label that
+/// starts at a zero-length fade adjusts the fade-in instead of moving the clip, as in Premiere).
+/// On a clip narrower than `narrowClipWidth` the handle zone is only
+/// `narrowFadeHandleZoneHeight` points tall (hit testing only; the handles are drawn the same),
+/// so most of a small clip's label still selects and moves it.
+///
+/// Durations (transition labels, drop feedback) follow Settings > Editing > "Show durations as"
+/// and re-format as soon as it changes (`ProjectStore.preferences`).
+///
+/// Redraw budget: the canvas depends on the model (`ProjectStore`, rebuilt once per model change),
+/// the viewport and the Editing preferences, never on the playhead. The playhead line, the ruler
+/// marker and the timecode are overlays observing `PlayheadModel` alone, so playback at the
+/// display rate does not redraw the clips.
 struct TimelineView: View {
     @ObservedObject var store: ProjectStore
     @ObservedObject var viewport: TimelineViewport
@@ -178,8 +190,9 @@ struct TimelineView: View {
                 DurationFormat.shortString(frames: $0, frameDuration: frameDuration, display: display)
             }
         )
-        // Reading the caches' versions makes new thumbnails and waveforms redraw the canvas.
-        let redrawToken = thumbnails.version &+ waveforms.version
+        // Reading the caches' versions makes new thumbnails and waveforms redraw the canvas, and
+        // the preferences' revision re-formats the labels when the duration display changes.
+        let redrawToken = thumbnails.version &+ waveforms.version &+ store.preferences.revision
         return Canvas { context, size in
             _ = redrawToken
             renderer.draw(in: &context, size: size)
@@ -207,7 +220,7 @@ struct TimelineView: View {
                 .updating($trackGestureActive) { _, active, _ in active = true }
                 .onChanged { value in
                     gestures.changed(location: value.location, startLocation: value.startLocation,
-                                     modifiers: NSEvent.modifierFlags, clickCount: NSApp.currentEvent?.clickCount ?? 1)
+                                     modifiers: NSEvent.modifierFlags, clickCount: Self.currentClickCount)
                 }
                 .onEnded { _ in gestures.ended() }
         )
@@ -226,6 +239,20 @@ struct TimelineView: View {
         .onDrop(of: TimelineDropDelegate.types,
                 delegate: TimelineDropDelegate(gestures: gestures, isAssetTargeted: $isDropTargeted))
         .clipped()
+    }
+
+    /// The click count of the mouse event being handled (1 when the current event is not a mouse
+    /// press, release or drag: SwiftUI may run the gesture's callback while another event is
+    /// current, and `NSEvent.clickCount` raises for non-mouse events).
+    private static var currentClickCount: Int {
+        guard let event = NSApp.currentEvent else { return 1 }
+        switch event.type {
+        case .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+             .otherMouseDown, .otherMouseUp, .otherMouseDragged:
+            return max(1, event.clickCount)
+        default:
+            return 1
+        }
     }
 
     // MARK: Scrolling

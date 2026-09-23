@@ -40,9 +40,16 @@ final class ProjectStore: ObservableObject {
     private(set) lazy var playbackActions: PlaybackActions = EnginePlaybackActions(store: self)
     /// The inspector's editing logic (parameters, nudges, sliders, resets, messages).
     private(set) lazy var inspector = InspectorModel(store: self)
+    /// The Editing preferences (Settings > Editing), observed: a change re-renders every view
+    /// observing the store (durations re-format at once, without a model change).
+    let preferences = EditingPreferencesModel()
     /// Where the Editing preferences are read from (tests use their own suite).
-    var defaults: UserDefaults = .standard
-    var editingPreferences: EditingPreferences { EditingPreferences(defaults: defaults) }
+    var defaults: UserDefaults {
+        get { preferences.defaults }
+        set { preferences.defaults = newValue }
+    }
+
+    var editingPreferences: EditingPreferences { preferences.current }
 
     // Engine snapshots.
     @Published private(set) var sequence: VESequenceInfo
@@ -115,6 +122,7 @@ final class ProjectStore: ObservableObject {
     private(set) var timelineBuildCount = 0
     private var cachedTimeline: (changeCount: UInt64, model: TimelineViewModel)?
     private var observers: [NSObjectProtocol] = []
+    private var preferencesForwarding: AnyCancellable?
 
     /// A store over a new engine with the default cache directory.
     convenience init() {
@@ -152,6 +160,9 @@ final class ProjectStore: ObservableObject {
             let critical = (note.userInfo?[VEEngineCriticalKey] as? NSNumber)?.boolValue ?? false
             store.thumbnails.handleMemoryPressure(critical: critical)
             store.waveforms.handleMemoryPressure(critical: critical)
+        }
+        preferencesForwarding = preferences.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
         }
         refreshAssets()
         refreshModel()
@@ -297,6 +308,12 @@ final class ProjectStore: ObservableObject {
     func durationString(frames: Int64) -> String {
         DurationFormat.string(frames: frames, frameDuration: frameDuration,
                               display: editingPreferences.durationDisplay)
+    }
+
+    /// The compact form of `durationString` (timeline labels: "1:05", "35f", "1.17s").
+    func shortDurationString(frames: Int64) -> String {
+        DurationFormat.shortString(frames: frames, frameDuration: frameDuration,
+                                   display: editingPreferences.durationDisplay)
     }
 
     /// Asks the inspector to focus `field`.
@@ -484,9 +501,7 @@ final class ProjectStore: ObservableObject {
             break
         }
         if selection.isEmpty, let transition = selectedTransitionID {
-            if report(engine.removeTransition(transition)) {
-                selectedTransitionID = nil
-            }
+            removeTransition(transition)
             return
         }
         guard !selection.isEmpty else { return }
@@ -496,52 +511,97 @@ final class ProjectStore: ObservableObject {
         }
     }
 
+    /// Removes a transition (Delete in the timeline, the inspector's Delete Transition button,
+    /// whatever panel has the focus). Ignored during a gesture; a refusal is reported.
+    @discardableResult
+    func removeTransition(_ id: VETransitionID) -> Bool {
+        guard !isGestureActive else { return false }
+        guard report(engine.removeTransition(id)) else { return false }
+        if selectedTransitionID == id { selectedTransitionID = nil }
+        return true
+    }
+
     /// Adds a transition of `kind` (Shift+Cmd+D: cross dissolve; Option+Shift+Cmd+D: audio
-    /// crossfade) on the cut nearest the playhead on the selected clips' track of that kind, else
-    /// the target track, with the default duration (Settings > Editing). Refusals are reported.
+    /// crossfade) on the selected clips' track of that kind, else the target track, at the cut
+    /// `nearestCut` picks, with the default duration (Settings > Editing). Refusals are reported.
     func addTransitionAtPlayhead(_ kind: TransitionKind) {
         guard !isGestureActive else { return }
         let selectedTrack = selectedClips.first { ($0.trackKind == .video) == (kind.trackKind == .video) }?.trackID
         let trackID = selectedTrack ?? (kind.trackKind == .video ? targetVideoTrackID : targetAudioTrackID)
+        let name = track(trackID)?.name ?? ""
+        guard hasCut(onTrack: trackID) else {
+            statusMessage = "No cut between two adjacent clips on track \(name)."
+            return
+        }
         guard let (from, to) = nearestCut(onTrack: trackID, toSeconds: playheadTime.secondsOrZero) else {
-            statusMessage = "No cut between two adjacent clips on track \(track(trackID)?.name ?? "")."
+            statusMessage = "Move the playhead near a cut: none on track \(name) is within "
+                + "\(Int(Self.cutSearchSeconds)) seconds of it."
             return
         }
         addTransition(kind, from: from, to: to)
     }
 
-    /// The adjacent pair of clips on `trackID` whose cut is nearest `seconds`.
-    func nearestCut(onTrack trackID: VETrackID, toSeconds seconds: Double) -> (VEClipID, VEClipID)? {
+    /// How far from the playhead (seconds) Add Cross Dissolve / Add Audio Crossfade look for a
+    /// cut when the playhead is not on a clip that meets another.
+    static let cutSearchSeconds = 2.0
+
+    /// The adjacent clips meeting at a cut on `trackID`, in timeline order.
+    private func cuts(onTrack trackID: VETrackID) -> [(from: VEClipInfo, to: VEClipInfo)] {
         let onTrack = clips.values.filter { $0.trackID == trackID }.sorted { $0.timelineStart < $1.timelineStart }
-        var best: (VEClipID, VEClipID)?
-        var bestDistance = Double.infinity
-        for (from, to) in zip(onTrack, onTrack.dropFirst()) where from.timelineEnd == to.timelineStart {
-            let distance = abs(from.timelineEnd.secondsOrZero - seconds)
-            if distance < bestDistance {
-                best = (from.clipID, to.clipID)
-                bestDistance = distance
+        return zip(onTrack, onTrack.dropFirst()).filter { pair in pair.0.timelineEnd == pair.1.timelineStart }
+            .map { pair in (from: pair.0, to: pair.1) }
+    }
+
+    private func hasCut(onTrack trackID: VETrackID) -> Bool {
+        !cuts(onTrack: trackID).isEmpty
+    }
+
+    /// The cut on `trackID` a transition added at the playhead (`seconds`) goes on: the nearer
+    /// edge of the clip under the playhead that meets another clip; otherwise the nearest cut
+    /// within `cutSearchSeconds`; nil when there is none that close.
+    func nearestCut(onTrack trackID: VETrackID, toSeconds seconds: Double) -> (VEClipID, VEClipID)? {
+        let all = cuts(onTrack: trackID)
+        func distance(_ cut: (from: VEClipInfo, to: VEClipInfo)) -> Double {
+            abs(cut.from.timelineEnd.secondsOrZero - seconds)
+        }
+        let under = clips.values.first {
+            $0.trackID == trackID && $0.timelineStart.secondsOrZero <= seconds && seconds < $0.timelineEnd.secondsOrZero
+        }
+        if let under {
+            let edges = all.filter { $0.from.clipID == under.clipID || $0.to.clipID == under.clipID }
+            if let best = edges.min(by: { distance($0) < distance($1) }) {
+                return (best.from.clipID, best.to.clipID)
             }
         }
-        return best
+        guard let best = all.min(by: { distance($0) < distance($1) }), distance(best) <= Self.cutSearchSeconds else {
+            return nil
+        }
+        return (best.from.clipID, best.to.clipID)
     }
 
     /// Adds a transition of `kind` with the default duration on the cut between `from` and `to`,
     /// shortened to what the cut allows. A video dissolve also gets the linked audio's crossfade
-    /// (one undo step) per the Editing preference: always, never, or ask (the question is asked
-    /// through `pendingLinkedTransition`). Returns whether a transition was added (false while
-    /// waiting for the answer).
+    /// (one undo step, fitted to the audio's own cut) per the Editing preference: always, never,
+    /// or ask (asked through `pendingLinkedTransition`, only when the audio's cut can take one).
+    /// When the linked crossfade is wanted but cannot be added, the status line says why (the
+    /// engine's note). Returns whether a transition was added (false while waiting for the answer).
     @discardableResult
     func addTransition(_ kind: TransitionKind, from: VEClipID, to: VEClipID, frames: Int64? = nil) -> Bool {
         guard !isGestureActive else { return false }
         let length = frames ?? editingPreferences.transitionFrames(frameDuration: frameDuration)
         var includeLinked = false
-        if kind == .crossDissolve, linkedCutAcceptsTransition(from: from, to: to) {
+        if kind == .crossDissolve {
             switch editingPreferences.linkedCrossfade {
             case .always: includeLinked = true
             case .never: includeLinked = false
             case .ask:
-                pendingLinkedTransition = PendingTransition(kind: kind, fromClipID: from, toClipID: to, frames: length)
-                return false
+                if linkedCutAcceptsTransition(from: from, to: to) {
+                    pendingLinkedTransition = PendingTransition(kind: kind, fromClipID: from, toClipID: to,
+                                                                frames: length)
+                    return false
+                }
+                // Nothing to ask: the engine adds the dissolve alone and its note says why.
+                includeLinked = true
             }
         }
         return commitTransition(kind, from: from, to: to, frames: length, includeLinked: includeLinked)

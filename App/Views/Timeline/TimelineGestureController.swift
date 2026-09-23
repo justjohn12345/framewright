@@ -87,6 +87,28 @@ final class TimelineGestureController: ObservableObject {
         let message: String
     }
 
+    /// The pointer shapes the track area uses.
+    enum PointerCursor: Equatable {
+        case arrow
+        case resizeLeftRight
+        case resizeUpDown
+
+        var nsCursor: NSCursor {
+            switch self {
+            case .arrow: return .arrow
+            case .resizeLeftRight: return .resizeLeftRight
+            case .resizeUpDown: return .resizeUpDown
+            }
+        }
+    }
+
+    /// The cursor hover last set (nil: none since the pointer entered, or since the last drag).
+    private(set) var cursor: PointerCursor?
+    /// Number of cursor changes hover made (diagnostics and tests).
+    private(set) var cursorChanges = 0
+    /// Sets the cursor (tests may observe it instead).
+    var applyCursor: (PointerCursor) -> Void = { $0.nsCursor.set() }
+
     private unowned let store: ProjectStore
     /// The timeline's content when the drag started (snap candidates).
     private var snapshot: TimelineViewModel?
@@ -238,6 +260,7 @@ final class TimelineGestureController: ObservableObject {
         gainTooltip = nil
         snapshot = nil
         drag = .idle
+        cursor = nil // a drag may have changed the cursor: the next hover sets it again
     }
 
     /// Press: select according to what was hit, or grab the playhead. Option grabs the playhead
@@ -485,25 +508,48 @@ final class TimelineGestureController: ObservableObject {
 
     /// The pointer hovers `point` (nil: it left the track area): updates the cursor and the gain
     /// tooltip. Publishes only when what is hovered changes.
+    /// The pointer moved over the track area (`nil`: it left). The cursor is set only when the
+    /// shape it needs changes (hover fires on every pointer event); leaving the area restores
+    /// the arrow if hover had changed it, and otherwise leaves the cursor to whatever the pointer
+    /// is over now (a split-view divider sets its own).
     func hover(at point: CGPoint?) {
         guard drag == .idle else { return }
+        guard let point else {
+            if hover != nil { hover = nil }
+            if gainTooltip != nil { gainTooltip = nil }
+            if let cursor, cursor != .arrow {
+                setCursor(.arrow)
+            }
+            cursor = nil
+            return
+        }
         let model = store.timelineModel
-        let hit = point.map { model.hitTest($0) }
+        let hit = model.hitTest(point)
         if hit != hover { hover = hit }
         var tooltip: GainTooltip?
+        let wanted: PointerCursor
         switch hit {
-        case .clipHead?, .clipTail?, .transitionHead?, .transitionTail?, .fadeIn?, .fadeOut?:
-            NSCursor.resizeLeftRight.set()
-        case let .gainLine(id)?:
-            NSCursor.resizeUpDown.set()
-            if let clip = model.clip(id: id), let point {
+        case .clipHead, .clipTail, .transitionHead, .transitionTail, .fadeIn, .fadeOut:
+            wanted = .resizeLeftRight
+        case let .gainLine(id):
+            wanted = .resizeUpDown
+            if let clip = model.clip(id: id) {
                 tooltip = GainTooltip(text: Self.gainText(clip.gainDb), point: point)
             }
         default:
-            NSCursor.arrow.set()
+            wanted = .arrow
+        }
+        if wanted != cursor {
+            setCursor(wanted)
         }
         // Republish only when the text changes (not on every pointer move along the line).
         if tooltip?.text != gainTooltip?.text { gainTooltip = tooltip }
+    }
+
+    private func setCursor(_ wanted: PointerCursor) {
+        cursor = wanted
+        cursorChanges += 1
+        applyCursor(wanted)
     }
 
     // MARK: Transition drops
