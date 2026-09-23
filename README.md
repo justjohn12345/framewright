@@ -1,13 +1,48 @@
-# Framewright (code name VidEdit)
+# Framewright
 
 <img src="docs/logo/framewright-icon.png" width="128" alt="Framewright icon">
 
-A simple Premiere-style video editor for macOS. The product is called Framewright; targets, bundle identifiers and
-source use the code name VidEdit.
+Framewright is a native macOS video editor in the spirit of a simple Premiere: import
+footage, arrange clips on a multi-track timeline, trim, split and move them, dissolve between
+them, adjust motion and sound in an inspector, play it back with synced audio, and export.
+It runs on Apple silicon and uses the hardware wherever there is hardware to use.
 
-A native macOS non-linear video editor: an Objective-C++ engine framework
-(`VidEditEngine`) with a Swift/SwiftUI app on top. See [PLAN.md](PLAN.md) for the
-design and roadmap.
+**This codebase is entirely AI-written.** Every line of engine code, UI, build script, test
+and document was produced by Claude Code: Claude Fable 5.1 acting as the lead (planning,
+review, verification) directing Claude Opus 5.5 subagents that implemented each phase, with a
+human owner steering by hand-testing the app and reviewing the reports. Treat it accordingly:
+the test suite is large and every phase was adversarially reviewed and fixed, but no human has
+audited the code line by line.
+
+## What it does today
+
+- Import MP4, MOV, MKV, WebM, ProRes, AV1, stills and audio; a router picks Apple's
+  AVFoundation/VideoToolbox path when it can decode the file in hardware and an FFmpeg path
+  (with the VideoToolbox hwaccel) otherwise. Both backends pass one conformance suite.
+- Multi-track timeline with move, trim, split, ripple, linked audio/video, snapping, marquee,
+  undo/redo of every edit, and exact rational time math (29.97 fps and 44.1 kHz audio do not
+  accumulate rounding).
+- Real-time playback with an audio-clocked Metal compositor, JKL shuttle, frame stepping and
+  scrubbing; measured A/V offset on the real output device is zero within a sample.
+- Inspector for position, scale, rotation, opacity, gain, fades and exact speed; cross
+  dissolves and constant-power crossfades with duration handles; fade and gain handles on
+  audio clips; Speed/Duration sheet.
+- Project files in JSON with schema migration; security-scoped bookmarks for media.
+- Export (in progress): hardware H.264/HEVC/ProRes and software AV1 through the same
+  compositor and mixer as playback.
+
+## Architecture
+
+- `Engine/` is an Objective-C++ framework (`VidEditEngine`, the code name): a plain C++ model
+  and edit engine (`Model`, `Edit`, `Serialize`), media backends behind one interface
+  (`Media/Apple`, `Media/FFmpeg`, a router, a frame cache and a decode pool), a Metal compositor
+  and preview view (`Render`), a lock-free audio mixer and playback controller (`Audio`,
+  `Playback`), and an Objective-C facade for Swift (`Facade`).
+- `App/` is SwiftUI with AppKit where SwiftUI is weak (the timeline canvas, numeric fields,
+  window and keyboard handling).
+- `docs/reviews/` holds the review process: every phase gets an adversarial read-only review,
+  the findings are fixed in a follow-up round, and the open list is kept current.
+- See [PLAN.md](PLAN.md) for the original design and roadmap.
 
 Requirements: macOS 14+ on Apple silicon, Xcode 26 (with its Metal Toolchain
 component), Homebrew.
@@ -130,3 +165,14 @@ patent licence) are linked statically into libavcodec.
   complete corresponding source (tarballs and build script) of the FFmpeg libraries shipped with
   any VidEdit release on request, for at least three years after that release.
 - nlohmann/json and doctest are MIT-licensed (doctest is used only to build the tests).
+
+## License
+
+Framewright is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3 of
+the License, or (at your option) any later version. See [LICENSE](LICENSE). It is distributed
+without any warranty; see the license for details.
+
+Third-party components keep their own licenses (FFmpeg LGPL 2.1+, dav1d BSD-2, SVT-AV1
+BSD-3-Clear with the AOMedia patent license, nlohmann/json and doctest MIT), all compatible
+with GPL-3.0; the texts ship in the app and are listed in `App/Resources/Acknowledgements.md`.
