@@ -5,7 +5,8 @@
 //   requested. None of them points into the engine; holding one never keeps model state alive
 //   and it never changes after an edit. Ask VEEngine again after VEEngineModelDidChange.
 // - Ids are plain 64-bit integers (0 = none/invalid). They are stable for the lifetime of the
-//   object they name and are never reused within a project (undo/redo restores the same ids).
+//   object they name and are never reused within a project: undo/redo restores the same ids,
+//   and objects created after an undo get ids no undone object ever had.
 // - Times are CMTime (bridges to Swift's CMTime).
 // Plain Objective-C only: this header is part of the framework's public module.
 
@@ -113,7 +114,11 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 /// Used source range (for stills measured in timeline time from zero).
 @property (nonatomic, readonly) CMTime sourceIn;
 @property (nonatomic, readonly) CMTime sourceOut;
+/// Playback speed for display (1 = normal; stills: 1). The exact value is
+/// speedNumerator / speedDenominator (reduced, denominator 1...1000).
 @property (nonatomic, readonly) double speed;
+@property (nonatomic, readonly) int64_t speedNumerator;
+@property (nonatomic, readonly) int64_t speedDenominator;
 @property (nonatomic, readonly) BOOL isStill;
 /// Linked partner, or 0.
 @property (nonatomic, readonly) VEClipID linkedClipID;
@@ -168,16 +173,132 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
+/// Why an edit was refused (mirrors the engine's EditError).
+typedef NS_ENUM(NSInteger, VEEditErrorCode) {
+    VEEditErrorNone = 0,
+    VEEditErrorSequenceNotFound,
+    VEEditErrorTrackNotFound,
+    VEEditErrorClipNotFound,
+    VEEditErrorTransitionNotFound,
+    VEEditErrorAssetNotFound,
+    VEEditErrorTrackLocked,
+    VEEditErrorTrackKindMismatch,
+    VEEditErrorInvalidTime,
+    VEEditErrorInvalidArgument,
+    /// The result would overlap another clip or transition (e.g. an all-tracks ripple blocked by
+    /// a clip on another track).
+    VEEditErrorOverlap,
+    VEEditErrorOutOfSourceRange,
+    VEEditErrorInsufficientHandles,
+    VEEditErrorNotAdjacent,
+    VEEditErrorAlreadyExists,
+    VEEditErrorAlreadyLinked,
+    VEEditErrorNotLinked,
+    /// The edit point lies inside a transition (splitClips:atTime:breakingTransitions: can
+    /// remove it instead).
+    VEEditErrorInsideTransition,
+    /// An exact result time has no CMTime form; nothing is ever rounded, so the edit is refused.
+    VEEditErrorNotRepresentable,
+    VEEditErrorInvariantViolation,
+    /// Refused by the facade itself (e.g. an edit while another gesture's edit is in progress).
+    VEEditErrorBusy,
+};
+
 /// Outcome of an edit. A refused edit changes nothing; `message` says why.
 @interface VEEditResult : NSObject
 @property (nonatomic, readonly) BOOL ok;
+@property (nonatomic, readonly) VEEditErrorCode errorCode;
 @property (nonatomic, readonly, copy) NSString *message;
 /// Ids created by the edit (new clips of an insert/overwrite/split, a new track or
 /// transition), in the order the engine reports them.
 @property (nonatomic, readonly, copy) NSArray<NSNumber *> *createdIDs;
+/// Transitions a successful edit removed as a side effect (their cut no longer exists or lacks
+/// the media they need). Undo restores them.
+@property (nonatomic, readonly, copy) NSArray<NSNumber *> *droppedTransitionIDs;
+/// Something the user should know about a successful edit ("" when nothing): a ripple that fell
+/// back to the synced tracks, removed transitions.
+@property (nonatomic, readonly, copy) NSString *note;
 + (instancetype)success;
 + (instancetype)successWithCreatedIDs:(NSArray<NSNumber *> *)createdIDs;
 + (instancetype)failureWithMessage:(NSString *)message;
++ (instancetype)failureWithCode:(VEEditErrorCode)code message:(NSString *)message;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+// MARK: - Playback
+
+typedef NS_ENUM(NSInteger, VEPlaybackState) {
+    VEPlaybackStateStopped = 0,    ///< Paused, showing currentTime.
+    VEPlaybackStatePrerolling = 1, ///< play() is waiting for the first frames and audio.
+    VEPlaybackStatePlaying = 2,
+    VEPlaybackStateScrubbing = 3,  ///< scrubToTime: in progress (ends with endScrub).
+};
+
+typedef NS_ENUM(NSInteger, VEClockMode) {
+    VEClockModeStopped = 0,
+    VEClockModeAudioSamples = 1, ///< The audio sample clock is master (1x, 2x).
+    VEClockModeHostTime = 2,     ///< Host time (reverse, above 2x, or no audio output).
+};
+
+/// A playback state change, as delivered with VEEnginePlaybackDidChangeNotification.
+@interface VEPlaybackStatus : NSObject
+@property (nonatomic, readonly) VEPlaybackState state;
+/// Playhead on the sequence frame grid.
+@property (nonatomic, readonly) CMTime time;
+/// Signed rate (1, 2, 4, 8, -1, ...); meaningful while playing or pre-rolling.
+@property (nonatomic, readonly) double rate;
+/// The audio clock drives playback (audible or muted).
+@property (nonatomic, readonly) BOOL audioActive;
+/// The most recent audio problem ("" when none): no output device, or the device went away.
+@property (nonatomic, readonly, copy) NSString *errorMessage;
+/// Playing or pre-rolling (the monitor's render loop should run).
+@property (nonatomic, readonly) BOOL isRunning;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+/// A clip under the playhead and how it is decoded (debug HUD).
+@interface VEActiveClipInfo : NSObject
+@property (nonatomic, readonly) VEClipID clipID;
+@property (nonatomic, readonly) VEAssetID assetID;
+@property (nonatomic, readonly) BOOL isAudio;
+/// Decoder backend ("apple", "ffmpeg"; "" until a decoder opened).
+@property (nonatomic, readonly, copy) NSString *backendName;
+@property (nonatomic, readonly) BOOL hardware;
+@property (nonatomic, readonly) BOOL failed;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+/// Playback counters for the debug HUD (a snapshot).
+@interface VEPlaybackStats : NSObject
+/// Presented frames per second (0 once nothing was presented for half a second).
+@property (nonatomic, readonly) double fps;
+@property (nonatomic, readonly) uint64_t presentedFrames;
+/// Sequence frames skipped beyond what the rate explains.
+@property (nonatomic, readonly) uint64_t droppedFrames;
+/// Presentations missing a frame (the previous picture was held).
+@property (nonatomic, readonly) uint64_t lateFrames;
+@property (nonatomic, readonly) uint64_t cacheHits;
+@property (nonatomic, readonly) uint64_t cacheMisses;
+@property (nonatomic, readonly) double cacheHitRate;
+@property (nonatomic, readonly) NSInteger decodeQueueDepth;
+@property (nonatomic, readonly) uint64_t audioUnderruns;
+@property (nonatomic, readonly) uint64_t audioUnderrunFrames;
+/// Decoded frames that could not be mapped to Metal textures.
+@property (nonatomic, readonly) uint64_t mapFailures;
+/// Presentations whose clock read was held so the picture never stepped backwards.
+@property (nonatomic, readonly) uint64_t monotonicHolds;
+@property (nonatomic, readonly) VEClockMode clockMode;
+@property (nonatomic, readonly) CMTime clockTime;
+@property (nonatomic, readonly) BOOL audioActive;
+@property (nonatomic, readonly) BOOL outputRunning;
+/// Output latency the clock subtracts, in seconds.
+@property (nonatomic, readonly) double outputLatency;
+/// Kind of audio output ("avaudioengine", "null", ...).
+@property (nonatomic, readonly, copy) NSString *audioOutputKind;
+/// Frame cache bytes in use.
+@property (nonatomic, readonly) uint64_t cacheBytes;
+@property (nonatomic, readonly, copy) NSString *errorMessage;
+@property (nonatomic, readonly, copy) NSArray<VEActiveClipInfo *> *activeClips;
 - (instancetype)init NS_UNAVAILABLE;
 @end
 

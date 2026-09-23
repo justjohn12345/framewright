@@ -56,6 +56,8 @@ VEAudioParams VEAudioParamsDefault(void) {
 @property (nonatomic, readwrite) CMTime sourceIn;
 @property (nonatomic, readwrite) CMTime sourceOut;
 @property (nonatomic, readwrite) double speed;
+@property (nonatomic, readwrite) int64_t speedNumerator;
+@property (nonatomic, readwrite) int64_t speedDenominator;
 @property (nonatomic, readwrite) BOOL isStill;
 @property (nonatomic, readwrite) VEClipID linkedClipID;
 @property (nonatomic, readwrite) VEVideoParams videoParams;
@@ -101,7 +103,55 @@ VEAudioParams VEAudioParamsDefault(void) {
 @end
 
 @interface VEEditResult ()
-- (instancetype)initWithOK:(BOOL)ok message:(NSString *)message createdIDs:(NSArray<NSNumber *> *)createdIDs;
+- (instancetype)initWithCode:(VEEditErrorCode)code
+                     message:(NSString *)message
+                  createdIDs:(NSArray<NSNumber *> *)createdIDs
+                     dropped:(NSArray<NSNumber *> *)dropped
+                        note:(NSString *)note;
+@end
+
+@interface VEPlaybackStatus ()
+@property (nonatomic, readwrite) VEPlaybackState state;
+@property (nonatomic, readwrite) CMTime time;
+@property (nonatomic, readwrite) double rate;
+@property (nonatomic, readwrite) BOOL audioActive;
+@property (nonatomic, readwrite, copy) NSString *errorMessage;
+- (instancetype)initInternal;
+@end
+
+@interface VEActiveClipInfo ()
+@property (nonatomic, readwrite) VEClipID clipID;
+@property (nonatomic, readwrite) VEAssetID assetID;
+@property (nonatomic, readwrite) BOOL isAudio;
+@property (nonatomic, readwrite, copy) NSString *backendName;
+@property (nonatomic, readwrite) BOOL hardware;
+@property (nonatomic, readwrite) BOOL failed;
+- (instancetype)initInternal;
+@end
+
+@interface VEPlaybackStats ()
+@property (nonatomic, readwrite) double fps;
+@property (nonatomic, readwrite) uint64_t presentedFrames;
+@property (nonatomic, readwrite) uint64_t droppedFrames;
+@property (nonatomic, readwrite) uint64_t lateFrames;
+@property (nonatomic, readwrite) uint64_t cacheHits;
+@property (nonatomic, readwrite) uint64_t cacheMisses;
+@property (nonatomic, readwrite) double cacheHitRate;
+@property (nonatomic, readwrite) NSInteger decodeQueueDepth;
+@property (nonatomic, readwrite) uint64_t audioUnderruns;
+@property (nonatomic, readwrite) uint64_t audioUnderrunFrames;
+@property (nonatomic, readwrite) uint64_t mapFailures;
+@property (nonatomic, readwrite) uint64_t monotonicHolds;
+@property (nonatomic, readwrite) VEClockMode clockMode;
+@property (nonatomic, readwrite) CMTime clockTime;
+@property (nonatomic, readwrite) BOOL audioActive;
+@property (nonatomic, readwrite) BOOL outputRunning;
+@property (nonatomic, readwrite) double outputLatency;
+@property (nonatomic, readwrite, copy) NSString *audioOutputKind;
+@property (nonatomic, readwrite) uint64_t cacheBytes;
+@property (nonatomic, readwrite, copy) NSString *errorMessage;
+@property (nonatomic, readwrite, copy) NSArray<VEActiveClipInfo *> *activeClips;
+- (instancetype)initInternal;
 @end
 
 @interface VECodecCapability ()
@@ -182,25 +232,61 @@ static NSString *describeTime(CMTime t) {
 @end
 
 @implementation VEEditResult
-- (instancetype)initWithOK:(BOOL)ok message:(NSString *)message createdIDs:(NSArray<NSNumber *> *)createdIDs {
+- (instancetype)initWithCode:(VEEditErrorCode)code
+                     message:(NSString *)message
+                  createdIDs:(NSArray<NSNumber *> *)createdIDs
+                     dropped:(NSArray<NSNumber *> *)dropped
+                        note:(NSString *)note {
     if ((self = [super init])) {
-        _ok = ok;
+        _ok = code == VEEditErrorNone;
+        _errorCode = code;
         _message = [message copy];
         _createdIDs = [createdIDs copy];
+        _droppedTransitionIDs = [dropped copy];
+        _note = [note copy];
     }
     return self;
 }
 + (instancetype)success {
-    return [[self alloc] initWithOK:YES message:@"" createdIDs:@[]];
+    return [[self alloc] initWithCode:VEEditErrorNone message:@"" createdIDs:@[] dropped:@[] note:@""];
 }
 + (instancetype)successWithCreatedIDs:(NSArray<NSNumber *> *)createdIDs {
-    return [[self alloc] initWithOK:YES message:@"" createdIDs:createdIDs];
+    return [[self alloc] initWithCode:VEEditErrorNone message:@"" createdIDs:createdIDs dropped:@[] note:@""];
 }
 + (instancetype)failureWithMessage:(NSString *)message {
-    return [[self alloc] initWithOK:NO message:message createdIDs:@[]];
+    return [self failureWithCode:VEEditErrorInvalidArgument message:message];
+}
++ (instancetype)failureWithCode:(VEEditErrorCode)code message:(NSString *)message {
+    const VEEditErrorCode failure = code == VEEditErrorNone ? VEEditErrorInvalidArgument : code;
+    return [[self alloc] initWithCode:failure message:message createdIDs:@[] dropped:@[] note:@""];
 }
 - (NSString *)description {
     return self.ok ? @"<VEEditResult ok>" : [NSString stringWithFormat:@"<VEEditResult failed: %@>", self.message];
+}
+@end
+
+@implementation VEPlaybackStatus
+- (instancetype)initInternal {
+    return [super init];
+}
+- (BOOL)isRunning {
+    return self.state == VEPlaybackStatePlaying || self.state == VEPlaybackStatePrerolling;
+}
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<VEPlaybackStatus state %ld at %@ rate %g>", long(self.state),
+                                      describeTime(self.time), self.rate];
+}
+@end
+
+@implementation VEActiveClipInfo
+- (instancetype)initInternal {
+    return [super init];
+}
+@end
+
+@implementation VEPlaybackStats
+- (instancetype)initInternal {
+    return [super init];
 }
 @end
 
@@ -363,6 +449,8 @@ VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &pr
     info.sourceIn = clip.sourceIn;
     info.sourceOut = clip.sourceOut();
     info.speed = clip.speedValue();
+    info.speedNumerator = clip.speedRatio().num;
+    info.speedDenominator = clip.speedRatio().den;
     info.isStill = clip.isStill;
     info.linkedClipID = clip.linkedClipId ? static_cast<VEClipID>(clip.linkedClipId->value()) : 0;
     info.videoParams = toVE(clip.video);
@@ -456,6 +544,127 @@ VEHardwareCaps *makeHardwareCaps() {
 
 VEWaveform *makeWaveform(AssetId asset, const std::shared_ptr<const thumbs::WaveformPeaks> &peaks) {
     return [[VEWaveform alloc] initWithAsset:static_cast<VEAssetID>(asset.value()) peaks:peaks];
+}
+
+} // namespace ve::facade
+
+namespace ve::facade {
+
+VEEditErrorCode toVE(EditError error) {
+    switch (error) {
+    case EditError::None: return VEEditErrorNone;
+    case EditError::SequenceNotFound: return VEEditErrorSequenceNotFound;
+    case EditError::TrackNotFound: return VEEditErrorTrackNotFound;
+    case EditError::ClipNotFound: return VEEditErrorClipNotFound;
+    case EditError::TransitionNotFound: return VEEditErrorTransitionNotFound;
+    case EditError::AssetNotFound: return VEEditErrorAssetNotFound;
+    case EditError::TrackLocked: return VEEditErrorTrackLocked;
+    case EditError::TrackKindMismatch: return VEEditErrorTrackKindMismatch;
+    case EditError::InvalidTime: return VEEditErrorInvalidTime;
+    case EditError::InvalidArgument: return VEEditErrorInvalidArgument;
+    case EditError::Overlap: return VEEditErrorOverlap;
+    case EditError::OutOfSourceRange: return VEEditErrorOutOfSourceRange;
+    case EditError::InsufficientHandles: return VEEditErrorInsufficientHandles;
+    case EditError::NotAdjacent: return VEEditErrorNotAdjacent;
+    case EditError::AlreadyExists: return VEEditErrorAlreadyExists;
+    case EditError::AlreadyLinked: return VEEditErrorAlreadyLinked;
+    case EditError::NotLinked: return VEEditErrorNotLinked;
+    case EditError::InsideTransition: return VEEditErrorInsideTransition;
+    case EditError::NotRepresentable: return VEEditErrorNotRepresentable;
+    case EditError::InvariantViolation: return VEEditErrorInvariantViolation;
+    }
+    return VEEditErrorInvariantViolation;
+}
+
+VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *created, NSString *note) {
+    if (!result.ok()) {
+        NSString *message = toNS(result.message);
+        return [VEEditResult failureWithCode:toVE(result.error)
+                                     message:message.length > 0 ? message : @(nameOf(result.error))];
+    }
+    NSMutableArray<NSNumber *> *dropped = [NSMutableArray arrayWithCapacity:result.droppedTransitionIds.size()];
+    for (TransitionId id : result.droppedTransitionIds) {
+        [dropped addObject:@(static_cast<VETransitionID>(id.value()))];
+    }
+    NSString *text = note ?: @"";
+    if (dropped.count > 0) {
+        NSString *removed =
+            dropped.count == 1
+                ? @"1 transition was removed because its cut no longer exists."
+                : [NSString stringWithFormat:@"%lu transitions were removed because their cuts no longer exist.",
+                                             (unsigned long)dropped.count];
+        text = text.length > 0 ? [NSString stringWithFormat:@"%@ %@", text, removed] : removed;
+    }
+    return [[VEEditResult alloc] initWithCode:VEEditErrorNone
+                                      message:@""
+                                   createdIDs:created ?: @[]
+                                      dropped:dropped
+                                         note:text];
+}
+
+static VEPlaybackState toVE(playback::PlaybackState state) {
+    switch (state) {
+    case playback::PlaybackState::Stopped: return VEPlaybackStateStopped;
+    case playback::PlaybackState::Prerolling: return VEPlaybackStatePrerolling;
+    case playback::PlaybackState::Playing: return VEPlaybackStatePlaying;
+    case playback::PlaybackState::Scrubbing: return VEPlaybackStateScrubbing;
+    }
+    return VEPlaybackStateStopped;
+}
+
+VEPlaybackState playbackStateToVE(playback::PlaybackState state) {
+    return toVE(state);
+}
+
+VEPlaybackStatus *makePlaybackStatus(const playback::PlaybackStatus &status) {
+    VEPlaybackStatus *info = [[VEPlaybackStatus alloc] initInternal];
+    info.state = toVE(status.state);
+    info.time = status.time;
+    info.rate = status.rate;
+    info.audioActive = status.audioActive;
+    info.errorMessage = status.lastError ? toNS(status.lastError->message) : @"";
+    return info;
+}
+
+VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats) {
+    VEPlaybackStats *info = [[VEPlaybackStats alloc] initInternal];
+    info.fps = stats.fps;
+    info.presentedFrames = stats.presentedFrames;
+    info.droppedFrames = stats.droppedFrames;
+    info.lateFrames = stats.lateFrames;
+    info.cacheHits = stats.cacheHits;
+    info.cacheMisses = stats.cacheMisses;
+    info.cacheHitRate = stats.cacheHitRate;
+    info.decodeQueueDepth = stats.decodeQueueDepth;
+    info.audioUnderruns = stats.audioUnderruns;
+    info.audioUnderrunFrames = stats.audioUnderrunFrames;
+    info.mapFailures = stats.mapFailures;
+    info.monotonicHolds = stats.monotonicHolds;
+    switch (stats.clockMode) {
+    case audio::ClockMode::Stopped: info.clockMode = VEClockModeStopped; break;
+    case audio::ClockMode::AudioSamples: info.clockMode = VEClockModeAudioSamples; break;
+    case audio::ClockMode::HostTime: info.clockMode = VEClockModeHostTime; break;
+    }
+    info.clockTime = stats.clockTime;
+    info.audioActive = stats.audioActive;
+    info.outputRunning = stats.outputRunning;
+    info.outputLatency = stats.outputLatency;
+    info.audioOutputKind = toNS(stats.audioOutput);
+    info.cacheBytes = stats.cacheBytes;
+    info.errorMessage = stats.lastError ? toNS(stats.lastError->message) : @"";
+    NSMutableArray<VEActiveClipInfo *> *clips = [NSMutableArray arrayWithCapacity:stats.activeClips.size()];
+    for (const playback::ActiveClipInfo &active : stats.activeClips) {
+        VEActiveClipInfo *clip = [[VEActiveClipInfo alloc] initInternal];
+        clip.clipID = static_cast<VEClipID>(active.clip.value());
+        clip.assetID = static_cast<VEAssetID>(active.asset.value());
+        clip.isAudio = active.isAudio;
+        clip.backendName = toNS(active.backend);
+        clip.hardware = active.hardware;
+        clip.failed = active.failed;
+        [clips addObject:clip];
+    }
+    info.activeClips = clips;
+    return info;
 }
 
 } // namespace ve::facade

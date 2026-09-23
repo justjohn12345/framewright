@@ -21,8 +21,8 @@ struct ProgramFrameProvider::Pending {
     std::function<void()> onReady;
 };
 
-ProgramFrameProvider::ProgramFrameProvider(std::shared_ptr<media::DecodePool> pool)
-    : pool_(std::move(pool)), shared_(std::make_shared<Shared>()) {}
+ProgramFrameProvider::ProgramFrameProvider(std::shared_ptr<media::DecodePool> pool, uint64_t laneBase)
+    : pool_(std::move(pool)), laneBase_(laneBase), shared_(std::make_shared<Shared>()) {}
 
 render::PreviewFrameSource ProgramFrameProvider::makeSource() const {
     auto shared = shared_;
@@ -113,7 +113,8 @@ void ProgramFrameProvider::request(const std::shared_ptr<Pending> &pending, size
                                     self->deliver(pending, layer, std::move(*boxed));
                                 }
                             });
-                        });
+                        },
+                        laneBase_ + layer);
 }
 
 void ProgramFrameProvider::deliver(const std::shared_ptr<Pending> &pending, size_t layer,

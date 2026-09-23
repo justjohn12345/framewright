@@ -5,7 +5,9 @@
 
 #import "VETypes.h"
 
+#include "../Edit/EditResult.h"
 #include "../Model/Project.h"
+#include "../Playback/PlaybackController.h"
 #include "../Thumbs/WaveformService.h"
 
 #include <memory>
@@ -33,6 +35,15 @@ VETransitionInfo *makeTransitionInfo(const Transition &transition, const Sequenc
 VESequenceInfo *makeSequenceInfo(const Sequence &sequence);
 VEHardwareCaps *makeHardwareCaps();
 VEWaveform *makeWaveform(AssetId asset, const std::shared_ptr<const thumbs::WaveformPeaks> &peaks);
+
+VEEditErrorCode toVE(EditError error);
+/// The facade's result for an engine edit result (`note` may be nil). Dropped transitions are
+/// listed and mentioned in the note.
+VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *created,
+                             NSString *note);
+VEPlaybackState playbackStateToVE(playback::PlaybackState state);
+VEPlaybackStatus *makePlaybackStatus(const playback::PlaybackStatus &status);
+VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats);
 
 /// "29.97", "25", "23.976" for a frame duration; "" when not positive.
 NSString *fpsString(CMTime frameDuration);

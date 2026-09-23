@@ -16,6 +16,7 @@
 #include "../Media/FrameCache.h"
 #include "../Media/HardwareCaps.h"
 #include "../Media/MediaTypes.h"
+#include "../Playback/PlaybackController.h"
 #include "../Render/Scheduler.h"
 #include "../Serialize/ProjectJSON.h"
 #include "../Thumbs/ThumbnailService.h"
@@ -26,6 +27,7 @@
 #include <os/signpost.h>
 
 #include <algorithm>
+#include <climits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -47,12 +49,30 @@ NSNotificationName const VEEngineThumbnailDidBecomeAvailableNotification =
     @"VEEngineThumbnailDidBecomeAvailableNotification";
 NSNotificationName const VEEngineWaveformDidBecomeAvailableNotification =
     @"VEEngineWaveformDidBecomeAvailableNotification";
+NSNotificationName const VEEnginePlaybackDidChangeNotification = @"VEEnginePlaybackDidChangeNotification";
+NSNotificationName const VEEngineSourcePlaybackDidChangeNotification = @"VEEngineSourcePlaybackDidChangeNotification";
+NSNotificationName const VEEngineMemoryPressureNotification = @"VEEngineMemoryPressureNotification";
 NSString *const VEEngineChangeCountKey = @"changeCount";
 NSString *const VEEngineAssetIDKey = @"assetID";
+NSString *const VEEnginePlaybackStatusKey = @"playbackStatus";
+NSString *const VEEngineCriticalKey = @"critical";
 NSErrorDomain const VEEngineErrorDomain = @"VidEditEngine.VEEngine";
 
-/// Engine model calls are confined to the main thread.
-#define VE_ASSERT_MAIN() NSAssert(NSThread.isMainThread, @"VEEngine must be used on the main thread")
+/// Raises NSInternalInconsistencyException: a VEEngine method was called off the main thread.
+[[noreturn]] static void veMainThreadViolation(const char *function) {
+    [NSException raise:NSInternalInconsistencyException
+                format:@"VEEngine must be used on the main thread (%s called on %@)", function, NSThread.currentThread];
+    __builtin_unreachable();
+}
+
+/// Engine model calls are confined to the main thread. Active in every build configuration: a
+/// call from another thread would race the model, so it fails loudly instead.
+#define VE_ASSERT_MAIN()                                                                                               \
+    do {                                                                                                               \
+        if (__builtin_expect(!NSThread.isMainThread, 0)) {                                                             \
+            veMainThreadViolation(__PRETTY_FUNCTION__);                                                                \
+        }                                                                                                              \
+    } while (0)
 
 namespace {
 
@@ -73,12 +93,61 @@ NSError *makeError(const media::MediaError &error, NSString *context) {
                            userInfo:@{NSLocalizedDescriptionKey : message, @"mediaErrorCode" : @(int(error.code))}];
 }
 
-VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created = @[]) {
-    if (result.ok()) {
-        return [VEEditResult successWithCreatedIDs:created];
+VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created = @[], NSString *note = nil) {
+    return makeEditResult(result, created, note);
+}
+
+/// Lanes of DecodePool::requestFrame: the program controller's layers use kProgramLaneBase + i,
+/// the source monitor's scrub provider and controller their own ranges (on the source pool).
+constexpr uint64_t kProgramLaneBase = 0;
+constexpr uint64_t kSourceScrubLaneBase = uint64_t(1) << 40;
+constexpr uint64_t kSourcePlaybackLaneBase = uint64_t(2) << 40;
+/// First id of the source monitor's private one-clip project (never collides with model ids).
+constexpr uint64_t kSourceProjectFirstId = uint64_t(1) << 56;
+/// Clip id of the source monitor's picture in its still graphs.
+const ClipId kSourceVideoClip{kSourceProjectFirstId + 10};
+
+/// The source monitor's private project: `asset` (same id as in the real project, so the
+/// frame cache and routing are shared) as one clip over the whole media, video on V1 and audio
+/// on A1 (linked), on a sequence at the asset's own frame rate and size. Nullopt for stills and
+/// media without a positive duration.
+std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbackFrameDuration) {
+    if (asset.isStill() || !CMTIME_IS_NUMERIC(asset.duration) || asset.duration <= kCMTimeZero) {
+        return std::nullopt;
     }
-    NSString *message = toNS(result.message);
-    return [VEEditResult failureWithMessage:message.length > 0 ? message : @(nameOf(result.error))];
+    Project project;
+    project.name = "Source";
+    project.ids = IdGenerator(kSourceProjectFirstId);
+    project.assets.push_back(asset);
+    const CMTime fd = asset.hasVideo() && isPositive(asset.frameDuration) ? asset.frameDuration : fallbackFrameDuration;
+    const SequenceId sequenceId = project.addSequence("Source", fd, asset.hasVideo() ? std::max(1, asset.width) : 16,
+                                                      asset.hasVideo() ? std::max(1, asset.height) : 9, 1, 1);
+    Sequence &sequence = *project.findSequence(sequenceId);
+    const CMTime length = snapToFrame(asset.duration, fd, SnapMode::Floor);
+    if (length <= kCMTimeZero) {
+        return std::nullopt;
+    }
+    Clip video;
+    video.id = kSourceVideoClip;
+    video.assetId = asset.id;
+    video.trackId = sequence.videoTracks.front().id;
+    video.timelineStart = kCMTimeZero;
+    video.timelineDuration = length;
+    video.sourceIn = kCMTimeZero;
+    Clip audio = video;
+    audio.id = ClipId(kSourceProjectFirstId + 11);
+    audio.trackId = sequence.audioTracks.front().id;
+    if (asset.hasVideo() && asset.hasAudio()) {
+        video.linkedClipId = audio.id;
+        audio.linkedClipId = video.id;
+    }
+    if (asset.hasVideo()) {
+        sequence.videoTracks.front().clips.push_back(video);
+    }
+    if (asset.hasAudio()) {
+        sequence.audioTracks.front().clips.push_back(audio);
+    }
+    return project;
 }
 
 template <class IdType> NSArray<NSNumber *> *toNumbers(const std::vector<IdType> &ids) {
@@ -163,7 +232,23 @@ struct ProbedFile {
     std::shared_ptr<media::DecodePool> _decodePool;
     std::unique_ptr<thumbs::ThumbnailService> _thumbnails;
     std::unique_ptr<thumbs::WaveformService> _waveforms;
-    std::shared_ptr<ProgramFrameProvider> _program;
+    std::unique_ptr<playback::PlaybackController> _playback;
+    uint64_t _playbackGeneration; // _projectGeneration the controller's sequence belongs to
+    bool _playbackPublished;
+
+    // Source monitor: a pool of its own (a playback controller replaces its pool's whole target
+    // set), a still provider for scrubbing and a controller over a private one-clip project that
+    // is created when the monitor first plays.
+    std::shared_ptr<media::DecodePool> _sourcePool;
+    std::shared_ptr<ProgramFrameProvider> _sourceProvider;
+    std::unique_ptr<playback::PlaybackController> _sourcePlayback;
+    __weak VEPreviewView *_sourceView;
+    AssetId _sourceAsset;
+    CMTime _sourceTime;
+    std::optional<Project> _sourceProject;   // for _sourceAsset
+    AssetId _sourcePlaybackAsset;            // asset of the source controller's sequence
+    bool _sourceUsesController;              // the source view shows the controller's picture
+    std::map<AssetId, media::RoutedMediaInfo> _routing;
 
     Project _project;
     std::unique_ptr<UndoStack> _undo;
@@ -171,10 +256,12 @@ struct ProbedFile {
     uint64_t _extraChanges;    // changes outside the undo stack (relinks on open)
     bool _metadataDirty;       // relinked paths not saved yet
     uint64_t _projectGeneration; // drops async results that belong to a replaced project
+    uint64_t _idFloor; // highest IdGenerator value the project has reached (see FreshIds)
+    std::vector<std::pair<AssetId, size_t>> _lastUseCounts;
+    NSArray<NSString *> *_loadWarnings;
+    VERippleScope _rippleScope;
+    NSMutableArray<dispatch_block_t> *_deferredImports; // imports waiting for a coalescing group
     NSString *_coalescingKey;
-    // Active sequence as it was when the open coalescing group began: relative edits (moveClips)
-    // are computed against it because each step of the group replaces the previous one.
-    std::optional<Sequence> _coalescingBase;
 
     std::map<AssetId, AssetDetails> _details;
     std::set<AssetId> _missing;
@@ -184,7 +271,6 @@ struct ProbedFile {
 
     NSHashTable<id<VEEngineObserver>> *_observers;
     __weak VEPreviewView *_programView;
-    CMTime _programTime;
     dispatch_queue_t _probeQueue;
     dispatch_source_t _memoryPressureSource;
     double _mainThreadImportSeconds;
@@ -242,13 +328,25 @@ struct ProbedFile {
         }
         _thumbnails = std::make_unique<thumbs::ThumbnailService>(_router, thumbConfig);
         _waveforms = std::make_unique<thumbs::WaveformService>(_router, waveConfig);
-        _program = std::make_shared<ProgramFrameProvider>(_decodePool);
+        _sourcePool = std::make_shared<media::DecodePool>(_router, _frameCache);
+        _sourceProvider = std::make_shared<ProgramFrameProvider>(_sourcePool, kSourceScrubLaneBase);
+        _sourceTime = kCMTimeZero;
+        _sourceUsesController = false;
+        _playbackGeneration = 0;
+        _playbackPublished = false;
+        _idFloor = 0;
+        _loadWarnings = @[];
+        _rippleScope = VERippleScopeAllTracks;
+        _deferredImports = [NSMutableArray array];
+        playback::PlaybackConfig config;
+        config.scrubLaneBase = kProgramLaneBase;
+        _playback = std::make_unique<playback::PlaybackController>(_router, _frameCache, _decodePool, config);
+        [self observeController:*_playback source:NO];
         _undo = std::make_unique<UndoStack>();
         _changeBase = 0;
         _extraChanges = 0;
         _metadataDirty = false;
         _projectGeneration = 0;
-        _programTime = kCMTimeZero;
         _bookmarks = [NSMutableDictionary dictionary];
         _accessedURLs = [NSMutableArray array];
         _observers = [NSHashTable weakObjectsHashTable];
@@ -259,21 +357,20 @@ struct ProbedFile {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             (void)media::HardwareCaps::get();
         });
-        std::weak_ptr<media::FrameCache> weakCache = _frameCache;
+        // The handler runs on the main queue: it touches the preview views and the model's asset
+        // list, and the frame cache purge is cheap.
         _memoryPressureSource = dispatch_source_create(
             DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0, DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL,
-            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+            dispatch_get_main_queue());
         dispatch_source_t source = _memoryPressureSource;
+        __weak VEEngine *weakSelf = self;
         dispatch_source_set_event_handler(_memoryPressureSource, ^{
             const unsigned long level = dispatch_source_get_data(source);
-            if (auto cache = weakCache.lock()) {
-                cache->handleMemoryPressure((level & DISPATCH_MEMORYPRESSURE_CRITICAL) != 0
-                                                ? media::MemoryPressure::Critical
-                                                : media::MemoryPressure::Warning);
-            }
+            [weakSelf handleMemoryPressure:(level & DISPATCH_MEMORYPRESSURE_CRITICAL) != 0];
         });
         dispatch_resume(_memoryPressureSource);
         [self resetToEmptyProjectNamed:@"Untitled"];
+        [self publishPlaybackSnapshot];
     }
     return self;
 }
@@ -282,6 +379,9 @@ struct ProbedFile {
     if (_memoryPressureSource != nil) {
         dispatch_source_cancel(_memoryPressureSource);
     }
+    // The views may outlive the engine: they must stop calling into the controllers first.
+    [_programView setFrameSource:ve::render::PreviewFrameSource{}];
+    [_sourceView setFrameSource:ve::render::PreviewFrameSource{}];
     [self stopAccessingURLs];
 }
 
@@ -298,6 +398,8 @@ struct ProbedFile {
 // MARK: - Notifications
 
 - (void)notifyModelChanged {
+    [self publishPlaybackSnapshot];
+    [self updateUseCounts];
     const uint64_t count = self.changeCount;
     [NSNotificationCenter.defaultCenter postNotificationName:VEEngineModelDidChangeNotification
                                                       object:self
@@ -307,7 +409,31 @@ struct ProbedFile {
             [observer engine:self modelDidChange:count];
         }
     }
-    [self refreshProgramFrame];
+}
+
+/// Posts an assets notification when a clip edit changed how often an asset is used
+/// (VEAssetInfo.useCount), so the media bin does not show stale counts.
+- (void)updateUseCounts {
+    std::map<AssetId, size_t> counts;
+    for (const Sequence &sequence : _project.sequences) {
+        for (const auto *tracks : {&sequence.videoTracks, &sequence.audioTracks}) {
+            for (const Track &track : *tracks) {
+                for (const Clip &clip : track.clips) {
+                    ++counts[clip.assetId];
+                }
+            }
+        }
+    }
+    std::vector<std::pair<AssetId, size_t>> current;
+    current.reserve(_project.assets.size());
+    for (const MediaAsset &asset : _project.assets) {
+        auto it = counts.find(asset.id);
+        current.emplace_back(asset.id, it == counts.end() ? 0 : it->second);
+    }
+    if (current != _lastUseCounts) {
+        _lastUseCounts = std::move(current);
+        [self notifyAssetsChanged];
+    }
 }
 
 - (void)notifyAssetsChanged {
@@ -356,6 +482,10 @@ struct ProbedFile {
 
 /// Forgets everything cached for the current project's assets (ids restart in every project).
 - (void)forgetProjectMedia {
+    // The controllers stop using the old assets first (their ids will name other files).
+    auto empty = std::make_shared<const Project>();
+    _playback->setSequence(empty, SequenceId{});
+    _playbackPublished = false;
     for (const MediaAsset &asset : _project.assets) {
         _thumbnails->cancelPending(asset.id);
         _thumbnails->purge(asset.id);
@@ -363,8 +493,10 @@ struct ProbedFile {
         _decodePool->invalidate(asset.id);
     }
     _decodePool->setTargets({});
+    _sourcePool->setTargets({});
     _frameCache->purgeAll();
-    _program->cancel();
+    [self resetSourceMonitor];
+    _routing.clear();
     _details.clear();
     _missing.clear();
     [_bookmarks removeAllObjects];
@@ -380,10 +512,14 @@ struct ProbedFile {
     _metadataDirty = false;
     _undo = std::make_unique<UndoStack>();
     _coalescingKey = nil;
-    _coalescingBase.reset();
     _project = std::move(project);
     _projectURL = url;
-    _programTime = kCMTimeZero;
+    _idFloor = _project.ids.nextValue();
+    _loadWarnings = @[];
+    _lastUseCounts.clear();
+    // Imports waiting for the old project's gesture belong to the old project: run them now
+    // (they see the new generation and report the project as closed).
+    [self flushDeferredImports];
 }
 
 - (void)resetToEmptyProjectNamed:(NSString *)name {
@@ -451,7 +587,13 @@ struct ProbedFile {
         }
     }
 
+    std::vector<std::string> warnings = std::move(loaded.warnings);
     [self installProject:std::move(project) url:url];
+    NSMutableArray<NSString *> *warningStrings = [NSMutableArray arrayWithCapacity:warnings.size()];
+    for (const std::string &warning : warnings) {
+        [warningStrings addObject:toNS(warning)];
+    }
+    _loadWarnings = warningStrings;
 
     // Resolve every asset: through its bookmark (follows moves and grants sandbox access),
     // else by path.
@@ -536,7 +678,7 @@ struct ProbedFile {
                     return;
                 }
                 strongSelf->_details[assetId] = detailsFor(routed->value());
-                strongSelf->_decodePool->registerAsset(assetId, path, routed->value());
+                [strongSelf registerRouting:routed->value() forAsset:assetId path:path];
                 [strongSelf notifyAssetsChanged];
             });
         });
@@ -601,6 +743,11 @@ struct ProbedFile {
 - (uint64_t)changeCount {
     VE_ASSERT_MAIN();
     return _changeBase + _undo->changeCount() + _extraChanges;
+}
+
+- (NSArray<NSString *> *)loadWarnings {
+    VE_ASSERT_MAIN();
+    return _loadWarnings;
 }
 
 - (NSArray<NSNumber *> *)missingAssetIDs {
@@ -730,6 +877,7 @@ struct ProbedFile {
     VE_ASSERT_MAIN();
     auto router = _router;
     const size_t count = urls.count;
+    const uint64_t generation = _projectGeneration;
     auto results = std::make_shared<std::vector<ProbedFile>>(count);
     NSArray<NSURL *> *files = [urls copy];
     __weak VEEngine *weakSelf = self;
@@ -760,18 +908,38 @@ struct ProbedFile {
             }
         });
         dispatch_async(dispatch_get_main_queue(), ^{
-            VEEngine *strongSelf = weakSelf;
-            if (strongSelf == nil) {
-                return;
-            }
-            [strongSelf finishImport:*results urls:files completion:completion];
+            [weakSelf finishImport:results urls:files generation:generation completion:completion];
         });
     });
 }
 
-- (void)finishImport:(std::vector<ProbedFile> &)results
+- (void)finishImport:(std::shared_ptr<std::vector<ProbedFile>>)probed
                 urls:(NSArray<NSURL *> *)urls
+          generation:(uint64_t)generation
           completion:(nullable void (^)(NSArray<VEAssetInfo *> *, NSArray<NSError *> *))completion {
+    if (generation != _projectGeneration) {
+        // The project was replaced while probing: these files belong to a closed project.
+        NSMutableArray<NSError *> *errors = [NSMutableArray arrayWithCapacity:urls.count];
+        for (NSURL *url in urls) {
+            [errors addObject:makeError(VEEngineErrorProjectClosed,
+                                        [NSString stringWithFormat:@"%@ was not imported: the project was closed",
+                                                                   url.lastPathComponent])];
+        }
+        if (completion) {
+            completion(@[], errors);
+        }
+        return;
+    }
+    if (_coalescingKey != nil) {
+        // A gesture is in progress: adding the assets now would end its undo group (and its
+        // edits are expressed against the state when it began). Add them when it ends.
+        __weak VEEngine *weakSelf = self;
+        [_deferredImports addObject:^{
+            [weakSelf finishImport:probed urls:urls generation:generation completion:completion];
+        }];
+        return;
+    }
+    std::vector<ProbedFile> &results = *probed;
     const os_signpost_id_t signpost = os_signpost_id_generate(_log);
     os_signpost_interval_begin(_log, signpost, "ImportMainThread", "%zu files", results.size());
     const CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
@@ -798,8 +966,7 @@ struct ProbedFile {
     if (!toAdd.empty()) {
         auto command = std::make_unique<ImportAssets>(std::move(toAdd));
         ImportAssets *import = command.get();
-        [self closeCoalescingIfOpen];
-        EditResult result = _undo->push(_project, std::move(command));
+        EditResult result = [self pushCommand:std::move(command)];
         if (!result) {
             [errors addObject:makeError(VEEngineErrorImportFailed, toNS(result.message))];
         } else {
@@ -808,9 +975,8 @@ struct ProbedFile {
                 ProbedFile &file = results[sourceIndex[k]];
                 const AssetId id = ids[k];
                 _details[id] = file.details;
-                if (file.bookmark != nil) {
-                    _bookmarks[@(static_cast<int64_t>(id.value()))] = file.bookmark;
-                }
+                // Ids are never reused, but never let a stale entry name another file.
+                _bookmarks[@(static_cast<int64_t>(id.value()))] = file.bookmark;
                 _missing.erase(id);
                 // Keep sandbox access to the file for this session (bookmark resolution
                 // grants it again after reopening).
@@ -818,7 +984,7 @@ struct ProbedFile {
                 if ([url startAccessingSecurityScopedResource]) {
                     [_accessedURLs addObject:url];
                 }
-                _decodePool->registerAsset(id, file.asset->url, *file.routed);
+                [self registerRouting:*file.routed forAsset:id path:file.asset->url];
                 [self startPosterAndWaveformForAsset:id];
                 [reportedIDs addObject:@(static_cast<int64_t>(id.value()))];
             }
@@ -878,8 +1044,11 @@ struct ProbedFile {
 - (VEEditResult *)removeAsset:(VEAssetID)assetID {
     VE_ASSERT_MAIN();
     const AssetId id(static_cast<AssetId::ValueType>(assetID));
-    [self closeCoalescingIfOpen];
-    EditResult result = _undo->push(_project, std::make_unique<RemoveAsset>(id));
+    if (_coalescingKey != nil) {
+        return [VEEditResult failureWithCode:VEEditErrorBusy
+                                     message:@"Finish the current edit before removing media."];
+    }
+    EditResult result = [self pushCommand:std::make_unique<RemoveAsset>(id)];
     if (result) {
         [self notifyAssetsChanged];
         [self notifyModelChanged];
@@ -962,10 +1131,12 @@ struct ProbedFile {
 }
 
 - (VEHardwareCaps *)hardwareCaps {
+    VE_ASSERT_MAIN();
     return makeHardwareCaps();
 }
 
 - (NSArray<NSString *> *)backendNames {
+    VE_ASSERT_MAIN();
     NSMutableArray<NSString *> *names = [NSMutableArray array];
     for (const std::string &name : _router->backendNames()) {
         [names addObject:toNS(name)];
@@ -991,6 +1162,7 @@ struct ProbedFile {
 }
 
 - (NSUInteger)frameCacheBudgetBytes {
+    VE_ASSERT_MAIN();
     return _frameCache->budget();
 }
 
@@ -1004,18 +1176,80 @@ struct ProbedFile {
     return _mainThreadImportSeconds;
 }
 
+- (void)handleMemoryPressure:(BOOL)critical {
+    VE_ASSERT_MAIN();
+    _frameCache->handleMemoryPressure(critical ? media::MemoryPressure::Critical : media::MemoryPressure::Warning);
+    [_programView handleMemoryPressure];
+    [_sourceView handleMemoryPressure];
+    for (const MediaAsset &asset : _project.assets) {
+        _thumbnails->purge(asset.id);
+        _waveforms->purge(asset.id);
+    }
+    [NSNotificationCenter.defaultCenter postNotificationName:VEEngineMemoryPressureNotification
+                                                      object:self
+                                                    userInfo:@{VEEngineCriticalKey : @(critical)}];
+}
+
+/// Hands an asset's routing to every decode path (saves a probe per decoder).
+- (void)registerRouting:(const media::RoutedMediaInfo &)routed forAsset:(AssetId)asset path:(const std::string &)path {
+    _routing[asset] = routed;
+    _decodePool->registerAsset(asset, path, routed);
+    _sourcePool->registerAsset(asset, path, routed);
+    _playback->setAssetRouting(asset, routed);
+    if (_sourcePlayback) {
+        _sourcePlayback->setAssetRouting(asset, routed);
+    }
+}
+
 // MARK: - Edits
 
 - (SequenceId)sequenceId {
     return _project.activeSequenceId;
 }
 
-/// Pushes an edit (tagged with the open coalescing group's key) and notifies on success.
-- (VEEditResult *)push:(std::unique_ptr<Command>)command created:(NSArray<NSNumber *> * (^_Nullable)(void))created {
+/// Pushes a command onto the undo stack, wrapped so it never reuses an id (see FreshIds), and
+/// tagged with the open coalescing group's key.
+- (EditResult)pushCommand:(std::unique_ptr<Command>)command {
+    _idFloor = std::max(_idFloor, _project.ids.nextValue());
+    auto wrapped = std::make_unique<FreshIds>(std::move(command), _idFloor);
     if (_coalescingKey != nil) {
-        command->setCoalescingKey(toStd(_coalescingKey));
+        wrapped->setCoalescingKey(toStd(_coalescingKey));
     }
-    EditResult result = _undo->push(_project, std::move(command));
+    EditResult result = _undo->push(_project, std::move(wrapped));
+    _idFloor = std::max(_idFloor, _project.ids.nextValue());
+    return result;
+}
+
+/// Pushes an edit and notifies on success.
+- (VEEditResult *)push:(std::unique_ptr<Command>)command created:(NSArray<NSNumber *> * (^_Nullable)(void))created {
+    return [self push:std::move(command) created:created note:nil];
+}
+
+- (VEEditResult *)push:(std::unique_ptr<Command>)command
+               created:(NSArray<NSNumber *> * (^_Nullable)(void))created
+                  note:(nullable NSString *)note {
+    EditResult result = [self pushCommand:std::move(command)];
+    if (!result) {
+        return toVE(result);
+    }
+    NSArray<NSNumber *> *ids = created ? created() : @[];
+    [self notifyModelChanged];
+    return toVE(result, ids, note);
+}
+
+/// Pushes the ripple edit `make` builds for `scope`; with the all-tracks scope refused because
+/// another track is in the way, retries on the synced tracks and says so.
+- (VEEditResult *)pushRipple:(std::unique_ptr<Command> (^)(RippleScope scope))make
+                     created:(NSArray<NSNumber *> * (^_Nullable)(void))created {
+    if (_rippleScope == VERippleScopeSyncedTracks) {
+        return [self push:make(RippleScope::SyncedTracks) created:created];
+    }
+    EditResult result = [self pushCommand:make(RippleScope::AllUnlockedTracks)];
+    if (result.error == EditError::Overlap) {
+        return [self push:make(RippleScope::SyncedTracks)
+                  created:created
+                     note:@"Other tracks have clips in the way, so only the edited clips' tracks were rippled."];
+    }
     if (!result) {
         return toVE(result);
     }
@@ -1029,7 +1263,20 @@ struct ProbedFile {
         _undo->endCoalescing();
         _coalescingKey = nil;
     }
-    _coalescingBase.reset();
+    [self flushDeferredImports];
+}
+
+/// Runs the imports that finished while a coalescing group was open (on the next main-queue
+/// turn, so the caller that ended the group finishes first).
+- (void)flushDeferredImports {
+    if (_deferredImports.count == 0) {
+        return;
+    }
+    NSArray<dispatch_block_t> *pending = [_deferredImports copy];
+    [_deferredImports removeAllObjects];
+    for (dispatch_block_t block in pending) {
+        dispatch_async(dispatch_get_main_queue(), block);
+    }
 }
 
 - (std::vector<ClipPlacement>)placementsForAsset:(const MediaAsset &)asset
@@ -1094,12 +1341,19 @@ struct ProbedFile {
                       return toNumbers(raw->createdClipIds());
                   }];
     }
-    auto command = std::make_unique<InsertClip>([self sequenceId], time, std::move(placements), link);
-    InsertClip *raw = command.get();
-    return [self push:std::move(command)
-              created:^NSArray<NSNumber *> * {
-                  return toNumbers(raw->createdClipIds());
-              }];
+    __block InsertClip *raw = nullptr;
+    const SequenceId sequenceId = [self sequenceId];
+    return [self pushRipple:^std::unique_ptr<Command>(RippleScope scope) {
+        InsertOptions options;
+        options.linkPair = link;
+        options.ripple = scope;
+        auto command = std::make_unique<InsertClip>(sequenceId, time, placements, options);
+        raw = command.get();
+        return command;
+    }
+                    created:^NSArray<NSNumber *> * {
+                        return raw != nullptr ? toNumbers(raw->createdClipIds()) : @[];
+                    }];
 }
 
 - (VEEditResult *)insertAsset:(VEAssetID)assetID
@@ -1141,60 +1395,35 @@ struct ProbedFile {
 
 - (VEEditResult *)moveClips:(NSArray<NSNumber *> *)clipIDs byTime:(CMTime)delta trackOffset:(NSInteger)trackOffset {
     VE_ASSERT_MAIN();
+    return [self moveClips:clipIDs byTime:delta trackOffset:trackOffset kind:std::nullopt];
+}
+
+- (VEEditResult *)moveClips:(NSArray<NSNumber *> *)clipIDs
+                     byTime:(CMTime)delta
+                trackOffset:(NSInteger)trackOffset
+                ofTrackKind:(VETrackKind)kind {
+    VE_ASSERT_MAIN();
+    return [self moveClips:clipIDs
+                    byTime:delta
+               trackOffset:trackOffset
+                      kind:kind == VETrackKindVideo ? TrackKind::Video : TrackKind::Audio];
+}
+
+- (VEEditResult *)moveClips:(NSArray<NSNumber *> *)clipIDs
+                     byTime:(CMTime)delta
+                trackOffset:(NSInteger)trackOffset
+                       kind:(std::optional<TrackKind>)kind {
     if (!CMTIME_IS_NUMERIC(delta)) {
-        return [VEEditResult failureWithMessage:@"Invalid time."];
+        return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"Invalid time."];
     }
-    const Sequence &sequence = _coalescingBase ? *_coalescingBase : [self activeSequence];
     std::vector<ClipId> ids = toClipIds(clipIDs);
-    // A linked partner is carried along by MoveClip; moving it again would double the move.
-    std::set<ClipId> chosen;
-    struct Move {
-        ClipId clip;
-        TrackId destination;
-        CMTime start;
-    };
-    std::vector<Move> moves;
-    for (ClipId id : ids) {
-        auto location = sequence.locateClip(id);
-        if (!location) {
-            return [VEEditResult failureWithMessage:@"A selected clip no longer exists."];
-        }
-        const Clip &clip = sequence.tracks(location->trackKind)[location->trackIndex].clips[location->clipIndex];
-        if (chosen.count(id) || (clip.linkedClipId && chosen.count(*clip.linkedClipId))) {
-            continue;
-        }
-        chosen.insert(id);
-        const auto &tracks = sequence.tracks(location->trackKind);
-        const NSInteger destinationIndex = NSInteger(location->trackIndex) + trackOffset;
-        if (destinationIndex < 0 || destinationIndex >= NSInteger(tracks.size())) {
-            return [VEEditResult failureWithMessage:@"There is no track there."];
-        }
-        const CMTime newStart = clip.timelineStart + delta;
-        if (newStart < kCMTimeZero) {
-            return [VEEditResult failureWithMessage:@"Clips cannot move before the sequence start."];
-        }
-        moves.push_back(Move{id, tracks[size_t(destinationIndex)].id, newStart});
-    }
-    if (moves.empty()) {
+    if (ids.empty()) {
         return [VEEditResult failureWithMessage:@"Nothing to move."];
     }
-    // Move the leading clips first so a moved clip never overwrites one still waiting to move.
-    const bool forward = delta > kCMTimeZero;
-    std::stable_sort(moves.begin(), moves.end(), [&](const Move &a, const Move &b) {
-        const Clip *ca = sequence.findClip(a.clip);
-        const Clip *cb = sequence.findClip(b.clip);
-        return forward ? cb->timelineStart < ca->timelineStart : ca->timelineStart < cb->timelineStart;
-    });
-    if (moves.size() == 1) {
-        return [self push:std::make_unique<MoveClip>([self sequenceId], moves[0].clip, moves[0].destination,
-                                                     moves[0].start)
-                  created:nil];
-    }
-    std::vector<std::unique_ptr<Command>> children;
-    for (const Move &m : moves) {
-        children.push_back(std::make_unique<MoveClip>([self sequenceId], m.clip, m.destination, m.start));
-    }
-    return [self push:std::make_unique<CompositeCommand>("Move Clips", std::move(children)) created:nil];
+    // Inside a coalescing group the undo stack reverts the group's previous step before this
+    // one applies, so the offsets are relative to the positions when the group began.
+    return [self push:std::make_unique<MoveClips>([self sequenceId], std::move(ids), delta, trackOffset, kind)
+              created:nil];
 }
 
 - (VEEditResult *)trimClipHead:(VEClipID)clipID toTime:(CMTime)time clamp:(BOOL)clamp {
@@ -1228,6 +1457,15 @@ struct ProbedFile {
 
 - (VEEditResult *)splitClips:(NSArray<NSNumber *> *)clipIDs atTime:(CMTime)time {
     VE_ASSERT_MAIN();
+    return [self splitClips:clipIDs atTime:time breakingTransitions:NO];
+}
+
+- (VEEditResult *)splitClips:(NSArray<NSNumber *> *)clipIDs
+                      atTime:(CMTime)time
+         breakingTransitions:(BOOL)breakingTransitions {
+    VE_ASSERT_MAIN();
+    SplitOptions options;
+    options.allowBreakingTransitions = breakingTransitions;
     const Sequence &sequence = [self activeSequence];
     const CMTime at = snapToFrame(time, sequence.frameDuration, SnapMode::Round);
     std::vector<ClipId> candidates = clipIDs.count > 0 ? toClipIds(clipIDs) : Scheduler::clipsAt(sequence, at);
@@ -1247,7 +1485,7 @@ struct ProbedFile {
         if (clip->linkedClipId) {
             covered.insert(*clip->linkedClipId); // SplitClip splits the partner too
         }
-        auto split = std::make_unique<SplitClip>([self sequenceId], id, at);
+        auto split = std::make_unique<SplitClip>([self sequenceId], id, at, options);
         splits.push_back(split.get());
         children.push_back(std::move(split));
     }
@@ -1282,7 +1520,23 @@ struct ProbedFile {
     if (ids.empty()) {
         return [VEEditResult failureWithMessage:@"Nothing selected."];
     }
-    return [self push:std::make_unique<RippleDelete>([self sequenceId], std::move(ids)) created:nil];
+    const SequenceId sequenceId = [self sequenceId];
+    return [self pushRipple:^std::unique_ptr<Command>(RippleScope scope) {
+        RippleOptions options;
+        options.scope = scope;
+        return std::make_unique<RippleDelete>(sequenceId, ids, options);
+    }
+                    created:nil];
+}
+
+- (VERippleScope)rippleScope {
+    VE_ASSERT_MAIN();
+    return _rippleScope;
+}
+
+- (void)setRippleScope:(VERippleScope)rippleScope {
+    VE_ASSERT_MAIN();
+    _rippleScope = rippleScope;
 }
 
 - (VEEditResult *)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID {
@@ -1301,11 +1555,33 @@ struct ProbedFile {
 
 - (VEEditResult *)setSpeed:(double)speed forClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
-    SpeedOptions options;
-    options.ripple = true;
-    return [self push:std::make_unique<SetClipSpeed>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)),
-                                                     speed, options)
-              created:nil];
+    if (!std::isfinite(speed) || speed <= 0) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"The speed must be positive."];
+    }
+    return [self setSpeedRatio:speedFromDouble(speed) forClip:clipID];
+}
+
+- (VEEditResult *)setSpeedNumerator:(int64_t)numerator denominator:(int64_t)denominator forClip:(VEClipID)clipID {
+    VE_ASSERT_MAIN();
+    const std::optional<Ratio> ratio = Ratio::reduced(numerator, denominator);
+    if (!ratio || !isValidSpeed(*ratio)) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"The speed must be a fraction between 1/100 and 100 with a "
+                                             @"denominator of at most 1000."];
+    }
+    return [self setSpeedRatio:*ratio forClip:clipID];
+}
+
+- (VEEditResult *)setSpeedRatio:(Ratio)speed forClip:(VEClipID)clipID {
+    const SequenceId sequenceId = [self sequenceId];
+    const ClipId clip(static_cast<ClipId::ValueType>(clipID));
+    return [self pushRipple:^std::unique_ptr<Command>(RippleScope scope) {
+        SpeedOptions options;
+        options.ripple = true;
+        options.scope = scope;
+        return std::make_unique<SetClipSpeed>(sequenceId, clip, speed, options);
+    }
+                    created:nil];
 }
 
 - (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID duration:(CMTime)duration {
@@ -1407,7 +1683,6 @@ struct ProbedFile {
     VE_ASSERT_MAIN();
     [self closeCoalescingIfOpen];
     _coalescingKey = [key copy];
-    _coalescingBase = [self activeSequence];
     _undo->beginCoalescing(toStd(_coalescingKey));
 }
 
@@ -1422,12 +1697,12 @@ struct ProbedFile {
         return;
     }
     _coalescingKey = nil;
-    _coalescingBase.reset();
     const bool reverted = _undo->cancelCoalescing(_project);
     if (reverted) {
         [self notifyAssetsChanged];
         [self notifyModelChanged];
     }
+    [self flushDeferredImports];
 }
 
 - (BOOL)isCoalescing {
@@ -1438,7 +1713,7 @@ struct ProbedFile {
 - (BOOL)undo {
     VE_ASSERT_MAIN();
     _coalescingKey = nil;
-    _coalescingBase.reset();
+    [self flushDeferredImports];
     if (!_undo->undo(_project)) {
         return NO;
     }
@@ -1450,10 +1725,11 @@ struct ProbedFile {
 - (BOOL)redo {
     VE_ASSERT_MAIN();
     _coalescingKey = nil;
-    _coalescingBase.reset();
+    [self flushDeferredImports];
     if (!_undo->redo(_project)) {
         return NO;
     }
+    _idFloor = std::max(_idFloor, _project.ids.nextValue());
     [self notifyAssetsChanged];
     [self notifyModelChanged];
     return YES;
@@ -1479,7 +1755,85 @@ struct ProbedFile {
     return toNS(_undo->redoName());
 }
 
-// MARK: - Program monitor
+// MARK: - Playback
+
+/// Hands the controllers the model: the active sequence of a new project (setSequence, which
+/// stops and moves to frame 0), or the edited snapshot (modelChanged, which keeps playing).
+- (void)publishPlaybackSnapshot {
+    auto snapshot = std::make_shared<const Project>(_project);
+    if (!_playbackPublished || _playbackGeneration != _projectGeneration) {
+        _playbackPublished = true;
+        _playbackGeneration = _projectGeneration;
+        _playback->setSequence(std::move(snapshot), _project.activeSequenceId);
+    } else {
+        _playback->modelChanged(std::move(snapshot));
+    }
+    // The source monitor's asset may have been removed (undo of its import).
+    if (_sourceAsset && _project.findAsset(_sourceAsset) == nullptr) {
+        [self resetSourceMonitor];
+        [self notifySourcePlayback:_sourcePlayback ? _sourcePlayback->status() : playback::PlaybackStatus{}];
+    }
+}
+
+- (void)observeController:(playback::PlaybackController &)controller source:(BOOL)isSource {
+    __weak VEEngine *weakSelf = self;
+    playback::PlaybackObserver observer;
+    observer.statusChanged = [weakSelf, isSource](const playback::PlaybackStatus &status) {
+        VEEngine *strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        if (isSource) {
+            [strongSelf notifySourcePlayback:status];
+        } else {
+            [strongSelf notifyPlayback:status];
+        }
+    };
+    observer.needsDisplay = [weakSelf, isSource] {
+        VEEngine *strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        if (isSource) {
+            if (strongSelf->_sourceUsesController) {
+                [strongSelf->_sourceView renderOnce];
+            }
+        } else {
+            [strongSelf->_programView renderOnce];
+        }
+    };
+    controller.setObserver(dispatch_get_main_queue(), std::move(observer));
+}
+
+- (void)notifyPlayback:(const playback::PlaybackStatus &)status {
+    VEPlaybackStatus *info = makePlaybackStatus(status);
+    [NSNotificationCenter.defaultCenter postNotificationName:VEEnginePlaybackDidChangeNotification
+                                                      object:self
+                                                    userInfo:@{VEEnginePlaybackStatusKey : info}];
+    for (id<VEEngineObserver> observer in _observers.allObjects) {
+        if ([observer respondsToSelector:@selector(engine:playbackDidChange:)]) {
+            [observer engine:self playbackDidChange:info];
+        }
+    }
+}
+
+- (void)notifySourcePlayback:(const playback::PlaybackStatus &)status {
+    VEPlaybackStatus *info = makePlaybackStatus(status);
+    if (!_sourceUsesController) {
+        // The controller is not what the monitor shows: report the scrub position, stopped.
+        playback::PlaybackStatus shown;
+        shown.time = _sourceTime;
+        info = makePlaybackStatus(shown);
+    }
+    [NSNotificationCenter.defaultCenter postNotificationName:VEEngineSourcePlaybackDidChangeNotification
+                                                      object:self
+                                                    userInfo:@{VEEnginePlaybackStatusKey : info}];
+    for (id<VEEngineObserver> observer in _observers.allObjects) {
+        if ([observer respondsToSelector:@selector(engine:sourcePlaybackDidChange:)]) {
+            [observer engine:self sourcePlaybackDidChange:info];
+        }
+    }
+}
 
 - (void)attachProgramView:(nullable VEPreviewView *)view {
     VE_ASSERT_MAIN();
@@ -1489,34 +1843,333 @@ struct ProbedFile {
     }
     _programView = view;
     if (view != nil) {
-        [view setFrameSource:_program->makeSource()];
-        [self refreshProgramFrame];
-    } else {
-        _program->cancel();
+        [view setFrameSource:_playback->frameSource()];
+        [view renderOnce];
     }
+}
+
+- (nullable VEPreviewView *)programView {
+    VE_ASSERT_MAIN();
+    return _programView;
 }
 
 - (void)showProgramFrameAtTime:(CMTime)time {
     VE_ASSERT_MAIN();
-    _programTime = CMTIME_IS_NUMERIC(time) ? time : kCMTimeZero;
-    [self refreshProgramFrame];
+    [self seekToTime:time];
 }
 
-- (void)refreshProgramFrame {
-    if (_programView == nil) {
+- (void)play {
+    VE_ASSERT_MAIN();
+    _playback->play();
+}
+
+- (void)pause {
+    VE_ASSERT_MAIN();
+    _playback->pause();
+}
+
+- (void)togglePlay {
+    VE_ASSERT_MAIN();
+    _playback->togglePlay();
+}
+
+- (void)seekToTime:(CMTime)time {
+    VE_ASSERT_MAIN();
+    _playback->seek(CMTIME_IS_NUMERIC(time) ? time : kCMTimeZero, playback::SeekMode::Exact);
+}
+
+- (void)setRate:(double)rate {
+    VE_ASSERT_MAIN();
+    _playback->setRate(rate);
+}
+
+- (void)shuttleForward {
+    VE_ASSERT_MAIN();
+    _playback->shuttleForward();
+}
+
+- (void)shuttleReverse {
+    VE_ASSERT_MAIN();
+    _playback->shuttleReverse();
+}
+
+- (void)shuttleStop {
+    VE_ASSERT_MAIN();
+    _playback->pause();
+}
+
+- (void)stepFrames:(NSInteger)frames {
+    VE_ASSERT_MAIN();
+    _playback->stepFrames(static_cast<int>(std::clamp<NSInteger>(frames, INT_MIN, INT_MAX)));
+}
+
+- (void)scrubToTime:(CMTime)time {
+    VE_ASSERT_MAIN();
+    if (CMTIME_IS_NUMERIC(time)) {
+        _playback->scrubTo(time);
+    }
+}
+
+- (void)endScrub {
+    VE_ASSERT_MAIN();
+    _playback->endScrub();
+}
+
+- (BOOL)isMuted {
+    VE_ASSERT_MAIN();
+    return _playback->isMuted();
+}
+
+- (void)setMuted:(BOOL)muted {
+    VE_ASSERT_MAIN();
+    _playback->setMuted(muted);
+    if (_sourcePlayback) {
+        _sourcePlayback->setMuted(muted);
+    }
+}
+
+- (VEPlaybackState)playbackState {
+    VE_ASSERT_MAIN();
+    return playbackStateToVE(_playback->state());
+}
+
+- (double)playbackRate {
+    VE_ASSERT_MAIN();
+    return _playback->rate();
+}
+
+- (CMTime)currentTime {
+    VE_ASSERT_MAIN();
+    return _playback->currentTime();
+}
+
+- (NSString *)playbackError {
+    VE_ASSERT_MAIN();
+    const playback::PlaybackStatus status = _playback->status();
+    return status.lastError ? toNS(status.lastError->message) : @"";
+}
+
+- (VEPlaybackStatus *)playbackStatus {
+    VE_ASSERT_MAIN();
+    return makePlaybackStatus(_playback->status());
+}
+
+- (VEPlaybackStats *)playbackStats {
+    VE_ASSERT_MAIN();
+    return makePlaybackStats(_playback->stats());
+}
+
+// MARK: - Source monitor
+
+- (void)attachSourceView:(nullable VEPreviewView *)view {
+    VE_ASSERT_MAIN();
+    VEPreviewView *previous = _sourceView;
+    if (previous != nil && previous != view) {
+        [previous setFrameSource:ve::render::PreviewFrameSource{}];
+    }
+    _sourceView = view;
+    if (view != nil) {
+        [view setFrameSource:_sourceUsesController && _sourcePlayback ? _sourcePlayback->frameSource()
+                                                                       : _sourceProvider->makeSource()];
+        [self refreshSourcePicture];
+    }
+}
+
+/// Clears the source monitor (no asset, provider picture, controller stopped and emptied).
+- (void)resetSourceMonitor {
+    _sourceProvider->cancel();
+    if (_sourceUsesController) {
+        _sourceUsesController = false;
+        [_sourceView setFrameSource:_sourceProvider->makeSource()];
+    }
+    if (_sourcePlayback && _sourcePlaybackAsset) {
+        // Stops it and drops its private project (and decode targets) until the next play.
+        _sourcePlayback->setSequence(std::make_shared<const Project>(), SequenceId{});
+        _sourcePlaybackAsset = AssetId{};
+    }
+    _sourceAsset = AssetId{};
+    _sourceProject.reset();
+    _sourceTime = kCMTimeZero;
+    [self refreshSourcePicture];
+}
+
+/// Shows the provider's picture of the source asset at _sourceTime (black without an asset).
+- (void)refreshSourcePicture {
+    if (_sourceUsesController) {
+        [_sourceView renderOnce];
         return;
     }
-    RenderGraph graph = Scheduler::renderGraphAt([self activeSequence], _project, _programTime);
-    const Sequence &sequence = [self activeSequence];
-    graph.width = sequence.width;
-    graph.height = sequence.height;
+    RenderGraph graph;
+    if (_sourceProject) {
+        const Sequence &sequence = *_sourceProject->activeSequence();
+        graph = Scheduler::renderGraphAt(sequence, *_sourceProject, _sourceTime);
+        graph.width = sequence.width;
+        graph.height = sequence.height;
+    } else if (const MediaAsset *asset = _project.findAsset(_sourceAsset); asset != nullptr && asset->isStill()) {
+        VideoLayer layer;
+        layer.clipId = kSourceVideoClip;
+        layer.assetId = asset->id;
+        layer.isStill = true;
+        layer.sourceRotationDegrees = asset->rotationDegrees;
+        graph.layers.push_back(layer);
+        graph.time = kCMTimeZero;
+        graph.width = std::max(1, asset->width);
+        graph.height = std::max(1, asset->height);
+    }
+    if (_sourceView == nil) {
+        _sourceProvider->cancel();
+        return;
+    }
     __weak VEEngine *weakSelf = self;
-    _program->show(std::move(graph), [weakSelf] {
+    _sourceProvider->show(std::move(graph), [weakSelf] {
         VEEngine *strongSelf = weakSelf;
-        if (strongSelf != nil) {
-            [strongSelf->_programView renderOnce];
+        if (strongSelf != nil && !strongSelf->_sourceUsesController) {
+            [strongSelf->_sourceView renderOnce];
         }
     });
+}
+
+- (CMTime)frameTimeForAsset:(VEAssetID)assetID atTime:(CMTime)time {
+    VE_ASSERT_MAIN();
+    const MediaAsset *asset = _project.findAsset(AssetId(static_cast<AssetId::ValueType>(assetID)));
+    if (asset == nullptr || !CMTIME_IS_NUMERIC(time) || time < kCMTimeZero || asset->isStill()) {
+        return kCMTimeZero;
+    }
+    const CMTime fd = asset->hasVideo() && isPositive(asset->frameDuration) ? asset->frameDuration
+                                                                             : [self activeSequence].frameDuration;
+    CMTime t = snapToFrame(time, fd, SnapMode::Floor);
+    if (CMTIME_IS_NUMERIC(asset->duration) && asset->duration > kCMTimeZero) {
+        const CMTime last = snapToFrame(asset->duration, fd, SnapMode::Floor);
+        const CMTime lastStart = last == asset->duration ? last - fd : last;
+        if (t > lastStart) {
+            t = std::max(kCMTimeZero, lastStart);
+        }
+    }
+    return t;
+}
+
+- (void)sourceMonitorShowAsset:(VEAssetID)assetID atTime:(CMTime)time {
+    VE_ASSERT_MAIN();
+    const AssetId id(static_cast<AssetId::ValueType>(assetID));
+    const MediaAsset *asset = assetID > 0 ? _project.findAsset(id) : nullptr;
+    if (asset == nullptr) {
+        [self resetSourceMonitor];
+        [self notifySourcePlayback:playback::PlaybackStatus{}];
+        return;
+    }
+    const CMTime t = [self frameTimeForAsset:assetID atTime:time];
+    if (id != _sourceAsset) {
+        [self resetSourceMonitor];
+        _sourceAsset = id;
+        _sourceProject = makeSourceProject(*asset, [self activeSequence].frameDuration);
+    }
+    _sourceTime = t;
+    if (_sourceUsesController && _sourcePlayback) {
+        _sourcePlayback->seek(t, playback::SeekMode::Exact);
+        return; // the controller reports the new position
+    }
+    [self refreshSourcePicture];
+    [self notifySourcePlayback:playback::PlaybackStatus{}];
+}
+
+- (VEAssetID)sourceMonitorAssetID {
+    VE_ASSERT_MAIN();
+    return static_cast<VEAssetID>(_sourceAsset.value());
+}
+
+- (CMTime)sourceMonitorTime {
+    VE_ASSERT_MAIN();
+    return _sourceUsesController && _sourcePlayback ? _sourcePlayback->currentTime() : _sourceTime;
+}
+
+- (VEPlaybackState)sourceMonitorPlaybackState {
+    VE_ASSERT_MAIN();
+    return _sourceUsesController && _sourcePlayback ? playbackStateToVE(_sourcePlayback->state())
+                                                    : VEPlaybackStateStopped;
+}
+
+- (VEPlaybackStatus *)sourceMonitorPlaybackStatus {
+    VE_ASSERT_MAIN();
+    if (_sourceUsesController && _sourcePlayback) {
+        return makePlaybackStatus(_sourcePlayback->status());
+    }
+    playback::PlaybackStatus shown;
+    shown.time = _sourceTime;
+    return makePlaybackStatus(shown);
+}
+
+/// Makes the source controller play the monitor's asset and shows its picture. False when the
+/// asset cannot play (none, a still, no duration).
+- (BOOL)prepareSourcePlayback {
+    if (!_sourceProject) {
+        return NO;
+    }
+    if (!_sourcePlayback) {
+        playback::PlaybackConfig config;
+        config.scrubLaneBase = kSourcePlaybackLaneBase;
+        _sourcePlayback = std::make_unique<playback::PlaybackController>(_router, _frameCache, _sourcePool, config);
+        _sourcePlayback->setMuted(_playback->isMuted());
+        for (const auto &[asset, routed] : _routing) {
+            _sourcePlayback->setAssetRouting(asset, routed);
+        }
+        [self observeController:*_sourcePlayback source:YES];
+    }
+    if (_sourcePlaybackAsset != _sourceAsset) {
+        _sourcePlaybackAsset = _sourceAsset;
+        _sourcePlayback->setSequence(std::make_shared<const Project>(*_sourceProject),
+                                     _sourceProject->activeSequenceId);
+    }
+    if (!_sourceUsesController) {
+        _sourceProvider->cancel();
+        _sourceUsesController = true;
+        _sourcePlayback->seek(_sourceTime, playback::SeekMode::Exact);
+        [_sourceView setFrameSource:_sourcePlayback->frameSource()];
+        [_sourceView renderOnce];
+    }
+    return YES;
+}
+
+- (void)sourceMonitorTogglePlay {
+    VE_ASSERT_MAIN();
+    if ([self prepareSourcePlayback]) {
+        _sourcePlayback->togglePlay();
+    }
+}
+
+- (void)sourceMonitorPause {
+    VE_ASSERT_MAIN();
+    if (_sourceUsesController && _sourcePlayback) {
+        _sourcePlayback->pause();
+    }
+}
+
+- (void)sourceMonitorShuttleForward {
+    VE_ASSERT_MAIN();
+    if ([self prepareSourcePlayback]) {
+        _sourcePlayback->shuttleForward();
+    }
+}
+
+- (void)sourceMonitorShuttleReverse {
+    VE_ASSERT_MAIN();
+    if ([self prepareSourcePlayback]) {
+        _sourcePlayback->shuttleReverse();
+    }
+}
+
+- (void)sourceMonitorStepFrames:(NSInteger)frames {
+    VE_ASSERT_MAIN();
+    if (_sourceUsesController && _sourcePlayback) {
+        _sourcePlayback->stepFrames(static_cast<int>(std::clamp<NSInteger>(frames, INT_MIN, INT_MAX)));
+        return;
+    }
+    if (!_sourceProject) {
+        return;
+    }
+    const CMTime fd = _sourceProject->activeSequence()->frameDuration;
+    const CMTime t = std::max(kCMTimeZero, _sourceTime + CMTimeMultiply(fd, static_cast<int32_t>(std::clamp<NSInteger>(
+                                                                                 frames, INT32_MIN, INT32_MAX))));
+    [self sourceMonitorShowAsset:static_cast<VEAssetID>(_sourceAsset.value()) atTime:t];
 }
 
 @end

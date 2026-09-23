@@ -1,0 +1,679 @@
+// VEEngine playback and monitor wiring: the program monitor driven by the playback controller
+// (play, pause, seek, JKL, scrub, stats, notifications, control-call latency) and the source
+// monitor, checked on the burn-in media through a real VEPreviewView; plus the facade's other
+// review fixes that need the new API (main-thread enforcement, edit results, ripple scope,
+// exact speeds, load warnings, memory pressure, use counts).
+
+#import <Metal/Metal.h>
+#import <VidEditEngine/VidEditEngine.h>
+#import <XCTest/XCTest.h>
+
+#include "../Media/BurnIn.h"
+#include "../Media/TestMedia.h"
+
+#include <algorithm>
+#include <cmath>
+#include <functional>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace {
+
+CMTime seconds(double s) {
+    return CMTimeMakeWithSeconds(s, 600);
+}
+
+int64_t frameOf(CMTime t) {
+    return static_cast<int64_t>(std::floor(CMTimeGetSeconds(t) * 30.0 + 1e-6));
+}
+
+/// Reads the burn-in frame index of what `view` shows (-1 if unreadable, e.g. mid-dissolve).
+int shownIndex(VEPreviewView *view) {
+    CGImageRef image = [view snapshot];
+    if (image == NULL) {
+        return -1;
+    }
+    const size_t w = CGImageGetWidth(image);
+    const size_t h = CGImageGetHeight(image);
+    CVPixelBufferRef buffer = nullptr;
+    if (CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA, nullptr, &buffer) !=
+        kCVReturnSuccess) {
+        return -1;
+    }
+    CVPixelBufferLockBaseAddress(buffer, 0);
+    CGContextRef ctx = CGBitmapContextCreate(CVPixelBufferGetBaseAddress(buffer), w, h, 8,
+                                             CVPixelBufferGetBytesPerRow(buffer), CGImageGetColorSpace(image),
+                                             CGBitmapInfo(kCGImageAlphaNoneSkipFirst) |
+                                                 CGBitmapInfo(kCGBitmapByteOrder32Little));
+    CGContextSetBlendMode(ctx, kCGBlendModeCopy);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, CGFloat(w), CGFloat(h)), image);
+    CGContextRelease(ctx);
+    CVPixelBufferUnlockBaseAddress(buffer, 0);
+    const int index = ve::test::readBurnIn(buffer).value_or(-1);
+    CVPixelBufferRelease(buffer);
+    return index;
+}
+
+} // namespace
+
+@interface VEEnginePlaybackTests : XCTestCase
+@end
+
+@implementation VEEnginePlaybackTests {
+    NSURL *_cacheDir;
+    id<MTLDevice> _device;
+}
+
+- (void)setUp {
+    NSURL *scratch = [NSURL fileURLWithPath:@(ve::test::scratchDirectory().c_str()) isDirectory:YES];
+    _cacheDir = [scratch URLByAppendingPathComponent:@"Caches" isDirectory:YES];
+    _device = MTLCreateSystemDefaultDevice();
+}
+
+- (VEEngine *)makeEngine {
+    return [[VEEngine alloc] initWithCacheDirectory:_cacheDir];
+}
+
+- (VEPreviewView *)makeView {
+    if (_device == nil) {
+        return nil;
+    }
+    VEPreviewView *view = [[VEPreviewView alloc] initWithFrame:NSMakeRect(0, 0, 480, 270) device:_device error:nil];
+    XCTAssertNotNil(view);
+    return view;
+}
+
+- (NSURL *)mediaURL:(const char *)file {
+    std::string error;
+    const std::string path = ve::test::testMediaPath(file, error);
+    XCTAssertTrue(error.empty(), @"%s", error.c_str());
+    return [NSURL fileURLWithPath:@(path.c_str())];
+}
+
+- (VEAssetInfo *)importOne:(const char *)file into:(VEEngine *)engine {
+    XCTestExpectation *done = [self expectationWithDescription:@"import"];
+    __block VEAssetInfo *asset = nil;
+    [engine importMediaAtURLs:@[ [self mediaURL:file] ]
+                   completion:^(NSArray<VEAssetInfo *> *assets, NSArray<NSError *> *errors) {
+                       XCTAssertEqual(errors.count, 0u, @"%@", errors);
+                       asset = assets.firstObject;
+                       [done fulfill];
+                   }];
+    [self waitForExpectations:@[ done ] timeout:60];
+    XCTAssertNotNil(asset);
+    return asset;
+}
+
+- (BOOL)spinUntil:(BOOL (^)(void))condition timeout:(NSTimeInterval)timeout {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    while (!condition() && deadline.timeIntervalSinceNow > 0) {
+        [NSRunLoop.mainRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.005]];
+    }
+    return condition();
+}
+
+/// renderOnce and wait for the GPU (the preview view's completion API).
+- (void)renderAndWait:(VEPreviewView *)view {
+    XCTestExpectation *rendered = [self expectationWithDescription:@"rendered"];
+    [view renderOnceWithCompletion:^(NSError *) {
+        [rendered fulfill];
+    }];
+    [self waitForExpectations:@[ rendered ] timeout:5];
+}
+
+/// Renders until the view shows burn-in `expected` (or `timeout`); returns what it showed last.
+- (int)renderUntil:(VEPreviewView *)view shows:(int)expected timeout:(NSTimeInterval)timeout {
+    int shown = -1;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    while (shown != expected && deadline.timeIntervalSinceNow > 0) {
+        [self renderAndWait:view];
+        shown = shownIndex(view);
+    }
+    return shown;
+}
+
+/// The test sequence: h264_1080p30.mp4 (burn-in = source frame) on V1 as clip A [0, 2 s) from
+/// source 0 and clip B [2 s, 5 s) from source 5 s, with a 10-frame dissolve on the cut; their
+/// linked audio on A1. Returns the transition id.
+- (VETransitionID)buildSequence:(VEEngine *)engine asset:(VEAssetInfo *)asset {
+    const VETrackID v1 = engine.sequence.videoTrackIDs[0].longLongValue;
+    const VETrackID a1 = engine.sequence.audioTrackIDs[0].longLongValue;
+    VEEditResult *a = [engine overwriteAsset:asset.assetID
+                                      atTime:kCMTimeZero
+                                  videoTrack:v1
+                                  audioTrack:a1
+                                    sourceIn:kCMTimeZero
+                                   sourceOut:seconds(2)];
+    VEEditResult *b = [engine overwriteAsset:asset.assetID
+                                      atTime:seconds(2)
+                                  videoTrack:v1
+                                  audioTrack:a1
+                                    sourceIn:seconds(5)
+                                   sourceOut:seconds(8)];
+    XCTAssertTrue(a.ok && b.ok, @"%@ %@", a.message, b.message);
+    VEEditResult *t = [engine addTransitionFromClip:a.createdIDs[0].longLongValue
+                                             toClip:b.createdIDs[0].longLongValue
+                                           duration:CMTimeMake(10, 30)];
+    XCTAssertTrue(t.ok, @"%@", t.message);
+    return t.createdIDs.firstObject.longLongValue;
+}
+
+/// Burn-in expected at sequence frame `f` of the test sequence (-1 inside the dissolve, where
+/// two pictures are mixed).
+static int expectedIndex(int64_t f) {
+    if (f >= 55 && f < 65) {
+        return -1;
+    }
+    return f < 60 ? int(f) : int(150 + (f - 60));
+}
+
+/// Whether burn-in `shown` is a picture of sequence frame `f`: inside the dissolve the dominant
+/// picture may be readable, and it is then clip A's (source f) or clip B's (source 150 + f - 60).
+static bool showsFrame(int shown, int64_t f) {
+    if (f >= 55 && f < 65) {
+        return shown == int(f) || shown == int(150 + (f - 60));
+    }
+    return shown == expectedIndex(f);
+}
+
+// MARK: - Program monitor
+
+- (void)testPlaybackShowsTheFrameAtTheClockThenPausesSeeksAndScrubs {
+    VEPreviewView *view = [self makeView];
+    if (view == nil) {
+        XCTSkip(@"no Metal device");
+    }
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
+    [self buildSequence:engine asset:asset];
+    [engine attachProgramView:view];
+    XCTAssertEqual(engine.programView, view);
+    XCTAssertEqual([self renderUntil:view shows:0 timeout:20], 0, @"the paused picture at 0");
+
+    __block NSInteger notifications = 0;
+    __block VEPlaybackState lastState = VEPlaybackStateStopped;
+    id token = [NSNotificationCenter.defaultCenter addObserverForName:VEEnginePlaybackDidChangeNotification
+                                                               object:engine
+                                                                queue:nil
+                                                           usingBlock:^(NSNotification *note) {
+                                                               VEPlaybackStatus *status =
+                                                                   note.userInfo[VEEnginePlaybackStatusKey];
+                                                               lastState = status.state;
+                                                               notifications += 1;
+                                                           }];
+
+    [engine play];
+    XCTAssertTrue(engine.playbackState == VEPlaybackStatePrerolling || engine.playbackState == VEPlaybackStatePlaying);
+    XCTAssertTrue([self spinUntil:^BOOL {
+        return lastState == VEPlaybackStatePlaying;
+    }
+                          timeout:10]);
+    XCTAssertTrue(engine.playbackStatus.isRunning);
+
+    // For 3 s: render (completion API), read the burn-in, and check it against the clock read
+    // around the render: the picture is the frame at the clock within one frame.
+    const CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
+    int checked = 0;
+    int64_t previousFrame = -1;
+    while (CFAbsoluteTimeGetCurrent() - start < 3.0 && engine.playbackState == VEPlaybackStatePlaying) {
+        const int64_t before = frameOf(engine.currentTime);
+        [self renderAndWait:view];
+        const int64_t after = frameOf(engine.currentTime);
+        const int shown = shownIndex(view);
+        if (shown < 0) {
+            continue; // inside the dissolve: no single picture to read
+        }
+        bool matched = false;
+        for (int64_t f = before - 1; f <= after + 1; ++f) {
+            matched = matched || showsFrame(shown, f);
+        }
+        XCTAssertTrue(matched, @"showed %d with the clock at frames %lld...%lld", shown, before, after);
+        XCTAssertGreaterThanOrEqual(after, previousFrame, @"the clock never goes backwards");
+        previousFrame = after;
+        ++checked;
+    }
+    XCTAssertGreaterThan(checked, 30, @"enough samples over 3 s");
+    const NSInteger duringPlay = notifications;
+    const double elapsed = CFAbsoluteTimeGetCurrent() - start;
+    XCTAssertLessThanOrEqual(double(duringPlay), elapsed * 30.0 + 10, @"at most one notification per frame");
+
+    VEPlaybackStats *stats = engine.playbackStats;
+    XCTAssertGreaterThan(stats.presentedFrames, 30u);
+    XCTAssertGreaterThan(stats.cacheHits, 0u);
+    XCTAssertGreaterThan(stats.cacheHitRate, 0.5);
+    XCTAssertNotEqual(stats.clockMode, VEClockModeStopped);
+    XCTAssertGreaterThan(stats.audioOutputKind.length, 0u);
+    XCTAssertGreaterThanOrEqual(stats.activeClips.count, 2u, @"a video and an audio clip under the playhead");
+    bool sawVideoBackend = false;
+    for (VEActiveClipInfo *clip in stats.activeClips) {
+        XCTAssertEqual(clip.assetID, asset.assetID);
+        XCTAssertFalse(clip.failed);
+        sawVideoBackend = sawVideoBackend || (!clip.isAudio && clip.backendName.length > 0);
+    }
+    XCTAssertTrue(sawVideoBackend, @"the HUD names the video decoder backend");
+    NSLog(@"playback stats: fps %.1f presented %llu dropped %llu late %llu hit rate %.2f queue %ld underruns %llu "
+          @"clock %ld output %@ latency %.1f ms",
+          stats.fps, stats.presentedFrames, stats.droppedFrames, stats.lateFrames, stats.cacheHitRate,
+          long(stats.decodeQueueDepth), stats.audioUnderruns, long(stats.clockMode), stats.audioOutputKind,
+          stats.outputLatency * 1000);
+
+    // Pause: the picture converges on exactly the paused frame.
+    [engine pause];
+    XCTAssertEqual(engine.playbackState, VEPlaybackStateStopped);
+    const int64_t pausedFrame = frameOf(engine.currentTime);
+    const int pausedExpected = expectedIndex(pausedFrame);
+    if (pausedExpected >= 0) {
+        XCTAssertEqual([self renderUntil:view shows:pausedExpected timeout:10], pausedExpected);
+    }
+
+    // Seek (exact) to 3.5 s: source 5 s + 1.5 s = frame 195.
+    [engine seekToTime:seconds(3.5)];
+    XCTAssertEqual(CMTimeCompare(engine.currentTime, CMTimeMake(105, 30)), 0);
+    XCTAssertEqual([self renderUntil:view shows:195 timeout:20], 195);
+    XCTAssertNil(view.lastError);
+    XCTAssertEqual(view.missingLayerCount, 0u);
+
+    // Frame steps.
+    [engine stepFrames:-3];
+    XCTAssertEqual(CMTimeCompare(engine.currentTime, CMTimeMake(102, 30)), 0);
+    XCTAssertEqual([self renderUntil:view shows:192 timeout:20], 192);
+
+    // Scrub: lands on the right frame, no audio, ends Stopped.
+    [engine scrubToTime:seconds(1.0)];
+    XCTAssertEqual(engine.playbackState, VEPlaybackStateScrubbing);
+    [engine scrubToTime:seconds(1.5)];
+    XCTAssertEqual([self renderUntil:view shows:45 timeout:20], 45);
+    [engine endScrub];
+    XCTAssertEqual(engine.playbackState, VEPlaybackStateStopped);
+    XCTAssertEqual(CMTimeCompare(engine.currentTime, CMTimeMake(45, 30)), 0);
+
+    // Still frames via the old entry point.
+    [engine showProgramFrameAtTime:seconds(0.5)];
+    XCTAssertEqual([self renderUntil:view shows:15 timeout:20], 15);
+
+    [NSNotificationCenter.defaultCenter removeObserver:token];
+    [engine attachProgramView:nil];
+}
+
+- (void)testPausedDissolveOfOneAssetShowsBothLayers {
+    VEPreviewView *view = [self makeView];
+    if (view == nil) {
+        XCTSkip(@"no Metal device");
+    }
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
+    [self buildSequence:engine asset:asset];
+    [engine attachProgramView:view];
+    // Frame 60 is mid-dissolve: both layers come from the same asset. Each must be decoded
+    // (their scrub requests use different lanes, so one does not cancel the other).
+    [engine seekToTime:CMTimeMake(60, 30)];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
+    do {
+        [self renderAndWait:view];
+    } while ((view.missingLayerCount != 0 || view.renderCount == 0) && deadline.timeIntervalSinceNow > 0);
+    XCTAssertEqual(view.missingLayerCount, 0u, @"both dissolve layers are shown");
+    XCTAssertNil(view.lastError);
+    [engine attachProgramView:nil];
+}
+
+- (void)testShuttleRatesAndMute {
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
+    [self buildSequence:engine asset:asset];
+    [engine seekToTime:seconds(2.5)];
+
+    [engine shuttleForward];
+    XCTAssertEqual(engine.playbackRate, 1.0);
+    XCTAssertTrue(engine.playbackStatus.isRunning);
+    [engine shuttleForward];
+    XCTAssertEqual(engine.playbackRate, 2.0);
+    [engine shuttleForward];
+    XCTAssertEqual(engine.playbackRate, 4.0);
+    [engine shuttleReverse];
+    XCTAssertEqual(engine.playbackRate, -1.0, @"the other direction restarts at 1x");
+    [engine shuttleReverse];
+    XCTAssertEqual(engine.playbackRate, -2.0);
+    XCTAssertTrue([self spinUntil:^BOOL {
+        return engine.playbackState == VEPlaybackStatePlaying;
+    }
+                          timeout:10]);
+    const CMTime t0 = engine.currentTime;
+    [self spinUntil:^BOOL {
+        return NO;
+    }
+            timeout:0.3];
+    XCTAssertLessThan(CMTimeCompare(engine.currentTime, t0), 0, @"reverse play moves backwards");
+    [engine shuttleStop];
+    XCTAssertEqual(engine.playbackState, VEPlaybackStateStopped);
+    [engine setRate:8];
+    XCTAssertEqual(engine.playbackRate, 8.0);
+    [engine setRate:0];
+    XCTAssertEqual(engine.playbackState, VEPlaybackStateStopped);
+
+    XCTAssertFalse(engine.isMuted);
+    engine.muted = YES;
+    XCTAssertTrue(engine.isMuted);
+    engine.muted = NO;
+    XCTAssertFalse(engine.isMuted);
+    XCTAssertEqualObjects(engine.playbackError, engine.playbackStatus.errorMessage);
+}
+
+- (void)testControlCallsReturnWithinOneMillisecond {
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    XCTSkip(@"timing is meaningless under ThreadSanitizer (every memory access is instrumented)");
+#endif
+#endif
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
+    [self buildSequence:engine asset:asset];
+    VEPreviewView *view = [self makeView];
+    if (view != nil) {
+        [engine attachProgramView:view];
+    }
+    std::map<std::string, std::vector<double>> samples;
+    auto measure = [&](const char *name, void (^call)(void)) {
+        const CFAbsoluteTime begin = CFAbsoluteTimeGetCurrent();
+        call();
+        samples[name].push_back((CFAbsoluteTimeGetCurrent() - begin) * 1000.0);
+    };
+    for (int i = 0; i < 40; ++i) {
+        measure("play", ^{ [engine play]; });
+        [self spinUntil:^BOOL { return NO; } timeout:0.01];
+        measure("seek (playing)", ^{ [engine seekToTime:seconds(1 + 0.1 * i)]; });
+        measure("setRate 2", ^{ [engine setRate:2]; });
+        measure("shuttleForward", ^{ [engine shuttleForward]; });
+        measure("shuttleReverse", ^{ [engine shuttleReverse]; });
+        [self spinUntil:^BOOL { return NO; } timeout:0.01];
+        measure("pause", ^{ [engine pause]; });
+        measure("togglePlay", ^{ [engine togglePlay]; });
+        measure("shuttleStop", ^{ [engine shuttleStop]; });
+        measure("seek (stopped)", ^{ [engine seekToTime:seconds(0.2 * i)]; });
+        measure("stepFrames", ^{ [engine stepFrames:1]; });
+        measure("scrubToTime", ^{ [engine scrubToTime:seconds(0.15 * i)]; });
+        measure("endScrub", ^{ [engine endScrub]; });
+        measure("setMuted", ^{ engine.muted = (i % 2) == 0; });
+        measure("currentTime", ^{ (void)engine.currentTime; });
+        measure("playbackStatus", ^{ (void)engine.playbackStatus; });
+    }
+    // Every call must return in well under a millisecond. The main thread can still be preempted
+    // by the OS in the middle of one (seen as a rare ~2 ms sample when the machine is loaded by
+    // the rest of the suite), so the bound is on the 95th percentile, and the worst case only has
+    // to stay far below anything that waits for work (a device start or decode takes 10+ ms).
+    for (auto &[name, values] : samples) {
+        std::sort(values.begin(), values.end());
+        const double median = values[values.size() / 2];
+        const double p95 = values[(values.size() * 95) / 100];
+        const double worst = values.back();
+        NSLog(@"control call %-16s median %.3f ms, p95 %.3f ms, max %.3f ms", name.c_str(), median, p95, worst);
+        XCTAssertLessThan(p95, 1.0, @"%s: 95th percentile %.3f ms on the main thread", name.c_str(), p95);
+        XCTAssertLessThan(worst, 5.0, @"%s took %.3f ms on the main thread", name.c_str(), worst);
+    }
+    [engine pause];
+    [engine attachProgramView:nil];
+}
+
+// MARK: - Source monitor
+
+- (void)testSourceMonitorScrubsOnTheAssetGridAndPlays {
+    VEPreviewView *view = [self makeView];
+    if (view == nil) {
+        XCTSkip(@"no Metal device");
+    }
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
+    NSURL *thumbs = [_cacheDir URLByAppendingPathComponent:@"Thumbnails" isDirectory:YES];
+    NSArray *thumbsBefore = [NSFileManager.defaultManager contentsOfDirectoryAtPath:thumbs.path error:nil] ?: @[];
+
+    [engine attachSourceView:view];
+    // 1.01 s is inside frame 30: shown on the asset's frame grid.
+    XCTAssertEqual(CMTimeCompare([engine frameTimeForAsset:asset.assetID atTime:seconds(1.01)], CMTimeMake(30, 30)), 0);
+    [engine sourceMonitorShowAsset:asset.assetID atTime:seconds(1.01)];
+    XCTAssertEqual(engine.sourceMonitorAssetID, asset.assetID);
+    XCTAssertEqual(CMTimeCompare(engine.sourceMonitorTime, CMTimeMake(30, 30)), 0);
+    XCTAssertEqual([self renderUntil:view shows:30 timeout:20], 30);
+    // Scrubbing: the newest request wins.
+    for (int f = 40; f <= 120; f += 20) {
+        [engine sourceMonitorShowAsset:asset.assetID atTime:CMTimeMake(f, 30)];
+    }
+    XCTAssertEqual([self renderUntil:view shows:120 timeout:20], 120);
+    [engine sourceMonitorStepFrames:5];
+    XCTAssertEqual([self renderUntil:view shows:125 timeout:20], 125);
+
+    // Play the asset (its own controller: picture and sound), then pause.
+    __block VEPlaybackState state = VEPlaybackStateStopped;
+    id token = [NSNotificationCenter.defaultCenter addObserverForName:VEEngineSourcePlaybackDidChangeNotification
+                                                               object:engine
+                                                                queue:nil
+                                                           usingBlock:^(NSNotification *note) {
+                                                               VEPlaybackStatus *status =
+                                                                   note.userInfo[VEEnginePlaybackStatusKey];
+                                                               state = status.state;
+                                                           }];
+    [engine sourceMonitorTogglePlay];
+    XCTAssertTrue([self spinUntil:^BOOL {
+        return state == VEPlaybackStatePlaying;
+    }
+                          timeout:10]);
+    XCTAssertEqual(engine.sourceMonitorPlaybackState, VEPlaybackStatePlaying);
+    const CMTime playingFrom = engine.sourceMonitorTime;
+    [self spinUntil:^BOOL { return NO; } timeout:0.5];
+    XCTAssertGreaterThan(CMTimeGetSeconds(engine.sourceMonitorTime) - CMTimeGetSeconds(playingFrom), 0.25);
+    [self renderAndWait:view];
+    const int playingShown = shownIndex(view);
+    XCTAssertGreaterThan(playingShown, 125, @"the source monitor shows the playing picture");
+    [engine sourceMonitorPause];
+    XCTAssertEqual(engine.sourceMonitorPlaybackState, VEPlaybackStateStopped);
+    const int paused = int(frameOf(engine.sourceMonitorTime));
+    XCTAssertEqual([self renderUntil:view shows:paused timeout:20], paused);
+    // Scrubbing after playing goes through the same controller.
+    [engine sourceMonitorShowAsset:asset.assetID atTime:CMTimeMake(10, 30)];
+    XCTAssertEqual([self renderUntil:view shows:10 timeout:20], 10);
+    // The program monitor is unaffected.
+    XCTAssertEqual(engine.playbackState, VEPlaybackStateStopped);
+
+    // Clearing.
+    [engine sourceMonitorShowAsset:0 atTime:kCMTimeZero];
+    XCTAssertEqual(engine.sourceMonitorAssetID, 0);
+    NSArray *thumbsAfter = [NSFileManager.defaultManager contentsOfDirectoryAtPath:thumbs.path error:nil] ?: @[];
+    // The poster thumbnail may land during the test; scrubbing itself writes nothing.
+    XCTAssertLessThanOrEqual(thumbsAfter.count, thumbsBefore.count + 1, @"scrubbing writes no thumbnails to disk");
+    [NSNotificationCenter.defaultCenter removeObserver:token];
+    [engine attachSourceView:nil];
+}
+
+// MARK: - Facade rules
+
+- (void)testMainThreadIsEnforcedInEveryConfiguration {
+    VEEngine *engine = [self makeEngine];
+    XCTestExpectation *done = [self expectationWithDescription:@"background"];
+    __block BOOL threw = NO;
+    __block BOOL capsThrew = NO;
+    __weak VEEngine *weakEngine = engine; // the engine must be released on the main thread
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool {
+            VEEngine *strongEngine = weakEngine;
+            @try {
+                (void)strongEngine.changeCount;
+            } @catch (NSException *exception) {
+                threw = [exception.name isEqualToString:NSInternalInconsistencyException];
+            }
+            @try {
+                (void)strongEngine.hardwareCaps;
+            } @catch (NSException *exception) {
+                capsThrew = YES;
+            }
+        }
+        [done fulfill];
+    });
+    [self waitForExpectations:@[ done ] timeout:10];
+    XCTAssertTrue(threw);
+    XCTAssertTrue(capsThrew);
+}
+
+- (void)testEditResultsReportDroppedTransitionsAndErrorCodes {
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
+    const VETransitionID transition = [self buildSequence:engine asset:asset];
+    const VETrackID v1 = engine.sequence.videoTrackIDs[0].longLongValue;
+    NSArray<VEClipInfo *> *clips = [engine clipsOnTrack:v1];
+    XCTAssertEqual(clips.count, 2u);
+
+    // A split inside the dissolve is refused with its own code...
+    VEEditResult *r = [engine splitClips:@[ @(clips[0].clipID) ] atTime:CMTimeMake(58, 30)];
+    XCTAssertFalse(r.ok);
+    XCTAssertEqual(r.errorCode, VEEditErrorInsideTransition);
+    // ...and allowed when breaking transitions, which reports the removed transition.
+    r = [engine splitClips:@[ @(clips[0].clipID) ] atTime:CMTimeMake(58, 30) breakingTransitions:YES];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(r.droppedTransitionIDs, @[ @(transition) ]);
+    XCTAssertGreaterThan(r.note.length, 0u);
+    XCTAssertNil([engine transitionInfo:transition]);
+    XCTAssertTrue([engine undo]);
+    XCTAssertNotNil([engine transitionInfo:transition], @"undo restores it");
+
+    // Trimming the cut away drops it too (a plain edit reporting a side effect).
+    r = [engine trimClipTail:clips[0].clipID toTime:seconds(1) clamp:NO];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(r.droppedTransitionIDs, @[ @(transition) ]);
+
+    // Removing media while a gesture is open is refused (it would end the gesture's undo step).
+    [engine beginCoalescingWithKey:@"drag"];
+    r = [engine removeAsset:asset.assetID];
+    XCTAssertFalse(r.ok);
+    XCTAssertEqual(r.errorCode, VEEditErrorBusy);
+    [engine endCoalescing];
+}
+
+- (void)testRippleScopeFallsBackToSyncedTracksAndSpeedIsExact {
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
+    NSArray<NSNumber *> *video = engine.sequence.videoTrackIDs;
+    VEEditResult *x = [engine overwriteAsset:asset.assetID
+                                      atTime:kCMTimeZero
+                                  videoTrack:video[0].longLongValue
+                                  audioTrack:0
+                                    sourceIn:kCMTimeZero
+                                   sourceOut:seconds(2)];
+    VEEditResult *after = [engine overwriteAsset:asset.assetID
+                                          atTime:seconds(2)
+                                      videoTrack:video[0].longLongValue
+                                      audioTrack:0
+                                        sourceIn:seconds(3)
+                                       sourceOut:seconds(4)];
+    VEEditResult *blocker = [engine overwriteAsset:asset.assetID
+                                            atTime:seconds(1)
+                                        videoTrack:video[1].longLongValue
+                                        audioTrack:0
+                                          sourceIn:kCMTimeZero
+                                         sourceOut:seconds(2)];
+    XCTAssertTrue(x.ok && after.ok && blocker.ok);
+    XCTAssertEqual(engine.rippleScope, VERippleScopeAllTracks);
+    // Closing [0, 2) on every track is blocked by the V2 clip at [1, 3): falls back.
+    VEEditResult *r = [engine rippleDeleteClips:@[ x.createdIDs[0] ]];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertGreaterThan(r.note.length, 0u, @"the fallback is reported");
+    XCTAssertEqualWithAccuracy(CMTimeGetSeconds([engine clipInfo:after.createdIDs[0].longLongValue].timelineStart), 0,
+                               1e-9);
+    XCTAssertEqualWithAccuracy(CMTimeGetSeconds([engine clipInfo:blocker.createdIDs[0].longLongValue].timelineStart), 1,
+                               1e-9, @"the other track did not move");
+    XCTAssertTrue([engine undo]);
+    engine.rippleScope = VERippleScopeSyncedTracks;
+    r = [engine rippleDeleteClips:@[ x.createdIDs[0] ]];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(r.note, @"");
+
+    // Exact speeds.
+    const VEClipID clip = after.createdIDs[0].longLongValue;
+    r = [engine setSpeedNumerator:1 denominator:3 forClip:clip];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    VEClipInfo *info = [engine clipInfo:clip];
+    XCTAssertEqual(info.speedNumerator, 1);
+    XCTAssertEqual(info.speedDenominator, 3);
+    XCTAssertEqualWithAccuracy(info.speed, 1.0 / 3.0, 1e-12);
+    r = [engine setSpeedNumerator:2 denominator:4 forClip:clip];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqual([engine clipInfo:clip].speedNumerator, 1, @"reduced");
+    XCTAssertEqual([engine clipInfo:clip].speedDenominator, 2);
+    XCTAssertFalse([engine setSpeedNumerator:0 denominator:1 forClip:clip].ok);
+    XCTAssertFalse([engine setSpeedNumerator:1 denominator:1001 forClip:clip].ok);
+    XCTAssertFalse([engine setSpeed:-1 forClip:clip].ok);
+}
+
+- (void)testOpenReportsLoadWarnings {
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
+    [self buildSequence:engine asset:asset];
+    NSURL *scratch = [NSURL fileURLWithPath:@(ve::test::scratchDirectory().c_str())];
+    NSURL *url = [scratch URLByAppendingPathComponent:@"w.videdit"];
+    NSError *error = nil;
+    XCTAssertTrue([engine saveProjectToURL:url error:&error], @"%@", error);
+    NSString *text = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
+    XCTAssertTrue([text containsString:@"\"crossDissolve\""]);
+    text = [text stringByReplacingOccurrencesOfString:@"\"crossDissolve\"" withString:@"\"pageCurl\""];
+    XCTAssertTrue([text writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    XCTAssertTrue([engine openProjectAtURL:url error:&error], @"%@", error);
+    XCTAssertEqual(engine.loadWarnings.count, 1u);
+    XCTAssertTrue([engine.loadWarnings.firstObject containsString:@"pageCurl"], @"%@", engine.loadWarnings);
+    [engine newProjectWithName:@"Clean"];
+    XCTAssertEqual(engine.loadWarnings.count, 0u);
+}
+
+- (void)testUseCountsAndMemoryPressureAreDelivered {
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
+    __block NSInteger assetNotes = 0;
+    id assetsToken = [NSNotificationCenter.defaultCenter addObserverForName:VEEngineAssetsDidChangeNotification
+                                                                     object:engine
+                                                                      queue:nil
+                                                                 usingBlock:^(NSNotification *) {
+                                                                     assetNotes += 1;
+                                                                 }];
+    const VETrackID v1 = engine.sequence.videoTrackIDs[0].longLongValue;
+    XCTAssertTrue([engine overwriteAsset:asset.assetID
+                                  atTime:kCMTimeZero
+                              videoTrack:v1
+                              audioTrack:0
+                                sourceIn:kCMTimeZero
+                               sourceOut:seconds(1)]
+                      .ok);
+    XCTAssertEqual(assetNotes, 1, @"the use count changed: the bin is told");
+    XCTAssertEqual([engine assetInfo:asset.assetID].useCount, 1);
+    XCTAssertTrue([engine setTrack:v1 muted:YES].ok);
+    XCTAssertEqual(assetNotes, 1, @"no use count change, no assets notification");
+    [NSNotificationCenter.defaultCenter removeObserver:assetsToken];
+
+    VEPreviewView *view = [self makeView];
+    if (view != nil) {
+        [engine attachProgramView:view];
+        [self renderAndWait:view];
+    }
+    [engine seekToTime:seconds(0.5)];
+    XCTAssertTrue([self spinUntil:^BOOL {
+        return engine.playbackStats.cacheBytes > 0;
+    }
+                          timeout:10]);
+    XCTestExpectation *peaks = [self expectationWithDescription:@"waveform"];
+    [engine waveformForAsset:asset.assetID
+                  completion:^(VEWaveform *, NSError *) {
+                      [peaks fulfill];
+                  }];
+    [self waitForExpectations:@[ peaks ] timeout:30];
+    XCTAssertNotNil([engine cachedWaveformForAsset:asset.assetID]);
+    __block BOOL critical = NO;
+    id token = [NSNotificationCenter.defaultCenter addObserverForName:VEEngineMemoryPressureNotification
+                                                               object:engine
+                                                                queue:nil
+                                                           usingBlock:^(NSNotification *note) {
+                                                               NSNumber *value = note.userInfo[VEEngineCriticalKey];
+                                                               critical = value.boolValue;
+                                                           }];
+    [engine handleMemoryPressure:YES];
+    XCTAssertTrue(critical);
+    XCTAssertNil([engine cachedWaveformForAsset:asset.assetID], @"in-memory peaks were released");
+    [NSNotificationCenter.defaultCenter removeObserver:token];
+    [engine attachProgramView:nil];
+}
+
+@end

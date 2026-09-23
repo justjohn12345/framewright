@@ -1,6 +1,6 @@
-// A still-frame source for the program monitor: shows the sequence frame at one time, decoded
-// through DecodePool's scrub path. Used while playback is stopped until the playback controller
-// takes over the view (it installs its own PreviewFrameSource).
+// A still-frame source: shows one RenderGraph, decoded through DecodePool's scrub path on the
+// provider's own lanes. The source monitor uses it for scrubbing while its asset is not playing
+// (the playback controllers install their own PreviewFrameSource).
 // Private to the facade implementation: excluded from the framework's headers (project.yml).
 
 #pragma once
@@ -19,7 +19,8 @@ namespace ve::facade {
 
 class ProgramFrameProvider : public std::enable_shared_from_this<ProgramFrameProvider> {
   public:
-    explicit ProgramFrameProvider(std::shared_ptr<media::DecodePool> pool);
+    /// Layer i of a graph is requested on lane `laneBase + i` (give every monitor its own base).
+    explicit ProgramFrameProvider(std::shared_ptr<media::DecodePool> pool, uint64_t laneBase = 0);
 
     /// The frame source to install on a VEPreviewView (render thread side; never blocks).
     render::PreviewFrameSource makeSource() const;
@@ -29,8 +30,8 @@ class ProgramFrameProvider : public std::enable_shared_from_this<ProgramFramePro
     /// is published immediately (black).
     ///
     /// A layer whose scrub request was cancelled (DecodePool keeps only the newest request per
-    /// asset, whoever made it, e.g. another monitor scrubbing the same asset) is requested
-    /// again while this show() is current, up to kMaxRerequests times. A layer that fails to
+    /// asset and lane) is requested again while this show() is current, up to kMaxRerequests
+    /// times. A layer that fails to
     /// decode is published without its picture and the error as the frame's status (the view
     /// reports it as lastError); a failure to map a picture to Metal textures likewise.
     void show(RenderGraph graph, std::function<void()> onReady);
@@ -55,6 +56,7 @@ class ProgramFrameProvider : public std::enable_shared_from_this<ProgramFramePro
     void publish(RenderGraph graph, std::vector<media::PixelBuffer> buffers, media::Status status);
 
     std::shared_ptr<media::DecodePool> pool_;
+    uint64_t laneBase_ = 0;
     std::shared_ptr<Shared> shared_;
     uint64_t generation_ = 0; // main thread only
 };

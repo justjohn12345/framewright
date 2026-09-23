@@ -1,6 +1,9 @@
 #include "VEFacadeCommands+Internal.h"
 
+#include "../Edit/EditPrimitives.h"
+
 #include <algorithm>
+#include <set>
 
 namespace ve::facade {
 
@@ -91,6 +94,7 @@ EditResult CompositeCommand::apply(Project &project) {
     if (children_.empty()) {
         return EditResult::failure(EditError::InvalidArgument, "nothing to do");
     }
+    EditResult combined = EditResult::success();
     for (size_t i = 0; i < children_.size(); ++i) {
         EditResult result = children_[i]->apply(project);
         if (!result) {
@@ -99,14 +103,162 @@ EditResult CompositeCommand::apply(Project &project) {
             }
             return result;
         }
+        // Every child's side effects are the composite's.
+        for (TransitionId id : result.droppedTransitionIds) {
+            if (std::find(combined.droppedTransitionIds.begin(), combined.droppedTransitionIds.end(), id) ==
+                combined.droppedTransitionIds.end()) {
+                combined.droppedTransitionIds.push_back(id);
+            }
+        }
     }
-    return EditResult::success();
+    return combined;
+}
+
+bool CompositeCommand::canRevert(const Project &project) const {
+    // The project must be in the state the last child left it in; each earlier child's state
+    // is then restored by the revert of the one after it.
+    return children_.empty() || children_.back()->canRevert(project);
+}
+
+bool CompositeCommand::isNoOp() const {
+    return std::all_of(children_.begin(), children_.end(), [](const auto &child) { return child->isNoOp(); });
 }
 
 void CompositeCommand::revert(Project &project) {
     for (size_t i = children_.size(); i-- > 0;) {
         children_[i]->revert(project);
     }
+}
+
+// MARK: - FreshIds
+
+FreshIds::FreshIds(std::unique_ptr<Command> inner, uint64_t floor) : inner_(std::move(inner)), floor_(floor) {
+    setCoalescingKey(inner_->coalescingKey());
+}
+
+EditResult FreshIds::apply(Project &project) {
+    const IdGenerator saved = project.ids;
+    if (floor_ > 0) {
+        project.ids.reserveThrough(floor_ - 1);
+    }
+    EditResult result = inner_->apply(project);
+    if (!result || inner_->isNoOp()) {
+        project.ids = saved; // refused or nothing changed: the project is exactly as it was
+        return result;
+    }
+    before_ = saved;
+    return result;
+}
+
+void FreshIds::revert(Project &project) {
+    inner_->revert(project);
+    project.ids = before_;
+}
+
+bool FreshIds::canRevert(const Project &project) const {
+    return inner_->canRevert(project);
+}
+
+bool FreshIds::isNoOp() const {
+    return inner_->isNoOp();
+}
+
+// MARK: - MoveClips
+
+MoveClips::MoveClips(SequenceId sequenceId, std::vector<ClipId> clipIds, CMTime delta, int64_t trackOffset,
+                     std::optional<TrackKind> offsetKind)
+    : SequenceCommand(sequenceId), clipIds_(std::move(clipIds)), delta_(delta), trackOffset_(trackOffset),
+      offsetKind_(offsetKind) {}
+
+EditResult MoveClips::perform(const Project &, Sequence &sequence, IdGenerator &ids) {
+    if (clipIds_.empty()) {
+        return EditResult::failure(EditError::InvalidArgument, "nothing to move");
+    }
+    if (!CMTIME_IS_NUMERIC(delta_)) {
+        return EditResult::failure(EditError::InvalidTime, "the move offset is not a valid time");
+    }
+    const CMTime delta = snapToSequence(sequence, delta_);
+
+    // The clips to move: the chosen ones and their linked partners, each once.
+    std::vector<ClipId> moving;
+    std::set<ClipId> seen;
+    auto add = [&](ClipId id) {
+        if (seen.insert(id).second) {
+            moving.push_back(id);
+        }
+    };
+    for (ClipId id : clipIds_) {
+        const Clip *clip = sequence.findClip(id);
+        if (clip == nullptr) {
+            return EditResult::failure(EditError::ClipNotFound, "a selected clip no longer exists");
+        }
+        add(id);
+        if (clip->linkedClipId) {
+            add(*clip->linkedClipId);
+        }
+    }
+
+    struct Placement {
+        Clip clip;
+        TrackId destination;
+    };
+    std::vector<Placement> placements;
+    placements.reserve(moving.size());
+    for (ClipId id : moving) {
+        Track *track = nullptr;
+        Clip *clip = nullptr;
+        if (EditResult r = findEditableClip(sequence, id, track, clip); !r) {
+            return r;
+        }
+        const auto &tracks = sequence.tracks(track->kind);
+        const auto position =
+            std::find_if(tracks.begin(), tracks.end(), [&](const Track &t) { return t.id == track->id; });
+        const bool listed = std::find(clipIds_.begin(), clipIds_.end(), id) != clipIds_.end();
+        const bool changesTrack = listed && (!offsetKind_ || track->kind == *offsetKind_);
+        const int64_t destinationIndex =
+            static_cast<int64_t>(position - tracks.begin()) + (changesTrack ? trackOffset_ : 0);
+        if (destinationIndex < 0 || destinationIndex >= static_cast<int64_t>(tracks.size())) {
+            return EditResult::failure(EditError::TrackNotFound, "there is no track there");
+        }
+        const Track &destination = tracks[static_cast<size_t>(destinationIndex)];
+        if (EditResult r = requireEditableTrack(&destination, destination.id); !r) {
+            return r;
+        }
+        if (clip->timelineStart + delta < kCMTimeZero) {
+            return EditResult::failure(EditError::InvalidTime, "clips cannot move before the sequence start");
+        }
+        placements.push_back(Placement{*clip, destination.id});
+    }
+    if (delta == kCMTimeZero && std::all_of(placements.begin(), placements.end(), [](const Placement &p) {
+            return p.destination == p.clip.trackId;
+        })) {
+        return EditResult::success(); // nothing moves: a no-op, not recorded
+    }
+
+    // Lift everything first, so no moved clip can cut another one of the same move.
+    for (Placement &p : placements) {
+        removeClip(*sequence.findTrack(p.clip.trackId), p.clip.id);
+        p.clip.timelineStart = p.clip.timelineStart + delta;
+        p.clip.trackId = p.destination;
+    }
+    for (size_t i = 0; i < placements.size(); ++i) {
+        for (size_t j = i + 1; j < placements.size(); ++j) {
+            if (placements[i].destination == placements[j].destination &&
+                placements[i].clip.timelineRange().intersects(placements[j].clip.timelineRange())) {
+                return EditResult::failure(EditError::Overlap, "the moved clips would overlap each other");
+            }
+        }
+    }
+    SplitList splits;
+    for (Placement &p : placements) {
+        Track &target = *sequence.findTrack(p.destination);
+        if (EditResult r = clearRange(sequence, target, p.clip.timelineRange(), ids, splits); !r) {
+            return r;
+        }
+        insertClipSorted(target, std::move(p.clip));
+    }
+    relinkSplitPieces(sequence, splits);
+    return EditResult::success();
 }
 
 } // namespace ve::facade
