@@ -105,7 +105,7 @@ class WaveformService {
         /// Analysis sample rate; must be a multiple of bucketsPerSecond.
         double sampleRate = 48000;
         int threads = 1;
-        media::RoutingPolicy routing;
+        media::RoutingPolicy routing{};
     };
 
     using RequestId = uint64_t;

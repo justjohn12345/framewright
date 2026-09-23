@@ -76,7 +76,7 @@ class ThumbnailService {
         /// Open decoders kept for reuse (per (path, track, maxDimension)); timeline strips ask
         /// for many times of one asset in a row.
         int maxIdleDecoders = 4;
-        media::RoutingPolicy routing;
+        media::RoutingPolicy routing{};
     };
 
     struct Stats {

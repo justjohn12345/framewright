@@ -8,6 +8,16 @@ options:
   generateEmptyDirectories: true
   groupSortPosition: top
 
+# Debug and Release are ad hoc signed (headless, no account); Distribution is Release plus a real
+# identity and the hardened runtime (see Config/Distribution.xcconfig).
+configs:
+  Debug: debug
+  Release: release
+  Distribution: release
+
+configFiles:
+  Distribution: Config/Distribution.xcconfig
+
 settings:
   base:
     MARKETING_VERSION: 0.1.0
@@ -23,13 +33,9 @@ settings:
     SWIFT_STRICT_CONCURRENCY: minimal
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     DEAD_CODE_STRIPPING: YES
-    # Ad hoc signing so xcodebuild works headless without a developer account.
-    CODE_SIGN_IDENTITY: "-"
     CODE_SIGN_STYLE: Manual
     CODE_SIGNING_ALLOWED: YES
     CODE_SIGNING_REQUIRED: YES
-    DEVELOPMENT_TEAM: ""
-    ENABLE_HARDENED_RUNTIME: NO
     # FFmpeg is found through the system-header path so its headers don't add
     # warnings to our build; our own code keeps the full warning set.
     FFMPEG_ROOT: $(SRCROOT)/ThirdParty/ffmpeg
@@ -38,6 +44,27 @@ settings:
     GCC_WARN_SHADOW: YES
     CLANG_WARN_IMPLICIT_SIGN_CONVERSION: NO
     GCC_WARN_64_TO_32_BIT_CONVERSION: YES
+    # The build is warning-free and must stay so.
+    WARNING_CFLAGS: $(inherited) -Wall -Wextra
+    GCC_TREAT_WARNINGS_AS_ERRORS: YES
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+  configs:
+    # Ad hoc signing without the hardened runtime, so xcodebuild builds, tests and launches
+    # headless without a developer account (library validation would reject ad hoc libraries).
+    Debug:
+      CODE_SIGN_IDENTITY: "-"
+      DEVELOPMENT_TEAM: ""
+      ENABLE_HARDENED_RUNTIME: NO
+    Release:
+      CODE_SIGN_IDENTITY: "-"
+      DEVELOPMENT_TEAM: ""
+      ENABLE_HARDENED_RUNTIME: NO
+    # A real identity and team (Config/Distribution.xcconfig) and the hardened runtime: what
+    # notarized distribution requires.
+    Distribution:
+      CODE_SIGN_IDENTITY: $(VIDEDIT_CODE_SIGN_IDENTITY)
+      DEVELOPMENT_TEAM: $(VIDEDIT_DEVELOPMENT_TEAM)
+      ENABLE_HARDENED_RUNTIME: YES
 
 targets:
   VidEditEngine:
@@ -87,6 +114,8 @@ targets:
     configs:
       Release:
         MTL_ENABLE_DEBUG_INFO: NO
+      Distribution:
+        MTL_ENABLE_DEBUG_INFO: NO
     dependencies:
       - sdk: AVFoundation.framework
       - sdk: CoreMedia.framework
@@ -98,6 +127,7 @@ targets:
       - sdk: Accelerate.framework
       - sdk: AVFAudio.framework
       - sdk: AudioToolbox.framework
+      - sdk: CoreAudio.framework
       - sdk: CoreImage.framework
       - sdk: IOSurface.framework
       - sdk: ImageIO.framework
@@ -135,6 +165,13 @@ targets:
       - path: App
         excludes:
           - "**/.gitkeep"
+          - "Resources/Acknowledgements.md"
+          - "Resources/COPYING.LGPLv2.1"
+      # Third-party notices and the LGPL text, shown by VidEdit > Acknowledgements.
+      - path: App/Resources/Acknowledgements.md
+        buildPhase: resources
+      - path: App/Resources/COPYING.LGPLv2.1
+        buildPhase: resources
       # Embed the FFmpeg dylibs in VidEdit.app/Contents/Frameworks and sign them on
       # copy (LGPL: the libraries stay dynamically linked and replaceable).
       - path: ThirdParty/ffmpeg/lib
@@ -238,7 +275,7 @@ schemes:
     analyze:
       config: Debug
     archive:
-      config: Release
+      config: Distribution
 
   EngineTests:
     build:

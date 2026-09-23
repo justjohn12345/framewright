@@ -12,3 +12,10 @@ build/
 # FFmpeg build output and sources (Scripts/build-ffmpeg.sh)
 ThirdParty/ffmpeg/
 ThirdParty/ffmpeg-src/
+
+# Swift Package Manager (tools, scratch builds)
+.swiftpm/
+.build/
+
+# Local signing overrides (Config/Distribution.xcconfig)
+Config/Signing.local.xcconfig
