@@ -44,11 +44,16 @@ CMTime clampToZero(CMTime t) {
 // MARK: - Internal types
 
 struct DecodePool::AssetSlot {
-    explicit AssetSlot(std::string path) : url(std::move(path)) {}
-    AssetSlot(std::string path, RoutedMediaInfo info)
-        : url(std::move(path)), resolved(true), routed(std::make_shared<const RoutedMediaInfo>(std::move(info))) {}
+    AssetSlot(std::string path, FrameCache::Epoch mediaEpoch) : url(std::move(path)), epoch(mediaEpoch) {}
+    AssetSlot(std::string path, FrameCache::Epoch mediaEpoch, RoutedMediaInfo info)
+        : url(std::move(path)), epoch(mediaEpoch), resolved(true),
+          routed(std::make_shared<const RoutedMediaInfo>(std::move(info))) {}
 
     const std::string url; ///< Immutable: readable without `mutex`.
+    const FrameCache::Epoch epoch; ///< Media epoch the slot belongs to (frames are put under it).
+    /// The slot no longer describes its asset (relinked, invalidated, or its epoch ended): its
+    /// frames are not published any more. Guarded by DecodePool::mutex_.
+    bool retired = false;
 
     /// Routes the asset (blocking; concurrent callers wait for the first). A definitive probe
     /// error is remembered; a transient one (isTransient: a load timeout) is not, so the next
@@ -157,7 +162,9 @@ DecodePool::DecodePool(std::shared_ptr<BackendRouter> router, std::shared_ptr<Fr
           c.decodeOptions.interrupt.reset(); // Per decoder, set by the pool.
           return c;
       }()),
-      lookahead_(config_.lookahead) {}
+      lookahead_(config_.lookahead) {
+    epoch_ = cache_->epoch();
+}
 
 DecodePool::~DecodePool() {
     {
@@ -183,18 +190,31 @@ DecodePool::~DecodePool() {
     streams_.clear();
     retired_.clear();
     scrubDecoders_.clear();
-    cache_->setFocus({});
+    cache_->setFocus(focusClient_, {});
 }
 
 // MARK: - Assets
+
+void DecodePool::retire(AssetId asset, const std::shared_ptr<AssetSlot> &slot) {
+    slot->retired = true;
+    if (scrubThread_.joinable()) {
+        scrubCleanupPending_ = true; // the scrub thread may hold a decoder of it
+    }
+    if (scrubBusy_ && scrubInterrupt_ && scrubInFlight_.asset == asset) {
+        scrubInterrupt_->request(); // its result would be discarded anyway
+    }
+}
 
 std::shared_ptr<DecodePool::AssetSlot> DecodePool::slotFor(AssetId asset, const std::string &url) {
     auto it = assets_.find(asset);
     if (it != assets_.end() && (url.empty() || url == it->second->url)) {
         return it->second;
     }
-    auto slot = std::make_shared<AssetSlot>(url);
+    auto slot = std::make_shared<AssetSlot>(url, epoch_);
     const bool relinked = it != assets_.end();
+    if (relinked) {
+        retire(asset, it->second);
+    }
     assets_[asset] = slot;
     if (relinked) {
         for (auto &[key, stream] : streams_) {
@@ -219,7 +239,11 @@ void DecodePool::registerAsset(AssetId asset, std::string url, std::optional<Rou
         if (sameUrl && !routed) {
             return;
         }
-        auto slot = routed ? std::make_shared<AssetSlot>(url, std::move(*routed)) : std::make_shared<AssetSlot>(url);
+        auto slot = routed ? std::make_shared<AssetSlot>(url, epoch_, std::move(*routed))
+                           : std::make_shared<AssetSlot>(url, epoch_);
+        if (it != assets_.end() && !sameUrl) {
+            retire(asset, it->second); // another file now: the old one's frames must not be published
+        }
         assets_[asset] = slot;
         for (auto &[key, stream] : streams_) {
             if (key.asset == asset) {
@@ -236,6 +260,7 @@ void DecodePool::registerAsset(AssetId asset, std::string url, std::optional<Rou
         }
     }
     workCv_.notify_all();
+    scrubCv_.notify_all();
 }
 
 void DecodePool::invalidate(AssetId asset) {
@@ -245,7 +270,8 @@ void DecodePool::invalidate(AssetId asset) {
         if (it == assets_.end()) {
             return;
         }
-        auto slot = std::make_shared<AssetSlot>(it->second->url);
+        auto slot = std::make_shared<AssetSlot>(it->second->url, epoch_);
+        retire(asset, it->second);
         it->second = slot;
         for (auto &[key, stream] : streams_) {
             if (key.asset == asset) {
@@ -259,6 +285,43 @@ void DecodePool::invalidate(AssetId asset) {
         }
     }
     workCv_.notify_all();
+    scrubCv_.notify_all();
+}
+
+void DecodePool::beginEpoch(FrameCache::Epoch epoch) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_) {
+            return;
+        }
+        for (auto &[asset, slot] : assets_) {
+            retire(asset, slot);
+        }
+        assets_.clear();
+        epoch_ = epoch;
+        for (auto &[key, stream] : streams_) {
+            stream->removed = true;
+            stream->interrupt->request();
+            retire(key.asset, stream->slot); // normally in assets_ too; retiring twice is harmless
+            if (!stream->busy) {
+                retired_.push_back(stream);
+            }
+        }
+        streams_.clear();
+        for (auto &[key, request] : scrubPending_) {
+            scrubToCancel_.push_back(std::move(request.callback));
+        }
+        scrubPending_.clear();
+        if (scrubBusy_ && scrubInterrupt_) {
+            scrubInterrupt_->request();
+        }
+        if (scrubThread_.joinable()) {
+            scrubCleanupPending_ = true;
+        }
+        updateFocus();
+    }
+    workCv_.notify_all();
+    scrubCv_.notify_all();
 }
 
 // MARK: - Targets
@@ -286,7 +349,7 @@ void DecodePool::updateFocus() {
         focus.push_back(FrameCache::Focus{key.asset, clampToZero(stream->target.sourceTime),
                                           stream->target.direction == DecodeDirection::Forward});
     }
-    cache_->setFocus(std::move(focus));
+    cache_->setFocus(focusClient_, std::move(focus));
 }
 
 void DecodePool::setTargets(std::vector<DecodeTarget> targets) {
@@ -435,6 +498,7 @@ void DecodePool::workerMain() {
             continue;
         }
         std::shared_ptr<Stream> keep = streams_.at(s->key);
+        ++stepsInFlight_;
         s->busy = true;
         s->lastServed = ++tick_;
         s->interrupt->clear(); // Any request so far concerned the target read below or earlier.
@@ -452,6 +516,7 @@ void DecodePool::workerMain() {
         }
 
         lock.lock();
+        --stepsInFlight_;
         s->busy = false;
         if (s->reopen) {
             // registerAsset()/invalidate() during the step: whatever this step concluded
@@ -471,6 +536,17 @@ void DecodePool::workerMain() {
         }
         progressCv_.notify_all();
     }
+}
+
+bool DecodePool::publishStreamFrame(const Stream &s, const std::shared_ptr<AssetSlot> &slot, const VideoFrame &f,
+                                    CMTime frameDuration, CMTime coverFrom) {
+    // Checked and put under mutex_, so a removal, relink, invalidate() or beginEpoch() that
+    // returned before cannot be overtaken by this put.
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (s.removed || slot->retired || slot->epoch != epoch_) {
+        return false;
+    }
+    return cache_->put(slot->epoch, s.key.asset, f, frameDuration, coverFrom);
 }
 
 CMTime DecodePool::effectiveWindow(const Stream &s, CMTime lookahead, size_t streamCount) const {
@@ -615,7 +691,7 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
         // target lies in a gap (before the first frame), the first frame after it: either way
         // it is what shows from the target on.
         const CMTime coverFrom = s.firstAfterSeek && isNumeric(s.seekedTo) && s.seekedTo < f.pts ? s.seekedTo : f.pts;
-        cache_->put(asset, f, s.frameDuration, coverFrom);
+        publishStreamFrame(s, slot, f, s.frameDuration, coverFrom);
         const CMTime end = frameEnd(f, s.frameDuration);
         if (s.extending) {
             if (s.firstAfterSeek) {
@@ -740,9 +816,29 @@ void DecodePool::requestFrame(AssetId asset, CMTime time, ScrubCallback callback
     scrubCv_.notify_one();
 }
 
+void DecodePool::dropRetiredScrubDecoders(std::unique_lock<std::mutex> &lock) {
+    std::vector<std::unique_ptr<ScrubDecoder>> dead;
+    for (auto it = scrubDecoders_.begin(); it != scrubDecoders_.end();) {
+        if (it->second->slot->retired) {
+            dead.push_back(std::move(it->second));
+            it = scrubDecoders_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    scrubCleanupPending_ = false;
+    lock.unlock();
+    dead.clear(); // Closes the files outside the lock.
+    lock.lock();
+    progressCv_.notify_all();
+}
+
 void DecodePool::scrubMain() {
     std::unique_lock<std::mutex> lock(mutex_);
     for (;;) {
+        if (scrubCleanupPending_) {
+            dropRetiredScrubDecoders(lock);
+        }
         if (stopping_) {
             for (auto &[key, request] : scrubPending_) {
                 scrubToCancel_.push_back(std::move(request.callback));
@@ -878,7 +974,15 @@ Result<ScrubFrame> DecodePool::serviceScrub(const ScrubKey &key, const std::shar
         return makeError(MediaErrorCode::InvalidArgument, "no frame at or after the requested time in " + slot->url);
     }
     const VideoFrame &f = *frame.value();
-    cache_->put(key.asset, f, fd, time < f.pts ? time : f.pts);
+    {
+        // Checked and put under mutex_ (see publishStreamFrame): a frame of a file the asset no
+        // longer names is neither cached nor delivered.
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (slot->retired || slot->epoch != epoch_) {
+            return cancelledError();
+        }
+        cache_->put(slot->epoch, key.asset, f, fd, time < f.pts ? time : f.pts);
+    }
     return ScrubFrame{f.image, f.pts, f.duration, FrameCache::frameIndex(f.pts, fd), false};
 }
 
@@ -887,7 +991,8 @@ Result<ScrubFrame> DecodePool::serviceScrub(const ScrubKey &key, const std::shar
 bool DecodePool::waitUntilIdle(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mutex_);
     return progressCv_.wait_for(lock, timeout, [&] {
-        if (!scrubPending_.empty() || !scrubToCancel_.empty() || scrubBusy_ || !retired_.empty() || retiring_ > 0) {
+        if (!scrubPending_.empty() || !scrubToCancel_.empty() || scrubBusy_ || !retired_.empty() || retiring_ > 0 ||
+            stepsInFlight_ > 0 || scrubCleanupPending_) {
             return false;
         }
         for (const auto &[key, stream] : streams_) {

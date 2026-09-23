@@ -4,6 +4,7 @@
 
 #include <IOSurface/IOSurfaceRef.h>
 
+#include <atomic>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -58,7 +59,9 @@ struct FrameCache::State {
     uint64_t nextSerial = 1;
     uint64_t useTick = 0;
     Stats stats;
-    std::vector<Focus> focus;
+    Epoch epoch = 1;
+    std::map<FocusClient, std::vector<Focus>> focusByClient;
+    std::vector<Focus> focus; ///< Union of focusByClient (what rank() uses).
     /// Buffers of removed entries, released after the mutex is dropped (destroying an
     /// IOSurface is a kernel call; keep it out of the critical section the render thread uses).
     std::vector<PixelBuffer> graveyard;
@@ -297,14 +300,54 @@ size_t FrameCache::bufferBytes(CVPixelBufferRef buffer) {
     return sum;
 }
 
+// MARK: - Epochs and focus clients
+
+FrameCache::FocusClient FrameCache::makeFocusClient() {
+    static std::atomic<FocusClient> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
+
+FrameCache::Epoch FrameCache::epoch() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->epoch;
+}
+
+FrameCache::Epoch FrameCache::beginEpoch() {
+    State &s = *state_;
+    std::vector<PixelBuffer> dead;
+    Locked lock(s, dead);
+    for (auto &[asset, a] : s.assets) {
+        for (auto &[key, entry] : a.entries) {
+            s.graveyard.push_back(std::move(entry.frame.image));
+        }
+    }
+    s.assets.clear();
+    s.stats.bytes = 0;
+    s.stats.count = 0;
+    s.stats.pinnedBytes = 0;
+    s.stats.pinnedCount = 0;
+    s.focusByClient.clear();
+    s.focus.clear();
+    return ++s.epoch;
+}
+
 // MARK: - Insert and look up
 
 bool FrameCache::put(AssetId asset, const VideoFrame &frame, CMTime frameDuration, CMTime coverFrom) {
-    return put(asset, frame.image, frame.pts, frame.duration, frameDuration, coverFrom);
+    return insert(std::nullopt, asset, frame.image, frame.pts, frame.duration, frameDuration, coverFrom);
 }
 
 bool FrameCache::put(AssetId asset, PixelBuffer image, CMTime pts, CMTime duration, CMTime frameDuration,
                      CMTime coverFrom) {
+    return insert(std::nullopt, asset, std::move(image), pts, duration, frameDuration, coverFrom);
+}
+
+bool FrameCache::put(Epoch epoch, AssetId asset, const VideoFrame &frame, CMTime frameDuration, CMTime coverFrom) {
+    return insert(epoch, asset, frame.image, frame.pts, frame.duration, frameDuration, coverFrom);
+}
+
+bool FrameCache::insert(std::optional<Epoch> epoch, AssetId asset, PixelBuffer image, CMTime pts, CMTime duration,
+                        CMTime frameDuration, CMTime coverFrom) {
     if (!image || !isNumeric(pts)) {
         return false;
     }
@@ -325,8 +368,8 @@ bool FrameCache::put(AssetId asset, PixelBuffer image, CMTime pts, CMTime durati
     State &s = *state_;
     std::vector<PixelBuffer> dead;
     Locked lock(s, dead);
-    if (bytes > s.budget) {
-        return false;
+    if ((epoch && *epoch != s.epoch) || bytes > s.budget) {
+        return false; // decoded for media ids of an earlier epoch, or larger than the whole budget
     }
     State::Asset &a = s.assets[asset];
     a.frameDuration = frameDuration;
@@ -428,10 +471,22 @@ std::vector<CMTime> FrameCache::presentationTimes(AssetId asset) const {
 
 // MARK: - Eviction order, removal and budget
 
-void FrameCache::setFocus(std::vector<Focus> focus) {
+void FrameCache::setFocus(FocusClient client, std::vector<Focus> focus) {
     State &s = *state_;
     std::lock_guard<std::mutex> lock(s.mutex);
-    s.focus = std::move(focus);
+    if (focus.empty()) {
+        s.focusByClient.erase(client);
+    } else {
+        s.focusByClient[client] = std::move(focus);
+    }
+    s.focus.clear();
+    for (const auto &[id, list] : s.focusByClient) {
+        s.focus.insert(s.focus.end(), list.begin(), list.end());
+    }
+}
+
+void FrameCache::setFocus(std::vector<Focus> focus) {
+    setFocus(FocusClient{0}, std::move(focus));
 }
 
 void FrameCache::purge(AssetId asset) {

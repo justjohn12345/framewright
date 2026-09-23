@@ -742,4 +742,198 @@ struct ScrubLog {
     XCTAssertEqual(_fake->liveDecoders.load(), 0);
 }
 
+// MARK: - Stale publication (review 2026-09-23, finding 1)
+
+/// A frame whose decode was in flight when its stream was removed (setTargets({}), as when a
+/// project closes) must not land in the cache after the cache was purged: with the removal and
+/// the purge done, nothing of the old stream may appear.
+- (void)testARemovedStreamCannotPublishAfterAPurge {
+    _fake->honorInterrupt = false; // a decode that cannot be abandoned mid-frame (VideoToolbox)
+    Gate release;
+    Latch inDecode(1);
+    std::atomic<int> calls{0};
+    _fake->onDecode = [&](int64_t) {
+        if (calls++ == 0) {
+            inDecode.countDown();
+            release.pass();
+        }
+    };
+    DecodePool pool(_fakeRouter, _cache);
+    pool.setTargets({DecodeTarget{AssetId(1), "/fake/a.mov"}});
+    XCTAssertTrue(inDecode.wait(std::chrono::seconds(10)), @"the worker is inside the first frame's decode");
+    pool.setTargets({});
+    _cache->purgeAll();
+    release.open();
+    // The worker finishes the frame, then destroys the removed stream's decoder.
+    const auto deadline = Clock::now() + std::chrono::seconds(10);
+    while ((_fake->framesDecoded.load() < 1 || _fake->liveDecoders.load() > 0) && Clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    XCTAssertEqual(_fake->framesDecoded.load(), 1);
+    XCTAssertEqual(_fake->liveDecoders.load(), 0);
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    XCTAssertEqual(_cache->stats().count, size_t(0), @"the removed stream published a frame after the purge");
+}
+
+/// The same for a relink: frames of the old file decoded while the asset was pointed at another
+/// file must not be published under the asset (the cache may only receive frames decoded from
+/// the new file).
+- (void)testFramesOfTheOldFileAreNotPublishedAfterARelink {
+    _fake->honorInterrupt = false;
+    Gate release;
+    Latch inDecode(1);
+    std::atomic<int> calls{0};
+    _fake->onDecode = [&](int64_t) {
+        if (calls++ == 0) {
+            inDecode.countDown();
+            release.pass();
+        }
+    };
+    DecodePool pool(_fakeRouter, _cache);
+    pool.registerAsset(AssetId(1), "/fake/old.mov");
+    pool.setTargets({DecodeTarget{AssetId(1), "", -1, kCMTimeZero}});
+    XCTAssertTrue(inDecode.wait(std::chrono::seconds(10)));
+    pool.registerAsset(AssetId(1), "/fake/new.mov"); // relink while the old file's frame decodes
+    _cache->purge(AssetId(1));
+    _cache->resetStats();
+    const int decodedBeforeRelink = calls.load();
+    release.open();
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    const int decodedFromNewFile = calls.load() - decodedBeforeRelink;
+    XCTAssertGreaterThan(decodedFromNewFile, 0, @"the stream reopened on the new file");
+    XCTAssertEqual(_cache->stats().insertions, uint64_t(decodedFromNewFile),
+                   @"only frames of the new file were published");
+}
+
+// MARK: - Two pools on one cache (review 2026-09-23, finding 4)
+
+/// The program and source monitors each have a pool on the shared cache. Each pool's playhead
+/// must stay protected from eviction whatever the other pool (or an unfocused client) puts: the
+/// cache keeps both pools' focus, and each pool keeps its windows within its share.
+- (void)testTwoPoolsOnOneSmallCacheKeepBothPlayheads {
+    DecodePool::Config programConfig;
+    programConfig.budgetFraction = 0.5;
+    DecodePool::Config sourceConfig;
+    sourceConfig.budgetFraction = 0.25;
+    DecodePool program(_fakeRouter, _cache, programConfig);
+    DecodePool source(_fakeRouter, _cache, sourceConfig);
+
+    // Learn the size of one decoded frame, then give the cache room for 20 of them.
+    program.setTargets({DecodeTarget{AssetId(1), "/fake/program.mov", -1, kCMTimeZero}});
+    XCTAssertTrue(program.waitUntilIdle(std::chrono::seconds(10)));
+    const size_t frameBytes = program.stats().streams.at(0).frameBytes;
+    XCTAssertGreaterThan(frameBytes, size_t(0));
+    _cache->setBudget(20 * frameBytes);
+
+    const CMTime programAt = CMTimeMake(2, 1);
+    const CMTime sourceAt = CMTimeMake(3, 1);
+    program.setTargets({DecodeTarget{AssetId(1), "/fake/program.mov", -1, programAt}});
+    source.setTargets({DecodeTarget{AssetId(2), "/fake/source.mov", -1, sourceAt}});
+    XCTAssertTrue(program.waitUntilIdle(std::chrono::seconds(10)));
+    XCTAssertTrue(source.waitUntilIdle(std::chrono::seconds(10)));
+    XCTAssertTrue(_cache->contains(AssetId(1), programAt));
+    XCTAssertTrue(_cache->contains(AssetId(2), sourceAt));
+    XCTAssertLessThanOrEqual(_cache->stats().bytes, size_t(20) * frameBytes);
+
+    // Another client fills the cache with frames nobody is playing (scrubbed frames of a third
+    // asset): they are evicted before either playhead.
+    for (int i = 0; i < 40; ++i) {
+        CVPixelBufferRef buffer = nullptr;
+        NSDictionary *attributes = @{(id)kCVPixelBufferIOSurfacePropertiesKey : @{}};
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, size_t(_fake->width), size_t(_fake->height),
+                                           kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)attributes, &buffer),
+                       kCVReturnSuccess);
+        XCTAssertTrue(_cache->put(AssetId(3), PixelBuffer::adopt(buffer), CMTimeMake(i, 30), CMTimeMake(1, 30),
+                                  CMTimeMake(1, 30)));
+    }
+    XCTAssertTrue(_cache->contains(AssetId(1), programAt), @"the program's playhead frame was evicted");
+    XCTAssertTrue(_cache->contains(AssetId(2), sourceAt), @"the source monitor's playhead frame was evicted");
+    XCTAssertTrue(_cache->contains(AssetId(1), programAt + CMTimeMake(1, 30)));
+    XCTAssertTrue(_cache->contains(AssetId(2), sourceAt + CMTimeMake(1, 30)));
+}
+
+// MARK: - Media epochs (review 2026-09-23, finding 1)
+
+/// beginEpoch (another project was opened): a stream decode in flight is not published, every
+/// stream and decoder is gone, and the asset ids are unknown until registered again.
+- (void)testBeginEpochDropsStreamsAndTheirFramesInFlight {
+    _fake->honorInterrupt = false;
+    Gate release;
+    Latch inDecode(1);
+    std::atomic<int> calls{0};
+    _fake->onDecode = [&](int64_t) {
+        if (calls++ == 0) {
+            inDecode.countDown();
+            release.pass();
+        }
+    };
+    DecodePool pool(_fakeRouter, _cache);
+    pool.registerAsset(AssetId(1), "/fake/a.mov");
+    pool.setTargets({DecodeTarget{AssetId(1), "", -1, kCMTimeZero}});
+    XCTAssertTrue(inDecode.wait(std::chrono::seconds(10)));
+    const FrameCache::Epoch epoch = _cache->beginEpoch();
+    pool.beginEpoch(epoch);
+    release.open();
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)), @"idle covers the removed stream's step");
+    XCTAssertEqual(_fake->liveDecoders.load(), 0);
+    XCTAssertEqual(_cache->stats().count, size_t(0), @"the previous epoch's frame was published");
+    XCTAssertTrue(pool.stats().streams.empty());
+
+    // Asset 1 of the new epoch is unknown until registered: a request fails instead of
+    // decoding the previous epoch's file.
+    ScrubLog log;
+    pool.requestFrame(AssetId(1), kCMTimeZero, log.callback(0));
+    XCTAssertTrue(log.waitFor(1, std::chrono::seconds(10)));
+    {
+        std::lock_guard<std::mutex> lock(log.mutex);
+        XCTAssertFalse(log.results[0].at(0).ok());
+        XCTAssertEqual(log.results[0].at(0).error().code, MediaErrorCode::InvalidArgument);
+    }
+    pool.registerAsset(AssetId(1), "/fake/b.mov");
+    pool.setTargets({DecodeTarget{AssetId(1), "", -1, kCMTimeZero}});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    XCTAssertTrue(_cache->contains(AssetId(1), kCMTimeZero), @"the new epoch's file decodes");
+}
+
+/// beginEpoch cancels pending scrub requests, turns the one in flight into Cancelled (its frame
+/// is neither cached nor delivered) and destroys the scrub decoders.
+- (void)testBeginEpochCancelsScrubRequestsAndDropsScrubDecoders {
+    _fake->honorInterrupt = false;
+    DecodePool pool(_fakeRouter, _cache);
+    pool.registerAsset(AssetId(1), "/fake/a.mov");
+    ScrubLog log;
+    pool.requestFrame(AssetId(1), CMTimeMake(1, 1), log.callback(0), 1); // opens a scrub decoder
+    XCTAssertTrue(log.waitFor(1, std::chrono::seconds(10)));
+    XCTAssertEqual(_fake->liveDecoders.load(), 1);
+
+    Gate release;
+    Latch inDecode(1);
+    std::atomic<int> calls{0};
+    _fake->onDecode = [&](int64_t) {
+        if (calls++ == 0) {
+            inDecode.countDown();
+            release.pass();
+        }
+    };
+    pool.requestFrame(AssetId(1), CMTimeMake(5, 1), log.callback(1), 1); // in flight (blocked)
+    XCTAssertTrue(inDecode.wait(std::chrono::seconds(10)));
+    pool.requestFrame(AssetId(1), CMTimeMake(6, 1), log.callback(2), 2); // pending
+    const FrameCache::Epoch epoch = _cache->beginEpoch();
+    pool.beginEpoch(epoch);
+    release.open();
+    XCTAssertTrue(log.waitFor(3, std::chrono::seconds(10)));
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    {
+        std::lock_guard<std::mutex> lock(log.mutex);
+        XCTAssertTrue(log.results[0].at(0).ok());
+        for (int id : {1, 2}) {
+            XCTAssertEqual(log.results[id].size(), size_t(1), @"request %d answered once", id);
+            XCTAssertFalse(log.results[id].at(0).ok());
+            XCTAssertEqual(log.results[id].at(0).error().code, MediaErrorCode::Cancelled, @"request %d", id);
+        }
+    }
+    XCTAssertEqual(_cache->stats().count, size_t(0));
+    XCTAssertEqual(_fake->liveDecoders.load(), 0, @"the scrub decoder of the previous epoch was destroyed");
+}
+
 @end

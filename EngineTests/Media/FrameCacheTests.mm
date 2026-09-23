@@ -452,4 +452,68 @@ bool putSlot(FrameCache &cache, AssetId asset, int64_t index, PixelBuffer image 
     XCTAssertGreaterThanOrEqual(s.hits + s.misses, gets.load(), @"every get was counted (acquires too)");
 }
 
+// MARK: - Media epochs and focus clients (review 2026-09-23, findings 1 and 4)
+
+/// A new epoch drops every entry (pinned ones from the index too) and every focus, and frames
+/// tagged with an earlier epoch are refused from then on; untagged puts go to the current epoch.
+- (void)testEpochsDropEverythingAndRefuseStaleFrames {
+    FrameCache cache(64 * _unit);
+    const FrameCache::Epoch first = cache.epoch();
+    VideoFrame frame;
+    frame.image = makeBuffer();
+    frame.pts = kCMTimeZero;
+    frame.duration = kFd;
+    XCTAssertTrue(cache.put(first, AssetId(1), frame, kFd));
+    XCTAssertTrue(putSlot(cache, AssetId(2), 3));
+    FrameCache::PinnedFrame pinned = cache.acquire(AssetId(2), int64_t(3));
+    XCTAssertTrue(pinned);
+    cache.setFocus(FrameCache::makeFocusClient(), {FrameCache::Focus{AssetId(1), kCMTimeZero, true}});
+
+    const FrameCache::Epoch second = cache.beginEpoch();
+    XCTAssertGreaterThan(second, first);
+    XCTAssertEqual(cache.epoch(), second);
+    XCTAssertEqual(cache.stats().count, size_t(0));
+    XCTAssertEqual(cache.stats().bytes, size_t(0));
+    XCTAssertEqual(cache.stats().pinnedCount, size_t(0));
+    XCTAssertFalse(cache.contains(AssetId(1), kCMTimeZero));
+    XCTAssertTrue(pinned, @"a pin keeps its buffer");
+    pinned.release(); // a no-op for the dropped entry
+
+    XCTAssertFalse(cache.put(first, AssetId(1), frame, kFd), @"a frame decoded for the previous epoch");
+    XCTAssertFalse(cache.contains(AssetId(1), kCMTimeZero));
+    XCTAssertTrue(cache.put(second, AssetId(1), frame, kFd));
+    XCTAssertTrue(putSlot(cache, AssetId(3), 0));
+    XCTAssertEqual(cache.stats().count, size_t(2));
+}
+
+/// Two clients' focus is merged: each client's playhead survives what the other or an
+/// unfocused client inserts; removing one client's focus leaves its frames to plain LRU.
+- (void)testFocusClientsAreMergedForEviction {
+    FrameCache cache(10 * _unit);
+    const FrameCache::FocusClient program = FrameCache::makeFocusClient();
+    const FrameCache::FocusClient source = FrameCache::makeFocusClient();
+    XCTAssertNotEqual(program, source);
+    for (int64_t i = 0; i < 3; ++i) {
+        XCTAssertTrue(putSlot(cache, AssetId(1), 10 + i));
+        XCTAssertTrue(putSlot(cache, AssetId(2), 20 + i));
+    }
+    cache.setFocus(program, {FrameCache::Focus{AssetId(1), timeForFrame(10, kFd), true}});
+    cache.setFocus(source, {FrameCache::Focus{AssetId(2), timeForFrame(20, kFd), true}});
+    // An unfocused client fills the cache many times over.
+    for (int64_t i = 0; i < 30; ++i) {
+        XCTAssertTrue(putSlot(cache, AssetId(3), i));
+    }
+    for (int64_t i = 0; i < 3; ++i) {
+        XCTAssertTrue(cache.contains(AssetId(1), int64_t(10 + i)), @"program frame %lld", 10 + i);
+        XCTAssertTrue(cache.contains(AssetId(2), int64_t(20 + i)), @"source frame %lld", 20 + i);
+    }
+    // The source client stops: its frames are now ordinary least-recently-used entries.
+    cache.setFocus(source, {});
+    for (int64_t i = 30; i < 40; ++i) {
+        XCTAssertTrue(putSlot(cache, AssetId(3), i));
+    }
+    XCTAssertFalse(cache.contains(AssetId(2), int64_t(20)));
+    XCTAssertTrue(cache.contains(AssetId(1), int64_t(10)), @"the program's focus is untouched");
+}
+
 @end

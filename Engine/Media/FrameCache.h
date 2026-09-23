@@ -32,6 +32,21 @@
 // frame first whenever a lookahead window is larger than the budget (frames are inserted in
 // playback order). Without any focus (paused, scrubbing) the order is plain LRU.
 //
+// Focus clients. Several decode pools share one cache (the program monitor's and the source
+// monitor's). Each declares its own focus under its own FocusClient id (setFocus(client, ...));
+// the eviction order uses the union of every client's focus, so one pool's targets never make
+// another pool's playhead look unwatched. setFocus(focus) without a client is client 0.
+//
+// Media epochs (why ids alone are not enough). Asset ids restart in every project, so after an
+// Open or a New the same id can name another file. The cache is keyed by (epoch, asset): its
+// owner starts a new epoch whenever ids start naming other media (beginEpoch()), which drops
+// every entry and every client's focus, and from then on put(epoch, ...) refuses frames
+// decoded for an earlier epoch. Producers (the decode pools) tag every frame with the epoch its
+// asset was registered in, so a decode that was in flight when the project changed can never
+// publish the previous project's picture under a reused id. Lookups always see the current
+// epoch only (entries of earlier epochs no longer exist). put() without an epoch inserts into
+// the current epoch (single-project users and tests).
+//
 // Pinning (why, and why not a generation counter). PixelBuffer is ref-counted, so eviction can
 // never free a buffer someone is still using: correctness does not need pins. What eviction
 // CAN do to a frame that is being presented is (a) drop it from the cache while the render
@@ -107,6 +122,13 @@ class FrameCache {
 
     class PinnedFrame;
 
+    /// Generation of asset ids the cache holds (see header comment).
+    using Epoch = uint64_t;
+    /// Identifies one client's focus (see header comment).
+    using FocusClient = uint64_t;
+    /// A new client id, unique in the process (never 0, the default client).
+    static FocusClient makeFocusClient();
+
     explicit FrameCache(size_t budgetBytes = kDefaultBudgetBytes);
     ~FrameCache();
     FrameCache(const FrameCache &) = delete;
@@ -123,6 +145,14 @@ class FrameCache {
     /// Memory held by a pixel buffer (see header comment).
     static size_t bufferBytes(CVPixelBufferRef buffer);
 
+    // MARK: Epochs
+
+    /// The current epoch (starts at 1).
+    Epoch epoch() const;
+    /// Starts a new epoch: removes every entry (like purgeAll()) and every client's focus, and
+    /// refuses puts tagged with an earlier epoch from now on. Returns the new epoch.
+    Epoch beginEpoch();
+
     // MARK: Insert and look up
 
     /// Inserts a decoded frame of `asset`. `frameDuration` is the asset's nominal frame duration
@@ -134,6 +164,10 @@ class FrameCache {
     /// non-numeric pts, or a frame larger than the whole budget.
     bool put(AssetId asset, const VideoFrame &frame, CMTime frameDuration, CMTime coverFrom = kCMTimeInvalid);
     bool put(AssetId asset, PixelBuffer image, CMTime pts, CMTime duration, CMTime frameDuration,
+             CMTime coverFrom = kCMTimeInvalid);
+    /// Like put(), for a frame decoded for `epoch`: refused (false, nothing changes) unless
+    /// `epoch` is the current epoch. The check and the insertion are atomic with beginEpoch().
+    bool put(Epoch epoch, AssetId asset, const VideoFrame &frame, CMTime frameDuration,
              CMTime coverFrom = kCMTimeInvalid);
 
     /// The entry showing at time `t` (marked recently used; counted as hit or miss).
@@ -154,8 +188,10 @@ class FrameCache {
 
     // MARK: Eviction order, removal and budget
 
-    /// Replaces the playhead positions the eviction order is based on (the decode pool calls it
-    /// with its targets; empty = plain LRU). Does not evict by itself.
+    /// Replaces `client`'s playhead positions (empty: the client has none). The eviction order
+    /// uses the union of every client's focus (none at all = plain LRU). Does not evict by itself.
+    void setFocus(FocusClient client, std::vector<Focus> focus);
+    /// setFocus(0, focus): the default client.
     void setFocus(std::vector<Focus> focus);
     /// Removes every entry of `asset` (pinned ones included; see header comment).
     void purge(AssetId asset);
@@ -174,6 +210,9 @@ class FrameCache {
     struct State;
 
   private:
+    bool insert(std::optional<Epoch> epoch, AssetId asset, PixelBuffer image, CMTime pts, CMTime duration,
+                CMTime frameDuration, CMTime coverFrom);
+
     std::shared_ptr<State> state_;
 };
 
