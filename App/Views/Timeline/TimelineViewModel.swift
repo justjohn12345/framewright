@@ -36,6 +36,12 @@ struct TimelineViewModel: Equatable {
         var speed: Double = 1
         var linkedClipID: Int64 = 0
         var isStill = false
+        /// On an audio track: gain and fades are drawn and editable on the clip.
+        var isAudio = false
+        var gainDb: Double = 0
+        /// Fade durations in seconds.
+        var fadeIn: Double = 0
+        var fadeOut: Double = 0
     }
 
     struct Transition: Equatable, Identifiable {
@@ -43,6 +49,13 @@ struct TimelineViewModel: Equatable {
         let trackID: Int64
         let start: Double
         let end: Double
+        var fromClipID: Int64 = 0
+        var toClipID: Int64 = 0
+
+        /// The cut the transition is centred on (the outgoing clip's end).
+        func cut(in model: TimelineViewModel) -> Double {
+            model.clip(id: fromClipID)?.end ?? (start + end) / 2
+        }
     }
 
     struct TrackLayout: Equatable {
@@ -57,6 +70,14 @@ struct TimelineViewModel: Equatable {
         case clipHead(Int64)
         case clipTail(Int64)
         case transition(Int64)
+        /// Within `transitionEdgeZone` of a transition band's left or right edge (resize).
+        case transitionHead(Int64)
+        case transitionTail(Int64)
+        /// The fade-in / fade-out handle at an audio clip's top corner.
+        case fadeIn(Int64)
+        case fadeOut(Int64)
+        /// The horizontal gain line of an audio clip.
+        case gainLine(Int64)
         /// Empty space on a track.
         case track(Int64)
         /// Below the last track.
@@ -82,7 +103,21 @@ struct TimelineViewModel: Equatable {
     static let edgeZone: CGFloat = 8
     static let snapThreshold: CGFloat = 8
     /// Height of the strip at the top of a row where transitions are drawn and hit.
-    static let transitionStripHeight: CGFloat = 14
+    static let transitionStripHeight: CGFloat = 16
+    /// Width of the resize zone at each edge of a transition band (at most a quarter of it).
+    static let transitionEdgeZone: CGFloat = 5
+    /// Fade handles: a square this big at the clip's top corner (at the fade's end), hit within
+    /// `fadeHandleHitRadius` horizontally and the top `fadeHandleZoneHeight` points vertically.
+    static let fadeHandleSize: CGFloat = 7
+    static let fadeHandleHitRadius: CGFloat = 6
+    static let fadeHandleZoneHeight: CGFloat = 12
+    /// The gain line is hit within this many points vertically.
+    static let gainLineHitDistance: CGFloat = 3
+    /// Gain line mapping: the top of the content area is `gainMaxDb`, its bottom `gainMinDb`.
+    static let gainMaxDb = 24.0
+    static let gainMinDb = -60.0
+    /// Top inset of a clip's content (below its name label).
+    static let clipLabelHeight: CGFloat = 16
     static let minPixelsPerSecond = 2.0
     static let maxPixelsPerSecond = 2000.0
 
@@ -186,6 +221,39 @@ struct TimelineViewModel: Equatable {
         clipIndex[id].map { clips[$0] }
     }
 
+    func transition(id: Int64) -> Transition? {
+        transitions.first { $0.id == id }
+    }
+
+    /// The part of a clip's rect below its label, where waveforms, fades and the gain line are.
+    func contentRect(forClip clip: Clip) -> CGRect? {
+        guard let rect = rect(forClip: clip) else { return nil }
+        let body = rect.insetBy(dx: 0.5, dy: 1)
+        return CGRect(x: body.minX, y: body.minY + Self.clipLabelHeight, width: body.width,
+                      height: max(1, body.height - Self.clipLabelHeight))
+    }
+
+    /// y of the gain line for `gainDb` within `content` (clamped to the content area).
+    static func gainY(_ gainDb: Double, in content: CGRect) -> CGFloat {
+        let fraction = (gainMaxDb - min(gainMaxDb, max(gainMinDb, gainDb))) / (gainMaxDb - gainMinDb)
+        return content.minY + CGFloat(fraction) * content.height
+    }
+
+    /// Decibels per point of vertical drag on the gain line (`fine`: a tenth of it).
+    func decibelsPerPoint(forClip clip: Clip, fine: Bool) -> Double {
+        let height = contentRect(forClip: clip)?.height ?? 32
+        return (Self.gainMaxDb - Self.gainMinDb) / Double(max(height, 1)) * (fine ? 0.1 : 1)
+    }
+
+    /// Centre of the fade-in (`fadeIn` true) or fade-out handle of an audio clip.
+    func fadeHandleCenter(forClip clip: Clip, fadeIn: Bool) -> CGPoint? {
+        guard clip.isAudio, let rect = rect(forClip: clip) else { return nil }
+        let inset = Self.fadeHandleSize / 2 + 1
+        let x = fadeIn ? max(x(forTime: clip.start + clip.fadeIn), rect.minX + inset)
+            : min(x(forTime: clip.end - clip.fadeOut), rect.maxX - inset)
+        return CGPoint(x: x, y: rect.minY + 1 + inset)
+    }
+
     /// Clips whose rect intersects the horizontal range [minX, maxX] (visible culling).
     func clips(visibleIn width: CGFloat) -> [Clip] {
         let start = time(forX: 0)
@@ -195,15 +263,34 @@ struct TimelineViewModel: Equatable {
 
     // MARK: Hit testing
 
+    /// What a press at `point` grabs, by priority: a transition band (its edges resize it), an
+    /// audio clip's fade handle (top corner zone), a clip edge (trim), an audio clip's gain line,
+    /// a clip body, empty track space.
     func hitTest(_ point: CGPoint) -> Hit {
         guard let layout = layout(atY: point.y) else { return .none }
         let rowTop = layout.y - scrollY
         if point.y - rowTop < Self.transitionStripHeight {
             for transition in transitions where transition.trackID == layout.track.id {
-                if let r = rect(forTransition: transition), point.x >= r.minX, point.x <= r.maxX {
+                if let r = rect(forTransition: transition), point.x >= r.minX - 1, point.x <= r.maxX + 1 {
+                    let zone = min(Self.transitionEdgeZone, r.width / 4)
+                    if point.x <= r.minX + zone { return .transitionHead(transition.id) }
+                    if point.x >= r.maxX - zone { return .transitionTail(transition.id) }
                     return .transition(transition.id)
                 }
             }
+        }
+        if layout.track.kind == .audio, point.y - rowTop < Self.fadeHandleZoneHeight {
+            var best: (hit: Hit, distance: CGFloat)?
+            for clip in clips where clip.trackID == layout.track.id && clip.isAudio {
+                for fadeIn in [true, false] {
+                    guard let center = fadeHandleCenter(forClip: clip, fadeIn: fadeIn) else { continue }
+                    let distance = abs(point.x - center.x)
+                    if distance <= Self.fadeHandleHitRadius, best.map({ distance < $0.distance }) ?? true {
+                        best = (fadeIn ? .fadeIn(clip.id) : .fadeOut(clip.id), distance)
+                    }
+                }
+            }
+            if let best { return best.hit }
         }
         // Edge zones win over bodies so the edit point between two touching clips can be trimmed
         // from either side (the closer edge wins).
@@ -227,6 +314,10 @@ struct TimelineViewModel: Equatable {
         }
         for clip in clips where clip.trackID == layout.track.id {
             if let r = rect(forClip: clip), point.x >= r.minX, point.x < r.maxX {
+                if clip.isAudio, let content = contentRect(forClip: clip),
+                   abs(point.y - Self.gainY(clip.gainDb, in: content)) <= Self.gainLineHitDistance {
+                    return .gainLine(clip.id)
+                }
                 return .clipBody(clip.id)
             }
         }

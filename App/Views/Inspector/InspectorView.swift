@@ -2,37 +2,99 @@ import CoreMedia
 import SwiftUI
 import VidEditEngine
 
-/// Properties of the selected clip (or the selected media when no clip is selected).
+/// Properties of the selection: the selected clips' video and audio parameters (multi-selection
+/// edits apply to every selected clip of the matching kind), a single clip's speed, the selected
+/// transition, or the selected media.
 ///
-/// Slider drags are coalesced into one undo step per drag; typed values apply on Return.
+/// Every parameter can be dragged (slider: one undo step per drag), typed with or without its
+/// unit (Return applies it, clamped to the parameter's range) and nudged from its field with
+/// Up/Down (±1) and Shift+Up/Down (±10; a burst of nudges is one undo step). Each parameter and
+/// each section has a reset button. Refused edits show a message at the top (see
+/// `InspectorModel`, which holds the logic).
 struct InspectorView: View {
     @ObservedObject var store: ProjectStore
+    @ObservedObject var inspector: InspectorModel
+
+    init(store: ProjectStore) {
+        self.store = store
+        inspector = store.inspector
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Inspector")
                     .font(.headline)
-                if let clip = primaryClip {
-                    ClipInspector(store: store, clip: clip)
-                        .id(clip.clipID)
-                    if let asset = store.asset(clip.assetID) {
-                        AssetDetailsView(asset: asset)
-                    }
-                } else if let id = store.selectedAssetID, let asset = store.asset(id) {
-                    AssetDetailsView(asset: asset)
-                } else {
-                    Text(store.selection.count > 1 ? "\(store.selection.count) clips selected" : "Nothing selected")
-                        .foregroundStyle(.secondary)
+                if let message = inspector.message {
+                    InspectorMessage(text: message) { inspector.clearMessage() }
                 }
+                content
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityIdentifier("Inspector")
+        .onDisappear {
+            inspector.endSliderDrag()
+            inspector.endNudgeBurst()
+        }
     }
 
-    /// The clip whose properties are shown: the only selected clip, or the video clip of a
+    @ViewBuilder
+    private var content: some View {
+        if let transition = inspector.transition {
+            TransitionInspector(store: store, inspector: inspector, transition: transition)
+        } else if !store.selection.isEmpty {
+            if let clip = primaryClip {
+                ClipInfoSection(store: store, clip: clip)
+            } else {
+                Text("\(store.selection.count) clips selected")
+                    .foregroundStyle(.secondary)
+                Divider()
+            }
+            if inspector.isAvailable(.positionX) {
+                ParameterSection(store: store, inspector: inspector, section: .video,
+                                 subtitle: inspector.videoTargets.count > 1 ? "\(inspector.videoTargets.count) video clips" : nil)
+            }
+            if inspector.isAvailable(.gain) {
+                ParameterSection(store: store, inspector: inspector, section: .audio,
+                                 subtitle: inspector.audioTargets.count > 1 ? "\(inspector.audioTargets.count) audio clips" : nil)
+            }
+            speedSection
+            if let clip = primaryClip, let asset = store.asset(clip.assetID) {
+                AssetDetailsView(asset: asset)
+            }
+        } else if let id = store.selectedAssetID, let asset = store.asset(id) {
+            AssetDetailsView(asset: asset)
+        } else {
+            Text("Nothing selected")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var speedSection: some View {
+        let movable = store.selectedClips.contains { !$0.isStill }
+        if inspector.isAvailable(.speed) {
+            ParameterSection(store: store, inspector: inspector, section: .speed, subtitle: nil) {
+                speedButton
+            }
+        } else if movable {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Speed").font(.subheadline.weight(.semibold))
+                speedButton
+            }
+            Divider()
+        }
+    }
+
+    private var speedButton: some View {
+        Button("Speed/Duration…") { store.showSpeedSheet() }
+            .controlSize(.small)
+            .help("Change the speed of the selected clips (⌘R)")
+    }
+
+    /// The clip whose details are shown: the only selected clip, or the video clip of a
     /// selected linked pair.
     private var primaryClip: VEClipInfo? {
         let selected = store.selectedClips
@@ -44,185 +106,196 @@ struct InspectorView: View {
     }
 }
 
-/// Editable clip properties.
-private struct ClipInspector: View {
+/// A non-modal message (a refused edit, a limit that was applied) with a close button.
+private struct InspectorMessage: View {
+    let text: String
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.orange)
+            Text(text)
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Dismiss")
+        }
+        .padding(6)
+        .background(RoundedRectangle(cornerRadius: 5).fill(Color.orange.opacity(0.12)))
+        .accessibilityIdentifier("InspectorMessage")
+    }
+}
+
+/// Read-only facts about a clip, and Link/Unlink.
+private struct ClipInfoSection: View {
     @ObservedObject var store: ProjectStore
     let clip: VEClipInfo
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            section("Clip") {
-                row("Name", clip.name)
-                row("Start", Timecode.string(clip.timelineStart, frameDuration: store.frameDuration))
-                row("Duration", Timecode.string(clip.duration, frameDuration: store.frameDuration))
-                if !clip.isStill {
-                    row("Source In", Timecode.duration(clip.sourceIn))
-                    row("Source Out", Timecode.duration(clip.sourceOut))
-                    SpeedField(numerator: clip.speedNumerator, denominator: clip.speedDenominator) { parsed in
-                        switch parsed {
-                        case let .fraction(numerator, denominator):
-                            store.report(store.engine.setSpeedNumerator(numerator, denominator: denominator,
-                                                                        forClip: clip.clipID))
-                        case let .decimal(value):
-                            store.report(store.engine.setSpeed(value, forClip: clip.clipID))
-                        }
-                    }
+        section("Clip") {
+            row("Name", clip.name)
+            row("Start", Timecode.string(clip.timelineStart, frameDuration: store.frameDuration))
+            row("Duration", store.durationString(frames: store.frames(clip.duration)))
+            if !clip.isStill {
+                row("Source In", Timecode.duration(clip.sourceIn))
+                row("Source Out", Timecode.duration(clip.sourceOut))
+            }
+            HStack {
+                Text(clip.linkedClipID != 0 ? "Linked" : "Not linked")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(clip.linkedClipID != 0 ? "Unlink" : "Link Selected") {
+                    store.linkOrUnlinkSelection()
                 }
-                HStack {
-                    Text(clip.linkedClipID != 0 ? "Linked" : "Not linked")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button(clip.linkedClipID != 0 ? "Unlink" : "Link Selected") {
-                        store.linkOrUnlinkSelection()
-                    }
-                    .controlSize(.small)
-                }
+                .controlSize(.small)
             }
-            if clip.trackKind == .video {
-                videoSection
-            }
-            if let audioClip = audioClip {
-                AudioSection(store: store, clip: audioClip)
-            }
-        }
-    }
-
-    /// The clip whose audio settings are shown: this clip, or its linked audio partner.
-    private var audioClip: VEClipInfo? {
-        if clip.trackKind == .audio { return clip }
-        if clip.linkedClipID != 0, let partner = store.clips[clip.linkedClipID], partner.trackKind == .audio {
-            return partner
-        }
-        return nil
-    }
-
-    private var videoSection: some View {
-        let params = clip.videoParams
-        return section("Video") {
-            ParameterSlider(store: store, clipID: clip.clipID, label: "Position X", value: params.x, range: -4000 ... 4000, key: "x") { p, v in p.x = v }
-            ParameterSlider(store: store, clipID: clip.clipID, label: "Position Y", value: params.y, range: -4000 ... 4000, key: "y") { p, v in p.y = v }
-            ParameterSlider(store: store, clipID: clip.clipID, label: "Scale %", value: params.scale * 100, range: 1 ... 800, key: "scale") { p, v in
-                p.scale = v / 100
-            }
-            ParameterSlider(store: store, clipID: clip.clipID, label: "Rotation °", value: params.rotationDegrees, range: -360 ... 360, key: "rotation") { p, v in
-                p.rotationDegrees = v
-            }
-            ParameterSlider(store: store, clipID: clip.clipID, label: "Opacity %", value: params.opacity * 100, range: 0 ... 100, key: "opacity") { p, v in
-                p.opacity = v / 100
-            }
-            Button("Reset") {
-                store.report(store.engine.setVideoParams(VEVideoParamsIdentity(), forClip: clip.clipID))
-            }
-            .controlSize(.small)
         }
     }
 }
 
-/// A slider plus a numeric field for one video parameter. Dragging the slider is one undo step.
-private struct ParameterSlider: View {
+/// A section of parameters with a reset button for the whole section.
+private struct ParameterSection<Extra: View>: View {
     @ObservedObject var store: ProjectStore
-    let clipID: VEClipID
-    let label: String
-    let value: Double
-    let range: ClosedRange<Double>
-    let key: String
-    let apply: (inout VEVideoParams, Double) -> Void
+    let inspector: InspectorModel
+    let section: InspectorSection
+    let subtitle: String?
+    let extra: Extra
 
-    /// The coalescing group of the slider drag in progress (nil: not dragging).
-    @State private var dragGroup: String?
+    init(store: ProjectStore, inspector: InspectorModel, section: InspectorSection, subtitle: String?,
+         @ViewBuilder extra: () -> Extra) {
+        self.store = store
+        self.inspector = inspector
+        self.section = section
+        self.subtitle = subtitle
+        self.extra = extra()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(section.title).font(.subheadline.weight(.semibold))
+                if let subtitle {
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Reset") { inspector.reset(section) }
+                    .controlSize(.small)
+                    .help("Reset every \(section.title.lowercased()) setting of the selection")
+                    .accessibilityIdentifier("Reset.\(section.rawValue)")
+            }
+            ForEach(InspectorParameter.parameters(in: section)) { parameter in
+                ParameterRow(store: store, inspector: inspector, parameter: parameter)
+            }
+            extra
+        }
+        Divider()
+    }
+}
+
+extension ParameterSection where Extra == EmptyView {
+    init(store: ProjectStore, inspector: InspectorModel, section: InspectorSection, subtitle: String?) {
+        self.init(store: store, inspector: inspector, section: section, subtitle: subtitle) { EmptyView() }
+    }
+}
+
+/// One parameter: label, typed field (with nudges), reset button and slider.
+private struct ParameterRow: View {
+    @ObservedObject var store: ProjectStore
+    let inspector: InspectorModel
+    let parameter: InspectorParameter
+    var focusSerial = 0
+    @State private var dragging = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            NumberField(label: label, value: value, range: range) { set($0) }
-            Slider(value: Binding(get: { value }, set: { set($0) }), in: range) { editing in
+            HStack(spacing: 4) {
+                Text(parameter.label)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                NumericField(text: inspector.text(parameter),
+                             placeholder: inspector.isMixed(parameter) ? "Mixed" : "",
+                             commit: { inspector.commitText(parameter, $0) },
+                             nudge: { inspector.nudge(parameter, steps: $0) },
+                             focusSerial: focusSerial,
+                             accessibilityIdentifier: "Parameter.\(parameter.rawValue)")
+                    .frame(width: 104, height: 20)
+                Button {
+                    inspector.reset(parameter)
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("Reset \(parameter.label)")
+            }
+            .font(.caption)
+            Slider(value: Binding(get: { inspector.value(parameter) ?? parameter.defaultValue },
+                                  set: { inspector.sliderChanged(parameter, $0) }),
+                   in: inspector.sliderRange(parameter)) { editing in
                 if editing {
-                    let group = "inspector.\(key).\(clipID)"
-                    store.engine.beginCoalescing(withKey: group)
-                    dragGroup = group
+                    inspector.beginSliderDrag(parameter)
+                    dragging = true
                 } else {
-                    dragGroup = nil
-                    store.engine.endCoalescing()
+                    inspector.endSliderDrag()
+                    dragging = false
                 }
             }
             .controlSize(.mini)
         }
         .onDisappear {
-            // The inspector changed selection mid-drag: commit what the drag did.
-            if dragGroup != nil {
-                dragGroup = nil
-                store.engine.endCoalescing()
+            // The selection changed mid-drag: commit what the drag did.
+            if dragging {
+                dragging = false
+                inspector.endSliderDrag()
             }
-        }
-    }
-
-    private func set(_ newValue: Double) {
-        guard let current = store.clips[clipID] else { return }
-        var params = current.videoParams
-        apply(&params, min(range.upperBound, max(range.lowerBound, newValue)))
-        let clip = clipID
-        if let group = dragGroup {
-            // A slider drag step: part of the drag's undo step.
-            store.report(store.engine.performInCoalescingGroup(group) {
-                store.engine.setVideoParams(params, forClip: clip)
-            })
-        } else {
-            store.report(store.engine.setVideoParams(params, forClip: clip))
         }
     }
 }
 
-/// Gain and fades of an audio clip.
-private struct AudioSection: View {
+/// The selected transition: kind, alignment and duration (bounded by the cut's media).
+private struct TransitionInspector: View {
     @ObservedObject var store: ProjectStore
-    let clip: VEClipInfo
-    /// The coalescing group of the gain slider drag in progress (nil: not dragging).
-    @State private var dragGroup: String?
+    let inspector: InspectorModel
+    let transition: VETransitionInfo
 
     var body: some View {
-        let params = clip.audioParams
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Audio").font(.subheadline.weight(.semibold))
-            NumberField(label: "Gain dB", value: params.gainDb, range: -60 ... 24) { update { $0.gainDb = $1 }($0) }
-            Slider(value: Binding(get: { params.gainDb }, set: { update { $0.gainDb = $1 }($0) }), in: -60 ... 24) { editing in
-                if editing {
-                    let group = "inspector.gain.\(clip.clipID)"
-                    store.engine.beginCoalescing(withKey: group)
-                    dragGroup = group
-                } else {
-                    dragGroup = nil
-                    store.engine.endCoalescing()
-                }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Transition").font(.subheadline.weight(.semibold))
+                Spacer()
+                Button("Reset") { inspector.reset(.transition) }
+                    .controlSize(.small)
+                    .help("Back to the default duration (Settings > Editing)")
             }
-            .controlSize(.mini)
-            .onDisappear {
-                if dragGroup != nil {
-                    dragGroup = nil
-                    store.engine.endCoalescing()
-                }
+            row("Kind", inspector.transitionKind?.title ?? "Cross Dissolve")
+            row("Alignment", "Centred on cut")
+            row("Starts", Timecode.string(transition.start, frameDuration: store.frameDuration))
+            ParameterRow(store: store, inspector: inspector, parameter: .transitionDuration,
+                         focusSerial: focusSerial)
+            if let limit = inspector.transitionLimit {
+                Text("At most \(store.durationString(frames: limit.maximumFrames)): \(limit.reason)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            NumberField(label: "Fade In s", value: params.fadeInDuration.secondsOrZero, range: 0 ... clip.duration.secondsOrZero) {
-                update { $0.fadeInDuration = store.frameTime($1) }($0)
+            Button("Delete Transition") {
+                store.deleteSelection(ripple: false)
             }
-            NumberField(label: "Fade Out s", value: params.fadeOutDuration.secondsOrZero, range: 0 ... clip.duration.secondsOrZero) {
-                update { $0.fadeOutDuration = store.frameTime($1) }($0)
-            }
+            .controlSize(.small)
         }
+        Divider()
     }
 
-    private func update(_ change: @escaping (inout VEAudioParams, Double) -> Void) -> (Double) -> Void {
-        { value in
-            guard let current = store.clips[clip.clipID] else { return }
-            var params = current.audioParams
-            change(&params, value)
-            let clipID = clip.clipID
-            if let group = dragGroup {
-                store.report(store.engine.performInCoalescingGroup(group) {
-                    store.engine.setAudioParams(params, forClip: clipID)
-                })
-            } else {
-                store.report(store.engine.setAudioParams(params, forClip: clipID))
-            }
-        }
+    private var focusSerial: Int {
+        guard let request = store.inspectorFocusRequest, request.field == .transitionDuration else { return 0 }
+        return request.serial
     }
 }
 
@@ -272,94 +345,6 @@ struct AssetDetailsView: View {
         case .audioVideo: return "Video + audio"
         @unknown default: return "Media"
         }
-    }
-}
-
-/// Clip speed as a multiplier: shows the exact value ("0.5", "2", "1/3") and accepts a decimal
-/// (approximated by the engine to a fraction with a denominator up to 1000) or a fraction.
-struct SpeedField: View {
-    let numerator: Int64
-    let denominator: Int64
-    let commit: (SpeedFormat.Parsed) -> Void
-    @State private var text = ""
-    @FocusState private var focused: Bool
-
-    private var formatted: String {
-        SpeedFormat.multiplier(numerator: numerator, denominator: denominator)
-    }
-
-    var body: some View {
-        HStack {
-            Text("Speed ×")
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(SpeedFormat.percent(Double(numerator) / Double(max(denominator, 1))))
-                .foregroundStyle(.tertiary)
-            TextField("Speed", text: $text)
-                .textFieldStyle(.roundedBorder)
-                .multilineTextAlignment(.trailing)
-                .frame(width: 80)
-                .focused($focused)
-                .onSubmit {
-                    if let parsed = SpeedFormat.parseMultiplier(text) {
-                        commit(parsed)
-                    }
-                    text = formatted
-                }
-                .onAppear { text = formatted }
-                .onChange(of: formatted) { _, newValue in
-                    if !focused { text = newValue }
-                }
-                .onChange(of: focused) { _, isFocused in
-                    if !isFocused { text = formatted }
-                }
-                .help("A multiplier: 0.5 plays at half speed, 2 at double; fractions like 1/3 are exact")
-        }
-        .font(.caption)
-    }
-}
-
-/// A labelled number field that applies its value on Return.
-struct NumberField: View {
-    let label: String
-    let value: Double
-    let range: ClosedRange<Double>
-    let commit: (Double) -> Void
-    @State private var text = ""
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        HStack {
-            Text(label)
-                .foregroundStyle(.secondary)
-            Spacer()
-            TextField(label, text: $text)
-                .textFieldStyle(.roundedBorder)
-                .multilineTextAlignment(.trailing)
-                .frame(width: 80)
-                .focused($focused)
-                .onSubmit(apply)
-                .onAppear { text = format(value) }
-                .onChange(of: value) { _, newValue in
-                    if !focused { text = format(newValue) }
-                }
-                .onChange(of: focused) { _, isFocused in
-                    if !isFocused { text = format(value) }
-                }
-        }
-        .font(.caption)
-    }
-
-    private func apply() {
-        guard let parsed = Double(text.replacingOccurrences(of: ",", with: ".")), parsed.isFinite else {
-            text = format(value)
-            return
-        }
-        commit(min(range.upperBound, max(range.lowerBound, parsed)))
-    }
-
-    private func format(_ v: Double) -> String {
-        abs(v - v.rounded()) < 1e-9 ? String(format: "%.0f", v) : String(format: "%.2f", v)
     }
 }
 

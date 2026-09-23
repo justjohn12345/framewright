@@ -1,6 +1,7 @@
 import AppKit
 import CoreMedia
 import SwiftUI
+import UniformTypeIdentifiers
 import VidEditEngine
 
 /// The timeline: ruler, track headers and the track area drawn in a `Canvas`.
@@ -17,6 +18,15 @@ import VidEditEngine
 /// field that had it ends editing). Media dropped from the bin lands
 /// at the drop position and row (overwrite; hold Command to insert). Scroll to pan,
 /// Option/Command-scroll to zoom.
+///
+/// Transitions are bands across their cut at the top of the row, labelled with their duration:
+/// click selects (Delete removes, double-click edits the duration in the inspector), dragging an
+/// edge resizes symmetrically about the cut (whole frames, bounded by the media beyond the cut,
+/// which the status line names when the drag reaches it). Transitions dragged from the
+/// Transitions panel highlight the cut they would land on (red, with the reason, when it cannot
+/// take one). Audio clips show their volume envelope over the waveform: a fade handle in each top
+/// corner (drag to set the fade, never overlapping the other) and the gain line (drag vertically;
+/// Option for fine steps; the value shows next to the pointer). Every such drag is one undo step.
 ///
 /// Redraw budget: the canvas depends on the model (`ProjectStore`, rebuilt once per model change)
 /// and the viewport, never on the playhead. The playhead line, the ruler marker and the
@@ -162,7 +172,11 @@ struct TimelineView: View {
             model: model, selection: store.selection,
             selectedTransitionID: store.selectedTransitionID,
             targetTrackIDs: [store.targetVideoTrackID, store.targetAudioTrackID], assets: store.assetsByID,
-            thumbnails: thumbnails, waveforms: waveforms, snapTime: store.snapIndicator, marquee: gestures.marquee
+            thumbnails: thumbnails, waveforms: waveforms, snapTime: store.snapIndicator, marquee: gestures.marquee,
+            gainTooltip: gestures.gainTooltip, transitionDrop: gestures.transitionDrop,
+            formatFrames: { [frameDuration = store.frameDuration, display = store.editingPreferences.durationDisplay] in
+                DurationFormat.shortString(frames: $0, frameDuration: frameDuration, display: display)
+            }
         )
         // Reading the caches' versions makes new thumbnails and waveforms redraw the canvas.
         let redrawToken = thumbnails.version &+ waveforms.version
@@ -193,7 +207,7 @@ struct TimelineView: View {
                 .updating($trackGestureActive) { _, active, _ in active = true }
                 .onChanged { value in
                     gestures.changed(location: value.location, startLocation: value.startLocation,
-                                     modifiers: NSEvent.modifierFlags)
+                                     modifiers: NSEvent.modifierFlags, clickCount: NSApp.currentEvent?.clickCount ?? 1)
                 }
                 .onEnded { _ in gestures.ended() }
         )
@@ -203,10 +217,14 @@ struct TimelineView: View {
                 gestures.abandon()
             }
         }
-        .dropDestination(for: AssetReference.self) { items, location in
-            guard let item = items.first else { return false }
-            return gestures.drop(assetID: item.assetID, at: location, insert: NSEvent.modifierFlags.contains(.command))
-        } isTargeted: { isDropTargeted = $0 }
+        .onContinuousHover { phase in
+            switch phase {
+            case let .active(location): gestures.hover(at: location)
+            case .ended: gestures.hover(at: nil)
+            }
+        }
+        .onDrop(of: TimelineDropDelegate.types,
+                delegate: TimelineDropDelegate(gestures: gestures, isAssetTargeted: $isDropTargeted))
         .clipped()
     }
 
@@ -301,6 +319,60 @@ struct PlayheadMarker: View {
             }
         }
         .allowsHitTesting(false)
+    }
+}
+
+/// Drops on the track area: media from the bin (placed at the drop point, overwrite; hold
+/// Command to insert) and transitions from the Transitions panel (added on the nearest cut; the
+/// cut is highlighted while dragging, in red with the reason when it cannot take one).
+@MainActor
+struct TimelineDropDelegate: DropDelegate {
+    static let types: [UTType] = [.videditAssetReference, .videditCrossDissolve, .videditAudioCrossfade]
+
+    let gestures: TimelineGestureController
+    @Binding var isAssetTargeted: Bool
+
+    private func transitionKind(_ info: DropInfo) -> TransitionKind? {
+        TransitionKind.allCases.first { info.hasItemsConforming(to: [$0.contentType]) }
+    }
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: Self.types)
+    }
+
+    func dropEntered(info: DropInfo) {
+        if transitionKind(info) == nil { isAssetTargeted = true }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard let kind = transitionKind(info) else { return DropProposal(operation: .copy) }
+        let target = gestures.transitionDragUpdated(kind: kind, at: info.location)
+        return DropProposal(operation: target?.allowed == true ? .copy : .forbidden)
+    }
+
+    func dropExited(info: DropInfo) {
+        isAssetTargeted = false
+        gestures.transitionDragExited()
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        isAssetTargeted = false
+        if let kind = transitionKind(info) {
+            return gestures.dropTransition(kind: kind, at: info.location)
+        }
+        guard let provider = info.itemProviders(for: [.videditAssetReference]).first else { return false }
+        let location = info.location
+        let insert = NSEvent.modifierFlags.contains(.command)
+        let controller = gestures
+        provider.loadDataRepresentation(forTypeIdentifier: UTType.videditAssetReference.identifier) { data, _ in
+            guard let data, let reference = try? JSONDecoder().decode(AssetReference.self, from: data) else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    _ = controller.drop(assetID: reference.assetID, at: location, insert: insert)
+                }
+            }
+        }
+        return true
     }
 }
 

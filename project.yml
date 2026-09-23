@@ -213,6 +213,16 @@ targets:
             UTTypeDescription: VidEdit Media Reference
             UTTypeConformsTo:
               - public.data
+          # In-app drag payloads of the Transitions panel (one type per kind, so the timeline
+          # knows what is dragged before the drop).
+          - UTTypeIdentifier: com.justjohn12345.videdit.transition.cross-dissolve
+            UTTypeDescription: VidEdit Cross Dissolve
+            UTTypeConformsTo:
+              - public.data
+          - UTTypeIdentifier: com.justjohn12345.videdit.transition.audio-crossfade
+            UTTypeDescription: VidEdit Audio Crossfade
+            UTTypeConformsTo:
+              - public.data
     entitlements:
       path: App/Resources/VidEdit.entitlements
       properties:

@@ -25,6 +25,12 @@ struct TimelineRenderer {
     let waveforms: WaveformCache
     let snapTime: Double?
     let marquee: CGRect?
+    /// Gain value shown next to the pointer (gain line hovered or dragged).
+    var gainTooltip: TimelineGestureController.GainTooltip?
+    /// Where a transition dragged from the Transitions panel would land.
+    var transitionDrop: TimelineGestureController.TransitionDropTarget?
+    /// Formats a transition's duration in sequence frames for its band.
+    var formatFrames: (Int64) -> String = { "\($0)f" }
 
     static let thumbnailMaxDimension = 160
     static let labelHeight: CGFloat = 16
@@ -36,6 +42,9 @@ struct TimelineRenderer {
             drawClip(clip, in: &context, size: size)
         }
         drawTransitions(&context, size: size)
+        if let transitionDrop {
+            drawDropTarget(transitionDrop, in: &context, size: size)
+        }
         if let snapTime {
             let x = model.x(forTime: snapTime)
             context.stroke(Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height)) },
@@ -46,6 +55,22 @@ struct TimelineRenderer {
             context.fill(Path(rect), with: .color(Color.accentColor.opacity(0.15)))
             context.stroke(Path(rect), with: .color(.accentColor), lineWidth: 1)
         }
+        if let gainTooltip {
+            drawTooltip(gainTooltip.text, at: gainTooltip.point, in: &context, size: size)
+        }
+    }
+
+    /// A small label box next to `point`, kept inside the canvas.
+    private func drawTooltip(_ text: String, at point: CGPoint, in context: inout GraphicsContext, size: CGSize) {
+        let label = context.resolve(Text(text).font(.system(size: 10, weight: .semibold).monospacedDigit())
+            .foregroundColor(.white))
+        let textSize = label.measure(in: CGSize(width: 200, height: 40))
+        var box = CGRect(x: point.x + 12, y: point.y - textSize.height - 10, width: textSize.width + 10,
+                         height: textSize.height + 4)
+        if box.maxX > size.width { box.origin.x = point.x - box.width - 12 }
+        if box.minY < 0 { box.origin.y = point.y + 10 }
+        context.fill(Path(roundedRect: box, cornerRadius: 4), with: .color(Color.black.opacity(0.8)))
+        context.draw(label, at: CGPoint(x: box.midX, y: box.midY), anchor: .center)
     }
 
     private func drawRows(_ context: inout GraphicsContext, size: CGSize) {
@@ -81,6 +106,7 @@ struct TimelineRenderer {
                              height: max(0, body.height - Self.labelHeight))
         if isAudio {
             drawWaveform(clip, in: content, context: &inner, size: size)
+            drawFadesAndGain(clip, in: content, context: &inner)
         } else if let asset, asset.hasVideo, !asset.isMissing {
             drawThumbnails(clip, asset: asset, in: content, context: &inner, size: size)
         }
@@ -94,11 +120,65 @@ struct TimelineRenderer {
         if clip.linkedClipID != 0 {
             label = "⛓ " + label
         }
+        if isAudio, abs(clip.gainDb) > 1e-9 {
+            label += "  " + TimelineGestureController.gainText(clip.gainDb)
+        }
         let text = Text(label).font(.system(size: 10, weight: .medium)).foregroundColor(.white)
         let labelX = max(body.minX, 0) + 5
         inner.draw(text, at: CGPoint(x: labelX, y: body.minY + 2), anchor: .topLeading)
 
         context.stroke(shape, with: .color(isSelected ? .white : Color.black.opacity(0.5)), lineWidth: isSelected ? 2 : 1)
+        if isAudio {
+            drawFadeHandles(clip, in: &context)
+        }
+    }
+
+    /// The volume envelope over an audio clip's waveform: the gain line, the fade-in rising from
+    /// silence at the clip start to the gain line and the fade-out falling back to silence at
+    /// its end, with the silenced area above the fades darkened.
+    private func drawFadesAndGain(_ clip: TimelineViewModel.Clip, in content: CGRect, context: inout GraphicsContext) {
+        guard content.height > 4 else { return }
+        let gainY = TimelineViewModel.gainY(clip.gainDb, in: content)
+        let startX = model.x(forTime: clip.start)
+        let endX = model.x(forTime: clip.end)
+        let fadeInX = model.x(forTime: clip.start + clip.fadeIn)
+        let fadeOutX = model.x(forTime: clip.end - clip.fadeOut)
+        let shade = Color.black.opacity(0.35)
+        if clip.fadeIn > 0 {
+            var region = Path()
+            region.move(to: CGPoint(x: startX, y: content.minY))
+            region.addLine(to: CGPoint(x: startX, y: content.maxY))
+            region.addLine(to: CGPoint(x: fadeInX, y: gainY))
+            region.addLine(to: CGPoint(x: fadeInX, y: content.minY))
+            region.closeSubpath()
+            context.fill(region, with: .color(shade))
+        }
+        if clip.fadeOut > 0 {
+            var region = Path()
+            region.move(to: CGPoint(x: endX, y: content.minY))
+            region.addLine(to: CGPoint(x: endX, y: content.maxY))
+            region.addLine(to: CGPoint(x: fadeOutX, y: gainY))
+            region.addLine(to: CGPoint(x: fadeOutX, y: content.minY))
+            region.closeSubpath()
+            context.fill(region, with: .color(shade))
+        }
+        var envelope = Path()
+        envelope.move(to: CGPoint(x: startX, y: clip.fadeIn > 0 ? content.maxY : gainY))
+        envelope.addLine(to: CGPoint(x: fadeInX, y: gainY))
+        envelope.addLine(to: CGPoint(x: fadeOutX, y: gainY))
+        envelope.addLine(to: CGPoint(x: endX, y: clip.fadeOut > 0 ? content.maxY : gainY))
+        context.stroke(envelope, with: .color(Color.yellow.opacity(0.9)), lineWidth: 1.2)
+    }
+
+    /// The fade handles: small squares at the top corners (at each fade's end).
+    private func drawFadeHandles(_ clip: TimelineViewModel.Clip, in context: inout GraphicsContext) {
+        let size = TimelineViewModel.fadeHandleSize
+        for fadeIn in [true, false] {
+            guard let center = model.fadeHandleCenter(forClip: clip, fadeIn: fadeIn) else { continue }
+            let square = CGRect(x: center.x - size / 2, y: center.y - size / 2, width: size, height: size)
+            context.fill(Path(square), with: .color(.white))
+            context.stroke(Path(square), with: .color(.black.opacity(0.6)), lineWidth: 1)
+        }
     }
 
     private func drawThumbnails(_ clip: TimelineViewModel.Clip, asset: VEAssetInfo, in rect: CGRect,
@@ -157,18 +237,65 @@ struct TimelineRenderer {
         }
     }
 
+    /// Transitions: a band across the cut at the top of the row with its duration, resize
+    /// handles at both edges and a white outline when selected.
     private func drawTransitions(_ context: inout GraphicsContext, size: CGSize) {
         for transition in model.transitions {
             guard let rect = model.rect(forTransition: transition), rect.maxX >= 0, rect.minX <= size.width else { continue }
-            let shape = Path(roundedRect: rect.insetBy(dx: 0, dy: 1), cornerRadius: 3)
-            context.fill(shape, with: .color(Color.purple.opacity(0.85)))
+            let band = rect.insetBy(dx: 0, dy: 1)
+            let shape = Path(roundedRect: band, cornerRadius: 3)
+            context.fill(shape, with: .color(Color.purple.opacity(0.9)))
             var diagonal = Path()
-            diagonal.move(to: CGPoint(x: rect.minX, y: rect.maxY))
-            diagonal.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-            context.stroke(diagonal, with: .color(.white.opacity(0.7)), lineWidth: 1)
+            diagonal.move(to: CGPoint(x: band.minX, y: band.maxY))
+            diagonal.addLine(to: CGPoint(x: band.maxX, y: band.minY))
+            context.stroke(diagonal, with: .color(.white.opacity(0.35)), lineWidth: 1)
+            let cutX = model.x(forTime: transition.cut(in: model))
+            context.stroke(Path { $0.move(to: CGPoint(x: cutX, y: band.minY)); $0.addLine(to: CGPoint(x: cutX, y: band.maxY)) },
+                           with: .color(.white.opacity(0.6)), lineWidth: 1)
+            let frames = Int64(((transition.end - transition.start) / max(model.frameSeconds, 1e-9)).rounded())
+            let label = context.resolve(Text(formatFrames(frames)).font(.system(size: 9, weight: .semibold).monospacedDigit())
+                .foregroundColor(.white))
+            let labelSize = label.measure(in: CGSize(width: 200, height: band.height))
+            if labelSize.width + 12 < band.width {
+                context.draw(label, at: CGPoint(x: band.midX, y: band.midY), anchor: .center)
+            }
             let isSelected = transition.id == selectedTransitionID
+            let handleWidth: CGFloat = 3
+            if band.width > 12 {
+                for x in [band.minX + 1, band.maxX - 1 - handleWidth] {
+                    let handle = CGRect(x: x, y: band.minY + 2, width: handleWidth, height: band.height - 4)
+                    context.fill(Path(roundedRect: handle, cornerRadius: 1), with: .color(.white.opacity(isSelected ? 0.95 : 0.6)))
+                }
+            }
             context.stroke(shape, with: .color(isSelected ? .white : .black.opacity(0.4)), lineWidth: isSelected ? 2 : 1)
         }
+    }
+
+    /// Drop feedback for a transition dragged from the panel: the cut is highlighted with the
+    /// band the transition would get (green) or in red when it cannot take one, with the reason.
+    private func drawDropTarget(_ target: TimelineGestureController.TransitionDropTarget,
+                                in context: inout GraphicsContext, size: CGSize) {
+        guard let layout = model.layout(forTrack: target.trackID) else { return }
+        let rowTop = layout.y - model.scrollY
+        let color: Color = target.allowed ? .green : .red
+        let cutX = model.x(forTime: target.cut)
+        context.stroke(Path { $0.move(to: CGPoint(x: cutX, y: rowTop)); $0.addLine(to: CGPoint(x: cutX, y: rowTop + layout.height)) },
+                       with: .color(color), lineWidth: 2)
+        if target.allowed {
+            let x0 = model.x(forTime: target.start)
+            let x1 = model.x(forTime: target.end)
+            let band = CGRect(x: x0, y: rowTop + 1, width: max(4, x1 - x0), height: TimelineViewModel.transitionStripHeight - 2)
+            context.fill(Path(roundedRect: band, cornerRadius: 3), with: .color(color.opacity(0.45)))
+            context.stroke(Path(roundedRect: band, cornerRadius: 3), with: .color(color), lineWidth: 1.5)
+        }
+        let text = target.message.isEmpty ? "\(target.kind.title) · \(formatFrames(target.frames))" : target.message
+        let label = context.resolve(Text(text).font(.system(size: 10, weight: .medium)).foregroundColor(.white))
+        let textSize = label.measure(in: CGSize(width: 360, height: 60))
+        var box = CGRect(x: cutX + 8, y: rowTop + TimelineViewModel.transitionStripHeight + 2,
+                         width: textSize.width + 10, height: textSize.height + 4)
+        if box.maxX > size.width { box.origin.x = max(0, cutX - box.width - 8) }
+        context.fill(Path(roundedRect: box, cornerRadius: 4), with: .color((target.allowed ? Color.black : Color.red).opacity(0.8)))
+        context.draw(label, at: CGPoint(x: box.midX, y: box.midY), anchor: .center)
     }
 }
 

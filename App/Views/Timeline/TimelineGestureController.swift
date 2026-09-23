@@ -29,6 +29,15 @@ final class TimelineGestureController: ObservableObject {
         case trimmingHead(clip: Int64, origin: CGPoint, edge: Double, excluded: Set<Int64>)
         case trimmingTail(clip: Int64, origin: CGPoint, edge: Double, excluded: Set<Int64>)
         case marquee(origin: CGPoint, base: Set<Int64>)
+        /// Dragging an edge of a transition band: the duration changes by twice the edge's
+        /// movement (the transition stays centred on its cut), in whole frames within
+        /// [1, maxFrames] (`limit` says what stops it at the top).
+        case resizingTransition(id: Int64, tail: Bool, origin: CGPoint, frames: Int64, maxFrames: Int64,
+                                limit: String)
+        /// Dragging an audio clip's fade handle.
+        case fading(clip: Int64, fadeIn: Bool)
+        /// Dragging an audio clip's gain line (`gain`: the value so far; Option drags finely).
+        case gain(clip: Int64, lastY: CGFloat, gain: Double)
         /// Dragging the playhead (see the type's comment).
         case scrubbing
         /// Escape pressed: the rest of the gesture is ignored.
@@ -42,9 +51,41 @@ final class TimelineGestureController: ObservableObject {
     /// Coalescing group keys of the drags.
     static let moveGroup = "timeline.move"
     static let trimGroup = "timeline.trim"
+    static let transitionGroup = "timeline.transition"
+    static let fadeGroup = "timeline.fade"
+    static let gainGroup = "timeline.gain"
 
     @Published private(set) var drag: DragState = .idle
     @Published private(set) var marquee: CGRect?
+    /// The value shown next to the pointer while the gain line is dragged or hovered.
+    @Published private(set) var gainTooltip: GainTooltip?
+    /// What a transition dragged from the Transitions panel would land on.
+    @Published private(set) var transitionDrop: TransitionDropTarget?
+    /// What the pointer hovers (cursor and gain tooltip).
+    @Published private(set) var hover: TimelineViewModel.Hit?
+
+    struct GainTooltip: Equatable {
+        let text: String
+        let point: CGPoint
+    }
+
+    /// A cut a dragged transition would be added to.
+    struct TransitionDropTarget: Equatable {
+        let kind: TransitionKind
+        let trackID: Int64
+        let fromClipID: Int64
+        let toClipID: Int64
+        /// Seconds.
+        let cut: Double
+        /// The duration it would get (the default, shortened to what the cut allows).
+        let frames: Int64
+        /// Seconds of the band it would cover (centred on the cut).
+        let start: Double
+        let end: Double
+        let allowed: Bool
+        /// Why the drop is refused, or what shortens it ("" when neither).
+        let message: String
+    }
 
     private unowned let store: ProjectStore
     /// The timeline's content when the drag started (snap candidates).
@@ -67,13 +108,14 @@ final class TimelineGestureController: ObservableObject {
 
     // MARK: Events
 
-    /// The pointer moved (or was pressed: the first event of a gesture).
-    func changed(location: CGPoint, startLocation: CGPoint, modifiers: NSEvent.ModifierFlags) {
+    /// The pointer moved (or was pressed: the first event of a gesture). `clickCount` is the
+    /// press's click count (2 for a double-click).
+    func changed(location: CGPoint, startLocation: CGPoint, modifiers: NSEvent.ModifierFlags, clickCount: Int = 1) {
         let model = store.timelineModel
         switch drag {
         case .idle:
-            begin(at: startLocation, extend: modifiers.contains(.shift), grabPlayhead: modifiers.contains(.option),
-                  model: model)
+            begin(at: startLocation, extend: modifiers.contains(.shift), option: modifiers.contains(.option),
+                  clickCount: clickCount, model: model)
             if drag != .idle {
                 changed(location: location, startLocation: startLocation, modifiers: modifiers)
             }
@@ -100,6 +142,13 @@ final class TimelineGestureController: ObservableObject {
             })
         case .scrubbing:
             scrub(to: location, model: model)
+        case let .resizingTransition(id, tail, origin, frames, maxFrames, limit):
+            resizeTransition(id, tail: tail, origin: origin, location: location, frames: frames, maxFrames: maxFrames,
+                             limit: limit, model: model)
+        case let .fading(clip, fadeIn):
+            fade(clip, fadeIn: fadeIn, location: location, model: model)
+        case let .gain(clip, lastY, gain):
+            dragGain(clip, lastY: lastY, gain: gain, location: location, fine: modifiers.contains(.option), model: model)
         case let .marquee(origin, base):
             let rect = CGRect(x: origin.x, y: origin.y, width: location.x - origin.x,
                               height: location.y - origin.y).standardized
@@ -119,8 +168,8 @@ final class TimelineGestureController: ObservableObject {
             if case let .clipBody(id) = hit, !extend, wasSelected {
                 store.select(clip: id, extend: false)
             }
-        case .moving, .trimmingHead, .trimmingTail:
-            store.engine.endCoalescing()
+        case .moving, .trimmingHead, .trimmingTail, .resizingTransition, .fading, .gain:
+            endGroup()
         case .scrubbing:
             store.endScrub()
         default:
@@ -129,11 +178,22 @@ final class TimelineGestureController: ObservableObject {
         reset()
     }
 
+    /// Ends the drag's coalescing group if it is still open (another edit may have ended it).
+    private func endGroup() {
+        if let key = store.engine.coalescingKey, Self.dragGroups.contains(key) {
+            store.engine.endCoalescing()
+        }
+    }
+
+    private static let dragGroups: Set<String> = [moveGroup, trimGroup, transitionGroup, fadeGroup, gainGroup]
+
     /// Escape / Cmd+Z: reverts the drag's edits; the rest of the gesture is ignored.
     func cancel() {
         switch drag {
-        case .moving, .trimmingHead, .trimmingTail:
-            store.engine.cancelCoalescing()
+        case .moving, .trimmingHead, .trimmingTail, .resizingTransition, .fading, .gain:
+            if let key = store.engine.coalescingKey, Self.dragGroups.contains(key) {
+                store.engine.cancelCoalescing()
+            }
             drag = .cancelled
         case .pending, .marquee:
             drag = .cancelled
@@ -146,6 +206,7 @@ final class TimelineGestureController: ObservableObject {
         store.snapIndicator = nil
         store.cancelActiveGesture = nil
         marquee = nil
+        gainTooltip = nil
         snapshot = nil
     }
 
@@ -174,19 +235,25 @@ final class TimelineGestureController: ObservableObject {
         store.snapIndicator = nil
         store.cancelActiveGesture = nil
         marquee = nil
+        gainTooltip = nil
         snapshot = nil
         drag = .idle
     }
 
-    /// Press: select according to what was hit, or grab the playhead.
-    private func begin(at point: CGPoint, extend: Bool, grabPlayhead: Bool, model: TimelineViewModel) {
+    /// Press: select according to what was hit, or grab the playhead. Option grabs the playhead
+    /// anywhere except on a gain line (where it means a fine gain drag).
+    private func begin(at point: CGPoint, extend: Bool, option: Bool, clickCount: Int, model: TimelineViewModel) {
         let hit = model.hitTest(point)
         store.focusArea = .timeline
         store.reclaimKeyboardFocus()
         store.statusMessage = nil
         let onEmptySpace: Bool
+        var grabPlayhead = option
         switch hit {
         case .track, .none: onEmptySpace = true
+        case .gainLine:
+            onEmptySpace = false
+            grabPlayhead = false
         default: onEmptySpace = false
         }
         if grabPlayhead || (onEmptySpace && abs(point.x - model.x(forTime: model.playhead)) <= Self.playheadGrabZone) {
@@ -196,16 +263,21 @@ final class TimelineGestureController: ObservableObject {
             return
         }
         switch hit {
-        case let .clipBody(id), let .clipHead(id), let .clipTail(id):
+        case let .clipBody(id), let .clipHead(id), let .clipTail(id), let .fadeIn(id), let .fadeOut(id),
+             let .gainLine(id):
             let wasSelected = store.selection.contains(id)
             if extend || !wasSelected {
                 store.select(clip: id, extend: extend)
             }
             store.selectedTransitionID = nil
             drag = .pending(hit: hit, origin: point, extend: extend, wasSelected: wasSelected)
-        case let .transition(id):
+        case let .transition(id), let .transitionHead(id), let .transitionTail(id):
             store.selection = []
             store.selectedTransitionID = id
+            if clickCount >= 2 {
+                // Double-click: edit the duration in the inspector.
+                store.requestInspectorFocus(.transitionDuration)
+            }
             drag = .pending(hit: hit, origin: point, extend: extend, wasSelected: false)
         case let .track(id):
             if let track = model.tracks.first(where: { $0.id == id }) {
@@ -252,6 +324,27 @@ final class TimelineGestureController: ObservableObject {
             snapshot = model
             store.engine.beginCoalescing(withKey: Self.trimGroup)
             drag = .trimmingTail(clip: id, origin: origin, edge: clip.end, excluded: model.expandingLinks([id]))
+        case let .transitionHead(id), let .transitionTail(id):
+            guard let info = store.engine.transitionInfo(id) else { drag = .cancelled; return }
+            let limit = store.engine.transitionLimit(forTransition: id)
+            snapshot = model
+            store.engine.beginCoalescing(withKey: Self.transitionGroup)
+            var tail = false
+            if case .transitionTail = hit { tail = true }
+            drag = .resizingTransition(id: id, tail: tail, origin: origin, frames: store.frames(info.duration),
+                                       maxFrames: max(1, limit.maximumFrames), limit: limit.reason)
+        case let .fadeIn(id), let .fadeOut(id):
+            guard model.clip(id: id) != nil else { drag = .cancelled; return }
+            snapshot = model
+            store.engine.beginCoalescing(withKey: Self.fadeGroup)
+            var fadeIn = false
+            if case .fadeIn = hit { fadeIn = true }
+            drag = .fading(clip: id, fadeIn: fadeIn)
+        case let .gainLine(id):
+            guard let clip = model.clip(id: id) else { drag = .cancelled; return }
+            snapshot = model
+            store.engine.beginCoalescing(withKey: Self.gainGroup)
+            drag = .gain(clip: id, lastY: origin.y, gain: clip.gainDb)
         default:
             drag = .cancelled
             return
@@ -291,6 +384,208 @@ final class TimelineGestureController: ObservableObject {
             seconds = snap.time
         }
         store.scrub(toSeconds: max(0, seconds))
+    }
+
+    /// A step of a transition edge drag.
+    private func resizeTransition(_ id: Int64, tail: Bool, origin: CGPoint, location: CGPoint, frames: Int64,
+                                  maxFrames: Int64, limit: String, model: TimelineViewModel) {
+        let dx = model.time(forX: location.x) - model.time(forX: origin.x)
+        let requested = Int64((Double(frames) + (tail ? 2 : -2) * dx / max(model.frameSeconds, 1e-9)).rounded())
+        let length = min(maxFrames, max(1, requested))
+        let duration = store.time(frames: length)
+        let result = store.engine.performInCoalescingGroup(Self.transitionGroup) {
+            store.engine.setDuration(duration, forTransition: id)
+        }
+        guard handleStep(result) else { return }
+        if requested > maxFrames {
+            store.statusMessage = "Limited to \(store.durationString(frames: maxFrames)): \(limit)"
+        } else if requested < 1 {
+            store.statusMessage = "A transition is at least one frame long."
+        } else {
+            store.statusMessage = "Transition: \(store.durationString(frames: length))"
+        }
+    }
+
+    /// A step of a fade handle drag: the fade ends at the pointer, on the frame grid, within
+    /// the clip and never overlapping the other fade.
+    private func fade(_ id: Int64, fadeIn: Bool, location: CGPoint, model: TimelineViewModel) {
+        guard let clip = snapModel.clip(id: id), let info = store.clips[id] else { return }
+        let frameSeconds = max(model.frameSeconds, 1e-9)
+        let pointer = model.time(forX: location.x)
+        let requested = Int64(((fadeIn ? pointer - clip.start : clip.end - pointer) / frameSeconds).rounded())
+        let clipFrames = store.frames(info.duration)
+        let other = store.frames(fadeIn ? info.audioParams.fadeOutDuration : info.audioParams.fadeInDuration)
+        let room = max(0, clipFrames - other)
+        let frames = min(room, max(0, requested))
+        var params = info.audioParams
+        if fadeIn {
+            params.fadeInDuration = store.time(frames: frames)
+        } else {
+            params.fadeOutDuration = store.time(frames: frames)
+        }
+        let result = store.engine.performInCoalescingGroup(Self.fadeGroup) {
+            store.engine.setAudioParams(params, forClip: id)
+        }
+        guard handleStep(result) else { return }
+        let name = fadeIn ? "Fade in" : "Fade out"
+        if requested > room {
+            store.statusMessage = other > 0
+                ? "\(name) limited to \(store.durationString(frames: room)): the fades cannot overlap."
+                : "\(name) limited to the clip's length."
+        } else {
+            store.statusMessage = "\(name): \(store.durationString(frames: frames))"
+        }
+    }
+
+    /// A step of a gain line drag: up raises the gain; Option drags ten times finer.
+    private func dragGain(_ id: Int64, lastY: CGFloat, gain: Double, location: CGPoint, fine: Bool,
+                          model: TimelineViewModel) {
+        guard let clip = snapModel.clip(id: id), let info = store.clips[id] else { return }
+        let raw = gain - Double(location.y - lastY) * model.decibelsPerPoint(forClip: clip, fine: fine)
+        let clamped = min(TimelineViewModel.gainMaxDb, max(TimelineViewModel.gainMinDb, raw))
+        let rounded = (clamped * 10).rounded() / 10
+        drag = .gain(clip: id, lastY: location.y, gain: clamped)
+        var params = info.audioParams
+        guard abs(params.gainDb - rounded) > 1e-9 else {
+            gainTooltip = GainTooltip(text: Self.gainText(rounded), point: location)
+            return
+        }
+        params.gainDb = rounded
+        let result = store.engine.performInCoalescingGroup(Self.gainGroup) {
+            store.engine.setAudioParams(params, forClip: id)
+        }
+        guard handleStep(result) else { return }
+        gainTooltip = GainTooltip(text: Self.gainText(rounded), point: location)
+    }
+
+    /// "+3.0 dB", "0.0 dB", "−6.5 dB".
+    static func gainText(_ gainDb: Double) -> String {
+        let value = (gainDb * 10).rounded() / 10
+        if value > 0 { return String(format: "+%.1f dB", value) }
+        if value < 0 { return String(format: "−%.1f dB", -value) }
+        return "0.0 dB"
+    }
+
+    /// Reports a drag step's result; a refusal because another edit ended the drag's group
+    /// (VEEditErrorBusy) stops the drag, keeping what it did. Returns whether the step applied.
+    private func handleStep(_ result: VEEditResult) -> Bool {
+        if result.ok { return true }
+        store.statusMessage = result.message
+        if result.errorCode == .busy {
+            store.statusMessage = "Another edit interrupted the drag; what it did so far is kept."
+            drag = .cancelled
+            store.cancelActiveGesture = nil
+            gainTooltip = nil
+            store.snapIndicator = nil
+        }
+        return false
+    }
+
+    // MARK: Hover
+
+    /// The pointer hovers `point` (nil: it left the track area): updates the cursor and the gain
+    /// tooltip. Publishes only when what is hovered changes.
+    func hover(at point: CGPoint?) {
+        guard drag == .idle else { return }
+        let model = store.timelineModel
+        let hit = point.map { model.hitTest($0) }
+        if hit != hover { hover = hit }
+        var tooltip: GainTooltip?
+        switch hit {
+        case .clipHead?, .clipTail?, .transitionHead?, .transitionTail?, .fadeIn?, .fadeOut?:
+            NSCursor.resizeLeftRight.set()
+        case let .gainLine(id)?:
+            NSCursor.resizeUpDown.set()
+            if let clip = model.clip(id: id), let point {
+                tooltip = GainTooltip(text: Self.gainText(clip.gainDb), point: point)
+            }
+        default:
+            NSCursor.arrow.set()
+        }
+        // Republish only when the text changes (not on every pointer move along the line).
+        if tooltip?.text != gainTooltip?.text { gainTooltip = tooltip }
+    }
+
+    // MARK: Transition drops
+
+    /// A transition from the Transitions panel is dragged over `location`: finds the cut it would
+    /// land on (the nearest cut on that row within `dropCutDistance` points) and whether it fits.
+    @discardableResult
+    func transitionDragUpdated(kind: TransitionKind, at location: CGPoint) -> TransitionDropTarget? {
+        let target = dropTarget(kind: kind, at: location)
+        if target != transitionDrop { transitionDrop = target }
+        return target
+    }
+
+    func transitionDragExited() {
+        if transitionDrop != nil { transitionDrop = nil }
+    }
+
+    /// Drops a transition: added on the target cut (see `ProjectStore.addTransition`); a refused
+    /// drop says why in the status line. Returns whether a transition was added (or is waiting
+    /// for the linked-crossfade question).
+    @discardableResult
+    func dropTransition(kind: TransitionKind, at location: CGPoint) -> Bool {
+        let target = dropTarget(kind: kind, at: location)
+        transitionDrop = nil
+        store.focusArea = .timeline
+        guard let target else {
+            store.statusMessage = dropMissMessage(kind: kind, at: location)
+            return false
+        }
+        guard target.allowed else {
+            store.statusMessage = target.message
+            return false
+        }
+        if store.addTransition(kind, from: target.fromClipID, to: target.toClipID) {
+            return true
+        }
+        return store.pendingLinkedTransition != nil
+    }
+
+    /// Distance (points) from the pointer within which a cut takes a dropped transition.
+    static let dropCutDistance: CGFloat = 40
+
+    private func dropTarget(kind: TransitionKind, at location: CGPoint) -> TransitionDropTarget? {
+        let model = store.timelineModel
+        guard let row = model.layout(atY: location.y),
+              (row.track.kind == .video) == (kind.trackKind == .video) else { return nil }
+        let onTrack = model.clips.filter { $0.trackID == row.track.id }
+        var best: (from: TimelineViewModel.Clip, to: TimelineViewModel.Clip, distance: CGFloat)?
+        for (from, to) in zip(onTrack, onTrack.dropFirst()) where abs(from.end - to.start) < 1e-9 {
+            let distance = abs(model.x(forTime: from.end) - location.x)
+            if distance <= Self.dropCutDistance, best.map({ distance < $0.distance }) ?? true {
+                best = (from, to, distance)
+            }
+        }
+        guard let (from, to, _) = best else { return nil }
+        let limit = store.engine.transitionLimit(fromClip: from.id, toClip: to.id)
+        let wanted = store.editingPreferences.transitionFrames(frameDuration: store.frameDuration)
+        let frames = min(wanted, limit.maximumFrames)
+        let allowed = limit.maximumFrames > 0 && !row.track.locked
+        var message = ""
+        if row.track.locked {
+            message = "Track \(row.track.name) is locked."
+        } else if !allowed {
+            message = "No transition fits this cut: \(limit.reason)"
+        } else if frames < wanted {
+            message = "Shortened to \(store.durationString(frames: frames)): \(limit.reason)"
+        }
+        let shown = max(frames, 1)
+        let frameSeconds = model.frameSeconds
+        let start = from.end - Double(shown / 2) * frameSeconds
+        let end = from.end + Double(shown - shown / 2) * frameSeconds
+        return TransitionDropTarget(kind: kind, trackID: row.track.id, fromClipID: from.id, toClipID: to.id,
+                                    cut: from.end, frames: frames, start: start, end: end, allowed: allowed,
+                                    message: message)
+    }
+
+    private func dropMissMessage(kind: TransitionKind, at location: CGPoint) -> String {
+        let model = store.timelineModel
+        if let row = model.layout(atY: location.y), (row.track.kind == .video) != (kind.trackKind == .video) {
+            return "\(kind.title) goes on \(kind.trackKind == .video ? "a video" : "an audio") track."
+        }
+        return "Drop \(kind.title) on a cut between two adjacent clips."
     }
 
     private func trimTime(edge: Double, origin: CGPoint, location: CGPoint, excluded: Set<Int64>,

@@ -17,6 +17,8 @@ struct ContentView: View {
             HSplitView {
                 VStack(spacing: 0) {
                     MediaBinView(store: store)
+                    Divider()
+                    TransitionsPanel(store: store)
                     Text(Self.versionText)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
@@ -42,6 +44,30 @@ struct ContentView: View {
                 .frame(minHeight: 200, idealHeight: 320)
         }
         .frame(minWidth: 1100, minHeight: 640)
+        .sheet(isPresented: Binding(get: { store.speedSheetClipIDs != nil },
+                                    set: { if !$0 { store.speedSheetClipIDs = nil } })) {
+            if let ids = store.speedSheetClipIDs {
+                SpeedDurationSheet(model: SpeedDurationModel(store: store, clipIDs: ids))
+            }
+        }
+        .confirmationDialog("Also add a crossfade to the linked audio?",
+                            isPresented: Binding(get: { store.pendingLinkedTransition != nil },
+                                                 set: { presented in
+                                                     // Dismissed without a choice (Escape, a click
+                                                     // outside): cancel, after any button action.
+                                                     guard !presented else { return }
+                                                     DispatchQueue.main.async {
+                                                         store.resolvePendingTransition(includeLinked: nil)
+                                                     }
+                                                 }),
+                            titleVisibility: .visible) {
+            Button("Add Dissolve and Crossfade") { store.resolvePendingTransition(includeLinked: true) }
+            Button("Video Only") { store.resolvePendingTransition(includeLinked: false) }
+            Button("Cancel", role: .cancel) { store.resolvePendingTransition(includeLinked: nil) }
+        } message: {
+            Text("The clips' linked audio also meets at this cut. Both transitions are added as one undo step. "
+                + "(Settings > Editing decides whether to ask.)")
+        }
         .background(
             WindowAccessor(title: store.projectName, representedURL: store.projectURL, isEdited: store.isDirty,
                            shouldClose: { documents.confirmClosingWindow() },

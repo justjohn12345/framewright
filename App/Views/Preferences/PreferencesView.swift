@@ -26,6 +26,10 @@ struct PreferencesView: View {
     @AppStorage(Preferences.preferredBackendKey) private var preferredBackend = ""
     @AppStorage(Preferences.frameCacheMegabytesKey) private var frameCacheMegabytes = Preferences.defaultFrameCacheMegabytes
     @AppStorage(Preferences.rippleScopeKey) private var rippleScope = "all"
+    @AppStorage(EditingPreferences.defaultTransitionSecondsKey) private var transitionSeconds =
+        EditingPreferences.defaultTransitionSeconds
+    @AppStorage(EditingPreferences.linkedCrossfadeKey) private var linkedCrossfade = LinkedCrossfadeMode.always.rawValue
+    @AppStorage(EditingPreferences.durationDisplayKey) private var durationDisplay = DurationDisplay.timecode.rawValue
 
     var body: some View {
         TabView {
@@ -36,7 +40,7 @@ struct PreferencesView: View {
             editingTab
                 .tabItem { Label("Editing", systemImage: "scissors") }
         }
-        .frame(width: 560, height: 360)
+        .frame(width: 560, height: 440)
         .padding()
     }
 
@@ -87,6 +91,33 @@ extension PreferencesView {
             .onChange(of: rippleScope) { _, _ in Preferences.apply(to: engine) }
             Text("Ripple delete, speed changes and inserts shift later clips. With All tracks, when another "
                 + "track has a clip in the way the edit ripples only the edited clips’ tracks and says so.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Section("Transitions") {
+                HStack {
+                    TextField("Default duration", value: $transitionSeconds,
+                              format: .number.precision(.fractionLength(0 ... 2)))
+                        .frame(width: 180)
+                    Stepper("", value: $transitionSeconds, in: 0.1 ... 10, step: 0.5)
+                        .labelsHidden()
+                    Text("seconds")
+                }
+                Picker("Add the linked audio crossfade", selection: $linkedCrossfade) {
+                    ForEach(LinkedCrossfadeMode.allCases) { Text($0.title).tag($0.rawValue) }
+                }
+                Text("New transitions get this duration (rounded to whole frames), shortened when the clips "
+                    + "lack media beyond the cut. A video dissolve on linked clips can also add the audio "
+                    + "crossfade on their cut, as one undo step.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Picker("Show durations as", selection: $durationDisplay) {
+                ForEach(DurationDisplay.allCases) { Text($0.title).tag($0.rawValue) }
+            }
+            Text("Fades and transition durations in the inspector and the timeline. Typed durations accept "
+                + "12f, 0.5s or timecode in any mode.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

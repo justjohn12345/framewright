@@ -11,7 +11,8 @@ import Foundation
 /// in the timeline, a monitor or the bin takes that focus back (`ProjectStore.reclaimKeyboardFocus`).
 /// Handled: Space (play/pause), J/K/L (shuttle), ←/→ (one frame), Home/End (start/end), Delete /
 /// Forward Delete (delete in the focused panel), Shift+Delete (ripple delete), I/O (source
-/// in/out), = or + / - (zoom the timeline, like Command-= / Command--), Escape (cancel the drag in
+/// in/out), = or + / - (zoom the timeline, like Command-= / Command--), ] / [ (gain of the selected
+/// audio clips ±1 dB, with Shift ±10 dB; a burst is one undo step), Escape (cancel the drag in
 /// progress; passed on when there is none), Command-A (select all clips). Auto-repeat of Space and
 /// J/K/L is ignored (holding L does not race to 8x, holding Space does not toggle). Transport
 /// keys drive the monitor that has focus (see `PlaybackActions`).
@@ -26,6 +27,8 @@ final class KeyboardController {
         case zoomIn, zoomOut
         case cancel
         case selectAll
+        /// `]` / `[`: gain of the selected audio clips ±1 dB (with Shift, `}` / `{`: ±10 dB).
+        case gainUp(big: Bool), gainDown(big: Bool)
 
         /// Keys whose auto-repeat is ignored (each press is a discrete transport command).
         var ignoresRepeat: Bool {
@@ -82,6 +85,15 @@ final class KeyboardController {
         // "+" is Shift+= on most layouts: accept it with or without Shift.
         if characters == "+", flags.isEmpty || flags == .shift {
             return .zoomIn
+        }
+        if flags.isEmpty || flags == .shift {
+            switch characters {
+            case "]": return .gainUp(big: flags == .shift)
+            case "[": return .gainDown(big: flags == .shift)
+            case "}": return .gainUp(big: true)
+            case "{": return .gainDown(big: true)
+            default: break
+            }
         }
         guard flags.isEmpty else { return nil }
         switch characters.lowercased() {
@@ -154,6 +166,8 @@ final class KeyboardController {
         case .zoomOut: store.zoomOut()
         case .cancel: store.cancelActiveGesture?()
         case .selectAll: store.selectAll()
+        case let .gainUp(big): store.nudgeGain(big ? InspectorModel.bigStep : 1)
+        case let .gainDown(big): store.nudgeGain(big ? -InspectorModel.bigStep : -1)
         }
     }
 }

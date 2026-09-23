@@ -86,6 +86,13 @@ struct AppCommands: Commands {
             .keyboardShortcut("z", modifiers: [.command, .shift])
             .disabled(!store.canRedo && !Self.textFieldCan(undo: false))
         }
+        CommandGroup(after: .undoRedo) {
+            Divider()
+            Button("Reset Video Settings") { store.resetSettings(.video) }
+                .disabled(!store.selectedClips.contains { $0.trackKind == .video })
+            Button("Reset Audio Settings") { store.resetSettings(.audio) }
+                .disabled(!store.selectedClips.contains { $0.trackKind == .audio })
+        }
         CommandMenu("Clip") {
             Button("Split at Playhead") { store.splitAtPlayhead() }
                 .keyboardShortcut("k")
@@ -98,8 +105,21 @@ struct AppCommands: Commands {
             Divider()
             Button("Link / Unlink") { store.linkOrUnlinkSelection() }
                 .keyboardShortcut("l")
-            Button("Add Cross Dissolve") { store.addCrossDissolveAtPlayhead() }
+            Button("Speed/Duration…") { store.showSpeedSheet() }
+                .keyboardShortcut("r")
+                .disabled(store.selection.isEmpty)
+            Divider()
+            Button("Add Cross Dissolve") { store.addTransitionAtPlayhead(.crossDissolve) }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
+            Button("Add Audio Crossfade") { store.addTransitionAtPlayhead(.audioCrossfade) }
+                .keyboardShortcut("d", modifiers: [.command, .shift, .option])
+            Button("Transition Duration…") { store.editTransitionDuration() }
+                .disabled(store.selectedTransitionID == nil)
+            Divider()
+            Button("Raise Gain 1 dB  ]") { store.nudgeGain(1) }
+                .disabled(store.selection.isEmpty)
+            Button("Lower Gain 1 dB  [") { store.nudgeGain(-1) }
+                .disabled(store.selection.isEmpty)
             Divider()
             Button("Select All Clips  ⌘A") { store.selectAll() }
             Button("Insert from Source") { store.placeSource(overwrite: false) }

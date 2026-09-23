@@ -74,6 +74,26 @@
 			<key>UTTypeIdentifier</key>
 			<string>com.justjohn12345.videdit.asset-reference</string>
 		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>VidEdit Cross Dissolve</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.videdit.transition.cross-dissolve</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>VidEdit Audio Crossfade</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.videdit.transition.audio-crossfade</string>
+		</dict>
 	</array>
 </dict>
 </plist>

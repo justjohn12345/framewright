@@ -38,6 +38,11 @@ final class ProjectStore: ObservableObject {
     let sourcePlayhead = PlayheadModel()
     let viewport = TimelineViewport()
     private(set) lazy var playbackActions: PlaybackActions = EnginePlaybackActions(store: self)
+    /// The inspector's editing logic (parameters, nudges, sliders, resets, messages).
+    private(set) lazy var inspector = InspectorModel(store: self)
+    /// Where the Editing preferences are read from (tests use their own suite).
+    var defaults: UserDefaults = .standard
+    var editingPreferences: EditingPreferences { EditingPreferences(defaults: defaults) }
 
     // Engine snapshots.
     @Published private(set) var sequence: VESequenceInfo
@@ -72,6 +77,16 @@ final class ProjectStore: ObservableObject {
     @Published var statusMessage: String?
     /// The snap line shown while dragging (seconds), or nil.
     @Published var snapIndicator: Double?
+    /// A video dissolve waiting for the user to decide about the linked audio crossfade
+    /// (Editing preference "Ask each time"); shown as a confirmation dialog.
+    @Published var pendingLinkedTransition: PendingTransition?
+    /// Clips the Speed/Duration sheet edits (nil: the sheet is closed).
+    @Published var speedSheetClipIDs: [VEClipID]?
+    /// Asks the inspector to focus a field (double-clicking a transition focuses its duration).
+    @Published private(set) var inspectorFocusRequest: InspectorFocusRequest?
+    /// The coalescing group of the inspector's keyboard-nudge burst, while one is open. Unlike a
+    /// drag it does not block other commands: another edit simply commits the burst first.
+    var nudgeGroup: String?
 
     /// Width of the timeline's track area, for Zoom to Fit (updated by the timeline).
     var timelineViewportWidth: CGFloat = 800
@@ -83,12 +98,16 @@ final class ProjectStore: ObservableObject {
     /// clicks in the timeline, monitors and bin take keyboard focus back from its text fields.
     weak var editorWindow: NSWindow?
 
-    /// A gesture is in progress: a timeline drag (move, trim, marquee, playhead) or an edit
-    /// group such as an inspector slider drag. Edit commands (Delete, Split, Link, Insert...)
-    /// from keys and menus are ignored meanwhile, so they never interleave with the gesture's
-    /// own coalesced edits (the engine would commit the gesture first; see VEEngine.h).
+    /// A gesture is in progress: a timeline drag (move, trim, marquee, playhead, transition or
+    /// fade handle, gain line) or an edit group such as an inspector slider drag. Edit commands
+    /// (Delete, Split, Link, Insert...) from keys and menus are ignored meanwhile, so they never
+    /// interleave with the gesture's own coalesced edits (the engine would commit the gesture
+    /// first; see VEEngine.h). An inspector nudge burst is not a gesture: the next command
+    /// commits it as its own undo step.
     var isGestureActive: Bool {
-        cancelActiveGesture != nil || engine.isCoalescing
+        guard cancelActiveGesture == nil else { return true }
+        guard let key = engine.coalescingKey else { return false }
+        return key != nudgeGroup
     }
 
     /// Number of times the timeline's content model was rebuilt (once per model change;
@@ -227,14 +246,18 @@ final class ProjectStore: ObservableObject {
                                     name: $0.name, muted: $0.muted, solo: $0.solo, locked: $0.locked)
         }
         model.clips = clips.values.map {
-            TimelineViewModel.Clip(id: $0.clipID, trackID: $0.trackID, assetID: $0.assetID, name: $0.name,
-                                   start: $0.timelineStart.secondsOrZero, end: $0.timelineEnd.secondsOrZero,
-                                   sourceIn: $0.sourceIn.secondsOrZero, speed: $0.speed,
-                                   linkedClipID: $0.linkedClipID, isStill: $0.isStill)
+            let audio = $0.audioParams
+            return TimelineViewModel.Clip(id: $0.clipID, trackID: $0.trackID, assetID: $0.assetID, name: $0.name,
+                                          start: $0.timelineStart.secondsOrZero, end: $0.timelineEnd.secondsOrZero,
+                                          sourceIn: $0.sourceIn.secondsOrZero, speed: $0.speed,
+                                          linkedClipID: $0.linkedClipID, isStill: $0.isStill,
+                                          isAudio: $0.trackKind == .audio, gainDb: audio.gainDb,
+                                          fadeIn: audio.fadeInDuration.secondsOrZero,
+                                          fadeOut: audio.fadeOutDuration.secondsOrZero)
         }.sorted { $0.start < $1.start }
         model.transitions = sequence.transitions.map {
             TimelineViewModel.Transition(id: $0.transitionID, trackID: $0.trackID, start: $0.start.secondsOrZero,
-                                         end: $0.end.secondsOrZero)
+                                         end: $0.end.secondsOrZero, fromClipID: $0.fromClipID, toClipID: $0.toClipID)
         }
         cachedTimeline = (changeCount, model)
         return model
@@ -256,6 +279,29 @@ final class ProjectStore: ObservableObject {
             statusMessage = result.message
         }
         return result.ok
+    }
+
+    /// Sequence frames in `time` (rounded).
+    func frames(_ time: CMTime) -> Int64 {
+        let frame = frameDuration.secondsOrZero
+        guard frame > 0 else { return 0 }
+        return Int64((time.secondsOrZero / frame).rounded())
+    }
+
+    /// `frames` sequence frames as a time.
+    func time(frames: Int64) -> CMTime {
+        CMTimeMultiply(frameDuration, multiplier: Int32(clamping: frames))
+    }
+
+    /// A duration in the user's preferred form (Settings > Editing).
+    func durationString(frames: Int64) -> String {
+        DurationFormat.string(frames: frames, frameDuration: frameDuration,
+                              display: editingPreferences.durationDisplay)
+    }
+
+    /// Asks the inspector to focus `field`.
+    func requestInspectorFocus(_ field: InspectorFocusRequest.Field) {
+        inspectorFocusRequest = InspectorFocusRequest(field: field, serial: (inspectorFocusRequest?.serial ?? 0) + 1)
     }
 
     /// Cmd+Z: during a drag it only cancels the drag (the drag was never committed, so there is
@@ -450,32 +496,128 @@ final class ProjectStore: ObservableObject {
         }
     }
 
-    /// Adds a one-second cross dissolve on the cut nearest the playhead on the target video
-    /// track (or the selected clip's track).
-    func addCrossDissolveAtPlayhead() {
+    /// Adds a transition of `kind` (Shift+Cmd+D: cross dissolve; Option+Shift+Cmd+D: audio
+    /// crossfade) on the cut nearest the playhead on the selected clips' track of that kind, else
+    /// the target track, with the default duration (Settings > Editing). Refusals are reported.
+    func addTransitionAtPlayhead(_ kind: TransitionKind) {
         guard !isGestureActive else { return }
-        let trackID = selectedClips.first?.trackID ?? targetVideoTrackID
+        let selectedTrack = selectedClips.first { ($0.trackKind == .video) == (kind.trackKind == .video) }?.trackID
+        let trackID = selectedTrack ?? (kind.trackKind == .video ? targetVideoTrackID : targetAudioTrackID)
+        guard let (from, to) = nearestCut(onTrack: trackID, toSeconds: playheadTime.secondsOrZero) else {
+            statusMessage = "No cut between two adjacent clips on track \(track(trackID)?.name ?? "")."
+            return
+        }
+        addTransition(kind, from: from, to: to)
+    }
+
+    /// The adjacent pair of clips on `trackID` whose cut is nearest `seconds`.
+    func nearestCut(onTrack trackID: VETrackID, toSeconds seconds: Double) -> (VEClipID, VEClipID)? {
         let onTrack = clips.values.filter { $0.trackID == trackID }.sorted { $0.timelineStart < $1.timelineStart }
-        let playheadSeconds = playheadTime.secondsOrZero
-        var best: (VEClipInfo, VEClipInfo)?
+        var best: (VEClipID, VEClipID)?
         var bestDistance = Double.infinity
         for (from, to) in zip(onTrack, onTrack.dropFirst()) where from.timelineEnd == to.timelineStart {
-            let distance = abs(from.timelineEnd.secondsOrZero - playheadSeconds)
+            let distance = abs(from.timelineEnd.secondsOrZero - seconds)
             if distance < bestDistance {
-                best = (from, to)
+                best = (from.clipID, to.clipID)
                 bestDistance = distance
             }
         }
-        guard let (from, to) = best else {
-            statusMessage = "No cut between two adjacent clips on this track."
+        return best
+    }
+
+    /// Adds a transition of `kind` with the default duration on the cut between `from` and `to`,
+    /// shortened to what the cut allows. A video dissolve also gets the linked audio's crossfade
+    /// (one undo step) per the Editing preference: always, never, or ask (the question is asked
+    /// through `pendingLinkedTransition`). Returns whether a transition was added (false while
+    /// waiting for the answer).
+    @discardableResult
+    func addTransition(_ kind: TransitionKind, from: VEClipID, to: VEClipID, frames: Int64? = nil) -> Bool {
+        guard !isGestureActive else { return false }
+        let length = frames ?? editingPreferences.transitionFrames(frameDuration: frameDuration)
+        var includeLinked = false
+        if kind == .crossDissolve, linkedCutAcceptsTransition(from: from, to: to) {
+            switch editingPreferences.linkedCrossfade {
+            case .always: includeLinked = true
+            case .never: includeLinked = false
+            case .ask:
+                pendingLinkedTransition = PendingTransition(kind: kind, fromClipID: from, toClipID: to, frames: length)
+                return false
+            }
+        }
+        return commitTransition(kind, from: from, to: to, frames: length, includeLinked: includeLinked)
+    }
+
+    /// Answers the pending "also add the audio crossfade?" question.
+    func resolvePendingTransition(includeLinked: Bool?) {
+        guard let pending = pendingLinkedTransition else { return }
+        pendingLinkedTransition = nil
+        guard let includeLinked else { return } // cancelled
+        commitTransition(pending.kind, from: pending.fromClipID, to: pending.toClipID, frames: pending.frames,
+                         includeLinked: includeLinked)
+    }
+
+    /// Whether the linked partners of `from` and `to` meet at a cut that can take a transition.
+    func linkedCutAcceptsTransition(from: VEClipID, to: VEClipID) -> Bool {
+        guard let fromClip = clips[from], let toClip = clips[to], fromClip.linkedClipID != 0,
+              toClip.linkedClipID != 0 else { return false }
+        return engine.transitionLimit(fromClip: fromClip.linkedClipID, toClip: toClip.linkedClipID).maximumFrames > 0
+    }
+
+    @discardableResult
+    private func commitTransition(_ kind: TransitionKind, from: VEClipID, to: VEClipID, frames: Int64,
+                                  includeLinked: Bool) -> Bool {
+        guard !isGestureActive else { return false }
+        var options: VETransitionOptions = [.fitToCut]
+        if includeLinked { options.insert(.includeLinked) }
+        let result = engine.addTransition(fromClip: from, toClip: to, duration: time(frames: frames), options: options)
+        if report(result), let id = result.createdIDs.first?.int64Value {
+            selection = []
+            selectedTransitionID = id
+            focusArea = .timeline
+            return true
+        }
+        return false
+    }
+
+    // MARK: Parameters from keys and menus
+
+    /// `]` / `[` (Shift: ±10 dB): changes the gain of the selected audio clips; a burst of
+    /// presses is one undo step.
+    func nudgeGain(_ steps: Double) {
+        guard !isGestureActive else { return }
+        guard inspector.isAvailable(.gain) else {
+            statusMessage = "Select an audio clip to change its gain."
             return
         }
-        let duration = CMTimeMultiply(frameDuration, multiplier: Int32(max(1, Timecode.framesPerSecond(frameDuration))))
-        let result = engine.addTransition(fromClip: from.clipID, toClip: to.clipID, duration: duration)
-        if report(result), let id = result.createdIDs.first?.int64Value {
-            selectedTransitionID = id
-            selection = []
+        inspector.nudge(.gain, steps: steps)
+    }
+
+    /// Edit > Reset Video/Audio Settings: back to the defaults for every selected clip of that
+    /// kind (one undo step).
+    func resetSettings(_ section: InspectorSection) {
+        guard !isGestureActive else { return }
+        inspector.reset(section)
+    }
+
+    /// Clip > Transition Duration…: focuses the selected transition's duration in the inspector.
+    func editTransitionDuration() {
+        guard !isGestureActive, selectedTransitionID != nil else { return }
+        selection = []
+        requestInspectorFocus(.transitionDuration)
+    }
+
+    // MARK: Speed
+
+    /// Cmd+R: opens the Speed/Duration sheet for the selected clips (not stills).
+    func showSpeedSheet() {
+        guard !isGestureActive else { return }
+        let chosen = selectedClips.filter { !$0.isStill }
+        guard !chosen.isEmpty else {
+            statusMessage = selection.isEmpty ? "Select the clips whose speed to change."
+                : "Still images have no playback speed; trim them to change their duration."
+            return
         }
+        speedSheetClipIDs = chosen.map(\.clipID)
     }
 
     func linkOrUnlinkSelection() {
