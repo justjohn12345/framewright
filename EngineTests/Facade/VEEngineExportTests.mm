@@ -2,8 +2,9 @@
 // availability against VideoToolbox, the size estimate, an export of an imported sequence through
 // -beginExportWithSettings:... checked with the FFmpeg prober (a second, independent reader) and
 // the Apple decoders, paced progress notifications, refusals before any file exists (gesture,
-// another export, invalid settings, empty sequence, missing media, unwritable output), cancel
-// through the handle, and playback pausing when an export starts.
+// another export, invalid settings, empty sequence, missing or unreadable media, unwritable output,
+// an output that is the project's media), cancel through the handle (an existing file at the
+// output is kept), and playback pausing when an export starts and not starting while it runs.
 
 #import <FramewrightEngine/FramewrightEngine.h>
 #import <XCTest/XCTest.h>
@@ -348,6 +349,21 @@ CMTime seconds(double s) {
     XCTAssertTrue([error.localizedDescription containsString:@"to-be-deleted.mp4"], @"%@", error.localizedDescription);
     XCTAssertTrue([NSFileManager.defaultManager copyItemAtURL:[self mediaURL:"h264_1080p30.mp4"] toURL:copy error:nil]);
 
+    // Media that cannot be read is missing media too (not an unwritable output).
+    XCTAssertTrue([NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions : @0} ofItemAtPath:copy.path error:nil]);
+    error = nil;
+    XCTAssertNil([engine beginExportWithSettings:settings outputURL:url progress:nil completion:never error:&error]);
+    [NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions : @0644} ofItemAtPath:copy.path error:nil];
+    XCTAssertEqual(error.code, VEEngineErrorMissingMedia, @"%@", error);
+    XCTAssertTrue([error.localizedDescription containsString:@"cannot be read"], @"%@", error.localizedDescription);
+
+    // The output may not be the project's own media.
+    error = nil;
+    XCTAssertNil([engine beginExportWithSettings:settings outputURL:copy progress:nil completion:never error:&error]);
+    XCTAssertEqual(error.code, VEEngineErrorExportUnsupported, @"%@", error);
+    XCTAssertTrue([error.localizedDescription containsString:@"would overwrite"], @"%@", error.localizedDescription);
+    XCTAssertTrue([NSFileManager.defaultManager fileExistsAtPath:copy.path]);
+
     // A gesture in progress.
     [engine beginCoalescingWithKey:@"drag"];
     error = nil;
@@ -384,6 +400,9 @@ CMTime seconds(double s) {
     VEAssetInfo *asset = [self importURL:[self mediaURL:"h264_1080p30.mp4"] into:engine];
     [self buildSequence:engine asset:asset];
     NSURL *url = [_scratch URLByAppendingPathComponent:@"cancel.mov"];
+    // A previous export at that location survives the cancelled one.
+    NSData *previous = [@"the previous export" dataUsingEncoding:NSUTF8StringEncoding];
+    XCTAssertTrue([previous writeToURL:url atomically:NO]);
     VEExportSettings *settings = [VEExportSettings defaultSettingsForPreset:VEExportPresetHEVC];
     __block NSError *failure = nil;
     __block BOOL completed = NO;
@@ -414,8 +433,54 @@ CMTime seconds(double s) {
     [NSNotificationCenter.defaultCenter removeObserver:token];
     XCTAssertEqual(failure.code, VEEngineErrorExportCancelled, @"%@", failure);
     XCTAssertTrue(finishNotified);
-    XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:url.path]);
+    XCTAssertEqualObjects([NSData dataWithContentsOfURL:url], previous, @"the existing file is untouched");
     XCTAssertFalse(engine.isExporting);
+}
+
+/// While an export runs, playback does not start on either monitor (it would compete for the
+/// decoders and the GPU); pausing still works, and playing works again once the export ended.
+- (void)testPlaybackDoesNotStartWhileExporting {
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importURL:[self mediaURL:"h264_1080p30.mp4"] into:engine];
+    [self buildSequence:engine asset:asset];
+    [engine sourceMonitorShowAsset:asset.assetID atTime:kCMTimeZero];
+    __block BOOL completed = NO;
+    NSError *error = nil;
+    VEExportHandle *handle = [engine beginExportWithSettings:[VEExportSettings defaultSettingsForPreset:VEExportPresetHEVC]
+                                                   outputURL:[_scratch URLByAppendingPathComponent:@"busy.mov"]
+                                                    progress:nil
+                                                  completion:^(VEExportSummary *, NSError *) {
+                                                      completed = YES;
+                                                  }
+                                                       error:&error];
+    XCTAssertNotNil(handle, @"%@", error);
+    XCTAssertTrue(engine.isExporting);
+    [engine play];
+    [engine togglePlay];
+    [engine setRate:2];
+    [engine shuttleForward];
+    [engine shuttleReverse];
+    [engine sourceMonitorTogglePlay];
+    [engine sourceMonitorShuttleForward];
+    [engine sourceMonitorShuttleReverse];
+    [self spinUntil:^BOOL { return NO; } timeout:0.15];
+    XCTAssertTrue(engine.isExporting, @"still exporting (the test needs the export to outlast the requests)");
+    XCTAssertFalse(engine.playbackState == VEPlaybackStatePlaying || engine.playbackState == VEPlaybackStatePrerolling,
+                   @"the program monitor did not start");
+    XCTAssertFalse(engine.sourceMonitorPlaybackState == VEPlaybackStatePlaying ||
+                       engine.sourceMonitorPlaybackState == VEPlaybackStatePrerolling,
+                   @"the source monitor did not start");
+    [engine pause];
+    [engine sourceMonitorPause];
+    XCTAssertTrue([handle cancelAndWaitWithTimeout:5]);
+    XCTAssertTrue([self spinUntil:^BOOL { return completed; } timeout:10]);
+    XCTAssertFalse(engine.isExporting);
+    [engine play];
+    XCTAssertTrue([self spinUntil:^BOOL {
+        return engine.playbackState == VEPlaybackStatePlaying || engine.playbackState == VEPlaybackStatePrerolling;
+    } timeout:5],
+                  @"playback starts again after the export");
+    [engine pause];
 }
 
 @end

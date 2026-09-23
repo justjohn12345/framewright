@@ -41,12 +41,6 @@ uint64_t fileSize(const std::string &path) {
     return ::stat(path.c_str(), &st) == 0 ? static_cast<uint64_t>(st.st_size) : 0;
 }
 
-void removeFile(const std::string &path) {
-    if (!path.empty()) {
-        ::unlink(path.c_str());
-    }
-}
-
 std::string displayName(const MediaAsset &asset) {
     return asset.name.empty() ? playback::mediaPathForURL(asset.url) : asset.name;
 }
@@ -56,6 +50,10 @@ std::string secondsText(CMTime t) {
     std::snprintf(text, sizeof text, "%.3f s", CMTIME_IS_NUMERIC(t) ? CMTimeGetSeconds(t) : 0.0);
     return text;
 }
+
+/// Refreshes in a row of a settled stream that made no progress before a missing picture fails the
+/// export.
+constexpr int kMaxFruitlessRefreshes = 3;
 
 /// Frames of the export: the sequence duration on its frame grid (rounded up).
 int64_t frameCount(const Sequence &sequence) {
@@ -90,6 +88,108 @@ std::string canonicalPath(const std::string &path) {
     char resolved[PATH_MAX];
     return ::realpath(path.c_str(), resolved) != nullptr ? std::string(resolved) : path;
 }
+
+/// Whether `a` and `b` name the same file: the same inode when both exist, else the same
+/// canonical path.
+bool sameFile(const std::string &a, const std::string &b) {
+    struct stat sa {};
+    struct stat sb {};
+    if (::stat(a.c_str(), &sa) == 0 && ::stat(b.c_str(), &sb) == 0) {
+        return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+    }
+    return canonicalPath(a) == canonicalPath(b);
+}
+
+NSURL *fileURL(const std::string &path) {
+    return [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()] isDirectory:NO];
+}
+
+std::string describeNSError(NSError *error) {
+    return error != nil ? std::string(error.localizedDescription.UTF8String ?: "unknown error") : "unknown error";
+}
+
+/// The file an export is written to until it is complete: `path` inside a fresh directory from
+/// NSItemReplacementDirectory for the destination (on the destination's volume, and one a
+/// sandboxed app may write for a URL the save panel granted), with the destination's name so the
+/// container is recognised by its extension. The destination is only touched once the file is
+/// complete (replace()), so a cancelled or failed export leaves the user's existing file as it
+/// was. discard() deletes the directory with whatever is in it.
+struct WorkingFile {
+    std::string directory;
+    std::string path;
+
+    static Result<WorkingFile> create(const std::string &destination) {
+        @autoreleasepool {
+            NSFileManager *fm = NSFileManager.defaultManager;
+            NSURL *dest = fileURL(destination);
+            NSError *error = nil;
+            NSURL *dir = [fm URLForDirectory:NSItemReplacementDirectory
+                                    inDomain:NSUserDomainMask
+                           appropriateForURL:dest
+                                      create:YES
+                                       error:&error];
+            if (dir == nil) {
+                // Some volumes have no replacement directory for a file that does not exist yet;
+                // ask for its folder's.
+                NSError *folderError = nil;
+                dir = [fm URLForDirectory:NSItemReplacementDirectory
+                                 inDomain:NSUserDomainMask
+                        appropriateForURL:dest.URLByDeletingLastPathComponent
+                                   create:YES
+                                    error:&folderError];
+            }
+            if (dir == nil) {
+                return makeError(MediaErrorCode::PermissionDenied,
+                                 "cannot create a temporary file next to " + destination + ": " + describeNSError(error));
+            }
+            WorkingFile file;
+            file.directory = dir.path.fileSystemRepresentation;
+            file.path = [dir URLByAppendingPathComponent:dest.lastPathComponent isDirectory:NO].path.fileSystemRepresentation;
+            return file;
+        }
+    }
+
+    void discard() const {
+        if (!directory.empty()) {
+            @autoreleasepool {
+                [NSFileManager.defaultManager removeItemAtPath:[NSString stringWithUTF8String:directory.c_str()]
+                                                         error:nil];
+            }
+        }
+    }
+
+    /// Moves the complete file to `destination`, replacing a file there (atomically, keeping the
+    /// original's identity and attributes where the file system can), then removes the directory.
+    Status replace(const std::string &destination) const {
+        @autoreleasepool {
+            NSFileManager *fm = NSFileManager.defaultManager;
+            NSURL *dest = fileURL(destination);
+            NSURL *source = fileURL(path);
+            NSError *error = nil;
+            BOOL moved = NO;
+            if (![fm fileExistsAtPath:dest.path]) {
+                moved = [fm moveItemAtURL:source toURL:dest error:&error];
+            }
+            if (!moved && [fm fileExistsAtPath:dest.path]) {
+                // An existing file (or one that appeared meanwhile): replace it.
+                NSURL *resulting = nil;
+                error = nil;
+                moved = [fm replaceItemAtURL:dest
+                               withItemAtURL:source
+                              backupItemName:nil
+                                     options:0
+                            resultingItemURL:&resulting
+                                       error:&error];
+            }
+            discard();
+            if (!moved) {
+                return makeError(MediaErrorCode::WriteFailed,
+                                 "could not save the finished file as " + destination + ": " + describeNSError(error));
+            }
+            return okStatus();
+        }
+    }
+};
 
 /// The settings the job actually writes (frame duration and input format filled in).
 media::EncodeSettings effectiveSettings(const ExportRequest &request, const Sequence &sequence) {
@@ -216,7 +316,12 @@ struct ExportJob::Run {
         }
         const int64_t slot = playback::frameSlotFor(layer, *asset);
         const auto deadline = std::chrono::steady_clock::now() + job.options_.frameTimeout;
-        int refreshes = 0;
+        // Refreshes that found the stream exactly where the previous one left it (no frame
+        // decoded, no seek in between): only such refreshes in a row count towards giving up, so
+        // repeated memory purges between a decode and the lookup below cannot fail an export that
+        // progresses.
+        int fruitlessRefreshes = 0;
+        std::optional<std::pair<uint64_t, uint64_t>> lastRefreshMark; // (framesDecoded, seeks)
         auto describe = [&](const std::string &what) {
             return "Frame " + std::to_string(frameIndex) + " (" + secondsText(timeForFrame(frameIndex, frameDuration)) +
                    ") cannot be exported: “" + displayName(*asset) + "” " + what;
@@ -255,12 +360,24 @@ struct ExportJob::Run {
                                               " (" + reason + ")"));
                 }
                 // Settled without the picture: it was evicted after decoding (memory pressure), or
-                // the media ends before it. Ask the pool to look again, twice.
-                if (refreshes >= 2) {
-                    return makeError(MediaErrorCode::DecodeFailed,
-                                     describe("has no picture at source time " + secondsText(layer.sourceTime)));
+                // the media has no picture there. Ask the pool to look again; give up after
+                // refreshes that made no progress at all.
+                const std::pair<uint64_t, uint64_t> mark{stream->framesDecoded, stream->seeks};
+                if (lastRefreshMark && *lastRefreshMark == mark) {
+                    ++fruitlessRefreshes;
+                } else if (lastRefreshMark) {
+                    fruitlessRefreshes = 0; // the stream moved since: start counting again
                 }
-                ++refreshes;
+                if (fruitlessRefreshes >= kMaxFruitlessRefreshes) {
+                    std::string where = "has no picture at source time " + secondsText(layer.sourceTime);
+                    if (stream->eof) {
+                        where += isNumeric(stream->videoEnd)
+                                     ? ": its video ends at " + secondsText(stream->videoEnd)
+                                     : ": its video ends before that";
+                    }
+                    return makeError(MediaErrorCode::DecodeFailed, describe(where));
+                }
+                lastRefreshMark = mark;
                 pool->refresh();
             }
             if (std::chrono::steady_clock::now() >= deadline) {
@@ -351,7 +468,7 @@ struct ExportJob::Run {
     }
 
     Result<ExportSummary> execute() {
-        const std::string &path = job.request_.outputPath;
+        const std::string &destination = job.request_.outputPath;
         const double started = now();
         VE_MEDIA_TRY(setUp());
         auto made = job.services_.router->makeWriter(encode);
@@ -359,10 +476,23 @@ struct ExportJob::Run {
             return std::move(made).error();
         }
         writer = std::move(made).value();
-        if (Status opened = writer.writer->open(path, encode); !opened.ok()) {
+        auto created = WorkingFile::create(destination);
+        if (!created.ok()) {
+            return makeError(created.error().code, "Could not start writing " + destination + ": " +
+                                                       created.error().message);
+        }
+        const WorkingFile working = std::move(created).value();
+        job.setWorkingPath(working.path);
+        // Every way out below that is not a success discards the working file only: the
+        // destination is not touched until the file is complete.
+        auto abandon = [&](media::MediaError error) -> Result<ExportSummary> {
             writer.writer->cancel();
-            removeFile(path);
-            return makeError(opened.error().code, "Could not start writing " + path + ": " + opened.error().message);
+            working.discard();
+            return error;
+        };
+        if (Status opened = writer.writer->open(working.path, encode); !opened.ok()) {
+            return abandon(makeError(opened.error().code,
+                                     "Could not start writing " + destination + ": " + opened.error().message));
         }
         media::VideoPullFn video;
         media::AudioPullFn audioPull;
@@ -377,29 +507,34 @@ struct ExportJob::Run {
             pool->setTargets({}); // stop decoding ahead
         }
         if (!pulled.ok() || cancelled()) {
-            writer.writer->cancel();
-            removeFile(path);
-            if (cancelled()) {
-                return makeError(MediaErrorCode::Cancelled, "Export cancelled");
-            }
-            return pulled.error();
+            return abandon(cancelled() ? makeError(MediaErrorCode::Cancelled, "Export cancelled") : pulled.error());
         }
+        // finish() can take a while (the MP4 index rewrite); a cancel meanwhile abandons it.
+        writer.writer->setFinishCancellation([this] { return cancelled(); });
         if (Status finished = writer.writer->finish(); !finished.ok()) {
-            writer.writer->cancel();
-            removeFile(path);
-            return makeError(finished.error().code, "Could not finish writing " + path + ": " +
-                                                        finished.error().message);
+            if (cancelled() || finished.error().code == MediaErrorCode::Cancelled) {
+                return abandon(makeError(MediaErrorCode::Cancelled, "Export cancelled"));
+            }
+            return abandon(makeError(finished.error().code, "Could not finish writing " + destination + ": " +
+                                                                finished.error().message));
         }
-        if (cancelled()) { // a cancel during finish() still means "no file"
-            removeFile(path);
+        if (cancelled()) { // a cancel that came as finish() returned still means "no new file"
+            working.discard();
             return makeError(MediaErrorCode::Cancelled, "Export cancelled");
         }
+        const uint64_t bytes = fileSize(working.path);
+        if (Status replaced = working.replace(destination); !replaced.ok()) {
+            return makeError(replaced.error().code, "The export could not be saved: " + replaced.error().message);
+        }
         ExportSummary summary;
-        summary.path = path;
+        summary.path = destination;
         summary.frames = encode.video ? next : totalFrames;
         summary.duration = CMTimeMultiply(frameDuration, static_cast<int32_t>(totalFrames));
         summary.audioFrames = audioFramesDone;
-        summary.bytes = fileSize(path);
+        summary.bytes = fileSize(destination);
+        if (summary.bytes == 0) {
+            summary.bytes = bytes; // the destination is not stat-able (unlikely): the size written
+        }
         summary.writerBackend = writer.backend;
         summary.videoEncoder = writer.writer->videoEncoderName();
         summary.hardwareEncoder = encode.video && writer.writer->usesHardwareVideoEncoder();
@@ -467,12 +602,21 @@ Status ExportJob::validate(const ExportRequest &request, const ExportServices &s
         return makeError(MediaErrorCode::InvalidArgument, "The audio settings are incomplete.");
     }
 
-    // Media: every asset a playing clip uses must be there.
     const std::string output = request.outputPath;
     if (output.empty() || output.front() != '/') {
         return makeError(MediaErrorCode::InvalidArgument, "The output needs an absolute file path.");
     }
-    const std::string canonicalOutput = canonicalPath(output);
+    // The output must not be any of the project's media, used by this sequence or not (another
+    // sequence, a clip on a muted track, media only in the bin).
+    for (const MediaAsset &asset : request.project->assets) {
+        if (sameFile(playback::mediaPathForURL(asset.url), output)) {
+            return makeError(MediaErrorCode::InvalidArgument,
+                             "The export would overwrite “" + displayName(asset) +
+                                 "”, which is media of this project. Choose another file name.");
+        }
+    }
+    // Media: every asset a playing clip uses must be there and readable (FileNotFound either way:
+    // it is a media problem, not one of the output).
     std::set<AssetId> checked;
     auto checkTrack = [&](const Track &track) -> Status {
         if (!Scheduler::isTrackActive(*sequence, track)) {
@@ -497,12 +641,9 @@ Status ExportJob::validate(const ExportRequest &request, const ExportServices &s
                                                                    "). Relink it or remove its clips, then export again.");
             }
             if (::access(path.c_str(), R_OK) != 0) {
-                return makeError(MediaErrorCode::PermissionDenied,
-                                 "“" + displayName(*asset) + "” cannot be read (" + path + ").");
-            }
-            if (canonicalPath(path) == canonicalOutput) {
-                return makeError(MediaErrorCode::InvalidArgument,
-                                 "The export would overwrite “" + displayName(*asset) + "”, which the sequence uses.");
+                return makeError(MediaErrorCode::FileNotFound,
+                                 "“" + displayName(*asset) + "” cannot be read (" + path +
+                                     "): check its permissions or relink it, then export again.");
             }
         }
         return okStatus();
@@ -593,7 +734,7 @@ void ExportJob::noteProgress(int64_t framesDone, int64_t totalFrames) {
                                    : -1;
         if (lastSizeCheck_ < 0 || t - lastSizeCheck_ >= options_.progressInterval) {
             lastSizeCheck_ = t;
-            progress_.bytesWritten = fileSize(request_.outputPath);
+            progress_.bytesWritten = workingPath_.empty() ? 0 : fileSize(workingPath_);
         }
     }
     scheduleProgress();
@@ -641,6 +782,16 @@ void ExportJob::finish(Result<ExportSummary> result) {
     dispatch_async(callbackQueue_, ^{
       completion(std::move(*shared));
     });
+}
+
+void ExportJob::setWorkingPath(std::string path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    workingPath_ = std::move(path);
+}
+
+std::string ExportJob::workingPath() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return workingPath_;
 }
 
 void ExportJob::cancel() {

@@ -21,6 +21,9 @@ namespace ve::media::apple {
 ///
 /// - finish() ends the session where the longer stream ends, so audio running past the last
 ///   video frame is kept; the video track still ends one frame duration after its last frame.
+///   It waits for AVAssetWriter in 20 ms slices and honours setFinishCancellation() (cancelWriting,
+///   then the partial file is deleted).
+/// - open() refuses an existing path (it never deletes a file it did not create).
 ///
 /// Hardware: AVAssetWriter does not expose its VTCompressionSession, so the encoder is never
 /// left to chance: open() first creates the writer with the hardware encoder REQUIRED
@@ -47,6 +50,7 @@ class AppleWriter final : public IMediaWriter {
     Status endStream(TrackKind kind) override;
     Status runPull(const VideoPullFn &video, const AudioPullFn &audio) override;
     Status finish() override;
+    void setFinishCancellation(std::function<bool()> check) override;
     void cancel() override;
     bool usesHardwareVideoEncoder() const override;
     /// "VideoToolbox HEVC Main10 (hardware)" etc.

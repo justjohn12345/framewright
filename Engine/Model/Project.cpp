@@ -47,6 +47,7 @@ AssetId Project::addAsset(MediaAsset asset) {
     asset.id = ids.make<AssetId>();
     asset.duration = canonicalProbedTime(asset.duration);
     asset.frameDuration = canonicalProbedTime(asset.frameDuration);
+    asset.videoDuration = canonicalProbedTime(asset.videoDuration);
     const AssetId assetId = asset.id;
     assets.push_back(std::move(asset));
     return assetId;

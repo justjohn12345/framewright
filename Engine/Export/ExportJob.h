@@ -22,11 +22,23 @@
 //
 // Before anything is written, validate() checks what can be checked (see there); start() runs
 // it and creates no file when it fails. After that every failure (decode, encode, write, GPU)
-// ends the export with an error that says what went wrong, and the partial file is deleted.
+// ends the export with an error that says what went wrong.
+//
+// The output file is written atomically: the movie is rendered into a working file (workingPath():
+// the output's name inside a fresh directory from NSItemReplacementDirectory for the output, so on
+// its volume and writable by a sandboxed app for a URL the save panel granted). Only when the
+// writer has finished it is it moved to the output path (NSFileManager replaceItemAtURL when a file
+// is there, which keeps the original's attributes); a cancel or a failure deletes the working
+// directory and never touches the output path, so re-exporting over an existing file and
+// cancelling (or running out of disk) leaves the old file as it was. The writers themselves refuse
+// an existing path (Interfaces.h). Caveat: progress bytesWritten is the working file's size, and
+// AVAssetWriter writing MP4 (index up front, shouldOptimizeForNetworkUse) stages the media data
+// elsewhere and fills the working file only in finish(), so it stays 0 until then for Apple MP4.
 //
 // Cancel: cancel() is non-blocking; the pull callbacks notice it within one frame decode or
-// 20 ms, the writer abandons and deletes the file, and the completion reports Cancelled (well
-// within 500 ms). Memory pressure: handleMemoryPressure() makes the render thread release the
+// 20 ms, and finish() (IMediaWriter::setFinishCancellation) within 20 ms or one packet; the
+// working file is deleted and the completion reports Cancelled (well within 500 ms). Memory
+// pressure: handleMemoryPressure() makes the render thread release the
 // compositor's scratch memory before its next frame; the frame cache is trimmed by its owner (the
 // pool re-decodes a picture that was evicted before the job pinned it).
 //
@@ -74,7 +86,8 @@ struct ExportRequest {
     media::EncodeSettings encode;
     /// 8, or 10 for HEVC Main10 and 10-bit AV1.
     int videoBitDepth = 8;
-    /// Absolute POSIX path of the output file (replaced if it exists).
+    /// Absolute POSIX path of the output file. An existing file there is replaced once the export
+    /// is complete, and left untouched when it is cancelled or fails.
     std::string outputPath;
 };
 
@@ -109,8 +122,8 @@ struct ExportProgress {
     int64_t totalFrames = 0;
     double framesPerSecond = 0; ///< Over the last second.
     double etaSeconds = -1;     ///< -1 while unknown.
-    /// Current size of the output file. 0 while the writer stages the media elsewhere
-    /// (AVAssetWriter writing MP4 with the index up front moves the file into place at the end).
+    /// Current size of the working file (see the header comment). 0 while the writer stages the
+    /// media elsewhere (AVAssetWriter writing MP4 with the index up front fills it only at the end).
     uint64_t bytesWritten = 0;
     double elapsedSeconds = 0;
 };
@@ -139,12 +152,13 @@ class ExportJob : public std::enable_shared_from_this<ExportJob> {
     static OSType pixelFormatFor(media::VideoCodec codec, int bitDepth);
 
     /// Checks, without writing anything: the project and sequence exist and the sequence is not
-    /// empty; every asset used by a clip on a playing track is in the project and its file exists
-    /// and is readable (FileNotFound naming the asset otherwise); the settings are complete and
-    /// some writer accepts them (UnsupportedCodec otherwise); the bit depth suits the codec; the
-    /// output is not one of the project's media files and can be written (PermissionDenied
-    /// otherwise; checked by opening it, which leaves no file behind); the cache is in the
-    /// project's media epoch.
+    /// empty; the output is none of the project's media files (any asset, used or not:
+    /// InvalidArgument); every asset used by a clip on an exported, playing track is in the
+    /// project and its file exists and is readable (FileNotFound naming the asset otherwise); the
+    /// settings are complete and some writer accepts them (UnsupportedCodec otherwise); the bit
+    /// depth suits the codec; the output can be written (PermissionDenied otherwise; checked by
+    /// opening it, which neither truncates an existing file nor leaves a new one behind); the
+    /// cache is in the project's media epoch.
     static media::Status validate(const ExportRequest &request, const ExportServices &services);
 
     /// validate(), then starts the export. On a validation error nothing is created and no
@@ -157,20 +171,25 @@ class ExportJob : public std::enable_shared_from_this<ExportJob> {
     ExportJob(const ExportJob &) = delete;
     ExportJob &operator=(const ExportJob &) = delete;
 
-    /// Stops the export as soon as possible and deletes the partial file; the completion then
-    /// reports Cancelled (unless the export already finished). Non-blocking; idempotent.
+    /// Stops the export as soon as possible and deletes the working file (an existing output file
+    /// is kept); the completion then reports Cancelled (unless the export already finished).
+    /// Non-blocking; idempotent.
     void cancel();
     bool isCancelled() const;
     /// Asks the render thread to release the compositor's scratch memory before its next frame.
     void handleMemoryPressure(bool critical);
 
     ExportProgress progress() const;
-    /// The export has ended (written, failed or cancelled, with the partial file removed); the
-    /// completion is dispatched right after.
+    /// The export has ended (written and moved into place, failed or cancelled, with the working
+    /// file removed); the completion is dispatched right after.
     bool isFinished() const;
     bool waitUntilFinished(std::chrono::milliseconds timeout) const;
 
     const ExportRequest &request() const { return request_; }
+    /// The working file the movie is written to (see the header comment): empty until writing
+    /// starts; it keeps the path after the export ended (the file itself is gone by then: moved to
+    /// the output or deleted).
+    std::string workingPath() const;
 
     struct Run; // the export's working state (ExportJob.mm)
 
@@ -182,6 +201,7 @@ class ExportJob : public std::enable_shared_from_this<ExportJob> {
     void noteProgress(int64_t framesDone, int64_t totalFrames);
     void scheduleProgress();
     void finish(media::Result<ExportSummary> result);
+    void setWorkingPath(std::string path);
     friend struct Run;
 
     ExportRequest request_;
@@ -205,6 +225,7 @@ class ExportJob : public std::enable_shared_from_this<ExportJob> {
     std::deque<std::pair<double, int64_t>> rateSamples_; // (time, frames done) over the last second
     double startedAt_ = 0;
     double lastSizeCheck_ = -1;
+    std::string workingPath_;
 };
 
 } // namespace ve::exporting

@@ -919,4 +919,66 @@ double rmsOver(const audio::NullAudioOutput::Capture &capture, int64_t from, int
     XCTAssertEqual(after.cacheHits, before.cacheHits);
 }
 
+/// Phase 7 review P2: a clip that runs past the end of its video (a project saved before the video
+/// end was recorded, whose asset lasts as long as its container; or a track that overstates its
+/// pictures) shows the video's last picture there, playing and paused, never a missing layer.
+- (void)testTheLastPictureIsHeldPastTheEndOfTheVideo {
+    PlaybackHarness h(PlaybackHarness::Mode::Realtime, 2.0);
+    const AssetId movie = h.importAsset("h264_1080p30.mp4"); // 300 frames, 10 s
+    if (!h.ok()) {
+        XCTFail(@"%s", h.error().c_str());
+        return;
+    }
+    MediaAsset &asset = *h.project.findAsset(movie);
+    asset.duration = CMTimeMake(11, 1); // as the container might say; the video end unknown
+    asset.videoDuration = kCMTimeInvalid;
+    h.addClip(h.v1, movie, 0, 330, kCMTimeZero);
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+
+    // Playing across the end of the video.
+    h.controller->seek(frames30(285));
+    XCTAssertGreaterThanOrEqual(h.playAndWait(), 0.0);
+    int pastEnd = 0;
+    std::vector<std::string> failures;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(1100);
+    while (std::chrono::steady_clock::now() < until) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        const PlaybackHarness::Sample sample = h.present();
+        const int64_t frame = sample.presented.frameIndex;
+        if (frame < 0 || sample.burnIns.empty()) {
+            continue;
+        }
+        if (!sample.presented.layers.at(0).exact || !sample.burnIns[0]) {
+            failures.push_back("frame " + std::to_string(frame) + ": no picture");
+            continue;
+        }
+        const int expected = int(std::min<int64_t>(frame, 299));
+        if (*sample.burnIns[0] != expected && std::llabs(*sample.burnIns[0] - expected) > 1) {
+            failures.push_back("frame " + std::to_string(frame) + ": burn-in " + std::to_string(*sample.burnIns[0]));
+        }
+        if (frame >= 300) {
+            ++pastEnd;
+            if (*sample.burnIns[0] != 299) {
+                failures.push_back("frame " + std::to_string(frame) + " past the end shows " +
+                                   std::to_string(*sample.burnIns[0]));
+            }
+        }
+    }
+    h.controller->pause();
+    XCTAssertGreaterThan(pastEnd, 10, @"frames past the end of the video were presented");
+    XCTAssertTrue(failures.empty(), @"%zu failures, first: %s", failures.size(),
+                  failures.empty() ? "" : failures.front().c_str());
+
+    // Paused (the scrub path) further past the end.
+    h.controller->seek(frames30(320));
+    const PlaybackHarness::Sample paused = h.presentExact();
+    XCTAssertEqual(paused.presented.frameIndex, 320);
+    XCTAssertFalse(paused.presented.layers.empty());
+    if (!paused.presented.layers.empty()) {
+        XCTAssertTrue(paused.presented.layers[0].exact, @"the layer has its picture");
+        XCTAssertEqual(paused.burnIns.at(0).value_or(-1), 299);
+    }
+}
+
 @end

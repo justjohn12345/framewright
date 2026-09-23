@@ -53,7 +53,7 @@ inline std::string problemOf(const Project &project) {
 inline bool hasInexactTime(const Project &project) {
     auto inexact = [](CMTime t) { return isRounded(t) || t.epoch != 0; };
     for (const MediaAsset &asset : project.assets) {
-        if (inexact(asset.duration) || inexact(asset.frameDuration)) {
+        if (inexact(asset.duration) || inexact(asset.frameDuration) || inexact(asset.videoDuration)) {
             return true;
         }
     }

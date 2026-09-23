@@ -160,8 +160,10 @@ class FrameCache {
     /// frameDuration (a still: forever). `coverFrom` (<= pts) extends the entry backwards over a
     /// gap in which no frame is shown (see header comment). A different buffer at the same pts
     /// replaces the old entry unless that entry is pinned (then the pinned entry is kept and only
-    /// marked recently used). Returns false if the frame was not retained: an empty image, a
-    /// non-numeric pts, or a frame larger than the whole budget.
+    /// marked recently used). Putting the frame at an existing entry's pts again with a later end
+    /// (e.g. an infinite duration: the last frame held past the end of its stream, DecodePool.h)
+    /// extends the kept entry to that end. Returns false if the frame was not retained: an empty
+    /// image, a non-numeric pts, or a frame larger than the whole budget.
     bool put(AssetId asset, const VideoFrame &frame, CMTime frameDuration, CMTime coverFrom = kCMTimeInvalid);
     bool put(AssetId asset, PixelBuffer image, CMTime pts, CMTime duration, CMTime frameDuration,
              CMTime coverFrom = kCMTimeInvalid);

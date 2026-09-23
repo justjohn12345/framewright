@@ -133,6 +133,11 @@ class PlaybackHarness {
     /// Calls the frame source for a vsync presented at host time `targetSeconds` (the clock's
     /// host time base, like CADisplayLink.targetTimestamp).
     Sample presentAt(double targetSeconds);
+    /// The frame (graph and textures) the frame source produced for the last present*() call:
+    /// what a monitor view composites.
+    const render::PreviewFrame &frame() const { return frame_; }
+    /// The Metal device the frame's textures belong to.
+    id<MTLDevice> device() const { return textures_.device(); }
     /// Presents until the current frame is presented (not held back while it decodes) with every
     /// layer showing its exact frame (or `timeout`); returns the last sample.
     Sample presentExact(std::chrono::milliseconds timeout = std::chrono::seconds(5));

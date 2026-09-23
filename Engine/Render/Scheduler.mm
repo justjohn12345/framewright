@@ -62,16 +62,19 @@ CMTime Scheduler::sourceFrameTime(const Clip &clip, const MediaAsset &asset, CMT
                 }
             }
         }
-        if (isPositive(asset.duration)) {
-            const std::int64_t frames = frameIndexAt(asset.duration, frame, SnapMode::Ceil);
+        // Never past the last frame of the video (which may end before the container).
+        const CMTime videoEnd = asset.videoEnd();
+        if (isPositive(videoEnd)) {
+            const std::int64_t frames = frameIndexAt(videoEnd, frame, SnapMode::Ceil);
             index = std::min(index, frames > 0 ? frames - 1 : 0);
         }
         return timeForFrame(std::max<std::int64_t>(index, 0), frame);
     }
-    // No frame grid: the mapped time itself, strictly inside the media.
+    // No frame grid: the mapped time itself, strictly inside the video.
     CMTime exact = source->toTimeRounded();
-    if (isPositive(asset.duration) && exact >= asset.duration) {
-        exact = asset.duration - CMTimeMake(1, asset.duration.timescale);
+    const CMTime videoEnd = asset.videoEnd();
+    if (isPositive(videoEnd) && exact >= videoEnd) {
+        exact = videoEnd - CMTimeMake(1, videoEnd.timescale);
     }
     return maxTime(exact, kCMTimeZero);
 }

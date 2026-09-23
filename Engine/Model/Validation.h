@@ -27,6 +27,10 @@ std::optional<std::string> validateAsset(const MediaAsset &asset);
 // audio: Audio/AudioVideo).
 bool assetFitsTrack(const MediaAsset &asset, TrackKind kind);
 
+// How far clips of `asset` on a track of `kind` may use its media: MediaAsset::videoEnd() on
+// video tracks (the video may end before the container's duration), duration on audio tracks.
+CMTime mediaEndFor(const MediaAsset &asset, TrackKind kind);
+
 enum class TransitionIssueKind {
     Structure,           // unknown track, clips missing or not on that track, clip joined to itself
     NotAdjacent,         // outgoing clip does not end where the incoming clip starts

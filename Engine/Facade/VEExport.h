@@ -142,8 +142,9 @@ typedef NS_ENUM(NSInteger, VEExportAudioCodec) {
 @property (nonatomic, readonly) double framesPerSecond;
 /// -1 while unknown.
 @property (nonatomic, readonly) double estimatedSecondsRemaining;
-/// Size of the output file so far; 0 while the writer stages the media elsewhere (MP4 through
-/// AVAssetWriter appears when it is finished).
+/// Size of the file being written so far (the temporary file the export moves into place when it
+/// is complete); 0 while the writer stages the media elsewhere (MP4 through AVAssetWriter fills
+/// it only when it finishes).
 @property (nonatomic, readonly) uint64_t bytesWritten;
 @property (nonatomic, readonly) double elapsedSeconds;
 - (instancetype)init NS_UNAVAILABLE;
@@ -176,11 +177,12 @@ typedef NS_ENUM(NSInteger, VEExportAudioCodec) {
 /// The export has ended (written, failed or cancelled); its completion runs next on the main queue.
 @property (nonatomic, readonly, getter=isFinished) BOOL finished;
 @property (nonatomic, readonly) VEExportProgress *progress;
-/// Stops the export and deletes the partial file; the completion reports
-/// VEEngineErrorExportCancelled. Returns at once.
+/// Stops the export and deletes its temporary file (a file that was at the output URL before is
+/// kept); the completion reports VEEngineErrorExportCancelled. Returns at once.
 - (void)cancel;
-/// Cancels and waits (at most `timeout` seconds) until the export has ended and its partial
-/// file is gone. For quitting the app with an export running. Returns whether it ended.
+/// Cancels and waits (at most `timeout` seconds) until the export has ended and its temporary
+/// file is gone (typically well under a second, also while the file is being finished). For
+/// quitting the app with an export running. Returns whether it ended.
 - (BOOL)cancelAndWaitWithTimeout:(NSTimeInterval)timeout;
 - (instancetype)init NS_UNAVAILABLE;
 @end

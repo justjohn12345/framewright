@@ -129,7 +129,7 @@ EditResult buildClip(const Project &project, const Sequence &sequence, const Tra
         if (EditResult r = requireExact(placement.sourceIn, "source in point"); !r) {
             return r;
         }
-        const CMTime sourceOut = isNumeric(placement.sourceOut) ? placement.sourceOut : asset->duration;
+        CMTime sourceOut = isNumeric(placement.sourceOut) ? placement.sourceOut : asset->duration;
         if (EditResult r = requireExact(sourceOut, "source out point"); !r) {
             return r;
         }
@@ -137,6 +137,18 @@ EditResult buildClip(const Project &project, const Sequence &sequence, const Tra
             return EditResult::failure(EditError::OutOfSourceRange,
                                        "source range " + describe(placement.sourceIn) + " - " + describe(sourceOut) +
                                            " is outside the media (0 - " + describe(asset->duration) + ")");
+        }
+        // On a video track the media ends where its video ends (the container may run on with
+        // audio): the range is cut there (see ClipPlacement), and one starting after it has
+        // nothing to show.
+        const CMTime mediaEnd = mediaEndFor(*asset, track.kind);
+        if (sourceOut > mediaEnd) {
+            if (!(placement.sourceIn < mediaEnd)) {
+                return EditResult::failure(EditError::OutOfSourceRange,
+                                           "the video of \"" + asset->name + "\" ends at " + describe(mediaEnd) +
+                                               ", before the source in point " + describe(placement.sourceIn));
+            }
+            sourceOut = mediaEnd;
         }
         if (!(placement.sourceIn < sourceOut)) {
             return EditResult::failure(EditError::InvalidArgument, "source range is empty");
@@ -623,14 +635,20 @@ EditResult TrimClipTail::perform(const Project &project, Sequence &sequence, IdG
             if (!asset) {
                 return EditResult::failure(EditError::AssetNotFound, "the clip's asset is missing");
             }
-            // The last whole frame at which the source media still lasts.
-            const auto mediaEnd = clip.exactTimelineTimeAt(asset->duration);
+            // The last whole frame at which the source media (on a video track: its video) still
+            // lasts.
+            const CMTime sourceEnd = mediaEndFor(*asset, track.kind);
+            const auto mediaEnd = clip.exactTimelineTimeAt(sourceEnd);
             const auto frameIndex = mediaEnd ? mediaEnd->frameIndex(frame, SnapMode::Floor) : std::nullopt;
             const auto latest = frameIndex ? checkedTimeForFrame(*frameIndex, frame) : std::nullopt;
             if (!latest) {
-                return notRepresentable(clip.id, asset->duration);
+                return notRepresentable(clip.id, sourceEnd);
             }
-            limits.lowerHi(*latest - end, EditError::OutOfSourceRange, "the end of the source media" + which);
+            limits.lowerHi(*latest - end, EditError::OutOfSourceRange,
+                           std::string(track.kind == TrackKind::Video && sourceEnd < asset->duration
+                                           ? "the end of the media's video"
+                                           : "the end of the source media") +
+                               which);
         }
         limits.raiseLo(clip.timelineStart + frame - end, EditError::InvalidTime,
                        "the minimum length of one frame" + which);
@@ -890,7 +908,7 @@ EditResult SetClipSpeed::perform(const Project &project, Sequence &sequence, IdG
         // point never moves later), at least one frame, and never past the end of the media.
         const auto in = ExactTime::from(clip.sourceIn);
         const auto sourceOut = clip.exactSourceOut();
-        const auto mediaEnd = ExactTime::from(asset->duration);
+        const auto mediaEnd = ExactTime::from(mediaEndFor(*asset, track.kind));
         if (!in || !sourceOut || !mediaEnd) {
             return notRepresentable(clip.id, clip.timelineStart);
         }

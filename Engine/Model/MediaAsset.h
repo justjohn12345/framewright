@@ -36,6 +36,14 @@ struct MediaAsset {
     // ignored for stills and audio.
     CMTime frameDuration = kCMTimeInvalid;
     bool isVFR = false;
+    // Video (Video, AudioVideo): where the video track ends (the end of its last frame, as the
+    // prober reports it), at most `duration`; shorter when the container runs on with audio
+    // (screen recordings, files trimmed elsewhere). kCMTimeInvalid when not recorded (stills,
+    // audio-only assets); the video then lasts `duration`. Projects saved before schema 3 get
+    // `duration` (the best they know). Clips on video tracks use media up to videoEnd() only
+    // (Validation, EditOps); the decode pool holds the last frame should the pictures still end
+    // earlier (DecodePool.h).
+    CMTime videoDuration = kCMTimeInvalid;
     // Display rotation from the container (MP4 preferredTransform, MKV display matrix), in
     // degrees clockwise: 0, 90, 180 or 270. `width`/`height` are the DISPLAYED size after this
     // rotation; decoders return frames in storage orientation, so the renderer must apply it.
@@ -56,6 +64,11 @@ struct MediaAsset {
     }
     bool isStill() const {
         return kind == AssetKind::Still;
+    }
+    // End of the media a clip on a video track may use: videoDuration when recorded, else
+    // duration.
+    CMTime videoEnd() const {
+        return isNumeric(videoDuration) ? videoDuration : duration;
     }
 };
 

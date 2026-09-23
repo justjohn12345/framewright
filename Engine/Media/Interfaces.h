@@ -251,7 +251,9 @@ class IAudioEncoder {
 class IMuxer {
   public:
     virtual ~IMuxer() = default;
-    /// Creates (overwriting) the output file.
+    /// Creates the output file. `path` must not exist (InvalidArgument otherwise): a muxer never
+    /// deletes or truncates a file it did not create. To replace a file, write a new one (e.g. in
+    /// a temporary directory on the same volume) and move it into place when it is complete.
     virtual Status open(const std::string &path, ContainerFormat container) = 0;
     /// Declares a stream; returns its index for EncodedPacket::streamIndex. Before begin().
     virtual Result<int> addStream(const EncodedStreamFormat &format) = 0;
@@ -262,7 +264,7 @@ class IMuxer {
     virtual Status writePacket(EncodedPacket &&packet) = 0;
     /// Writes the trailer and closes the file.
     virtual Status finish() = 0;
-    /// Abandons the output and deletes the partial file.
+    /// Abandons the output and deletes the partial file (the file open() created).
     virtual void cancel() = 0;
 };
 
@@ -301,7 +303,11 @@ using AudioPullFn = std::function<Result<int>(float *dst, int maxFrames)>;
 class IMediaWriter {
   public:
     virtual ~IMediaWriter() = default;
-    /// Validates the settings and creates (overwriting) the output file.
+    /// Validates the settings and creates the output file. `path` must not exist
+    /// (InvalidArgument otherwise): a writer never deletes or truncates a file it did not create,
+    /// so a cancelled or failed write cannot destroy the file being replaced. To replace a file,
+    /// write a new one (e.g. in NSItemReplacementDirectory for the destination) and move it into
+    /// place once finish() succeeded (ExportJob does).
     virtual Status open(const std::string &path, const EncodeSettings &settings) = 0;
     /// A buffer of the video input format and size, from the writer's pool (preferred source
     /// of frames: it is already in the layout the encoder wants). After open().
@@ -316,7 +322,15 @@ class IMediaWriter {
     virtual Status runPull(const VideoPullFn &video, const AudioPullFn &audio) = 0;
     /// Flushes encoders, writes the trailer, waits for completion and reports any error.
     virtual Status finish() = 0;
-    /// Abandons the output and deletes the partial file. Safe to call at any time.
+    /// Makes finish() cancellable: while finish() flushes the encoders, writes the trailer and
+    /// waits for the file to be completed (an MP4 rewrite with the index up front can take a
+    /// while), it polls `check` (between packets, and at least every 20 ms while it waits on
+    /// AVAssetWriter); once `check` returns true it abandons the output as cancel() does
+    /// (deleting the partial file) and returns Cancelled. Set before finish(); `check` must be
+    /// thread-safe. Empty (the default): finish() runs to completion.
+    virtual void setFinishCancellation(std::function<bool()> check) = 0;
+    /// Abandons the output and deletes the partial file (the file open() created). Safe to call
+    /// at any time.
     virtual void cancel() = 0;
     /// Whether the video encoder runs in hardware. See the backend for how this is determined.
     virtual bool usesHardwareVideoEncoder() const = 0;

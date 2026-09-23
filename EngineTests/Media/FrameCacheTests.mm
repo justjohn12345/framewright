@@ -516,4 +516,41 @@ bool putSlot(FrameCache &cache, AssetId asset, int64_t index, PixelBuffer image 
     XCTAssertTrue(cache.contains(AssetId(1), int64_t(10)), @"the program's focus is untouched");
 }
 
+/// The decode pool holds the last frame of a stream past its end by putting it again with an
+/// infinite duration: the kept entry (same buffer, or a pinned one) grows to answer every later
+/// time, and is not an insertion.
+- (void)testPuttingAFrameAgainWithALaterEndExtendsItsEntry {
+    FrameCache cache(10 * _unit);
+    const AssetId a(1);
+    VideoFrame last;
+    last.pts = CMTimeMake(59, 30);
+    last.duration = kFd;
+    last.image = makeBuffer();
+    XCTAssertTrue(cache.put(a, last, kFd));
+    XCTAssertFalse(cache.contains(a, CMTimeMake(2, 1)), @"the end is exclusive");
+    VideoFrame held = last;
+    held.duration = kCMTimePositiveInfinity;
+    XCTAssertTrue(cache.put(a, held, kFd, held.pts));
+    XCTAssertTrue(cache.contains(a, CMTimeMake(2, 1)));
+    XCTAssertTrue(cache.contains(a, int64_t(3000)));
+    XCTAssertTrue(identical(cache.get(a, CMTimeMake(100, 1))->pts, last.pts));
+    XCTAssertTrue(cache.contains(a, int64_t(59)), @"still answers its own slot");
+    XCTAssertFalse(cache.contains(a, int64_t(58)));
+    XCTAssertEqual(cache.stats().insertions, uint64_t(1), @"extending is not an insertion");
+    XCTAssertEqual(cache.stats().count, size_t(1));
+
+    // A pinned entry at that pts keeps its buffer and still gets the longer end.
+    const AssetId b(2);
+    XCTAssertTrue(cache.put(b, last, kFd));
+    FrameCache::PinnedFrame pin = cache.acquire(b, int64_t(59));
+    XCTAssertTrue(pin);
+    VideoFrame redecoded = held;
+    redecoded.image = makeBuffer();
+    XCTAssertTrue(cache.put(b, redecoded, kFd, redecoded.pts));
+    XCTAssertTrue(cache.get(b, CMTimeMake(9, 1))->image == last.image, @"the pinned buffer stays");
+    // A shorter end never shrinks an entry.
+    XCTAssertTrue(cache.put(a, last, kFd));
+    XCTAssertTrue(cache.contains(a, CMTimeMake(100, 1)));
+}
+
 @end

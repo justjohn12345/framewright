@@ -113,6 +113,19 @@ Fixture goldenFixture() {
     return fx;
 }
 
+// The golden project after the schema 2 -> 3 migration: video and A/V assets' video lasts their
+// duration (version 2 did not record where the video ends).
+Fixture migratedGoldenFixture() {
+    Fixture fx = goldenFixture();
+    for (MediaAsset &asset : fx.project.assets) {
+        if (asset.kind == AssetKind::Video || asset.kind == AssetKind::AudioVideo) {
+            asset.videoDuration = asset.duration;
+        }
+    }
+    fx.requireValid();
+    return fx;
+}
+
 // A minimal version 1 document with one clip on V1 of a 30 fps sequence; `clip` fields are
 // merged over the defaults.
 json v1Document(const json &clipFields, CMTime frameDuration = CMTimeMake(1, 30)) {
@@ -174,7 +187,7 @@ TEST_CASE("ProjectJSON: format details") {
     const Fixture fx = richFixture();
     const json j = projectToJson(fx.project);
     CHECK(j.at("schemaVersion") == kProjectSchemaVersion);
-    CHECK(kProjectSchemaVersion == 2);
+    CHECK(kProjectSchemaVersion == 3);
     CHECK(j.at("nextId") == fx.project.ids.nextValue());
     const json &clip = j.at("sequences")[0].at("videoTracks")[0].at("clips")[0];
     CHECK(clip.at("timelineStart") == json{{"value", 0}, {"timescale", 30}});
@@ -408,7 +421,7 @@ TEST_CASE("ProjectJSON: the checked-in version 1 project loads through the migra
     const ProjectLoadResult loaded = parseProject(text);
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
     CHECK(loaded.warnings.empty());
-    const Fixture expected = goldenFixture();
+    const Fixture expected = migratedGoldenFixture();
     CHECK(*loaded.project == expected.project);
     // Spot checks of what the migration derived.
     const Sequence &main = *loaded.project->findSequence(expected.seq);
@@ -421,11 +434,20 @@ TEST_CASE("ProjectJSON: the checked-in version 1 project loads through the migra
     CHECK(identical(in44.timelineDuration, CMTimeMake(60, 30)));
 }
 
-TEST_CASE("ProjectJSON: the checked-in version 2 project matches the current writer byte for byte") {
+TEST_CASE("ProjectJSON: the checked-in version 2 project loads through the migration") {
     const std::string text = readFile(goldenPath("project-v2.json"));
+    REQUIRE(json::parse(text).at("schemaVersion") == 2);
     const ProjectLoadResult loaded = parseProject(text);
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
-    CHECK(*loaded.project == goldenFixture().project);
+    CHECK(loaded.warnings.empty());
+    CHECK(*loaded.project == migratedGoldenFixture().project);
+}
+
+TEST_CASE("ProjectJSON: the checked-in version 3 project matches the current writer byte for byte") {
+    const std::string text = readFile(goldenPath("project-v3.json"));
+    const ProjectLoadResult loaded = parseProject(text);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(*loaded.project == migratedGoldenFixture().project);
     CHECK(serializeProject(*loaded.project) + "\n" == text);
 }
 

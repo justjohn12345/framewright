@@ -1,6 +1,6 @@
 // Project file serialization (JSON via nlohmann/json).
 //
-// Format (schema version 2): a top-level object with "schemaVersion" (kProjectSchemaVersion),
+// Format (schema version 3): a top-level object with "schemaVersion" (kProjectSchemaVersion),
 // "name", "nextId", "activeSequenceId", "assets" and "sequences". CMTime is {"value",
 // "timescale"} plus "flags" when the flags are anything other than plain valid (e.g. infinite)
 // and "epoch" when non-zero; kCMTimeInvalid is null. A clip stores "timelineStart", "duration"
@@ -29,7 +29,7 @@
 
 namespace ve {
 
-inline constexpr int kProjectSchemaVersion = 2;
+inline constexpr int kProjectSchemaVersion = 3;
 
 nlohmann::json projectToJson(const Project &project);
 
@@ -59,6 +59,8 @@ ProjectLoadResult parseProject(std::string_view text);
 //           epochs left in stored times by the version 1 time math are dropped (the rounded
 //           values are within 1.5 ns of the intended ones) and durations snapped back to the
 //           frame grid.
+//   2 -> 3: video and A/V assets get "videoDuration" (where their video ends), set to their
+//           "duration" (version 2 did not record it separately).
 std::optional<std::string> migrateProjectJson(nlohmann::json &document, int fromVersion,
                                               std::vector<std::string> &warnings);
 

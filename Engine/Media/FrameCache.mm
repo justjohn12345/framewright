@@ -380,6 +380,13 @@ bool FrameCache::insert(std::optional<Epoch> epoch, AssetId asset, PixelBuffer i
             if (existing.frame.image == image && CMTimeCompare(cover, existing.frame.coverFrom) < 0) {
                 existing.frame.coverFrom = cover; // Learned about a gap before it.
             }
+            if (CMTimeCompare(end, existing.end) > 0) {
+                // The same frame (same pts) put again with a longer interval: the decode pool
+                // holding the last frame of a stream past its end (DecodePool.h).
+                existing.end = end;
+                existing.frame.duration = duration;
+                existing.frame.span = frameSpan(pts, duration, frameDuration);
+            }
             return true;
         }
         s.erase(asset, it);

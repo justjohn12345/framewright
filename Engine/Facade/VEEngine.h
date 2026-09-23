@@ -36,7 +36,9 @@
 //   millisecond); the state follows asynchronously through VEEnginePlaybackDidChangeNotification
 //   (at most once per displayed frame). One monitor plays at a time: starting the program
 //   (play, togglePlay, setRate:, shuttle) pauses the source monitor, and starting the source
-//   monitor pauses the program. The owner of a monitor view un-pauses it
+//   monitor pauses the program. While an export runs (isExporting) playback does not start:
+//   play, togglePlay (from paused), setRate: with a rate, the shuttles and the source monitor's
+//   equivalents do nothing (pausing, stepping and scrubbing still work). The owner of a monitor view un-pauses it
 //   (VEPreviewView.paused = NO) while the monitor's status isRunning, and keeps it paused
 //   otherwise; the engine renders the paused picture itself.
 
@@ -100,7 +102,7 @@ typedef NS_ERROR_ENUM(VEEngineErrorDomain, VEEngineErrorCode) {
     VEEngineErrorProjectClosed = 5,
     /// An export failed while running (decode, encode, write or GPU error; see the description).
     VEEngineErrorExportFailed = 6,
-    /// An export was cancelled (its partial file is deleted).
+    /// An export was cancelled (its temporary file is deleted; an existing output file is kept).
     VEEngineErrorExportCancelled = 7,
     /// An export was refused: media used by the sequence is missing or unreadable.
     VEEngineErrorMissingMedia = 8,
@@ -476,8 +478,10 @@ NS_SWIFT_UI_ACTOR
 /// Approximate size in bytes of an export of the active sequence with `settings` (from the bit
 /// rate, or for quality settings a typical bits-per-pixel figure; 0 for an empty sequence).
 - (int64_t)estimatedFileSizeForSettings:(VEExportSettings *)settings;
-/// Starts exporting the active sequence to `outputURL` (replaced if it exists; security-scoped
-/// URLs from a save panel are accessed for the export's lifetime). Refused, returning nil with
+/// Starts exporting the active sequence to `outputURL` (security-scoped URLs from a save panel
+/// are accessed for the export's lifetime). The movie is written to a temporary file on the
+/// same volume and moved to `outputURL` only once it is complete, replacing a file there then; a
+/// cancelled or failed export deletes the temporary file and leaves an existing file untouched. Refused, returning nil with
 /// an error and without creating any file, when: a coalescing group is open or another export
 /// runs (VEEngineErrorBusy), the settings are invalid, no encoder takes them or the sequence is
 /// empty (VEEngineErrorExportUnsupported), media a playing clip uses is missing
@@ -486,8 +490,9 @@ NS_SWIFT_UI_ACTOR
 /// (the monitors keep theirs); edits made meanwhile do not affect it (it renders the sequence as
 /// it was when it started). `progress` (at most 10 Hz) and `completion` (once) run on the main
 /// thread; the completion gets the summary, or an error (VEEngineErrorExportCancelled after
-/// -[VEExportHandle cancel], VEEngineErrorExportFailed with the reason otherwise), and the partial
-/// file is deleted on failure. New/Open cancels a running export.
+/// -[VEExportHandle cancel], VEEngineErrorExportFailed with the reason otherwise). The output
+/// must not be any of the project's media (VEEngineErrorExportUnsupported). Unreadable media is
+/// VEEngineErrorMissingMedia too. New/Open cancels a running export.
 - (nullable VEExportHandle *)beginExportWithSettings:(VEExportSettings *)settings
                                            outputURL:(NSURL *)outputURL
                                             progress:(nullable void (^)(VEExportProgress *progress))progress

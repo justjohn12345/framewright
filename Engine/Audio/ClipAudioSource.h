@@ -98,7 +98,13 @@ class ClipAudioSource {
         std::string backend; ///< Backend that opened the decoder ("" until opened).
         std::string error;   ///< Open/decode error, if any (the source then plays silence).
         bool opened = false;
-        bool failed = false;
+        bool failed = false; ///< The decoder could not be opened: the source only plays silence.
+        /// A read or seek failed after the decoder opened: the audio from `readFailedAt` (the
+        /// earliest sequence sample produced as silence because of it) was not decoded. Playback
+        /// keeps playing (silence there, and retries at later positions); an export must fail
+        /// (AudioMixer::failedSourceIn).
+        bool readFailed = false;
+        int64_t readFailedAt = -1;
         uint64_t framesProduced = 0;
         uint64_t repositions = 0;   ///< Segments started by the producer.
         int64_t bufferedFrames = 0; ///< Decoded and not yet consumed.
@@ -150,8 +156,13 @@ class ClipAudioSource {
     /// Fills `frames` frames of sequence audio starting at `pos` (producer thread).
     void produce(int64_t pos, int frames, float *out);
     /// Source samples [start, start + frames) at the output rate, silence outside the media.
-    void readSource(int64_t start, int64_t frames, float *out);
-    void ensureSourceWindow(int64_t first, int64_t lastInclusive);
+    /// Returns the first source sample that could not be decoded (a failed read or seek; then
+    /// silence from there on), or -1.
+    int64_t readSource(int64_t start, int64_t frames, float *out);
+    /// Like readSource() into the resampler's window; returns its failed source sample or -1.
+    int64_t ensureSourceWindow(int64_t first, int64_t lastInclusive);
+    /// Records that sequence sample `at` was produced as silence because the decoder failed.
+    void noteReadFailure(int64_t at) noexcept;
     /// Blocks until signalled (producer thread).
     void waitForWork();
     void wake() noexcept;
@@ -194,6 +205,7 @@ class ClipAudioSource {
     std::atomic<uint64_t> repositions_{0};
     std::atomic<bool> opened_{false};
     std::atomic<bool> failed_{false};
+    std::atomic<int64_t> readFailedAt_{-1}; // earliest sequence sample of a read failure (-1: none)
 
     // Consumer-only state (audio render thread).
     uint32_t consumerSerial_ = 0;

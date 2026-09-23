@@ -5,6 +5,7 @@
 
 #include "Interfaces.h"
 
+#include <functional>
 #include <memory>
 
 namespace ve::media {
@@ -31,6 +32,8 @@ class ComposedMediaWriter final : public IMediaWriter {
     Status endStream(TrackKind kind) override;
     Status runPull(const VideoPullFn &video, const AudioPullFn &audio) override;
     Status finish() override;
+    /// Checked before each packet the encoder flushes produce and before the trailer.
+    void setFinishCancellation(std::function<bool()> check) override;
     void cancel() override;
     bool usesHardwareVideoEncoder() const override;
     /// The video encoder's name() ("hevc_videotoolbox", "libsvtav1", ...).
@@ -53,6 +56,8 @@ class ComposedMediaWriter final : public IMediaWriter {
     int64_t audioFrames_ = 0;
     bool videoEnded_ = false;
     bool audioEnded_ = false;
+    bool finishing_ = false; ///< Inside finish(): the sink checks finishCancelled_.
+    std::function<bool()> finishCancelled_;
 };
 
 } // namespace ve::media

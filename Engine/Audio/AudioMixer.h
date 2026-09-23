@@ -108,6 +108,9 @@ class AudioMixer {
         int64_t bufferedFrames = 0;
         uint64_t repositions = 0;
         uint64_t wakeups = 0; ///< Producer thread wake-ups (ClipAudioSource::Stats::wakeups).
+        /// Sequence sample from which the source played silence because its decoder failed
+        /// (failedSourceIn: within the queried range; stats(): the read failure's, -1 if none).
+        int64_t failedAt = -1;
     };
 
     struct Stats {
@@ -181,8 +184,11 @@ class AudioMixer {
     /// within sequence samples [from, from + frames) has decoded that part (or can only produce
     /// silence there: its decoder failed, or the media ended). Non-blocking.
     bool isRangeReady(int64_t from, int64_t frames) const;
-    /// The first source of the newest plan sounding within [from, from + frames) whose decoder
-    /// failed (it renders silence), or nullopt.
+    /// The first source of the newest plan sounding within [from, from + frames) that renders
+    /// silence there because its decoder failed: it could not be opened, or a read or seek failed
+    /// at or before a sample of the range where the source sounds (ClipAudioSource::Stats::
+    /// readFailedAt); SourceInfo::failedAt says from which sequence sample. nullopt otherwise.
+    /// Playback ignores this (it keeps playing silence); the offline renderer fails the export.
     std::optional<SourceInfo> failedSourceIn(int64_t from, int64_t frames) const;
     /// Frames rendered as silence because a source was not ready (Stats::underrunFrames), without
     /// copying the stats. Any thread.

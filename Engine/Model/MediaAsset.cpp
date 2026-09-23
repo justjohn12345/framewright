@@ -33,6 +33,7 @@ bool operator==(const MediaAsset &a, const MediaAsset &b) {
     return a.id == b.id && a.name == b.name && a.url == b.url && a.kind == b.kind &&
            identical(a.duration, b.duration) && a.width == b.width && a.height == b.height &&
            identical(a.frameDuration, b.frameDuration) && a.isVFR == b.isVFR &&
+           identical(a.videoDuration, b.videoDuration) &&
            a.rotationDegrees == b.rotationDegrees && a.audioSampleRate == b.audioSampleRate &&
            a.audioChannels == b.audioChannels &&
            a.backendHint == b.backendHint && a.hardwareDecode == b.hardwareDecode;

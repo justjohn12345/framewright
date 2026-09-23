@@ -463,15 +463,19 @@ std::optional<AudioMixer::SourceInfo> AudioMixer::failedSourceIn(int64_t from, i
             continue;
         }
         const ClipAudioSource::Stats st = ps.source->stats();
-        if (st.failed) {
+        // A read failure matters from its sample on (the source played audio before it).
+        const bool readFailedHere = st.readFailed && st.readFailedAt < std::min(to, ps.spanEnd);
+        if (st.failed || readFailedHere) {
             TrackId track;
             for (const SourceEntry &entry : sources_) {
                 if (entry.source.get() == ps.source) {
                     track = entry.track;
                 }
             }
-            return SourceInfo{ps.source->mapping().asset, track, st.backend, st.error, true,
-                              st.bufferedFrames, st.repositions, st.wakeups};
+            SourceInfo info{ps.source->mapping().asset, track, st.backend, st.error, true,
+                            st.bufferedFrames, st.repositions, st.wakeups};
+            info.failedAt = st.failed ? std::max(from, ps.spanStart) : std::max(st.readFailedAt, ps.spanStart);
+            return info;
         }
     }
     return std::nullopt;
@@ -519,8 +523,10 @@ AudioMixer::Stats AudioMixer::stats() const {
     s.garbageBatches = garbageBatches_;
     for (const SourceEntry &entry : sources_) {
         const ClipAudioSource::Stats st = entry.source->stats();
-        s.sources.push_back(SourceInfo{entry.source->mapping().asset, entry.track, st.backend, st.error, st.failed,
-                                       st.bufferedFrames, st.repositions, st.wakeups});
+        SourceInfo info{entry.source->mapping().asset, entry.track, st.backend, st.error, st.failed,
+                        st.bufferedFrames, st.repositions, st.wakeups};
+        info.failedAt = st.readFailed ? st.readFailedAt : -1;
+        s.sources.push_back(std::move(info));
     }
     return s;
 }

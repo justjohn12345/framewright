@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <thread>
 
@@ -98,9 +99,16 @@ media::Result<int> OfflineAudioRenderer::render(float *dst, int maxFrames, const
     }
     if (auto failed = mixer_->failedSourceIn(pos, n)) {
         const MediaAsset *asset = project_->findAsset(failed->asset);
-        const std::string name = asset ? asset->name : "asset " + std::to_string(failed->asset.value());
+        const std::string name = asset ? (asset->name.empty() ? playback::mediaPathForURL(asset->url) : asset->name)
+                                       : "asset " + std::to_string(failed->asset.value());
+        const int64_t at = failed->failedAt >= 0 ? failed->failedAt : pos;
+        const Sequence *sequence = project_->findSequence(sequenceId_);
+        const Track *track = sequence ? sequence->findTrack(failed->track) : nullptr;
+        char when[32];
+        std::snprintf(when, sizeof when, "%.3f s", static_cast<double>(at) / config_.sampleRate);
         return makeError(MediaErrorCode::DecodeFailed,
-                         "the audio of “" + name + "” could not be decoded" +
+                         "The audio of “" + name + "”" + (track ? " on " + track->name : std::string()) +
+                             " could not be decoded at " + when + " in the sequence" +
                              (failed->error.empty() ? std::string() : ": " + failed->error));
     }
 

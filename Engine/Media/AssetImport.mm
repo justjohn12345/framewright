@@ -107,6 +107,13 @@ Result<MediaAsset> makeMediaAsset(const RoutedMediaInfo &routed, AssetId id, con
             return makeError(MediaErrorCode::InvalidArgument, info.path + " has no duration");
         }
         asset.duration = duration;
+        // Where the pictures end: the video track's end on the container timeline, which comes
+        // before the container's duration when the audio runs longer. Clips on video tracks are
+        // kept within it (MediaAsset::videoDuration).
+        if (video != nullptr && isNumeric(video->duration) && isPositive(video->duration)) {
+            const CMTime start = isNumeric(video->startTime) ? maxTime(video->startTime, kCMTimeZero) : kCMTimeZero;
+            asset.videoDuration = canonicalProbedTime(minTime(start + video->duration, duration));
+        }
     }
 
     const TrackRoute *route = visual ? routed.route(visual->index) : routed.route(audio->index);

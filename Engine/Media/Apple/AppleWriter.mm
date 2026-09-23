@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -195,6 +196,7 @@ struct AppleWriter::Impl {
     std::atomic<uint64_t> readyGeneration{0};
     VEWriterReadyObserver *observer = nil;
     bool hardwareEncoder = false; ///< The video input runs on the hardware encoder (required at open).
+    std::function<bool()> finishCancelled; ///< setFinishCancellation().
 
     ~Impl() {
         removeObservers();
@@ -509,12 +511,11 @@ Status AppleWriter::open(const std::string &path, const EncodeSettings &settings
         if (p == nil || path.empty()) {
             return makeError(MediaErrorCode::InvalidArgument, "invalid output path");
         }
-        NSFileManager *fm = NSFileManager.defaultManager;
-        if ([fm fileExistsAtPath:p]) {
-            NSError *removeError = nil;
-            if (![fm removeItemAtPath:p error:&removeError]) {
-                return errorFromNSError(removeError, MediaErrorCode::PermissionDenied, "removing existing output");
-            }
+        // Never delete or replace an existing file (Interfaces.h): a cancelled or failed write
+        // would destroy it. Callers replacing a file write a new one and move it into place.
+        if ([NSFileManager.defaultManager fileExistsAtPath:p]) {
+            return makeError(MediaErrorCode::InvalidArgument,
+                             "the output " + path + " already exists; the writer only creates new files");
         }
         // Video: the hardware encoder first (required, so AVAssetWriter fails at startWriting
         // when VideoToolbox has none for these settings, e.g. H.264 above 4096x2304), then, unless
@@ -777,15 +778,39 @@ Status AppleWriter::finish() {
         if (CMTIME_IS_NUMERIC(end)) {
             [d.writer endSessionAtSourceTime:end];
         }
+        if (d.finishCancelled && d.finishCancelled()) {
+            d.removeObservers();
+            d.cancelAndDelete();
+            return makeError(MediaErrorCode::Cancelled, "writing was cancelled before it finished");
+        }
         dispatch_semaphore_t done = dispatch_semaphore_create(0);
         [d.writer finishWritingWithCompletionHandler:^{
             dispatch_semaphore_signal(done);
         }];
-        const dispatch_time_t deadline =
-            dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(kFinishTimeoutSeconds * NSEC_PER_SEC));
-        const bool timedOut = dispatch_semaphore_wait(done, deadline) != 0;
+        // Wait in slices so a cancel is honoured while AVAssetWriter completes the file (MP4 with
+        // shouldOptimizeForNetworkUse rewrites the whole file to put the index first).
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                  std::chrono::duration<double>(kFinishTimeoutSeconds));
+        bool finished = false;
+        bool cancelled = false;
+        while (!finished && std::chrono::steady_clock::now() < deadline) {
+            finished = dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_MSEC)) == 0;
+            if (!finished && d.finishCancelled && d.finishCancelled()) {
+                cancelled = true;
+                break;
+            }
+        }
         d.removeObservers();
-        if (timedOut) {
+        if (cancelled) {
+            // Legal while the writer is still completing (its status is Writing until then):
+            // blocks until writing stopped; the completion handler still runs.
+            [d.writer cancelWriting];
+            (void)dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+            d.cancelAndDelete();
+            return makeError(MediaErrorCode::Cancelled, "writing was cancelled while the file was being finished");
+        }
+        if (!finished) {
             d.cancelAndDelete();
             return makeError(MediaErrorCode::Timeout, "AVAssetWriter finishWriting timed out");
         }
@@ -797,6 +822,10 @@ Status AppleWriter::finish() {
         d.state = Impl::State::Finished;
         return okStatus();
     }
+}
+
+void AppleWriter::setFinishCancellation(std::function<bool()> check) {
+    impl_->finishCancelled = std::move(check);
 }
 
 void AppleWriter::cancel() {

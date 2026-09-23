@@ -48,6 +48,7 @@ json assetToJson(const MediaAsset &asset) {
                 {"height", asset.height},
                 {"frameDuration", timeToJson(asset.frameDuration)},
                 {"isVFR", asset.isVFR},
+                {"videoDuration", timeToJson(asset.videoDuration)},
                 {"rotationDegrees", asset.rotationDegrees},
                 {"audioSampleRate", asset.audioSampleRate},
                 {"audioChannels", asset.audioChannels},
@@ -320,6 +321,7 @@ MediaAsset parseAsset(const Node &node) {
     asset.height = node.int32Or("height", 0);
     asset.frameDuration = node.timeOr("frameDuration", kCMTimeInvalid);
     asset.isVFR = node.boolOr("isVFR", false);
+    asset.videoDuration = node.timeOr("videoDuration", kCMTimeInvalid);
     asset.rotationDegrees = node.int32Or("rotationDegrees", 0);
     asset.audioSampleRate = node.int32Or("audioSampleRate", 0);
     asset.audioChannels = node.int32Or("audioChannels", 0);
@@ -609,6 +611,29 @@ void migrateV1ToV2(json &document, Warnings &warnings) {
     }
 }
 
+// Version 2 did not record where an asset's video ends. The container's duration is the best the
+// file knows (it is what version 2 let video clips use); the decode pool holds the last frame
+// should the pictures end earlier.
+void migrateV2ToV3(json &document, Warnings &) {
+    const Node root(document, "");
+    root.requireObject();
+    if (!root.has("assets")) {
+        return;
+    }
+    const Node list = root.field("assets");
+    for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
+        const Node asset = list.element(i);
+        asset.requireObject();
+        if (asset.has("videoDuration") || !asset.has("kind") || !asset.has("duration")) {
+            continue;
+        }
+        const std::string kind = asset.field("kind").asString();
+        if (kind == nameOf(AssetKind::Video) || kind == nameOf(AssetKind::AudioVideo)) {
+            document["assets"][i]["videoDuration"] = document["assets"][i]["duration"];
+        }
+    }
+}
+
 struct MigrationStep {
     int fromVersion;
     void (*apply)(json &document, Warnings &warnings);
@@ -617,6 +642,7 @@ struct MigrationStep {
 // One entry per schema version bump, in order: entry i upgrades fromVersion to fromVersion + 1.
 constexpr MigrationStep kMigrations[] = {
     {1, migrateV1ToV2},
+    {2, migrateV2ToV3},
 };
 static_assert(sizeof(kMigrations) / sizeof(kMigrations[0]) == kProjectSchemaVersion - 1,
               "every schema version below the current one needs a migration step");

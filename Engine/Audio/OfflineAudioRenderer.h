@@ -8,7 +8,9 @@
 // - Before each block it waits until every source sounding in the block has decoded it
 //   (AudioMixer::isRangeReady), so the mixer never underruns. An underrun would be a gap of
 //   silence in the file; should one happen anyway it is reported as an error, never written.
-// - A source whose decoder failed would play silence; here it is an error naming the asset.
+// - A source whose decoder failed would play silence: at open, or a read or seek in the middle of
+//   the stream (AudioMixer::failedSourceIn); here it is an error naming the clip's media, its track
+//   and the sequence time from which the audio is missing.
 // - Plans cover `planSeconds` ahead of the render position and are renewed when less than
 //   `replanMarginSeconds` remain (the playback controller plans a 5 s horizon every second). A
 //   renewed plan of the running transport blends envelopes over the mixer's 5 ms ramp, which is
@@ -62,8 +64,9 @@ class OfflineAudioRenderer {
 
     /// Renders up to `maxFrames` interleaved frames into `dst`; returns the number rendered, 0 at
     /// the end. Errors: Cancelled when `cancelled()` returns true while waiting for decoded audio;
-    /// DecodeFailed when the decoder of a clip sounding in the block failed (the message names the
-    /// asset); Timeout when the sources did not decode the block within Config::stallTimeout;
+    /// DecodeFailed when the decoder of a clip sounding in the block failed, at open or mid-stream
+    /// (the message names the media, the track and the time); Timeout when the sources did not
+    /// decode the block within Config::stallTimeout;
     /// Internal if the mixer underran regardless.
     media::Result<int> render(float *dst, int maxFrames, const std::function<bool()> &cancelled);
 

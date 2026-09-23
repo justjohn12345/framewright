@@ -936,4 +936,61 @@ struct ScrubLog {
     XCTAssertEqual(_fake->liveDecoders.load(), 0, @"the scrub decoder of the previous epoch was destroyed");
 }
 
+// MARK: - End of the video
+
+/// Media whose pictures end (2 s, 60 frames) before the track's duration (10 s): a stream that
+/// plays into the end holds the last frame for every later time; one targeted far past the end
+/// (its seek finds nothing) searches back for the last frame and holds it; the scrub path does
+/// the same. StreamStats says where the video ends.
+- (void)testTheLastFrameIsHeldPastTheEndOfTheVideo {
+    _fake->frames = 60;
+    const AssetId asset(1);
+    DecodePool pool(_fakeRouter, _cache);
+    pool.setTargets({DecodeTarget{asset, "/fake/short.mov", -1, CMTimeMake(3, 2)}});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    DecodePool::StreamStats stream = pool.stats().streams.at(0);
+    XCTAssertTrue(stream.eof);
+    XCTAssertEqual(CMTimeCompare(stream.videoEnd, CMTimeMake(2, 1)), 0, @"%.4f s", CMTimeGetSeconds(stream.videoEnd));
+    XCTAssertFalse(stream.error.has_value());
+    for (CMTime t : {CMTimeMake(2, 1), CMTimeMake(5, 2), CMTimeMake(9, 1)}) {
+        auto frame = _cache->get(asset, t);
+        XCTAssertTrue(frame.has_value(), @"%.2f s", CMTimeGetSeconds(t));
+        if (frame) {
+            XCTAssertEqual(readBurnIn(frame->image.get()), std::optional<int>(59), @"%.2f s", CMTimeGetSeconds(t));
+        }
+    }
+    XCTAssertTrue(_cache->contains(asset, int64_t(250)), @"slot lookups too (the program monitor, export)");
+
+    // Far past the end with nothing cached: the seek lands after the last frame.
+    _cache->purge(asset);
+    const int seeksBefore = _fake->seeks.load();
+    pool.setTargets({DecodeTarget{asset, "/fake/short.mov", -1, CMTimeMake(8, 1)}});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    auto found = _cache->get(asset, CMTimeMake(8, 1));
+    XCTAssertTrue(found.has_value());
+    if (found) {
+        XCTAssertEqual(readBurnIn(found->image.get()), std::optional<int>(59));
+    }
+    stream = pool.stats().streams.at(0);
+    XCTAssertTrue(stream.eof);
+    XCTAssertFalse(stream.error.has_value());
+    NSLog(@"end search: %d seeks", _fake->seeks.load() - seeksBefore);
+    XCTAssertLessThanOrEqual(_fake->seeks.load() - seeksBefore, 8, @"the search doubles its step");
+
+    // Scrubbing past the end.
+    _cache->purge(asset);
+    ScrubLog log;
+    pool.requestFrame(asset, CMTimeMake(7, 1), log.callback(0));
+    XCTAssertTrue(log.waitFor(1, std::chrono::seconds(10)));
+    {
+        std::lock_guard<std::mutex> lock(log.mutex);
+        const auto &r = log.results[0].at(0);
+        XCTAssertTrue(r.ok(), @"%s", r.ok() ? "" : r.error().description().c_str());
+        if (r.ok()) {
+            XCTAssertEqual(readBurnIn(r.value().image.get()), std::optional<int>(59));
+        }
+    }
+    XCTAssertTrue(_cache->contains(asset, CMTimeMake(7, 1)), @"the scrubbed last frame is held too");
+}
+
 @end

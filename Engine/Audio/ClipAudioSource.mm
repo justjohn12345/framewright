@@ -115,6 +115,8 @@ ClipAudioSource::Stats ClipAudioSource::stats() const {
     }
     s.opened = opened_.load(std::memory_order_acquire);
     s.failed = failed_.load(std::memory_order_acquire);
+    s.readFailedAt = readFailedAt_.load(std::memory_order_acquire);
+    s.readFailed = s.readFailedAt >= 0;
     s.framesProduced = framesProduced_.load(std::memory_order_relaxed);
     s.repositions = repositions_.load(std::memory_order_relaxed);
     const uint64_t w = writeIndex_.load(std::memory_order_acquire);
@@ -270,7 +272,16 @@ bool ClipAudioSource::openDecoder() {
     return true;
 }
 
-void ClipAudioSource::readSource(int64_t start, int64_t frames, float *out) {
+void ClipAudioSource::noteReadFailure(int64_t at) noexcept {
+    at = std::max<int64_t>(0, at);
+    int64_t current = readFailedAt_.load(std::memory_order_relaxed);
+    while ((current < 0 || at < current) &&
+           !readFailedAt_.compare_exchange_weak(current, at, std::memory_order_release, std::memory_order_relaxed)) {
+    }
+}
+
+int64_t ClipAudioSource::readSource(int64_t start, int64_t frames, float *out) {
+    int64_t failedAt = -1;
     int64_t done = 0;
     if (start < 0) {
         const int64_t silent = std::min(frames, -start);
@@ -279,19 +290,23 @@ void ClipAudioSource::readSource(int64_t start, int64_t frames, float *out) {
     }
     if (done < frames && decoder_ && !failed_.load(std::memory_order_relaxed)) {
         const int64_t first = start + done;
+        bool positioned = true;
         if (decoder_->position() != first) {
             auto status = decoder_->seek(sampleTime(first, config_.sampleRate));
             if (!status.ok()) {
                 std::lock_guard<std::mutex> lock(statsMutex_);
                 error_ = status.error().description();
+                positioned = false; // reading on would deliver audio from the wrong place
+                failedAt = first;
             }
         }
-        while (done < frames) {
+        while (positioned && done < frames) {
             const int want = static_cast<int>(std::min<int64_t>(frames - done, 1 << 16));
             auto got = decoder_->read(out + done * channels_, want);
             if (!got.ok()) {
                 std::lock_guard<std::mutex> lock(statsMutex_);
                 error_ = got.error().description();
+                failedAt = start + done;
                 break;
             }
             if (*got <= 0) {
@@ -303,9 +318,10 @@ void ClipAudioSource::readSource(int64_t start, int64_t frames, float *out) {
     if (done < frames) {
         std::fill(out + done * channels_, out + frames * channels_, 0.0f);
     }
+    return failedAt;
 }
 
-void ClipAudioSource::ensureSourceWindow(int64_t first, int64_t lastInclusive) {
+int64_t ClipAudioSource::ensureSourceWindow(int64_t first, int64_t lastInclusive) {
     const int64_t windowEnd = sourceWindowStart_ + sourceWindowFrames_;
     if (sourceWindowFrames_ == 0 || first < sourceWindowStart_ || first > windowEnd) {
         sourceWindowStart_ = first;
@@ -323,15 +339,19 @@ void ClipAudioSource::ensureSourceWindow(int64_t first, int64_t lastInclusive) {
         if (sourceWindow_.size() < size) {
             sourceWindow_.resize(size);
         }
-        readSource(sourceWindowStart_ + sourceWindowFrames_, need,
-                   sourceWindow_.data() + sourceWindowFrames_ * channels_);
+        const int64_t failedAt = readSource(sourceWindowStart_ + sourceWindowFrames_, need,
+                                            sourceWindow_.data() + sourceWindowFrames_ * channels_);
         sourceWindowFrames_ += need;
+        return failedAt;
     }
+    return -1;
 }
 
 void ClipAudioSource::produce(int64_t pos, int frames, float *out) {
     if (unitSpeed_) {
-        readSource(pos + unitOffset_, frames, out);
+        if (const int64_t failedAt = readSource(pos + unitOffset_, frames, out); failedAt >= 0) {
+            noteReadFailure(failedAt - unitOffset_);
+        }
         return;
     }
     const double num = static_cast<double>(mapping_.speed.num);
@@ -341,7 +361,12 @@ void ClipAudioSource::produce(int64_t pos, int frames, float *out) {
     const double xn = sourceAt(pos + frames - 1);
     const int64_t first = static_cast<int64_t>(std::floor(x0));
     const int64_t last = static_cast<int64_t>(std::floor(xn)) + 1;
-    ensureSourceWindow(first, last);
+    if (const int64_t failedAt = ensureSourceWindow(first, last); failedAt >= 0) {
+        // The first output sample that interpolates from the failed source sample (from
+        // floor(x) and floor(x) + 1): x + 1 >= failedAt.
+        const double n = std::ceil((static_cast<double>(failedAt) - 1.0 - offsetSamples_) * den / num);
+        noteReadFailure(std::clamp<int64_t>(static_cast<int64_t>(n), pos, pos + frames - 1));
+    }
     const float *window = sourceWindow_.data();
     for (int k = 0; k < frames; ++k) {
         const double x = sourceAt(pos + k);

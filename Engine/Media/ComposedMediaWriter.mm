@@ -24,6 +24,9 @@ Status ComposedMediaWriter::fail(MediaError error) {
 
 PacketSink ComposedMediaWriter::sinkFor(int streamIndex) {
     return [this, streamIndex](EncodedPacket &&packet) -> Status {
+        if (finishing_ && finishCancelled_ && finishCancelled_()) {
+            return makeError(MediaErrorCode::Cancelled, "writing was cancelled while the file was being finished");
+        }
         packet.streamIndex = streamIndex;
         return muxer_->writePacket(std::move(packet));
     };
@@ -206,11 +209,15 @@ Status ComposedMediaWriter::finish() {
     if (state_ != State::Writing) {
         return makeError(MediaErrorCode::InvalidState, "finish() needs an open writer");
     }
+    finishing_ = true;
     if (videoStream_ >= 0) {
         VE_MEDIA_TRY(endStream(TrackKind::Video));
     }
     if (audioStream_ >= 0) {
         VE_MEDIA_TRY(endStream(TrackKind::Audio));
+    }
+    if (finishCancelled_ && finishCancelled_()) {
+        return fail(makeError(MediaErrorCode::Cancelled, "writing was cancelled while the file was being finished"));
     }
     if (Status s = muxer_->finish(); !s.ok()) {
         state_ = State::Failed;
@@ -218,6 +225,10 @@ Status ComposedMediaWriter::finish() {
     }
     state_ = State::Finished;
     return okStatus();
+}
+
+void ComposedMediaWriter::setFinishCancellation(std::function<bool()> check) {
+    finishCancelled_ = std::move(check);
 }
 
 void ComposedMediaWriter::cancel() {

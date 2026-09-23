@@ -29,6 +29,16 @@
 //   target makes the work in flight useless (outside the decoded range plus
 //   seekAheadThreshold, or a direction change). A far seek into a long GOP is then abandoned
 //   after the frame being decoded instead of after the whole GOP.
+// - End of the video: when a stream reaches the end of its track, the last frame decoded is put
+//   into the cache again with an infinite duration, so it answers every later time (FrameCache
+//   extends the entry). A clip that runs past the end of the video (a container whose audio lasts
+//   longer than its pictures, a track duration that overstates them, an old project whose asset
+//   duration is the container's) then shows the last picture, in the program monitor and in an
+//   export alike, instead of a missing layer. A target at or after the end (a seek that returns
+//   no frame) first finds the last frame: the stream seeks back 2 frames (at least 0.25 s) from
+//   where the track ends, doubling the step until a frame comes out, and decodes forward to the
+//   end. The scrub path does the same for a request past the end. StreamStats::eof / videoEnd
+//   report it.
 // - Targets are matched to streams by (asset, trackIndex, lane); `lane` distinguishes two
 //   simultaneous uses of one asset (pass e.g. the clip id). Streams whose key is absent from
 //   the latest setTargets are cancelled and their decoders destroyed on a worker thread.
@@ -151,6 +161,11 @@ class DecodePool {
         CMTime rangeEnd = kCMTimeInvalid;
         CMTime window = kCMTimeInvalid;     ///< Lookahead actually used (budget-limited).
         size_t frameBytes = 0;              ///< Bytes of one decoded frame (0 before the first).
+        /// The stream reached the end of the media's video; its last frame is held (see the
+        /// header comment), so rangeEnd is +infinity then.
+        bool eof = false;
+        /// Where the media's video ends (the end of its last frame), once it was reached.
+        CMTime videoEnd = kCMTimeInvalid;
         uint64_t framesDecoded = 0;
         uint64_t seeks = 0;
         uint64_t interrupts = 0;            ///< Decodes abandoned because the target moved.

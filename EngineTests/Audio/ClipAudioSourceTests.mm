@@ -6,6 +6,7 @@
 
 #include "../../Engine/Audio/ClipAudioSource.h"
 #include "../Media/BurnIn.h"
+#include "../Media/RouterTestSupport.h"
 #include "../Media/TestMedia.h"
 #include "AudioTestSupport.h"
 
@@ -253,6 +254,42 @@ std::vector<float> readRange(ClipAudioSource &source, int64_t at, int64_t frames
     std::vector<float> buffer(512 * 2);
     XCTAssertEqual(source.read(48000, buffer.data(), 512), 512);
     XCTAssertFalse(source.isPositionedAt(48000), @"consumed past its position: a reseek is needed");
+}
+
+/// A read that fails after the decoder opened (phase 7 review P3): the source plays silence (it
+/// stays ready: playback goes on) and records the first sequence sample it could not decode, at
+/// speed 1 and when resampling, for AudioMixer::failedSourceIn and so the export.
+- (void)testReadFailureMidStreamIsRecordedWithItsSequenceSample {
+    auto behavior = std::make_shared<FakeBehavior>();
+    behavior->frames = 300;
+    behavior->failAudioAtSample = 24576; // reads starting there fail (the source reads 1024-frame chunks)
+    behavior->probe = [](const std::string &path) -> media::Result<media::MediaInfo> {
+        return makeFakeInfo(path, "mp4", media::fourcc::H264, true);
+    };
+    auto router = std::make_shared<media::BackendRouter>();
+    XCTAssertTrue(router->registerBackend(std::make_shared<FakeBackend>(behavior)).ok());
+    struct Case {
+        Ratio speed;
+        int64_t expected; // first sequence sample produced as silence
+    };
+    // Speed 2: the source window reads 2048 source frames per 1024-frame chunk, so the failing read
+    // starts at source sample 24576, which sequence sample 12288 is the first to need.
+    for (const Case c : {Case{Ratio{1, 1}, 24576}, Case{Ratio{2, 1}, 12288}}) {
+        AudioSourceMapping m;
+        m.asset = AssetId(1);
+        m.path = "/fake/av.mp4";
+        m.speed = c.speed;
+        ClipAudioSource source(router, m);
+        source.seekTo(0);
+        XCTAssertTrue(waitReady(source, 0, 48000, std::chrono::seconds(10)), @"silence counts as ready");
+        const std::vector<float> got = readRange(source, 0, 48000);
+        XCTAssertEqual(got.size(), size_t(96000));
+        const ClipAudioSource::Stats stats = source.stats();
+        XCTAssertFalse(stats.failed, @"the decoder opened");
+        XCTAssertTrue(stats.readFailed, @"speed %lld", (long long)c.speed.num);
+        XCTAssertEqual(stats.readFailedAt, c.expected, @"speed %lld", (long long)c.speed.num);
+        XCTAssertNotEqual(stats.error.find("scripted audio failure"), std::string::npos, @"%s", stats.error.c_str());
+    }
 }
 
 @end

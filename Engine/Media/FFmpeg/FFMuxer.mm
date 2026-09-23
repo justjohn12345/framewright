@@ -8,6 +8,7 @@ extern "C" {
 #include <libavutil/mem.h>
 }
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -194,14 +195,24 @@ Status FFMuxer::openFormat(const std::string &path, const std::string &formatNam
         return makeError(MediaErrorCode::InvalidArgument, "empty output path");
     }
     initializeFFmpegOnce();
-    if (::unlink(path.c_str()) != 0 && errno != ENOENT) {
+    // Never truncate or replace an existing file (Interfaces.h): the file is created exclusively
+    // first, so avio_open below only ever truncates the empty file made here.
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (fd < 0) {
         const int e = errno;
+        if (e == EEXIST) {
+            return makeError(MediaErrorCode::InvalidArgument,
+                             "the output " + path + " already exists; the muxer only creates new files", "POSIX", e);
+        }
         return makeError(e == EACCES || e == EPERM ? MediaErrorCode::PermissionDenied : MediaErrorCode::WriteFailed,
-                         "cannot replace existing output " + path + ": " + std::strerror(e), "POSIX", e);
+                         "cannot create " + path + ": " + std::strerror(e), "POSIX", e);
     }
+    ::close(fd);
+    auto removeCreated = [&] { ::unlink(path.c_str()); };
     AVFormatContext *raw = nullptr;
     int rc = avformat_alloc_output_context2(&raw, nullptr, formatName.c_str(), path.c_str());
     if (rc < 0 || raw == nullptr) {
+        removeCreated();
         return ffError(rc < 0 ? rc : AVERROR_MUXER_NOT_FOUND, MediaErrorCode::UnsupportedFormat,
                        "avformat_alloc_output_context2(" + formatName + ")");
     }
@@ -210,13 +221,16 @@ Status FFMuxer::openFormat(const std::string &path, const std::string &formatNam
         rc = avio_open(&d.ctx->pb, path.c_str(), AVIO_FLAG_WRITE);
         if (rc < 0) {
             d.ctx.reset();
+            removeCreated();
             return ffError(rc, MediaErrorCode::WriteFailed, "avio_open(" + path + ")");
         }
+    } else {
+        removeCreated(); // the muxer writes no file of its own
     }
     auto packet = allocPacket();
     if (!packet.ok()) {
         d.ctx.reset();
-        ::unlink(path.c_str());
+        removeCreated();
         return std::move(packet).error();
     }
     d.packet = std::move(packet).value();

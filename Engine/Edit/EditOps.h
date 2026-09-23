@@ -39,6 +39,10 @@ struct ClipPlacement {
     AssetId assetId;
     // Used source range. For a still asset only the length (sourceOut - sourceIn) matters; if it
     // is not positive the still gets defaultStillDuration().
+    // On a video track the range ends at the latest where the media's video ends
+    // (MediaAsset::videoEnd(), which may come before `duration` when the container runs on with
+    // audio): a longer sourceOut is cut there (compare the clip's length with the request to tell
+    // the user), a sourceIn at or after it is refused (OutOfSourceRange).
     CMTime sourceIn = kCMTimeZero;
     CMTime sourceOut = kCMTimeInvalid; // invalid: to the end of the media
     Ratio speed{1, 1};                 // see speedFromDouble(); ignored for stills

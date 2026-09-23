@@ -8,6 +8,8 @@ namespace ve::media::ffmpeg {
 
 /// IMuxer over libavformat. Not thread-safe (see Interfaces.h).
 ///
+/// open() creates the file exclusively (O_EXCL): an existing path is refused, never truncated.
+///
 /// Containers: ContainerFormat::MOV / MP4 / M4A / WAV / MKV map to FFmpeg's "mov" / "mp4" (with
 /// +faststart, like AVAssetWriter's shouldOptimizeForNetworkUse) / "ipod" / "wav" / "matroska" muxers;
 /// openFormat() accepts any libavformat muxer name (e.g. "matroska", "webm").

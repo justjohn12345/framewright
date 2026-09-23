@@ -191,4 +191,43 @@ RoutedMediaInfo routed(std::vector<TrackInfo> tracks, const std::string &backend
     XCTAssertEqual(asset->name, "hevc_720p2997.mov");
 }
 
+/// Where the video ends (MediaAsset::videoDuration): the video track's end on the container
+/// timeline, which can come before the container's duration (the audio runs on); never past it.
+- (void)testVideoDurationIsWhereTheVideoTrackEnds {
+    TrackInfo video = videoTrack(0, 1920, 1080, CMTimeMake(1, 30));
+    video.duration = CMTimeMake(2, 1);
+    auto asset = makeMediaAsset(routed({video, audioTrack(1, 48000, 2)}), AssetId(1));
+    XCTAssertTrue(asset.ok());
+    if (asset.ok()) {
+        XCTAssertEqual(CMTimeCompare(asset->duration, CMTimeMake(10, 1)), 0);
+        XCTAssertEqual(CMTimeCompare(asset->videoDuration, CMTimeMake(2, 1)), 0);
+        XCTAssertEqual(CMTimeCompare(asset->videoEnd(), CMTimeMake(2, 1)), 0);
+    }
+    // A track that starts late ends later on the container timeline.
+    video.startTime = CMTimeMake(1, 2);
+    asset = makeMediaAsset(routed({video, audioTrack(1, 48000, 2)}), AssetId(1));
+    XCTAssertTrue(asset.ok() && CMTimeCompare(asset->videoDuration, CMTimeMake(5, 2)) == 0);
+    // Never past the container.
+    video.startTime = kCMTimeZero;
+    video.duration = CMTimeMake(12, 1);
+    asset = makeMediaAsset(routed({video, audioTrack(1, 48000, 2)}), AssetId(1));
+    XCTAssertTrue(asset.ok() && CMTimeCompare(asset->videoDuration, CMTimeMake(10, 1)) == 0);
+    // Audio only: nothing recorded.
+    asset = makeMediaAsset(routed({audioTrack(0, 48000, 2)}), AssetId(1));
+    XCTAssertTrue(asset.ok() && CMTIME_IS_INVALID(asset->videoDuration));
+    // A real file whose video and audio both last 10 s.
+    std::string error;
+    const std::string path = test::testMediaPath("h264_1080p30.mp4", error);
+    auto probed = BackendRouter::makeDefault()->probe(path);
+    XCTAssertTrue(probed.ok());
+    if (probed.ok()) {
+        auto real = makeMediaAsset(*probed, AssetId(2));
+        XCTAssertTrue(real.ok());
+        if (real.ok()) {
+            XCTAssertEqualWithAccuracy(CMTimeGetSeconds(real->videoDuration), 10.0, 1e-9);
+            XCTAssertLessThanOrEqual(CMTimeCompare(real->videoDuration, real->duration), 0);
+        }
+    }
+}
+
 @end

@@ -158,6 +158,11 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
     Clip audio = video;
     audio.id = ClipId(kSourceProjectFirstId + 11);
     audio.trackId = sequence.audioTracks.front().id;
+    // The picture ends where the media's video ends (the audio may run on).
+    const CMTime videoLength = snapToFrame(asset.videoEnd(), fd, SnapMode::Floor);
+    if (videoLength > kCMTimeZero && videoLength < length) {
+        video.timelineDuration = videoLength;
+    }
     if (asset.hasVideo() && asset.hasAudio()) {
         video.linkedClipId = audio.id;
         audio.linkedClipId = video.id;
@@ -1434,21 +1439,30 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 - (VEEditResult *)pushRipple:(std::unique_ptr<Command> (^)(RippleScope scope))make
                        scope:(VERippleScope)rippleScope
                      created:(NSArray<NSNumber *> * (^_Nullable)(void))created {
+    return [self pushRipple:make scope:rippleScope created:created note:nil];
+}
+
+/// `note`: what the user should know when the edit succeeds (joined with the ripple fallback's).
+- (VEEditResult *)pushRipple:(std::unique_ptr<Command> (^)(RippleScope scope))make
+                       scope:(VERippleScope)rippleScope
+                     created:(NSArray<NSNumber *> * (^_Nullable)(void))created
+                        note:(nullable NSString *)note {
     if (rippleScope == VERippleScopeSyncedTracks) {
-        return [self push:make(RippleScope::SyncedTracks) created:created];
+        return [self push:make(RippleScope::SyncedTracks) created:created note:note];
     }
     EditResult result = [self pushCommand:make(RippleScope::AllUnlockedTracks)];
     if (result.error == EditError::Overlap) {
+        NSString *fallback = @"Other tracks have clips in the way, so only the edited clips' tracks were rippled.";
         return [self push:make(RippleScope::SyncedTracks)
                   created:created
-                     note:@"Other tracks have clips in the way, so only the edited clips' tracks were rippled."];
+                     note:note.length > 0 ? [NSString stringWithFormat:@"%@ %@", note, fallback] : fallback];
     }
     if (!result) {
         return toVE(result);
     }
     NSArray<NSNumber *> *ids = created ? created() : @[];
     [self notifyModelChanged];
-    return toVE(result, ids);
+    return toVE(result, ids, note);
 }
 
 - (void)closeCoalescingIfOpen {
@@ -1526,13 +1540,25 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
                                                                   : @"Choose an audio track for this media."];
     }
     const bool link = placements.size() == 2;
+    // A video clip cannot use media past the end of the video (EditOps cuts its range there):
+    // say so when the request (or the whole media) runs past it.
+    NSString *note = nil;
+    const CMTime videoEnd = asset->videoEnd();
+    const CMTime requestedOut = CMTIME_IS_NUMERIC(sourceOut) ? sourceOut : asset->duration;
+    if (!asset->isStill() && asset->hasVideo() && videoTrackID != 0 && CMTIME_IS_NUMERIC(videoEnd) &&
+        videoEnd < asset->duration && requestedOut > videoEnd) {
+        note = [NSString stringWithFormat:@"The video of “%@” ends at %.3f s, before its audio: the video clip "
+                                          @"ends there.",
+                                          toNS(asset->name), CMTimeGetSeconds(videoEnd)];
+    }
     if (overwrite) {
         auto command = std::make_unique<OverwriteClip>([self sequenceId], time, std::move(placements), link);
         OverwriteClip *raw = command.get();
         return [self push:std::move(command)
                   created:^NSArray<NSNumber *> * {
                       return toNumbers(raw->createdClipIds());
-                  }];
+                  }
+                     note:note];
     }
     __block InsertClip *raw = nullptr;
     const SequenceId sequenceId = [self sequenceId];
@@ -1544,9 +1570,11 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
         raw = command.get();
         return command;
     }
+                      scope:_rippleScope
                     created:^NSArray<NSNumber *> * {
                         return raw != nullptr ? toNumbers(raw->createdClipIds()) : @[];
-                    }];
+                    }
+                       note:note];
 }
 
 - (VEEditResult *)insertAsset:(VEAssetID)assetID
@@ -2280,8 +2308,17 @@ static bool isRunning(playback::PlaybackState state) {
     }
 }
 
+/// Playback does not start while an export runs (the export has the decoders and the GPU; the
+/// monitors were paused when it began).
+- (BOOL)refusesPlaybackForExport {
+    return _activeExport != nil;
+}
+
 - (void)play {
     VE_ASSERT_MAIN();
+    if ([self refusesPlaybackForExport]) {
+        return;
+    }
     [self pauseSourceMonitorIfRunning];
     _playback->play();
 }
@@ -2294,6 +2331,9 @@ static bool isRunning(playback::PlaybackState state) {
 - (void)togglePlay {
     VE_ASSERT_MAIN();
     if (!isRunning(_playback->state())) {
+        if ([self refusesPlaybackForExport]) {
+            return;
+        }
         [self pauseSourceMonitorIfRunning];
     }
     _playback->togglePlay();
@@ -2307,6 +2347,9 @@ static bool isRunning(playback::PlaybackState state) {
 - (void)setRate:(double)rate {
     VE_ASSERT_MAIN();
     if (rate != 0) {
+        if ([self refusesPlaybackForExport]) {
+            return;
+        }
         [self pauseSourceMonitorIfRunning];
     }
     _playback->setRate(rate);
@@ -2314,12 +2357,18 @@ static bool isRunning(playback::PlaybackState state) {
 
 - (void)shuttleForward {
     VE_ASSERT_MAIN();
+    if ([self refusesPlaybackForExport]) {
+        return;
+    }
     [self pauseSourceMonitorIfRunning];
     _playback->shuttleForward();
 }
 
 - (void)shuttleReverse {
     VE_ASSERT_MAIN();
+    if ([self refusesPlaybackForExport]) {
+        return;
+    }
     [self pauseSourceMonitorIfRunning];
     _playback->shuttleReverse();
 }
@@ -2562,6 +2611,10 @@ static bool isRunning(playback::PlaybackState state) {
 
 - (void)sourceMonitorTogglePlay {
     VE_ASSERT_MAIN();
+    const bool running = _sourceUsesController && _sourcePlayback && isRunning(_sourcePlayback->state());
+    if (!running && [self refusesPlaybackForExport]) {
+        return;
+    }
     if ([self prepareSourcePlayback]) {
         if (!isRunning(_sourcePlayback->state())) {
             [self pauseProgramIfRunning];
@@ -2579,6 +2632,9 @@ static bool isRunning(playback::PlaybackState state) {
 
 - (void)sourceMonitorShuttleForward {
     VE_ASSERT_MAIN();
+    if ([self refusesPlaybackForExport]) {
+        return;
+    }
     if ([self prepareSourcePlayback]) {
         [self pauseProgramIfRunning];
         _sourcePlayback->shuttleForward();
@@ -2587,6 +2643,9 @@ static bool isRunning(playback::PlaybackState state) {
 
 - (void)sourceMonitorShuttleReverse {
     VE_ASSERT_MAIN();
+    if ([self refusesPlaybackForExport]) {
+        return;
+    }
     if ([self prepareSourcePlayback]) {
         [self pauseProgramIfRunning];
         _sourcePlayback->shuttleReverse();

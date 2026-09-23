@@ -78,9 +78,10 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
         if (!sourceOut) {
             return where + ": its source out point overflows exact arithmetic";
         }
-        if (!isNumeric(asset->duration) || sourceOut->compare(asset->duration) > 0) {
-            return where + ": source out point " + describe(sourceOut->toTimeRounded()) +
-                   " past the end of the media (" + describe(asset->duration) + ")";
+        const CMTime mediaEnd = mediaEndFor(*asset, track.kind);
+        if (!isNumeric(mediaEnd) || sourceOut->compare(mediaEnd) > 0) {
+            return where + ": source out point " + describe(sourceOut->toTimeRounded()) + " past the end of the " +
+                   (track.kind == TrackKind::Video ? "media's video (" : "media (") + describe(mediaEnd) + ")";
         }
     }
     if (!isOnFrameGrid(clip.timelineStart, sequence.frameDuration)) {
@@ -172,6 +173,18 @@ std::optional<std::string> validateAsset(const MediaAsset &asset) {
     } else if (!isPositive(asset.duration)) {
         return what + ": duration " + describe(asset.duration) + " is not positive";
     }
+    if (auto problem = optionalTimeProblem(asset.videoDuration, "video duration")) {
+        return what + ": " + *problem;
+    }
+    if (isNumeric(asset.videoDuration)) {
+        if (!asset.hasVideo() || asset.isStill()) {
+            return what + ": only video has a video duration, found " + describe(asset.videoDuration);
+        }
+        if (!isPositive(asset.videoDuration) || asset.videoDuration > asset.duration) {
+            return what + ": video duration " + describe(asset.videoDuration) + " is not within (0, " +
+                   describe(asset.duration) + "]";
+        }
+    }
     if (asset.hasVideo()) {
         if (asset.width <= 0 || asset.height <= 0) {
             return what + ": frame size " + std::to_string(asset.width) + "x" + std::to_string(asset.height) +
@@ -196,6 +209,10 @@ std::optional<std::string> validateAsset(const MediaAsset &asset) {
 
 bool assetFitsTrack(const MediaAsset &asset, TrackKind kind) {
     return kind == TrackKind::Video ? asset.hasVideo() : asset.hasAudio();
+}
+
+CMTime mediaEndFor(const MediaAsset &asset, TrackKind kind) {
+    return kind == TrackKind::Video ? asset.videoEnd() : asset.duration;
 }
 
 std::optional<TransitionIssue> checkTransition(const Sequence &sequence, const Project &project,
@@ -237,7 +254,8 @@ std::optional<TransitionIssue> checkTransition(const Sequence &sequence, const P
     if (!from->isStill) {
         const MediaAsset *asset = project.findAsset(from->assetId);
         const auto sourceEnd = from->exactSourceTimeAt(range->end);
-        if (!asset || !isNumeric(asset->duration) || !sourceEnd || sourceEnd->compare(asset->duration) > 0) {
+        const CMTime mediaEnd = asset ? mediaEndFor(*asset, track->kind) : kCMTimeInvalid;
+        if (!asset || !isNumeric(mediaEnd) || !sourceEnd || sourceEnd->compare(mediaEnd) > 0) {
             return TransitionIssue{K::InsufficientHandles,
                                    where + ": " + clipName(from->id) + " lacks media after its out point for the transition",
                                    from->id};

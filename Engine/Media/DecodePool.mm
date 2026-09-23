@@ -117,6 +117,17 @@ struct DecodePool::Stream {
     CMTime rangeEnd = kCMTimeZero;
     bool continues = false;  ///< The decoder's next frame starts at rangeEnd.
     bool eof = false;        ///< rangeEnd is the end of the stream.
+    CMTime videoEnd = kCMTimeInvalid;  ///< End of the last frame, once the end was reached.
+    CMTime trackEnd = kCMTimeInvalid;  ///< The prober's end of the track (startTime + duration).
+    /// The last frame decoded since the last seek (not while extending backwards): re-put with an
+    /// infinite duration when the end of the stream follows it (the hold, see the header). One
+    /// buffer per stream, normally the one the cache holds as well.
+    std::optional<VideoFrame> lastDecoded;
+    /// A seek landed at or after the end: seeking back in growing steps (tailStep) from
+    /// tailProbe to find the last frame, then decoding forward to the end.
+    bool findingEnd = false;
+    CMTime tailProbe = kCMTimeInvalid;
+    CMTime tailStep = kCMTimeInvalid;
     bool firstAfterSeek = false;
     CMTime seekedTo = kCMTimeInvalid;  ///< Target of the last seek (frames after it cover back to it).
     CMTime repairedAt = kCMTimeInvalid; ///< Target at which a lost frame was last re-decoded.
@@ -469,6 +480,8 @@ void DecodePool::publish(Stream &s) {
     p.rangeEnd = s.rangeValid ? s.rangeEnd : kCMTimeInvalid;
     p.window = s.window;
     p.frameBytes = s.frameBytes;
+    p.eof = s.eof;
+    p.videoEnd = s.videoEnd;
     p.framesDecoded = s.framesDecoded;
     p.seeks = s.seeks;
     p.interrupts = s.interrupts;
@@ -601,6 +614,12 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
         s.frameDuration = track && track->kind == TrackKind::Still ? kCMTimeInvalid
                           : track && isPositive(track->frameDuration) ? track->frameDuration
                                                                       : s.decoder->frameDuration();
+        s.trackEnd = track && track->kind != TrackKind::Still && isNumeric(track->duration)
+                         ? (isNumeric(track->startTime) ? track->startTime : kCMTimeZero) + track->duration
+                         : kCMTimeInvalid;
+        s.videoEnd = kCMTimeInvalid;
+        s.lastDecoded.reset();
+        s.findingEnd = false;
         // A fresh decoder is positioned at the start of the stream.
         s.rangeValid = true;
         s.rangeStart = kCMTimeZero;
@@ -619,7 +638,8 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
     const CMTime window = effectiveWindow(s, lookahead, streamCount);
     s.window = window;
 
-    auto seekTo = [&](CMTime to) {
+    // `findingEnd`: a seek of the search for the last frame (keeps the search state).
+    auto seekTo = [&](CMTime to, bool findingEnd = false) {
         ++s.seeks;
         s.rangeValid = true;
         s.rangeStart = to;
@@ -629,13 +649,59 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
         s.firstAfterSeek = true;
         s.seekedTo = to;
         s.extending = false;
+        s.lastDecoded.reset();
+        s.findingEnd = findingEnd;
+        if (!findingEnd) {
+            s.tailProbe = kCMTimeInvalid;
+            s.tailStep = kCMTimeInvalid;
+        }
         Status st = s.decoder->seek(to);
         if (!st.ok()) {
             s.error = st.error();
             s.rangeValid = false;
+            s.findingEnd = false;
             return StepResult::Settled;
         }
         return StepResult::Progress;
+    };
+    // End of the stream after the frames of the current range. The last frame is held: put
+    // again with an infinite duration, its cache entry answers every time from its pts on, so a
+    // clip that runs past the end of the video (a container whose audio lasts longer, a track
+    // duration that overstates the pictures) shows the last picture, in playback and export alike,
+    // instead of a missing layer. If the range has no frame (the seek landed at or after the end),
+    // the last frame is searched for first: seek back 2 frames (at least 0.25 s) before where the
+    // stream ended, doubling the step, and decode forward to the end.
+    auto reachedEnd = [&]() {
+        s.eof = true;
+        if (s.lastDecoded) {
+            VideoFrame held = *s.lastDecoded;
+            s.lastDecoded.reset();
+            s.videoEnd = frameEnd(held, s.frameDuration);
+            held.duration = kCMTimePositiveInfinity;
+            publishStreamFrame(s, slot, held, s.frameDuration, held.pts);
+            s.rangeEnd = kCMTimePositiveInfinity;
+            s.findingEnd = false;
+            s.tailProbe = kCMTimeInvalid;
+            s.tailStep = kCMTimeInvalid;
+            return StepResult::Settled;
+        }
+        CMTime from = s.findingEnd && isNumeric(s.tailProbe) ? s.tailProbe : s.seekedTo;
+        if (!s.findingEnd && isNumeric(s.trackEnd) && isNumeric(from) && s.trackEnd < from) {
+            from = s.trackEnd;
+        }
+        if (!isNumeric(from) || !(from > kCMTimeZero)) {
+            s.findingEnd = false; // nothing before either: the stream has no frames
+            return StepResult::Settled;
+        }
+        CMTime step = s.findingEnd && isPositive(s.tailStep) ? s.tailStep + s.tailStep : kCMTimeInvalid;
+        if (!isNumeric(step)) {
+            step = isPositive(s.frameDuration) ? s.frameDuration + s.frameDuration : kCMTimeZero;
+            step = maxTime(step, CMTimeMake(1, 4));
+        }
+        const CMTime probe = clampToZero(from - step);
+        s.tailStep = step;
+        s.tailProbe = probe;
+        return seekTo(probe, true);
     };
     // Re-positions the decoder at rangeEnd without forgetting the decoded range.
     auto resume = [&]() {
@@ -674,8 +740,7 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
                 s.continues = false;
                 return StepResult::Progress;
             }
-            s.eof = true;
-            return StepResult::Settled;
+            return reachedEnd();
         }
         const VideoFrame &f = *r.value();
         ++s.framesDecoded;
@@ -710,6 +775,7 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
             s.firstAfterSeek = false;
         }
         s.rangeEnd = maxTime(s.rangeEnd, end);
+        s.lastDecoded = f;
         return StepResult::Progress;
     };
     // The frame under the playhead is decoded but gone from the cache (memory pressure,
@@ -717,6 +783,10 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
     auto lost = [&](CMTime at) {
         return at < s.rangeEnd && !(isNumeric(s.repairedAt) && s.repairedAt == at) && !cache_->contains(asset, at);
     };
+
+    if (s.findingEnd && s.rangeValid && t >= s.rangeStart) {
+        return decodeOne(); // searching for the last frame: decode on to the end
+    }
 
     if (target.direction == DecodeDirection::Forward) {
         if (s.extending) {
@@ -962,10 +1032,43 @@ Result<ScrubFrame> DecodePool::serviceScrub(const ScrubKey &key, const std::shar
         }
         return d.decoder->next();
     };
+    // Past the end: the last frame, as a scrub to the end of a clip expects. It is found like the
+    // streams find it (step()): seek back from the track's end (or `time`) by 2 frames (at least
+    // 0.25 s), doubling the step until a frame comes out, and decode forward to the end.
+    auto lastFrame = [&](CMTime from) -> Result<std::optional<VideoFrame>> {
+        CMTime step = maxTime(isPositive(fd) ? fd + fd : kCMTimeZero, CMTimeMake(1, 4));
+        for (;;) {
+            const CMTime probe = clampToZero(from - step);
+            if (Status st = d.decoder->seek(probe); !st.ok()) {
+                return std::move(st).error();
+            }
+            std::optional<VideoFrame> last;
+            for (;;) {
+                auto n = d.decoder->next();
+                if (!n.ok()) {
+                    return std::move(n).error();
+                }
+                if (!n.value()) {
+                    break;
+                }
+                last = std::move(n).value();
+            }
+            if (last || !(probe > kCMTimeZero)) {
+                return last;
+            }
+            from = probe;
+            step = step + step;
+        }
+    };
     auto frame = decodeAt(time);
-    if (frame.ok() && !frame.value() && isPositive(fd) && isNumeric(track->duration)) {
-        // Past the end: show the last frame, as a scrub to the end of a clip expects.
-        frame = decodeAt(clampToZero(track->startTime + track->duration - fd));
+    bool pastEnd = false;
+    if (frame.ok() && !frame.value() && track->kind != TrackKind::Still) {
+        CMTime from = time;
+        if (isNumeric(track->duration)) {
+            from = minTime(from, (isNumeric(track->startTime) ? track->startTime : kCMTimeZero) + track->duration);
+        }
+        frame = lastFrame(from);
+        pastEnd = true;
     }
     if (!frame.ok()) {
         return std::move(frame).error();
@@ -981,7 +1084,14 @@ Result<ScrubFrame> DecodePool::serviceScrub(const ScrubKey &key, const std::shar
         if (slot->retired || slot->epoch != epoch_) {
             return cancelledError();
         }
-        cache_->put(slot->epoch, key.asset, f, fd, time < f.pts ? time : f.pts);
+        if (pastEnd) {
+            // The last frame holds for every later time (as the streams hold it at the end).
+            VideoFrame held = f;
+            held.duration = kCMTimePositiveInfinity;
+            cache_->put(slot->epoch, key.asset, held, fd, held.pts);
+        } else {
+            cache_->put(slot->epoch, key.asset, f, fd, time < f.pts ? time : f.pts);
+        }
     }
     return ScrubFrame{f.image, f.pts, f.duration, FrameCache::frameIndex(f.pts, fd), false};
 }
