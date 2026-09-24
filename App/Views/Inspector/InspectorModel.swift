@@ -111,8 +111,8 @@ enum InspectorParameter: String, CaseIterable, Identifiable {
     }
 }
 
-/// The interpolations the inspector offers for a keyframe's segment (Custom, what a split leaves
-/// on an eased segment, is shown but cannot be chosen).
+/// The interpolations the inspector offers for a keyframe's segment (Custom, the part of an eased
+/// segment that a split or a keyframe added inside it leaves, is shown but cannot be chosen).
 extension VEKeyframeInterpolation {
     static let choices: [VEKeyframeInterpolation] = [.linear, .hold, .easeOut, .easeIn, .easeInOut]
 
@@ -123,7 +123,7 @@ extension VEKeyframeInterpolation {
         case .easeOut: return "Ease Out"
         case .easeIn: return "Ease In"
         case .easeInOut: return "Ease In and Out"
-        case .custom: return "Custom (from a split)"
+        case .custom: return "Custom"
         @unknown default: return "Linear"
         }
     }
@@ -136,7 +136,7 @@ extension VEKeyframeInterpolation {
         case .easeOut: return "Leaves this keyframe slowly, then speeds up."
         case .easeIn: return "Slows down to arrive at the next keyframe."
         case .easeInOut: return "Leaves slowly and arrives slowly."
-        case .custom: return "The part of an eased move a split left on this piece."
+        case .custom: return "The part of an eased move left when a keyframe was added inside it or the clip was split."
         @unknown default: return ""
         }
     }

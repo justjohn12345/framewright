@@ -91,6 +91,41 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(try clip(id).keyframes(for: .scale).count, 2)
     }
 
+    func testTheDiamondInsideAHoldOrAnEaseKeepsTheSegmentAndTheInspectorSaysWhatItIs() async throws {
+        let id = try await placedClip()
+        // Scale holds 1 from frame 0 and jumps to 2 at frame 50; rotation eases in and out 0 -> 90.
+        store.playheadTime = frames(0)
+        inspector.toggleKeyframe(.scale)
+        inspector.toggleKeyframe(.rotation)
+        inspector.setInterpolation(.hold, for: .scale)
+        inspector.setInterpolation(.easeInOut, for: .rotation)
+        store.playheadTime = frames(50)
+        inspector.commitText(.scale, "200 %")
+        inspector.commitText(.rotation, "90")
+        let before = (0 ..< 60).map { try? clip(id).motion(at: frames(Int64($0))) }
+
+        // The diamond at frame 20, inside both segments: no frame changes.
+        store.playheadTime = frames(20)
+        inspector.toggleKeyframe(.scale)
+        inspector.toggleKeyframe(.rotation)
+        for frame in 0 ..< 60 {
+            let now = try clip(id).motion(at: frames(Int64(frame)))
+            let then = try XCTUnwrap(before[frame])
+            XCTAssertEqual(now.scale, then.scale, accuracy: 1e-9, "scale at frame \(frame)")
+            XCTAssertEqual(now.rotationDegrees, then.rotationDegrees, accuracy: 1e-9, "rotation at frame \(frame)")
+        }
+        // The inspector shows the new keyframes' segments as they are: a hold, and the eased
+        // segment's divided part (Custom).
+        XCTAssertEqual(inspector.keyframeControlState(.scale)?.interpolation, .hold)
+        XCTAssertEqual(inspector.keyframeControlState(.rotation)?.interpolation, .custom)
+        XCTAssertEqual(VEKeyframeInterpolation.custom.title, "Custom")
+        XCTAssertFalse(VEKeyframeInterpolation.choices.contains(.custom), "shown, not offered")
+        // A keyframe after the last one is Linear, the default.
+        store.playheadTime = frames(55)
+        inspector.toggleKeyframe(.rotation)
+        XCTAssertEqual(inspector.keyframeControlState(.rotation)?.interpolation, .linear)
+    }
+
     func testPreviousAndNextKeyframeMoveThePlayhead() async throws {
         let id = try await placedClip()
         for frame: Int64 in [5, 20, 45] {
