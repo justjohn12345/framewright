@@ -304,8 +304,9 @@ struct TimelineViewModel: Equatable {
     // MARK: Hit testing
 
     /// What a press at `point` grabs, by priority: a transition band (its edges resize it), an
-    /// audio clip's fade handle (top corner zone), a video clip's keyframe marker (bottom zone), a
-    /// clip edge (trim), an audio clip's gain line, a clip body, empty track space.
+    /// audio clip's fade handle (top corner zone), a video clip's keyframe marker (bottom zone; a
+    /// trim edge nearer than the marker wins there), a clip edge (trim), an audio clip's gain line,
+    /// a clip body, empty track space.
     func hitTest(_ point: CGPoint) -> Hit {
         guard let layout = layout(atY: point.y) else { return .none }
         let rowTop = layout.y - scrollY
@@ -338,10 +339,17 @@ struct TimelineViewModel: Equatable {
             for clip in clips where clip.trackID == layout.track.id && !clip.keyframes.isEmpty {
                 guard let r = rect(forClip: clip), point.x >= r.minX - Self.keyframeHitRadius,
                       point.x <= r.maxX + Self.keyframeHitRadius else { continue }
+                // A trim edge nearer than the marker keeps the press (a marker on the clip's first or
+                // last frame sits a few points inside its edge).
+                let zone = min(Self.edgeZone, r.width / 3)
+                let head = point.x <= r.minX + zone ? abs(point.x - r.minX) : .infinity
+                let tail = point.x >= r.maxX - zone ? abs(point.x - r.maxX) : .infinity
+                let edge = min(head, tail)
                 for time in clip.keyframes {
                     guard let center = keyframeMarkerCenter(forClip: clip, time: time) else { continue }
                     let distance = abs(point.x - center.x)
-                    if distance <= Self.keyframeHitRadius, best.map({ distance < $0.distance }) ?? true {
+                    if distance <= Self.keyframeHitRadius, distance < edge,
+                       best.map({ distance < $0.distance }) ?? true {
                         best = (.keyframe(clip.id, time), distance)
                     }
                 }

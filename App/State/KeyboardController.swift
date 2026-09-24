@@ -53,10 +53,11 @@ final class KeyboardController {
             }
         }
 
-        /// Keys whose auto-repeat is ignored (each press is a discrete transport command).
+        /// Keys whose auto-repeat is ignored: discrete transport commands, and toggles (holding
+        /// Control-K would add and remove the keyframes over and over, each an undo step).
         var ignoresRepeat: Bool {
             switch self {
-            case .togglePlay, .shuttleReverse, .shuttleStop, .shuttleForward: return true
+            case .togglePlay, .shuttleReverse, .shuttleStop, .shuttleForward, .toggleMotionKeyframes: return true
             default: return false
             }
         }

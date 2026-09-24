@@ -472,7 +472,8 @@ final class TimelineGestureController: ObservableObject {
             message += " (as far as \(count == 1 ? "it goes" : "they go"): keyframes stay in order, a frame apart, "
                 + "on the clip's frames)"
         }
-        store.statusMessage = message
+        // Set only when it changes: every assignment re-runs everything that observes the store.
+        if store.statusMessage != message { store.statusMessage = message }
     }
 
     /// Moves the playhead to the pointer (snapping to clip edges, never to itself).

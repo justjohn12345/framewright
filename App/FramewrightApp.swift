@@ -137,9 +137,7 @@ struct AppCommands: Commands {
                 .disabled(store.selectedTransitionID == nil)
             Divider()
             // Control-K is handled by KeyboardController (like Delete), so a text field keeps it.
-            Button(store.motionKeyframeClip().map { store.hasAllMotionKeyframesAtPlayhead($0) } == true
-                ? "Remove Motion Keyframes  ⌃K" : "Add Motion Keyframe  ⌃K") { store.toggleMotionKeyframes() }
-                .disabled(store.motionKeyframeClip() == nil)
+            MotionKeyframeMenuItem(store: store, playhead: store.playhead)
             Divider()
             Button("Raise Gain 1 dB  ]") { store.nudgeGain(1) }
                 .disabled(store.selection.isEmpty)
@@ -218,5 +216,19 @@ struct AppCommands: Commands {
     private static func textFieldCan(undo: Bool) -> Bool {
         guard let text = NSApp.keyWindow?.firstResponder as? NSTextView, let manager = text.undoManager else { return false }
         return undo ? manager.canUndo : manager.canRedo
+    }
+}
+
+/// Clip > Add (or Remove) Motion Keyframe: observes the playhead, so its title says what Control-K
+/// does on the frame under it, and it is disabled while the playhead is off the clip. Its own view,
+/// so the playhead moving re-evaluates this item only, not the whole menu bar.
+struct MotionKeyframeMenuItem: View {
+    @ObservedObject var store: ProjectStore
+    @ObservedObject var playhead: PlayheadModel
+
+    var body: some View {
+        let state = store.motionKeyframeMenuState(at: playhead.time)
+        Button(state.title) { store.toggleMotionKeyframes() }
+            .disabled(!state.enabled)
     }
 }

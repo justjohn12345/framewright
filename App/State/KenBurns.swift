@@ -173,8 +173,14 @@ final class KenBurnsModel: ObservableObject {
     let assetID: VEAssetID
     let sequenceSize: CGSize
     let frameDuration: CMTime
-    /// How durations are shown and what a bare typed number means (Settings > Editing).
-    let durationDisplay: DurationDisplay
+    /// How durations are shown and what a bare typed number means (Settings > Editing; the store
+    /// passes a change on while the helper is open, and the fields not being typed in follow it).
+    var durationDisplay: DurationDisplay {
+        didSet {
+            guard durationDisplay != oldValue else { return }
+            rangeChanged()
+        }
+    }
     /// The picture as the compositor fits it into the frame at scale 1, no offset.
     let pictureBounds: CGRect
     /// Loads the picture under the rectangles (the store gives the helper one over its thumbnails).
@@ -217,19 +223,21 @@ final class KenBurnsModel: ObservableObject {
     /// The clip touching this one's start / end on its track (nil when there is none).
     @Published private(set) var previous: Neighbour?
     @Published private(set) var next: Neighbour?
-    /// The start rectangle shows the framing the previous clip ends with.
+    /// The start rectangle shows the framing the previous clip ends with. Turning it on or off
+    /// (the user's choice) resets that rectangle; the helper turning it off because the neighbour
+    /// went away keeps a rectangle the user moved.
     @Published var continuesFromPrevious = false {
         didSet {
             guard continuesFromPrevious != oldValue else { return }
-            editedStart = false
+            if !keepsEditedRectangles { editedStart = false }
             rangeChanged()
         }
     }
-    /// The end rectangle shows the framing the next clip starts with.
+    /// The end rectangle shows the framing the next clip starts with (see `continuesFromPrevious`).
     @Published var leadsIntoNext = false {
         didSet {
             guard leadsIntoNext != oldValue else { return }
-            editedEnd = false
+            if !keepsEditedRectangles { editedEnd = false }
             rangeChanged()
         }
     }
@@ -239,8 +247,20 @@ final class KenBurnsModel: ObservableObject {
     /// The Custom range as chosen (kept within the clip by `clamped(_:)` when used).
     private var customSpan = FrameSpan(first: 0, last: 1)
     /// Rectangles the user moved or resized (they keep their place when the range changes).
-    private var editedStart = false
-    private var editedEnd = false
+    private(set) var editedStart = false
+    private(set) var editedEnd = false
+    /// Set while the helper itself turns a neighbour toggle off (the neighbour went away).
+    private var keepsEditedRectangles = false
+
+    /// The Start, End and Duration fields.
+    enum Field: CaseIterable {
+        case start, end, duration
+    }
+
+    /// The value each field was last given by the model: a field whose text still equals it is not
+    /// being typed in and follows the range; one whose text differs holds what the user is typing and
+    /// is left alone until it is committed.
+    private var committedText: [Field: String] = [:]
 
     var clipID: VEClipID { clip.clipID }
 
@@ -495,10 +515,15 @@ final class KenBurnsModel: ObservableObject {
     var startString: String { durationString(frames: frameIndex(clip.timelineStart) + fieldSpan.first) }
     var endString: String { durationString(frames: frameIndex(clip.timelineStart) + fieldSpan.last) }
 
-    /// A field's text differs from its committed value: Return commits it instead of pressing Apply.
+    /// A field's text (trimmed, as a commit reads it) differs from its committed value: Return
+    /// commits it instead of pressing Apply.
     var hasUncommittedText: Bool {
-        startText != startString || endText != endString
-            || (isDurationEditable && durationText != durationString(frames: durationFrames))
+        trimmed(startText) != startString || trimmed(endText) != endString
+            || (isDurationEditable && trimmed(durationText) != durationString(frames: durationFrames))
+    }
+
+    private func trimmed(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Commits the Start, End and Duration fields (Apply takes what is still being typed). False
@@ -523,8 +548,12 @@ final class KenBurnsModel: ObservableObject {
     /// frames of range (`rangeNote` says when). Returns false for text that is not a time
     /// (`rangeNote` says why; the range stays).
     private func commitBoundary(_ which: Framing) -> Bool {
-        let typed = (which == .start ? startText : endText).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard typed != (which == .start ? startString : endString) else { return true }
+        let field: Field = which == .start ? .start : .end
+        let typed = trimmed(which == .start ? startText : endText)
+        guard typed != (which == .start ? startString : endString) else {
+            rewrite(field) // spaces around the value
+            return true
+        }
         guard let frame = DurationFormat.parseFrames(typed, frameDuration: frameDuration, display: durationDisplay)
         else {
             rangeNote = "“\(typed)” is not a time (use timecode like 00:00:05:00, frames like 150f or seconds "
@@ -536,6 +565,11 @@ final class KenBurnsModel: ObservableObject {
             return false
         }
         let clipStart = frameIndex(clip.timelineStart)
+        if frame - clipStart == (which == .start ? fieldSpan.first : fieldSpan.last) {
+            // The same frame written another way ("2s" for 00:00:02:00): the range stays as it is.
+            rewrite(field)
+            return true
+        }
         let lastFrame = clipFrames - 1
         let current = fieldSpan
         var offset = frame - clipStart
@@ -563,7 +597,7 @@ final class KenBurnsModel: ObservableObject {
             }
             span.last = offset
         }
-        setCustom(span, note: note)
+        setCustom(span, note: note, committing: field)
         return true
     }
 
@@ -572,12 +606,13 @@ final class KenBurnsModel: ObservableObject {
         durationString(frames: frameIndex(clip.timelineStart) + offset)
     }
 
-    /// Makes the range Custom over `span` (clip frames), with `note` explaining a limit.
-    private func setCustom(_ span: FrameSpan, note: String?) {
+    /// Makes the range Custom over `span` (clip frames), with `note` explaining a limit; the field
+    /// `committing` shows its committed value (the other fields keep what is being typed in them).
+    private func setCustom(_ span: FrameSpan, note: String?, committing field: Field) {
         if range != .custom { range = .custom } // prefills customSpan, then refreshes
         customSpan = clamped(span)
         rangeNote = note
-        rangeChanged()
+        rangeChanged(rewriting: [field])
     }
 
     /// Takes the Duration field's text: parsed like every duration field
@@ -588,15 +623,27 @@ final class KenBurnsModel: ObservableObject {
     @discardableResult
     func commitDuration() -> Bool {
         guard isDurationEditable else {
-            durationText = durationString(frames: durationFrames)
+            rewrite(.duration)
             return true
         }
-        let typed = durationText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard typed != durationString(frames: durationFrames) else { return true }
+        let typed = trimmed(durationText)
+        guard typed != durationString(frames: durationFrames) else {
+            rewrite(.duration)
+            return true
+        }
         guard let frames = DurationFormat.parseFrames(typed, frameDuration: frameDuration, display: durationDisplay)
         else {
             rangeNote = "“\(typed)” is not a duration (use frames like 45f, seconds like 2.5s, or timecode)."
             return false
+        }
+        if let problem = rangeProblem {
+            // "From playhead" with the playhead off the clip: there is no range to give a duration.
+            rangeNote = problem
+            return false
+        }
+        if frames == durationFrames {
+            rewrite(.duration) // the same length written another way: the range stays
+            return true
         }
         var taken = frames
         var note: String?
@@ -611,11 +658,11 @@ final class KenBurnsModel: ObservableObject {
         switch range {
         case .existingMove, .custom:
             let first = rangeOffset ?? 0
-            setCustom(FrameSpan(first: first, last: first + taken - 1), note: note)
+            setCustom(FrameSpan(first: first, last: first + taken - 1), note: note, committing: .duration)
         case .wholeClip, .fromPlayhead, .fromClipStart:
             requestedFrames = taken
             rangeNote = note
-            rangeChanged()
+            rangeChanged(rewriting: [.duration])
         }
         return true
     }
@@ -636,9 +683,12 @@ final class KenBurnsModel: ObservableObject {
         let after = Neighbour(next, atEnd: false, frameDuration: frameDuration)
         if before != self.previous { self.previous = before }
         if after != self.next { self.next = after }
-        // A neighbour that went away cannot be followed (the didSet refreshes the rectangle).
+        // A neighbour that went away cannot be followed (the didSet refreshes a rectangle the user
+        // has not moved; one the user moved stays where it is).
+        keepsEditedRectangles = true
         if before == nil, continuesFromPrevious { continuesFromPrevious = false }
         if after == nil, leadsIntoNext { leadsIntoNext = false }
+        keepsEditedRectangles = false
         // The existing move follows its keyframes (dragged in the timeline, undone...).
         let detected = Self.detectMove(in: clip, frameDuration: frameDuration)
         if detected != detection { detection = detected }
@@ -649,12 +699,15 @@ final class KenBurnsModel: ObservableObject {
         }
     }
 
-    /// The range, the playhead or the clip changed: reformat the Start, End and Duration fields and
-    /// move the rectangles the user has not touched to their defaults.
-    private func rangeChanged() {
-        durationText = durationString(frames: durationFrames)
-        startText = startString
-        endText = endString
+    /// The range, the playhead or the clip changed: reformat the Start, End and Duration fields that
+    /// are not being typed in (and the ones in `rewriting`, just committed) and move the rectangles
+    /// the user has not touched to their defaults. A field whose text differs from what the model last
+    /// put there holds the user's typing: a save, an import, an undo or the playhead moving never
+    /// replaces it.
+    private func rangeChanged(rewriting: Set<Field> = []) {
+        for field in Field.allCases {
+            refresh(field, force: rewriting.contains(field))
+        }
         let band = rangeProblem == nil
             ? KenBurnsBandRange(clipID: clip.clipID, start: rangeStart.secondsOrZero,
                                 end: CMTimeAdd(rangeLastFrame, frameDuration).secondsOrZero)
@@ -662,6 +715,47 @@ final class KenBurnsModel: ObservableObject {
         if band != bandRange { bandRange = band }
         if !editedStart { start = defaultRect(.start) }
         if !editedEnd { end = defaultRect(.end) }
+    }
+
+    /// The model's value of `field` now.
+    private func modelText(_ field: Field) -> String {
+        switch field {
+        case .start: return startString
+        case .end: return endString
+        case .duration: return durationString(frames: durationFrames)
+        }
+    }
+
+    private func text(_ field: Field) -> String {
+        switch field {
+        case .start: return startText
+        case .end: return endText
+        case .duration: return durationText
+        }
+    }
+
+    private func setText(_ field: Field, _ value: String) {
+        guard text(field) != value else { return }
+        switch field {
+        case .start: startText = value
+        case .end: endText = value
+        case .duration: durationText = value
+        }
+    }
+
+    /// Puts the model's value in `field` when it is not being typed in (its text is still what the
+    /// model last put there) or when `force`d, and remembers it as the committed value.
+    private func refresh(_ field: Field, force: Bool) {
+        let value = modelText(field)
+        if force || text(field) == (committedText[field] ?? "") {
+            setText(field, value)
+        }
+        committedText[field] = value
+    }
+
+    /// Shows the committed value in `field` (after it was committed).
+    private func rewrite(_ field: Field) {
+        refresh(field, force: true)
     }
 
     /// The rectangle `which` has before the user moves it: the clip's framing at that end of the
@@ -804,6 +898,20 @@ final class KenBurnsModel: ObservableObject {
         }
     }
 
+    /// A drag on the overlay: `target` (a rectangle's body or corner, `KenBurnsHit`) grabbed with the
+    /// rectangle at `origin`, now `translation` from where it started and at `location` (sequence
+    /// pixels). A drag that has not moved changes nothing (a click does not mark the rectangle as
+    /// moved, so it keeps following the range).
+    func applyDrag(_ target: KenBurnsHit.Target, origin: CGRect, translation: CGSize, location: CGPoint) {
+        guard translation != .zero else { return }
+        switch target {
+        case let .body(which):
+            move(which, from: origin, by: translation)
+        case let .corner(which, corner):
+            resize(which, from: origin, corner: corner, to: location)
+        }
+    }
+
     /// Moves a rectangle from `original` by `delta` (sequence pixels), kept inside the picture.
     func move(_ which: Framing, from original: CGRect, by delta: CGSize) {
         set(which, constrained(original.offsetBy(dx: delta.width, dy: delta.height)))
@@ -858,6 +966,103 @@ final class KenBurnsModel: ObservableObject {
 
     var endFraming: VEMotionFraming {
         Self.framing(for: end, sequence: sequenceSize, rotationDegrees: endRotation)
+    }
+}
+
+/// What a press on the Ken Burns overlay grabs, from the two rectangles as drawn (view points). The
+/// end rectangle is drawn over the start, and with the default push in, or an unanimated placed clip,
+/// the two overlap or coincide; so the grab is decided by geometry, not by which is on top: the
+/// nearest corner handle, then a rectangle's label (the start's inside its top-left corner, the
+/// end's inside its bottom-right), then the nearest edge (a band either side of each edge), then the
+/// inside of a rectangle (inside both: the smaller one, whose edges are the nearer). Where the two coincide
+/// the start owns the top and left corners and edges, the end the bottom and right, and the inside
+/// drags the end.
+enum KenBurnsHit {
+    enum Target: Equatable {
+        case body(KenBurnsModel.Framing)
+        case corner(KenBurnsModel.Framing, KenBurnsModel.Corner)
+
+        var framing: KenBurnsModel.Framing {
+            switch self {
+            case let .body(which): return which
+            case let .corner(which, _): return which
+            }
+        }
+    }
+
+    /// How far from a corner a press grabs it, and from an edge a press grabs the rectangle.
+    static let cornerRadius: CGFloat = 8
+    static let edgeBand: CGFloat = 6
+    /// The labels' hit areas.
+    static let labelSize = CGSize(width: 40, height: 16)
+
+    /// Where a rectangle's label is drawn (inside it: the start's at the top-left, the end's at the
+    /// bottom-right).
+    static func labelRect(_ which: KenBurnsModel.Framing, of rect: CGRect) -> CGRect {
+        which == .start
+            ? CGRect(origin: rect.origin, size: labelSize)
+            : CGRect(x: rect.maxX - labelSize.width, y: rect.maxY - labelSize.height, width: labelSize.width,
+                     height: labelSize.height)
+    }
+
+    static func cornerPoint(_ corner: KenBurnsModel.Corner, of rect: CGRect) -> CGPoint {
+        switch corner {
+        case .topLeft: return CGPoint(x: rect.minX, y: rect.minY)
+        case .topRight: return CGPoint(x: rect.maxX, y: rect.minY)
+        case .bottomLeft: return CGPoint(x: rect.minX, y: rect.maxY)
+        case .bottomRight: return CGPoint(x: rect.maxX, y: rect.maxY)
+        }
+    }
+
+    /// The target at `point`, or nil (outside both rectangles and their handles).
+    static func target(at point: CGPoint, start: CGRect, end: CGRect) -> Target? {
+        let rects: [(KenBurnsModel.Framing, CGRect)] = [(.start, start), (.end, end)]
+        // Corners: the nearest within reach. On a tie (the rectangles coincide there) the start takes
+        // the left corners and the end the right ones.
+        var corners: [(target: Target, distance: CGFloat, owner: Bool)] = []
+        for (which, rect) in rects {
+            for corner in KenBurnsModel.Corner.allCases {
+                let c = cornerPoint(corner, of: rect)
+                let distance = hypot(point.x - c.x, point.y - c.y)
+                guard distance <= cornerRadius else { continue }
+                let left = corner == .topLeft || corner == .bottomLeft
+                corners.append((.corner(which, corner), distance, (which == .start) == left))
+            }
+        }
+        if let target = nearest(corners) { return target }
+        // Labels (each inside its own rectangle, away from the other's).
+        for (which, rect) in rects where labelRect(which, of: rect).contains(point) {
+            return .body(which)
+        }
+        // Edges: the nearest within the band either side. On a tie the start takes the top and left
+        // edges and the end the bottom and right ones.
+        var edges: [(target: Target, distance: CGFloat, owner: Bool)] = []
+        for (which, rect) in rects {
+            guard point.x >= rect.minX - edgeBand, point.x <= rect.maxX + edgeBand,
+                  point.y >= rect.minY - edgeBand, point.y <= rect.maxY + edgeBand else { continue }
+            let sides: [(CGFloat, Bool)] = [ // (distance, a top or left edge)
+                (abs(point.x - rect.minX), true), (abs(point.y - rect.minY), true),
+                (abs(point.x - rect.maxX), false), (abs(point.y - rect.maxY), false),
+            ]
+            for (distance, topOrLeft) in sides where distance <= edgeBand {
+                edges.append((.body(which), distance, (which == .start) == topOrLeft))
+            }
+        }
+        if let target = nearest(edges) { return target }
+        // Inside: one rectangle, or the smaller of the two (the end when they coincide).
+        let inside = rects.filter { $0.1.contains(point) }
+        if inside.count == 1 { return .body(inside[0].0) }
+        if inside.count == 2 {
+            return .body(start.width * start.height < end.width * end.height ? .start : .end)
+        }
+        return nil
+    }
+
+    /// The nearest candidate; among those within half a point of it, one its owner rule prefers.
+    private static func nearest(_ candidates: [(target: Target, distance: CGFloat, owner: Bool)]) -> Target? {
+        guard let closest = candidates.map(\.distance).min() else { return nil }
+        let tied = candidates.filter { $0.distance <= closest + 0.5 }
+        return (tied.first { $0.owner } ?? tied.first)?.target
     }
 }
 

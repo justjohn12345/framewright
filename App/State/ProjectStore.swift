@@ -87,8 +87,9 @@ final class ProjectStore: ObservableObject {
     // UI state.
     @Published var selection: Set<VEClipID> = [] {
         didSet {
-            // The Ken Burns helper edits one selected clip.
-            if let kenBurns, !selection.contains(kenBurns.clipID) { self.kenBurns = nil }
+            // The Ken Burns helper edits one selected clip: deselecting it, or adding another clip to
+            // the selection (the inspector then hides the helper's controls), closes it.
+            if let kenBurns, selection != [kenBurns.clipID] { self.kenBurns = nil }
         }
     }
     @Published var selectedAssetID: VEAssetID?
@@ -217,6 +218,14 @@ final class ProjectStore: ObservableObject {
         }
         preferencesForwarding = preferences.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
+            // The open Ken Burns helper shows durations in the chosen format too (the change is
+            // read once it has been made).
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, let kenBurns = self.kenBurns else { return }
+                    kenBurns.durationDisplay = self.editingPreferences.durationDisplay
+                }
+            }
         }
         // Every path that shows or hides the monitor (the menu, a double-click in the bin, Reset
         // Window Layout, the saved layout at launch) goes through `layout.showsSourceMonitor`.
@@ -814,11 +823,21 @@ final class ProjectStore: ObservableObject {
 
     /// Whether every Motion parameter of `clip` has a keyframe on the frame under the playhead (Add
     /// Motion Keyframe then removes them).
-    func hasAllMotionKeyframesAtPlayhead(_ clip: VEClipInfo) -> Bool {
-        let time = playheadTime
+    func hasAllMotionKeyframesAtPlayhead(_ clip: VEClipInfo, at time: CMTime? = nil) -> Bool {
+        let time = time ?? playheadTime
         return ([.positionX, .positionY, .scale, .rotation, .opacity] as [VEMotionParameter]).allSatisfy {
             clip.keyframe(for: $0, at: time) != nil
         }
+    }
+
+    /// Clip > Add Motion Keyframe with the playhead at `time`: "Remove Motion Keyframes" when all
+    /// five are on that frame; enabled only for a single selected video clip under the playhead.
+    func motionKeyframeMenuState(at time: CMTime) -> (title: String, enabled: Bool) {
+        guard let clip = motionKeyframeClip(), clip.timelineStart <= time, time < clip.timelineEnd else {
+            return ("Add Motion Keyframe  ⌃K", false)
+        }
+        return (hasAllMotionKeyframesAtPlayhead(clip, at: time) ? "Remove Motion Keyframes  ⌃K"
+            : "Add Motion Keyframe  ⌃K", true)
     }
 
     /// Clip > Add Motion Keyframe (Control-K), also in the timeline's context menu: on the frame under
@@ -861,6 +880,9 @@ final class ProjectStore: ObservableObject {
             return
         }
         guard let clip = clips[id], let info = asset(clip.assetID) else { return }
+        if kenBurns?.clipID == id {
+            return // already open on this clip: keep its rectangles and range
+        }
         var reason = ""
         let picture = KenBurnsPictureLoader(assetID: info.assetID, engine: engine)
         guard let model = KenBurnsModel(clip: clip, asset: info, sequence: sequence, playhead: playheadTime,
@@ -870,7 +892,7 @@ final class ProjectStore: ObservableObject {
             statusMessage = reason
             return
         }
-        if !selection.contains(id) { selection = [id] }
+        if selection != [id] { selection = [id] }
         engine.pause()
         kenBurns = model
     }

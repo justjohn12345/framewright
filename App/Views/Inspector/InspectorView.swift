@@ -221,9 +221,14 @@ private struct ParameterSection<Extra: View>: View {
                     .help("Reset every \(section.title.lowercased()) setting of the selection")
                     .accessibilityIdentifier("Reset.\(section.rawValue)")
             }
-            if section == .video, let clip = inspector.motionTarget, clip.hasKeyframes {
-                // Animated values follow the playhead.
-                AnimatedParameterRows(store: store, inspector: inspector, playhead: store.playhead)
+            if section == .video {
+                // One view whatever the clip's animation, so a clip gaining its first keyframe keeps
+                // the rows (their focus and typed text); only an animated clip's rows observe the
+                // playhead (a still one's observe a playhead that never moves).
+                let animated = inspector.motionTarget?.hasKeyframes == true
+                VideoParameterRows(store: store, inspector: inspector,
+                                   playhead: animated ? store.playhead : VideoParameterRows.stillPlayhead,
+                                   followsPlayhead: animated)
             } else {
                 ForEach(InspectorParameter.parameters(in: section)) { parameter in
                     ParameterRow(store: store, inspector: inspector, parameter: parameter)
@@ -241,16 +246,21 @@ extension ParameterSection where Extra == EmptyView {
     }
 }
 
-/// The Video rows of an animated clip: they observe the playhead, since the values shown (and the
-/// keyframe under the playhead) change with it.
-private struct AnimatedParameterRows: View {
+/// The Video rows. For an animated clip they observe the program playhead, since the values shown
+/// (and the keyframe under the playhead) change with it; otherwise `stillPlayhead`, which never
+/// changes, so a still clip's rows are not redrawn while the playhead moves.
+private struct VideoParameterRows: View {
+    @MainActor static let stillPlayhead = PlayheadModel()
+
     @ObservedObject var store: ProjectStore
     let inspector: InspectorModel
     @ObservedObject var playhead: PlayheadModel
+    let followsPlayhead: Bool
 
     var body: some View {
         ForEach(InspectorParameter.parameters(in: .video)) { parameter in
-            ParameterRow(store: store, inspector: inspector, parameter: parameter, displayTime: playhead.time)
+            ParameterRow(store: store, inspector: inspector, parameter: parameter,
+                         displayTime: followsPlayhead ? playhead.time : .invalid)
         }
     }
 }

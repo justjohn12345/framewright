@@ -538,13 +538,6 @@ final class InspectorModel: ObservableObject {
         return clip.keyframe(for: motion, at: store.playheadTime)
     }
 
-    /// Whether the playhead is over the single video clip (keyframes are set on its frames).
-    var playheadIsOverMotionTarget: Bool {
-        guard let clip = motionTarget else { return false }
-        let t = store.playheadTime
-        return clip.timelineStart <= t && t < clip.timelineEnd
-    }
-
     /// The frames (timeline times) of `parameter`'s keyframes that the clip shows, in order.
     func keyframeFrames(_ parameter: InspectorParameter) -> [CMTime] {
         guard let motion = parameter.motionParameter, let clip = motionTarget else { return [] }

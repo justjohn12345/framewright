@@ -20,9 +20,17 @@ struct KenBurnsOverlay: View {
     @ObservedObject var model: KenBurnsModel
     @ObservedObject var playhead: PlayheadModel
     @ObservedObject var picture: KenBurnsPictureLoader
-    /// The rectangle as it was when the current drag started.
-    @State private var dragOrigin: CGRect?
+    /// The drag in progress: what it grabbed and the rectangle as it was when it started. A gesture
+    /// state, so it is reset when the drag ends or is cancelled (a stale origin never makes the next
+    /// drag jump).
+    @GestureState private var drag: ActiveDrag?
     @FocusState private var focusedField: RangeField?
+
+    struct ActiveDrag: Equatable {
+        /// Nil when the press grabbed nothing.
+        let target: KenBurnsHit.Target?
+        let origin: CGRect
+    }
 
     /// The bar's text fields.
     enum RangeField: Hashable {
@@ -43,6 +51,7 @@ struct KenBurnsOverlay: View {
                     ForEach([KenBurnsModel.Framing.start, .end], id: \.self) { which in
                         framingView(which, mapping: mapping)
                     }
+                    dragLayer(mapping)
                 }
                 .clipped()
             }
@@ -133,54 +142,57 @@ struct KenBurnsOverlay: View {
         which == .start ? .green : .red
     }
 
+    /// A rectangle as drawn: its border, its label (the start's at the top-left inside, the end's at
+    /// the bottom-right, so both show when the rectangles coincide) and its corner handles. Drawing
+    /// only: presses go to `dragLayer`, which decides what they grab by geometry (`KenBurnsHit`), so
+    /// the start stays reachable under the end.
     private func framingView(_ which: KenBurnsModel.Framing, mapping: Mapping) -> some View {
         let rect = mapping.view(model.rect(which))
         let tint = color(which)
+        let name = which == .start ? "start" : "end"
+        let label = KenBurnsHit.labelRect(which, of: rect)
         return ZStack(alignment: .topLeading) {
             Rectangle()
                 .strokeBorder(tint, lineWidth: 2)
-                .background(Color.white.opacity(0.001)) // hit-testable inside
                 .frame(width: rect.width, height: rect.height)
-                .overlay(alignment: .topLeading) {
-                    Text(which == .start ? "Start" : "End")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.black)
-                        .padding(.horizontal, 4)
-                        .background(tint)
-                }
                 .offset(x: rect.minX, y: rect.minY)
-                .gesture(DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        let origin = dragOrigin ?? model.rect(which)
-                        dragOrigin = origin
-                        model.move(which, from: origin, by: mapping.sequence(value.translation))
-                    }
-                    .onEnded { _ in dragOrigin = nil })
-                .accessibilityIdentifier("KenBurns.\(which == .start ? "start" : "end")")
+                .accessibilityIdentifier("KenBurns.\(name)")
+            Text(which == .start ? "Start" : "End")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.black)
+                .padding(.horizontal, 4)
+                .background(tint)
+                .frame(width: label.width, height: label.height, alignment: which == .start ? .topLeading : .bottomTrailing)
+                .offset(x: label.minX, y: label.minY)
             ForEach(KenBurnsModel.Corner.allCases, id: \.self) { corner in
-                let point = cornerPoint(corner, of: rect)
+                let point = KenBurnsHit.cornerPoint(corner, of: rect)
                 Rectangle()
                     .fill(tint)
                     .frame(width: Self.handleSize, height: Self.handleSize)
                     .offset(x: point.x - Self.handleSize / 2, y: point.y - Self.handleSize / 2)
-                    .gesture(DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            let origin = dragOrigin ?? model.rect(which)
-                            dragOrigin = origin
-                            model.resize(which, from: origin, corner: corner, to: mapping.sequence(value.location))
-                        }
-                        .onEnded { _ in dragOrigin = nil })
+                    .accessibilityIdentifier("KenBurns.\(name).\(String(describing: corner))")
             }
         }
+        .allowsHitTesting(false)
     }
 
-    private func cornerPoint(_ corner: KenBurnsModel.Corner, of rect: CGRect) -> CGPoint {
-        switch corner {
-        case .topLeft: return CGPoint(x: rect.minX, y: rect.minY)
-        case .topRight: return CGPoint(x: rect.maxX, y: rect.minY)
-        case .bottomLeft: return CGPoint(x: rect.minX, y: rect.maxY)
-        case .bottomRight: return CGPoint(x: rect.maxX, y: rect.maxY)
-        }
+    /// Takes every press on the picture area: what it grabs (a rectangle's label, corner, edge or
+    /// inside) is decided once when the drag starts; a drag that has not moved changes nothing.
+    private func dragLayer(_ mapping: Mapping) -> some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .updating($drag) { value, state, _ in
+                    if state == nil {
+                        let target = KenBurnsHit.target(at: value.startLocation, start: mapping.view(model.start),
+                                                        end: mapping.view(model.end))
+                        state = ActiveDrag(target: target, origin: target.map { model.rect($0.framing) } ?? .zero)
+                    }
+                    guard let active = state, let target = active.target else { return }
+                    model.applyDrag(target, origin: active.origin, translation: mapping.sequence(value.translation),
+                                    location: mapping.sequence(value.location))
+                })
+            .accessibilityIdentifier("KenBurnsDragArea")
     }
 
     /// The move's range (which part of the clip, where it starts and ends, its duration), what it
@@ -310,6 +322,7 @@ struct KenBurnsOverlay: View {
             .labelsHidden()
             .fixedSize()
             .help("How the move starts and ends (Ease In and Out: it accelerates slowly and comes to rest slowly)")
+            .accessibilityIdentifier("KenBurnsSmoothing")
             Button {
                 model.swap()
             } label: {
@@ -319,6 +332,7 @@ struct KenBurnsOverlay: View {
             .accessibilityIdentifier("KenBurnsSwap")
             Button("Cancel") { store.cancelKenBurns() }
                 .keyboardShortcut(.cancelAction)
+                .accessibilityIdentifier("KenBurnsCancel")
             Button("Apply") { store.applyKenBurns() }
                 // Return in a field with text still being typed commits the field only.
                 .keyboardShortcut(model.hasUncommittedText ? nil : .defaultAction)
