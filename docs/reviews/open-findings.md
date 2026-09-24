@@ -3,9 +3,9 @@
 Only what is still open. Fixed findings are in the history table of `README.md` (fix commits and regression tests);
 the full reports are in git history at the commits the table names.
 
-## Keyframed Motion, Ken Burns and Photos drops (2026-09-24 review, `2026-09-24-motion-photos-review.md`)
+## Keyframed Motion, Ken Burns and Photos drops (2026-09-24 review; report in git history at b9add9f)
 All twenty-six findings are fixed and test gaps 1-5 are covered, except the items listed under the UI-test section
-below (see `integration-notes.md`, "Motion/Photos review fix round"); the lead's read of the fix round is pending:
+below (see `integration-notes.md`, "Motion/Photos review fix round"):
 1. Adding a keyframe keeps every frame (`insertKeyframeKeepingValues`): `KeyframeInsertTests.cpp` (AddKeyframe, the
    Control-K toggle and SetMotionValue's add path inside a hold, a linear, each ease and a custom curve, every frame
    against the value before and an independent Newton reference), `VEEngineKeyframeReviewTests.testAddingKeyframesInsideAHoldAndAnEaseKeepsEveryFrame`,

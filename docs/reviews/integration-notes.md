@@ -562,7 +562,7 @@ in the history table of `README.md`.
   30 fps around a 240 fps section; `slowmoFrameTime` / `slowmoFrameAt` in TestMedia.h), which
   regenerates the generated test media once.
 
-## Motion/Photos review fix round (report `2026-09-24-motion-photos-review.md`)
+## Motion/Photos review fix round (2026-09-24 review; report in git history at b9add9f)
 - Keyframe inserts (engine). `insertKeyframeKeepingValues(track, staticValue, time)` (Keyframes.h) adds a
   keyframe that changes no value: inside a segment it divides it exactly like a split (`splitTrack`, the
   boundary once): a hold stays a hold, a linear segment linear, an eased or custom segment becomes its two
