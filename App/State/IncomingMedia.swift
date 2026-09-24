@@ -241,8 +241,10 @@ final class PasteboardFilePromise: PromisedFile {
     }
 }
 
-/// Live Photos: a still and a short movie that belong together (Photos names them alike:
-/// IMG_1234.HEIC and IMG_1234.MOV; PHPicker hands a bundle folder holding both).
+/// Live Photos: a still and a short movie that belong together, delivered together by one promise
+/// (Photos names them alike: IMG_1234.HEIC and IMG_1234.MOV; PHPicker hands a bundle folder holding
+/// both). Files of different promises are never paired, however alike their names (camera names
+/// wrap at IMG_9999, so two unrelated items can share one).
 enum LivePhotos {
     enum Choice: String {
         case video
@@ -254,8 +256,14 @@ enum LivePhotos {
         let movie: URL
     }
 
-    /// UserDefaults key of the remembered choice ("video" or "still"; absent: ask).
+    /// UserDefaults key of the remembered choice ("video" or "still"; absent or empty: ask). Settings
+    /// > Media > Live Photos shows and changes it (`LivePhotoImportSetting`).
     static let choiceKey = "livePhotoImport"
+
+    /// The remembered choice in `defaults`, nil when the app asks.
+    static func rememberedChoice(in defaults: UserDefaults) -> Choice? {
+        defaults.string(forKey: choiceKey).flatMap(Choice.init(rawValue:))
+    }
 
     static func isImage(_ url: URL) -> Bool {
         UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
@@ -304,29 +312,86 @@ enum LivePhotos {
         return (pairs, others)
     }
 
-    /// Asks which part of the Live Photos to import, with "Remember my choice" (stored under
-    /// `choiceKey`). Nil when cancelled.
+    /// The question for `count` Live Photos, with "Remember my choice"; it names the setting that
+    /// changes a remembered choice later.
     @MainActor
-    static func ask(count: Int, defaults: UserDefaults) -> Choice? {
+    static func makeAlert(count: Int) -> NSAlert {
         let alert = NSAlert()
         alert.messageText = count == 1 ? "Import the Live Photo’s video or its still photo?"
             : "Import the \(count) Live Photos’ videos or their still photos?"
-        alert.informativeText = "A Live Photo is a still photo with a short movie around it."
+        alert.informativeText = "A Live Photo is a still photo with a short movie around it. A remembered choice can "
+            + "be changed in Settings > Media > Live Photos."
         alert.addButton(withTitle: "Video")
         alert.addButton(withTitle: "Still Photo")
         alert.addButton(withTitle: "Cancel")
         alert.showsSuppressionButton = true
         alert.suppressionButton?.title = "Remember my choice"
+        return alert
+    }
+
+    /// The choice an answer to `makeAlert` means (nil: Cancel); with `remember` it is stored under
+    /// `choiceKey`, which Settings > Media > Live Photos shows.
+    static func choice(for response: NSApplication.ModalResponse, remember: Bool, defaults: UserDefaults) -> Choice? {
         let choice: Choice?
-        switch alert.runModal() {
+        switch response {
         case .alertFirstButtonReturn: choice = .video
         case .alertSecondButtonReturn: choice = .still
         default: choice = nil
         }
-        if let choice, alert.suppressionButton?.state == .on {
-            defaults.set(choice.rawValue, forKey: choiceKey)
+        if let choice, remember {
+            LivePhotoImportSetting(choice).store(in: defaults)
         }
         return choice
+    }
+
+    /// Asks which part of the Live Photos to import. Nil when cancelled.
+    @MainActor
+    static func ask(count: Int, defaults: UserDefaults) -> Choice? {
+        let alert = makeAlert(count: count)
+        let response = alert.runModal()
+        return choice(for: response, remember: alert.suppressionButton?.state == .on, defaults: defaults)
+    }
+}
+
+/// Settings > Media > Live Photos: ask each time, or import the video or the still photo without
+/// asking (the choice "Remember my choice" stores). Stored under `LivePhotos.choiceKey`; the raw
+/// values are what the Settings picker binds to.
+enum LivePhotoImportSetting: String, CaseIterable, Identifiable {
+    case ask = ""
+    case video
+    case still
+
+    init(_ choice: LivePhotos.Choice?) {
+        switch choice {
+        case .video: self = .video
+        case .still: self = .still
+        case nil: self = .ask
+        }
+    }
+
+    init(defaults: UserDefaults) {
+        self.init(LivePhotos.rememberedChoice(in: defaults))
+    }
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .ask: return "Ask each time"
+        case .video: return "Import the video"
+        case .still: return "Import the still photo"
+        }
+    }
+
+    /// The part to import without asking (nil: ask).
+    var choice: LivePhotos.Choice? { LivePhotos.Choice(rawValue: rawValue) }
+
+    func store(in defaults: UserDefaults) {
+        if self == .ask {
+            defaults.removeObject(forKey: LivePhotos.choiceKey)
+        } else {
+            defaults.set(rawValue, forKey: LivePhotos.choiceKey)
+        }
     }
 }
 
@@ -576,8 +641,10 @@ final class IncomingMedia: ObservableObject {
         items.removeAll { $0.batchID == batch.id }
         batches[batch.id] = nil
         completedBatches += 1
-        let received = LivePhotos.expand(batch.order.flatMap { batch.files[$0] ?? [] })
-        let files = choosingLivePhotoParts(received)
+        // Live Photos pair only within what one promise delivered (one receiver's files, or a
+        // PHPicker bundle): never across the items of a batch.
+        let deliveries = batch.order.map { LivePhotos.expand(batch.files[$0] ?? []) }
+        let files = choosingLivePhotoParts(deliveries)
         if !failures.isEmpty {
             store.statusMessage = failures.joined(separator: "\n")
         }
@@ -590,13 +657,14 @@ final class IncomingMedia: ObservableObject {
         }
     }
 
-    /// The files to import: Live Photo pairs reduced to the chosen part (the other one, our own
-    /// copy, is deleted), in order.
-    private func choosingLivePhotoParts(_ urls: [URL]) -> [URL] {
-        let (pairs, _) = LivePhotos.pairs(in: urls)
+    /// The files to import: each delivery's Live Photo pair (a still and a movie that one promise
+    /// delivered together) reduced to the chosen part (the other one, our own copy, is deleted), in
+    /// order. The remembered choice (Settings > Media > Live Photos) applies to those pairs only.
+    private func choosingLivePhotoParts(_ deliveries: [[URL]]) -> [URL] {
+        let urls = deliveries.flatMap { $0 }
+        let pairs = deliveries.flatMap { LivePhotos.pairs(in: $0).pairs }
         guard !pairs.isEmpty else { return urls }
-        let remembered = store.defaults.string(forKey: LivePhotos.choiceKey).flatMap(LivePhotos.Choice.init(rawValue:))
-        let choice = remembered ?? askLivePhoto(pairs.count, store.defaults)
+        let choice = LivePhotos.rememberedChoice(in: store.defaults) ?? askLivePhoto(pairs.count, store.defaults)
         var dropped: Set<URL> = []
         for pair in pairs {
             switch choice {

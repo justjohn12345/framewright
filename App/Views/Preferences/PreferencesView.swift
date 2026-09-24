@@ -30,6 +30,7 @@ struct PreferencesView: View {
         EditingPreferences.defaultTransitionSeconds
     @AppStorage(EditingPreferences.linkedCrossfadeKey) private var linkedCrossfade = LinkedCrossfadeMode.always.rawValue
     @AppStorage(EditingPreferences.durationDisplayKey) private var durationDisplay = DurationDisplay.timecode.rawValue
+    @AppStorage(LivePhotos.choiceKey) private var livePhotoImport = LivePhotoImportSetting.ask.rawValue
 
     var body: some View {
         TabView {
@@ -81,6 +82,15 @@ struct PreferencesView: View {
                 + "battery), so Space starts at once.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Picker("Live Photos", selection: $livePhotoImport) {
+                ForEach(LivePhotoImportSetting.allCases) { Text($0.title).tag($0.rawValue) }
+            }
+            .accessibilityIdentifier("LivePhotoImportSetting")
+            Text("What to import from a Live Photo dropped from Photos or picked with Import from Photos: the "
+                + "question asks each time, and its Remember my choice sets this.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

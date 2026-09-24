@@ -362,22 +362,83 @@ final class PhotosDropTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: media.appendingPathComponent("IMG_0005.HEIC").path),
                        "the part not imported is not left behind")
 
-        // A remembered choice is not asked again; here the still.
-        store.defaults.set(LivePhotos.Choice.still.rawValue, forKey: LivePhotos.choiceKey)
+        // A remembered choice (Settings > Media > Live Photos) is not asked again; here the still.
+        LivePhotoImportSetting.still.store(in: store.defaults)
         let stillCopy = fixture.directory.appendingPathComponent("IMG_0006.heic")
         let movieCopy = fixture.directory.appendingPathComponent("IMG_0006.mov")
         try FileManager.default.copyItem(at: still, to: stillCopy)
         try FileManager.default.copyItem(at: movie, to: movieCopy)
-        // Delivered as two separate items of one batch (the still and the movie promised apart).
-        let stillItem = ScriptedPromise(name: "IMG_0006 still")
-        let movieItem = ScriptedPromise(name: "IMG_0006 movie")
-        XCTAssertTrue(store.incoming.receive([stillItem, movieItem]))
-        try movieItem.deliver([movieCopy])
-        try stillItem.deliver([stillCopy])
+        let pair = ScriptedPromise(name: "IMG_0006")
+        XCTAssertTrue(store.incoming.receive([pair]))
+        try pair.deliver([movieCopy, stillCopy])
         await wait("the still is imported") { store.assets.count == 2 }
         XCTAssertEqual(asked, [1])
         let imported = try XCTUnwrap(store.assets.first { $0.path.hasSuffix("IMG_0006.heic") })
         XCTAssertTrue(imported.isStill, "an HEIC imports as a still")
+    }
+
+    func testUnrelatedItemsWithOneNameAreNeverPairedNorDeleted() async throws {
+        _ = try saveProject()
+        // An old phone's IMG_0001.HEIC and a new phone's unrelated IMG_0001.MOV (camera names wrap at
+        // 9999), dropped together while a Live Photo choice is remembered: two separate promises.
+        LivePhotoImportSetting.video.store(in: store.defaults)
+        let still = fixture.directory.appendingPathComponent("IMG_0001.HEIC")
+        let movie = fixture.directory.appendingPathComponent("IMG_0001.MOV")
+        try TestMediaFactory.writeHEIC(to: still)
+        try FileManager.default.copyItem(at: fixture.movieURL, to: movie)
+        let oldPhone = ScriptedPromise(name: "IMG_0001 (old phone)")
+        let newPhone = ScriptedPromise(name: "IMG_0001 (new phone)")
+        XCTAssertTrue(store.incoming.receive([oldPhone, newPhone]))
+        try oldPhone.deliver([still])
+        try newPhone.deliver([movie])
+        await wait("both are imported") { store.assets.count == 2 }
+        let media = try XCTUnwrap(oldPhone.directory)
+        for name in ["IMG_0001.HEIC", "IMG_0001.MOV"] {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: media.appendingPathComponent(name).path),
+                          "\(name) is kept: the remembered choice applies to one promise's pair only")
+        }
+        // The same through PHPicker: each pick is its own item.
+        let stillAgain = fixture.directory.appendingPathComponent("IMG_0002.heic")
+        let movieAgain = fixture.directory.appendingPathComponent("IMG_0002.mov")
+        try FileManager.default.copyItem(at: still, to: stillAgain)
+        try FileManager.default.copyItem(at: movie, to: movieAgain)
+        let pickedStill = FakePromiseProvider(name: "IMG_0002", file: stillAgain, type: .heic)
+        let pickedMovie = FakePromiseProvider(name: "IMG_0002", file: movieAgain, type: .quickTimeMovie)
+        store.photosPicker.receivePicked([pickedStill.provider, pickedMovie.provider])
+        await wait("both picks are requested") { pickedStill.loadRequested && pickedMovie.loadRequested }
+        pickedStill.deliver()
+        pickedMovie.deliver()
+        await wait("both picks are imported") { store.assets.count == 4 }
+    }
+
+    func testTheLivePhotoSettingRoundTripsWithTheQuestionsRememberedChoice() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "live-photo-setting-\(UUID())"))
+        XCTAssertEqual(LivePhotoImportSetting(defaults: defaults), .ask, "asks by default")
+        XCTAssertNil(LivePhotos.rememberedChoice(in: defaults))
+        // "Remember my choice" in the question: Settings shows it.
+        XCTAssertEqual(LivePhotos.choice(for: .alertSecondButtonReturn, remember: true, defaults: defaults), .still)
+        XCTAssertEqual(LivePhotoImportSetting(defaults: defaults), .still)
+        XCTAssertEqual(defaults.string(forKey: LivePhotos.choiceKey), LivePhotoImportSetting.still.rawValue,
+                       "the key and value the Settings picker binds to")
+        // Without Remember nothing is stored; Cancel stores nothing.
+        XCTAssertEqual(LivePhotos.choice(for: .alertFirstButtonReturn, remember: false, defaults: defaults), .video)
+        XCTAssertNil(LivePhotos.choice(for: .alertThirdButtonReturn, remember: true, defaults: defaults))
+        XCTAssertEqual(LivePhotoImportSetting(defaults: defaults), .still)
+        // Settings back to Ask: the question comes back.
+        LivePhotoImportSetting.ask.store(in: defaults)
+        XCTAssertNil(defaults.object(forKey: LivePhotos.choiceKey))
+        XCTAssertNil(LivePhotos.rememberedChoice(in: defaults))
+        LivePhotoImportSetting.video.store(in: defaults)
+        XCTAssertEqual(LivePhotos.rememberedChoice(in: defaults), .video)
+        // What an empty value (the picker's Ask tag) means.
+        defaults.set(LivePhotoImportSetting.ask.rawValue, forKey: LivePhotos.choiceKey)
+        XCTAssertEqual(LivePhotoImportSetting(defaults: defaults), .ask)
+        XCTAssertEqual(LivePhotoImportSetting.allCases.map(\.title),
+                       ["Ask each time", "Import the video", "Import the still photo"])
+        // The question names the setting.
+        let alert = LivePhotos.makeAlert(count: 2)
+        XCTAssertTrue(alert.informativeText.contains("Settings > Media > Live Photos"))
+        XCTAssertTrue(alert.showsSuppressionButton)
     }
 
     func testLivePhotoPairingAndBundles() throws {
