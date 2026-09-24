@@ -90,9 +90,6 @@ final class ProjectStore: ObservableObject {
     @Published var selection: Set<VEClipID> = [] {
         didSet {
             if !selection.isEmpty, selectedSpanID != nil { selectedSpanID = nil }
-            // The Ken Burns helper edits one selected clip: deselecting it, or adding another clip to
-            // the selection (the inspector then hides the helper's controls), closes it.
-            if let kenBurns, selection != [kenBurns.clipID] { self.kenBurns = nil }
         }
     }
     /// The selected span (an effect span on lanes 1-3 or a transition on lane 0), exclusive with the
@@ -101,6 +98,9 @@ final class ProjectStore: ObservableObject {
     @Published var selectedSpanID: VESpanID? {
         didSet {
             if selectedSpanID != nil, !selection.isEmpty { selection = [] }
+            if selectedSpanID != oldValue { kenBurnsClosedSpan = nil }
+            // Selecting a Motion span opens its Ken Burns editor; anything else closes it.
+            syncKenBurns()
         }
     }
     @Published var selectedAssetID: VEAssetID?
@@ -140,22 +140,12 @@ final class ProjectStore: ObservableObject {
     @Published var exportModel: ExportModel?
     /// An export is running (the engine's `isExporting`, republished).
     @Published private(set) var isExporting = false
-    /// The Ken Burns helper drawn on the program monitor while it edits a clip (nil otherwise).
-    @Published private(set) var kenBurns: KenBurnsModel? {
-        didSet {
-            guard kenBurns !== oldValue else { return }
-            // The timeline marks the open helper's range; closing it (Apply, Cancel, selection...)
-            // hides the band.
-            kenBurnsBandForwarding = kenBurns?.$bandRange.sink { [weak band = kenBurnsBand] range in
-                // Published on the main actor, where the model changes.
-                MainActor.assumeIsolated { band?.show(range) }
-            }
-            if kenBurns == nil { kenBurnsBand.show(nil) }
-        }
-    }
-    /// The Ken Burns range the timeline highlights while the helper is open.
-    let kenBurnsBand = KenBurnsTimelineBand()
-    private var kenBurnsBandForwarding: AnyCancellable?
+    /// The Ken Burns editor drawn on the program monitor while a Motion span is selected (nil
+    /// otherwise, or after the user closed it for that span).
+    @Published private(set) var kenBurns: KenBurnsModel?
+    /// The Motion span whose editor the user closed (Escape, Close): it stays closed while that span
+    /// stays selected, until it is reopened (Ken Burns…, a click on the span).
+    private var kenBurnsClosedSpan: VESpanID?
     /// Asks the inspector to focus a field (double-clicking a transition focuses its duration).
     @Published private(set) var inspectorFocusRequest: InspectorFocusRequest?
     /// The coalescing group of the inspector's keyboard-nudge burst, while one is open. Unlike a
@@ -255,13 +245,10 @@ final class ProjectStore: ObservableObject {
         }
         preferencesForwarding = preferences.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
-            // The open Ken Burns helper shows durations in the chosen format too (the change is
-            // read once it has been made).
+            // The open Ken Burns editor shows durations in the chosen format too (redrawn once the
+            // change has been made).
             DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self, let kenBurns = self.kenBurns else { return }
-                    kenBurns.durationDisplay = self.editingPreferences.durationDisplay
-                }
+                MainActor.assumeIsolated { self?.kenBurns?.objectWillChange.send() }
             }
         }
         // Every path that shows or hides the monitor (the menu, a double-click in the bin, Reset
@@ -299,14 +286,9 @@ final class ProjectStore: ObservableObject {
         if let span = selectedSpanID, engine.spanInfo(span) == nil {
             selectedSpanID = nil
         }
-        if let kenBurns {
-            if let clip = byID[kenBurns.clipID] {
-                kenBurns.update(clip: clip, previous: adjacentClip(to: clip.clipID, at: .start),
-                                next: adjacentClip(to: clip.clipID, at: .end))
-            } else {
-                self.kenBurns = nil
-            }
-        }
+        // The editor re-reads its span and framings on every model change (an edit of an earlier
+        // span, an undo, a trim move what it shows).
+        syncKenBurns()
         changeCount = engine.changeCount
         canUndo = engine.canUndo
         canRedo = engine.canRedo
@@ -920,102 +902,59 @@ final class ProjectStore: ObservableObject {
 
     // MARK: Ken Burns
 
-    /// The inspector's Ken Burns… button: shows the start and end rectangles of `clip` on the
-    /// program monitor. A clip with a Motion span opens on its first one ("Existing move": its range,
-    /// its framing at the range's ends, its smoothing), so Apply edits it in place; otherwise the
-    /// range is the whole clip and the rectangles show its position and scale at its first and last
-    /// frames, or a gentle push in when it has none. Nothing changes until `applyKenBurns()`.
-    func beginKenBurns(clip id: VEClipID) {
-        guard !isGestureActive else {
-            statusMessage = "Finish the current drag first."
+    /// Opens, updates or closes the Ken Burns editor after the selection or the model changed: open
+    /// on the selected Motion span (unless the user closed it for that span), switched when another
+    /// Motion span is selected, updated with the span as it is now, closed for anything else. Opening
+    /// pauses playback. A clip without a picture says why in the status line.
+    func syncKenBurns() {
+        guard let id = selectedSpanID, kenBurnsClosedSpan != id, let span = engine.spanInfo(id), span.kind == .motion,
+              let clip = clips[span.clipID] ?? engine.clipInfo(span.clipID) else {
+            if kenBurns != nil { kenBurns = nil }
             return
         }
-        guard let clip = clips[id], let info = asset(clip.assetID) else { return }
-        if kenBurns?.clipID == id {
-            return // already open on this clip: keep its rectangles and range
+        let previous = adjacentClip(to: clip.clipID, at: .start)
+        let next = adjacentClip(to: clip.clipID, at: .end)
+        if let kenBurns, kenBurns.spanID == id {
+            kenBurns.update(span: span, clip: clip, previous: previous, next: next)
+            return
+        }
+        kenBurns?.cancelDrag()
+        guard let info = asset(clip.assetID) else {
+            kenBurns = nil
+            return
         }
         var reason = ""
         let picture = KenBurnsPictureLoader(assetID: info.assetID, engine: engine)
-        guard let model = KenBurnsModel(clip: clip, asset: info, sequence: sequence, playhead: playheadTime,
-                                        durationDisplay: editingPreferences.durationDisplay, picture: picture,
-                                        previous: adjacentClip(to: id, at: .start),
-                                        next: adjacentClip(to: id, at: .end), reason: &reason) else {
+        guard let model = KenBurnsModel(store: self, span: span, clip: clip, asset: info, sequence: sequence,
+                                        playhead: playheadTime, picture: picture, previous: previous, next: next,
+                                        reason: &reason) else {
+            kenBurns = nil
             statusMessage = reason
             return
         }
-        if selection != [id] { selection = [id] }
         engine.pause()
         kenBurns = model
     }
 
-    /// Applies the Ken Burns rectangles to a Motion span over the helper's range (one undo step) and
-    /// closes the helper: the clip's Motion span over exactly that range, or a new one on the first
-    /// effect lane with room there (`VEEngine.addSpan` then `applyKenBurns(span:)` in one Accumulate
-    /// group). A Start, End or Duration still being typed is taken first. Returns whether it was
-    /// applied (a refusal is reported and the helper stays).
-    @discardableResult
-    func applyKenBurns() -> Bool {
-        guard let model = kenBurns else { return false }
-        guard !isGestureActive else {
-            statusMessage = "Finish the current drag first."
-            return false
-        }
-        guard model.commitFields() else {
-            statusMessage = model.rangeNote
-            return false
-        }
-        if let problem = model.rangeProblem {
-            statusMessage = problem
-            return false
-        }
-        guard report(applyKenBurns(model)) else { return false }
-        kenBurns = nil
-        return true
-    }
-
-    /// The Ken Burns helper's move as one undo step over the new engine API (see `applyKenBurns()`).
-    private func applyKenBurns(_ model: KenBurnsModel) -> VEEditResult {
-        // Taken before the edits: adding the span updates the helper's clip (and with it the
-        // rectangles it would offer for an untouched range).
-        let clipID = model.clipID
-        let range = CMTimeRange(start: model.rangeStart, duration: model.rangeDuration)
-        let start = model.startFraming
-        let end = model.endFraming
-        let interpolation = model.interpolation
-        let existing = engine.spans(forClip: clipID).first {
-            $0.kind == .motion && $0.start == range.start && $0.end == range.end
-        }
-        let key = "kenBurns.apply"
-        engine.beginCoalescing(withKey: key, mode: .accumulate)
-        var spanID = existing?.spanID ?? 0
-        if spanID == 0 {
-            var added = VEEditResult.failure(withMessage: "No effect lane of the clip has room for the move there.")
-            for lane in 1 ... 3 {
-                added = engine.performInCoalescingGroup(key) {
-                    self.engine.addSpan(kind: .motion, lane: lane, clip: clipID, range: range)
-                }
-                if added.ok || added.errorCode != .overlap { break }
-            }
-            guard added.ok, let span = added.span else {
-                engine.cancelCoalescing()
-                return added
-            }
-            spanID = span.spanID
-        }
-        let result = engine.performInCoalescingGroup(key) {
-            self.engine.applyKenBurns(span: spanID, start: start, end: end, interpolation: interpolation)
-        }
-        if result.ok {
-            engine.endCoalescing()
+    /// Ken Burns… in the inspector, or a click on the selected Motion span: selects the span and
+    /// (re)opens its editor.
+    func showKenBurns(span id: VESpanID) {
+        guard engine.spanInfo(id)?.kind == .motion else { return }
+        kenBurnsClosedSpan = nil
+        if selectedSpanID != id {
+            select(span: id)
         } else {
-            engine.cancelCoalescing()
+            syncKenBurns()
         }
-        return result
     }
 
-    /// Closes the Ken Burns helper without changing anything.
-    func cancelKenBurns() {
-        kenBurns = nil
+    /// Escape (no drag in progress) or the editor's Close button: closes the Ken Burns editor; the
+    /// span stays selected (the inspector shows it).
+    func closeKenBurns() {
+        guard let kenBurns else { return }
+        kenBurns.cancelDrag()
+        kenBurnsClosedSpan = kenBurns.spanID
+        self.kenBurns = nil
     }
 
     // MARK: Speed
@@ -1323,7 +1262,9 @@ final class ProjectStore: ObservableObject {
     }
 
     private func resetUIState() {
+        kenBurns?.cancelDrag()
         kenBurns = nil
+        kenBurnsClosedSpan = nil
         // Media still arriving belongs to the previous project (its Media folder).
         incoming.discardAll()
         mediaFolder.reset()

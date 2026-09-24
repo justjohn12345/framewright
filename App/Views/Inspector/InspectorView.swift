@@ -440,6 +440,13 @@ private struct SpanInspector: View {
                     .font(.subheadline.weight(.semibold))
                     .accessibilityIdentifier("SpanKind")
                 Spacer()
+                if span.kind == .motion {
+                    Button("Ken Burns…") { store.showKenBurns(span: span.spanID) }
+                        .controlSize(.small)
+                        .help("Show the span's start and end framings on the program monitor (it opens when the "
+                            + "span is selected; this brings it back after it was closed)")
+                        .accessibilityIdentifier("KenBurns")
+                }
                 Button("Remove") { inspector.removeSpan() }
                     .controlSize(.small)
                     .help("Remove the span (⌫)")

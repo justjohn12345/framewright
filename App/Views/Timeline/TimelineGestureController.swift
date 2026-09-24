@@ -405,6 +405,9 @@ final class TimelineGestureController: ObservableObject {
             }
             drag = .pending(hit: hit, origin: point, extend: extend, wasSelected: wasSelected, option: option)
         case let .span(id), let .spanHead(id), let .spanTail(id):
+            if store.selectedSpanID == id, store.kenBurns == nil {
+                store.showKenBurns(span: id) // a click on the selected Motion span reopens its editor
+            }
             store.select(span: id)
             if clickCount >= 2, model.span(id: id)?.kind == .transition {
                 // Double-click on a transition: edit its duration in the inspector.

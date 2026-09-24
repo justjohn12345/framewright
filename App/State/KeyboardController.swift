@@ -18,7 +18,8 @@ import Foundation
 /// Option+Delete (only the selected transition), Shift+Delete (ripple delete), I/O (source
 /// in/out), = or + / - (zoom the timeline, like Command-= / Command--), ] / [ (gain of the selected
 /// audio clips ±1 dB, with Shift ±10 dB; a burst is one undo step), Escape (cancel the drag in
-/// progress; passed on when there is none), Command-A (select all clips), Control-K (Add Motion
+/// progress, a Ken Burns rectangle drag too; else close the Ken Burns editor; passed on when there is
+/// neither), Command-A (select all clips), Control-K (Add Motion
 /// Span at Playhead: a Motion span from the playhead, 5 s or to the clip's end, which opens the Ken
 /// Burns editor). Auto-repeat of Space, J/K/L and Control-K is ignored (holding L does not race to
 /// 8x, holding Space does not toggle, holding Control-K adds one span). Transport keys drive the
@@ -162,9 +163,15 @@ final class KeyboardController {
         // it goes on to the window, which ignores it).
         if fromOutput, !action.isTransportOrCancel { return false }
         if action == .cancel {
-            // Escape cancels a drag in progress (whatever has focus); otherwise it is not ours.
-            guard let cancel = store.cancelActiveGesture else { return false }
-            cancel()
+            // Escape cancels a drag in progress (whatever has focus); otherwise it closes the Ken
+            // Burns editor (not from the output window, and not while a text field has the key).
+            if let cancel = store.cancelActiveGesture {
+                cancel()
+                return true
+            }
+            guard !fromOutput, store.kenBurns != nil,
+                  Self.shouldHandleKeys(firstResponder: window.firstResponder) else { return false }
+            store.closeKenBurns()
             return true
         }
         guard Self.shouldHandleKeys(firstResponder: window.firstResponder) else { return false }
@@ -196,7 +203,8 @@ final class KeyboardController {
         case .markOut: store.markSourceOut()
         case .zoomIn: store.zoomIn()
         case .zoomOut: store.zoomOut()
-        case .cancel: store.cancelActiveGesture?()
+        case .cancel:
+            if let cancel = store.cancelActiveGesture { cancel() } else { store.closeKenBurns() }
         case .selectAll: store.selectAll()
         case let .gainUp(big): store.nudgeGain(big ? InspectorModel.bigStep : 1)
         case let .gainDown(big): store.nudgeGain(big ? -InspectorModel.bigStep : -1)

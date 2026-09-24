@@ -193,7 +193,7 @@ final class InspectorModel: ObservableObject {
     // MARK: Targets
 
     var videoTargets: [VEClipInfo] { store.selectedClips.filter { $0.trackKind == .video } }
-    /// The only selected video clip (Match Previous/Next, the Ken Burns helper).
+    /// The only selected video clip (the Video section's Match menu).
     var motionTarget: VEClipInfo? {
         let targets = videoTargets
         return targets.count == 1 ? targets[0] : nil

@@ -2,19 +2,19 @@ import CoreMedia
 import SwiftUI
 import FramewrightEngine
 
-/// The Ken Burns helper over the program monitor (see `KenBurnsModel`): the whole picture of the
-/// clip, unanimated, with the start rectangle (green) and the end rectangle (red), an arrow showing
-/// the direction of travel (as in FCP), and a bar with the move's range (Whole clip, From playhead,
-/// From clip start, Existing move when the clip has one, Custom; Start, End and Duration fields),
-/// the smoothing, Swap, Cancel and Apply. Drag a rectangle to pan, drag a corner to
-/// zoom (the aspect ratio stays the frame's). The picture is the clip's unanimated frame at the
-/// playhead (its first or last frame while the playhead is outside it) and follows every playhead
-/// change, loaded by `KenBurnsPictureLoader` (its own small cache, one fetch at a time, each landed
-/// picture shown before the latest time is fetched), never from the program view or the shared
+/// The Ken Burns editor over the program monitor while a Motion span is selected (see
+/// `KenBurnsModel`): the whole picture of the clip, unanimated, with the start rectangle (green) and
+/// the end rectangle (red) of the span, an arrow showing the direction of travel (as in FCP), and a
+/// bar with the span's range (Start, End and Duration as timeline times), the hold-after caption or
+/// what limited the last edit, the neighbour toggles, the smoothing, Swap and Close. Drag a rectangle
+/// to pan, drag a corner to zoom (the aspect ratio stays the frame's): every drag writes the span as
+/// it moves and is one undo step; Escape mid-drag cancels it. There is no Apply or Cancel. The
+/// picture is the clip's unanimated frame at the playhead, clamped to the span's range, loaded by
+/// `KenBurnsPictureLoader` (its own small cache), never from the program view or the shared
 /// thumbnail cache, so pictures landing redraw this overlay alone.
 ///
 /// Everything drawn comes from observed objects (the model, the playhead, the picture loader), so a
-/// change of any of them redraws the overlay.
+/// change of any of them redraws the overlay; the model re-reads the span on every model change.
 struct KenBurnsOverlay: View {
     let store: ProjectStore
     @ObservedObject var model: KenBurnsModel
@@ -24,17 +24,11 @@ struct KenBurnsOverlay: View {
     /// state, so it is reset when the drag ends or is cancelled (a stale origin never makes the next
     /// drag jump).
     @GestureState private var drag: ActiveDrag?
-    @FocusState private var focusedField: RangeField?
 
     struct ActiveDrag: Equatable {
         /// Nil when the press grabbed nothing.
         let target: KenBurnsHit.Target?
         let origin: CGRect
-    }
-
-    /// The bar's text fields.
-    enum RangeField: Hashable {
-        case start, end, duration
     }
 
     static let handleSize: CGFloat = 9
@@ -60,9 +54,14 @@ struct KenBurnsOverlay: View {
         }
         .background(Color.black)
         .accessibilityIdentifier("KenBurnsOverlay")
-        // The picture and a "From playhead" range follow the playhead while the helper is open.
+        // The picture follows the playhead (within the span's range).
         .onChange(of: playhead.time, initial: true) { _, time in model.setPlayhead(time) }
         .onChange(of: model.pictureSeconds, initial: true) { _, seconds in picture.want(seconds: seconds) }
+        // A drag the system abandoned without an end (the view went away, another gesture won) is
+        // reverted; a released drag has ended already.
+        .onChange(of: drag == nil) { _, ended in
+            if ended, model.isDragging { model.cancelDrag() }
+        }
     }
 
     /// Sequence pixels to view points: the frame letterboxed into the view.
@@ -177,7 +176,8 @@ struct KenBurnsOverlay: View {
     }
 
     /// Takes every press on the picture area: what it grabs (a rectangle's label, corner, edge or
-    /// inside) is decided once when the drag starts; a drag that has not moved changes nothing.
+    /// inside) is decided once when the drag starts; every movement writes the span (the model opens
+    /// the drag's undo group on the first one); the release ends the group.
     private func dragLayer(_ mapping: Mapping) -> some View {
         Color.clear
             .contentShape(Rectangle())
@@ -191,19 +191,25 @@ struct KenBurnsOverlay: View {
                     guard let active = state, let target = active.target else { return }
                     model.applyDrag(target, origin: active.origin, translation: mapping.sequence(value.translation),
                                     location: mapping.sequence(value.location))
-                })
+                }
+                .onEnded { _ in model.endDrag() })
             .accessibilityIdentifier("KenBurnsDragArea")
     }
 
-    /// The move's range (which part of the clip, where it starts and ends, its duration), what it
-    /// means (or why it was limited) and, next to touching clips, whether the rectangles follow them.
+    /// The span's range, what the last edit hit (or the hold-after caption) and, next to touching
+    /// clips, whether the rectangles follow them.
     private var rangeControls: some View {
         VStack(alignment: .leading, spacing: 4) {
             rangeRow
-            if model.rangeNote != nil || model.rangeCaption != nil {
-                captionRow
+            if let text = model.note ?? model.caption {
+                Text(text)
+                    .foregroundStyle(model.note != nil ? .orange : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(text)
+                    .accessibilityIdentifier("KenBurnsCaption")
             }
-            if model.previous != nil || model.next != nil {
+            if model.canContinueFromPrevious || model.next != nil {
                 neighbourRow
             }
         }
@@ -216,24 +222,19 @@ struct KenBurnsOverlay: View {
 
     private var neighbourRow: some View {
         HStack(spacing: 12) {
-            if model.previous != nil {
-                Toggle("Continue from previous clip", isOn: $model.continuesFromPrevious)
+            if model.canContinueFromPrevious {
+                Toggle("Continue from previous clip",
+                       isOn: Binding(get: { model.continuesFromPrevious }, set: { model.setContinuesFromPrevious($0) }))
                     .toggleStyle(.checkbox)
-                    .help("Start from the framing the previous clip ends with (the green rectangle)")
+                    .help("Start on the framing the previous clip ends with (the green rectangle)")
                     .accessibilityIdentifier("KenBurnsContinuePrevious")
             }
             if model.next != nil {
-                Toggle("Lead into next clip", isOn: $model.leadsIntoNext)
+                Toggle("Lead into next clip",
+                       isOn: Binding(get: { model.leadsIntoNext }, set: { model.setLeadsIntoNext($0) }))
                     .toggleStyle(.checkbox)
                     .help("End on the framing the next clip starts with (the red rectangle)")
                     .accessibilityIdentifier("KenBurnsLeadIntoNext")
-            }
-            if let note = model.neighbourNote {
-                Text(note)
-                    .foregroundStyle(.orange)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .help(note)
             }
             Spacer(minLength: 0)
         }
@@ -241,72 +242,26 @@ struct KenBurnsOverlay: View {
 
     private var rangeRow: some View {
         HStack(spacing: 8) {
-            Picker("Move", selection: $model.range) {
-                ForEach(model.rangeChoices) { choice in
-                    Text(choice.title).tag(choice)
-                }
-            }
-            .fixedSize()
-            .help("The part of the clip the move covers; before it the clip keeps its framing, after it the end framing holds")
-            .accessibilityIdentifier("KenBurnsRange")
-            field("Start", text: $model.startText, field: .start, enabled: true,
-                  help: "The move's first frame, as a timeline time (the ruler's); typing one makes the range Custom")
-            field("End", text: $model.endText, field: .end, enabled: true,
-                  help: "The move's last frame, where the end keyframes go, as a timeline time; typing one makes "
-                      + "the range Custom")
-            field("Duration", text: $model.durationText, field: .duration, enabled: model.isDurationEditable,
-                  help: "How long the move lasts: frames (45f), seconds (2.5s) or timecode")
+            Text("Motion span")
+                .font(.caption.weight(.semibold))
+            field("Start", .start, help: "The move's first instant, as a timeline time (the ruler's)")
+            field("End", .end, help: "Where the move reaches its end framing, as a timeline time")
+            field("Duration", .duration, help: "How long the move lasts: frames (45f), seconds (2.5s) or timecode")
             Spacer(minLength: 0)
         }
-        .help(model.rangeTimecodes)
     }
 
-    /// A labelled field of the bar: Return and leaving the field commit it (see `commit(_:)`).
-    private func field(_ title: String, text: Binding<String>, field: RangeField, enabled: Bool,
-                       help: String) -> some View {
+    /// A labelled range field: Return and leaving the field commit it, ↑/↓ move by a frame.
+    private func field(_ title: String, _ field: KenBurnsModel.RangeField, help: String) -> some View {
         HStack(spacing: 4) {
             Text(title)
-                .foregroundStyle(enabled ? .primary : .secondary)
-            TextField(title, text: text)
-                .labelsHidden()
-                .textFieldStyle(.roundedBorder)
-                .monospacedDigit()
-                .frame(width: 92)
-                .disabled(!enabled)
-                .focused($focusedField, equals: field)
-                .onSubmit { commit(field) }
+            NumericField(text: model.rangeText(field), placeholder: "",
+                         commit: { model.commitRange(field, $0) },
+                         nudge: { model.nudgeRange(field, steps: $0) },
+                         accessibilityIdentifier: "KenBurns\(title)")
+                .frame(width: 92, height: 20)
         }
         .help(help)
-        .accessibilityIdentifier("KenBurns\(title)")
-        .onChange(of: focusedField) { old, new in
-            if old == field, new != field { commit(field) }
-        }
-    }
-
-    /// Commits a field's text. Return does this without pressing Apply while the text differs from
-    /// the committed value (Apply's default-button shortcut is off then: `hasUncommittedText`);
-    /// once committed, Return presses Apply.
-    private func commit(_ field: RangeField) {
-        switch field {
-        case .start: model.commitStart()
-        case .end: model.commitEnd()
-        case .duration: model.commitDuration()
-        }
-    }
-
-    /// Why a typed value was refused or limited (orange), else what the range means.
-    private var captionRow: some View {
-        HStack(spacing: 8) {
-            if let note = model.rangeNote ?? model.rangeCaption {
-                Text(note)
-                    .foregroundStyle(model.rangeProblem != nil || model.rangeNote != nil ? .orange : .secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .help(note)
-                    .accessibilityIdentifier("KenBurnsRangeCaption")
-            }
-            Spacer(minLength: 0)
-        }
     }
 
     private var controls: some View {
@@ -314,9 +269,13 @@ struct KenBurnsOverlay: View {
             Label("Start", systemImage: "square").foregroundStyle(.green)
             Label("End", systemImage: "square").foregroundStyle(.red)
             Spacer(minLength: 4)
-            Picker("Smoothing", selection: $model.interpolation) {
+            Picker("Smoothing", selection: Binding(get: { model.interpolation },
+                                                   set: { model.setInterpolation($0) })) {
                 ForEach(KenBurnsModel.interpolations, id: \.rawValue) { choice in
                     Text(choice.title).tag(choice)
+                }
+                if !KenBurnsModel.interpolations.contains(model.interpolation) {
+                    Text(model.interpolation.title).tag(model.interpolation)
                 }
             }
             .labelsHidden()
@@ -330,14 +289,13 @@ struct KenBurnsOverlay: View {
             }
             .help("Swap the start and end framings")
             .accessibilityIdentifier("KenBurnsSwap")
-            Button("Cancel") { store.cancelKenBurns() }
-                .keyboardShortcut(.cancelAction)
-                .accessibilityIdentifier("KenBurnsCancel")
-            Button("Apply") { store.applyKenBurns() }
-                // Return in a field with text still being typed commits the field only.
-                .keyboardShortcut(model.hasUncommittedText ? nil : .defaultAction)
-                .disabled(model.rangeProblem != nil)
-                .accessibilityIdentifier("KenBurnsApply")
+            Button {
+                store.closeKenBurns()
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .help("Close the Ken Burns editor (Esc); the span stays selected")
+            .accessibilityIdentifier("KenBurnsClose")
         }
         .font(.caption)
         .controlSize(.small)
@@ -347,14 +305,57 @@ struct KenBurnsOverlay: View {
     }
 }
 
-/// Shows the Ken Burns helper over the program monitor while one is open. Observes the store only
-/// to notice the helper opening and closing.
+/// A small readout on the program monitor while an Opacity or Gain span is selected: what its start
+/// and end show ("Fade  100 % → 0 %", "Gain  0 dB → −6 dB"), absolute, and its range. The inspector
+/// is its editor.
+struct SpanReadout: View {
+    @ObservedObject var store: ProjectStore
+    let span: VEEffectSpan
+
+    var body: some View {
+        let parameter = SpanParameter.parameters(for: span.kind).first
+        HStack(spacing: 6) {
+            Image(systemName: span.kind == .gain ? "speaker.wave.2" : "circle.lefthalf.filled")
+            Text(ProjectStore.title(of: span, isAudio: span.kind == .gain))
+                .fontWeight(.semibold)
+            if let parameter {
+                Text(store.inspector.spanText(parameter, atEnd: false, of: span) + " → "
+                    + store.inspector.spanText(parameter, atEnd: true, of: span))
+                    .monospacedDigit()
+                    .accessibilityIdentifier("SpanReadoutValues")
+            }
+            Text(store.rangeString(start: span.start, end: span.end))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .font(.caption)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 5).fill(Color.black.opacity(0.7)))
+        .foregroundStyle(.white)
+        .padding(8)
+        .allowsHitTesting(false)
+        .accessibilityIdentifier("SpanReadout")
+    }
+}
+
+/// Shows the Ken Burns editor over the program monitor while a Motion span is selected (and it was
+/// not closed), or the readout of a selected Opacity or Gain span. Observes the store to notice the
+/// selection and the editor changing.
 struct KenBurnsOverlayHost: View {
     @ObservedObject var store: ProjectStore
 
     var body: some View {
         if let model = store.kenBurns, let picture = model.picture {
             KenBurnsOverlay(store: store, model: model, playhead: store.playhead, picture: picture)
+        } else if let span = store.selectedEffectSpan, span.kind == .opacity || span.kind == .gain {
+            VStack {
+                HStack {
+                    SpanReadout(store: store, span: span)
+                    Spacer(minLength: 0)
+                }
+                Spacer(minLength: 0)
+            }
         }
     }
 }

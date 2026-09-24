@@ -643,4 +643,49 @@ final class EffectLanesTimelineTests: XCTestCase {
         XCTAssertEqual(store.selectedEffectSpan?.start, frames(220))
         XCTAssertEqual(store.selectedEffectSpan?.lane, 2, "lane 1 has the span added near the end")
     }
+
+    /// Held Control-K through the key monitor adds one span: the auto-repeat is swallowed.
+    func testHeldControlKAddsOneMotionSpan() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let id = try fixture.placeMovie(movie, at: 0)
+        store.selection = [id]
+        store.playheadTime = frames(10)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer {
+            store.editorWindow = nil
+            window.close()
+        }
+        store.editorWindow = window
+        let keyboard = KeyboardController(store: store)
+        func controlK(repeating: Bool) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .control, timestamp: 0,
+                                           windowNumber: 0, context: nil, characters: "\u{b}",
+                                           charactersIgnoringModifiers: "k", isARepeat: repeating, keyCode: 40))
+        }
+        XCTAssertTrue(keyboard.handle(try controlK(repeating: false), window: window))
+        XCTAssertEqual(store.engine.spans(forClip: id).count, 1, "one Motion span from the playhead")
+        let changes = store.changeCount
+        for _ in 0 ..< 5 {
+            XCTAssertTrue(keyboard.handle(try controlK(repeating: true), window: window), "swallowed")
+        }
+        XCTAssertEqual(store.changeCount, changes, "the auto-repeat adds nothing")
+        XCTAssertEqual(store.engine.spans(forClip: id).count, 1)
+    }
+
+    /// The bottom of a clip keeps its trim edges and its body (the spans are on the lanes below).
+    func testTheBottomOfAClipWithSpansKeepsItsTrimEdges() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let id = try fixture.placeMovie(movie, at: 0)
+        let span = try addSpan(.motion, lane: 1, clip: id, 0, 60)
+        store.refreshModel()
+        let model = store.timelineModel
+        let rect = try XCTUnwrap(model.rect(forClip: try XCTUnwrap(model.clip(id: id))))
+        let y = rect.maxY - 4
+        XCTAssertEqual(model.hitTest(CGPoint(x: rect.minX + 0.5, y: y)), .clipHead(id))
+        XCTAssertEqual(model.hitTest(CGPoint(x: rect.maxX - 0.5, y: y)), .clipTail(id))
+        XCTAssertEqual(model.hitTest(CGPoint(x: rect.midX, y: y)), .clipBody(id))
+        XCTAssertEqual(model.hitTest(CGPoint(x: rect.midX, y: rect.maxY + 7)), .span(span))
+    }
 }

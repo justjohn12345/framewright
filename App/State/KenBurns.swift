@@ -3,63 +3,40 @@ import CoreMedia
 import Foundation
 import FramewrightEngine
 
-/// The Ken Burns helper (Final Cut Pro's "Ken Burns" crop mode): a start rectangle (green) and an
-/// end rectangle (red) drawn over the whole picture on the program monitor. Each rectangle is the
-/// part of the picture that fills the frame at that end of the move; the move between them becomes
-/// position and scale keyframes on the first and last frames of its range
-/// (`VEEngine.applyKenBurns(clip:start:end:interpolation:from:duration:)`), smoothed with Ease In
-/// and Out by default as in FCP (Linear, Ease Out and Ease In can be chosen). Swap exchanges the
-/// two framings, like FCP's swap button.
+/// The Ken Burns editor (Final Cut Pro's "Ken Burns" crop mode) of one Motion span: a start
+/// rectangle (green) and an end rectangle (red) drawn over the whole picture on the program
+/// monitor. Each rectangle is the part of the picture that fills the frame at that edge of the span
+/// (its start, and its end, where the end framing is reached).
 ///
-/// Range (`MoveRange`): the whole clip (the default, FCP's behaviour), `durationFrames` from the
-/// playhead or from the clip's start (5 s by default, clamped to what is left of the clip), or a
-/// Custom span. Before the move the picture shows the clip's framing without it; after it the end
-/// framing holds until the clip ends or the next move starts (which moves on from it), so a 5 s push
-/// in at the head of a 30 s clip holds its end framing for the other 25 s.
+/// Bound to the span and live: it opens when a Motion span is selected (the store keeps it keyed by
+/// `spanID`) and every drag of a rectangle or a corner writes the span's values as it moves, inside
+/// one coalescing group (`beginDrag`, `applyDrag`, `endDrag`: one undo step per drag; Escape mid-drag
+/// cancels it through the group, `cancelDrag`). There is no Apply or Cancel: Undo reverts a drag.
+/// The Start, End and Duration fields edit the span's range (`commitRange`, limited to the clip and
+/// the free space of its lane), Smoothing its interpolation, Swap exchanges the two framings (one
+/// step), and the neighbour toggles make the span continue the previous clip's last frame or lead
+/// into the next clip's first frame (`VEEngine.matchSpanEdge`; turning one off gives that edge the
+/// clip's own framing back).
 ///
-/// Start and End fields (`startText`, `endText`) show the range's first and last frames as timeline
-/// times (the ruler's), in the user's duration format, whatever the range; committing a different
-/// value (`commitStart()`, `commitEnd()`) makes the range Custom with that end moved and the other
-/// kept, clamped to the clip's frames and at least two frames long (`rangeNote` says when it was
-/// limited). A typed Duration in Custom (or Existing move) moves the end. A field whose text is
-/// still being typed is committed by Return (which then does not press Apply:
-/// `hasUncommittedText`) and by Apply.
-///
-/// Editing a move: when the clip already has position or scale keyframes on its frames
-/// (`detectMove(in:frameDuration:)`), the helper opens on that move ("Existing move"): the range is
-/// the span from the earliest to the latest of those keyframes' frames, the rectangles show the
-/// framing on its first and last frames and the smoothing is the first keyframe's (when the helper
-/// offers it), so Apply replaces the move in place. The span follows the keyframes while the helper
-/// is open (a keyframe dragged in the timeline, an undo). Keyframes a trim hid do not count, unless
-/// they are the only ones: then the move covers the whole clip and `rangeCaption` says why.
-///
-/// Neighbours: with a clip touching this one's start on its track, "Continue from previous clip"
-/// (`continuesFromPrevious`) puts the start rectangle on the framing the previous clip ends with;
-/// with one touching its end, "Lead into next clip" (`leadsIntoNext`) puts the end rectangle on the
-/// framing the next clip starts with (position and scale; the rectangle is drawn with this clip's
-/// rotation and kept inside its picture, `neighbourNote` says when that changed the framing). Each is
-/// on by default when that neighbour animates its position or scale or its framing there is not the
-/// identity (centred, 100 %): then continuing it is what keeps the cut smooth; next to an unmoved
-/// clip the push in stays the default. Turning one on or off resets that rectangle.
-///
-/// While the helper is open the timeline marks the range on the clip (`bandRange`, forwarded by the
-/// store to `KenBurnsTimelineBand`).
+/// The rectangles are never cached across edits: span values are relative and cumulative (a span
+/// applies on top of what the rest of the clip composes to, earlier spans' held end values
+/// included), so an edit of an earlier span, an undo or a trim moves what this span shows while its
+/// own values stay. Every model change reaches `update(clip:previous:next:)`, which re-reads both
+/// framings (`VEClipInfo.getMotion(_:atEdgeOfSpan:)`) and the bases the span applies onto
+/// (`getBaseValues`). A drag converts a rectangle to a framing and the framing to the span's
+/// relative values over the base read when the drag started (the base does not depend on the
+/// span's own values, so every step of the drag is exact).
 ///
 /// The picture under the rectangles follows the playhead, as in FCP: the clip's unanimated frame at
-/// the playhead, or at its first or last frame while the playhead is before or after it
-/// (`pictureSeconds`, loaded and paced by `KenBurnsPictureLoader`).
-///
-/// Default rectangles: when the clip is placed (position or scale animated, or not at the identity)
-/// they show the framing the clip has at the range's first and last frames; otherwise the whole
-/// picture pushing in gently. A rectangle the user moved or resized keeps its place when the range
-/// changes; the others follow the range.
+/// the playhead, clamped to the span's range (its first frame before it, its last frame after it),
+/// loaded and paced by `KenBurnsPictureLoader`.
 ///
 /// Geometry, in sequence pixels (origin at the frame's top-left corner, +y down): the picture is
 /// shown as the compositor fits it at scale 1 and no offset (`pictureBounds`). A rectangle keeps
-/// the sequence's aspect ratio (FCP locks it too), stays inside the picture (so the frame never
-/// shows past the picture's edge) and is at least a tenth of the frame wide (a 1000 % zoom). The
-/// clip's rotation is kept: a rectangle frames the unrotated picture and the frame shows it turned
-/// by the clip's rotation at that end of the move.
+/// the sequence's aspect ratio (FCP locks it too), stays inside the picture while it is dragged (so
+/// the frame never shows past the picture's edge) and is at least a tenth of the frame wide (a
+/// 1000 % zoom). The clip's rotation is kept: a rectangle frames the unrotated picture and the frame
+/// shows it turned by the rotation at that edge of the span.
 @MainActor
 final class KenBurnsModel: ObservableObject {
     enum Framing: CaseIterable {
@@ -71,77 +48,19 @@ final class KenBurnsModel: ObservableObject {
         case topLeft, topRight, bottomLeft, bottomRight
     }
 
-    /// The part of the clip the move covers.
-    enum MoveRange: String, CaseIterable, Identifiable {
-        /// From the clip's first frame to its last (FCP's Ken Burns).
-        case wholeClip
-        /// `durationFrames` from the frame under the playhead.
-        case fromPlayhead
-        /// `durationFrames` from the clip's first frame.
-        case fromClipStart
-        /// The move already on the clip (`existingMove`): from its first to its last position or
-        /// scale keyframe. Offered only while the clip has one.
-        case existingMove
-        /// A span typed in the Start and End fields (`customSpan`, counted from the clip's first
-        /// frame).
-        case custom
-
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .wholeClip: return "Whole clip"
-            case .fromPlayhead: return "From playhead"
-            case .fromClipStart: return "From clip start"
-            case .existingMove: return "Existing move"
-            case .custom: return "Custom"
-            }
-        }
-    }
-
-    /// A move already on the clip: the frames (counted from the clip's first frame) of its earliest
-    /// and latest position or scale keyframes that a frame of the clip shows.
-    struct ExistingMove: Equatable {
-        let first: Int64
-        let last: Int64
-        /// Position or scale keyframes lie on frames between the two (a curve through them, or
-        /// several moves): Apply replaces them.
-        let hasKeyframesBetween: Bool
-        /// The smoothing of the move's first keyframe (position X, else Y, else scale), when it is
-        /// one of `interpolations`; else nil.
-        let interpolation: VEKeyframeInterpolation?
-    }
-
-    /// A range's first and last frames, counted from the clip's first frame.
-    struct FrameSpan: Equatable {
-        var first: Int64
-        var last: Int64
-    }
-
-    /// What `detectMove(in:frameDuration:)` finds on a clip.
-    enum MoveDetection: Equatable {
-        /// No position or scale keyframes on two different frames of the clip.
-        case none
-        /// Position or scale keyframes exist, but a trim hid every one of them.
-        case hiddenOnly
-        case move(ExistingMove)
+    /// The Start, End and Duration fields.
+    enum RangeField: String, CaseIterable {
+        case start, end, duration
     }
 
     /// A touching neighbour's framing at the cut (its last frame before this clip, its first after).
     struct Neighbour: Equatable {
         let clipID: VEClipID
         let framing: VEMotionFraming
-        /// It animates its position or scale.
-        let isAnimated: Bool
-
-        /// The framing is the identity (centred, 100 %).
-        var isIdentity: Bool { framing.x == 0 && framing.y == 0 && framing.scale == 1 }
-        /// "Continue" / "Lead into" is on by default next to this neighbour.
-        var isFollowedByDefault: Bool { isAnimated || !isIdentity }
 
         static func == (a: Neighbour, b: Neighbour) -> Bool {
-            a.clipID == b.clipID && a.isAnimated == b.isAnimated && a.framing.x == b.framing.x
-                && a.framing.y == b.framing.y && a.framing.scale == b.framing.scale
+            a.clipID == b.clipID && a.framing.x == b.framing.x && a.framing.y == b.framing.y
+                && a.framing.scale == b.framing.scale
         }
 
         /// `clip`'s framing on its last frame (`atEnd`) or its first, as the monitor shows it.
@@ -151,654 +70,349 @@ final class KenBurnsModel: ObservableObject {
             let motion = clip.motion(at: frame)
             clipID = clip.clipID
             framing = VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale)
-            isAnimated = clip.spans.contains { $0.kind == .motion }
         }
     }
 
-    /// The interpolations the helper offers (FCP's smoothing choices).
+    /// The interpolations the editor offers (FCP's smoothing choices).
     static let interpolations: [VEKeyframeInterpolation] = [.easeInOut, .easeOut, .easeIn, .linear]
     /// The smallest rectangle, as a fraction of the frame's width (a 1000 % zoom).
     static let minimumWidthFraction = 0.1
-    /// The default end framing, as a fraction of the largest one (a gentle push in).
-    static let defaultEndFraction = 0.8
-    /// The default length of a move that does not cover the whole clip.
-    static let defaultRangeSeconds = 5.0
-    /// The caption shown while the move ends before the clip does (a Motion span holds its end
-    /// values after its end; a later move on its lane starts from them).
-    static let holdCaption = "After the move its end framing holds until the clip ends or the next move starts"
-    /// The caption shown when the clip's position and scale keyframes are all hidden by a trim.
-    static let hiddenMoveCaption = "The clip's position and scale keyframes are all in parts a trim hid: "
-        + "the move covers the whole clip (Apply replaces them)"
+    /// The coalescing group of a rectangle drag.
+    static let dragGroup = "kenBurns.drag"
+    /// The caption shown while the span ends before its clip does (hold after).
+    static let holdCaption = "After the move its end framing holds until the clip ends; a later move on the "
+        + "clip starts from it"
 
-    /// The clip as it is now (the store passes every change through `update(clip:)`).
+    private unowned let store: ProjectStore
+    let spanID: VESpanID
+    /// The span and its clip as they are now (every model change passes through `update`).
+    private(set) var span: VEEffectSpan
     private(set) var clip: VEClipInfo
     let assetID: VEAssetID
     let sequenceSize: CGSize
     let frameDuration: CMTime
-    /// How durations are shown and what a bare typed number means (Settings > Editing; the store
-    /// passes a change on while the helper is open, and the fields not being typed in follow it).
-    var durationDisplay: DurationDisplay {
-        didSet {
-            guard durationDisplay != oldValue else { return }
-            rangeChanged()
-        }
-    }
     /// The picture as the compositor fits it into the frame at scale 1, no offset.
     let pictureBounds: CGRect
-    /// Loads the picture under the rectangles (the store gives the helper one over its thumbnails).
+    /// Loads the picture under the rectangles.
     let picture: KenBurnsPictureLoader?
 
-    @Published var start: CGRect
-    @Published var end: CGRect
-    @Published var interpolation: VEKeyframeInterpolation = .easeInOut
-    /// The part of the clip the move covers (a change resets the duration to its default; choosing
-    /// Custom keeps the current span).
-    @Published var range: MoveRange = .wholeClip {
-        willSet {
-            if newValue == .custom, range != .custom {
-                customSpan = currentSpan ?? wholeSpan
-            }
-        }
-        didSet {
-            guard range != oldValue else { return }
-            requestedFrames = nil
-            rangeNote = nil
-            rangeChanged()
-        }
-    }
-    /// The Duration field's text (committed by `commitDuration()`).
-    @Published var durationText = ""
-    /// The Start and End fields' text: the range's first and last frames as timeline times
-    /// (committed by `commitStart()` / `commitEnd()`).
-    @Published var startText = ""
-    @Published var endText = ""
-    /// Why the last typed Start, End or Duration was refused or limited (nil when it was taken as
-    /// typed).
-    @Published private(set) var rangeNote: String?
-    /// The range as the timeline marks it (nil while it cannot be applied); changes only when the
-    /// range does.
-    @Published private(set) var bandRange: KenBurnsBandRange?
-    /// The program playhead (where "From playhead" starts).
-    @Published private(set) var playhead: CMTime
-    /// The move already on the clip (updated with every clip change while the helper is open).
-    @Published private(set) var detection: MoveDetection
+    /// The rectangles as the span's edges show them (or as a drag in progress has put them).
+    @Published private(set) var start: CGRect = .zero
+    @Published private(set) var end: CGRect = .zero
+    /// The rotation the picture has at each edge (the rectangles are drawn with it).
+    @Published private(set) var startRotation: Double = 0
+    @Published private(set) var endRotation: Double = 0
+    /// How the span moves (its interpolation).
+    @Published private(set) var interpolation: VEKeyframeInterpolation
+    /// The span's range, re-published with every change of it (the fields show it).
+    @Published private(set) var rangeStart: CMTime
+    @Published private(set) var rangeEnd: CMTime
     /// The clip touching this one's start / end on its track (nil when there is none).
     @Published private(set) var previous: Neighbour?
     @Published private(set) var next: Neighbour?
-    /// The start rectangle shows the framing the previous clip ends with. Turning it on or off
-    /// (the user's choice) resets that rectangle; the helper turning it off because the neighbour
-    /// went away keeps a rectangle the user moved.
-    @Published var continuesFromPrevious = false {
-        didSet {
-            guard continuesFromPrevious != oldValue else { return }
-            if !keepsEditedRectangles { editedStart = false }
-            rangeChanged()
+    /// The program playhead (the picture follows it).
+    @Published private(set) var playhead: CMTime
+    /// Why the last edit was refused or limited (nil when it went as asked).
+    @Published private(set) var note: String?
+    /// A rectangle drag is in progress (its coalescing group is open).
+    @Published private(set) var isDragging = false
+
+    /// The bases the span's values apply onto at its start and end, read when a drag starts.
+    private var dragBase: (start: VESpanValues, end: VESpanValues)?
+
+    /// Nil when the span is not a Motion span of a video clip with a picture; `reason` says why.
+    init?(store: ProjectStore, span: VEEffectSpan, clip: VEClipInfo, asset: VEAssetInfo, sequence: VESequenceInfo,
+          playhead: CMTime, picture: KenBurnsPictureLoader? = nil, previous: VEClipInfo? = nil,
+          next: VEClipInfo? = nil, reason: inout String) {
+        guard span.kind == .motion else {
+            reason = "Ken Burns edits a Motion span."
+            return nil
         }
-    }
-    /// The end rectangle shows the framing the next clip starts with (see `continuesFromPrevious`).
-    @Published var leadsIntoNext = false {
-        didSet {
-            guard leadsIntoNext != oldValue else { return }
-            if !keepsEditedRectangles { editedEnd = false }
-            rangeChanged()
-        }
-    }
-
-    /// The duration typed for a partial range (frames, at least 2), or nil for the default.
-    private var requestedFrames: Int64?
-    /// The Custom range as chosen (kept within the clip by `clamped(_:)` when used).
-    private var customSpan = FrameSpan(first: 0, last: 1)
-    /// Rectangles the user moved or resized (they keep their place when the range changes).
-    private(set) var editedStart = false
-    private(set) var editedEnd = false
-    /// Set while the helper itself turns a neighbour toggle off (the neighbour went away).
-    private var keepsEditedRectangles = false
-
-    /// The Start, End and Duration fields.
-    enum Field: CaseIterable {
-        case start, end, duration
-    }
-
-    /// The value each field was last given by the model: a field whose text still equals it is not
-    /// being typed in and follows the range; one whose text differs holds what the user is typing and
-    /// is left alone until it is committed.
-    private var committedText: [Field: String] = [:]
-
-    var clipID: VEClipID { clip.clipID }
-
-    /// Nil when the clip cannot take a Ken Burns move (not a single video clip with a picture, or
-    /// one frame long); `reason` says why.
-    init?(clip: VEClipInfo, asset: VEAssetInfo, sequence: VESequenceInfo, playhead: CMTime,
-          durationDisplay: DurationDisplay = .timecode, picture: KenBurnsPictureLoader? = nil,
-          previous: VEClipInfo? = nil, next: VEClipInfo? = nil, reason: inout String) {
         guard clip.trackKind == .video, asset.hasVideo, asset.width > 0, asset.height > 0 else {
             reason = "Ken Burns works on a clip with a picture."
             return nil
         }
         let frame = sequence.frameDuration
-        let lastFrame = CMTimeSubtract(clip.timelineEnd, frame)
-        guard sequence.width > 0, sequence.height > 0, frame.isNumeric, frame.secondsOrZero > 0,
-              lastFrame > clip.timelineStart else {
-            reason = "The clip is one frame long: a Ken Burns move needs at least two frames."
+        guard sequence.width > 0, sequence.height > 0, frame.isNumeric, frame.secondsOrZero > 0 else {
+            reason = "The sequence has no frame size."
             return nil
         }
+        self.store = store
+        spanID = span.spanID
+        self.span = span
         self.clip = clip
         assetID = asset.assetID
         sequenceSize = CGSize(width: sequence.width, height: sequence.height)
         frameDuration = frame
-        self.durationDisplay = durationDisplay
         self.picture = picture
         self.playhead = playhead
-        pictureBounds = Self.fittedPicture(width: Double(asset.width), height: Double(asset.height),
-                                           in: sequenceSize)
-        start = .zero
-        end = .zero
-        detection = Self.detectMove(in: clip, frameDuration: frame)
+        interpolation = span.interpolation
+        rangeStart = span.start
+        rangeEnd = span.end
+        pictureBounds = Self.fittedPicture(width: Double(asset.width), height: Double(asset.height), in: sequenceSize)
         self.previous = Neighbour(previous, atEnd: true, frameDuration: frame)
         self.next = Neighbour(next, atEnd: false, frameDuration: frame)
-        if case let .move(move) = detection {
-            // Editing the clip's move: it opens as it is. A neighbour is followed only where the move
-            // already continues it (its end of the clip, the same framing), so the rectangles show the
-            // clip's own framing.
-            range = .existingMove
-            interpolation = move.interpolation ?? interpolation
-            let lastFrame = max(0, clipFrames - 1)
-            let span = Self.moveSpan(in: clip)
-            continuesFromPrevious = self.previous.map {
-                move.first == 0 && Self.sameFraming(edgeFraming(of: span, atEnd: false) ?? framing(atFrame: 0), $0.framing)
-            } ?? false
-            leadsIntoNext = self.next.map {
-                move.last == lastFrame
-                    && Self.sameFraming(edgeFraming(of: span, atEnd: true) ?? framing(atFrame: lastFrame), $0.framing)
-            } ?? false
-        } else {
-            continuesFromPrevious = self.previous?.isFollowedByDefault ?? false
-            leadsIntoNext = self.next?.isFollowedByDefault ?? false
-        }
-        rangeChanged()
+        readFramings()
     }
 
-    // MARK: Existing move
+    // MARK: The span and its clip
 
-    /// Frames of `time` from zero on a `frameDuration` grid (the frame containing it).
-    static func frameIndex(_ time: CMTime, frameDuration: CMTime) -> Int64 {
-        let frame = frameDuration.secondsOrZero
-        guard frame > 0 else { return 0 }
-        return Int64((time.secondsOrZero / frame + 1e-6).rounded(.down))
-    }
-
-    /// The move already on `clip`: its first Motion span (the frames it covers, counted from the clip's
-    /// first frame, and its smoothing when the helper offers it). A span of a single frame is no move
-    /// (`.none`). (Motion keyframes became Motion spans; `.hiddenOnly` no longer occurs: a trim clips a
-    /// span instead of hiding it.)
-    static func detectMove(in clip: VEClipInfo, frameDuration: CMTime) -> MoveDetection {
-        guard let span = moveSpan(in: clip) else { return .none }
-        let clipStart = frameIndex(clip.timelineStart, frameDuration: frameDuration)
-        let first = frameIndex(span.start, frameDuration: frameDuration) - clipStart
-        let last = frameIndex(CMTimeSubtract(span.end, frameDuration), frameDuration: frameDuration) - clipStart
-        guard last > first else { return .none }
-        return .move(ExistingMove(first: first, last: last, hasKeyframesBetween: false,
-                                  interpolation: interpolations.contains(span.interpolation) ? span.interpolation : nil))
-    }
-
-    /// The Motion span `detectMove` takes as the clip's move: its first by start (nil for an audio
-    /// clip or one without Motion spans).
-    static func moveSpan(in clip: VEClipInfo) -> VEEffectSpan? {
-        guard clip.trackKind == .video else { return nil }
-        return clip.spans.filter { $0.kind == .motion }.min { $0.start < $1.start }
-    }
-
-    /// The move already on the clip, if any.
-    var existingMove: ExistingMove? {
-        if case let .move(move) = detection { return move }
-        return nil
-    }
-
-    /// The ranges the Move menu offers (Existing move only while the clip has one).
-    var rangeChoices: [MoveRange] {
-        MoveRange.allCases.filter { $0 != .existingMove || existingMove != nil || range == .existingMove }
-    }
-
-    /// The clip's position and scale on its frame `offset` frames from its first.
-    /// The framing an edge of the Motion span `span` shows: what a Ken Burns move applied to it
-    /// (`VEClipInfo.getMotion(_:atEdgeOfSpan:)`; its end framing is reached at the span's end).
-    private func edgeFraming(of span: VEEffectSpan?, atEnd: Bool) -> VEMotionFraming? {
-        guard let span else { return nil }
-        var motion = VEVideoParams()
-        guard clip.getMotion(&motion, atEdgeOfSpan: span.spanID, atEnd: atEnd, frameDuration: frameDuration) else {
-            return nil
-        }
-        return VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale)
-    }
-
-    private func framing(atFrame offset: Int64) -> VEMotionFraming {
-        let motion = clip.motion(at: CMTimeAdd(clip.timelineStart, time(frames: offset)))
-        return VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale)
-    }
-
-    // MARK: Range
-
-    /// Frames of `time` from zero on the sequence's frame grid (the frame containing it).
-    private func frameIndex(_ time: CMTime) -> Int64 {
-        Self.frameIndex(time, frameDuration: frameDuration)
-    }
-
-    private func time(frames: Int64) -> CMTime {
-        CMTimeMultiply(frameDuration, multiplier: Int32(clamping: frames))
-    }
-
-    /// The clip's length in frames.
-    var clipFrames: Int64 { max(0, frameIndex(clip.duration)) }
-
-    /// The range's first frame, counted from the clip's first frame; nil when "From playhead" has
-    /// the playhead outside the clip.
-    var rangeOffset: Int64? {
-        switch range {
-        case .wholeClip, .fromClipStart:
-            return 0
-        case .fromPlayhead:
-            let offset = frameIndex(playhead) - frameIndex(clip.timelineStart)
-            return offset >= 0 && offset < clipFrames ? offset : nil
-        case .existingMove:
-            return existingSpan?.first ?? 0
-        case .custom:
-            return clamped(customSpan).first
-        }
-    }
-
-    /// `span` kept within the clip's frames, first before last (for a clip of at least two frames).
-    private func clamped(_ span: FrameSpan) -> FrameSpan {
-        guard clipFrames >= 2 else { return FrameSpan(first: 0, last: max(0, clipFrames - 1)) }
-        let first = min(max(0, span.first), clipFrames - 2)
-        return FrameSpan(first: first, last: min(max(first + 1, span.last), clipFrames - 1))
-    }
-
-    /// The whole clip as a span.
-    private var wholeSpan: FrameSpan { FrameSpan(first: 0, last: max(0, clipFrames - 1)) }
-
-    /// The existing move's frames, kept within the clip's; nil without one.
-    private var existingSpan: FrameSpan? {
-        guard let move = existingMove else { return nil }
-        return clamped(FrameSpan(first: move.first, last: move.last))
-    }
-
-    /// The range's first and last frames (counted from the clip's first frame); nil when "From
-    /// playhead" has the playhead outside the clip.
-    var currentSpan: FrameSpan? {
-        guard let offset = rangeOffset else { return nil }
-        return FrameSpan(first: offset, last: offset + max(1, durationFrames) - 1)
-    }
-
-    /// Frames of the clip from the range's first frame to its end.
-    var remainingFrames: Int64 { rangeOffset.map { clipFrames - $0 } ?? 0 }
-
-    /// The default duration of a partial range: 5 s, or what is left of the clip.
-    var defaultFrames: Int64 {
-        let seconds = frameDuration.secondsOrZero
-        let fiveSeconds = seconds > 0 ? Int64((Self.defaultRangeSeconds / seconds).rounded()) : 0
-        return min(fiveSeconds, remainingFrames)
-    }
-
-    /// The move's length in frames: the clip's for the whole clip, else the typed or default
-    /// duration clamped to what is left of the clip.
-    var durationFrames: Int64 {
-        switch range {
-        case .wholeClip:
-            return clipFrames
-        case .fromPlayhead, .fromClipStart:
-            return min(requestedFrames ?? defaultFrames, remainingFrames)
-        case .existingMove:
-            guard let span = existingSpan else { return clipFrames }
-            return span.last - span.first + 1
-        case .custom:
-            let span = clamped(customSpan)
-            return span.last - span.first + 1
-        }
-    }
-
-    /// Why the move cannot be applied with this range (nil when it can).
-    var rangeProblem: String? {
-        if clipFrames < 2 {
-            return "The clip is one frame long: a Ken Burns move needs at least two frames."
-        }
-        guard let offset = rangeOffset else {
-            return "Move the playhead over the clip to start the move there."
-        }
-        if clipFrames - offset < 2 {
-            return "Less than two frames of the clip are left after the playhead: a move needs at least two."
-        }
-        return nil
-    }
-
-    /// The timeline time of the range's first frame (the clip's start while `rangeProblem` is set).
-    var rangeStart: CMTime {
-        CMTimeAdd(clip.timelineStart, time(frames: rangeOffset ?? 0))
-    }
-
-    /// The range's length on the timeline.
-    var rangeDuration: CMTime { time(frames: durationFrames) }
-
-    /// The timeline time of the range's last frame (where the end keyframes go).
-    var rangeLastFrame: CMTime {
-        CMTimeAdd(rangeStart, time(frames: max(0, durationFrames - 1)))
-    }
-
-    /// Where the move starts and ends ("00:00:02:00 – 00:00:06:29"): the frames of its keyframes.
-    var rangeTimecodes: String {
-        "\(Timecode.string(rangeStart, frameDuration: frameDuration)) – "
-            + "\(Timecode.string(rangeLastFrame, frameDuration: frameDuration))"
-    }
-
-    /// The caption under the range: why it cannot be applied, which existing move it edits, that
-    /// the clip's keyframes are all hidden by a trim, or that the end framing holds.
-    var rangeCaption: String? {
-        if let rangeProblem { return rangeProblem }
-        if range == .existingMove, let move = existingMove {
-            let span = "Editing the move from \(Timecode.string(rangeStart, frameDuration: frameDuration)) to "
-                + Timecode.string(rangeLastFrame, frameDuration: frameDuration)
-            return move.hasKeyframesBetween ? span + "; keyframes in between are replaced" : span
-        }
-        if range == .wholeClip, detection == .hiddenOnly { return Self.hiddenMoveCaption }
-        return durationFrames < remainingFrames ? Self.holdCaption : nil
-    }
-
-    /// Whether the Duration field can be edited (not for the whole clip; in Existing move a typed
-    /// duration makes the range Custom).
-    var isDurationEditable: Bool { range != .wholeClip }
-
-    /// `frames` in the user's duration format.
-    func durationString(frames: Int64) -> String {
-        DurationFormat.string(frames: frames, frameDuration: frameDuration, display: durationDisplay)
-    }
-
-    /// The span the Start and End fields show and edit: the range's, or the whole clip's while the
-    /// range cannot be applied ("From playhead" with the playhead off the clip).
-    private var fieldSpan: FrameSpan {
-        guard rangeProblem == nil, let span = currentSpan else { return wholeSpan }
-        return span
-    }
-
-    /// The Start and End fields' committed values: the first and last frames of `fieldSpan` as
-    /// timeline times in the user's duration format (the ruler's timecode by default).
-    var startString: String { durationString(frames: frameIndex(clip.timelineStart) + fieldSpan.first) }
-    var endString: String { durationString(frames: frameIndex(clip.timelineStart) + fieldSpan.last) }
-
-    /// A field's text (trimmed, as a commit reads it) differs from its committed value: Return
-    /// commits it instead of pressing Apply.
-    var hasUncommittedText: Bool {
-        trimmed(startText) != startString || trimmed(endText) != endString
-            || (isDurationEditable && trimmed(durationText) != durationString(frames: durationFrames))
-    }
-
-    private func trimmed(_ text: String) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Commits the Start, End and Duration fields (Apply takes what is still being typed). False
-    /// when one holds text that is not a time or duration (`rangeNote` says why).
-    func commitFields() -> Bool {
-        commitStart() && commitEnd() && commitDuration()
-    }
-
-    /// Takes the Start field's text: the timeline frame the move starts on (see `commitBoundary`).
-    @discardableResult
-    func commitStart() -> Bool { commitBoundary(.start) }
-
-    /// Takes the End field's text: the timeline frame of the end keyframes (see `commitBoundary`).
-    @discardableResult
-    func commitEnd() -> Bool { commitBoundary(.end) }
-
-    /// Takes the Start (`.start`) or End field's text: a timeline time parsed like the Duration
-    /// field (`DurationFormat.parseFrames`: timecode, 150f, 5s, or a bare number in the display's
-    /// unit), as the sequence frame from zero. Unchanged text changes nothing. Otherwise the range
-    /// becomes Custom with that end moved and the other kept (`fieldSpan`: the whole clip's while
-    /// the range cannot be applied), the moved end limited to the clip's frames and to at least two
-    /// frames of range (`rangeNote` says when). Returns false for text that is not a time
-    /// (`rangeNote` says why; the range stays).
-    private func commitBoundary(_ which: Framing) -> Bool {
-        let field: Field = which == .start ? .start : .end
-        let typed = trimmed(which == .start ? startText : endText)
-        guard typed != (which == .start ? startString : endString) else {
-            rewrite(field) // spaces around the value
-            return true
-        }
-        guard let frame = DurationFormat.parseFrames(typed, frameDuration: frameDuration, display: durationDisplay)
-        else {
-            rangeNote = "“\(typed)” is not a time (use timecode like 00:00:05:00, frames like 150f or seconds "
-                + "like 5s)."
-            return false
-        }
-        guard clipFrames >= 2 else {
-            rangeNote = rangeProblem
-            return false
-        }
-        let clipStart = frameIndex(clip.timelineStart)
-        if frame - clipStart == (which == .start ? fieldSpan.first : fieldSpan.last) {
-            // The same frame written another way ("2s" for 00:00:02:00): the range stays as it is.
-            rewrite(field)
-            return true
-        }
-        let lastFrame = clipFrames - 1
-        let current = fieldSpan
-        var offset = frame - clipStart
-        var note: String?
-        if offset < 0 {
-            offset = 0
-            note = "Limited to the clip's first frame, \(timeText(offset: 0))."
-        } else if offset > lastFrame {
-            offset = lastFrame
-            note = "Limited to the clip's last frame, \(timeText(offset: lastFrame))."
-        }
-        var span = current
-        if which == .start {
-            if offset > current.last - 1 {
-                offset = max(0, current.last - 1)
-                note = "A move is at least two frames long: the start is \(timeText(offset: offset)), a frame "
-                    + "before the end."
-            }
-            span.first = offset
-        } else {
-            if offset < current.first + 1 {
-                offset = min(lastFrame, current.first + 1)
-                note = "A move is at least two frames long: the end is \(timeText(offset: offset)), a frame "
-                    + "after the start."
-            }
-            span.last = offset
-        }
-        setCustom(span, note: note, committing: field)
-        return true
-    }
-
-    /// The timeline time of the clip's frame `offset` frames from its first, in the user's format.
-    private func timeText(offset: Int64) -> String {
-        durationString(frames: frameIndex(clip.timelineStart) + offset)
-    }
-
-    /// Makes the range Custom over `span` (clip frames), with `note` explaining a limit; the field
-    /// `committing` shows its committed value (the other fields keep what is being typed in them).
-    private func setCustom(_ span: FrameSpan, note: String?, committing field: Field) {
-        if range != .custom { range = .custom } // prefills customSpan, then refreshes
-        customSpan = clamped(span)
-        rangeNote = note
-        rangeChanged(rewriting: [field])
-    }
-
-    /// Takes the Duration field's text: parsed like every duration field
-    /// (`DurationFormat.parseFrames`), at least two frames and at most what is left of the clip
-    /// (`rangeNote` says when it was limited). In Custom and Existing move it moves the range's end
-    /// (the range becomes Custom). Returns false for text that is not a duration (`rangeNote` says
-    /// why; the duration stays). The whole clip has no duration to type.
-    @discardableResult
-    func commitDuration() -> Bool {
-        guard isDurationEditable else {
-            rewrite(.duration)
-            return true
-        }
-        let typed = trimmed(durationText)
-        guard typed != durationString(frames: durationFrames) else {
-            rewrite(.duration)
-            return true
-        }
-        guard let frames = DurationFormat.parseFrames(typed, frameDuration: frameDuration, display: durationDisplay)
-        else {
-            rangeNote = "“\(typed)” is not a duration (use frames like 45f, seconds like 2.5s, or timecode)."
-            return false
-        }
-        if let problem = rangeProblem {
-            // "From playhead" with the playhead off the clip: there is no range to give a duration.
-            rangeNote = problem
-            return false
-        }
-        if frames == durationFrames {
-            rewrite(.duration) // the same length written another way: the range stays
-            return true
-        }
-        var taken = frames
-        var note: String?
-        if taken < 2 {
-            taken = 2
-            note = "A move is at least two frames long."
-        }
-        if taken > remainingFrames {
-            taken = remainingFrames
-            note = "Limited to the \(durationString(frames: remainingFrames)) left in the clip."
-        }
-        switch range {
-        case .existingMove, .custom:
-            let first = rangeOffset ?? 0
-            setCustom(FrameSpan(first: first, last: first + taken - 1), note: note, committing: .duration)
-        case .wholeClip, .fromPlayhead, .fromClipStart:
-            requestedFrames = taken
-            rangeNote = note
-            rangeChanged(rewriting: [.duration])
-        }
-        return true
-    }
-
-    /// The program playhead moved: the picture follows it, and so does a "From playhead" range.
-    func setPlayhead(_ time: CMTime) {
-        guard time != playhead else { return }
-        playhead = time
-        if range == .fromPlayhead { rangeChanged() }
-    }
-
-    /// The clip changed while the helper is open (a trim, an undo): the range and the rectangles
-    /// the user has not moved follow it.
-    func update(clip: VEClipInfo, previous: VEClipInfo? = nil, next: VEClipInfo? = nil) {
-        guard clip.clipID == self.clip.clipID else { return }
+    /// The span, its clip or a neighbour changed (an edit, an undo, a trim, an edit of an earlier
+    /// span): re-read everything the editor shows. A drag in progress keeps its rectangles.
+    func update(span: VEEffectSpan, clip: VEClipInfo, previous: VEClipInfo?, next: VEClipInfo?) {
+        guard span.spanID == spanID else { return }
+        self.span = span
         self.clip = clip
+        if interpolation != span.interpolation { interpolation = span.interpolation }
+        if rangeStart != span.start { rangeStart = span.start }
+        if rangeEnd != span.end { rangeEnd = span.end }
         let before = Neighbour(previous, atEnd: true, frameDuration: frameDuration)
         let after = Neighbour(next, atEnd: false, frameDuration: frameDuration)
         if before != self.previous { self.previous = before }
         if after != self.next { self.next = after }
-        // A neighbour that went away cannot be followed (the didSet refreshes a rectangle the user
-        // has not moved; one the user moved stays where it is).
-        keepsEditedRectangles = true
-        if before == nil, continuesFromPrevious { continuesFromPrevious = false }
-        if after == nil, leadsIntoNext { leadsIntoNext = false }
-        keepsEditedRectangles = false
-        // The existing move follows its keyframes (dragged in the timeline, undone...).
-        let detected = Self.detectMove(in: clip, frameDuration: frameDuration)
-        if detected != detection { detection = detected }
-        if range == .existingMove, existingMove == nil {
-            range = .wholeClip // the move is gone (the didSet refreshes the range)
-        } else {
-            rangeChanged()
+        if !isDragging { readFramings() }
+    }
+
+    /// The Motion an edge of the span shows (what a Ken Burns move sets), or the clip's framing
+    /// there if the engine cannot say.
+    private func edgeMotion(atEnd: Bool) -> VEVideoParams {
+        var motion = VEVideoParams()
+        if clip.getMotion(&motion, atEdgeOfSpan: spanID, atEnd: atEnd, frameDuration: frameDuration) {
+            return motion
+        }
+        return clip.motion(at: atEnd ? CMTimeSubtract(span.end, frameDuration) : span.start)
+    }
+
+    /// Re-reads both rectangles from the span's edges.
+    private func readFramings() {
+        let first = edgeMotion(atEnd: false)
+        let last = edgeMotion(atEnd: true)
+        let startRect = Self.rect(for: VEMotionFraming(x: first.x, y: first.y, scale: first.scale),
+                                  sequence: sequenceSize, rotationDegrees: first.rotationDegrees)
+        let endRect = Self.rect(for: VEMotionFraming(x: last.x, y: last.y, scale: last.scale),
+                                sequence: sequenceSize, rotationDegrees: last.rotationDegrees)
+        if start != startRect { start = startRect }
+        if end != endRect { end = endRect }
+        if startRotation != first.rotationDegrees { startRotation = first.rotationDegrees }
+        if endRotation != last.rotationDegrees { endRotation = last.rotationDegrees }
+    }
+
+    /// The framings the rectangles give (position and scale).
+    var startFraming: VEMotionFraming {
+        Self.framing(for: start, sequence: sequenceSize, rotationDegrees: startRotation)
+    }
+
+    var endFraming: VEMotionFraming {
+        Self.framing(for: end, sequence: sequenceSize, rotationDegrees: endRotation)
+    }
+
+    /// The span ends before its clip does: its end framing holds after it (`holdCaption`).
+    var caption: String? {
+        span.end < clip.timelineEnd ? Self.holdCaption : nil
+    }
+
+    // MARK: Writing
+
+    /// The bases the span applies onto at its edges (nil when the engine cannot say).
+    private func bases() -> (start: VESpanValues, end: VESpanValues)? {
+        var first = VESpanValues()
+        var last = VESpanValues()
+        guard clip.getBaseValues(&first, underSpan: spanID, atEnd: false, frameDuration: frameDuration),
+              clip.getBaseValues(&last, underSpan: spanID, atEnd: true, frameDuration: frameDuration) else { return nil }
+        return (first, last)
+    }
+
+    /// The span's relative values that make its edges show `start` and/or `end` over `base`.
+    private func values(start: VEMotionFraming?, end: VEMotionFraming?,
+                        base: (start: VESpanValues, end: VESpanValues)) -> (VESpanValues, VESpanValues)? {
+        var from = VESpanValuesUnchanged()
+        var to = VESpanValuesUnchanged()
+        if let start {
+            guard let relative = ProjectStore.relativeFraming(start, base: base.start) else { return nil }
+            from = relative
+        }
+        if let end {
+            guard let relative = ProjectStore.relativeFraming(end, base: base.end) else { return nil }
+            to = relative
+        }
+        return (from, to)
+    }
+
+    private static let zeroScaleNote = "The rest of the clip has scale 0 here, so the move cannot change what it shows."
+
+    // MARK: Drags
+
+    /// A drag on the overlay: `target` (a rectangle's body or corner, `KenBurnsHit`) grabbed with the
+    /// rectangle at `origin`, now `translation` from where it started and at `location` (sequence
+    /// pixels). The first step that moves opens the drag's coalescing group; every step writes the
+    /// span's values inside it. A drag that has not moved changes nothing. Refused during another
+    /// gesture (a timeline drag): nothing happens and the note says why.
+    func applyDrag(_ target: KenBurnsHit.Target, origin: CGRect, translation: CGSize, location: CGPoint) {
+        guard translation != .zero else { return }
+        if !isDragging, !beginDrag() { return }
+        let rect: CGRect
+        switch target {
+        case .body:
+            rect = constrained(origin.offsetBy(dx: translation.width, dy: translation.height))
+        case let .corner(_, corner):
+            rect = resized(origin, corner: corner, to: location)
+        }
+        write(target.framing, rect)
+    }
+
+    /// Opens the drag's coalescing group (one undo step) and makes Escape cancel it; false (with the
+    /// note) while another gesture is in progress.
+    @discardableResult
+    func beginDrag() -> Bool {
+        guard !isDragging else { return true }
+        guard !store.isGestureActive else {
+            note = "Finish the current drag first."
+            return false
+        }
+        guard let base = bases() else {
+            note = "The span no longer exists."
+            return false
+        }
+        store.inspector.endNudgeBurst()
+        dragBase = base
+        store.engine.beginCoalescing(withKey: Self.dragGroup)
+        store.cancelActiveGesture = { [weak self] in self?.cancelDrag() }
+        isDragging = true
+        note = nil
+        return true
+    }
+
+    /// Writes one rectangle as a step of the drag.
+    private func write(_ which: Framing, _ rect: CGRect) {
+        guard isDragging, let base = dragBase else { return }
+        let rotation = which == .start ? startRotation : endRotation
+        let framing = Self.framing(for: rect, sequence: sequenceSize, rotationDegrees: rotation)
+        guard let (from, to) = values(start: which == .start ? framing : nil, end: which == .end ? framing : nil,
+                                      base: base) else {
+            note = Self.zeroScaleNote
+            return
+        }
+        if which == .start { start = rect } else { end = rect }
+        let result = store.engine.performInCoalescingGroup(Self.dragGroup) {
+            self.store.engine.setSpanValues(self.spanID, start: from, end: to)
+        }
+        guard !result.ok else { return }
+        note = result.message
+        if result.errorCode == .busy {
+            // Another edit ended the group (committing what the drag did): the drag stops.
+            finishDrag()
+            readFramings()
         }
     }
 
-    /// The range, the playhead or the clip changed: reformat the Start, End and Duration fields that
-    /// are not being typed in (and the ones in `rewriting`, just committed) and move the rectangles
-    /// the user has not touched to their defaults. A field whose text differs from what the model last
-    /// put there holds the user's typing: a save, an import, an undo or the playhead moving never
-    /// replaces it.
-    private func rangeChanged(rewriting: Set<Field> = []) {
-        for field in Field.allCases {
-            refresh(field, force: rewriting.contains(field))
+    /// The drag was released: its group ends (one undo step).
+    func endDrag() {
+        guard isDragging else { return }
+        if store.engine.coalescingKey == Self.dragGroup {
+            store.engine.endCoalescing()
         }
-        let band = rangeProblem == nil
-            ? KenBurnsBandRange(clipID: clip.clipID, start: rangeStart.secondsOrZero,
-                                end: CMTimeAdd(rangeLastFrame, frameDuration).secondsOrZero)
-            : nil
-        if band != bandRange { bandRange = band }
-        if !editedStart { start = defaultRect(.start) }
-        if !editedEnd { end = defaultRect(.end) }
+        finishDrag()
+        readFramings()
     }
 
-    /// The model's value of `field` now.
-    private func modelText(_ field: Field) -> String {
-        switch field {
-        case .start: return startString
-        case .end: return endString
-        case .duration: return durationString(frames: durationFrames)
+    /// Escape (or Undo) mid-drag, or a drag the system abandoned: reverts what the drag did.
+    func cancelDrag() {
+        guard isDragging else { return }
+        if store.engine.coalescingKey == Self.dragGroup {
+            store.engine.cancelCoalescing()
         }
+        finishDrag()
+        readFramings()
     }
 
-    private func text(_ field: Field) -> String {
-        switch field {
-        case .start: return startText
-        case .end: return endText
-        case .duration: return durationText
-        }
+    private func finishDrag() {
+        isDragging = false
+        dragBase = nil
+        store.cancelActiveGesture = nil
     }
 
-    private func setText(_ field: Field, _ value: String) {
-        guard text(field) != value else { return }
-        switch field {
-        case .start: startText = value
-        case .end: endText = value
-        case .duration: durationText = value
+    // MARK: Commands
+
+    /// Refuses a command during a gesture; true when it may go ahead.
+    private func mayEdit() -> Bool {
+        guard !store.isGestureActive else {
+            note = "Finish the current drag first."
+            return false
         }
+        store.inspector.endNudgeBurst()
+        return true
     }
 
-    /// Puts the model's value in `field` when it is not being typed in (its text is still what the
-    /// model last put there) or when `force`d, and remembers it as the committed value.
-    private func refresh(_ field: Field, force: Bool) {
-        let value = modelText(field)
-        if force || text(field) == (committedText[field] ?? "") {
-            setText(field, value)
+    /// Exchanges the start and end framings (FCP's swap button): one undo step.
+    func swap() {
+        guard mayEdit(), let base = bases() else { return }
+        guard let (from, to) = values(start: endFraming, end: startFraming, base: base) else {
+            note = Self.zeroScaleNote
+            return
         }
-        committedText[field] = value
+        report(store.engine.setSpanValues(spanID, start: from, end: to))
     }
 
-    /// Shows the committed value in `field` (after it was committed).
-    private func rewrite(_ field: Field) {
-        refresh(field, force: true)
+    /// Smoothing: how the span moves (one undo step).
+    func setInterpolation(_ interpolation: VEKeyframeInterpolation) {
+        guard mayEdit(), interpolation != span.interpolation else { return }
+        report(store.engine.setSpanInterpolation(spanID, interpolation: interpolation))
     }
 
-    /// The rectangle `which` has before the user moves it: the clip's framing at that end of the
-    /// range when the clip is placed, else the whole picture (start) pushing in gently (end).
-    func defaultRect(_ which: Framing) -> CGRect {
-        if which == .start, continuesFromPrevious, let previous {
-            return constrained(Self.rect(for: previous.framing, sequence: sequenceSize, rotationDegrees: startRotation))
-        }
-        if which == .end, leadsIntoNext, let next {
-            return constrained(Self.rect(for: next.framing, sequence: sequenceSize, rotationDegrees: endRotation))
-        }
-        let first = rangeMotion(atEnd: false)
-        let placed = clip.spans.contains { $0.kind == .motion } || first.scale != 1 || first.x != 0 || first.y != 0
-        let largest = Self.largestRect(in: pictureBounds, aspect: aspect)
-        guard placed else {
-            return which == .start ? largest : Self.scaled(largest, by: Self.defaultEndFraction)
-        }
-        let motion = which == .start ? first : rangeMotion(atEnd: true)
-        return constrained(Self.rect(for: VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale),
-                                     sequence: sequenceSize, rotationDegrees: motion.rotationDegrees))
+    private func report(_ result: VEEditResult) {
+        note = result.ok ? (result.note.isEmpty ? nil : result.note) : result.message
+        if !result.ok { store.statusMessage = result.message }
     }
 
-    /// Says when a followed neighbour's framing could not be kept exactly (it shows past this clip's
-    /// picture, or zooms in further than the helper allows, so its rectangle was kept inside).
-    var neighbourNote: String? {
-        var parts: [String] = []
-        if continuesFromPrevious, let previous, !editedStart, !Self.sameFraming(startFraming, previous.framing) {
-            parts.append("the previous clip's end")
+    // MARK: Neighbours
+
+    /// "Continue from previous clip" applies: a clip touches this one's start and the span starts on
+    /// the clip's first frame.
+    var canContinueFromPrevious: Bool { previous != nil && span.start == clip.timelineStart }
+
+    /// The start shows the framing the previous clip ends with.
+    var continuesFromPrevious: Bool {
+        guard canContinueFromPrevious, let previous else { return false }
+        return Self.sameFraming(edgeFraming(atEnd: false), previous.framing)
+    }
+
+    /// The end shows the framing the next clip starts with.
+    var leadsIntoNext: Bool {
+        guard let next else { return false }
+        return Self.sameFraming(edgeFraming(atEnd: true), next.framing)
+    }
+
+    private func edgeFraming(atEnd: Bool) -> VEMotionFraming {
+        let motion = edgeMotion(atEnd: atEnd)
+        return VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale)
+    }
+
+    /// Turns "Continue from previous clip" on (the start matches the previous clip's last frame,
+    /// `VEEngine.matchSpanEdge`) or off (the start shows the clip's own framing: neutral start
+    /// values). One undo step.
+    func setContinuesFromPrevious(_ on: Bool) {
+        setFollows(.start, on)
+    }
+
+    /// Turns "Lead into next clip" on (the end matches the next clip's first frame) or off (the end
+    /// shows the clip's own framing). One undo step.
+    func setLeadsIntoNext(_ on: Bool) {
+        setFollows(.end, on)
+    }
+
+    private func setFollows(_ edge: VEClipEdge, _ on: Bool) {
+        guard mayEdit() else { return }
+        if on {
+            report(store.matchSpanEdge(spanID, edge))
+            return
         }
-        if leadsIntoNext, let next, !editedEnd, !Self.sameFraming(endFraming, next.framing) {
-            parts.append("the next clip's start")
-        }
-        guard !parts.isEmpty else { return nil }
-        return "The framing of \(parts.joined(separator: " and ")) reaches past this picture: its rectangle "
-            + "was kept inside it."
+        var neutral = VESpanValuesUnchanged()
+        neutral.x = 0
+        neutral.y = 0
+        neutral.scale = 1
+        let unchanged = VESpanValuesUnchanged()
+        report(store.engine.setSpanValues(spanID, start: edge == .start ? neutral : unchanged,
+                                          end: edge == .end ? neutral : unchanged))
     }
 
     /// Two framings the same within a millionth (the engine's `motionValuesMatch`).
@@ -807,35 +421,82 @@ final class KenBurnsModel: ObservableObject {
         return same(a.x, b.x) && same(a.y, b.y) && same(a.scale, b.scale)
     }
 
-    /// The clip's rotation at the range's first and last frames (kept by the move).
-    var startRotation: Double { rangeMotion(atEnd: false).rotationDegrees }
-    var endRotation: Double { rangeMotion(atEnd: true).rotationDegrees }
+    // MARK: Range
 
-    /// The clip's Motion span over exactly the helper's range, if any (what Apply edits in place).
-    private var rangeSpan: VEEffectSpan? {
-        let end = CMTimeAdd(rangeStart, rangeDuration)
-        return clip.spans.first { $0.kind == .motion && $0.start == rangeStart && $0.end == end }
-    }
-
-    /// The Motion at the range's start or end: for a Motion span over exactly the range, the
-    /// framings a move applied to it (`VEClipInfo.getMotion(_:atEdgeOfSpan:)`: the span's end values
-    /// are reached at its end, one frame after its last frame); otherwise what the range's first or
-    /// last frame shows.
-    private func rangeMotion(atEnd: Bool) -> VEVideoParams {
-        if let span = rangeSpan {
-            var motion = VEVideoParams()
-            if clip.getMotion(&motion, atEdgeOfSpan: span.spanID, atEnd: atEnd, frameDuration: frameDuration) {
-                return motion
-            }
+    /// A range field's value in the user's duration format: the span's start and end as timeline
+    /// times (the end is where the end framing is reached), its length.
+    func rangeText(_ field: RangeField) -> String {
+        switch field {
+        case .start: return store.timelineTimeString(rangeStart)
+        case .end: return store.timelineTimeString(rangeEnd)
+        case .duration: return store.durationString(frames: store.frames(CMTimeSubtract(rangeEnd, rangeStart)))
         }
-        return clip.motion(at: atEnd ? rangeLastFrame : rangeStart)
     }
 
-    /// The clip's frame the picture under the rectangles shows: the one under the playhead, or the
-    /// clip's first or last frame while the playhead is before or after the clip (timeline time).
+    /// Takes a typed Start, End or Duration (parsed like every duration field: timecode, 150f, 5s,
+    /// a bare number in the display's unit): the other end stays (Duration moves the end), limited
+    /// to the clip and the free space of the lane (`ProjectStore.setSpanRange`; `note` says so).
+    /// Text that is not a time is refused with the note. Returns whether it was taken.
+    @discardableResult
+    func commitRange(_ field: RangeField, _ text: String) -> Bool {
+        let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty else { return true }
+        guard let frames = DurationFormat.parseFrames(typed, frameDuration: frameDuration,
+                                                      display: store.editingPreferences.durationDisplay) else {
+            note = "“\(typed)” is not a time (use timecode like 00:00:05:00, frames like 150f or seconds like 5s)."
+            return false
+        }
+        return setRange(field, frames: frames)
+    }
+
+    /// Up/Down in a range field: that end (Duration: the end) moves `steps` frames.
+    func nudgeRange(_ field: RangeField, steps: Double) {
+        let current: Int64
+        switch field {
+        case .start: current = store.frames(rangeStart)
+        case .end: current = store.frames(rangeEnd)
+        case .duration: current = store.frames(CMTimeSubtract(rangeEnd, rangeStart))
+        }
+        setRange(field, frames: max(0, current + Int64(steps)))
+    }
+
+    @discardableResult
+    private func setRange(_ field: RangeField, frames: Int64) -> Bool {
+        guard mayEdit() else { return false }
+        var from = rangeStart
+        var to = rangeEnd
+        switch field {
+        case .start: from = store.time(frames: frames)
+        case .end: to = store.time(frames: frames)
+        case .duration: to = CMTimeAdd(rangeStart, store.time(frames: frames))
+        }
+        let (ok, text) = store.setSpanRange(spanID, start: from, end: to, typed: field == .start ? .start : .end)
+        note = text
+        return ok
+    }
+
+    // MARK: Picture
+
+    /// The playhead moved: the picture follows it.
+    func setPlayhead(_ time: CMTime) {
+        guard time != playhead else { return }
+        playhead = time
+    }
+
+    /// Frames of `time` from zero on the sequence's frame grid (the frame containing it).
+    private func frameIndex(_ time: CMTime) -> Int64 {
+        let frame = frameDuration.secondsOrZero
+        guard frame > 0 else { return 0 }
+        return Int64((time.secondsOrZero / frame + 1e-6).rounded(.down))
+    }
+
+    /// The clip's frame the picture under the rectangles shows: the one under the playhead, clamped
+    /// to the span's range (its first frame before it, its last frame after it) and to the clip.
     var pictureFrame: CMTime {
-        let offset = min(max(0, frameIndex(playhead) - frameIndex(clip.timelineStart)), max(0, clipFrames - 1))
-        return CMTimeAdd(clip.timelineStart, time(frames: offset))
+        let first = max(frameIndex(span.start), frameIndex(clip.timelineStart))
+        let last = max(first, min(frameIndex(span.end), frameIndex(clip.timelineEnd)) - 1)
+        let frame = min(max(frameIndex(playhead), first), last)
+        return CMTimeMultiply(frameDuration, multiplier: Int32(clamping: frame))
     }
 
     /// Source seconds of that frame's picture, through the clip's speed (a still has one picture).
@@ -915,39 +576,10 @@ final class KenBurnsModel: ObservableObject {
         which == .start ? start : end
     }
 
-    private func set(_ which: Framing, _ rect: CGRect) {
-        if which == .start {
-            start = rect
-            editedStart = true
-        } else {
-            end = rect
-            editedEnd = true
-        }
-    }
-
-    /// A drag on the overlay: `target` (a rectangle's body or corner, `KenBurnsHit`) grabbed with the
-    /// rectangle at `origin`, now `translation` from where it started and at `location` (sequence
-    /// pixels). A drag that has not moved changes nothing (a click does not mark the rectangle as
-    /// moved, so it keeps following the range).
-    func applyDrag(_ target: KenBurnsHit.Target, origin: CGRect, translation: CGSize, location: CGPoint) {
-        guard translation != .zero else { return }
-        switch target {
-        case let .body(which):
-            move(which, from: origin, by: translation)
-        case let .corner(which, corner):
-            resize(which, from: origin, corner: corner, to: location)
-        }
-    }
-
-    /// Moves a rectangle from `original` by `delta` (sequence pixels), kept inside the picture.
-    func move(_ which: Framing, from original: CGRect, by delta: CGSize) {
-        set(which, constrained(original.offsetBy(dx: delta.width, dy: delta.height)))
-    }
-
-    /// Resizes a rectangle from `original` by dragging `corner` to `point` (sequence pixels): the
-    /// opposite corner stays, the aspect ratio stays the frame's, and the rectangle stays inside the
-    /// picture and within the size limits.
-    func resize(_ which: Framing, from original: CGRect, corner: Corner, to point: CGPoint) {
+    /// `original` resized by dragging `corner` to `point` (sequence pixels): the opposite corner
+    /// stays, the aspect ratio stays the frame's, and the rectangle stays inside the picture and
+    /// within the size limits.
+    func resized(_ original: CGRect, corner: Corner, to point: CGPoint) -> CGRect {
         let anchor: CGPoint
         let growsRight: Bool
         let growsDown: Bool
@@ -976,23 +608,7 @@ final class KenBurnsModel: ObservableObject {
         let height = width / aspect
         let rect = CGRect(x: growsRight ? anchor.x : anchor.x - width, y: growsDown ? anchor.y : anchor.y - height,
                           width: width, height: height)
-        set(which, constrained(rect))
-    }
-
-    /// Exchanges the start and end framings (FCP's swap button).
-    func swap() {
-        (start, end) = (end, start)
-        editedStart = true
-        editedEnd = true
-    }
-
-    /// The keyframe values the two rectangles give.
-    var startFraming: VEMotionFraming {
-        Self.framing(for: start, sequence: sequenceSize, rotationDegrees: startRotation)
-    }
-
-    var endFraming: VEMotionFraming {
-        Self.framing(for: end, sequence: sequenceSize, rotationDegrees: endRotation)
+        return constrained(rect)
     }
 }
 
@@ -1093,30 +709,8 @@ enum KenBurnsHit {
     }
 }
 
-/// The Ken Burns range as the timeline marks it: the clip and the timeline seconds from the range's
-/// first frame's start to its last frame's end.
-struct KenBurnsBandRange: Equatable {
-    let clipID: VEClipID
-    let start: Double
-    let end: Double
-}
-
-/// The range the timeline highlights while the Ken Burns helper is open (nil otherwise). A separate
-/// object observed only by the timeline's band overlay (`KenBurnsBandView`), so a range that moves
-/// with the playhead or with typing redraws that overlay alone: never the clips' canvas, never the
-/// timeline model.
-@MainActor
-final class KenBurnsTimelineBand: ObservableObject {
-    @Published private(set) var range: KenBurnsBandRange?
-
-    /// Shows `range` (nil hides the band); publishes only a change.
-    func show(_ range: KenBurnsBandRange?) {
-        if range != self.range { self.range = range }
-    }
-}
-
-/// Loads the Ken Burns helper's picture, paced for scrubbing, with a small cache of its own: the
-/// pictures are large (up to `maxDimension`, several MB each) and belong to the helper alone, so they
+/// Loads the Ken Burns editor's picture, paced for scrubbing, with a small cache of its own: the
+/// pictures are large (up to `maxDimension`, several MB each) and belong to the editor alone, so they
 /// never go through the shared `ThumbnailCache` (whose every landing redraws the timeline and the
 /// media bin, and whose entries have no byte budget). At most one fetch is in flight; when it lands
 /// its picture is shown at once (the playhead may have moved on: a picture a little behind the
@@ -1158,7 +752,7 @@ final class KenBurnsPictureLoader: ObservableObject {
     /// Times whose fetch failed, not fetched again until another time was wanted.
     private var failedMillis: Int64?
 
-    /// Pictures from `engine` (held weakly: the helper never keeps a closed project's engine).
+    /// Pictures from `engine` (held weakly: the editor never keeps a closed project's engine).
     convenience init(assetID: VEAssetID, engine: VEEngine, capacity: Int = KenBurnsPictureLoader.defaultCapacity) {
         self.init(assetID: assetID, capacity: capacity) { [weak engine] asset, time, size, completion in
             guard let engine else {
