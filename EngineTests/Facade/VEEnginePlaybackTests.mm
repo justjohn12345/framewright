@@ -4,6 +4,7 @@
 // review fixes that need the new API (main-thread enforcement, edit results, ripple scope,
 // exact speeds, load warnings, memory pressure, use counts).
 
+#import <CoreAudio/CoreAudio.h>
 #import <Metal/Metal.h>
 #import <FramewrightEngine/FramewrightEngine.h>
 #import <XCTest/XCTest.h>
@@ -714,6 +715,37 @@ static bool showsFrame(int shown, int64_t f) {
 
 // MARK: - Play-start latency (open finding 3)
 
+/// Above this reported output latency (seconds) the play-start latency test does not check its targets.
+static constexpr double kLatencyTestMaximumOutputLatency = 0.040;
+
+/// The system's default output device: its name and whether it is a Bluetooth device (classic or
+/// LE), read from CoreAudio (empty name and false when there is none or it cannot be asked).
+static std::pair<std::string, bool> defaultOutputDevice() {
+    AudioObjectPropertyAddress address{kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
+                                       kAudioObjectPropertyElementMain};
+    AudioDeviceID device = kAudioObjectUnknown;
+    UInt32 size = sizeof(device);
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, 0, nullptr, &size, &device) != noErr ||
+        device == kAudioObjectUnknown) {
+        return {"", false};
+    }
+    UInt32 transport = 0;
+    size = sizeof(transport);
+    address.mSelector = kAudioDevicePropertyTransportType;
+    const bool bluetooth = AudioObjectGetPropertyData(device, &address, 0, nullptr, &size, &transport) == noErr &&
+                           (transport == kAudioDeviceTransportTypeBluetooth ||
+                            transport == kAudioDeviceTransportTypeBluetoothLE);
+    CFStringRef name = nullptr;
+    size = sizeof(name);
+    address.mSelector = kAudioObjectPropertyName;
+    std::string deviceName;
+    if (AudioObjectGetPropertyData(device, &address, 0, nullptr, &size, &name) == noErr && name != nullptr) {
+        deviceName = [(__bridge NSString *)name UTF8String] ?: "";
+        CFRelease(name);
+    }
+    return {deviceName, bluetooth};
+}
+
 /// Press-to-first-presented-frame through the facade, with the machine's real audio output (the
 /// clock starts when the first sample is audible, so the output latency is part of it): renders
 /// are requested every millisecond (a display link faster than any screen) and the host time
@@ -724,6 +756,8 @@ static bool showsFrame(int shown, int64_t f) {
 /// measurement, so it is skipped under ThreadSanitizer (every memory access is instrumented) and
 /// its bounds leave room for a machine loaded by the rest of the suite: the median of the cached
 /// starts must meet the 50 ms target and the worst stay under 80 ms (measured: 17-27 ms cached).
+/// On a Bluetooth output, or one reporting more than 40 ms of latency, the measurement is logged and
+/// the test skipped: the link, not the engine, decides when the first sample is audible.
 - (void)testPlayStartLatencyThroughTheFacade {
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
@@ -784,10 +818,22 @@ static bool showsFrame(int shown, int64_t f) {
     XCTAssertGreaterThanOrEqual(cold.rawMs, 0.0);
     std::sort(cached.begin(), cached.end());
     VEPlaybackStats *stats = engine.playbackStats;
-    NSLog(@"PLAY START LATENCY (facade, %@ output, latency %.1f ms): cached %.1f / %.1f / %.1f / %.1f ms, cold %.1f ms "
-          @"(first new frame %lld after %.1f ms)",
-          stats.audioOutputKind, stats.outputLatency * 1000, cached[0], cached[1], cached[2], cached[3], cold.latencyMs,
-          cold.frame, cold.rawMs);
+    const auto [deviceName, bluetooth] = defaultOutputDevice();
+    NSLog(@"PLAY START LATENCY (facade, %@ output to \"%s\"%s, latency %.1f ms): cached %.1f / %.1f / %.1f / %.1f ms, "
+          @"cold %.1f ms (first new frame %lld after %.1f ms)",
+          stats.audioOutputKind, deviceName.c_str(), bluetooth ? " (Bluetooth)" : "", stats.outputLatency * 1000,
+          cached[0], cached[1], cached[2], cached[3], cold.latencyMs, cold.frame, cold.rawMs);
+    // The targets are for a wired or built-in output. A Bluetooth device (or any output reporting
+    // more than 40 ms, e.g. AirPods at about 177 ms) delays the audio clock's first samples by
+    // its link, which the picture waits for: the measurement says nothing about the engine there,
+    // so it is logged and the test skipped rather than the bounds widened.
+    if (bluetooth || stats.outputLatency > kLatencyTestMaximumOutputLatency) {
+        [engine attachProgramView:nil];
+        XCTSkip(@"the output device \"%s\" is %s (reported latency %.1f ms): play start measured at %.1f ms median, "
+                @"%.1f ms worst, not checked against the 50 ms target",
+                deviceName.c_str(), bluetooth ? "Bluetooth" : "a high-latency output", stats.outputLatency * 1000,
+                cached[cached.size() / 2], cached.back());
+    }
     XCTAssertLessThan(cached[cached.size() / 2], 50.0, @"cached media starts within the 50 ms target (median)");
     XCTAssertLessThan(cached.back(), 80.0, @"no cached start is far off the target (worst %.1f ms)", cached.back());
     [engine attachProgramView:nil];

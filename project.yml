@@ -153,6 +153,8 @@ targets:
       - sdk: AppKit.framework
       - sdk: CoreGraphics.framework
       - sdk: IOKit.framework
+      # The playback latency test asks CoreAudio what the default output device is (Bluetooth?).
+      - sdk: CoreAudio.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.justjohn12345.framewright.EngineTests

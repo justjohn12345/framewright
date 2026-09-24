@@ -332,4 +332,48 @@ final class TimelineRedrawTests: XCTestCase {
         XCTAssertGreaterThan(bright, 20, "the waveform strip is drawn")
         XCTAssertGreaterThan(store.waveforms.stripsRendered, 0)
     }
+
+    /// The lanes paint their spans: a Motion span's bar in its colour on lane 1 under its clip, a
+    /// fade out's bar on lane 0, the empty part of a lane not.
+    func testTheLanesPaintTheirSpans() async throws {
+        let store = fixture.store
+        let (movie, _) = try await fixture.importMedia()
+        let clip = try fixture.placeMovie(movie, at: 1) // 1 s - 3 s
+        store.selection = []
+        let motion = try XCTUnwrap(store.engine.addSpan(kind: .motion, lane: 1, clip: clip,
+                                                        range: CMTimeRange(start: CMTime(value: 30, timescale: 30),
+                                                                           duration: CMTime(value: 30, timescale: 30))).span)
+        XCTAssertTrue(store.engine.addTransition(at: .end, of: clip, duration: CMTime(value: 15, timescale: 30),
+                                                 options: []).ok)
+        store.refreshModel()
+        store.pixelsPerSecond = 200
+        let size = CGSize(width: 1000, height: 400)
+        let renderer = ImageRenderer(content: TimelineView(store: store)
+            .frame(width: size.width, height: size.height)
+            .background(Color.white)
+            .environment(\.colorScheme, .light))
+        renderer.scale = 1
+        let bitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(renderer.cgImage))
+        let model = store.timelineModel
+        func pixel(_ x: CGFloat, _ y: CGFloat) -> (r: CGFloat, g: CGFloat, b: CGFloat) {
+            let px = Int(TimelineView.headerWidth + 1 + x)
+            let py = Int(TimelineView.rulerHeight + 1 + y)
+            guard let color = bitmap.colorAt(x: px, y: py)?.usingColorSpace(.sRGB) else { return (0, 0, 0) }
+            return (color.redComponent, color.greenComponent, color.blueComponent)
+        }
+        let bar = try XCTUnwrap(model.rect(forSpan: try XCTUnwrap(model.span(id: motion.spanID))))
+        // Right end of the bar (clear of its icon and name): the Motion colour, orange; the lane past
+        // the clip is not. (ImageRenderer tints the whole view for the AppKit views it cannot draw,
+        // so the lane is compared with the bar rather than with a fixed colour.)
+        let inside = pixel(bar.maxX - 4, bar.midY)
+        let empty = pixel(model.x(forTime: 3.8), bar.midY)
+        XCTAssertGreaterThan(inside.r, inside.b + 0.3, "the Motion bar is painted: \(inside)")
+        XCTAssertGreaterThan(inside.r, inside.g, "\(inside)")
+        XCTAssertGreaterThan(empty.g - inside.g, 0.15, "the empty lane is lighter: \(empty) vs \(inside)")
+        XCTAssertGreaterThan(empty.b - inside.b, 0.15, "\(empty) vs \(inside)")
+        let fade = try XCTUnwrap(model.spans.first { $0.kind == .transition })
+        let fadeBar = try XCTUnwrap(model.rect(forSpan: fade))
+        let purple = pixel(fadeBar.maxX - 4, fadeBar.midY)
+        XCTAssertGreaterThan(purple.b, purple.g + 0.2, "the fade out on lane 0 is painted: \(purple)")
+    }
 }
