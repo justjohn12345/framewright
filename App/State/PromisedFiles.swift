@@ -5,12 +5,21 @@ import FramewrightEngine
 
 extension UTType {
     /// AppKit's file promise types (`NSFilePromiseReceiver.readableDraggedTypes`): what Photos, Mail
-    /// and other apps put on a drag pasteboard instead of file URLs.
+    /// and other apps put on a drag pasteboard instead of file URLs. The metadata type is a pasteboard
+    /// type, not a UTI the system declares: `UTType("com.apple.NSFilePromiseItemMetaData")` is nil, so
+    /// the app always uses this value, never a lookup by identifier.
     static let filePromiseItemMetadata = UTType(importedAs: "com.apple.NSFilePromiseItemMetaData")
     /// `kPasteboardTypeFileURLPromise`.
     static let filePromiseURL = UTType(importedAs: "com.apple.pasteboard.promised-file-url")
-    /// Photos' Live Photo bundle (a folder with the still and the movie), offered by PHPicker.
-    static let livePhotoBundle = UTType(importedAs: "com.apple.live-photo-bundle")
+    /// The identifier PHPicker registers for a Live Photo bundle (a folder with the still and the
+    /// movie). Compare registered identifiers with this string.
+    static let livePhotoBundleIdentifier = "com.apple.live-photo-bundle"
+    /// That type: the system's declaration (a package). Not `UTType(importedAs:)`, which returns a
+    /// different, private system type for this identifier ("com.apple.private.live-photo-bundle",
+    /// neither equal to nor conforming to the public one); that is the fallback only where the system
+    /// does not declare the public identifier, made a package explicitly.
+    static let livePhotoBundle = UTType(livePhotoBundleIdentifier)
+        ?? UTType(importedAs: livePhotoBundleIdentifier, conformingTo: .package)
 
     /// The file promise types drop targets accept alongside file URLs: every type AppKit's promise
     /// receiver reads from a drag pasteboard (`NSFilePromiseReceiver.readableDraggedTypes`: the
@@ -211,8 +220,8 @@ final class ItemProviderPromise: PromisedFile {
     /// the provider offers no media.
     static func mediaTypeIdentifier(of provider: NSItemProvider) -> String? {
         let registered = provider.registeredTypeIdentifiers
-        if registered.contains(UTType.livePhotoBundle.identifier) {
-            return UTType.livePhotoBundle.identifier
+        if registered.contains(UTType.livePhotoBundleIdentifier) {
+            return UTType.livePhotoBundleIdentifier
         }
         let types = registered.compactMap { UTType($0) }
         let order: [(UTType) -> Bool] = [

@@ -60,24 +60,48 @@ final class PhotosDropTests: XCTestCase {
 
     // MARK: Types
 
-    func testTheDropTargetsAcceptEveryPromiseTypeTheSystemDeclares() throws {
-        // What the app needs: every type AppKit's promise receiver reads, the promised file URL and
-        // the Live Photo bundle resolve to types the system declares (the app no longer redeclares
-        // them: its Info.plist has no imported declarations), and a drop carrying any one of them
-        // is accepted by the media bin and the timeline.
+    func testTheDropTargetsAcceptEveryPromiseType() throws {
+        // What the app needs: its Info.plist declares no imported types; the app's own `UTType` values
+        // (made with `importedAs`, so they exist whatever LaunchServices has registered) carry the
+        // identifiers AppKit and PHPicker use; and a drop carrying any promise type, the promised file
+        // URL or a file URL is accepted by the media bin and the timeline.
         let imported = Bundle.main.infoDictionary?["UTImportedTypeDeclarations"] as? [[String: Any]] ?? []
         XCTAssertTrue(imported.isEmpty, "no imported type declarations: \(imported)")
-        for type in [UTType.filePromiseItemMetadata, .filePromiseURL, .livePhotoBundle] {
+        XCTAssertEqual(UTType.filePromiseItemMetadata.identifier, "com.apple.NSFilePromiseItemMetaData")
+        XCTAssertEqual(UTType.filePromiseURL.identifier, "com.apple.pasteboard.promised-file-url")
+        XCTAssertEqual(UTType.filePromiseURL.identifier, kPasteboardTypeFileURLPromise as String)
+        // The Live Photo bundle is the public identifier PHPicker registers (`UTType(importedAs:)` would
+        // give a private system type with another identifier), and a package (the system's declaration,
+        // or the fallback made with `conformingTo: .package`).
+        XCTAssertEqual(UTType.livePhotoBundleIdentifier, "com.apple.live-photo-bundle")
+        XCTAssertEqual(UTType.livePhotoBundle.identifier, UTType.livePhotoBundleIdentifier)
+        XCTAssertTrue(UTType.livePhotoBundle.conforms(to: .package))
+        // A picked item that offers a Live Photo bundle under that identifier is loaded as the bundle.
+        let picked = NSItemProvider()
+        for identifier in [UTType.livePhotoBundleIdentifier, UTType.heic.identifier, UTType.quickTimeMovie.identifier] {
+            picked.registerDataRepresentation(forTypeIdentifier: identifier, visibility: .all) { done in
+                done(Data(), nil)
+                return nil
+            }
+        }
+        XCTAssertEqual(ItemProviderPromise.mediaTypeIdentifier(of: picked), UTType.livePhotoBundleIdentifier)
+        XCTAssertTrue(PasteboardFilePromise.promisesMedia(FakeFilePromiseReceiver(types: [.livePhotoBundle])))
+        // The promised file URL and the Live Photo bundle are system UTIs. The file promise metadata
+        // type is not (it is a pasteboard type: `UTType(identifier)` is nil on a clean LaunchServices
+        // database), so it is only ever used through `UTType.filePromiseItemMetadata`.
+        for type in [UTType.filePromiseURL, .livePhotoBundle] {
             let declared = try XCTUnwrap(UTType(type.identifier), type.identifier)
             XCTAssertTrue(declared.isDeclared, "\(type.identifier) is declared by the system")
             XCTAssertFalse(declared.isDynamic)
         }
-        XCTAssertTrue(UTType.livePhotoBundle.conforms(to: .package))
-        XCTAssertEqual(UTType.filePromiseURL.identifier, kPasteboardTypeFileURLPromise as String)
+        for type in [UTType.filePromiseItemMetadata, .filePromiseURL] {
+            XCTAssertTrue(UTType.filePromiseTypes.contains(type), "\(type.identifier) is a drop type")
+        }
         let bin = MediaBinDropDelegate(store: store, isTargeted: .constant(false))
         let timeline = TimelineDropDelegate(gestures: TimelineGestureController(store: store),
                                             isAssetTargeted: .constant(false), commandHeld: { false })
         var identifiers = NSFilePromiseReceiver.readableDraggedTypes
+        identifiers.append(UTType.filePromiseItemMetadata.identifier)
         identifiers.append(UTType.filePromiseURL.identifier)
         identifiers.append(UTType.fileURL.identifier)
         for identifier in identifiers {

@@ -55,7 +55,7 @@ below (see `integration-notes.md`, "Motion/Photos review fix round"); the lead's
 25. UI details: `MotionReviewTests` (`testTheClipMenuItemFollowsThePlayhead`, `testPaddedOrEquivalentTextChangesNothing`,
     `testKenBurnsReopenedOnTheSameClipKeepsItAndAMultiSelectionClosesIt`, `testTheDurationFormatFollowsThePreferenceWhileOpen`,
     `testATrimEdgeNearerThanAMarkerKeepsThePress`, `testAnAbandonedMarkerDragPutsTheKeyframesBack`).
-26. Build and test plumbing: `PhotosDropTests.testTheDropTargetsAcceptEveryPromiseTypeTheSystemDeclares`,
+26. Build and test plumbing: `PhotosDropTests.testTheDropTargetsAcceptEveryPromiseType`,
     `PhotosMediaTests.testTheSlowMotionTableMatchesTheScript`, `testAnIncompleteOrOutdatedTestMediaDirectoryIsRecognised`.
 Test gaps: 1 and 2 by `KeyframeInsertTests.cpp` (also "Animated clips: a split at 1.5x, an overwrite inside, a move onto
 and a ripple keep the pictures"), `KeyframeTests.cpp`; 3 by `VEEngineKeyframeReviewTests.mm` and `PhotosMediaTests`; 4 by

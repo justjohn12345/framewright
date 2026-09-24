@@ -225,9 +225,10 @@ targets:
             UTTypeDescription: Framewright Audio Crossfade
             UTTypeConformsTo:
               - public.data
-        # The file promise types (NSFilePromiseReceiver.readableDraggedTypes: Photos drags) and
-        # Photos' Live Photo bundle (PHPicker) are declared by the system; the app does not
-        # redeclare them (PhotosDropTests checks they are declared without the app's Info.plist).
+        # No imported declarations: the app makes the file promise types and the Live Photo bundle
+        # type with UTType(importedAs:) (App/State/PromisedFiles.swift), which works whether or not
+        # the system declares them (com.apple.NSFilePromiseItemMetaData is a pasteboard type, not a
+        # system UTI). PhotosDropTests checks the drop targets accept each one.
     entitlements:
       path: App/Resources/Framewright.entitlements
       properties:

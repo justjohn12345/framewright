@@ -524,9 +524,9 @@ in the history table of `README.md`.
 
 ## Photos drops (feature request 9)
 - Drop types: `MediaDrop.types` = public.file-url plus `UTType.filePromiseTypes` (every
-  `NSFilePromiseReceiver.readableDraggedTypes` entry and kPasteboardTypeFileURLPromise; the named ones
-  and `com.apple.live-photo-bundle` are declared by the system: the app's redundant imported
-  declarations were removed in the Motion/Photos review fix round).
+  `NSFilePromiseReceiver.readableDraggedTypes` entry and kPasteboardTypeFileURLPromise, made with
+  `UTType(importedAs:)`; the app's imported declarations were removed in the Motion/Photos review fix
+  round, see there for the metadata type, which is not a system UTI).
   `TimelineDropDelegate.types` adds them to the in-app types; the media bin uses
   `MediaBinDropDelegate` (replacing `.dropDestination(for: URL.self)`). Both take any
   `TimelineDropInfo`; `handlePerform(_:pasteboardPromises:)` gets the drag pasteboard's
@@ -605,7 +605,13 @@ in the history table of `README.md`.
   an extension). A real drop is partitioned once from the drag pasteboard's items (`DragContents`: a file URL
   wins, promises of non-media types are refused); providers are partitioned once each otherwise.
   `ReceivedFiles.adopt` is thread safe (one lock, retry on a taken name) and sanitizes names; `adoptItem`
-  unpacks a Live Photo bundle into its parts.
+  unpacks a Live Photo bundle into its parts. `com.apple.NSFilePromiseItemMetaData` is a pasteboard type,
+  not a system UTI (`UTType("com.apple.NSFilePromiseItemMetaData")` is nil once no bundle declares it): the app
+  must never rely on `UTType(identifier)` for it, only on `UTType.filePromiseItemMetadata` (`importedAs`);
+  conversely `UTType(importedAs: "com.apple.live-photo-bundle")` returns a private system type
+  ("com.apple.private.live-photo-bundle", not equal to the public one), so `UTType.livePhotoBundle` is the
+  system lookup (falling back to `importedAs: ..., conformingTo: .package`) and registered identifiers are
+  compared with `UTType.livePhotoBundleIdentifier`.
 - Media folder rules (app). `ImportedMediaFolder` makes "Media" (with a `.framewright-media` marker) next to
   the project or inside a folder the user chose; an existing Media folder is adopted only with the marker
   ("Media 2" otherwise). Only a chosen folder is stored (`VEEngine.mediaFolderBookmark`); the one next to the
