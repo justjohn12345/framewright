@@ -481,6 +481,21 @@ in the history table of `README.md`.
   presses Apply. `store.applyKenBurns()` commits all three fields first (`commitFields()`), so the Apply button takes a
   value still being typed and refuses text that is not a time with the note.
 
+- The range on the timeline (app only). `KenBurnsModel.bandRange` (`KenBurnsBandRange`: clip id, timeline seconds from
+  the range's first frame's start to its last frame's end; nil while `rangeProblem` is set) changes only with the
+  range; the store forwards it to `store.kenBurnsBand` (`KenBurnsTimelineBand`, `show(_:)` publishes only a change)
+  while a helper is open and clears it when `kenBurns` becomes nil (Apply, Cancel, selection change, clip removal,
+  New/Open). `KenBurnsBandView` (TimelineView.swift, an overlay of the track area under the playhead line, no hit
+  testing) observes the band alone and takes the timeline model as a value from `TimelineView`'s body: a translucent
+  accent band over the clip's row, green start edge and flag, red end edge and flag (the overlay's colours);
+  `KenBurnsBandView.rect(for:in:)` is its geometry (`x(forTime:)`, the clip's row). A range moving with the playhead
+  or with typing redraws that overlay only (`TimelineDiagnostics.kenBurnsBandUpdates`; measured over 21 range changes:
+  0 model builds, 0 canvas draws, 21 band updates, `TimelineRedrawTests.testAKenBurnsRangeChangeRedrawsOnlyItsBand`).
+  Observation, not changed: the helper's picture loads through the shared `ThumbnailCache`, and every landing bumps
+  `thumbnails.version`, which the clips' canvas reads as its redraw token, so scrubbing with the helper open redraws
+  the canvas once per picture that lands (at most one fetch in flight). A cache that versions timeline-sized
+  thumbnails separately would remove that; the band test hosts the timeline alone for this reason.
+
 ## Photos drops (feature request 9)
 - Drop types: `MediaDrop.types` = public.file-url plus `UTType.filePromiseTypes` (every
   `NSFilePromiseReceiver.readableDraggedTypes` entry and kPasteboardTypeFileURLPromise; the named ones

@@ -39,9 +39,11 @@ audited the code line by line.
   shown as markers on the clip in the timeline; keyframes stay on their pictures through trims,
   speed changes and splits. A Ken Burns helper (as in Final Cut Pro) draws a start and an end
   rectangle over the picture at the playhead and turns them into an eased pan and zoom over the
-  whole clip or a set duration from the playhead or the clip's start (the end framing then holds),
-  optionally continuing from the previous clip's framing and leading into the next one's; Match
-  Previous Clip's End / Match Next Clip's Start copy a touching clip's framing across the cut.
+  whole clip, a set duration from the playhead or the clip's start (the end framing then holds) or
+  a range typed as Start and End timecodes, marked on the clip in the timeline while it is open;
+  reopened on a clip with a move it edits that move in place; optionally continuing from the
+  previous clip's framing and leading into the next one's; Match Previous Clip's End / Match Next
+  Clip's Start copy a touching clip's framing across the cut.
 - Inspector for position, scale, rotation, opacity, gain, fades and exact speed; cross
   dissolves and constant-power crossfades with duration handles, kept together with their linked
   partner (Delete removes both, Option-Delete one; a duration change also changes the linked one
