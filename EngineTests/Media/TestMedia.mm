@@ -11,6 +11,7 @@
 #include <fstream>
 #include <mutex>
 #include <sstream>
+#include <vector>
 
 /// Anchors NSBundle lookup of the test bundle.
 @interface VETestMediaAnchor : NSObject
@@ -22,6 +23,11 @@ namespace ve::test {
 
 namespace fs = std::filesystem;
 using ve::media::fourcc::make;
+
+namespace {
+/// The script's hash inside a generated media directory.
+constexpr const char *kScriptHashFile = ".script-hash";
+} // namespace
 
 const std::vector<TestClip> &testClips() {
     static const std::vector<TestClip> clips = [] {
@@ -215,26 +221,10 @@ std::string fnv1a64Hex(const std::string &data) {
     return buf;
 }
 
-std::string generate(std::string &error) {
-    if (const char *overrideDir = getenv("FRAMEWRIGHT_TEST_MEDIA_DIR")) {
-        return overrideDir;
-    }
-    const fs::path script = scriptPath();
-    std::ifstream in(script, std::ios::binary);
-    if (!in) {
-        error = "cannot read " + script.string();
-        return {};
-    }
-    std::stringstream contents;
-    contents << in.rdbuf();
-    // <build>/Products/Debug/EngineTests.xctest -> <build>/FramewrightTestMedia/<hash>
-    NSURL *bundle = [NSBundle bundleForClass:VETestMediaAnchor.class].bundleURL;
-    const fs::path buildDir = fs::path(bundle.path.UTF8String).parent_path().parent_path().parent_path();
-    const fs::path dir = buildDir / "FramewrightTestMedia" / fnv1a64Hex(contents.str());
+/// Generates the media into `dir` (replacing what is there): the script writes into a temporary
+/// directory beside it, which is renamed into place with the script's hash inside.
+bool generateInto(const fs::path &dir, const fs::path &script, const std::string &hash, std::string &error) {
     std::error_code ec;
-    if (fs::exists(dir / "manifest.json", ec)) {
-        return dir.string();
-    }
     fs::create_directories(dir.parent_path(), ec);
     const fs::path tmp = dir.string() + ".tmp-" + std::to_string(getpid());
     fs::remove_all(tmp, ec);
@@ -250,7 +240,7 @@ std::string generate(std::string &error) {
     NSError *launchError = nil;
     if (![task launchAndReturnError:&launchError]) {
         error = "cannot run xcrun swift: " + std::string(launchError.localizedDescription.UTF8String);
-        return {};
+        return false;
     }
     [task waitUntilExit];
     [logHandle closeFile];
@@ -259,22 +249,118 @@ std::string generate(std::string &error) {
         std::stringstream logText;
         logText << logIn.rdbuf();
         error = "make_test_media.swift failed (" + std::to_string(task.terminationStatus) + "): " + logText.str();
-        return {};
+        return false;
     }
     fs::remove(log, ec);
+    std::ofstream(tmp / kScriptHashFile) << hash;
+    if (fs::exists(dir, ec) && !testMediaIsComplete(dir.string(), hash)) {
+        fs::remove_all(dir, ec); // an incomplete or outdated copy is replaced
+    }
     fs::rename(tmp, dir, ec);
     if (ec) {
         // Another process generated it concurrently; use theirs.
         fs::remove_all(tmp, ec);
     }
-    if (!fs::exists(dir / "manifest.json", ec)) {
+    if (!testMediaIsComplete(dir.string(), hash)) {
         error = "generated media missing in " + dir.string();
+        return false;
+    }
+    return true;
+}
+
+std::string generate(std::string &error) {
+    const fs::path script = scriptPath();
+    std::ifstream in(script, std::ios::binary);
+    if (!in) {
+        error = "cannot read " + script.string();
         return {};
     }
+    std::stringstream contents;
+    contents << in.rdbuf();
+    const std::string hash = fnv1a64Hex(contents.str());
+    if (const char *overrideDir = getenv("FRAMEWRIGHT_TEST_MEDIA_DIR")) {
+        // A directory the developer chose: used when it is complete and made by this script, else
+        // regenerated into it.
+        if (testMediaIsComplete(overrideDir, hash)) {
+            return overrideDir;
+        }
+        std::string why;
+        if (!generateInto(overrideDir, script, hash, why)) {
+            error = "FRAMEWRIGHT_TEST_MEDIA_DIR=" + std::string(overrideDir) +
+                    " lacks a file of the current Scripts/make_test_media.swift (or was made by an earlier "
+                    "version) and could not be regenerated there: " +
+                    why + ". Unset FRAMEWRIGHT_TEST_MEDIA_DIR, or delete that directory so it is made again.";
+            return {};
+        }
+        return overrideDir;
+    }
+    // <build>/Products/Debug/EngineTests.xctest -> <build>/FramewrightTestMedia/<hash>
+    NSURL *bundle = [NSBundle bundleForClass:VETestMediaAnchor.class].bundleURL;
+    const fs::path buildDir = fs::path(bundle.path.UTF8String).parent_path().parent_path().parent_path();
+    const fs::path dir = buildDir / "FramewrightTestMedia" / hash;
+    if (testMediaIsComplete(dir.string(), hash)) {
+        return dir.string();
+    }
+    if (!generateInto(dir, script, hash, error)) {
+        return {};
+    }
+    pruneTestMediaVersions(dir.string());
     return dir.string();
 }
 
 } // namespace
+
+/// Media directories of earlier versions of the script beside `current` (named by their hash,
+/// alone or as the prefix of media derived from them, "<hash>-..."): removed, so the build folder
+/// does not grow with every change of the script.
+void pruneTestMediaVersions(const std::string &currentDirectory) {
+    const fs::path current(currentDirectory);
+    std::error_code ec;
+    const std::string hash = current.filename().string();
+    std::vector<fs::path> stale;
+    for (const auto &entry : fs::directory_iterator(current.parent_path(), ec)) {
+        const std::string name = entry.path().filename().string();
+        const std::string prefix = name.substr(0, 16);
+        const bool hashNamed = prefix.size() == 16 && prefix.find_first_not_of("0123456789abcdef") == std::string::npos &&
+                               (name.size() == 16 || name[16] == '-');
+        if (hashNamed && prefix != hash) {
+            stale.push_back(entry.path());
+        }
+    }
+    for (const fs::path &path : stale) {
+        fs::remove_all(path, ec);
+    }
+}
+
+bool testMediaIsComplete(const std::string &directory, const std::string &scriptHash) {
+    const fs::path dir(directory);
+    std::ifstream hashIn(dir / kScriptHashFile);
+    std::string stored;
+    if (!hashIn || !(hashIn >> stored) || stored != scriptHash) {
+        return false;
+    }
+    NSData *data = [NSData dataWithContentsOfFile:@((dir / "manifest.json").c_str())];
+    NSDictionary *manifest = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSArray *files = [manifest isKindOfClass:NSDictionary.class] ? manifest[@"files"] : nil;
+    if (![files isKindOfClass:NSArray.class] || files.count == 0) {
+        return false;
+    }
+    std::error_code ec;
+    for (NSDictionary *entry in files) {
+        NSString *name = [entry isKindOfClass:NSDictionary.class] ? entry[@"file"] : nil;
+        if (![name isKindOfClass:NSString.class] || !fs::exists(dir / name.UTF8String, ec)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string testMediaScriptHash() {
+    std::ifstream in(scriptPath(), std::ios::binary);
+    std::stringstream contents;
+    contents << in.rdbuf();
+    return fnv1a64Hex(contents.str());
+}
 
 std::string testMediaDirectory(std::string &error) {
     static std::once_flag once;

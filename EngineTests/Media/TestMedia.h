@@ -64,6 +64,15 @@ int vfrFrameAt(CMTime t);
 /// kSlowmoFrames gives the end) and the frame containing `t`.
 inline constexpr int kSlowmoFrames = 180;
 CMTime slowmoFrameTime(int index);
+/// Whether `directory` holds the media the current script makes: its hash (written when the media
+/// was generated), a manifest, and every file the manifest lists. `FRAMEWRIGHT_TEST_MEDIA_DIR` is
+/// regenerated when it is not complete.
+bool testMediaIsComplete(const std::string &directory, const std::string &scriptHash);
+/// The hash of Scripts/make_test_media.swift as it is now.
+std::string testMediaScriptHash();
+/// Removes the media of other script versions beside `currentDirectory` (directories named by a
+/// 16-digit hash, or "<hash>-..." for media derived from it); done after generating new media.
+void pruneTestMediaVersions(const std::string &currentDirectory);
 int slowmoFrameAt(CMTime t);
 
 /// Directory holding the generated files. Generates them on first use by running

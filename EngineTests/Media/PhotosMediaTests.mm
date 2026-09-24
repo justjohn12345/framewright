@@ -143,6 +143,57 @@ using namespace ve::test;
     XCTAssertEqual(distinctSlowFrames, int(kSlow), @"at 1/8 speed every 240 fps frame is shown once");
 }
 
+- (void)testTheSlowMotionTableMatchesTheScript {
+    // slowmoFrameTime is a C++ copy of the script's frame times: the manifest carries the script's.
+    std::string error;
+    const std::string dir = testMediaDirectory(error);
+    XCTAssertTrue(error.empty(), @"%s", error.c_str());
+    NSData *data = [NSData dataWithContentsOfFile:@((dir + "/manifest.json").c_str())];
+    NSDictionary *manifest = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSArray<NSNumber *> *ticks = nil;
+    for (NSDictionary *entry in manifest[@"files"]) {
+        if ([entry[@"file"] isEqualToString:@"slowmo_hevc_portrait.mov"]) {
+            ticks = entry[@"frameTicks960"];
+        }
+    }
+    XCTAssertEqual(ticks.count, (NSUInteger)kSlowmoFrames + 1, @"every frame's start and the end");
+    for (NSUInteger i = 0; i < ticks.count; ++i) {
+        XCTAssertEqual(CMTimeCompare(slowmoFrameTime(int(i)), CMTimeMake(ticks[i].longLongValue, 960)), 0,
+                       @"frame %lu", (unsigned long)i);
+    }
+}
+
+- (void)testAnIncompleteOrOutdatedTestMediaDirectoryIsRecognised {
+    // What decides whether FRAMEWRIGHT_TEST_MEDIA_DIR is used as it is or regenerated.
+    std::string error;
+    const std::string generated = testMediaDirectory(error);
+    const std::string hash = testMediaScriptHash();
+    XCTAssertTrue(testMediaIsComplete(generated, hash), @"the generated media is complete");
+    NSString *copy = [_scratch.path stringByAppendingPathComponent:@"media"];
+    NSFileManager *files = NSFileManager.defaultManager;
+    XCTAssertTrue([files createDirectoryAtPath:copy withIntermediateDirectories:YES attributes:nil error:nil]);
+    XCTAssertFalse(testMediaIsComplete(copy.UTF8String, hash), @"empty");
+    for (NSString *name in @[ @"manifest.json", @".script-hash", @"h264_1080p30.mp4" ]) {
+        NSString *from = [@(generated.c_str()) stringByAppendingPathComponent:name];
+        XCTAssertTrue([files copyItemAtPath:from toPath:[copy stringByAppendingPathComponent:name] error:nil]);
+    }
+    XCTAssertFalse(testMediaIsComplete(copy.UTF8String, hash), @"files the manifest lists are missing");
+    XCTAssertFalse(testMediaIsComplete(generated, hash + "0"), @"made by another version of the script");
+
+    // Pruning keeps the current version and what is derived from it, and anything not hash-named.
+    NSString *root = [_scratch.path stringByAppendingPathComponent:@"FramewrightTestMedia"];
+    for (NSString *name in @[ @"0123456789abcdef", @"0123456789abcdef-derived-1", @"fedcba9876543210",
+                              @"fedcba9876543210-mkv1", @"notes", @"0123456789abcdeg" ]) {
+        XCTAssertTrue([files createDirectoryAtPath:[root stringByAppendingPathComponent:name]
+                       withIntermediateDirectories:YES attributes:nil error:nil]);
+    }
+    pruneTestMediaVersions([root stringByAppendingPathComponent:@"0123456789abcdef"].UTF8String);
+    NSArray<NSString *> *left = [[files contentsOfDirectoryAtPath:root error:nil]
+        sortedArrayUsingSelector:@selector(compare:)];
+    XCTAssertEqualObjects(left, (@[ @"0123456789abcdef", @"0123456789abcdef-derived-1", @"0123456789abcdeg",
+                                    @"notes" ]));
+}
+
 - (void)testTheMediaFolderBookmarkIsSavedWithTheProject {
     VEEngine *engine = [[VEEngine alloc] initWithCacheDirectory:nil];
     XCTAssertNil(engine.mediaFolderBookmark);
