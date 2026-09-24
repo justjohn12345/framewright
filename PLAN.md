@@ -226,7 +226,11 @@ Each phase ends with something runnable and its tests green. Playback and A/V sy
 - Round 1b (engine): hold after: composition, audio levels, Ken Burns edges, matching, and trims/splits past a
   span keep the held value; the migration still renders identically.
 - Round 2 (app): lanes in the timeline, the inspector's span section, the Ken Burns editor on a lane range,
-  transitions dragged on lane 0.
+  transitions dragged on lane 0. Done (2026-09-24): lanes under each track (lane 0 with a transition, the effect
+  lanes in use plus an empty one, collapsible per track), span selection, move, trim and range-drag creation with
+  their defaults, transitions with asymmetric edges and fades on lane 0, Control-K, Fade and Gain in the Effects
+  tab; the inspector's span section shows absolute values (converted through the facade's `getBaseValues`); the Ken
+  Burns editor opens on a selected Motion span and edits it live, one undo step per drag. Next: the review round.
 
 ## Key risks and mitigations
 - **A/V drift**: audio clock is master; video never blocks; burn-in media tests in phase 4.

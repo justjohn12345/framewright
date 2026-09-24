@@ -30,25 +30,27 @@ audited the code line by line.
 - A window laid out for the program monitor: the source monitor appears beside it when media is
   opened (View > Show Source Monitor, Shift+Cmd+2), the timeline is as tall as its tracks (empty
   tracks collapse), the dividers can be dragged and are remembered, and the inspector has an
-  Effects tab with the transitions (drag onto a cut, or "+" at the playhead). View > Program
-  Monitor on Second Display shows the program full screen on another display, mirrored and in
-  sync with the in-window monitor.
-- Effect spans (effect lanes, engine round): position, scale, rotation, opacity and gain animate as spans on
-  lanes under each clip, each with start and end values that compose onto the clip's own (lanes combine: a pan
-  on one, a zoom on another); transitions are lane-0 spans whose share of each side of the cut can differ
-  (70/30), or fades to and from black or silence; projects from earlier versions open with their keyframes and
-  fades as spans and look and sound the same. The lanes are drawn in the timeline in the next round; until then
-  the keyframe controls are inactive. A Ken Burns helper (as in Final Cut Pro) draws a start and an end
-  rectangle over the picture at the playhead and turns them into an eased pan and zoom (a Motion span) over the
-  whole clip, a set duration from the playhead or the clip's start, or a range typed as Start and End
-  timecodes; reopened on a clip with a move it edits that move in place; optionally continuing from the
-  previous clip's framing and leading into the next one's; Match Previous Clip's End / Match Next Clip's Start
-  copy a touching clip's framing across the cut.
-- Inspector for position, scale, rotation, opacity, gain, fades and exact speed; cross
-  dissolves and constant-power crossfades with duration handles, kept together with their linked
-  partner (Delete removes both, Option-Delete one; a duration change also changes the linked one
-  unless turned off) and shown relative to their cut; a note when a dissolve sits on a plain split
-  (both sides show the same frames); fade and gain handles on audio clips; Speed/Duration sheet.
+  Effects tab with the transitions (drag onto a cut, or "+" at the playhead) and the lane
+  effects. View > Program Monitor on Second Display shows the program full screen on another
+  display, mirrored and in sync with the in-window monitor.
+- Effect lanes: under each track its lanes hold spans. Lane 0 has the transitions (cross dissolves and
+  constant-power crossfades across a cut, with any split of the two sides such as 70/30, and fades to and from
+  black or silence); lanes 1-3 have Motion, Fade (opacity) and Gain spans, each with start and end values that
+  compose onto the clip's own (a pan on one lane, a zoom on another) and hold their end value until the clip ends.
+  Drag across an empty lane to make a span (a Motion span on video, with Option a fade, a Gain span on audio), or
+  press Control-K for a Motion span at the playhead; drag a span to move it and its edges to trim it (snapping to
+  the playhead, the cuts and the other spans; one undo step each); drag a transition's edges to change each side
+  of its cut (a dissolve pulled back to its clip's end becomes a fade out). The Effects tab's transitions drop on a
+  cut or a clip's free start or end, its Fade and Gain effects on a lane. The inspector shows a span's range and
+  the values its start and end show on screen, editable, and a transition's share of each side of the cut. A track
+  header's disclosure hides its lanes. Selecting a Motion span opens the Ken Burns editor (as in Final Cut Pro)
+  over the program monitor: drag the green start and red end rectangles and the move follows as you drag (one undo
+  step per drag), with smoothing, swap and continuing a touching clip's framing. Projects from earlier versions open
+  with their keyframes and fades as spans and look and sound the same.
+- Inspector for the clips' position, scale, rotation, opacity, gain, fades and exact speed; transitions
+  kept together with their linked partner (Delete removes both, Option-Delete one; a change also changes
+  the linked one unless turned off); a note when a dissolve sits on a plain split (both sides show the
+  same frames); the gain line on audio clips; Speed/Duration sheet.
 - Photos: drag photos and videos from Photos.app onto the media bin or the timeline (file promises
   received into a Media folder the app makes next to the project, or inside a folder you choose,
   with progress and cancel; iCloud originals can take their time), or File > Import from Photos…

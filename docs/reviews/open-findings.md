@@ -4,6 +4,10 @@ Only what is still open. Fixed findings are in the history table of `README.md` 
 the full reports are in git history at the commits the table names.
 
 ## Keyframed Motion, Ken Burns and Photos drops (2026-09-24 review; report in git history at b9add9f)
+Effect lanes round 2 replaced the keyframe-era app tests (`KeyframedMotionTests`, `MotionReviewTests`): the Ken Burns
+geometry, the picture loader (3), the press rules (12) and the loader's engine path now live in `KenBurnsEditorTests`,
+the static values and matching in `StaticMotionTests`, held Control-K (15) in `EffectLanesTimelineTests`; the tests of
+the removed range fields, markers and Apply (11, 16-18, 25) went with the UI they covered (see "Effect lanes round 2").
 Effect lanes round 1 removed the keyframe API with its tests (`KeyframeInsertTests.cpp`, `KeyframeEditTests.cpp`,
 `KeyframeRefusalTests.cpp`, `VEEngineKeyframe*Tests.mm` and the keyframe app tests): the same guarantees for spans
 (no frame changes on a split, a cut or an added span; exact values against a Newton reference) are in
@@ -128,8 +132,23 @@ server's drag session, so these are covered at the model level only:
 - Open a project saved by the previous version with keyframed Motion, audio fades and dissolves: the program
   monitor, playback and an export look and sound as before (the render is proven equal frame by frame in
   `MigrationRenderTests`; this checks the app path end to end on real media).
-- Ken Burns in the app: apply over the whole clip and over a part, reopen (the rectangles are the applied
-  framings), edit in place, undo (one step), and the inspector's inactive keyframe controls say why.
+
+## Effect lanes round 2: by hand
+The gesture controller, the store, the inspector model and the Ken Burns model are tested with synthetic points and
+direct calls (`EffectLanesTimelineTests`, `InspectorSpanTests`, `KenBurnsEditorTests`, `TimelineRedrawTests`); what the
+test host cannot drive:
+- Real mouse drags through SwiftUI on the lanes: a range drag on an empty lane (Option for a fade), moving and trimming
+  a span, a transition's edges and bar, the snap line and the status line while dragging, the cursor over span edges.
+- The Ken Burns overlay's real drags (the SwiftUI gesture calling `applyDrag`/`endDrag`, a cancelled gesture reverting
+  through `cancelDrag`), Escape mid-drag from the keyboard, and the program monitor following each drag step.
+- Dragging a transition, Fade or Gain from the Effects tab onto a cut, a free clip edge or a lane (lane 0 appearing
+  under the tracks while a transition is dragged); `TimelineDropDelegate` is tested with a drop double.
+- The right-click menu's Set Interpolation and Move to Lane submenus in a real NSMenu (the items and actions are tested).
+- The look: span bars, icons and labels at several zooms, the header's lane names and disclosure, the readout of a
+  Fade or Gain span on the monitor, the inspector's span section and the overlay's bar at narrow widths; Return and
+  focus loss committing the range fields (`NumericField`); Escape with a text field focused leaving the editor open.
+- `VEEnginePlaybackTests.testPlayStartLatencyThroughTheFacade` on AirPods or another Bluetooth output: it skips and
+  its message and log line give the measured latency (the decision is read from CoreAudio at run time).
 
 ## Test gaps that need media or a performance scheme (phase 7)
 - Gap 8, size estimate against a real export in quality mode: the estimate is a bits-per-pixel heuristic (labelled "≈");

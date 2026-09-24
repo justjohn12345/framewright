@@ -716,8 +716,8 @@ calls and app controls described here are gone. Kept for the history of the eval
   `VEEditResult.span`, `freeRange`, `droppedSpanIDs`; `VEEditErrorSpanNotFound`. Every call asserts the main
   thread and pushes one command. The keyframe API (`VEKeyframe`, `VEKeyframeGroup`, add/remove/move
   keyframe, `setMotionValue`, the ranged Ken Burns call) is gone.
-- App spots changed mechanically (round 2 replaces them): the inspector's Video rows edit static values and
-  its keyframe controls are inert (`InspectorModel.keyframesMovedMessage`); Add Motion Keyframe (Control-K,
+- App spots changed mechanically (round 2 replaced them; see "Effect lanes round 2"): the inspector's Video
+  rows edit static values and its keyframe controls are inert (`InspectorModel.keyframesMovedMessage`); Add Motion Keyframe (Control-K,
   Clip menu, timeline context menu) is disabled or refuses with that message; no keyframe markers are drawn
   and a marker drag starts nothing; the Ken Burns helper applies to the clip's Motion span over exactly its
   range, or adds one on the first lane with room (`addSpan` then `applyKenBurns(span:)` in one Accumulate
@@ -791,3 +791,96 @@ calls and app controls described here are gone. Kept for the history of the eval
   the clip ends or the next move starts"; the Move menu's help and the model's doc say the same. The helper's
   default rectangles come from `motion(at:)`, so after a move they show the held framing, and a second move
   applied from the playhead starts there (AppTests updated).
+
+## Effect lanes round 2 (app; plan `docs/plans/2026-09-24-effect-lanes.md`)
+- Facade addition (engine): `VEClipInfo getBaseValues(_:underSpan:atEnd:frameDuration:)` (`VESpanValues`): what the
+  rest of the clip composes to under an edge of an effect span, at the instants `getMotion(_:atEdgeOfSpan:)` reads
+  (`composeMotion` / `composeGainDb` with the span left out at `spanEdgeFrameTime`), the fields of the span's kind set,
+  the others NaN; NO for a transition, an unknown span or a non-positive frame duration. It exists because the
+  composed value alone cannot be inverted for a factor at 0 (a fade from 0 shows 0 whatever the base).
+  `VEEngineSpanTests.testBaseValuesUnderASpanEdgeInvertTheComposition`.
+- Absolute and relative (app, `App/State/SpanEditing.swift`): the inspector, the readout and the Ken Burns editor show
+  what an edge shows, never the stored value: absolute = base + relative for Position X/Y, Rotation and Gain, base x
+  relative for Scale and Opacity (`SpanValueMath`, `SpanEdge`, `ProjectStore.spanEdge`); a typed or dragged value goes
+  back as relative = absolute - base, or absolute / base (`ProjectStore.relativeValue`, `setSpanValue`,
+  `relativeFraming` for a Ken Burns framing). Limits: a factor is at least 0; an Opacity span is a factor 0...1, so its
+  absolute value is limited to the base (the note says so); a factor over a base of 0 is refused. Everything is read
+  from the clip on every use (the views observe the store; the editor re-reads on every model change), since span
+  values are relative and cumulative (round 1b): an edit of an earlier span, an undo or a trim changes what a later
+  span shows while its stored values stay.
+- Selection: `ProjectStore.selectedSpanID` (effect spans and transitions; `selectedTransitionID` is now computed: the
+  selected span when it is a transition, and setting it selects that span). Exclusive with the clip selection:
+  selecting a span empties `selection`, selecting a clip clears the span; a click on an empty lane clears both.
+  `select(span:)`, `selectedSpan`, `selectedEffectSpan`. Delete removes the selected span (`removeSpan`: one undo step; a
+  transition with its linked one as before); `canDelete` counts it. A span that disappears is deselected in
+  `refreshModel`.
+- Timeline model: `TimelineViewModel.Span` (id, clip, track, lane, kind, timeline start/end, transition style and cut),
+  `model.spans`, `Track.lanes` / `lanesCollapsed`, `TrackLayout.rowHeight` (the clips' row; `height` is the row plus its
+  lanes), `laneY(_:)`, `lane(atContentY:)`, `laneRect`, `rect(forSpan:)` (effect spans clipped to their clip,
+  transitions across their cut). `lanes(hasClips:spans:collapsed:revealTransitionLane:)`: none for an empty track or
+  collapsed lanes; lane 0 with a transition or while a transition is dragged over the timeline
+  (`ProjectStore.revealTransitionLane`); effect lanes 1 up to the highest used plus one, at most 3; `laneHeight` 14.
+  Hits: `.span`, `.spanHead`, `.spanTail`, `.lane(track:lane:)` (the transition strip, `.transition*`, `.fadeIn/Out`
+  and `.keyframe` are gone). Snapping: `snap(_:excluding:excludingSpans:)`; span edges are candidates only when
+  `excludingSpans` is given (span drags), so clip drags snap as before. The model cache key is the change count, the
+  collapsed tracks, `WindowLayoutModel.collapsedLaneTracks` and the revealed transition lane
+  (`TimelineRedrawTests.testWithLanesAPlayheadTickBuildsNoModelAndASpanEditOne`: 0 builds for 60 playhead ticks, 1 for a
+  span edit). Lane collapse is remembered by the track's kind and number ("V1", `WindowLayoutModel.laneKey`), not by
+  id (ids restart per project); the header's disclosure collapses an empty track's row or a track's lanes
+  (`ProjectStore.toggleDisclosure`).
+- Gestures and group keys (`TimelineGestureController`): `timeline.span.move` (body), `timeline.span.trim` (edges),
+  `timeline.transition` (a transition's edges or its bar, `setTransitionRange` with `includingLinked` from
+  `resizesLinkedTransitions`), each a Replace group, one undo step, Escape/Undo cancel through `cancelActiveGesture`,
+  the status line showing the range, the shares ("Cross Dissolve: 5f before / 11f after the cut (31% / 69%)") or the
+  refusal with the engine's `freeRange` (`ProjectStore.spanRefusalText`). A range drag on an empty effect lane is
+  drawn by the controller (`creation`) and added on release (`ProjectStore.addSpan`, an Accumulate group `span.add`:
+  the span and its defaults are one undo step named after the add); under two frames nothing. Option on a lane means
+  an Opacity span, not the playhead. A fade in's start stays on its clip's start (its bar and left edge do not drag).
+- Defaults (`ProjectStore.addSpan`): Motion: the Ken Burns push in, relative start neutral (the framing the clip has
+  there: no jump at the span's start) and end scale 1.25 (80 % of the start framing around the same point), Ease In
+  and Out; Opacity: 1 -> 0 touching the clip's end, 0 -> 1 at its start, else 1 -> 1; Gain: 0 -> 0 dB. Without a
+  lane the first with room is used ("No effect lane of “x” has room there: ..." otherwise).
+- Commands: Control-K and Clip > Add Motion Span at Playhead (`addMotionSpanAtPlayhead`: the selected video clip, the
+  selected span's clip, else the top-most video clip under the playhead; 5 s or to the clip's end; at least two
+  frames; refused with the reason; `KeyboardController.Action.addMotionSpan`, repeat ignored). The span context menu:
+  Set Interpolation and Move to Lane (submenus: `ContextMenuItem.submenu`, `isChecked`), Remove. The clip menu adds
+  Add Motion Span at Playhead. `moveSpan(_:toLane:)`, `setSpanInterpolation`, `matchSpanEdge`, `canMatchSpan` (a clip
+  touches that edge; for the start the span starts on its clip's first frame), `setSpanRange(_:start:end:typed:)`
+  (limited to the clip and to the free space of its lane around it, `spanLimits`; the typed edge gives way when the
+  span would be shorter than a frame; the note says what was limited), `setTransitionRange`, `addFade(at:of:frames:)`
+  (a fade on that clip only, not its linked partner). All refuse during `isGestureActive`.
+- Drops: transitions from the Effects tab land on the nearest cut or free clip edge within 40 pt (a cross dissolve /
+  crossfade per the linked preference, or `addFade`), lane 0 shown while dragging (`transitionDragUpdated` reveals,
+  `transitionDragExited`/`dropTransition` hide). New drag types `com.justjohn12345.framewright.effect.fade` and
+  `...effect.gain` (`EffectKind`, `EffectReference`, declared in project.yml): a span of the default transition length
+  from the drop point (moved back to end on the clip's end when it would run past it) on the lane under the pointer, or
+  the first free lane when dropped on the clip or lane 0 (`effectDragUpdated`, `dropEffect`, `EffectDropTarget`).
+- Inspector (`InspectorModel`, `SpanInspector`): the span section replaces the keyframe controls (removed with
+  `KeyframeControlState`, `keyframesMovedMessage` and the playhead-following Video rows): kind, clip and lane, Start /
+  End / Duration (timeline times in the duration format; the end is where the end values are reached), interpolation
+  (Custom shown, not choosable), lane, per parameter Start and End values (absolute; typed with or without the unit,
+  nudged in Accumulate bursts `inspector.span.<id>.<parameter>.<edge>`), Match Previous Clip's End / Match Next Clip's
+  Start, Ken Burns… (Motion) and Remove. A transition shows what it does (cross dissolve / crossfade, fade in from or
+  out to black / silence) and, for a cross dissolve, the share of each side in percent (`commitShare`, `nudgeShare`:
+  the duration stays; `transitionShares`). The Video section keeps the static values with a note when spans compose
+  onto them.
+- Ken Burns editor (`KenBurnsModel`, now per span): opens when a Motion span is selected (`ProjectStore.syncKenBurns`,
+  run on every selection and model change; pauses playback), switches with the selection, closes when the selection
+  is no Motion span, and on Escape without a drag or its Close button (`closeKenBurns`; the span stays selected, a
+  click on it or Ken Burns… reopens: `showKenBurns(span:)`). Live contract: `applyDrag` opens the Replace group
+  `kenBurns.drag` on the first movement (`beginDrag`, refused during another gesture), sets
+  `cancelActiveGesture` (Escape and Undo cancel through the group), converts each step's rectangle to a framing and
+  that to relative values over the base read when the drag began, and writes `setSpanValues`; `endDrag` ends the
+  group (one undo step "Change Span Values"); the overlay reverts a drag the system abandons. No Apply or Cancel.
+  The range fields go through `setSpanRange`; Smoothing through `setSpanInterpolation`; Swap is one `setSpanValues`;
+  the neighbour toggles are derived from the framings (on: `matchSpanEdge`; off: that edge neutral), "Continue from
+  previous clip" only for a span starting on its clip's first frame. The picture is clamped to the span's range
+  (`pictureFrame`). The rectangles are re-read from `getMotion(_:atEdgeOfSpan:)` on every model change (never cached).
+  The caption is `KenBurnsModel.holdCaption` when the span ends before its clip. Removed: the range menu, existing-move
+  detection, Duration/From-playhead logic, `hasUncommittedText`, the timeline band (`KenBurnsTimelineBand`,
+  `KenBurnsBandView`), `beginKenBurns`/`applyKenBurns`/`cancelKenBurns`. An Opacity or Gain span shows `SpanReadout`
+  on the program monitor instead (start -> end, absolute, and its range).
+- Test plumbing: `VEEnginePlaybackTests.testPlayStartLatencyThroughTheFacade` logs its measurement and skips when the
+  default output device is Bluetooth (CoreAudio `kAudioDevicePropertyTransportType`) or `stats.outputLatency` is above
+  40 ms (`kLatencyTestMaximumOutputLatency`); EngineTests links CoreAudio. The keyframe-era app test files are
+  replaced: `EffectLanesTimelineTests`, `KenBurnsEditorTests`, `InspectorSpanTests`, `StaticMotionTests`.
