@@ -446,6 +446,25 @@ in the history table of `README.md`.
   menu item shows "⌃K" in its title like Delete does), and the timeline's clip context menu (disabled
   when the playhead is not over the clip; the title says Add or Remove).
 
+### Ken Burns editing
+- Reopening edits the existing move (app only). `KenBurnsModel.detectMove(in:frameDuration:)` (`MoveDetection`:
+  `.none`, `.hiddenOnly`, `.move(ExistingMove)`) takes the frames that show the clip's position X, position Y and
+  scale keyframes (`VEKeyframe.frameTime`, keyframes a trim hid ignored): two or more frames are a move from the
+  earliest to the latest (`first`/`last` counted from the clip's first frame, `hasKeyframesBetween`, and the first
+  keyframe's `interpolation` when the helper offers it, else nil and the smoothing stays Ease In and Out). The helper
+  then opens with `range == .existingMove` ("Existing move", offered in the Move menu only while the clip has one,
+  `rangeChoices`), the rectangles on the framing at the move's first and last frames (`motion(at:)`, the default
+  rectangles of a placed clip) and the caption "Editing the move from HH:MM:SS:FF to HH:MM:SS:FF" (+ "; keyframes in
+  between are replaced" when position/scale keyframes lie between). Apply goes through the ranged
+  `applyKenBurns(clip:start:end:interpolation:from:duration:)` as before, so the move is replaced in place (keyframes
+  on its frames replaced, the others kept) and a move made by the helper keeps its keyframe times. Keyframes all on one
+  frame, or only rotation/opacity keyframes, are no move (Whole clip, push in or the clip's framing, as before); when a
+  trim hid every position/scale keyframe the range is Whole clip and the caption is `hiddenMoveCaption` (Apply then
+  replaces them: the whole clip reaches both ends). With an existing move a neighbour toggle is on only where the move
+  already continues it (the move reaches that end of the clip with the neighbour's framing), so the rectangles show the
+  clip's own framing. `update(clip:)` re-runs the detection on every model change: the Existing move range follows its
+  keyframes (a timeline drag, an undo) and falls back to Whole clip when the move is gone. Rotation is kept as before.
+
 ## Photos drops (feature request 9)
 - Drop types: `MediaDrop.types` = public.file-url plus `UTType.filePromiseTypes` (every
   `NSFilePromiseReceiver.readableDraggedTypes` entry and kPasteboardTypeFileURLPromise; the named ones
