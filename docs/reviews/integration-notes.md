@@ -465,6 +465,22 @@ in the history table of `README.md`.
   clip's own framing. `update(clip:)` re-runs the detection on every model change: the Existing move range follows its
   keyframes (a timeline drag, an undo) and falls back to Whole clip when the move is gone. Rotation is kept as before.
 
+- Custom range (app only). `MoveRange.custom` ("Custom", always offered): `startText` / `endText` show the range's
+  first and last frames as timeline times (the ruler's: absolute sequence frames) in the user's duration format
+  (`durationString`: timecode by default, "150f", "5.00 s"), for every range; `commitStart()` / `commitEnd()` parse
+  with `DurationFormat.parseFrames` (the Duration field's parsing: timecode, "4:15", "150f", "5s", a bare number in
+  the display's unit). Unchanged text changes nothing; otherwise the range becomes Custom with that end moved and the
+  other kept (decision: the fields are always editable, also in Whole clip, From playhead, From clip start and
+  Existing move, rather than read-only), limited to the clip's frames and to at least two frames (the engine's
+  minimum: the start a frame before the end, or the end a frame after the start); `rangeNote` (was `durationNote`,
+  now for all three fields) says what was limited or why text was refused. Choosing Custom in the menu keeps the
+  current span; a typed Duration in Custom or Existing move moves the end (the range becomes Custom); the Duration is
+  editable in every range but Whole clip. The span is kept in clip frames (`FrameSpan`, from the clip's first frame)
+  and clamped when the clip changes. `hasUncommittedText`: a field's text differs from its committed value; the
+  overlay then drops Apply's default-button shortcut, so Return commits the field only, and once committed Return
+  presses Apply. `store.applyKenBurns()` commits all three fields first (`commitFields()`), so the Apply button takes a
+  value still being typed and refuses text that is not a time with the note.
+
 ## Photos drops (feature request 9)
 - Drop types: `MediaDrop.types` = public.file-url plus `UTType.filePromiseTypes` (every
   `NSFilePromiseReceiver.readableDraggedTypes` entry and kPasteboardTypeFileURLPromise; the named ones
