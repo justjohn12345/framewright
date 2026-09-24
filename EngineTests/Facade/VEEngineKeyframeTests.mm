@@ -481,6 +481,96 @@ CMTime frames30(int64_t n) {
     XCTAssertEqual(r.errorCode, VEEditErrorTrackKindMismatch);
 }
 
+- (void)testAKeyframeMarkersGroupMovesTogetherAsOneUndoStep {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    const auto clip = [self place:engine asset:asset at:30 from:0 to:90]; // timeline frames 30...119
+    VEEditResult *r = [engine applyKenBurnsToClip:clip.first
+                                            start:VEMotionFraming{0, 0, 1}
+                                              end:VEMotionFraming{-100, 50, 1.5}
+                                    interpolation:VEKeyframeInterpolationEaseInOut
+                                       rangeStart:frames30(40)
+                                         duration:frames30(30)];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertTrue([engine addKeyframeToClip:clip.first parameter:VEMotionParameterRotation atTime:frames30(50)].ok);
+
+    // The marker on frame 40: position and scale, up to the frame before their next keyframes.
+    VEKeyframeGroup *group = [engine keyframeGroupOfClip:clip.first atTime:CMTimeMake(81, 60)];
+    XCTAssertNotNil(group);
+    XCTAssertTrue(group.canMove);
+    XCTAssertEqualObjects(group.reason, @"");
+    XCTAssertEqual(CMTimeCompare(group.frameTime, frames30(40)), 0);
+    XCTAssertEqualObjects(group.parameters, (@[ @(VEMotionParameterPositionX), @(VEMotionParameterPositionY),
+                                                @(VEMotionParameterScale) ]));
+    XCTAssertEqual(CMTimeCompare(group.earliestFrame, frames30(30)), 0, @"the clip's first frame");
+    XCTAssertEqual(CMTimeCompare(group.latestFrame, frames30(68)), 0, @"a frame before the end keyframes");
+    VEKeyframeGroup *rotation = [engine keyframeGroupOfClip:clip.first atTime:frames30(50)];
+    XCTAssertEqualObjects(rotation.parameters, @[ @(VEMotionParameterRotation) ]);
+    XCTAssertEqual(CMTimeCompare(rotation.latestFrame, frames30(119)), 0, @"the clip's last frame");
+    XCTAssertNil([engine keyframeGroupOfClip:clip.first atTime:frames30(45)], @"no keyframe on that frame");
+    XCTAssertNil([engine keyframeGroupOfClip:clip.first atTime:frames30(10)], @"not over the clip");
+    XCTAssertNil([engine keyframeGroupOfClip:clip.second atTime:frames30(40)], @"an audio clip");
+
+    // A drag: every step from the original frame, one undo step.
+    const uint64_t before = engine.changeCount;
+    [engine beginCoalescingWithKey:@"marker"];
+    for (int64_t frame : {35, 45, 60, 55}) {
+        r = [engine performInCoalescingGroup:@"marker"
+                                        edit:^VEEditResult * {
+                                            return [engine moveKeyframeGroupOfClip:clip.first
+                                                                          fromTime:frames30(40)
+                                                                            toTime:frames30(frame)];
+                                        }];
+        XCTAssertTrue(r.ok, @"%lld: %@", frame, r.message);
+    }
+    r = [engine performInCoalescingGroup:@"marker"
+                                    edit:^VEEditResult * {
+                                        return [engine moveKeyframeGroupOfClip:clip.first
+                                                                      fromTime:frames30(40)
+                                                                        toTime:frames30(69)];
+                                    }];
+    XCTAssertEqual(r.errorCode, VEEditErrorInvalidTime, @"onto the end keyframes' frame");
+    [engine endCoalescing];
+    XCTAssertGreaterThan(engine.changeCount, before);
+    XCTAssertEqualObjects(engine.undoActionName, @"Move Keyframes");
+    VEClipInfo *info = [engine clipInfo:clip.first];
+    for (VEMotionParameter p : {VEMotionParameterPositionX, VEMotionParameterPositionY, VEMotionParameterScale}) {
+        NSArray<VEKeyframe *> *keys = [info keyframesForParameter:p];
+        XCTAssertEqual(keys.count, 2u);
+        XCTAssertEqual(CMTimeCompare(keys[0].frameTime, frames30(55)), 0);
+        XCTAssertEqual(CMTimeCompare(keys[1].frameTime, frames30(69)), 0);
+        XCTAssertEqual(keys[0].interpolation, VEKeyframeInterpolationEaseInOut);
+    }
+    XCTAssertEqual([info videoParamsAtTime:frames30(50)].x, 0, @"the start framing holds up to the moved keyframes");
+    XCTAssertTrue([engine undo]);
+    NSArray<VEKeyframe *> *undone = [[engine clipInfo:clip.first] keyframesForParameter:VEMotionParameterScale];
+    XCTAssertEqual(CMTimeCompare(undone[0].frameTime, frames30(40)), 0, @"one undo step");
+
+    // Cancelled: the keyframes go back.
+    [engine beginCoalescingWithKey:@"marker"];
+    r = [engine performInCoalescingGroup:@"marker"
+                                    edit:^VEEditResult * {
+                                        return [engine moveKeyframeGroupOfClip:clip.first
+                                                                      fromTime:frames30(50)
+                                                                        toTime:frames30(100)];
+                                    }];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(engine.undoActionName, @"Move Keyframe");
+    [engine cancelCoalescing];
+    NSArray<VEKeyframe *> *restored = [[engine clipInfo:clip.first] keyframesForParameter:VEMotionParameterRotation];
+    XCTAssertEqual(CMTimeCompare(restored[0].frameTime, frames30(50)), 0, @"the cancelled drag is reverted");
+
+    // A locked track: the group says why, and the move is refused.
+    XCTAssertTrue([engine setTrack:engine.sequence.videoTrackIDs[0].longLongValue locked:YES].ok);
+    group = [engine keyframeGroupOfClip:clip.first atTime:frames30(40)];
+    XCTAssertFalse(group.canMove);
+    XCTAssertTrue([group.reason hasSuffix:@"is locked."], @"%@", group.reason);
+    XCTAssertEqual(CMTimeCompare(group.earliestFrame, frames30(40)), 0);
+    XCTAssertEqual(CMTimeCompare(group.latestFrame, frames30(40)), 0);
+    r = [engine moveKeyframeGroupOfClip:clip.first fromTime:frames30(40) toTime:frames30(45)];
+    XCTAssertEqual(r.errorCode, VEEditErrorTrackLocked);
+}
+
 - (void)testStaticSettersKeepKeyframesAndAVideoResetClearsThem {
     VEAssetInfo *asset = nil;
     VEEngine *engine = [self engineWithAsset:&asset];

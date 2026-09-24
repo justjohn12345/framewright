@@ -1197,6 +1197,31 @@ EditResult MoveKeyframe::perform(const Project &, Sequence &sequence, IdGenerato
     return EditResult::success();
 }
 
+MoveKeyframeGroup::MoveKeyframeGroup(SequenceId sequenceId, ClipId clipId, CMTime fromFrame, CMTime toFrame)
+    : SequenceCommand(sequenceId), clipId_(clipId), fromFrame_(fromFrame), toFrame_(toFrame) {
+    setCoalescingKey("moveKeyframeGroup:" + idString(clipId.value()));
+}
+
+EditResult MoveKeyframeGroup::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Clip *clip = nullptr;
+    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
+        return r;
+    }
+    MotionKeyframeGroup group;
+    if (EditResult r = motionKeyframeGroupAt(*clip, sequence.frameDuration, fromFrame_, group); !r) {
+        return r;
+    }
+    parameterCount_ = group.keyframes.size();
+    std::vector<MotionTrackChange> changes;
+    if (EditResult r = planMotionKeyframeGroupMove(*clip, sequence.frameDuration, fromFrame_, toFrame_, changes); !r) {
+        return r;
+    }
+    for (MotionTrackChange &change : changes) {
+        clip->video.keyframes.track(change.parameter) = std::move(change.keyframes);
+    }
+    return EditResult::success();
+}
+
 SetKeyframeInterpolation::SetKeyframeInterpolation(SequenceId sequenceId, ClipId clipId, MotionParameter parameter,
                                                    CMTime time, KeyframeInterpolation interpolation)
     : SequenceCommand(sequenceId), clipId_(clipId), parameter_(parameter), time_(time),
@@ -1487,6 +1512,104 @@ EditResult planMotionKeyframeToggle(const Clip &clip, CMTime frameDuration, CMTi
             upsertKeyframe(change.keyframes, keyframe);
         }
         plan.changes.push_back(std::move(change));
+    }
+    return EditResult::success();
+}
+
+EditResult motionKeyframeGroupAt(const Clip &clip, CMTime frameDuration, CMTime frame, MotionKeyframeGroup &group) {
+    group = MotionKeyframeGroup{};
+    if (EditResult r = requireClipFrame(clip, frameDuration, frame, "the keyframe's frame"); !r) {
+        return r;
+    }
+    const std::optional<CMTime> lastFrame = checkedSubtract(clip.timelineEnd(), frameDuration);
+    if (!lastFrame) {
+        return notRepresentable(clip.id, frame);
+    }
+    CMTime earliest = clip.timelineStart;
+    CMTime latest = *lastFrame;
+    for (MotionParameter parameter : kMotionParameters) {
+        const auto index = keyframeIndexForFrame(clip, parameter, frame, frameDuration);
+        if (!index) {
+            continue;
+        }
+        const KeyframeTrack &track = clip.video.keyframes.track(parameter);
+        if (*index + 1 < track.size()) {
+            const std::optional<CMTime> next = frameShowingSourceTime(clip, track[*index + 1].time, frameDuration);
+            if (next && *next == frame) {
+                group.crowdedParameter = parameter;
+                return EditResult::failure(EditError::InvalidArgument,
+                                           std::string(displayNameOf(parameter)) +
+                                               " has several keyframes on the frame at " + describe(frame) +
+                                               " (the clip plays faster than the sequence): moved to one frame they "
+                                               "would meet");
+            }
+            if (next) {
+                const std::optional<CMTime> limit = checkedSubtract(*next, frameDuration);
+                if (!limit) {
+                    return notRepresentable(clip.id, *next);
+                }
+                latest = minTime(latest, *limit);
+            }
+        }
+        if (*index > 0) {
+            if (const std::optional<CMTime> previous =
+                    frameShowingSourceTime(clip, track[*index - 1].time, frameDuration)) {
+                const std::optional<CMTime> limit = checkedAdd(*previous, frameDuration);
+                if (!limit) {
+                    return notRepresentable(clip.id, *previous);
+                }
+                earliest = maxTime(earliest, *limit);
+            }
+        }
+        group.keyframes.emplace_back(parameter, *index);
+    }
+    if (group.keyframes.empty()) {
+        return EditResult::failure(EditError::KeyframeNotFound, "clip " + idString(clip.id.value()) +
+                                                                    " has no keyframe on the frame at " +
+                                                                    describe(frame));
+    }
+    group.earliestFrame = earliest;
+    group.latestFrame = latest;
+    return EditResult::success();
+}
+
+EditResult planMotionKeyframeGroupMove(const Clip &clip, CMTime frameDuration, CMTime fromFrame, CMTime toFrame,
+                                       std::vector<MotionTrackChange> &changes) {
+    changes.clear();
+    MotionKeyframeGroup group;
+    if (EditResult r = motionKeyframeGroupAt(clip, frameDuration, fromFrame, group); !r) {
+        return r;
+    }
+    if (!isNumeric(toFrame) || !isOnFrameGrid(toFrame, frameDuration) || toFrame < group.earliestFrame ||
+        toFrame > group.latestFrame) {
+        return EditResult::failure(EditError::InvalidTime, "the keyframes on the frame at " + describe(fromFrame) +
+                                                               " can move to the frames from " +
+                                                               describe(group.earliestFrame) + " to " +
+                                                               describe(group.latestFrame) + ", not " +
+                                                               describe(toFrame));
+    }
+    if (toFrame == fromFrame) {
+        return EditResult::success();
+    }
+    const std::optional<CMTime> destination = keyframeTimeForFrame(clip, toFrame);
+    if (!destination) {
+        return notRepresentable(clip.id, toFrame);
+    }
+    for (const auto &[parameter, index] : group.keyframes) {
+        MotionTrackChange change;
+        change.parameter = parameter;
+        change.staticValue = clip.video.staticValue(parameter);
+        change.keyframes = clip.video.keyframes.track(parameter);
+        Keyframe moved = change.keyframes[index];
+        moved.time = *destination;
+        change.keyframes.erase(change.keyframes.begin() + static_cast<std::ptrdiff_t>(index));
+        upsertKeyframe(change.keyframes, moved);
+        if (auto problem = keyframeTrackProblem(change.keyframes, parameter)) {
+            return EditResult::failure(EditError::InvariantViolation,
+                                       "moving the " + std::string(displayNameOf(parameter)) +
+                                           " keyframe would break its track: " + *problem);
+        }
+        changes.push_back(std::move(change));
     }
     return EditResult::success();
 }

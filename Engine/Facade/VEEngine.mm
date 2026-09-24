@@ -2014,6 +2014,64 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     return [self push:std::make_unique<MoveKeyframe>([self sequenceId], clip->id, p, at, *destination) created:nil];
 }
 
+- (nullable VEKeyframeGroup *)keyframeGroupOfClip:(VEClipID)clipID atTime:(CMTime)time {
+    VE_ASSERT_MAIN();
+    const Clip *clip = nullptr;
+    CMTime frame = kCMTimeInvalid;
+    if ([self refuseMotionEditOfClip:clipID atTime:time needsFrame:YES clip:&clip frame:&frame] != nil) {
+        return nil;
+    }
+    const Sequence &sequence = [self activeSequence];
+    const CMTime fd = sequence.frameDuration;
+    std::vector<MotionParameter> parameters;
+    for (MotionParameter parameter : kMotionParameters) {
+        if (keyframeIndexForFrame(*clip, parameter, frame, fd)) {
+            parameters.push_back(parameter);
+        }
+    }
+    if (parameters.empty()) {
+        return nil;
+    }
+    MotionKeyframeGroup group;
+    const EditResult found = motionKeyframeGroupAt(*clip, fd, frame, group);
+    NSString *refusal = found ? nil : toNS(found.message);
+    if (found) {
+        const Track *track = sequence.trackOfClip(clip->id);
+        if (track != nullptr && track->locked) {
+            refusal = [NSString stringWithFormat:@"Track %@ is locked.", toNS(track->name)];
+        }
+    } else if (group.crowdedParameter) {
+        refusal = [NSString stringWithFormat:@"This frame shows several %s keyframes (the clip plays faster than the "
+                                             @"sequence), so they cannot be moved together.",
+                                             displayNameOf(*group.crowdedParameter)];
+    }
+    return makeKeyframeGroup(clip->id, frame, parameters, group.earliestFrame, group.latestFrame, refusal);
+}
+
+- (VEEditResult *)moveKeyframeGroupOfClip:(VEClipID)clipID fromTime:(CMTime)from toTime:(CMTime)to {
+    VE_ASSERT_MAIN();
+    const Clip *clip = nullptr;
+    CMTime fromFrame = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
+                                                      atTime:from
+                                                  needsFrame:YES
+                                                        clip:&clip
+                                                       frame:&fromFrame]) {
+        return refusal;
+    }
+    CMTime toFrame = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
+                                                      atTime:to
+                                                  needsFrame:YES
+                                                        clip:&clip
+                                                       frame:&toFrame]) {
+        return refusal;
+    }
+    // Planned by the command against the model it applies to (in a drag's group: the model before
+    // the drag), not against the model now.
+    return [self push:std::make_unique<MoveKeyframeGroup>([self sequenceId], clip->id, fromFrame, toFrame) created:nil];
+}
+
 - (VEEditResult *)removeAnimationFromClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time {
     VE_ASSERT_MAIN();
     const Clip *clip = nullptr;

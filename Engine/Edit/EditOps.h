@@ -395,6 +395,29 @@ class MoveKeyframe final : public SequenceCommand {
     CMTime to_;
 };
 
+// Moves the keyframes a timeline marker stands for: those on the sequence frame starting at
+// `fromFrame` (motionKeyframeGroupAt) to the frame starting at `toFrame`, together, in one edit
+// (a marker drag; planned by planMotionKeyframeGroupMove against the model the command applies to,
+// so the steps of a ReplacePrevious coalescing group each start from the state before the drag).
+// Named "Move Keyframe" for one parameter, "Move Keyframes" for several. `toFrame == fromFrame`
+// changes nothing.
+class MoveKeyframeGroup final : public SequenceCommand {
+  public:
+    MoveKeyframeGroup(SequenceId sequenceId, ClipId clipId, CMTime fromFrame, CMTime toFrame);
+    std::string name() const override {
+        return parameterCount_ == 1 ? "Move Keyframe" : "Move Keyframes";
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    ClipId clipId_;
+    CMTime fromFrame_;
+    CMTime toFrame_;
+    std::size_t parameterCount_ = 0;
+};
+
 // Sets the interpolation of the segment that starts at the keyframe of `parameter` at `time`.
 // Bezier (a custom curve, which only a split creates) cannot be set this way.
 class SetKeyframeInterpolation final : public SequenceCommand {
@@ -528,6 +551,36 @@ struct MotionKeyframeToggle {
     bool removing = false;
 };
 EditResult planMotionKeyframeToggle(const Clip &clip, CMTime frameDuration, CMTime frame, MotionKeyframeToggle &plan);
+
+// The keyframes a timeline marker stands for: on the sequence frame starting at `frame` (a frame of
+// the clip), each Motion parameter's keyframe that frame shows (keyframeIndexForFrame), and how far
+// they can move together. Moving keeps each parameter's keyframes in order and at least a frame
+// apart: the group stays after the frame showing the previous keyframe of each of its parameters and
+// before the frame showing the next one; a neighbour a trim hid does not limit it beyond the clip's
+// own frames, which bound it too.
+struct MotionKeyframeGroup {
+    // Index of each parameter's keyframe in its track, in MotionParameter order (the parameters
+    // without a keyframe on the frame are left out).
+    std::vector<std::pair<MotionParameter, std::size_t>> keyframes;
+    // The first and last frame starts (timeline times) the group can move to; `frame` is between.
+    CMTime earliestFrame = kCMTimeInvalid;
+    CMTime latestFrame = kCMTimeInvalid;
+    // Set with the InvalidArgument refusal: the parameter with several keyframes on the frame.
+    std::optional<MotionParameter> crowdedParameter;
+};
+// Refused with InvalidTime (not a frame of the clip), KeyframeNotFound (no keyframe on the frame) and
+// InvalidArgument when a parameter has several keyframes on the frame (a sped-up clip's frame spans
+// several source frames; moved to one frame they would meet).
+EditResult motionKeyframeGroupAt(const Clip &clip, CMTime frameDuration, CMTime frame, MotionKeyframeGroup &group);
+
+// Plans moving the group on `fromFrame` to `toFrame` (a frame start within the group's
+// [earliestFrame, latestFrame]): each keyframe goes to the destination frame's start
+// (keyframeTimeForFrame) with its value, interpolation and curve. `changes` lists the group's
+// parameters (whole tracks for SetMotionTracks-like application; empty when `toFrame == fromFrame`).
+// Refused like motionKeyframeGroupAt, with InvalidTime when `toFrame` is not a frame the group can
+// move to, or NotRepresentable.
+EditResult planMotionKeyframeGroupMove(const Clip &clip, CMTime frameDuration, CMTime fromFrame, CMTime toFrame,
+                                       std::vector<MotionTrackChange> &changes);
 
 // Whether two values of `parameter` are the same for the picture: equal within a millionth of the
 // larger magnitude (at least 1, so within a millionth of a pixel near the centre).

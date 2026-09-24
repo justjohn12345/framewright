@@ -209,6 +209,29 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
+/// The keyframes a keyframe marker in the timeline stands for: every Motion parameter's keyframe
+/// that one sequence frame of a clip shows (VEEngine keyframeGroupOfClip:atTime:), and the frames
+/// they can be moved to together (moveKeyframeGroupOfClip:fromTime:toTime:). A snapshot.
+@interface VEKeyframeGroup : NSObject
+@property (nonatomic, readonly) VEClipID clipID;
+/// The sequence frame that shows them (its start, a timeline time).
+@property (nonatomic, readonly) CMTime frameTime;
+/// The Motion parameters with a keyframe on that frame (VEMotionParameter values), in parameter
+/// order.
+@property (nonatomic, readonly, copy) NSArray<NSNumber *> *parameters;
+/// The first and last frames (timeline times, frame starts) they can move to: after the frame
+/// showing the previous keyframe and before the frame showing the next one of each of those
+/// parameters (keyframes stay in order, a frame apart), within the clip's frames. Both are
+/// frameTime when they cannot move.
+@property (nonatomic, readonly) CMTime earliestFrame;
+@property (nonatomic, readonly) CMTime latestFrame;
+/// Whether they can be moved (not on a locked track, not several keyframes of one parameter on
+/// the frame); `reason` says why not ("" when they can).
+@property (nonatomic, readonly) BOOL canMove;
+@property (nonatomic, readonly, copy) NSString *reason;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
 /// A track of the active sequence.
 @interface VETrackInfo : NSObject
 @property (nonatomic, readonly) VETrackID trackID;

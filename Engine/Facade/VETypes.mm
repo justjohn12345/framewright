@@ -125,6 +125,17 @@ VEAudioParams VEAudioParamsDefault(void) {
                         note:(NSString *)note;
 @end
 
+@interface VEKeyframeGroup ()
+@property (nonatomic, readwrite) VEClipID clipID;
+@property (nonatomic, readwrite) CMTime frameTime;
+@property (nonatomic, readwrite, copy) NSArray<NSNumber *> *parameters;
+@property (nonatomic, readwrite) CMTime earliestFrame;
+@property (nonatomic, readwrite) CMTime latestFrame;
+@property (nonatomic, readwrite) BOOL canMove;
+@property (nonatomic, readwrite, copy) NSString *reason;
+- (instancetype)initInternal;
+@end
+
 @interface VETransitionLimit ()
 @property (nonatomic, readwrite) CMTime maximumDuration;
 @property (nonatomic, readwrite) int64_t maximumFrames;
@@ -374,6 +385,18 @@ VEKeyframe *makeKeyframe(const ve::Clip &clip, ve::MotionParameter parameter, co
 }
 - (NSString *)description {
     return self.ok ? @"<VEEditResult ok>" : [NSString stringWithFormat:@"<VEEditResult failed: %@>", self.message];
+}
+@end
+
+@implementation VEKeyframeGroup
+- (instancetype)initInternal {
+    return [super init];
+}
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<VEKeyframeGroup clip %lld at %@, %lu parameters, %@ - %@%@>", self.clipID,
+                                      describeTime(self.frameTime), (unsigned long)self.parameters.count,
+                                      describeTime(self.earliestFrame), describeTime(self.latestFrame),
+                                      self.canMove ? @"" : [@", fixed: " stringByAppendingString:self.reason]];
 }
 @end
 
@@ -780,6 +803,23 @@ VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *crea
                                    createdIDs:created ?: @[]
                                       dropped:dropped
                                          note:text];
+}
+
+VEKeyframeGroup *makeKeyframeGroup(ClipId clipId, CMTime frame, const std::vector<MotionParameter> &parameters,
+                                   CMTime earliestFrame, CMTime latestFrame, NSString *refusal) {
+    VEKeyframeGroup *info = [[VEKeyframeGroup alloc] initInternal];
+    info.clipID = static_cast<VEClipID>(clipId.value());
+    info.frameTime = frame;
+    NSMutableArray<NSNumber *> *list = [NSMutableArray arrayWithCapacity:parameters.size()];
+    for (MotionParameter parameter : parameters) {
+        [list addObject:@(toVE(parameter))];
+    }
+    info.parameters = list;
+    info.canMove = refusal.length == 0;
+    info.reason = refusal ?: @"";
+    info.earliestFrame = info.canMove ? earliestFrame : frame;
+    info.latestFrame = info.canMove ? latestFrame : frame;
+    return info;
 }
 
 VETransitionLimit *makeTransitionLimit(const TransitionLimit &limit) {

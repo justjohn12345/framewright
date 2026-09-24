@@ -50,6 +50,9 @@ VEEditErrorCode toVE(EditError error);
 VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *created,
                              NSString *note);
 VETransitionLimit *makeTransitionLimit(const TransitionLimit &limit);
+/// A keyframe group snapshot; `refusal` (nil or "" when the group can move) makes it fixed on `frame`.
+VEKeyframeGroup *makeKeyframeGroup(ClipId clipId, CMTime frame, const std::vector<MotionParameter> &parameters,
+                                   CMTime earliestFrame, CMTime latestFrame, NSString *refusal);
 VEPlaybackState playbackStateToVE(playback::PlaybackState state);
 VEPlaybackStatus *makePlaybackStatus(const playback::PlaybackStatus &status);
 VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats, const playback::PresentedFrame &presented);

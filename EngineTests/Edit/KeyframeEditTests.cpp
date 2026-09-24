@@ -657,3 +657,146 @@ TEST_CASE("planMotionKeyframeToggle adds the missing keyframes on a frame, or re
     CHECK(plan.changes[1].parameter == MotionParameter::Opacity);
     CHECK(planMotionKeyframeToggle(fx.clip(a.clip), f30(1), f30(120), plan).error == EditError::InvalidTime);
 }
+
+TEST_CASE("motionKeyframeGroupAt: a marker's keyframes and the frames they can move to") {
+    Animated a;
+    Fixture &fx = a.fx;
+    const Clip &clip = fx.clip(a.clip); // timeline frame t shows source frame t + 30
+    MotionKeyframeGroup group;
+    SUBCASE("the first frame: x, scale and rotation, up to the frame before scale's next keyframe") {
+        REQUIRE(motionKeyframeGroupAt(clip, f30(1), f30(30), group).ok());
+        using Entry = std::pair<MotionParameter, std::size_t>;
+        CHECK(group.keyframes == std::vector<Entry>{{MotionParameter::X, 0}, {MotionParameter::Scale, 0},
+                                                    {MotionParameter::Rotation, 0}});
+        CHECK(group.earliestFrame == f30(30)); // the clip's first frame
+        CHECK(group.latestFrame == f30(69));   // scale's next keyframe is on frame 70
+    }
+    SUBCASE("scale alone on frame 70: after the previous keyframe's frame, up to the clip's last frame") {
+        REQUIRE(motionKeyframeGroupAt(clip, f30(1), f30(70), group).ok());
+        CHECK(group.keyframes.size() == 1);
+        CHECK(group.keyframes.front().first == MotionParameter::Scale);
+        CHECK(group.earliestFrame == f30(31));
+        CHECK(group.latestFrame == f30(119));
+    }
+    SUBCASE("the last frame owns x's keyframe on the out point and rotation's inside it") {
+        REQUIRE(motionKeyframeGroupAt(clip, f30(1), f30(119), group).ok());
+        using Entry = std::pair<MotionParameter, std::size_t>;
+        CHECK(group.keyframes == std::vector<Entry>{{MotionParameter::X, 1}, {MotionParameter::Rotation, 1}});
+        CHECK(group.earliestFrame == f30(31));
+        CHECK(group.latestFrame == f30(119));
+    }
+    SUBCASE("refusals") {
+        CHECK(motionKeyframeGroupAt(clip, f30(1), f30(31), group).error == EditError::KeyframeNotFound);
+        CHECK(motionKeyframeGroupAt(clip, f30(1), f30(10), group).error == EditError::InvalidTime);
+        CHECK(motionKeyframeGroupAt(clip, f30(1), f30(120), group).error == EditError::InvalidTime);
+    }
+}
+
+TEST_CASE("MoveKeyframeGroup moves a marker's keyframes together, within their neighbours and the clip") {
+    Animated a;
+    Fixture &fx = a.fx;
+    SUBCASE("a shared frame moves every parameter's keyframe, keeping values and interpolations") {
+        MoveKeyframeGroup move(fx.seq, a.clip, f30(30), f30(40));
+        applyReversible(fx.project, move);
+        CHECK(move.name() == "Move Keyframes");
+        const Clip &clip = fx.clip(a.clip);
+        // (The same times: keyframeTimeForFrame gives the frame's start in its own timescale.)
+        const auto sameKey = [](const Keyframe &k, const Keyframe &expected) {
+            return k.time == expected.time && k.value == expected.value && k.interpolation == expected.interpolation &&
+                   k.curve == expected.curve;
+        };
+        CHECK(sameKey(clip.video.keyframes.x.front(), key(f30(70), 0, KeyframeInterpolation::EaseInOut)));
+        CHECK(sameKey(clip.video.keyframes.scale.front(), key(f30(70), 1, KeyframeInterpolation::Hold)));
+        CHECK(sameKey(clip.video.keyframes.rotation.front(), key(f30(70), 0)));
+        CHECK(timesOf(clip.video.keyframes.x) == std::vector<CMTime>{f30(70), f30(150)});
+        CHECK(Scheduler::motionAt(clip, f30(35)).x == 0); // held before the moved keyframe
+    }
+    SUBCASE("one parameter's keyframe") {
+        MoveKeyframeGroup move(fx.seq, a.clip, f30(70), f30(50));
+        applyReversible(fx.project, move);
+        CHECK(move.name() == "Move Keyframe");
+        CHECK(timesOf(fx.clip(a.clip).video.keyframes.scale) == std::vector<CMTime>{f30(60), f30(80)});
+        CHECK(fx.clip(a.clip).video.keyframes.scale.back().value == 2);
+    }
+    SUBCASE("the limits: a neighbour's frame, the clip's frames") {
+        MoveKeyframeGroup ontoNeighbour(fx.seq, a.clip, f30(30), f30(70));
+        applyRefused(fx.project, ontoNeighbour, EditError::InvalidTime);
+        MoveKeyframeGroup lastAllowed(fx.seq, a.clip, f30(30), f30(69));
+        applyReversible(fx.project, lastAllowed);
+        MoveKeyframeGroup outside(fx.seq, a.clip, f30(70), f30(120));
+        applyRefused(fx.project, outside, EditError::InvalidTime);
+        MoveKeyframeGroup offGrid(fx.seq, a.clip, f30(70), CMTimeMake(101, 60));
+        applyRefused(fx.project, offGrid, EditError::InvalidTime);
+        MoveKeyframeGroup missing(fx.seq, a.clip, f30(31), f30(40));
+        applyRefused(fx.project, missing, EditError::KeyframeNotFound);
+    }
+    SUBCASE("the out point's keyframe moves onto a frame's start") {
+        MoveKeyframeGroup move(fx.seq, a.clip, f30(119), f30(100));
+        applyReversible(fx.project, move);
+        CHECK(timesOf(fx.clip(a.clip).video.keyframes.x) == std::vector<CMTime>{f30(60), f30(130)});
+        CHECK(timesOf(fx.clip(a.clip).video.keyframes.rotation) == std::vector<CMTime>{f30(60), f30(130)});
+        CHECK(Scheduler::motionAt(fx.clip(a.clip), f30(110)).x == doctest::Approx(300));
+    }
+    SUBCASE("to its own frame: nothing changes") {
+        MoveKeyframeGroup still(fx.seq, a.clip, f30(70), f30(70));
+        const Project before = fx.project;
+        REQUIRE(still.apply(fx.project).ok());
+        CHECK(still.isNoOp());
+        CHECK(fx.project == before);
+    }
+    SUBCASE("a keyframe a trim hid does not limit the move beyond the clip's first frame") {
+        Clip &clip = *fx.sequence().findClip(a.clip);
+        clip.video.keyframes.y = {key(f30(40), -50), key(f30(90), 50)}; // source 40 plays before the clip
+        fx.requireValid();
+        MotionKeyframeGroup group;
+        REQUIRE(motionKeyframeGroupAt(fx.clip(a.clip), f30(1), f30(60), group).ok());
+        CHECK(group.earliestFrame == f30(30));
+        MoveKeyframeGroup move(fx.seq, a.clip, f30(60), f30(30));
+        applyReversible(fx.project, move);
+        CHECK(timesOf(fx.clip(a.clip).video.keyframes.y) == std::vector<CMTime>{f30(40), f30(60)});
+    }
+    SUBCASE("several keyframes of one parameter on a frame are not moved") {
+        Clip &clip = *fx.sequence().findClip(a.clip);
+        clip.video.keyframes.y = {key(f30(90), 0), key(CMTimeMake(181, 60), 10)}; // both on timeline frame 60
+        fx.requireValid();
+        MotionKeyframeGroup group;
+        CHECK(motionKeyframeGroupAt(fx.clip(a.clip), f30(1), f30(60), group).error == EditError::InvalidArgument);
+        REQUIRE(group.crowdedParameter.has_value());
+        CHECK(*group.crowdedParameter == MotionParameter::Y);
+        MoveKeyframeGroup move(fx.seq, a.clip, f30(60), f30(50));
+        applyRefused(fx.project, move, EditError::InvalidArgument);
+    }
+    SUBCASE("a locked track") {
+        fx.sequence().findTrack(fx.v1)->locked = true;
+        MoveKeyframeGroup move(fx.seq, a.clip, f30(70), f30(50));
+        applyRefused(fx.project, move, EditError::TrackLocked);
+    }
+}
+
+TEST_CASE("A marker drag is one undo step: each step of a ReplacePrevious group starts before the drag") {
+    Animated a;
+    Fixture &fx = a.fx;
+    const Project start = fx.project;
+    UndoStack stack;
+    const std::string key = MoveKeyframeGroup(fx.seq, a.clip, f30(30), f30(30)).coalescingKey();
+    stack.beginCoalescing(key, CoalesceMode::ReplacePrevious);
+    for (int frame : {35, 45, 60, 69, 50}) {
+        CAPTURE(frame);
+        REQUIRE(stack.push(fx.project, std::make_unique<MoveKeyframeGroup>(fx.seq, a.clip, f30(30), f30(frame))).ok());
+    }
+    // A step the group cannot take is refused and leaves the last good one.
+    CHECK(stack.push(fx.project, std::make_unique<MoveKeyframeGroup>(fx.seq, a.clip, f30(30), f30(90))).error ==
+          EditError::InvalidTime);
+    stack.endCoalescing();
+    CHECK(timesOf(fx.clip(a.clip).video.keyframes.x) == std::vector<CMTime>{f30(80), f30(150)});
+    CHECK(stack.undoName() == "Move Keyframes");
+    REQUIRE(stack.undo(fx.project));
+    CHECK(fx.project == start);
+    CHECK_FALSE(stack.canUndo());
+
+    // Cancelled: back where it started.
+    stack.beginCoalescing(key, CoalesceMode::ReplacePrevious);
+    REQUIRE(stack.push(fx.project, std::make_unique<MoveKeyframeGroup>(fx.seq, a.clip, f30(70), f30(90))).ok());
+    CHECK(stack.cancelCoalescing(fx.project));
+    CHECK(fx.project == start);
+}

@@ -455,6 +455,24 @@ NS_SWIFT_UI_ACTOR
                            parameter:(VEMotionParameter)parameter
                             fromTime:(CMTime)from
                               toTime:(CMTime)to NS_SWIFT_NAME(moveKeyframe(clip:parameter:from:to:));
+/// The keyframes the timeline's marker on the sequence frame containing `time` stands for (every
+/// Motion parameter's keyframe that frame shows) and the frames they can move to together; nil
+/// when that frame shows no keyframe of the clip (or it is not a frame of a video clip). Read it
+/// before a marker drag starts (it describes the model as it is now).
+- (nullable VEKeyframeGroup *)keyframeGroupOfClip:(VEClipID)clipID
+                                          atTime:(CMTime)time NS_SWIFT_NAME(keyframeGroup(clip:at:));
+/// Moves the keyframes of the marker on the frame containing `from` (keyframeGroupOfClip:atTime:)
+/// to the frame containing `to`, together, each to that frame's start with its value and
+/// interpolation: a keyframe marker dragged in the timeline. One undo step ("Move Keyframe", or
+/// "Move Keyframes" for several parameters). Inside a (Replace) coalescing group each step starts
+/// from the model before the group, so a drag passes its original frame as `from` on every step and
+/// is one undo step; cancelCoalescing puts the keyframes back. `to` equal to `from` changes nothing.
+/// Refused: VEEditErrorInvalidTime (`to` outside the group's earliestFrame...latestFrame, or a time
+/// not over the clip), VEEditErrorKeyframeNotFound, VEEditErrorInvalidArgument (several keyframes of
+/// one parameter on the frame), VEEditErrorTrackLocked, and the other Motion refusals.
+- (VEEditResult *)moveKeyframeGroupOfClip:(VEClipID)clipID
+                                 fromTime:(CMTime)from
+                                   toTime:(CMTime)to NS_SWIFT_NAME(moveKeyframeGroup(clip:from:to:));
 /// Removes every keyframe of `parameter`; it keeps the value it has at `time` (the clip's nearest
 /// frame when `time` is outside it) as its static value.
 - (VEEditResult *)removeAnimationFromClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time
