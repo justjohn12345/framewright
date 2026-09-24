@@ -13,8 +13,9 @@ import FramewrightEngine
 ///
 /// Range (`MoveRange`): the whole clip (the default, FCP's behaviour), `durationFrames` from the
 /// playhead or from the clip's start (5 s by default, clamped to what is left of the clip), or a
-/// Custom span. Before the move the picture holds the start framing and after it the end framing,
-/// so a 5 s push in at the head of a 30 s clip holds its end framing for the other 25 s.
+/// Custom span. Before the move the picture shows the clip's framing without it; after it the end
+/// framing holds until the clip ends or the next move starts (which moves on from it), so a 5 s push
+/// in at the head of a 30 s clip holds its end framing for the other 25 s.
 ///
 /// Start and End fields (`startText`, `endText`) show the range's first and last frames as timeline
 /// times (the ruler's), in the user's duration format, whatever the range; committing a different
@@ -162,9 +163,9 @@ final class KenBurnsModel: ObservableObject {
     static let defaultEndFraction = 0.8
     /// The default length of a move that does not cover the whole clip.
     static let defaultRangeSeconds = 5.0
-    /// The caption shown while the move ends before the clip does (a Motion span acts over its own
-    /// range only).
-    static let holdCaption = "After the move the clip returns to its framing without it"
+    /// The caption shown while the move ends before the clip does (a Motion span holds its end
+    /// values after its end; a later move on its lane starts from them).
+    static let holdCaption = "After the move its end framing holds until the clip ends or the next move starts"
     /// The caption shown when the clip's position and scale keyframes are all hidden by a trim.
     static let hiddenMoveCaption = "The clip's position and scale keyframes are all in parts a trim hid: "
         + "the move covers the whole clip (Apply replaces them)"

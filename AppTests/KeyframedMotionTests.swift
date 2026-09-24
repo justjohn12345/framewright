@@ -590,7 +590,7 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(framesModel.durationFrames, 90)
     }
 
-    func testAKenBurnsMoveOverTheFirstSecondsActsThereOnlyAndStartsFromTheCurrentFraming() async throws {
+    func testAKenBurnsMoveOverTheFirstSecondsHoldsItsEndFramingAndTheNextMoveStartsThere() async throws {
         let id = try await longClip()
         store.beginKenBurns(clip: id)
         let model = try XCTUnwrap(store.kenBurns)
@@ -605,10 +605,16 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(motionRanges(id), [[frames(0), frames(150)]])
         let info = try clip(id)
         XCTAssertGreaterThan(info.motion(at: frames(149)).scale, 1.99, "near the end framing on its last frame")
+        XCTAssertLessThan(info.motion(at: frames(149)).scale, 2)
+        let firstSpan = try XCTUnwrap(motionSpans(id).first)
+        var endFraming = VEVideoParams()
+        XCTAssertTrue(info.getMotion(&endFraming, atEdgeOfSpan: firstSpan.spanID, atEnd: true, frameDuration: frames(1)))
+        XCTAssertEqual(endFraming.scale, 2, accuracy: 1e-9)
         for frame: Int64 in [150, 220, 299] {
             let shown = info.motion(at: frames(frame))
-            XCTAssertEqual(shown.scale, 1, accuracy: 1e-12, "frame \(frame): the span acts over its range only")
-            XCTAssertEqual(shown.x, 0, accuracy: 1e-12)
+            XCTAssertEqual(shown.scale, endFraming.scale, "frame \(frame): the end framing holds to the clip's end")
+            XCTAssertEqual(shown.x, endFraming.x)
+            XCTAssertEqual(shown.y, endFraming.y)
         }
 
         // The clip has a move now: the helper opens on it, the rectangles on its framings.
@@ -621,8 +627,13 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(second.end.width, 960, accuracy: 1e-6)
         XCTAssertEqual(second.start.width, 1920, accuracy: 1e-6, "and its start")
         second.range = .fromPlayhead
-        XCTAssertEqual(second.start, CGRect(x: 0, y: 0, width: 1920, height: 1080), "the framing at the playhead")
-        XCTAssertEqual(second.end.width, 1920, accuracy: 1e-6)
+        // At the playhead (after the move) the picture holds the move's end framing: both rectangles
+        // show it.
+        for rect in [second.start, second.end] {
+            XCTAssertEqual(rect.minX, 960, accuracy: 1e-6, "the held end framing")
+            XCTAssertEqual(rect.minY, 540, accuracy: 1e-6)
+            XCTAssertEqual(rect.width, 960, accuracy: 1e-6)
+        }
         // A rectangle the user moved keeps its place when the range changes; the other follows.
         second.end = CGRect(x: 0, y: 0, width: 960, height: 540)
         second.move(.end, from: second.end, by: CGSize(width: 500, height: 300))
@@ -632,13 +643,16 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(second.end, moved)
         XCTAssertEqual(second.start.width, 1920, accuracy: 1e-6, "the framing on the clip's first frame")
 
-        // A second move later in the clip is a second span on the same lane; one undo step takes it
-        // back.
+        // A second move later in the clip is a second span on the same lane, starting from the held
+        // framing (no jump where it starts); one undo step takes it back.
         second.range = .fromPlayhead
         XCTAssertTrue(store.applyKenBurns())
         XCTAssertEqual(motionRanges(id), [[frames(0), frames(150)], [frames(200), frames(300)]])
         XCTAssertEqual(motionSpans(id).map(\.lane), [1, 1])
-        XCTAssertEqual(try clip(id).motion(at: frames(180)).scale, 1, accuracy: 1e-12, "between the moves")
+        let chained = try clip(id)
+        XCTAssertEqual(chained.motion(at: frames(180)).scale, 2, accuracy: 1e-9, "between the moves the first one holds")
+        XCTAssertEqual(chained.motion(at: frames(200)).scale, chained.motion(at: frames(199)).scale, accuracy: 1e-6)
+        XCTAssertEqual(chained.motion(at: frames(200)).x, chained.motion(at: frames(199)).x, accuracy: 1e-6)
         store.undo()
         XCTAssertEqual(motionRanges(id), [[frames(0), frames(150)]])
     }
@@ -714,9 +728,13 @@ final class KeyframedMotionTests: XCTestCase {
         let id = try await longClip()
         try kenBurns(id, start: VEMotionFraming(x: 0, y: 0, scale: 1), end: VEMotionFraming(x: -960, y: -540, scale: 2),
                      interpolation: .linear, range: CMTimeRange(start: .zero, duration: frames(150)))
+        // The later move on the same lane starts from the framing the first one holds, so its own
+        // values are relative to it (1.5 / 2 in scale).
         let later = try kenBurns(id, start: VEMotionFraming(x: -960, y: -540, scale: 2),
                                  end: VEMotionFraming(x: 0, y: 0, scale: 1.5), interpolation: .easeOut,
                                  range: CMTimeRange(start: frames(200), duration: frames(100)))
+        XCTAssertEqual(later.startValues.scale, 1, accuracy: 1e-12, "it continues the held framing")
+        XCTAssertEqual(later.endValues.scale, 0.75, accuracy: 1e-12)
         store.beginKenBurns(clip: id)
         let model = try XCTUnwrap(store.kenBurns)
         XCTAssertEqual(model.detection, .move(KenBurnsModel.ExistingMove(first: 0, last: 149, hasKeyframesBetween: false,
@@ -731,7 +749,9 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(motionSpans(id).first).endValues.x, 960, accuracy: 1e-6,
                        "the bottom-left quarter (the rectangle moved left by 960)")
         let kept = try XCTUnwrap(store.engine.spanInfo(later.spanID))
-        XCTAssertEqual(kept.endValues.scale, 1.5, accuracy: 1e-12, "the other move is untouched")
+        XCTAssertEqual(kept.startValues.scale, later.startValues.scale, "the other move's values are untouched")
+        XCTAssertEqual(kept.endValues.scale, later.endValues.scale)
+        XCTAssertEqual(kept.endValues.x, later.endValues.x)
     }
 
     func testAClipWithoutAMoveOpensOnTheWholeClipPushIn() async throws {
@@ -1096,7 +1116,8 @@ final class KeyframedMotionTests: XCTestCase {
         let first = try clip(b).motion(at: frames(60))
         XCTAssertEqual(first.opacity, 0.5, accuracy: 1e-12, "the cut matches")
         XCTAssertEqual(first.scale, 1.5)
-        XCTAssertEqual(try clip(b).motion(at: frames(100)).opacity, 0.5 / 0.8, accuracy: 1e-12, "after the span")
+        XCTAssertEqual(try clip(b).motion(at: frames(100)).opacity, 0.5 / 0.8 * 0.2, accuracy: 1e-12,
+                       "after the span its end value holds")
 
         // The next clip's start onto A's last frame: B starts exactly as A is, so nothing changes.
         store.selection = [a]

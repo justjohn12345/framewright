@@ -247,7 +247,7 @@ struct KenBurnsOverlay: View {
                 }
             }
             .fixedSize()
-            .help("The part of the clip the move covers; before and after it the framing holds")
+            .help("The part of the clip the move covers; before it the clip keeps its framing, after it the end framing holds")
             .accessibilityIdentifier("KenBurnsRange")
             field("Start", text: $model.startText, field: .start, enabled: true,
                   help: "The move's first frame, as a timeline time (the ruler's); typing one makes the range Custom")
