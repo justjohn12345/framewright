@@ -663,7 +663,8 @@ calls and app controls described here are gone. Kept for the history of the eval
   (normally one at 0 and one at the length). Values are relative: x, y and rotation add to the clip's static
   values, scale and opacity multiply, gain adds dB; neutral values (0, 1, 0 dB) change nothing.
   `VideoParams` is the static values only; `AudioParams` is `gainDb` only (fades are lane-0 spans).
-- Activity: a span acts where the frame's evaluation time (`spanEvaluationTime`: the exact source time, or the
+- Activity (superseded by the hold-after rule of "Effect lanes round 1b" below; `spanActiveAt` is gone): a span
+  acts where the frame's evaluation time (`spanEvaluationTime`: the exact source time, or the
   first kPreciseTimescale tick after it; held at the clip's edges in transition handles) is in `[start, end)`,
   plus the out bound itself for a span ending there (a tail handle keeps its end value). The end value is
   reached at the span's end: the span's last frame shows the move a frame short, so a move ending on a cut
@@ -722,9 +723,71 @@ calls and app controls described here are gone. Kept for the history of the eval
   range, or adds one on the first lane with room (`addSpan` then `applyKenBurns(span:)` in one Accumulate
   group, whose undo step is named after its first edit, "Add Motion Span"), reads an existing move's
   framings from the span's edges, and its caption for a move ending before the clip says the clip returns to
-  its own framing (spans act over their range only).
+  its own framing (spans act over their range only; round 1b changed both: the end framing holds).
 - Round 2 needs: lanes in the timeline (`laneCount(forTrack:)`, `spans(forTrack:)`), selection, drag, trim
   and Delete of spans with coalescing groups and `freeRange` for refusals, the inspector's span section
   (start / end values, interpolation, match), the Ken Burns editor on a lane range, transitions on lane 0
   with independently draggable edges (`setTransitionRange`), fades on video clips (the engine and exports
   support them; the app has no control yet).
+
+## Effect lanes round 1b (engine: hold after)
+- The rule (the user's decision; always on, no toggle, no model field, schema unchanged): an effect span (lanes
+  1-3: Motion, Opacity, Gain) contributes nothing before its start, animates over `[start, end)` and holds its
+  end value from its end until the clip's end, also in a tail transition handle (the evaluation time is held at
+  the out bound there). A later span on the same lane does not end the hold: its relative values apply on top of
+  the held value (chained spans are cumulative; one that starts neutral continues without a jump, one that starts
+  elsewhere jumps by its start values). Lane-0 transitions are unchanged. Reference case (tested frame by frame
+  and exported): a 30 s clip with a 5 s Ken Burns move from 5 s to 10 s shows its own framing for 0-5 s, the move
+  over 5-10 s and exactly the end framing for 10-30 s.
+- Composition (`Clip.h` "Composition"; `composeMotion`, `composeGainDb`, `motionValuesAt`, `gainDbAt`): at
+  evaluation time t every effect span with `start <= t` (`spanActsAt`) contributes its value at `min(t, end)`
+  (`spanContributionAt`: `spanValueAt` inside, `spanEdgeValue(atEnd)` from the end on); the contributions are
+  applied to the static values one after another, lanes 1, 2, 3 and within a lane in start order: Position X/Y
+  and Rotation offsets add, Scale and Opacity factors multiply, Gain decibels add to the static gain. "On top of"
+  means exactly this, across spans of one lane as across lanes. Evaluation stays exact-time
+  (`spanEvaluationTime`). New in `EffectSpan.h`: `spanActsAt`, `spanContributionAt`, `spanContributionFromLeft`
+  (the limit from the left: neutral up to the start, the ramp up to the end, the hold after it).
+  `spanActiveAt(clip, span, time)` is removed; use `spanActsAt(span, time)` (a span now acts from its start on,
+  with no special case for the out bound).
+- Audio (`Scheduler::audioGraphFor`): a segment's `level` adds each started Gain span's contribution at the
+  segment start and its limit from the left at the segment end, so a held level is a flat segment and a chained
+  span ramps from the held level. Segments are still cut at span edges and keyframes; `kEasedGainStep` steps only
+  inside eased segments (a held part is one segment). Playback and the offline renderer share it (parity tests).
+- Trims and splits (`Clip::fitSpans`): a span left wholly before a clip's new start (`end <= in bound`: a head
+  trim past it, the right piece of a split or an overwrite) used to vanish, which would now change the frames
+  after it. Its held value is folded into the clip's static values (`video` / `audio.gainDb`, composed in the
+  composition's order, so a single lane's hold is kept to the bit) and the span goes (still reported in
+  `EditResult::droppedSpanIds` / `VEEditResult.droppedSpanIDs`, like before). No remaining frame changes; a later
+  head extension shows the held framing, not the old move (extending never restores spans). New
+  `RetimeResult::HeldValuesOverflow` (non-finite folded values, only from pathological files) refuses the edit
+  with InvalidArgument. Round 2 must expect a clip's static values to change after such an edit (the inspector's
+  Video section shows them) and may want to name it in the note it shows for dropped spans.
+- Ken Burns edges (`spanEdgeFrameTime`, `spanEdgeMotion`, `planKenBurns`, facade
+  `getMotion(_:atEdgeOfSpan:atEnd:frameDuration:)` and `applyKenBurns(span:...)`): unchanged code, but "the rest
+  of the composition" at an edge now includes held values, of the span's own lane too. So the start edge of a
+  span that follows another on its lane reads that span's held end framing, and a Ken Burns move from that
+  framing gets neutral start values (continues without a jump). The plan and the read-back use the same
+  `composeMotion(except: span)` at the same times, so they remain exact inverses (tested for a lone move, a move
+  over another lane's held zoom, and two chained moves on one lane). The end framing is reached at the span's end
+  and is what every later frame shows while nothing else changes (on those frames `motionValuesAt` equals
+  `spanEdgeMotion(atEnd)` bit for bit).
+- Consequence for editing (round 2's Ken Burns editor and inspector): span values are relative and cumulative,
+  so changing an earlier span's end values (or removing it, or moving it past another) moves the picture of every
+  later span on the clip, which keeps its own relative values: a second Ken Burns move applied on top of a held
+  zoom of 2 stores scale 0.75 for a 1.5 end framing, and still shows 0.75 x the new held value after the first
+  move is edited. The editor should re-read `getMotion(_:atEdgeOfSpan:...)` for the later spans' rectangles after
+  such an edit rather than cache framings.
+- Matching (`planMatchSpanEdge`, `matchSpanEdge(_:toAdjacentClipAt:)`): a span now contributes at an edge frame
+  when it has started there. At the tail, a span that ended before the clip's last frame holds its end value
+  there, so matching the next clip sets that end value and the last frame shows the neighbour's exactly (before,
+  this was refused). Refused (InvalidArgument) only for a span that starts after the frame ("starts after the
+  first/last frame of clip N"); at the head that is any span not starting on the clip's first frame.
+- `matchMotion(clip:toAdjacentAt:)` (static values) composes the spans onto neutral static values through
+  `motionValuesAt`, so it takes held values into account without change.
+- Migration: v4 migrated spans cover the clip's whole source range, so nothing is ever held inside a clip and
+  the tail handle already showed the end value: `MigrationRenderTests` passes against the unchanged goldens.
+  JSON is unchanged (schema 5).
+- App (minimal; round 2 rebuilds it): `KenBurnsModel.holdCaption` is "After the move its end framing holds until
+  the clip ends or the next move starts"; the Move menu's help and the model's doc say the same. The helper's
+  default rectangles come from `motion(at:)`, so after a move they show the held framing, and a second move
+  applied from the playhead starts there (AppTests updated).

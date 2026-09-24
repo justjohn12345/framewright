@@ -22,9 +22,16 @@ keyframe machinery (exact evaluation, curve split, group move) is reused inside 
   - Invariants: spans of one clip on one lane never overlap; lane ≥ 0; a span lies inside its clip's source
     range (a trim that cuts through a span clips its range, the values at the new edge evaluated, like the
     keyframe split today; extending the clip does not restore it).
-- Composition (fixed, documented, tested): for a frame, start from the clip's static `VideoParams`, then apply
-  each active span in lane order: position adds, rotation adds, scale multiplies, opacity multiplies. Two motion
-  spans on different lanes therefore combine (a zoom-out with a pan); two on one lane cannot overlap.
+- Composition (fixed, documented, tested; hold after, decided 2026-09-24, round 1b): an effect span contributes
+  nothing before its start, animates over its range and holds its end value from its end until the clip ends (also
+  in a tail transition handle); there is no toggle and no model field. For a frame, start from the clip's static
+  `VideoParams`, then apply every span that has started, at its value at min(frame time, its end), in lane order
+  and within a lane in start order: position adds, rotation adds, scale multiplies, opacity multiplies (gain adds
+  dB). A later span on the same lane therefore applies on top of the value the earlier one holds (chained spans are
+  cumulative: one starting neutral continues without a jump), and two motion spans on different lanes combine (a
+  zoom-out with a pan); two on one lane cannot overlap. A 5 s move from 5 s on a 30 s clip shows the clip's framing
+  for 0-5 s, the move over 5-10 s and the end framing for 10-30 s. A span a trim or split leaves wholly before a
+  clip's start hands its held value to that clip's static values, so no remaining frame changes.
 - Lanes: every video and audio track has at most 4 lanes. Lane 0 is reserved for transitions; lanes 1-3 hold
   effect spans (motion, opacity, gain). A span's lane is part of the model; the app refuses a fifth.
 - Transitions are lane-0 spans attached to a clip (kind `transition`; video: cross dissolve, fade from/to black;
@@ -122,6 +129,8 @@ motion/opacity/gain/transition, stacking several transitions on one cut, more th
 ## Rounds
 1. Engine: model v5 + migration, composition, scheduler, edit ops, facade; tests (migration of v4 goldens,
    parity with two lanes, split/trim/ripple through spans, transition alignment limits, undo).
+   1b. Engine follow-up: the hold-after rule above (composition, the audio level, the Ken Burns edges, matching,
+   trims and splits past a span), the Ken Burns caption; the migration renders unchanged.
 2. App: lanes in the timeline (drawing, creation by range, move/trim, transition spans, snapping, collapse,
    redraw budget), inspector span section, Ken Burns bound to spans, Control-K, Effects tab drag to lane;
    removal of the diamonds/range controls/marker drags; tests.

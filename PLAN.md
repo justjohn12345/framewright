@@ -219,9 +219,12 @@ Each phase ends with something runnable and its tests green. Playback and A/V sy
 ### Effect lanes (2026-09-24; plan in `docs/plans/2026-09-24-effect-lanes.md`)
 - Effects become spans on lanes under each clip: lane 0 holds transitions (cross dissolve / crossfade across a
   cut with any split of its sides, fades to and from black or silence), lanes 1-3 Motion, Opacity and Gain spans
-  with start and end values that compose onto the clip's static values. Replaces per-parameter keyframes.
+  with start and end values that compose onto the clip's static values; a span holds its end value from its end
+  to the clip's end, and a later span on its lane applies on top (hold after). Replaces per-parameter keyframes.
 - Round 1 (engine): schema v5 with the v4 migration (v4 files render identically), Scheduler and mixer on spans,
   span edit ops and facade, parity tests. The app keeps working with its keyframe controls inert.
+- Round 1b (engine): hold after: composition, audio levels, Ken Burns edges, matching, and trims/splits past a
+  span keep the held value; the migration still renders identically.
 - Round 2 (app): lanes in the timeline, the inspector's span section, the Ken Burns editor on a lane range,
   transitions dragged on lane 0.
 
