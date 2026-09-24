@@ -60,24 +60,39 @@ final class PhotosDropTests: XCTestCase {
 
     // MARK: Types
 
-    func testTheDropTargetsAcceptFilePromisesAndFileURLs() throws {
-        for type in UTType.filePromiseTypes {
-            XCTAssertTrue(TimelineDropDelegate.types.contains(type))
-            XCTAssertTrue(MediaDrop.types.contains(type))
-        }
-        for type in [UTType.filePromiseItemMetadata, .filePromiseURL] {
-            XCTAssertTrue(UTType.filePromiseTypes.contains(type))
-            let declared = try XCTUnwrap(UTType(type.identifier))
-            XCTAssertTrue(declared.isDeclared, "\(type.identifier) is declared in Info.plist")
+    func testTheDropTargetsAcceptEveryPromiseTypeTheSystemDeclares() throws {
+        // What the app needs: every type AppKit's promise receiver reads, the promised file URL and
+        // the Live Photo bundle resolve to types the system declares (the app no longer redeclares
+        // them: its Info.plist has no imported declarations), and a drop carrying any one of them
+        // is accepted by the media bin and the timeline.
+        let imported = Bundle.main.infoDictionary?["UTImportedTypeDeclarations"] as? [[String: Any]] ?? []
+        XCTAssertTrue(imported.isEmpty, "no imported type declarations: \(imported)")
+        for type in [UTType.filePromiseItemMetadata, .filePromiseURL, .livePhotoBundle] {
+            let declared = try XCTUnwrap(UTType(type.identifier), type.identifier)
+            XCTAssertTrue(declared.isDeclared, "\(type.identifier) is declared by the system")
             XCTAssertFalse(declared.isDynamic)
         }
-        XCTAssertTrue(TimelineDropDelegate.types.contains(.fileURL))
-        // Every type AppKit's promise receiver reads from a drag pasteboard is accepted.
-        for identifier in NSFilePromiseReceiver.readableDraggedTypes {
-            let type = UTType(identifier) ?? UTType(importedAs: identifier)
-            XCTAssertTrue(MediaDrop.types.contains(type), "\(identifier) is accepted")
-        }
+        XCTAssertTrue(UTType.livePhotoBundle.conforms(to: .package))
         XCTAssertEqual(UTType.filePromiseURL.identifier, kPasteboardTypeFileURLPromise as String)
+        let bin = MediaBinDropDelegate(store: store, isTargeted: .constant(false))
+        let timeline = TimelineDropDelegate(gestures: TimelineGestureController(store: store),
+                                            isAssetTargeted: .constant(false), commandHeld: { false })
+        var identifiers = NSFilePromiseReceiver.readableDraggedTypes
+        identifiers.append(UTType.filePromiseURL.identifier)
+        identifiers.append(UTType.fileURL.identifier)
+        for identifier in identifiers {
+            let provider = NSItemProvider()
+            provider.registerDataRepresentation(forTypeIdentifier: identifier, visibility: .all) { done in
+                done(Data(), nil)
+                return nil
+            }
+            let info = FakeDropInfo(location: CGPoint(x: 50, y: 90), providers: [provider])
+            XCTAssertTrue(bin.handleValidate(info), "the bin accepts \(identifier)")
+            XCTAssertTrue(timeline.handleValidate(info), "the timeline accepts \(identifier)")
+        }
+        // Something that is neither a file nor a promise is not accepted.
+        let text = NSItemProvider(item: "text" as NSString, typeIdentifier: UTType.plainText.identifier)
+        XCTAssertFalse(bin.handleValidate(FakeDropInfo(location: .zero, providers: [text])))
     }
 
     // MARK: Media bin

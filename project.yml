@@ -225,25 +225,9 @@ targets:
             UTTypeDescription: Framewright Audio Crossfade
             UTTypeConformsTo:
               - public.data
-        # File promise types (NSFilePromiseReceiver.readableDraggedTypes: Photos drags) and Photos'
-        # Live Photo bundle (PHPicker), accepted by the media bin and the timeline.
-        UTImportedTypeDeclarations:
-          - UTTypeIdentifier: com.apple.NSFilePromiseItemMetaData
-            UTTypeDescription: File Promise
-            UTTypeConformsTo:
-              - public.data
-          - UTTypeIdentifier: com.apple.pasteboard.promised-file-url
-            UTTypeDescription: Promised File URL
-            UTTypeConformsTo:
-              - public.data
-          - UTTypeIdentifier: com.apple.pasteboard.promised-file-content-type
-            UTTypeDescription: Promised File Content Type
-            UTTypeConformsTo:
-              - public.data
-          - UTTypeIdentifier: com.apple.live-photo-bundle
-            UTTypeDescription: Live Photo
-            UTTypeConformsTo:
-              - com.apple.package
+        # The file promise types (NSFilePromiseReceiver.readableDraggedTypes: Photos drags) and
+        # Photos' Live Photo bundle (PHPicker) are declared by the system; the app does not
+        # redeclare them (PhotosDropTests checks they are declared without the app's Info.plist).
     entitlements:
       path: App/Resources/Framewright.entitlements
       properties:
