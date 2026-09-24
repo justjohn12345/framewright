@@ -5,11 +5,12 @@ import FramewrightEngine
 /// The Ken Burns helper over the program monitor (see `KenBurnsModel`): the whole picture of the
 /// clip, unanimated, with the start rectangle (green) and the end rectangle (red), an arrow showing
 /// the direction of travel (as in FCP), and a bar with the move's range (Whole clip, From playhead,
-/// From clip start, a Duration field and the range as timecodes), the smoothing, Swap, Cancel and
-/// Apply. Drag a rectangle to pan, drag a corner to zoom (the aspect ratio stays the frame's). The
-/// picture is the clip's unanimated frame at the playhead (its first or last frame while the
-/// playhead is outside it) and follows every playhead change, loaded through the thumbnail cache by
-/// `KenBurnsPictureLoader` (one fetch at a time, the latest time next), never from the program view.
+/// From clip start, Existing move when the clip has one, a Duration field and the range as
+/// timecodes), the smoothing, Swap, Cancel and Apply. Drag a rectangle to pan, drag a corner to
+/// zoom (the aspect ratio stays the frame's). The picture is the clip's unanimated frame at the
+/// playhead (its first or last frame while the playhead is outside it) and follows every playhead
+/// change, loaded through the thumbnail cache by `KenBurnsPictureLoader` (one fetch at a time, the
+/// latest time next), never from the program view.
 ///
 /// Everything drawn comes from observed objects (the model, the playhead, the picture loader), so a
 /// change of any of them redraws the overlay.
@@ -222,7 +223,7 @@ struct KenBurnsOverlay: View {
     private var rangeRow: some View {
         HStack(spacing: 8) {
             Picker("Move", selection: $model.range) {
-                ForEach(KenBurnsModel.MoveRange.allCases) { choice in
+                ForEach(model.rangeChoices) { choice in
                     Text(choice.title).tag(choice)
                 }
             }

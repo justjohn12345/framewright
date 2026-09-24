@@ -514,12 +514,15 @@ final class KeyframedMotionTests: XCTestCase {
             XCTAssertEqual(shown.y, -540, accuracy: 1e-9)
         }
 
-        // The clip is animated now: the rectangles start from its framing at the range's ends.
+        // The clip is animated now: the helper opens on its move, the rectangles on its framing at
+        // the move's ends.
         store.playheadTime = frames(200)
         store.beginKenBurns(clip: id)
         let second = try XCTUnwrap(store.kenBurns)
-        XCTAssertEqual(second.end.minX, 960, accuracy: 1e-6, "whole clip: the framing on the last frame")
-        XCTAssertEqual(second.start.width, 1920, accuracy: 1e-6, "and on the first")
+        XCTAssertEqual(second.range, .existingMove)
+        XCTAssertEqual(second.rangeTimecodes, "00:00:00:00 – 00:00:04:29")
+        XCTAssertEqual(second.end.minX, 960, accuracy: 1e-6, "the framing on the move's last frame")
+        XCTAssertEqual(second.start.width, 1920, accuracy: 1e-6, "and on its first")
         second.range = .fromPlayhead
         XCTAssertEqual(second.start.minX, 960, accuracy: 1e-6, "the framing held at the playhead")
         XCTAssertEqual(second.start.width, 960, accuracy: 1e-6)
@@ -539,6 +542,167 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(try clip(id).motion(at: frames(180)).scale, 2, accuracy: 1e-12, "held between the moves")
         store.undo()
         XCTAssertEqual(try clip(id).keyframes(for: .scale).map(\.frameTime), [frames(0), frames(149)])
+    }
+
+    // MARK: Ken Burns: editing a move
+
+    /// A move over timeline frames 60...209 of the long clip (2 s to 6:29), Ease In, from a 75 %
+    /// framing to the bottom-right quarter; the helper is closed afterwards.
+    private func applyPartialMove(_ id: VEClipID) throws {
+        store.playheadTime = frames(60)
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        model.range = .fromPlayhead
+        model.durationText = "150f"
+        XCTAssertTrue(model.commitDuration())
+        model.start = CGRect(x: 240, y: 135, width: 1440, height: 810)
+        model.end = CGRect(x: 960, y: 540, width: 960, height: 540)
+        model.interpolation = .easeIn
+        XCTAssertTrue(store.applyKenBurns())
+        XCTAssertEqual(try clip(id).keyframes(for: .scale).map(\.frameTime), [frames(60), frames(209)])
+    }
+
+    func testReopeningKenBurnsEditsTheExistingMoveInPlace() async throws {
+        let id = try await longClip()
+        try applyPartialMove(id)
+        let applied = try clip(id)
+
+        // Reopened with the playhead elsewhere: the same range, rectangles and smoothing.
+        store.playheadTime = frames(250)
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.detection, .move(KenBurnsModel.ExistingMove(first: 60, last: 209, hasKeyframesBetween: false,
+                                                                         interpolation: .easeIn)))
+        XCTAssertEqual(model.range, .existingMove)
+        XCTAssertEqual(model.rangeChoices, [.wholeClip, .fromPlayhead, .fromClipStart, .existingMove])
+        XCTAssertEqual(model.rangeStart, frames(60))
+        XCTAssertEqual(model.durationFrames, 150)
+        XCTAssertEqual(model.rangeTimecodes, "00:00:02:00 – 00:00:06:29")
+        XCTAssertEqual(model.rangeCaption, "Editing the move from 00:00:02:00 to 00:00:06:29")
+        XCTAssertEqual(model.interpolation, .easeIn, "the move's own smoothing")
+        XCTAssertFalse(model.isDurationEditable)
+        for (rect, expected) in [(model.start, CGRect(x: 240, y: 135, width: 1440, height: 810)),
+                                 (model.end, CGRect(x: 960, y: 540, width: 960, height: 540))] {
+            XCTAssertEqual(rect.minX, expected.minX, accuracy: 1e-6)
+            XCTAssertEqual(rect.minY, expected.minY, accuracy: 1e-6)
+            XCTAssertEqual(rect.width, expected.width, accuracy: 1e-6)
+        }
+
+        // Apply after moving the red rectangle to the top-left quarter: the keyframes keep their
+        // times and the start values; only the end values change.
+        model.move(.end, from: model.end, by: CGSize(width: -960, height: -540))
+        XCTAssertTrue(store.applyKenBurns())
+        XCTAssertEqual(store.undoActionName, "Ken Burns")
+        let edited = try clip(id)
+        for parameter: VEMotionParameter in [.positionX, .positionY, .scale] {
+            let before = applied.keyframes(for: parameter)
+            let after = edited.keyframes(for: parameter)
+            XCTAssertEqual(after.map(\.sourceTime), before.map(\.sourceTime), "\(parameter.rawValue): times kept")
+            XCTAssertEqual(after.first?.value ?? .nan, before.first?.value ?? 0, accuracy: 1e-9, "start value kept")
+            XCTAssertEqual(after.first?.interpolation, .easeIn)
+        }
+        XCTAssertEqual(edited.keyframes(for: .positionX).last?.value ?? 0, 960, accuracy: 1e-6, "was -960")
+        XCTAssertEqual(edited.keyframes(for: .positionY).last?.value ?? 0, 540, accuracy: 1e-6, "was -540")
+        XCTAssertEqual(edited.keyframes(for: .scale).last?.value ?? 0, 2, accuracy: 1e-9, "the same size")
+        XCTAssertEqual(edited.motion(at: frames(20)).scale, applied.motion(at: frames(20)).scale, accuracy: 1e-12,
+                       "the start framing still holds before the move")
+    }
+
+    func testSeveralMovesAreEditedAsOneSpanAndTheCaptionSaysSo() async throws {
+        let id = try await longClip()
+        XCTAssertTrue(store.engine.applyKenBurns(clip: id, start: VEMotionFraming(x: 0, y: 0, scale: 1),
+                                                 end: VEMotionFraming(x: -960, y: -540, scale: 2), interpolation: .linear,
+                                                 from: .zero, duration: frames(150)).ok)
+        XCTAssertTrue(store.engine.applyKenBurns(clip: id, start: VEMotionFraming(x: -960, y: -540, scale: 2),
+                                                 end: VEMotionFraming(x: 0, y: 0, scale: 1.5),
+                                                 interpolation: .easeOut, from: frames(200), duration: frames(100)).ok)
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.detection, .move(KenBurnsModel.ExistingMove(first: 0, last: 299, hasKeyframesBetween: true,
+                                                                         interpolation: .linear)))
+        XCTAssertEqual(model.rangeCaption,
+                       "Editing the move from 00:00:00:00 to 00:00:09:29; keyframes in between are replaced")
+        XCTAssertEqual(model.interpolation, .linear, "the first keyframe's smoothing")
+        XCTAssertEqual(model.end.width, 1280, accuracy: 1e-6, "the framing on the last frame (150 %)")
+        XCTAssertTrue(store.applyKenBurns())
+        for parameter: VEMotionParameter in [.positionX, .positionY, .scale] {
+            XCTAssertEqual(try clip(id).keyframes(for: parameter).map(\.frameTime), [frames(0), frames(299)])
+        }
+    }
+
+    func testAClipWithoutAMoveOpensOnTheWholeClipPushIn() async throws {
+        let id = try await placedClip()
+        // Rotation keyframes and keyframes all on one frame are not a move.
+        store.playheadTime = frames(10)
+        inspector.toggleKeyframe(.rotation)
+        store.playheadTime = frames(40)
+        inspector.setValue(.rotation, 0)
+        XCTAssertEqual(try clip(id).keyframes(for: .rotation).count, 2)
+        store.beginKenBurns(clip: id)
+        var model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.detection, .none)
+        XCTAssertEqual(model.range, .wholeClip)
+        XCTAssertEqual(model.rangeChoices, [.wholeClip, .fromPlayhead, .fromClipStart], "no Existing move to offer")
+        XCTAssertEqual(model.interpolation, .easeInOut)
+        XCTAssertEqual(model.start, CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        XCTAssertEqual(model.end.width, 1920 * KenBurnsModel.defaultEndFraction, accuracy: 1e-9, "the push in")
+        XCTAssertNil(model.rangeCaption)
+        store.cancelKenBurns()
+
+        store.playheadTime = frames(30)
+        inspector.toggleKeyframe(.scale)
+        inspector.toggleKeyframe(.positionX)
+        store.beginKenBurns(clip: id)
+        model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.detection, .none, "keyframes on a single frame")
+        XCTAssertEqual(model.range, .wholeClip)
+    }
+
+    func testAMoveHiddenByATrimFallsBackToTheWholeClipAndSaysWhy() async throws {
+        let id = try await placedClip()
+        XCTAssertTrue(store.engine.applyKenBurns(clip: id, start: VEMotionFraming(x: 0, y: 0, scale: 1),
+                                                 end: VEMotionFraming(x: -960, y: -540, scale: 2),
+                                                 interpolation: .easeInOut).ok)
+        XCTAssertTrue(store.engine.trimClipHead(id, to: frames(10), clamp: false).ok)
+        XCTAssertTrue(store.engine.trimClipTail(id, to: frames(50), clamp: false).ok)
+        XCTAssertTrue(try clip(id).keyframes(for: .scale).allSatisfy { !$0.isInsideClip }, "both hidden")
+        store.selection = [id]
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.detection, .hiddenOnly)
+        XCTAssertEqual(model.range, .wholeClip)
+        XCTAssertEqual(model.rangeCaption, KenBurnsModel.hiddenMoveCaption)
+        XCTAssertFalse(model.rangeChoices.contains(.existingMove))
+        XCTAssertEqual(model.rangeTimecodes, "00:00:00:10 – 00:00:01:19")
+        // The whole clip reaches both ends: Apply replaces the hidden keyframes.
+        XCTAssertTrue(store.applyKenBurns())
+        let keys = try clip(id).keyframes(for: .scale)
+        XCTAssertEqual(keys.map(\.frameTime), [frames(10), frames(49)])
+        XCTAssertTrue(keys.allSatisfy(\.isInsideClip))
+    }
+
+    func testTheExistingMoveFollowsModelChangesWhileTheHelperIsOpen() async throws {
+        let id = try await longClip()
+        try applyPartialMove(id)
+        // A smoothing the helper does not offer is not taken.
+        XCTAssertTrue(store.engine.setKeyframeInterpolation(.hold, parameter: .positionX, clip: id, at: frames(60)).ok)
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        XCTAssertNotNil(model.existingMove)
+        XCTAssertNil(model.existingMove?.interpolation)
+        XCTAssertEqual(model.interpolation, .easeInOut, "Hold is not offered: the default")
+        // The end keyframes move two frames earlier (all three parameters): the range follows.
+        for parameter: VEMotionParameter in [.positionX, .positionY, .scale] {
+            XCTAssertTrue(store.engine.moveKeyframe(clip: id, parameter: parameter, from: frames(209), to: frames(207)).ok)
+        }
+        XCTAssertTrue(store.kenBurns === model)
+        XCTAssertEqual(model.rangeTimecodes, "00:00:02:00 – 00:00:06:27")
+        // Undone back to no move at all: the range falls back to the whole clip.
+        while try clip(id).hasKeyframes, store.canUndo { store.undo() }
+        XCTAssertFalse(try clip(id).hasKeyframes)
+        XCTAssertEqual(model.detection, .none)
+        XCTAssertEqual(model.range, .wholeClip)
+        XCTAssertFalse(model.rangeChoices.contains(.existingMove))
     }
 
     // MARK: Neighbour matching

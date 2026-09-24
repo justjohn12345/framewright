@@ -16,6 +16,14 @@ import FramewrightEngine
 /// the move the picture holds the start framing and after it the end framing, so a 5 s push in at
 /// the head of a 30 s clip holds its end framing for the other 25 s.
 ///
+/// Editing a move: when the clip already has position or scale keyframes on its frames
+/// (`detectMove(in:frameDuration:)`), the helper opens on that move ("Existing move"): the range is
+/// the span from the earliest to the latest of those keyframes' frames, the rectangles show the
+/// framing on its first and last frames and the smoothing is the first keyframe's (when the helper
+/// offers it), so Apply replaces the move in place. The span follows the keyframes while the helper
+/// is open (a keyframe dragged in the timeline, an undo). Keyframes a trim hid do not count, unless
+/// they are the only ones: then the move covers the whole clip and `rangeCaption` says why.
+///
 /// Neighbours: with a clip touching this one's start on its track, "Continue from previous clip"
 /// (`continuesFromPrevious`) puts the start rectangle on the framing the previous clip ends with;
 /// with one touching its end, "Lead into next clip" (`leadsIntoNext`) puts the end rectangle on the
@@ -59,6 +67,9 @@ final class KenBurnsModel: ObservableObject {
         case fromPlayhead
         /// `durationFrames` from the clip's first frame.
         case fromClipStart
+        /// The move already on the clip (`existingMove`): from its first to its last position or
+        /// scale keyframe. Offered only while the clip has one.
+        case existingMove
 
         var id: String { rawValue }
 
@@ -67,8 +78,31 @@ final class KenBurnsModel: ObservableObject {
             case .wholeClip: return "Whole clip"
             case .fromPlayhead: return "From playhead"
             case .fromClipStart: return "From clip start"
+            case .existingMove: return "Existing move"
             }
         }
+    }
+
+    /// A move already on the clip: the frames (counted from the clip's first frame) of its earliest
+    /// and latest position or scale keyframes that a frame of the clip shows.
+    struct ExistingMove: Equatable {
+        let first: Int64
+        let last: Int64
+        /// Position or scale keyframes lie on frames between the two (a curve through them, or
+        /// several moves): Apply replaces them.
+        let hasKeyframesBetween: Bool
+        /// The smoothing of the move's first keyframe (position X, else Y, else scale), when it is
+        /// one of `interpolations`; else nil.
+        let interpolation: VEKeyframeInterpolation?
+    }
+
+    /// What `detectMove(in:frameDuration:)` finds on a clip.
+    enum MoveDetection: Equatable {
+        /// No position or scale keyframes on two different frames of the clip.
+        case none
+        /// Position or scale keyframes exist, but a trim hid every one of them.
+        case hiddenOnly
+        case move(ExistingMove)
     }
 
     /// A touching neighbour's framing at the cut (its last frame before this clip, its first after).
@@ -109,6 +143,9 @@ final class KenBurnsModel: ObservableObject {
     static let defaultRangeSeconds = 5.0
     /// The caption shown while the move ends before the clip does.
     static let holdCaption = "Holds the end framing until the clip ends"
+    /// The caption shown when the clip's position and scale keyframes are all hidden by a trim.
+    static let hiddenMoveCaption = "The clip's position and scale keyframes are all in parts a trim hid: "
+        + "the move covers the whole clip (Apply replaces them)"
 
     /// The clip as it is now (the store passes every change through `update(clip:)`).
     private(set) var clip: VEClipInfo
@@ -140,6 +177,8 @@ final class KenBurnsModel: ObservableObject {
     @Published private(set) var durationNote: String?
     /// The program playhead (where "From playhead" starts).
     @Published private(set) var playhead: CMTime
+    /// The move already on the clip (updated with every clip change while the helper is open).
+    @Published private(set) var detection: MoveDetection
     /// The clip touching this one's start / end on its track (nil when there is none).
     @Published private(set) var previous: Neighbour?
     @Published private(set) var next: Neighbour?
@@ -195,20 +234,88 @@ final class KenBurnsModel: ObservableObject {
                                            in: sequenceSize)
         start = .zero
         end = .zero
+        detection = Self.detectMove(in: clip, frameDuration: frame)
         self.previous = Neighbour(previous, atEnd: true, frameDuration: frame)
         self.next = Neighbour(next, atEnd: false, frameDuration: frame)
-        continuesFromPrevious = self.previous?.isFollowedByDefault ?? false
-        leadsIntoNext = self.next?.isFollowedByDefault ?? false
+        if case let .move(move) = detection {
+            // Editing the clip's move: it opens as it is. A neighbour is followed only where the move
+            // already continues it (its end of the clip, the same framing), so the rectangles show the
+            // clip's own framing.
+            range = .existingMove
+            interpolation = move.interpolation ?? interpolation
+            let lastFrame = max(0, clipFrames - 1)
+            continuesFromPrevious = self.previous.map {
+                move.first == 0 && Self.sameFraming(framing(atFrame: 0), $0.framing)
+            } ?? false
+            leadsIntoNext = self.next.map {
+                move.last == lastFrame && Self.sameFraming(framing(atFrame: lastFrame), $0.framing)
+            } ?? false
+        } else {
+            continuesFromPrevious = self.previous?.isFollowedByDefault ?? false
+            leadsIntoNext = self.next?.isFollowedByDefault ?? false
+        }
         rangeChanged()
+    }
+
+    // MARK: Existing move
+
+    /// Frames of `time` from zero on a `frameDuration` grid (the frame containing it).
+    static func frameIndex(_ time: CMTime, frameDuration: CMTime) -> Int64 {
+        let frame = frameDuration.secondsOrZero
+        guard frame > 0 else { return 0 }
+        return Int64((time.secondsOrZero / frame + 1e-6).rounded(.down))
+    }
+
+    /// The move already on `clip`: the span of the frames that show its position X, position Y and
+    /// scale keyframes (`VEKeyframe.frameTime`), from the earliest to the latest. Keyframes a trim hid
+    /// are ignored unless they are the only ones (`.hiddenOnly`); keyframes all on one frame are no
+    /// move (`.none`).
+    static func detectMove(in clip: VEClipInfo, frameDuration: CMTime) -> MoveDetection {
+        guard clip.trackKind == .video, clip.hasKeyframes else { return .none }
+        let clipStart = frameIndex(clip.timelineStart, frameDuration: frameDuration)
+        var shown: [(frame: Int64, keyframe: VEKeyframe)] = [] // in parameter order, then time
+        var hidden = false
+        for parameter: VEMotionParameter in [.positionX, .positionY, .scale] {
+            for keyframe in clip.keyframes(for: parameter) {
+                if keyframe.isInsideClip {
+                    shown.append((frameIndex(keyframe.frameTime, frameDuration: frameDuration) - clipStart, keyframe))
+                } else {
+                    hidden = true
+                }
+            }
+        }
+        guard let first = shown.map(\.frame).min(), let last = shown.map(\.frame).max() else {
+            return hidden ? .hiddenOnly : .none
+        }
+        guard last > first else { return .none }
+        let opening = shown.first { $0.frame == first }?.keyframe.interpolation
+        return .move(ExistingMove(first: first, last: last,
+                                  hasKeyframesBetween: shown.contains { $0.frame > first && $0.frame < last },
+                                  interpolation: opening.flatMap { interpolations.contains($0) ? $0 : nil }))
+    }
+
+    /// The move already on the clip, if any.
+    var existingMove: ExistingMove? {
+        if case let .move(move) = detection { return move }
+        return nil
+    }
+
+    /// The ranges the Move menu offers (Existing move only while the clip has one).
+    var rangeChoices: [MoveRange] {
+        MoveRange.allCases.filter { $0 != .existingMove || existingMove != nil || range == .existingMove }
+    }
+
+    /// The clip's position and scale on its frame `offset` frames from its first.
+    private func framing(atFrame offset: Int64) -> VEMotionFraming {
+        let motion = clip.motion(at: CMTimeAdd(clip.timelineStart, time(frames: offset)))
+        return VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale)
     }
 
     // MARK: Range
 
     /// Frames of `time` from zero on the sequence's frame grid (the frame containing it).
     private func frameIndex(_ time: CMTime) -> Int64 {
-        let frame = frameDuration.secondsOrZero
-        guard frame > 0 else { return 0 }
-        return Int64((time.secondsOrZero / frame + 1e-6).rounded(.down))
+        Self.frameIndex(time, frameDuration: frameDuration)
     }
 
     private func time(frames: Int64) -> CMTime {
@@ -227,7 +334,16 @@ final class KenBurnsModel: ObservableObject {
         case .fromPlayhead:
             let offset = frameIndex(playhead) - frameIndex(clip.timelineStart)
             return offset >= 0 && offset < clipFrames ? offset : nil
+        case .existingMove:
+            return existingSpan?.first ?? 0
         }
+    }
+
+    /// The existing move's frames, kept within the clip's (first before last); nil without one.
+    private var existingSpan: (first: Int64, last: Int64)? {
+        guard let move = existingMove, clipFrames >= 2 else { return nil }
+        let first = min(max(0, move.first), clipFrames - 2)
+        return (first, min(max(first + 1, move.last), clipFrames - 1))
     }
 
     /// Frames of the clip from the range's first frame to its end.
@@ -248,11 +364,17 @@ final class KenBurnsModel: ObservableObject {
             return clipFrames
         case .fromPlayhead, .fromClipStart:
             return min(requestedFrames ?? defaultFrames, remainingFrames)
+        case .existingMove:
+            guard let span = existingSpan else { return clipFrames }
+            return span.last - span.first + 1
         }
     }
 
     /// Why the move cannot be applied with this range (nil when it can).
     var rangeProblem: String? {
+        if clipFrames < 2 {
+            return "The clip is one frame long: a Ken Burns move needs at least two frames."
+        }
         guard let offset = rangeOffset else {
             return "Move the playhead over the clip to start the move there."
         }
@@ -281,14 +403,21 @@ final class KenBurnsModel: ObservableObject {
             + "\(Timecode.string(rangeLastFrame, frameDuration: frameDuration))"
     }
 
-    /// The caption under the range: why it cannot be applied, or that the end framing holds.
+    /// The caption under the range: why it cannot be applied, which existing move it edits, that
+    /// the clip's keyframes are all hidden by a trim, or that the end framing holds.
     var rangeCaption: String? {
         if let rangeProblem { return rangeProblem }
+        if range == .existingMove, let move = existingMove {
+            let span = "Editing the move from \(Timecode.string(rangeStart, frameDuration: frameDuration)) to "
+                + Timecode.string(rangeLastFrame, frameDuration: frameDuration)
+            return move.hasKeyframesBetween ? span + "; keyframes in between are replaced" : span
+        }
+        if range == .wholeClip, detection == .hiddenOnly { return Self.hiddenMoveCaption }
         return durationFrames < remainingFrames ? Self.holdCaption : nil
     }
 
-    /// Whether the Duration field can be edited (not for the whole clip).
-    var isDurationEditable: Bool { range != .wholeClip }
+    /// Whether the Duration field can be edited (not for the whole clip or the existing move).
+    var isDurationEditable: Bool { range != .wholeClip && range != .existingMove }
 
     /// `frames` in the user's duration format.
     func durationString(frames: Int64) -> String {
@@ -347,7 +476,14 @@ final class KenBurnsModel: ObservableObject {
         // A neighbour that went away cannot be followed (the didSet refreshes the rectangle).
         if before == nil, continuesFromPrevious { continuesFromPrevious = false }
         if after == nil, leadsIntoNext { leadsIntoNext = false }
-        rangeChanged()
+        // The existing move follows its keyframes (dragged in the timeline, undone...).
+        let detected = Self.detectMove(in: clip, frameDuration: frameDuration)
+        if detected != detection { detection = detected }
+        if range == .existingMove, existingMove == nil {
+            range = .wholeClip // the move is gone (the didSet refreshes the range)
+        } else {
+            rangeChanged()
+        }
     }
 
     /// The range, the playhead or the clip changed: reformat the duration and move the rectangles

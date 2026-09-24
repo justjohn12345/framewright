@@ -835,8 +835,10 @@ final class ProjectStore: ObservableObject {
     // MARK: Ken Burns
 
     /// The inspector's Ken Burns… button: shows the start and end rectangles of `clip` on the
-    /// program monitor (from its current position and scale at its first and last frames, or a
-    /// gentle push in when it has none), over the whole clip until another range is chosen.
+    /// program monitor. A clip with a move (position or scale keyframes on two of its frames) opens
+    /// on that move ("Existing move": its range, its framing at the range's ends, its smoothing), so
+    /// Apply edits it in place; otherwise the range is the whole clip and the rectangles show its
+    /// position and scale at its first and last frames, or a gentle push in when it has none.
     /// Nothing changes until `applyKenBurns()`.
     func beginKenBurns(clip id: VEClipID) {
         guard !isGestureActive else {
