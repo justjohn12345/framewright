@@ -313,6 +313,41 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
     *motion = ve::facade::toVE(*values);
     return YES;
 }
+- (BOOL)getBaseValues:(VESpanValues *)values
+            underSpan:(VESpanID)spanID
+                atEnd:(BOOL)atEnd
+        frameDuration:(CMTime)frameDuration {
+    const ve::EffectSpan *span = _clip.findSpan(ve::SpanId(static_cast<ve::SpanId::ValueType>(spanID)));
+    if (span == nullptr || values == nullptr || span->kind == ve::SpanKind::Transition ||
+        !ve::isPositive(frameDuration)) {
+        return NO;
+    }
+    const auto time = ve::spanEdgeFrameTime(_clip, *span, frameDuration, atEnd);
+    if (!time) {
+        return NO;
+    }
+    VESpanValues base = VESpanValuesUnchanged();
+    switch (span->kind) {
+    case ve::SpanKind::Motion: {
+        const ve::VideoParams rest = ve::composeMotion(_clip, *time, span->id);
+        base.x = rest.x;
+        base.y = rest.y;
+        base.scale = rest.scale;
+        base.rotationDegrees = rest.rotationDegrees;
+        break;
+    }
+    case ve::SpanKind::Opacity:
+        base.opacity = ve::composeMotion(_clip, *time, span->id).opacity;
+        break;
+    case ve::SpanKind::Gain:
+        base.gainDb = ve::composeGainDb(_clip, *time, span->id);
+        break;
+    case ve::SpanKind::Transition:
+        return NO;
+    }
+    *values = base;
+    return YES;
+}
 - (NSString *)description {
     return [NSString stringWithFormat:@"<VEClipInfo %lld asset %lld track %lld [%@, %@)>", self.clipID, self.assetID,
                                       self.trackID, describeTime(self.timelineStart), describeTime(self.timelineEnd)];

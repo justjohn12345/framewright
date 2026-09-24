@@ -352,6 +352,98 @@ VESpanValues values(double x, double scale) {
                    VEEditErrorSpanNotFound);
 }
 
+/// getBaseValues(_:underSpan:) is what the rest of the clip composes to under an edge: an edge shows
+/// base + value (position, rotation, gain) or base x value (scale, opacity), at the same instants as
+/// getMotion(_:atEdgeOfSpan:), so a wanted value on screen converts back exactly, even under a fade
+/// from 0 (whose edge shows 0 whatever the base).
+- (void)testBaseValuesUnderASpanEdgeInvertTheComposition {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    const auto [video, audio] = [self place:engine asset:asset at:0 from:0 to:90];
+    const VEVideoParams placed{40, -10, 1.5, 5, 0.8};
+    XCTAssertTrue([engine setVideoParams:placed forClip:video].ok);
+    // Lane 1: a zoom over [0, 30) holding 2x after it; lane 2: a move over [15, 60).
+    const VESpanID zoom = [engine addSpanOfKind:VESpanKindMotion lane:1 clip:video range:framesRange(0, 30)].span.spanID;
+    XCTAssertTrue([engine setValuesOfSpan:zoom start:values(NAN, 1) end:values(NAN, 2)].ok);
+    const VESpanID move = [engine addSpanOfKind:VESpanKindMotion lane:2 clip:video range:framesRange(15, 60)].span.spanID;
+    VESpanValues moveStart = VESpanValuesUnchanged();
+    moveStart.x = -30;
+    moveStart.scale = 1.25;
+    moveStart.rotationDegrees = 10;
+    VESpanValues moveEnd = VESpanValuesUnchanged();
+    moveEnd.x = 60;
+    moveEnd.scale = 0.5;
+    moveEnd.rotationDegrees = -20;
+    XCTAssertTrue([engine setValuesOfSpan:move start:moveStart end:moveEnd].ok);
+    VEClipInfo *info = [engine clipInfo:video];
+    VEEffectSpan *moveInfo = [engine spanInfo:move];
+    for (const BOOL atEnd : {NO, YES}) {
+        VESpanValues base = VESpanValuesUnchanged();
+        XCTAssertTrue([info getBaseValues:&base underSpan:move atEnd:atEnd frameDuration:frames30(1)]);
+        VEVideoParams edge = VEVideoParamsIdentity();
+        XCTAssertTrue([info getMotion:&edge atEdgeOfSpan:move atEnd:atEnd frameDuration:frames30(1)]);
+        const VESpanValues own = atEnd ? moveInfo.endValues : moveInfo.startValues;
+        XCTAssertEqualWithAccuracy(base.x + own.x, edge.x, 1e-9);
+        XCTAssertEqualWithAccuracy(base.y + own.y, edge.y, 1e-9);
+        XCTAssertEqualWithAccuracy(base.scale * own.scale, edge.scale, 1e-12);
+        XCTAssertEqualWithAccuracy(base.rotationDegrees + own.rotationDegrees, edge.rotationDegrees, 1e-9);
+        XCTAssertTrue(std::isnan(base.opacity), @"not a Motion field");
+        XCTAssertTrue(std::isnan(base.gainDb));
+    }
+    // At the move's start the zoom is halfway (1.5x); at its last frame it holds its 2x.
+    VESpanValues startBase = VESpanValuesUnchanged();
+    XCTAssertTrue([info getBaseValues:&startBase underSpan:move atEnd:NO frameDuration:frames30(1)]);
+    XCTAssertEqualWithAccuracy(startBase.scale, 1.5 * 1.5, 1e-12, @"static 1.5 x the zoom halfway");
+    XCTAssertEqualWithAccuracy(startBase.x, 40, 1e-12);
+    VESpanValues endBase = VESpanValuesUnchanged();
+    XCTAssertTrue([info getBaseValues:&endBase underSpan:move atEnd:YES frameDuration:frames30(1)]);
+    XCTAssertEqualWithAccuracy(endBase.scale, 1.5 * 2, 1e-12, @"the zoom's held end value");
+
+    // A fade from 0: the edge shows 0, the base still says what a value would multiply.
+    const VESpanID fade = [engine addSpanOfKind:VESpanKindOpacity lane:3 clip:video range:framesRange(0, 20)].span.spanID;
+    VESpanValues fadeStart = VESpanValuesUnchanged();
+    fadeStart.opacity = 0;
+    XCTAssertTrue([engine setValuesOfSpan:fade start:fadeStart end:VESpanValuesUnchanged()].ok);
+    info = [engine clipInfo:video];
+    XCTAssertEqual([info videoParamsAtTime:frames30(0)].opacity, 0);
+    VESpanValues fadeBase = VESpanValuesUnchanged();
+    XCTAssertTrue([info getBaseValues:&fadeBase underSpan:fade atEnd:NO frameDuration:frames30(1)]);
+    XCTAssertEqualWithAccuracy(fadeBase.opacity, 0.8, 1e-12, @"the static opacity");
+    XCTAssertTrue(std::isnan(fadeBase.x), @"only the Opacity field");
+    VESpanValues fadeEndBase = VESpanValuesUnchanged();
+    XCTAssertTrue([info getBaseValues:&fadeEndBase underSpan:fade atEnd:YES frameDuration:frames30(1)]);
+    XCTAssertEqualWithAccuracy(fadeEndBase.opacity * 1.0, [info videoParamsAtTime:frames30(20)].opacity, 1e-12,
+                               @"after its end the fade holds its end value on the base");
+
+    // Gain on the audio clip: base + value in dB.
+    const VEAudioParams quieter{-6, kCMTimeZero, kCMTimeZero};
+    XCTAssertTrue([engine setAudioParams:quieter forClip:audio].ok);
+    const VESpanID gain = [engine addSpanOfKind:VESpanKindGain lane:1 clip:audio range:framesRange(30, 60)].span.spanID;
+    VESpanValues gainEnd = VESpanValuesUnchanged();
+    gainEnd.gainDb = -12;
+    XCTAssertTrue([engine setValuesOfSpan:gain start:VESpanValuesUnchanged() end:gainEnd].ok);
+    VEClipInfo *sound = [engine clipInfo:audio];
+    VESpanValues gainBase = VESpanValuesUnchanged();
+    XCTAssertTrue([sound getBaseValues:&gainBase underSpan:gain atEnd:YES frameDuration:frames30(1)]);
+    XCTAssertEqualWithAccuracy(gainBase.gainDb, -6, 1e-12);
+    XCTAssertEqualWithAccuracy(gainBase.gainDb + gainEnd.gainDb, [sound gainDbAtTime:frames30(70)], 1e-9);
+    XCTAssertTrue(std::isnan(gainBase.scale));
+
+    // Refused: an unknown span, a transition, a non-positive frame duration.
+    VESpanValues untouched = VESpanValuesUnchanged();
+    untouched.x = 7;
+    XCTAssertFalse([info getBaseValues:&untouched underSpan:999 atEnd:NO frameDuration:frames30(1)]);
+    XCTAssertFalse([info getBaseValues:&untouched underSpan:move atEnd:NO frameDuration:kCMTimeZero]);
+    VEEditResult *fadeOut = [engine addTransitionAtEdge:VEClipEdgeEnd ofClip:video duration:frames30(10)
+                                                options:VETransitionOptionNone];
+    XCTAssertTrue(fadeOut.ok, @"%@", fadeOut.message);
+    XCTAssertFalse([[engine clipInfo:video] getBaseValues:&untouched
+                                                underSpan:fadeOut.createdIDs.firstObject.longLongValue
+                                                    atEnd:NO
+                                            frameDuration:frames30(1)]);
+    XCTAssertEqual(untouched.x, 7, @"left unchanged");
+}
+
 - (void)testAKenBurnsMoveHoldsItsEndFramingAndTheNextMoveStartsThere {
     VEAssetInfo *asset = nil;
     VEEngine *engine = [self engineWithAsset:&asset];

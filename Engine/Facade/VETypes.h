@@ -289,6 +289,20 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
      atEdgeOfSpan:(VESpanID)spanID
             atEnd:(BOOL)atEnd
     frameDuration:(CMTime)frameDuration NS_SWIFT_NAME(getMotion(_:atEdgeOfSpan:atEnd:frameDuration:));
+/// What the rest of the clip composes to under an edge of its effect span `spanID`: the values the
+/// span's own (relative) values apply onto there. It is the clip's static values with every other
+/// span that has started composed on, at the instant getMotion(_:atEdgeOfSpan:atEnd:frameDuration:)
+/// reads (the span's start, or its last frame for `atEnd`), what earlier spans hold there included.
+/// So an edge shows base + value for Position X/Y, Rotation and Gain and base x value for Scale and
+/// Opacity, and a value wanted on screen converts back to the span's value exactly (a fade from 0
+/// included, whose edge shows 0 whatever the base). The fields of the span's kind are set (Motion: x,
+/// y, scale, rotationDegrees; Opacity: opacity; Gain: gainDb), the others are NaN. Returns NO, leaving
+/// `values` unchanged, for an unknown span, a transition, a non-positive frame duration or a time
+/// with no exact form.
+- (BOOL)getBaseValues:(VESpanValues *)values
+            underSpan:(VESpanID)spanID
+                atEnd:(BOOL)atEnd
+        frameDuration:(CMTime)frameDuration NS_SWIFT_NAME(getBaseValues(_:underSpan:atEnd:frameDuration:));
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
