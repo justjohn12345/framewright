@@ -305,16 +305,23 @@ struct ProbedFile {
 } // namespace
 
 @interface VEClipParamsBatch ()
-/// The batch as engine changes, in the order clips were first added (video parameters without
-/// keyframes: the engine command gets each clip's keyframes from -applyClipParams:).
+/// The batch as engine changes, in the order clips were first added.
 @property (nonatomic, readonly) std::vector<ClipParamsChange> changes;
-/// Whether the batch removes the clip's Motion keyframes (setVideoParams:clearingKeyframesForClip:).
-- (BOOL)clearsKeyframesOfClip:(ClipId)clipId;
 @end
+
+namespace {
+
+/// The engine change for VEAudioParams: the static gain and the lane-0 fade lengths.
+void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
+    change.audio = fromVE(params);
+    change.fadeIn = params.fadeInDuration;
+    change.fadeOut = params.fadeOutDuration;
+}
+
+} // namespace
 
 @implementation VEClipParamsBatch {
     std::vector<ClipParamsChange> _changes;
-    std::set<ClipId> _clearsKeyframes; // clips whose Motion keyframes the batch removes
 }
 
 - (ClipParamsChange &)entryForClip:(VEClipID)clipID {
@@ -333,18 +340,11 @@ struct ProbedFile {
 - (void)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
     [self entryForClip:clipID].video = fromVE(params);
-    _clearsKeyframes.erase(ClipId(static_cast<ClipId::ValueType>(clipID)));
-}
-
-- (void)setVideoParams:(VEVideoParams)params clearingKeyframesForClip:(VEClipID)clipID {
-    VE_ASSERT_MAIN();
-    [self entryForClip:clipID].video = fromVE(params);
-    _clearsKeyframes.insert(ClipId(static_cast<ClipId::ValueType>(clipID)));
 }
 
 - (void)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
-    [self entryForClip:clipID].audio = fromVE(params);
+    setAudioChange([self entryForClip:clipID], params);
 }
 
 - (NSUInteger)count {
@@ -354,10 +354,6 @@ struct ProbedFile {
 
 - (std::vector<ClipParamsChange>)changes {
     return _changes;
-}
-
-- (BOOL)clearsKeyframesOfClip:(ClipId)clipId {
-    return _clearsKeyframes.count(clipId) > 0;
 }
 
 @end
@@ -1025,7 +1021,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     const ClipId id(static_cast<ClipId::ValueType>(clipID));
     const Track *track = sequence.trackOfClip(id);
     const Clip *clip = track ? track->find(id) : nullptr;
-    return clip ? makeClipInfo(*clip, *track, _project, sequence.frameDuration) : nil;
+    return clip ? makeClipInfo(*clip, *track, _project, sequence) : nil;
 }
 
 - (nullable VETrackInfo *)trackInfo:(VETrackID)trackID {
@@ -1055,9 +1051,8 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 
 - (nullable VETransitionInfo *)transitionInfo:(VETransitionID)transitionID {
     VE_ASSERT_MAIN();
-    const Sequence &sequence = [self activeSequence];
-    const Transition *t = sequence.findTransition(TransitionId(static_cast<TransitionId::ValueType>(transitionID)));
-    return t ? makeTransitionInfo(*t, sequence) : nil;
+    const auto transition = findTransition([self activeSequence], SpanId(static_cast<SpanId::ValueType>(transitionID)));
+    return transition ? makeTransitionInfo(*transition) : nil;
 }
 
 - (NSArray<VEAssetInfo *> *)allAssets {
@@ -1087,7 +1082,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     NSMutableArray<VEClipInfo *> *clips = [NSMutableArray array];
     if (track != nullptr) {
         for (const Clip &clip : track->clips) {
-            [clips addObject:makeClipInfo(clip, *track, _project, [self activeSequence].frameDuration)];
+            [clips addObject:makeClipInfo(clip, *track, _project, [self activeSequence])];
         }
     }
     return clips;
@@ -1100,7 +1095,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     for (const auto *list : {&sequence.videoTracks, &sequence.audioTracks}) {
         for (const Track &track : *list) {
             for (const Clip &clip : track.clips) {
-                [clips addObject:makeClipInfo(clip, track, _project, sequence.frameDuration)];
+                [clips addObject:makeClipInfo(clip, track, _project, sequence)];
             }
         }
     }
@@ -1826,18 +1821,17 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 
 - (VEEditResult *)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
-    const ClipId id(static_cast<ClipId::ValueType>(clipID));
-    VideoParams video = fromVE(params);
-    if (const Clip *clip = [self activeSequence].findClip(id)) {
-        video.keyframes = clip->video.keyframes; // static values only; the keyframes stay
-    }
-    return [self push:std::make_unique<SetVideoParams>([self sequenceId], id, std::move(video)) created:nil];
+    return [self push:std::make_unique<SetVideoParams>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)),
+                                                       fromVE(params))
+              created:nil];
 }
 
 - (VEEditResult *)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
-    return [self push:std::make_unique<SetAudioParams>([self sequenceId],
-                                                       ClipId(static_cast<ClipId::ValueType>(clipID)), fromVE(params))
+    ClipParamsChange change;
+    change.clipId = ClipId(static_cast<ClipId::ValueType>(clipID));
+    setAudioChange(change, params);
+    return [self push:std::make_unique<SetClipsParams>([self sequenceId], std::vector<ClipParamsChange>{change})
               created:nil];
 }
 
@@ -1846,473 +1840,255 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     if (batch.count == 0) {
         return [VEEditResult failureWithMessage:@"Nothing selected."];
     }
-    std::vector<ClipParamsChange> changes = batch.changes;
-    const Sequence &sequence = [self activeSequence];
-    for (ClipParamsChange &change : changes) {
-        const Clip *clip = sequence.findClip(change.clipId);
-        if (change.video && clip != nullptr && ![batch clearsKeyframesOfClip:change.clipId]) {
-            change.video->keyframes = clip->video.keyframes; // static values only; the keyframes stay
-        }
-    }
-    return [self push:std::make_unique<SetClipsParams>([self sequenceId], std::move(changes)) created:nil];
+    return [self push:std::make_unique<SetClipsParams>([self sequenceId], batch.changes) created:nil];
 }
 
-// MARK: - Keyframed Motion
+// MARK: - Effect spans
 
-/// Refusal of a Motion edit of `clipID` at timeline time `time` (nil when allowed): the clip must
-/// exist on a video track and, with `needsFrame`, the sequence frame containing `time` must be one
-/// of its frames. Sets `clip` and `frame` (the frame's start) when allowed.
-- (nullable VEEditResult *)refuseMotionEditOfClip:(VEClipID)clipID
-                                           atTime:(CMTime)time
-                                       needsFrame:(BOOL)needsFrame
-                                             clip:(const Clip **)clip
-                                            frame:(CMTime *)frame {
+/// The span `spanId` as it is now, or nil.
+- (nullable VEEffectSpan *)effectSpanInfo:(SpanId)spanId {
+    const Sequence &sequence = [self activeSequence];
+    const Clip *clip = nullptr;
+    const Track *track = nullptr;
+    const EffectSpan *span = sequence.findSpan(spanId, &clip, &track);
+    return span != nullptr ? makeEffectSpan(*span, *clip, *track, sequence) : nil;
+}
+
+/// Pushes a span edit; on success the result carries the span `spanId()` names (as it is after the
+/// edit), and `created` lists it when the edit created it.
+- (VEEditResult *)pushSpanCommand:(std::unique_ptr<Command>)command
+                           spanId:(SpanId (^)(void))spanId
+                          created:(BOOL)created
+                             note:(nullable NSString *)note {
+    const EditResult result = [self pushCommand:std::move(command)];
+    if (!result) {
+        return toVE(result);
+    }
+    const SpanId id = spanId();
+    [self notifyModelChanged];
+    NSArray<NSNumber *> *ids = created ? @[ @(static_cast<VESpanID>(id.value())) ] : @[];
+    return makeEditResult(result, ids, note, [self effectSpanInfo:id]);
+}
+
+/// A timeline range as its two ends, or a refusal for an unusable range.
+static std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
+    if (!CMTIME_IS_NUMERIC(range.start) || !CMTIME_IS_NUMERIC(range.duration)) {
+        return std::nullopt;
+    }
+    return std::make_pair(range.start, range.start + range.duration);
+}
+
+- (NSArray<VEEffectSpan *> *)spansForClip:(VEClipID)clipID {
+    VE_ASSERT_MAIN();
     const Sequence &sequence = [self activeSequence];
     const ClipId id(static_cast<ClipId::ValueType>(clipID));
     const Track *track = sequence.trackOfClip(id);
-    const Clip *found = track != nullptr ? track->find(id) : nullptr;
-    if (found == nullptr) {
-        return [VEEditResult failureWithCode:VEEditErrorClipNotFound message:@"The clip no longer exists."];
-    }
-    if (track->kind != TrackKind::Video) {
-        return [VEEditResult failureWithCode:VEEditErrorTrackKindMismatch
-                                     message:@"Audio clips have no Motion to animate."];
-    }
-    *clip = found;
-    *frame = CMTIME_IS_NUMERIC(time) ? snapToFrame(time, sequence.frameDuration, SnapMode::Floor) : kCMTimeInvalid;
-    if (needsFrame && (!CMTIME_IS_NUMERIC(*frame) || *frame < found->timelineStart || *frame >= found->timelineEnd())) {
-        return [VEEditResult failureWithCode:VEEditErrorInvalidTime
-                                     message:@"Move the playhead over the clip to work with its keyframes."];
-    }
-    return nil;
-}
-
-/// VEEditErrorInvalidArgument for a VEMotionParameter outside the enumeration; else sets `out`.
-- (nullable VEEditResult *)refuseMotionParameter:(VEMotionParameter)parameter into:(MotionParameter *)out {
-    const std::optional<MotionParameter> known = fromVE(parameter);
-    if (!known) {
-        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
-                                     message:[NSString stringWithFormat:@"%ld is not a Motion parameter.",
-                                                                        static_cast<long>(parameter)]];
-    }
-    *out = *known;
-    return nil;
-}
-
-/// VEEditErrorNotRepresentable: the source time of the frame `where` describes ("at the playhead",
-/// "where the keyframe would go") has no time form a keyframe can take.
-- (VEEditResult *)keyframeTimeRefusal:(const Clip &)clip where:(NSString *)where {
-    return [VEEditResult
-        failureWithCode:VEEditErrorNotRepresentable
-                message:[NSString stringWithFormat:@"The source time of clip %lld %@ cannot be represented, so no "
-                                                   @"keyframe can go there.",
-                                                   static_cast<long long>(clip.id.value()), where]];
-}
-
-- (VEEditResult *)addKeyframeToClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time {
-    VE_ASSERT_MAIN();
-    const Clip *clip = nullptr;
-    CMTime frame = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:time needsFrame:YES clip:&clip frame:&frame]) {
-        return refusal;
-    }
-    MotionParameter p = MotionParameter::X;
-    if (VEEditResult *refusal = [self refuseMotionParameter:parameter into:&p]) {
-        return refusal;
-    }
-    if (keyframeIndexForFrame(*clip, p, frame, [self activeSequence].frameDuration)) {
-        return [VEEditResult failureWithCode:VEEditErrorAlreadyExists
-                                     message:[NSString stringWithFormat:@"%s already has a keyframe at the playhead.",
-                                                                        displayNameOf(p)]];
-    }
-    const std::optional<CMTime> at = keyframeTimeForFrame(*clip, frame);
-    if (!at) {
-        return [self keyframeTimeRefusal:*clip where:@"at the playhead"];
-    }
-    return [self push:std::make_unique<AddKeyframe>([self sequenceId], clip->id, p, *at) created:nil];
-}
-
-- (VEEditResult *)removeKeyframeFromClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time {
-    VE_ASSERT_MAIN();
-    const Clip *clip = nullptr;
-    CMTime frame = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:time needsFrame:YES clip:&clip frame:&frame]) {
-        return refusal;
-    }
-    MotionParameter p = MotionParameter::X;
-    if (VEEditResult *refusal = [self refuseMotionParameter:parameter into:&p]) {
-        return refusal;
-    }
-    const auto index = keyframeIndexForFrame(*clip, p, frame, [self activeSequence].frameDuration);
-    if (!index) {
-        return [VEEditResult failureWithCode:VEEditErrorKeyframeNotFound
-                                     message:[NSString stringWithFormat:@"%s has no keyframe at the playhead.",
-                                                                        displayNameOf(p)]];
-    }
-    const CMTime at = clip->video.keyframes.track(p)[*index].time;
-    return [self push:std::make_unique<RemoveKeyframe>([self sequenceId], clip->id, p, at) created:nil];
-}
-
-- (VEEditResult *)setMotionValue:(double)value
-                       parameter:(VEMotionParameter)parameter
-                            clip:(VEClipID)clipID
-                          atTime:(CMTime)time {
-    VE_ASSERT_MAIN();
-    const Clip *clip = nullptr;
-    CMTime frame = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:time needsFrame:NO clip:&clip frame:&frame]) {
-        return refusal;
-    }
-    MotionParameter p = MotionParameter::X;
-    if (VEEditResult *refusal = [self refuseMotionParameter:parameter into:&p]) {
-        return refusal;
-    }
-    std::optional<CMTime> keyframeTime;
-    if (clip->video.isAnimated(p)) {
-        // An animated parameter changes at the playhead: the keyframe there, or a new one.
-        if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
-                                                          atTime:time
-                                                      needsFrame:YES
-                                                            clip:&clip
-                                                           frame:&frame]) {
-            return refusal;
-        }
-        keyframeTime = keyframeTimeForFrame(*clip, frame);
-        if (!keyframeTime) {
-            return [self keyframeTimeRefusal:*clip where:@"at the playhead"];
-        }
-        const CMTime fd = [self activeSequence].frameDuration;
-        const auto index = keyframeIndexForFrame(*clip, p, frame, fd);
-        if (index && !(clip->video.keyframes.track(p)[*index].time == *keyframeTime)) {
-            // The keyframe the frame shows is not on the frame's start, where the frame's picture is
-            // evaluated (a split's out point, or inside a frame of a sped-up clip): writing the value
-            // into it would show something else. Put the value on the frame's start instead, the
-            // frame's other keyframes giving way (planMotionValueAtFrame), as one edit.
-            MotionTrackChange change;
-            if (EditResult planned = planMotionValueAtFrame(*clip, fd, frame, p, value, change); !planned) {
-                return toVE(planned);
-            }
-            return [self push:std::make_unique<SetMotionTracks>([self sequenceId], clip->id,
-                                                                std::vector<MotionTrackChange>{std::move(change)},
-                                                                "Change Keyframe")
-                      created:nil];
+    const Clip *clip = track ? track->find(id) : nullptr;
+    NSMutableArray<VEEffectSpan *> *spans = [NSMutableArray array];
+    if (clip != nullptr) {
+        for (const EffectSpan &span : clip->spans) {
+            [spans addObject:makeEffectSpan(span, *clip, *track, sequence)];
         }
     }
-    return [self push:std::make_unique<SetMotionValue>([self sequenceId], clip->id, p, keyframeTime, value) created:nil];
+    return spans;
 }
 
-- (VEEditResult *)setKeyframeInterpolation:(VEKeyframeInterpolation)interpolation
-                                 parameter:(VEMotionParameter)parameter
-                                      clip:(VEClipID)clipID
-                                    atTime:(CMTime)time {
+- (NSArray<VEEffectSpan *> *)spansForTrack:(VETrackID)trackID {
     VE_ASSERT_MAIN();
-    const std::optional<KeyframeInterpolation> engineInterpolation = fromVE(interpolation);
-    if (!engineInterpolation || *engineInterpolation == KeyframeInterpolation::Bezier) {
-        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
-                                     message:@"Choose Hold, Linear or an ease (a custom curve comes only from dividing an eased segment)."];
-    }
-    const Clip *clip = nullptr;
-    CMTime frame = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:time needsFrame:YES clip:&clip frame:&frame]) {
-        return refusal;
-    }
-    MotionParameter p = MotionParameter::X;
-    if (VEEditResult *refusal = [self refuseMotionParameter:parameter into:&p]) {
-        return refusal;
-    }
-    const auto index = keyframeIndexForFrame(*clip, p, frame, [self activeSequence].frameDuration);
-    if (!index) {
-        return [VEEditResult failureWithCode:VEEditErrorKeyframeNotFound
-                                     message:[NSString stringWithFormat:@"%s has no keyframe at the playhead.",
-                                                                        displayNameOf(p)]];
-    }
-    const CMTime at = clip->video.keyframes.track(p)[*index].time;
-    return [self push:std::make_unique<SetKeyframeInterpolation>([self sequenceId], clip->id, p, at,
-                                                                 *engineInterpolation)
-              created:nil];
-}
-
-- (VEEditResult *)moveKeyframeOfClip:(VEClipID)clipID
-                           parameter:(VEMotionParameter)parameter
-                            fromTime:(CMTime)from
-                              toTime:(CMTime)to {
-    VE_ASSERT_MAIN();
-    const Clip *clip = nullptr;
-    CMTime fromFrame = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
-                                                      atTime:from
-                                                  needsFrame:YES
-                                                        clip:&clip
-                                                       frame:&fromFrame]) {
-        return refusal;
-    }
-    CMTime toFrame = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:to needsFrame:YES clip:&clip frame:&toFrame]) {
-        return refusal;
-    }
-    MotionParameter p = MotionParameter::X;
-    if (VEEditResult *refusal = [self refuseMotionParameter:parameter into:&p]) {
-        return refusal;
-    }
-    const auto index = keyframeIndexForFrame(*clip, p, fromFrame, [self activeSequence].frameDuration);
-    if (!index) {
-        return [VEEditResult failureWithCode:VEEditErrorKeyframeNotFound
-                                     message:[NSString stringWithFormat:@"%s has no keyframe there.", displayNameOf(p)]];
-    }
-    const std::optional<CMTime> destination = keyframeTimeForFrame(*clip, toFrame);
-    if (!destination) {
-        return [self keyframeTimeRefusal:*clip where:@"where the keyframe would go"];
-    }
-    const CMTime at = clip->video.keyframes.track(p)[*index].time;
-    return [self push:std::make_unique<MoveKeyframe>([self sequenceId], clip->id, p, at, *destination) created:nil];
-}
-
-- (nullable VEKeyframeGroup *)keyframeGroupOfClip:(VEClipID)clipID atTime:(CMTime)time {
-    VE_ASSERT_MAIN();
-    const Clip *clip = nullptr;
-    CMTime frame = kCMTimeInvalid;
-    if ([self refuseMotionEditOfClip:clipID atTime:time needsFrame:YES clip:&clip frame:&frame] != nil) {
-        return nil;
-    }
     const Sequence &sequence = [self activeSequence];
-    const CMTime fd = sequence.frameDuration;
-    std::vector<MotionParameter> parameters;
-    for (MotionParameter parameter : kMotionParameters) {
-        if (keyframeIndexForFrame(*clip, parameter, frame, fd)) {
-            parameters.push_back(parameter);
+    const Track *track = sequence.findTrack(TrackId(static_cast<TrackId::ValueType>(trackID)));
+    NSMutableArray<VEEffectSpan *> *spans = [NSMutableArray array];
+    if (track != nullptr) {
+        for (const Clip &clip : track->clips) {
+            for (const EffectSpan &span : clip.spans) {
+                [spans addObject:makeEffectSpan(span, clip, *track, sequence)];
+            }
         }
     }
-    if (parameters.empty()) {
-        return nil;
+    return spans;
+}
+
+- (nullable VEEffectSpan *)spanInfo:(VESpanID)spanID {
+    VE_ASSERT_MAIN();
+    return [self effectSpanInfo:SpanId(static_cast<SpanId::ValueType>(spanID))];
+}
+
+- (NSInteger)laneCountForTrack:(VETrackID)trackID {
+    VE_ASSERT_MAIN();
+    const Track *track = [self activeSequence].findTrack(TrackId(static_cast<TrackId::ValueType>(trackID)));
+    if (track == nullptr) {
+        return 0;
     }
-    MotionKeyframeGroup group;
-    const EditResult found = motionKeyframeGroupAt(*clip, fd, frame, group);
-    NSString *refusal = found ? nil : toNS(found.message);
-    if (found) {
-        const Track *track = sequence.trackOfClip(clip->id);
-        if (track != nullptr && track->locked) {
-            refusal = [NSString stringWithFormat:@"Track %@ is locked.", toNS(track->name)];
+    int highest = 0;
+    for (const Clip &clip : track->clips) {
+        for (const EffectSpan &span : clip.spans) {
+            highest = std::max(highest, span.lane);
         }
-    } else if (group.crowdedParameter) {
-        refusal = [NSString stringWithFormat:@"This frame shows several %s keyframes (the clip plays faster than the "
-                                             @"sequence), so they cannot be moved together.",
-                                             displayNameOf(*group.crowdedParameter)];
     }
-    return makeKeyframeGroup(clip->id, frame, parameters, group.earliestFrame, group.latestFrame, refusal);
+    return highest + 1;
 }
 
-- (VEEditResult *)moveKeyframeGroupOfClip:(VEClipID)clipID fromTime:(CMTime)from toTime:(CMTime)to {
+- (VEEditResult *)addSpanOfKind:(VESpanKind)kind lane:(NSInteger)lane clip:(VEClipID)clipID range:(CMTimeRange)range {
     VE_ASSERT_MAIN();
-    const Clip *clip = nullptr;
-    CMTime fromFrame = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
-                                                      atTime:from
-                                                  needsFrame:YES
-                                                        clip:&clip
-                                                       frame:&fromFrame]) {
-        return refusal;
+    const std::optional<SpanKind> spanKind = fromVE(kind);
+    if (!spanKind || *spanKind == SpanKind::Transition) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"Add a Motion, Opacity or Gain span (transitions have their own calls)."];
     }
-    CMTime toFrame = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
-                                                      atTime:to
-                                                  needsFrame:YES
-                                                        clip:&clip
-                                                       frame:&toFrame]) {
-        return refusal;
+    const auto ends = rangeEnds(range);
+    if (!ends) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The span's range is not a valid time range."];
     }
-    // Planned by the command against the model it applies to (in a drag's group: the model before
-    // the drag), not against the model now.
-    return [self push:std::make_unique<MoveKeyframeGroup>([self sequenceId], clip->id, fromFrame, toFrame) created:nil];
+    auto command = std::make_unique<AddSpan>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)), *spanKind,
+                                             static_cast<int>(std::clamp<NSInteger>(lane, INT_MIN, INT_MAX)),
+                                             ends->first, ends->second);
+    AddSpan *raw = command.get();
+    return [self pushSpanCommand:std::move(command)
+                          spanId:^SpanId {
+                              return raw->createdSpanId();
+                          }
+                         created:YES
+                            note:nil];
 }
 
-- (VEEditResult *)removeAnimationFromClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time {
+- (VEEditResult *)setRangeOfSpan:(VESpanID)spanID range:(CMTimeRange)range {
     VE_ASSERT_MAIN();
-    const Clip *clip = nullptr;
-    CMTime frame = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:time needsFrame:NO clip:&clip frame:&frame]) {
-        return refusal;
+    const auto ends = rangeEnds(range);
+    if (!ends) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The span's range is not a valid time range."];
     }
-    MotionParameter p = MotionParameter::X;
-    if (VEEditResult *refusal = [self refuseMotionParameter:parameter into:&p]) {
-        return refusal;
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    return [self pushSpanCommand:std::make_unique<SetSpanRange>([self sequenceId], id, ends->first, ends->second)
+                          spanId:^SpanId {
+                              return id;
+                          }
+                         created:NO
+                            note:nil];
+}
+
+- (VEEditResult *)setValuesOfSpan:(VESpanID)spanID start:(VESpanValues)start end:(VESpanValues)end {
+    VE_ASSERT_MAIN();
+    std::vector<SpanValueChange> changes;
+    for (const SpanParameter parameter : kSpanParameters) {
+        const double from = spanValueIn(start, parameter);
+        const double to = spanValueIn(end, parameter);
+        if (std::isnan(from) && std::isnan(to)) {
+            continue;
+        }
+        SpanValueChange change;
+        change.parameter = parameter;
+        if (!std::isnan(from)) {
+            change.start = from;
+        }
+        if (!std::isnan(to)) {
+            change.end = to;
+        }
+        changes.push_back(change);
     }
-    if (!clip->video.isAnimated(p)) {
-        return [VEEditResult failureWithCode:VEEditErrorKeyframeNotFound
-                                     message:[NSString stringWithFormat:@"%s is not animated.", displayNameOf(p)]];
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    return [self pushSpanCommand:std::make_unique<SetSpanValues>([self sequenceId], id, std::move(changes))
+                          spanId:^SpanId {
+                              return id;
+                          }
+                         created:NO
+                            note:nil];
+}
+
+- (VEEditResult *)setInterpolationOfSpan:(VESpanID)spanID interpolation:(VEKeyframeInterpolation)interpolation {
+    VE_ASSERT_MAIN();
+    const std::optional<KeyframeInterpolation> easing = fromVE(interpolation);
+    if (!easing) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"Unknown interpolation."];
     }
-    // The parameter keeps the value it has at the playhead (the clip's nearest frame when the
-    // playhead is elsewhere), like turning Premiere's animation stopwatch off.
-    const CMTime fd = [self activeSequence].frameDuration;
-    const CMTime last = checkedSubtract(clip->timelineEnd(), fd).value_or(clip->timelineStart);
-    const CMTime at = CMTIME_IS_NUMERIC(frame) ? clampTime(frame, clip->timelineStart, maxTime(last, clip->timelineStart))
-                                               : clip->timelineStart;
-    const double value = motionValuesAt(*clip, at).staticValue(p);
-    MotionTrackChange change;
-    change.parameter = p;
-    change.staticValue = value;
-    return [self push:std::make_unique<SetMotionTracks>([self sequenceId], clip->id,
-                                                        std::vector<MotionTrackChange>{change}, "Remove Animation")
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    return [self pushSpanCommand:std::make_unique<SetSpanInterpolation>([self sequenceId], id, *easing)
+                          spanId:^SpanId {
+                              return id;
+                          }
+                         created:NO
+                            note:nil];
+}
+
+- (VEEditResult *)moveSpan:(VESpanID)spanID toLane:(NSInteger)lane {
+    VE_ASSERT_MAIN();
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    return [self pushSpanCommand:std::make_unique<MoveSpanLane>([self sequenceId], id,
+                                                                static_cast<int>(std::clamp<NSInteger>(lane, INT_MIN, INT_MAX)))
+                          spanId:^SpanId {
+                              return id;
+                          }
+                         created:NO
+                            note:nil];
+}
+
+- (VEEditResult *)removeSpan:(VESpanID)spanID {
+    VE_ASSERT_MAIN();
+    return [self push:std::make_unique<RemoveSpans>([self sequenceId],
+                                                    std::vector<SpanId>{SpanId(static_cast<SpanId::ValueType>(spanID))})
               created:nil];
 }
 
-- (VEEditResult *)applyKenBurnsToClip:(VEClipID)clipID
+- (VEEditResult *)matchSpanEdge:(VESpanID)spanID toAdjacentClipAtEdge:(VEClipEdge)edge {
+    VE_ASSERT_MAIN();
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    const bool previous = edge == VEClipEdgeStart;
+    const Sequence &sequence = [self activeSequence];
+    std::vector<SpanValueChange> changes;
+    if (EditResult planned = planMatchSpanEdge(sequence, id, previous ? ClipEdge::Head : ClipEdge::Tail, changes);
+        !planned) {
+        return toVE(planned);
+    }
+    NSString *what = previous ? @"the previous clip's end" : @"the next clip's start";
+    if (changes.empty()) {
+        const Track *track = nullptr;
+        sequence.findSpan(id, nullptr, &track);
+        if (track != nullptr && track->locked) {
+            return [VEEditResult failureWithCode:VEEditErrorTrackLocked
+                                         message:[NSString stringWithFormat:@"Track %@ is locked.", toNS(track->name)]];
+        }
+        return makeEditResult(EditResult::success(), @[], [NSString stringWithFormat:@"This span already matches %@.", what],
+                              [self effectSpanInfo:id]);
+    }
+    return [self pushSpanCommand:std::make_unique<SetSpanValues>([self sequenceId], id, std::move(changes),
+                                                                 previous ? "Match Previous Clip" : "Match Next Clip")
+                          spanId:^SpanId {
+                              return id;
+                          }
+                         created:NO
+                            note:[NSString stringWithFormat:@"Matched %@.", what]];
+}
+
+- (VEEditResult *)applyKenBurnsToSpan:(VESpanID)spanID
                                 start:(VEMotionFraming)start
                                   end:(VEMotionFraming)end
                         interpolation:(VEKeyframeInterpolation)interpolation {
     VE_ASSERT_MAIN();
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    const Sequence &sequence = [self activeSequence];
     const Clip *clip = nullptr;
-    CMTime frame = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
-                                                      atTime:kCMTimeInvalid
-                                                  needsFrame:NO
-                                                        clip:&clip
-                                                       frame:&frame]) {
-        return refusal;
+    const Track *track = nullptr;
+    const EffectSpan *span = sequence.findSpan(id, &clip, &track);
+    if (span == nullptr) {
+        return [VEEditResult failureWithCode:VEEditErrorSpanNotFound message:@"The span no longer exists."];
     }
-    const CMTime fd = [self activeSequence].frameDuration;
-    const std::optional<CMTime> lastFrame = checkedSubtract(clip->timelineEnd(), fd);
-    if (!lastFrame || !(*lastFrame > clip->timelineStart)) {
+    const std::optional<KeyframeInterpolation> easing = fromVE(interpolation);
+    if (!easing || *easing == KeyframeInterpolation::Bezier) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
-                                     message:@"The clip is one frame long: a Ken Burns move needs at least two frames."];
+                                     message:@"Choose hold, linear or an ease for the Ken Burns move."];
     }
-    // FCP: the start framing on the clip's first frame, the end framing on its last.
-    return [self applyKenBurnsToClip:clipID
-                               start:start
-                                 end:end
-                       interpolation:interpolation
-                          rangeStart:clip->timelineStart
-                            duration:clip->timelineDuration];
-}
-
-/// "HH:MM:SS:FF" of timeline time `time` (non-drop-frame, as the app shows timecode).
-static NSString *timecodeOf(CMTime time, CMTime frameDuration) {
-    const std::int64_t frames = std::max<std::int64_t>(0, frameIndexAt(time, frameDuration, SnapMode::Floor));
-    const std::int64_t fps = std::max<std::int64_t>(1, std::llround(1.0 / toSeconds(frameDuration)));
-    const std::int64_t seconds = frames / fps;
-    return [NSString stringWithFormat:@"%02lld:%02lld:%02lld:%02lld", static_cast<long long>(seconds / 3600),
-                                      static_cast<long long>((seconds / 60) % 60), static_cast<long long>(seconds % 60),
-                                      static_cast<long long>(frames % fps)];
-}
-
-/// "Position X", "Position X and Scale", "Position X, Position Y and Scale".
-static NSString *parameterList(const std::vector<MotionParameter> &parameters) {
-    NSMutableArray<NSString *> *names = [NSMutableArray array];
-    for (MotionParameter parameter : parameters) {
-        [names addObject:@(displayNameOf(parameter))];
-    }
-    if (names.count <= 1) {
-        return names.firstObject ?: @"";
-    }
-    NSString *head = [[names subarrayWithRange:NSMakeRange(0, names.count - 1)] componentsJoinedByString:@", "];
-    return [NSString stringWithFormat:@"%@ and %@", head, names.lastObject];
-}
-
-/// Where a kept keyframe (source time `time`) plays, for a note.
-static NSString *keyframePlace(const Clip &clip, CMTime time, CMTime frameDuration) {
-    if (const auto frame = frameShowingSourceTime(clip, time, frameDuration)) {
-        return [NSString stringWithFormat:@"at %@", timecodeOf(*frame, frameDuration)];
-    }
-    const auto at = clip.exactTimelineTimeAt(time);
-    const auto start = ExactTime::from(clip.timelineStart);
-    const bool before = at && start && at->compare(*start) < 0;
-    return before ? @"before the clip's start (hidden by a trim)" : @"after the clip's end (hidden by a trim)";
-}
-
-- (VEEditResult *)applyKenBurnsToClip:(VEClipID)clipID
-                                start:(VEMotionFraming)start
-                                  end:(VEMotionFraming)end
-                        interpolation:(VEKeyframeInterpolation)interpolation
-                           rangeStart:(CMTime)rangeStart
-                             duration:(CMTime)duration {
-    VE_ASSERT_MAIN();
-    const std::optional<KeyframeInterpolation> engineInterpolation = fromVE(interpolation);
-    if (!engineInterpolation || *engineInterpolation == KeyframeInterpolation::Bezier) {
-        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
-                                     message:@"Choose Linear or an ease for the Ken Burns move."];
-    }
-    const Clip *clip = nullptr;
-    CMTime first = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
-                                                      atTime:rangeStart
-                                                  needsFrame:NO
-                                                        clip:&clip
-                                                       frame:&first]) {
-        return refusal;
-    }
-    const CMTime fd = [self activeSequence].frameDuration;
-    if (!CMTIME_IS_NUMERIC(first) || first < clip->timelineStart || first >= clip->timelineEnd()) {
-        return [VEEditResult failureWithCode:VEEditErrorInvalidTime
-                                     message:[NSString stringWithFormat:@"The move must start on a frame of the clip "
-                                                                        @"(%@ to %@).",
-                                                                        timecodeOf(clip->timelineStart, fd),
-                                                                        timecodeOf(clip->timelineEnd() - fd, fd)]];
-    }
-    const std::optional<std::int64_t> frames =
-        CMTIME_IS_NUMERIC(duration) ? checkedFrameIndexAt(duration, fd, SnapMode::Round) : std::nullopt;
-    if (!frames || *frames < 2) {
-        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
-                                     message:@"A Ken Burns move needs at least two frames."];
-    }
-    const std::int64_t available = frameIndexAt(clip->timelineEnd() - first, fd, SnapMode::Round);
-    if (*frames > available) {
-        return [VEEditResult
-            failureWithCode:VEEditErrorInvalidTime
-                    message:[NSString stringWithFormat:@"The move runs past the end of the clip: from %@ there are %lld "
-                                                       @"frames left, not %lld.",
-                                                       timecodeOf(first, fd), static_cast<long long>(available),
-                                                       static_cast<long long>(*frames)]];
-    }
-    MotionMoveRequest request;
-    request.firstFrame = first;
-    request.lastFrame = first + timeForFrame(*frames - 1, fd);
-    request.start = MotionFraming{start.x, start.y, start.scale};
-    request.end = MotionFraming{end.x, end.y, end.scale};
-    request.interpolation = *engineInterpolation;
-    MotionMovePlan plan;
-    if (EditResult planned = planMotionMove(*clip, fd, request, plan); !planned) {
+    std::vector<SpanValueChange> changes;
+    if (EditResult planned = planKenBurns(*clip, *span, sequence.frameDuration, MotionFraming{start.x, start.y, start.scale},
+                                          MotionFraming{end.x, end.y, end.scale}, changes);
+        !planned) {
         return toVE(planned);
     }
-    NSMutableArray<NSString *> *notes = [NSMutableArray array];
-    if (!plan.before.parameters.empty()) {
-        const bool several = plan.before.parameters.size() > 1;
-        [notes addObject:[NSString stringWithFormat:@"The framing does not hold before the move: the %@ keyframe%@ "
-                                                    @"%@ lead%@ into its start from a different framing.",
-                                                    parameterList(plan.before.parameters), several ? @"s" : @"",
-                                                    keyframePlace(*clip, plan.before.keyframeTime, fd),
-                                                    several ? @"" : @"s"]];
-    }
-    if (!plan.after.parameters.empty()) {
-        [notes addObject:[NSString stringWithFormat:@"The end framing does not hold after the move: it changes on "
-                                                    @"to the %@ keyframe%@ %@.",
-                                                    parameterList(plan.after.parameters),
-                                                    plan.after.parameters.size() > 1 ? @"s" : @"",
-                                                    keyframePlace(*clip, plan.after.keyframeTime, fd)]];
-    }
-    return [self push:std::make_unique<SetMotionTracks>([self sequenceId], clip->id, std::move(plan.changes), "Ken Burns")
-              created:nil
-                 note:notes.count > 0 ? [notes componentsJoinedByString:@" "] : nil];
-}
-
-- (VEEditResult *)toggleMotionKeyframesOfClip:(VEClipID)clipID atTime:(CMTime)time {
-    VE_ASSERT_MAIN();
-    const Clip *clip = nullptr;
-    CMTime frame = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:time needsFrame:YES clip:&clip frame:&frame]) {
-        return refusal;
-    }
-    MotionKeyframeToggle plan;
-    if (EditResult planned = planMotionKeyframeToggle(*clip, [self activeSequence].frameDuration, frame, plan); !planned) {
-        return toVE(planned);
-    }
-    const NSUInteger count = plan.changes.size();
-    NSString *note = plan.removing ? @"Keyframes removed"
-                                   : [NSString stringWithFormat:@"%@ added on %lu parameter%@",
-                                                                count == 1 ? @"Keyframe" : @"Keyframes",
-                                                                static_cast<unsigned long>(count), count == 1 ? @"" : @"s"];
-    return [self push:std::make_unique<SetMotionTracks>([self sequenceId], clip->id, std::move(plan.changes),
-                                                        plan.removing ? "Remove Keyframes" : "Add Keyframes")
-              created:nil
-                 note:note];
+    return [self pushSpanCommand:std::make_unique<SetSpanValues>([self sequenceId], id, std::move(changes), "Ken Burns",
+                                                                 *easing)
+                          spanId:^SpanId {
+                              return id;
+                          }
+                         created:NO
+                            note:nil];
 }
 
 - (VEClipID)adjacentClipOfClip:(VEClipID)clipID atEdge:(VEClipEdge)edge {
@@ -2324,19 +2100,19 @@ static NSString *keyframePlace(const Clip &clip, CMTime time, CMTime frameDurati
 
 - (VEEditResult *)matchMotionOfClip:(VEClipID)clipID toAdjacentAtEdge:(VEClipEdge)edge {
     VE_ASSERT_MAIN();
-    const Clip *clip = nullptr;
-    CMTime unused = kCMTimeInvalid;
-    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
-                                                      atTime:kCMTimeInvalid
-                                                  needsFrame:NO
-                                                        clip:&clip
-                                                       frame:&unused]) {
-        return refusal;
+    const Sequence &sequence = [self activeSequence];
+    const ClipId id(static_cast<ClipId::ValueType>(clipID));
+    const Track *track = sequence.trackOfClip(id);
+    const Clip *clip = track ? track->find(id) : nullptr;
+    if (clip == nullptr) {
+        return [VEEditResult failureWithCode:VEEditErrorClipNotFound message:@"The clip no longer exists."];
+    }
+    if (track->kind != TrackKind::Video) {
+        return [VEEditResult failureWithCode:VEEditErrorTrackKindMismatch message:@"Audio clips have no Motion."];
     }
     const bool previous = edge == VEClipEdgeStart;
-    const Sequence &sequence = [self activeSequence];
     const CMTime fd = sequence.frameDuration;
-    const Clip *neighbour = adjacentClip(sequence, clip->id, previous ? ClipEdge::Head : ClipEdge::Tail);
+    const Clip *neighbour = touchingClip(*track, *clip, previous ? ClipEdge::Head : ClipEdge::Tail);
     if (neighbour == nullptr) {
         return [VEEditResult failureWithCode:VEEditErrorNotAdjacent
                                      message:previous ? @"No clip ends where this clip starts on its track."
@@ -2345,43 +2121,44 @@ static NSString *keyframePlace(const Clip &clip, CMTime time, CMTime frameDurati
     // The neighbour's frame at the cut, as the monitors and export draw it; this clip's frame there.
     const CMTime neighbourFrame = previous ? neighbour->timelineEnd() - fd : neighbour->timelineStart;
     const CMTime frame = previous ? clip->timelineStart : clip->timelineEnd() - fd;
-    const VideoParams values = Scheduler::motionAt(*neighbour, neighbourFrame);
-    std::vector<MotionTrackChange> changes;
-    if (EditResult planned = planMotionAtFrame(*clip, fd, frame, values, changes); !planned) {
-        return toVE(planned);
+    const VideoParams target = Scheduler::motionAt(*neighbour, neighbourFrame);
+    // What the clip's spans add and multiply there, composed onto neutral static values.
+    Clip neutral = *clip;
+    neutral.video = VideoParams{};
+    const VideoParams spans = motionValuesAt(neutral, frame);
+    if (!(spans.scale > 0.0) || !(spans.opacity > 0.0)) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"The clip's spans make its scale or opacity 0 there, so no static value "
+                                             @"can match."];
     }
-    std::vector<MotionParameter> keyframed;
-    std::vector<MotionParameter> statics;
-    bool changesAnything = false;
-    for (const MotionTrackChange &change : changes) {
-        (change.keyframes.empty() ? statics : keyframed).push_back(change.parameter);
-        if (change.keyframes != clip->video.keyframes.track(change.parameter) ||
-            change.staticValue != clip->video.staticValue(change.parameter)) {
-            changesAnything = true;
-        }
+    VideoParams values = clip->video;
+    values.x = target.x - spans.x;
+    values.y = target.y - spans.y;
+    values.scale = target.scale / spans.scale;
+    values.rotationDegrees = target.rotationDegrees - spans.rotationDegrees;
+    values.opacity = target.opacity / spans.opacity;
+    if (!(values.opacity <= 1.0)) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"The clip's spans lower its opacity there, so no static opacity can reach "
+                                             @"the neighbour's."];
     }
     NSString *what = previous ? @"the previous clip's end" : @"the next clip's start";
+    bool changesAnything = false;
+    for (const MotionParameter parameter : kMotionParameters) {
+        changesAnything = changesAnything || !spanValuesMatch(spanParameterOf(parameter), values.staticValue(parameter),
+                                                              clip->video.staticValue(parameter));
+    }
     if (!changesAnything) {
-        if (const Track *track = sequence.trackOfClip(clip->id); track != nullptr && track->locked) {
+        if (track->locked) {
             return [VEEditResult failureWithCode:VEEditErrorTrackLocked
-                                         message:[NSString stringWithFormat:@"Track %s is locked.", track->name.c_str()]];
+                                         message:[NSString stringWithFormat:@"Track %@ is locked.", toNS(track->name)]];
         }
         return toVE(EditResult::success(), @[], [NSString stringWithFormat:@"This clip already matches %@.", what]);
     }
-    NSString *frameName = previous ? @"first frame" : @"last frame";
-    NSString *note;
-    if (keyframed.empty()) {
-        note = [NSString stringWithFormat:@"Matched %@: set as this clip's static values.", what];
-    } else if (statics.empty()) {
-        note = [NSString stringWithFormat:@"Matched %@: set as keyframes on this clip's %@.", what, frameName];
-    } else {
-        note = [NSString stringWithFormat:@"Matched %@: %@ got keyframes on this clip's %@; %@ became static values.",
-                                          what, parameterList(keyframed), frameName, parameterList(statics)];
-    }
-    return [self push:std::make_unique<SetMotionTracks>([self sequenceId], clip->id, std::move(changes),
-                                                        previous ? "Match Previous Clip" : "Match Next Clip")
+    return [self push:std::make_unique<SetVideoParams>([self sequenceId], clip->id, values,
+                                                       previous ? "Match Previous Clip" : "Match Next Clip")
               created:nil
-                 note:note];
+                 note:[NSString stringWithFormat:@"Matched %@: set as this clip's static values.", what]];
 }
 
 - (VEEditResult *)setSpeed:(double)speed forClip:(VEClipID)clipID {
@@ -2478,6 +2255,20 @@ static NSString *keyframePlace(const Clip &clip, CMTime time, CMTime frameDurati
     return [self addTransitionFromClip:fromClipID toClip:toClipID duration:duration options:VETransitionOptionNone];
 }
 
+/// Whole frames of a requested transition duration, or a refusal.
+- (nullable VEEditResult *)refuseTransitionDuration:(CMTime)duration frames:(int64_t *)frames {
+    const CMTime frameDuration = [self activeSequence].frameDuration;
+    if (!CMTIME_IS_NUMERIC(duration)) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The transition duration is not a valid time."];
+    }
+    *frames = frameIndexAt(snapToFrame(duration, frameDuration, SnapMode::Round), frameDuration, SnapMode::Round);
+    if (*frames < 1) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"A transition must be at least one frame long."];
+    }
+    return nil;
+}
+
 - (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID
                                  toClip:(VEClipID)toClipID
                                duration:(CMTime)duration
@@ -2485,14 +2276,9 @@ static NSString *keyframePlace(const Clip &clip, CMTime time, CMTime frameDurati
     VE_ASSERT_MAIN();
     const Sequence &sequence = [self activeSequence];
     const CMTime frameDuration = sequence.frameDuration;
-    if (!CMTIME_IS_NUMERIC(duration)) {
-        return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The transition duration is not a valid time."];
-    }
-    const int64_t frames =
-        frameIndexAt(snapToFrame(duration, frameDuration, SnapMode::Round), frameDuration, SnapMode::Round);
-    if (frames < 1) {
-        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
-                                     message:@"A transition must be at least one frame long."];
+    int64_t frames = 0;
+    if (VEEditResult *refusal = [self refuseTransitionDuration:duration frames:&frames]) {
+        return refusal;
     }
     const SequenceId sequenceId = [self sequenceId];
     const ClipId from(static_cast<ClipId::ValueType>(fromClipID));
@@ -2512,10 +2298,19 @@ static NSString *keyframePlace(const Clip &clip, CMTime time, CMTime frameDurati
         [notes addObject:[NSString stringWithFormat:@"Shortened to %@: %@", describeFrames(mainFrames, frameDuration),
                                                     toNS(limit.reason)]];
     }
+    std::vector<TransitionSpanRequest> requests;
+    auto centred = [&](ClipId owner, int64_t length) {
+        const auto [start, end] = centredTransitionOffsets(length, frameDuration);
+        TransitionSpanRequest request;
+        request.clipId = owner;
+        request.edge = ClipEdge::Tail;
+        request.start = start;
+        request.end = end;
+        return request;
+    };
+    requests.push_back(centred(from, mainFrames));
 
     // The linked partners' cut (the audio under a video dissolve).
-    std::optional<std::pair<ClipId, ClipId>> partners;
-    int64_t partnerFrames = requested;
     if (options & VETransitionOptionIncludeLinked) {
         const Clip *fromClip = sequence.findClip(from);
         const Clip *toClip = sequence.findClip(to);
@@ -2527,52 +2322,154 @@ static NSString *keyframePlace(const Clip &clip, CMTime time, CMTime frameDurati
                 [notes addObject:[NSString stringWithFormat:@"The linked clips got no transition: %@",
                                                             transitionRefusal(linked, requested, frameDuration)]];
             } else {
+                int64_t partnerFrames = requested;
                 if (partnerFrames > linked.maximumFrames) {
                     partnerFrames = linked.maximumFrames;
                     [notes addObject:[NSString stringWithFormat:@"The linked clips' transition was shortened to %@: %@",
                                                                 describeFrames(partnerFrames, frameDuration),
                                                                 toNS(linked.reason)]];
                 }
-                partners = std::make_pair(*fromClip->linkedClipId, *toClip->linkedClipId);
+                requests.push_back(centred(*fromClip->linkedClipId, partnerFrames));
             }
         } else if (fromClip && toClip && (fromClip->linkedClipId || toClip->linkedClipId)) {
             [notes addObject:@"The linked clips do not meet at a cut, so they got no transition."];
         }
     }
-
-    auto main = std::make_unique<AddTransition>(sequenceId, from, to, timeForFrame(mainFrames, frameDuration));
-    AddTransition *mainRaw = main.get();
-    AddTransition *partnerRaw = nullptr;
-    std::unique_ptr<Command> command;
-    if (partners) {
-        auto partner = std::make_unique<AddTransition>(sequenceId, partners->first, partners->second,
-                                                       timeForFrame(partnerFrames, frameDuration));
-        partnerRaw = partner.get();
-        std::vector<std::unique_ptr<Command>> children;
-        children.push_back(std::move(main));
-        children.push_back(std::move(partner));
-        command = std::make_unique<CompositeCommand>("Add Transitions", std::move(children));
-    } else {
-        command = std::move(main);
-    }
     if (isThroughEdit(sequence, from, to)) {
         // A plain split: both sides are the same media, so the transition changes nothing.
-        const Track *track = sequence.findTrack(sequence.findClip(from)->trackId);
+        const Track *track = sequence.trackOfClip(from);
         [notes addObject:track != nullptr && track->kind == TrackKind::Audio
                              ? @"Both sides play the same audio here; trim or move one side to hear the crossfade."
                              : @"Both sides show the same frames here; trim or move one side to see the dissolve."];
     }
     NSString *note = notes.count > 0 ? [notes componentsJoinedByString:@" "] : nil;
+    auto command = std::make_unique<AddTransitionSpans>(sequenceId, std::move(requests));
+    AddTransitionSpans *raw = command.get();
     return [self push:std::move(command)
               created:^NSArray<NSNumber *> * {
-                  NSMutableArray<NSNumber *> *ids =
-                      [NSMutableArray arrayWithObject:@(static_cast<int64_t>(mainRaw->createdTransitionId().value()))];
-                  if (partnerRaw != nullptr) {
-                      [ids addObject:@(static_cast<int64_t>(partnerRaw->createdTransitionId().value()))];
-                  }
-                  return ids;
+                  return toNumbers(raw->createdSpanIds());
               }
                  note:note];
+}
+
+/// "black" for a video track, "silence" for an audio track.
+static NSString *fadeTarget(const Track &track) {
+    return track.kind == TrackKind::Video ? @"black" : @"silence";
+}
+
+/// The longest fade (whole frames) `clip` takes at `edge`: its length less its other lane-0 span's
+/// part inside it; and why not longer.
+static int64_t fadeLimitFrames(const Clip &clip, ClipEdge edge, CMTime frameDuration, NSString **reason,
+                               EditError *error) {
+    CMTime taken = kCMTimeZero;
+    if (edge == ClipEdge::Head) {
+        if (const EffectSpan *tail = clip.transitionAt(ClipEdge::Tail)) {
+            taken = -tail->start;
+        }
+    } else {
+        taken = clipFadeLength(clip, ClipEdge::Head);
+    }
+    const CMTime room = clip.timelineDuration - taken;
+    *reason = taken == kCMTimeZero ? @"A fade cannot be longer than its clip."
+                                   : @"It would overlap the transition at the clip's other end.";
+    *error = taken == kCMTimeZero ? EditError::InvalidArgument : EditError::Overlap;
+    return std::max<int64_t>(0, frameIndexAt(room, frameDuration, SnapMode::Floor));
+}
+
+- (VEEditResult *)addTransitionAtEdge:(VEClipEdge)edge
+                               ofClip:(VEClipID)clipID
+                             duration:(CMTime)duration
+                              options:(VETransitionOptions)options {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    const CMTime frameDuration = sequence.frameDuration;
+    const ClipId id(static_cast<ClipId::ValueType>(clipID));
+    const Track *track = sequence.trackOfClip(id);
+    const Clip *clip = track ? track->find(id) : nullptr;
+    if (clip == nullptr) {
+        return [VEEditResult failureWithCode:VEEditErrorClipNotFound message:@"The clip no longer exists."];
+    }
+    const ClipEdge side = edge == VEClipEdgeStart ? ClipEdge::Head : ClipEdge::Tail;
+    if (side == ClipEdge::Tail) {
+        if (const Clip *next = touchingClip(*track, *clip, ClipEdge::Tail)) {
+            return [self addTransitionFromClip:clipID
+                                        toClip:static_cast<VEClipID>(next->id.value())
+                                      duration:duration
+                                       options:options];
+        }
+    }
+    int64_t frames = 0;
+    if (VEEditResult *refusal = [self refuseTransitionDuration:duration frames:&frames]) {
+        return refusal;
+    }
+    if (track->locked) {
+        return [VEEditResult failureWithCode:VEEditErrorTrackLocked
+                                     message:[NSString stringWithFormat:@"Track “%@” is locked.", toNS(track->name)]];
+    }
+    NSMutableArray<NSString *> *notes = [NSMutableArray array];
+    std::vector<TransitionSpanRequest> requests;
+    // A fade of `length` frames at `side` of `owner`, fitted when allowed; nil on success.
+    auto plan = [&](const Clip &owner, const Track &ownerTrack, bool linked) -> NSString * {
+        if (owner.transitionAt(side) != nullptr) {
+            return side == ClipEdge::Head ? @"The clip already has a transition at its start."
+                                          : @"The clip already has a transition at its end.";
+        }
+        if (side == ClipEdge::Head && touchingClip(ownerTrack, owner, ClipEdge::Head) != nullptr) {
+            return @"Another clip touches the clip's start, so the cut belongs to that clip: add a transition at its "
+                   @"end instead.";
+        }
+        NSString *reason = nil;
+        EditError error = EditError::None;
+        const int64_t limitFrames = fadeLimitFrames(owner, side, frameDuration, &reason, &error);
+        int64_t length = frames;
+        if (length > limitFrames) {
+            if (!(options & VETransitionOptionFitToCut) || limitFrames == 0) {
+                return [NSString stringWithFormat:@"A fade of %@ does not fit: %@ The longest it allows is %@.",
+                                                  describeFrames(frames, frameDuration), reason,
+                                                  describeFrames(limitFrames, frameDuration)];
+            }
+            length = limitFrames;
+            [notes addObject:[NSString stringWithFormat:@"%@shortened to %@: %@", linked ? @"The linked clip's fade was "
+                                                                                          : @"Shortened to ",
+                                                        describeFrames(length, frameDuration), reason]];
+        }
+        TransitionSpanRequest request;
+        request.clipId = owner.id;
+        request.edge = side;
+        const CMTime fade = timeForFrame(length, frameDuration);
+        request.start = side == ClipEdge::Head ? kCMTimeZero : -fade;
+        request.end = side == ClipEdge::Head ? fade : kCMTimeZero;
+        requests.push_back(request);
+        return nil;
+    };
+    if (NSString *refusal = plan(*clip, *track, false)) {
+        const bool exists = clip->transitionAt(side) != nullptr;
+        return [VEEditResult failureWithCode:exists ? VEEditErrorAlreadyExists : VEEditErrorInvalidArgument message:refusal];
+    }
+    if ((options & VETransitionOptionIncludeLinked) && clip->linkedClipId) {
+        const Track *partnerTrack = sequence.trackOfClip(*clip->linkedClipId);
+        const Clip *partner = partnerTrack ? partnerTrack->find(*clip->linkedClipId) : nullptr;
+        if (partner != nullptr && partnerTrack->locked) {
+            [notes addObject:[NSString stringWithFormat:@"The linked clip got no fade: track “%@” is locked.",
+                                                        toNS(partnerTrack->name)]];
+        } else if (partner != nullptr && side == ClipEdge::Tail && touchingClip(*partnerTrack, *partner, ClipEdge::Tail)) {
+            [notes addObject:@"The linked clip got no fade: another clip touches its end."];
+        } else if (partner != nullptr) {
+            if (NSString *why = plan(*partner, *partnerTrack, true)) {
+                [notes addObject:[NSString stringWithFormat:@"The linked clip got no fade: %@", why]];
+            }
+        }
+    }
+    [notes insertObject:[NSString stringWithFormat:side == ClipEdge::Head ? @"Fades in from %@." : @"Fades out to %@.",
+                                                   fadeTarget(*track)]
+                atIndex:0];
+    auto command = std::make_unique<AddTransitionSpans>([self sequenceId], std::move(requests));
+    AddTransitionSpans *raw = command.get();
+    return [self push:std::move(command)
+              created:^NSArray<NSNumber *> * {
+                  return toNumbers(raw->createdSpanIds());
+              }
+                 note:[notes componentsJoinedByString:@" "]];
 }
 
 - (VETransitionLimit *)transitionLimitFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID {
@@ -2582,118 +2479,183 @@ static NSString *keyframePlace(const Clip &clip, CMTime time, CMTime frameDurati
                                                ClipId(static_cast<ClipId::ValueType>(toClipID))));
 }
 
+/// The offsets a transition of `frames` gets from setDuration: a centred cross dissolve stays
+/// centred, an uneven one keeps its share before the cut in proportion (rounded down), a fade keeps
+/// its edge.
+static std::pair<CMTime, CMTime> resizedOffsets(const TransitionPlacement &transition, int64_t frames, CMTime fd) {
+    if (transition.role == TransitionRole::FadeIn) {
+        return {kCMTimeZero, timeForFrame(frames, fd)};
+    }
+    if (transition.role == TransitionRole::FadeOut) {
+        return {-timeForFrame(frames, fd), kCMTimeZero};
+    }
+    const int64_t before = frameIndexAt(transition.cut - transition.range.start, fd, SnapMode::Round);
+    const int64_t total = frameIndexAt(transition.range.duration(), fd, SnapMode::Round);
+    int64_t newBefore = frames / 2;
+    if (total > 0 && before != total / 2) {
+        newBefore = static_cast<int64_t>((static_cast<Int128>(frames) * before) / total);
+    }
+    return {-timeForFrame(newBefore, fd), timeForFrame(frames - newBefore, fd)};
+}
+
+/// The longest duration `transition` can be given by setDuration (resizedOffsets), and why not longer.
+- (TransitionLimit)durationLimitFor:(const TransitionPlacement &)transition {
+    const CMTime fd = [self activeSequence].frameDuration;
+    TransitionLimit limit;
+    if (transition.role != TransitionRole::CrossDissolve) {
+        NSString *reason = nil;
+        EditError error = EditError::None;
+        const ClipEdge edge = transition.role == TransitionRole::FadeIn ? ClipEdge::Head : ClipEdge::Tail;
+        // The fade's own length does not count against it.
+        Clip without = *transition.owner;
+        std::erase_if(without.spans, [&](const EffectSpan &s) { return s.id == transition.span->id; });
+        limit.maximumFrames = fadeLimitFrames(without, edge, fd, &reason, &error);
+        limit.maximum = limit.maximumFrames > 0 ? timeForFrame(limit.maximumFrames, fd) : kCMTimeZero;
+        limit.limitError = error;
+        limit.reason = toStd(reason);
+        return limit;
+    }
+    EditResult why = EditResult::success();
+    const auto sides = transitionSideLimits(_project, [self sequenceId], transition.owner->id, transition.span->id, why);
+    if (!sides) {
+        limit.limitError = why.error;
+        limit.reason = why.message;
+        return limit;
+    }
+    auto fits = [&](int64_t frames) {
+        const auto [start, end] = resizedOffsets(transition, frames, fd);
+        return frameIndexAt(-start, fd, SnapMode::Round) <= sides->maxBeforeFrames &&
+               frameIndexAt(end, fd, SnapMode::Round) <= sides->maxAfterFrames;
+    };
+    int64_t lo = 0;
+    int64_t hi = sides->maxBeforeFrames + sides->maxAfterFrames + 1;
+    while (hi - lo > 1) {
+        const int64_t mid = lo + (hi - lo) / 2;
+        (fits(mid) ? lo : hi) = mid;
+    }
+    limit.maximumFrames = lo;
+    limit.maximum = lo > 0 ? timeForFrame(lo, fd) : kCMTimeZero;
+    const auto [start, end] = resizedOffsets(transition, lo + 1, fd);
+    const bool beforeOverruns = frameIndexAt(-start, fd, SnapMode::Round) > sides->maxBeforeFrames;
+    (void)end;
+    limit.limitError = beforeOverruns ? sides->beforeError : sides->afterError;
+    limit.reason = beforeOverruns ? sides->beforeReason : sides->afterReason;
+    limit.limitingClip = beforeOverruns ? sides->beforeLimitingClip : sides->afterLimitingClip;
+    return limit;
+}
+
 - (VETransitionLimit *)transitionLimitForTransition:(VETransitionID)transitionID {
     VE_ASSERT_MAIN();
-    const TransitionId id(static_cast<TransitionId::ValueType>(transitionID));
-    const Transition *transition = [self activeSequence].findTransition(id);
-    if (transition == nullptr) {
+    const auto transition = findTransition([self activeSequence], SpanId(static_cast<SpanId::ValueType>(transitionID)));
+    if (!transition) {
         TransitionLimit none;
         none.limitError = EditError::TransitionNotFound;
         none.reason = "The transition no longer exists.";
         return makeTransitionLimit(none);
     }
-    return makeTransitionLimit(
-        transitionLimit(_project, [self sequenceId], transition->fromClipId, transition->toClipId, id));
+    return makeTransitionLimit([self durationLimitFor:*transition]);
 }
 
 - (VEEditResult *)removeTransition:(VETransitionID)transitionID {
     VE_ASSERT_MAIN();
-    return [self push:std::make_unique<RemoveTransition>([self sequenceId],
-                                                         TransitionId(static_cast<TransitionId::ValueType>(transitionID)))
-              created:nil];
+    const SpanId id(static_cast<SpanId::ValueType>(transitionID));
+    if (!findTransition([self activeSequence], id)) {
+        return [VEEditResult failureWithCode:VEEditErrorTransitionNotFound message:@"The transition no longer exists."];
+    }
+    return [self push:std::make_unique<RemoveSpans>([self sequenceId], std::vector<SpanId>{id}) created:nil];
 }
 
 - (VETransitionID)linkedTransitionForTransition:(VETransitionID)transitionID {
     VE_ASSERT_MAIN();
-    const auto partner =
-        linkedTransition([self activeSequence], TransitionId(static_cast<TransitionId::ValueType>(transitionID)));
+    const auto partner = linkedTransition([self activeSequence], SpanId(static_cast<SpanId::ValueType>(transitionID)));
     return partner ? static_cast<VETransitionID>(partner->value()) : 0;
 }
 
 - (VEEditResult *)removeTransition:(VETransitionID)transitionID includingLinked:(BOOL)includingLinked {
     VE_ASSERT_MAIN();
-    const TransitionId id(static_cast<TransitionId::ValueType>(transitionID));
+    const SpanId id(static_cast<SpanId::ValueType>(transitionID));
     const Sequence &sequence = [self activeSequence];
     const auto partner = includingLinked ? linkedTransition(sequence, id) : std::nullopt;
-    if (!partner || sequence.findTransition(id) == nullptr) {
+    if (!partner || !findTransition(sequence, id)) {
         return [self removeTransition:transitionID];
     }
-    const Transition *linked = sequence.findTransition(*partner);
-    const Track *linkedTrack = linked != nullptr ? sequence.findTrack(linked->trackId) : nullptr;
-    if (linkedTrack != nullptr && linkedTrack->locked) {
+    const auto linked = findTransition(sequence, *partner);
+    if (linked && linked->track->locked) {
         // The pair's other half is protected: remove the requested one and say why the other stays.
-        VEEditResult *result = [self push:std::make_unique<RemoveTransition>([self sequenceId], id)
-                                  created:nil
-                                     note:[NSString stringWithFormat:@"The linked transition on %@ was kept: the "
-                                                                     @"track is locked.",
-                                                                     toNS(linkedTrack->name)]];
-        return result;
+        return [self push:std::make_unique<RemoveSpans>([self sequenceId], std::vector<SpanId>{id})
+                  created:nil
+                     note:[NSString stringWithFormat:@"The linked transition on %@ was kept: the track is locked.",
+                                                     toNS(linked->track->name)]];
     }
-    return [self push:std::make_unique<RemoveTransitions>([self sequenceId], std::vector<TransitionId>{id, *partner})
-              created:nil];
+    return [self push:std::make_unique<RemoveSpans>([self sequenceId], std::vector<SpanId>{id, *partner}) created:nil];
 }
 
 - (VEEditResult *)setDuration:(CMTime)duration
                 forTransition:(VETransitionID)transitionID
               includingLinked:(BOOL)includingLinked {
     VE_ASSERT_MAIN();
-    const TransitionId id(static_cast<TransitionId::ValueType>(transitionID));
+    const SpanId id(static_cast<SpanId::ValueType>(transitionID));
     const Sequence &sequence = [self activeSequence];
-    const auto partner = includingLinked ? linkedTransition(sequence, id) : std::nullopt;
-    if (!partner || !CMTIME_IS_NUMERIC(duration)) {
-        return [self setDuration:duration forTransition:transitionID];
+    const auto transition = findTransition(sequence, id);
+    if (!transition) {
+        return [VEEditResult failureWithCode:VEEditErrorTransitionNotFound message:@"The transition no longer exists."];
     }
-    const CMTime frameDuration = sequence.frameDuration;
-    const int64_t frames =
-        frameIndexAt(snapToFrame(duration, frameDuration, SnapMode::Round), frameDuration, SnapMode::Round);
-    std::vector<SetTransitionDurations::Change> changes{{id, duration}};
+    int64_t frames = 0;
+    if (VEEditResult *refusal = [self refuseTransitionDuration:duration frames:&frames]) {
+        return refusal;
+    }
+    const CMTime fd = sequence.frameDuration;
+    const TransitionLimit limit = [self durationLimitFor:*transition];
+    if (frames > limit.maximumFrames && isLengthLimit(limit.limitError)) {
+        return [VEEditResult failureWithCode:refusalCode(limit) message:transitionRefusal(limit, frames, fd)];
+    }
+    const auto [start, end] = resizedOffsets(*transition, frames, fd);
+    std::vector<TransitionRangeChange> changes{{id, start, end}};
     NSString *note = nil;
-    const Transition *linked = sequence.findTransition(*partner);
-    const Track *linkedTrack = sequence.findTrack(linked->trackId);
-    if (linkedTrack != nullptr && linkedTrack->locked) {
-        note = [NSString stringWithFormat:@"The linked transition on %@ was not changed: the track is locked.",
-                                          toNS(linkedTrack->name)];
-    } else if (frames >= 1) {
-        // The linked transition gets the same length, fitted to its own cut.
-        const TransitionLimit limit =
-            transitionLimit(_project, [self sequenceId], linked->fromClipId, linked->toClipId, *partner);
-        if (limit.maximumFrames == 0) {
-            note = [NSString stringWithFormat:@"The linked transition was not changed: %@", toNS(limit.reason)];
+    const auto partner = includingLinked ? linkedTransition(sequence, id) : std::nullopt;
+    if (const auto linked = partner ? findTransition(sequence, *partner) : std::nullopt) {
+        if (linked->track->locked) {
+            note = [NSString stringWithFormat:@"The linked transition on %@ was not changed: the track is locked.",
+                                              toNS(linked->track->name)];
         } else {
-            int64_t linkedFrames = frames;
-            if (linkedFrames > limit.maximumFrames) {
-                linkedFrames = limit.maximumFrames;
-                note = [NSString stringWithFormat:@"The linked transition was limited to %@: %@",
-                                                  describeFrames(linkedFrames, frameDuration), toNS(limit.reason)];
+            // The linked transition gets the same length, fitted to its own cut.
+            const TransitionLimit linkedLimit = [self durationLimitFor:*linked];
+            if (linkedLimit.maximumFrames == 0) {
+                note = [NSString stringWithFormat:@"The linked transition was not changed: %@", toNS(linkedLimit.reason)];
+            } else {
+                int64_t linkedFrames = frames;
+                if (linkedFrames > linkedLimit.maximumFrames) {
+                    linkedFrames = linkedLimit.maximumFrames;
+                    note = [NSString stringWithFormat:@"The linked transition was limited to %@: %@",
+                                                      describeFrames(linkedFrames, fd), toNS(linkedLimit.reason)];
+                }
+                const auto [linkedStart, linkedEnd] = resizedOffsets(*linked, linkedFrames, fd);
+                changes.push_back({*partner, linkedStart, linkedEnd});
             }
-            changes.push_back({*partner, timeForFrame(linkedFrames, frameDuration)});
         }
     }
-    VEEditResult *result =
-        [self push:std::make_unique<SetTransitionDurations>([self sequenceId], std::move(changes)) created:nil note:note];
+    VEEditResult *result = [self push:std::make_unique<SetTransitionRanges>([self sequenceId], std::move(changes), true)
+                              created:nil
+                                 note:note];
     return [self explainDurationRefusal:result transition:id duration:duration];
 }
 
 - (VEEditResult *)setDuration:(CMTime)duration forTransition:(VETransitionID)transitionID {
     VE_ASSERT_MAIN();
-    const TransitionId id(static_cast<TransitionId::ValueType>(transitionID));
-    VEEditResult *result = [self push:std::make_unique<SetTransitionDuration>([self sequenceId], id, duration)
-                              created:nil];
-    return [self explainDurationRefusal:result transition:id duration:duration];
+    return [self setDuration:duration forTransition:transitionID includingLinked:NO];
 }
 
 /// A refused duration change of `id` that is about length gets the user-facing explanation of
 /// the cut's limit (as adding one does); anything else is returned as is.
-- (VEEditResult *)explainDurationRefusal:(VEEditResult *)result transition:(TransitionId)id duration:(CMTime)duration {
+- (VEEditResult *)explainDurationRefusal:(VEEditResult *)result transition:(SpanId)id duration:(CMTime)duration {
     const Sequence &sequence = [self activeSequence];
-    const Transition *transition = sequence.findTransition(id);
-    if (result.ok || transition == nullptr || !CMTIME_IS_NUMERIC(duration) ||
+    const auto transition = findTransition(sequence, id);
+    if (result.ok || !transition || !CMTIME_IS_NUMERIC(duration) ||
         !(result.errorCode == VEEditErrorInsufficientHandles || result.errorCode == VEEditErrorInvalidArgument ||
           result.errorCode == VEEditErrorOverlap)) {
         return result;
     }
-    const TransitionLimit limit =
-        transitionLimit(_project, [self sequenceId], transition->fromClipId, transition->toClipId, id);
+    const TransitionLimit limit = [self durationLimitFor:*transition];
     const int64_t frames =
         frameIndexAt(snapToFrame(duration, sequence.frameDuration, SnapMode::Round), sequence.frameDuration,
                      SnapMode::Round);
@@ -2702,6 +2664,151 @@ static NSString *keyframePlace(const Clip &clip, CMTime time, CMTime frameDurati
     }
     return [VEEditResult failureWithCode:result.errorCode
                                  message:transitionRefusal(limit, frames, sequence.frameDuration)];
+}
+
+/// The offsets of `transition` covering the timeline frames `range` (whole frames), fitted to what
+/// its clips allow; `notes` says what was fitted or changed role. Nil when nothing fits (`refusal`
+/// set).
+- (std::optional<std::pair<CMTime, CMTime>>)offsetsFor:(const TransitionPlacement &)transition
+                                                 range:(TimeRange)range
+                                                linked:(BOOL)linked
+                                                 notes:(NSMutableArray<NSString *> *)notes
+                                               refusal:(VEEditResult **)refusal {
+    const CMTime fd = [self activeSequence].frameDuration;
+    NSString *who = linked ? @"The linked transition" : @"The transition";
+    const Clip &owner = *transition.owner;
+    if (transition.span->edge == ClipEdge::Head) {
+        if (range.start != owner.timelineStart) {
+            *refusal = [VEEditResult failureWithCode:VEEditErrorInvalidTime
+                                             message:@"A fade in starts at its clip's start."];
+            return std::nullopt;
+        }
+        NSString *reason = nil;
+        EditError error = EditError::None;
+        Clip without = owner;
+        std::erase_if(without.spans, [&](const EffectSpan &s) { return s.id == transition.span->id; });
+        const int64_t limit = fadeLimitFrames(without, ClipEdge::Head, fd, &reason, &error);
+        int64_t length = frameIndexAt(range.duration(), fd, SnapMode::Round);
+        if (length > limit) {
+            length = limit;
+            [notes addObject:[NSString stringWithFormat:@"%@ was shortened to %@: %@", who, describeFrames(length, fd), reason]];
+        }
+        if (length < 1) {
+            *refusal = [VEEditResult failureWithCode:toVE(error) message:reason];
+            return std::nullopt;
+        }
+        return std::make_pair(kCMTimeZero, timeForFrame(length, fd));
+    }
+    const CMTime cut = owner.timelineEnd();
+    if (cut < range.start) {
+        *refusal = [VEEditResult failureWithCode:VEEditErrorInvalidTime
+                                         message:@"A transition at a clip's end starts inside the clip."];
+        return std::nullopt;
+    }
+    int64_t before = frameIndexAt(cut - range.start, fd, SnapMode::Round);
+    int64_t after = std::max<int64_t>(0, frameIndexAt(range.end - cut, fd, SnapMode::Round));
+    const Clip *next = touchingClip(*transition.track, owner, ClipEdge::Tail);
+    NSString *target = fadeTarget(*transition.track);
+    if (after > 0 && next == nullptr) {
+        after = 0;
+        [notes addObject:[NSString stringWithFormat:@"%@ fades out to %@: nothing follows the clip.", who, target]];
+    }
+    if (after > 0) {
+        EditResult why = EditResult::success();
+        const auto sides = transitionSideLimits(_project, [self sequenceId], owner.id, transition.span->id, why);
+        if (!sides) {
+            *refusal = toVE(why);
+            return std::nullopt;
+        }
+        if (before > sides->maxBeforeFrames) {
+            before = sides->maxBeforeFrames;
+            [notes addObject:[NSString stringWithFormat:@"%@ was shortened before the cut to %@: %@", who,
+                                                        describeFrames(before, fd), toNS(sides->beforeReason)]];
+        }
+        if (after > sides->maxAfterFrames) {
+            after = sides->maxAfterFrames;
+            [notes addObject:[NSString stringWithFormat:@"%@ was shortened after the cut to %@: %@", who,
+                                                        describeFrames(after, fd), toNS(sides->afterReason)]];
+        }
+        if (after > 0 && transition.role != TransitionRole::CrossDissolve) {
+            [notes addObject:[NSString stringWithFormat:@"%@ now crosses the cut: a %@ into the next clip.", who,
+                                                        transition.track->kind == TrackKind::Video ? @"cross dissolve"
+                                                                                                    : @"crossfade"]];
+        }
+    }
+    if (after == 0) {
+        NSString *reason = nil;
+        EditError error = EditError::None;
+        Clip without = owner;
+        std::erase_if(without.spans, [&](const EffectSpan &s) { return s.id == transition.span->id; });
+        const int64_t limit = fadeLimitFrames(without, ClipEdge::Tail, fd, &reason, &error);
+        if (before > limit) {
+            before = limit;
+            [notes addObject:[NSString stringWithFormat:@"%@ was shortened to %@: %@", who, describeFrames(before, fd), reason]];
+        }
+        if (transition.role == TransitionRole::CrossDissolve && before > 0 && next != nullptr) {
+            [notes addObject:[NSString stringWithFormat:@"%@ no longer reaches past the cut, so it now fades out to %@.",
+                                                        who, target]];
+        }
+    }
+    if (before + after < 1) {
+        *refusal = [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                         message:[NSString stringWithFormat:@"%@ would cover no frame.", who]];
+        return std::nullopt;
+    }
+    return std::make_pair(-timeForFrame(before, fd), timeForFrame(after, fd));
+}
+
+- (VEEditResult *)setRangeOfTransition:(VETransitionID)transitionID
+                                 range:(CMTimeRange)range
+                       includingLinked:(BOOL)includingLinked {
+    VE_ASSERT_MAIN();
+    const SpanId id(static_cast<SpanId::ValueType>(transitionID));
+    const Sequence &sequence = [self activeSequence];
+    const auto transition = findTransition(sequence, id);
+    if (!transition) {
+        return [VEEditResult failureWithCode:VEEditErrorTransitionNotFound message:@"The transition no longer exists."];
+    }
+    const auto ends = rangeEnds(range);
+    if (!ends) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The range is not a valid time range."];
+    }
+    const CMTime fd = sequence.frameDuration;
+    const TimeRange frames{snapToFrame(ends->first, fd, SnapMode::Round), snapToFrame(ends->second, fd, SnapMode::Round)};
+    if (!(frames.start < frames.end)) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"A transition covers at least one frame."];
+    }
+    if (transition->track->locked) {
+        return [VEEditResult failureWithCode:VEEditErrorTrackLocked
+                                     message:[NSString stringWithFormat:@"Track “%@” is locked.",
+                                                                        toNS(transition->track->name)]];
+    }
+    NSMutableArray<NSString *> *notes = [NSMutableArray array];
+    VEEditResult *refusal = nil;
+    const auto offsets = [self offsetsFor:*transition range:frames linked:NO notes:notes refusal:&refusal];
+    if (!offsets) {
+        return refusal;
+    }
+    std::vector<TransitionRangeChange> changes{{id, offsets->first, offsets->second}};
+    const auto partner = includingLinked ? linkedTransition(sequence, id) : std::nullopt;
+    if (const auto linked = partner ? findTransition(sequence, *partner) : std::nullopt) {
+        if (linked->track->locked) {
+            [notes addObject:[NSString stringWithFormat:@"The linked transition on %@ was not changed: the track is locked.",
+                                                        toNS(linked->track->name)]];
+        } else {
+            // The same range relative to its own cut.
+            const CMTime shift = linked->cut - transition->cut;
+            const TimeRange moved{frames.start + shift, frames.end + shift};
+            VEEditResult *linkedRefusal = nil;
+            if (const auto linkedOffsets = [self offsetsFor:*linked range:moved linked:YES notes:notes refusal:&linkedRefusal]) {
+                changes.push_back({*partner, linkedOffsets->first, linkedOffsets->second});
+            } else {
+                [notes addObject:[NSString stringWithFormat:@"The linked transition was not changed: %@", linkedRefusal.message]];
+            }
+        }
+    }
+    NSString *note = notes.count > 0 ? [notes componentsJoinedByString:@" "] : nil;
+    return [self push:std::make_unique<SetTransitionRanges>([self sequenceId], std::move(changes)) created:nil note:note];
 }
 
 - (VEEditResult *)linkClip:(VEClipID)clipID withClip:(VEClipID)otherClipID {

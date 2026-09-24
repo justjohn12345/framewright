@@ -3,15 +3,23 @@
 #include "../Media/HardwareCaps.h"
 #include "../Media/MediaTypes.h"
 
+#include "../Edit/EditOps.h"
+
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 VEVideoParams VEVideoParamsIdentity(void) {
     return ve::facade::toVE(ve::VideoParams{});
 }
 
 VEAudioParams VEAudioParamsDefault(void) {
-    return ve::facade::toVE(ve::AudioParams{});
+    return VEAudioParams{0.0, kCMTimeZero, kCMTimeZero};
+}
+
+VESpanValues VESpanValuesUnchanged(void) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    return VESpanValues{nan, nan, nan, nan, nan, nan};
 }
 
 // MARK: - Class extensions (writable for the factories below)
@@ -44,21 +52,31 @@ VEAudioParams VEAudioParamsDefault(void) {
 - (instancetype)initInternal;
 @end
 
-@interface VEKeyframe ()
-@property (nonatomic, readwrite) VEMotionParameter parameter;
-@property (nonatomic, readwrite) CMTime sourceTime;
-@property (nonatomic, readwrite) CMTime timelineTime;
-@property (nonatomic, readwrite) CMTime frameTime;
-@property (nonatomic, readwrite) BOOL isInsideClip;
-@property (nonatomic, readwrite) double value;
+@interface VEEffectSpan ()
+@property (nonatomic, readwrite) VESpanID spanID;
+@property (nonatomic, readwrite) VEClipID clipID;
+@property (nonatomic, readwrite) VETrackID trackID;
+@property (nonatomic, readwrite) NSInteger lane;
+@property (nonatomic, readwrite) VESpanKind kind;
+@property (nonatomic, readwrite) CMTime clipRelativeStart;
+@property (nonatomic, readwrite) CMTime clipRelativeEnd;
+@property (nonatomic, readwrite) CMTime start;
+@property (nonatomic, readwrite) CMTime end;
+@property (nonatomic, readwrite) VESpanValues startValues;
+@property (nonatomic, readwrite) VESpanValues endValues;
 @property (nonatomic, readwrite) VEKeyframeInterpolation interpolation;
+@property (nonatomic, readwrite) VETransitionStyle transitionStyle;
+@property (nonatomic, readwrite) CMTime duration;
+@property (nonatomic, readwrite) CMTime shareBeforeCut;
+@property (nonatomic, readwrite) CMTime shareAfterCut;
+@property (nonatomic, readwrite) VEClipID partnerClipID;
+@property (nonatomic, readwrite) VESpanID linkedSpanID;
 - (instancetype)initInternal;
 @end
 
 @interface VEClipInfo () {
   @public
-    ve::Clip _clip;         // the clip as it was (for keyframe queries)
-    CMTime _frameDuration;  // the sequence's frame duration
+    ve::Clip _clip; // the clip as it was (for the evaluations)
 }
 @property (nonatomic, readwrite) VEClipID clipID;
 @property (nonatomic, readwrite) VEAssetID assetID;
@@ -77,6 +95,7 @@ VEAudioParams VEAudioParamsDefault(void) {
 @property (nonatomic, readwrite) VEClipID linkedClipID;
 @property (nonatomic, readwrite) VEVideoParams videoParams;
 @property (nonatomic, readwrite) VEAudioParams audioParams;
+@property (nonatomic, readwrite, copy) NSArray<VEEffectSpan *> *spans;
 - (instancetype)initInternal;
 @end
 
@@ -97,9 +116,12 @@ VEAudioParams VEAudioParamsDefault(void) {
 @property (nonatomic, readwrite) VETrackID trackID;
 @property (nonatomic, readwrite) VEClipID fromClipID;
 @property (nonatomic, readwrite) VEClipID toClipID;
+@property (nonatomic, readwrite) VETransitionStyle style;
 @property (nonatomic, readwrite) CMTime duration;
 @property (nonatomic, readwrite) CMTime start;
 @property (nonatomic, readwrite) CMTime end;
+@property (nonatomic, readwrite) CMTime shareBeforeCut;
+@property (nonatomic, readwrite) CMTime shareAfterCut;
 - (instancetype)initInternal;
 @end
 
@@ -122,18 +144,10 @@ VEAudioParams VEAudioParamsDefault(void) {
                      message:(NSString *)message
                   createdIDs:(NSArray<NSNumber *> *)createdIDs
                      dropped:(NSArray<NSNumber *> *)dropped
+                droppedSpans:(NSArray<NSNumber *> *)droppedSpans
+                   freeRange:(CMTimeRange)freeRange
+                        span:(nullable VEEffectSpan *)span
                         note:(NSString *)note;
-@end
-
-@interface VEKeyframeGroup ()
-@property (nonatomic, readwrite) VEClipID clipID;
-@property (nonatomic, readwrite) CMTime frameTime;
-@property (nonatomic, readwrite, copy) NSArray<NSNumber *> *parameters;
-@property (nonatomic, readwrite) CMTime earliestFrame;
-@property (nonatomic, readwrite) CMTime latestFrame;
-@property (nonatomic, readwrite) BOOL canMove;
-@property (nonatomic, readwrite, copy) NSString *reason;
-- (instancetype)initInternal;
 @end
 
 @interface VETransitionLimit ()
@@ -239,13 +253,14 @@ static NSString *describeTime(CMTime t) {
 }
 @end
 
-@implementation VEKeyframe
+@implementation VEEffectSpan
 - (instancetype)initInternal {
     return [super init];
 }
 - (NSString *)description {
-    return [NSString stringWithFormat:@"<VEKeyframe %ld at %@ (timeline %@) = %g>", (long)self.parameter,
-                                      describeTime(self.sourceTime), describeTime(self.timelineTime), self.value];
+    return [NSString stringWithFormat:@"<VEEffectSpan %lld clip %lld lane %ld kind %ld [%@, %@)>", self.spanID,
+                                      self.clipID, (long)self.lane, (long)self.kind, describeTime(self.start),
+                                      describeTime(self.end)];
 }
 @end
 
@@ -268,72 +283,35 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
     return std::nullopt;
 }
 
-VEKeyframe *makeKeyframe(const ve::Clip &clip, ve::MotionParameter parameter, const ve::Keyframe &keyframe,
-                         CMTime frameDuration) {
-    VEKeyframe *info = [[VEKeyframe alloc] initInternal];
-    info.parameter = ve::facade::toVE(parameter);
-    info.sourceTime = keyframe.time;
-    info.timelineTime = clip.timelineTimeAt(keyframe.time);
-    const std::optional<CMTime> frame = ve::frameShowingSourceTime(clip, keyframe.time, frameDuration);
-    info.isInsideClip = frame.has_value();
-    info.frameTime = frame.value_or(ve::snapToFrame(info.timelineTime, frameDuration, ve::SnapMode::Floor));
-    info.value = keyframe.value;
-    info.interpolation = ve::facade::toVE(keyframe.interpolation);
-    return info;
-}
-
 } // namespace
 
 @implementation VEClipInfo
 - (instancetype)initInternal {
     return [super init];
 }
-- (BOOL)hasKeyframes {
-    return _clip.video.isAnimated();
-}
-- (BOOL)isAnimated:(VEMotionParameter)parameter {
-    const std::optional<ve::MotionParameter> p = motionParameterFrom(parameter);
-    return p && _clip.video.isAnimated(*p);
-}
-- (NSArray<VEKeyframe *> *)keyframesForParameter:(VEMotionParameter)parameter {
-    const std::optional<ve::MotionParameter> known = motionParameterFrom(parameter);
-    if (!known) {
-        return @[];
-    }
-    const ve::MotionParameter p = *known;
-    const ve::KeyframeTrack &track = _clip.video.keyframes.track(p);
-    NSMutableArray<VEKeyframe *> *keyframes = [NSMutableArray arrayWithCapacity:track.size()];
-    for (const ve::Keyframe &keyframe : track) {
-        [keyframes addObject:makeKeyframe(_clip, p, keyframe, _frameDuration)];
-    }
-    return keyframes;
-}
-- (NSArray<VEKeyframe *> *)allKeyframes {
-    NSMutableArray<VEKeyframe *> *all = [NSMutableArray array];
-    for (const ve::MotionParameter p : ve::kMotionParameters) {
-        for (const ve::Keyframe &keyframe : _clip.video.keyframes.track(p)) {
-            [all addObject:makeKeyframe(_clip, p, keyframe, _frameDuration)];
-        }
-    }
-    [all sortWithOptions:NSSortStable
-         usingComparator:^NSComparisonResult(VEKeyframe *a, VEKeyframe *b) {
-             const int32_t order = CMTimeCompare(a.sourceTime, b.sourceTime);
-             return order < 0 ? NSOrderedAscending : order > 0 ? NSOrderedDescending : NSOrderedSame;
-         }];
-    return all;
+- (BOOL)hasEffectSpans {
+    return _clip.hasEffectSpans();
 }
 - (VEVideoParams)videoParamsAtTime:(CMTime)time {
     return ve::facade::toVE(ve::motionValuesAt(_clip, time));
 }
-- (nullable VEKeyframe *)keyframeForParameter:(VEMotionParameter)parameter atTime:(CMTime)time {
-    const std::optional<ve::MotionParameter> known = motionParameterFrom(parameter);
-    if (!known) {
-        return nil;
+- (double)gainDbAtTime:(CMTime)time {
+    return ve::gainDbAt(_clip, time);
+}
+- (BOOL)getMotion:(VEVideoParams *)motion
+     atEdgeOfSpan:(VESpanID)spanID
+            atEnd:(BOOL)atEnd
+    frameDuration:(CMTime)frameDuration {
+    const ve::EffectSpan *span = _clip.findSpan(ve::SpanId(static_cast<ve::SpanId::ValueType>(spanID)));
+    if (span == nullptr || motion == nullptr || !ve::isPositive(frameDuration)) {
+        return NO;
     }
-    const ve::MotionParameter p = *known;
-    const CMTime frame = ve::snapToFrame(time, _frameDuration, ve::SnapMode::Floor);
-    const auto index = ve::keyframeIndexForFrame(_clip, p, frame, _frameDuration);
-    return index ? makeKeyframe(_clip, p, _clip.video.keyframes.track(p)[*index], _frameDuration) : nil;
+    const auto values = ve::spanEdgeMotion(_clip, *span, frameDuration, atEnd);
+    if (!values) {
+        return NO;
+    }
+    *motion = ve::facade::toVE(*values);
+    return YES;
 }
 - (NSString *)description {
     return [NSString stringWithFormat:@"<VEClipInfo %lld asset %lld track %lld [%@, %@)>", self.clipID, self.assetID,
@@ -368,6 +346,9 @@ VEKeyframe *makeKeyframe(const ve::Clip &clip, ve::MotionParameter parameter, co
                      message:(NSString *)message
                   createdIDs:(NSArray<NSNumber *> *)createdIDs
                      dropped:(NSArray<NSNumber *> *)dropped
+                droppedSpans:(NSArray<NSNumber *> *)droppedSpans
+                   freeRange:(CMTimeRange)freeRange
+                        span:(nullable VEEffectSpan *)span
                         note:(NSString *)note {
     if ((self = [super init])) {
         _ok = code == VEEditErrorNone;
@@ -375,37 +356,42 @@ VEKeyframe *makeKeyframe(const ve::Clip &clip, ve::MotionParameter parameter, co
         _message = [message copy];
         _createdIDs = [createdIDs copy];
         _droppedTransitionIDs = [dropped copy];
+        _droppedSpanIDs = [droppedSpans copy];
+        _freeRange = freeRange;
+        _span = span;
         _note = [note copy];
     }
     return self;
 }
 + (instancetype)success {
-    return [[self alloc] initWithCode:VEEditErrorNone message:@"" createdIDs:@[] dropped:@[] note:@""];
+    return [self successWithCreatedIDs:@[]];
 }
 + (instancetype)successWithCreatedIDs:(NSArray<NSNumber *> *)createdIDs {
-    return [[self alloc] initWithCode:VEEditErrorNone message:@"" createdIDs:createdIDs dropped:@[] note:@""];
+    return [[self alloc] initWithCode:VEEditErrorNone
+                              message:@""
+                           createdIDs:createdIDs
+                              dropped:@[]
+                         droppedSpans:@[]
+                            freeRange:kCMTimeRangeInvalid
+                                 span:nil
+                                 note:@""];
 }
 + (instancetype)failureWithMessage:(NSString *)message {
     return [self failureWithCode:VEEditErrorInvalidArgument message:message];
 }
 + (instancetype)failureWithCode:(VEEditErrorCode)code message:(NSString *)message {
     const VEEditErrorCode failure = code == VEEditErrorNone ? VEEditErrorInvalidArgument : code;
-    return [[self alloc] initWithCode:failure message:message createdIDs:@[] dropped:@[] note:@""];
+    return [[self alloc] initWithCode:failure
+                              message:message
+                           createdIDs:@[]
+                              dropped:@[]
+                         droppedSpans:@[]
+                            freeRange:kCMTimeRangeInvalid
+                                 span:nil
+                                 note:@""];
 }
 - (NSString *)description {
     return self.ok ? @"<VEEditResult ok>" : [NSString stringWithFormat:@"<VEEditResult failed: %@>", self.message];
-}
-@end
-
-@implementation VEKeyframeGroup
-- (instancetype)initInternal {
-    return [super init];
-}
-- (NSString *)description {
-    return [NSString stringWithFormat:@"<VEKeyframeGroup clip %lld at %@, %lu parameters, %@ - %@%@>", self.clipID,
-                                      describeTime(self.frameTime), (unsigned long)self.parameters.count,
-                                      describeTime(self.earliestFrame), describeTime(self.latestFrame),
-                                      self.canMove ? @"" : [@", fixed: " stringByAppendingString:self.reason]];
 }
 @end
 
@@ -518,15 +504,13 @@ VideoParams fromVE(const VEVideoParams &p) {
     return v;
 }
 
-VEAudioParams toVE(const AudioParams &p) {
-    return VEAudioParams{p.gainDb, p.fadeInDuration, p.fadeOutDuration};
+VEAudioParams audioParamsOf(const Clip &clip) {
+    return VEAudioParams{clip.audio.gainDb, clipFadeLength(clip, ClipEdge::Head), clipFadeLength(clip, ClipEdge::Tail)};
 }
 
 AudioParams fromVE(const VEAudioParams &p) {
     AudioParams a;
     a.gainDb = p.gainDb;
-    a.fadeInDuration = p.fadeInDuration;
-    a.fadeOutDuration = p.fadeOutDuration;
     return a;
 }
 
@@ -626,6 +610,87 @@ VEKeyframeInterpolation toVE(KeyframeInterpolation interpolation) {
     return VEKeyframeInterpolationLinear;
 }
 
+VESpanKind toVE(SpanKind kind) {
+    switch (kind) {
+    case SpanKind::Transition:
+        return VESpanKindTransition;
+    case SpanKind::Motion:
+        return VESpanKindMotion;
+    case SpanKind::Opacity:
+        return VESpanKindOpacity;
+    case SpanKind::Gain:
+        return VESpanKindGain;
+    }
+    return VESpanKindMotion;
+}
+
+std::optional<SpanKind> fromVE(VESpanKind kind) {
+    switch (kind) {
+    case VESpanKindTransition:
+        return SpanKind::Transition;
+    case VESpanKindMotion:
+        return SpanKind::Motion;
+    case VESpanKindOpacity:
+        return SpanKind::Opacity;
+    case VESpanKindGain:
+        return SpanKind::Gain;
+    }
+    return std::nullopt;
+}
+
+VETransitionStyle toVE(TransitionRole role) {
+    switch (role) {
+    case TransitionRole::CrossDissolve:
+        return VETransitionStyleCrossDissolve;
+    case TransitionRole::FadeOut:
+        return VETransitionStyleFadeOut;
+    case TransitionRole::FadeIn:
+        return VETransitionStyleFadeIn;
+    }
+    return VETransitionStyleCrossDissolve;
+}
+
+double spanValueIn(const VESpanValues &values, SpanParameter parameter) {
+    switch (parameter) {
+    case SpanParameter::X:
+        return values.x;
+    case SpanParameter::Y:
+        return values.y;
+    case SpanParameter::Scale:
+        return values.scale;
+    case SpanParameter::Rotation:
+        return values.rotationDegrees;
+    case SpanParameter::Opacity:
+        return values.opacity;
+    case SpanParameter::Gain:
+        return values.gainDb;
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
+static void setSpanValueIn(VESpanValues &values, SpanParameter parameter, double value) {
+    switch (parameter) {
+    case SpanParameter::X:
+        values.x = value;
+        break;
+    case SpanParameter::Y:
+        values.y = value;
+        break;
+    case SpanParameter::Scale:
+        values.scale = value;
+        break;
+    case SpanParameter::Rotation:
+        values.rotationDegrees = value;
+        break;
+    case SpanParameter::Opacity:
+        values.opacity = value;
+        break;
+    case SpanParameter::Gain:
+        values.gainDb = value;
+        break;
+    }
+}
+
 std::optional<KeyframeInterpolation> fromVE(VEKeyframeInterpolation interpolation) {
     switch (interpolation) {
     case VEKeyframeInterpolationHold:
@@ -644,10 +709,9 @@ std::optional<KeyframeInterpolation> fromVE(VEKeyframeInterpolation interpolatio
     return std::nullopt;
 }
 
-VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project, CMTime frameDuration) {
+VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project, const Sequence &sequence) {
     VEClipInfo *info = [[VEClipInfo alloc] initInternal];
     info->_clip = clip;
-    info->_frameDuration = frameDuration;
     info.clipID = static_cast<VEClipID>(clip.id.value());
     info.assetID = static_cast<VEAssetID>(clip.assetId.value());
     info.trackID = static_cast<VETrackID>(track.id.value());
@@ -665,7 +729,50 @@ VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &pr
     info.isStill = clip.isStill;
     info.linkedClipID = clip.linkedClipId ? static_cast<VEClipID>(clip.linkedClipId->value()) : 0;
     info.videoParams = toVE(clip.video);
-    info.audioParams = toVE(clip.audio);
+    info.audioParams = audioParamsOf(clip);
+    NSMutableArray<VEEffectSpan *> *spans = [NSMutableArray arrayWithCapacity:clip.spans.size()];
+    for (const EffectSpan &span : clip.spans) {
+        [spans addObject:makeEffectSpan(span, clip, track, sequence)];
+    }
+    info.spans = spans;
+    return info;
+}
+
+VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Track &track, const Sequence &sequence) {
+    VEEffectSpan *info = [[VEEffectSpan alloc] initInternal];
+    info.spanID = static_cast<VESpanID>(span.id.value());
+    info.clipID = static_cast<VEClipID>(clip.id.value());
+    info.trackID = static_cast<VETrackID>(track.id.value());
+    info.lane = span.lane;
+    info.kind = toVE(span.kind);
+    info.clipRelativeStart = span.start;
+    info.clipRelativeEnd = span.end;
+    const std::optional<TimeRange> range = spanTimelineRange(clip, span, track);
+    info.start = range ? range->start : kCMTimeInvalid;
+    info.end = range ? range->end : kCMTimeInvalid;
+    info.duration = range ? range->duration() : kCMTimeInvalid;
+    VESpanValues startValues = VESpanValuesUnchanged();
+    VESpanValues endValues = VESpanValuesUnchanged();
+    for (const SpanParameter parameter : parametersOf(span.kind)) {
+        setSpanValueIn(startValues, parameter, spanEdgeValue(span, parameter, false));
+        setSpanValueIn(endValues, parameter, spanEdgeValue(span, parameter, true));
+    }
+    info.startValues = startValues;
+    info.endValues = endValues;
+    info.interpolation = span.isTransition() ? VEKeyframeInterpolationLinear : toVE(spanInterpolation(span));
+    info.transitionStyle = VETransitionStyleCrossDissolve;
+    info.shareBeforeCut = kCMTimeZero;
+    info.shareAfterCut = kCMTimeZero;
+    if (span.isTransition()) {
+        if (const auto placement = placeTransition(track, clip, span)) {
+            info.transitionStyle = toVE(placement->role);
+            info.partnerClipID = placement->partner ? static_cast<VEClipID>(placement->partner->id.value()) : 0;
+            info.shareBeforeCut = placement->cut - placement->range.start;
+            info.shareAfterCut = placement->range.end - placement->cut;
+        }
+        const auto linked = linkedTransition(sequence, span.id);
+        info.linkedSpanID = linked ? static_cast<VESpanID>(linked->value()) : 0;
+    }
     return info;
 }
 
@@ -686,20 +793,31 @@ VETrackInfo *makeTrackInfo(const Track &track, NSInteger index) {
     return info;
 }
 
-VETransitionInfo *makeTransitionInfo(const Transition &transition, const Sequence &sequence) {
+VETransitionInfo *makeTransitionInfo(const TransitionPlacement &transition) {
     VETransitionInfo *info = [[VETransitionInfo alloc] initInternal];
-    info.transitionID = static_cast<VETransitionID>(transition.id.value());
-    info.trackID = static_cast<VETrackID>(transition.trackId.value());
-    info.fromClipID = static_cast<VEClipID>(transition.fromClipId.value());
-    info.toClipID = static_cast<VEClipID>(transition.toClipId.value());
-    info.duration = transition.duration;
-    if (auto range = sequence.transitionRange(transition)) {
-        info.start = range->start;
-        info.end = range->end;
-    } else {
-        info.start = kCMTimeInvalid;
-        info.end = kCMTimeInvalid;
+    const VEClipID owner = static_cast<VEClipID>(transition.owner->id.value());
+    info.transitionID = static_cast<VETransitionID>(transition.span->id.value());
+    info.trackID = static_cast<VETrackID>(transition.track->id.value());
+    info.style = toVE(transition.role);
+    switch (transition.role) {
+    case TransitionRole::CrossDissolve:
+        info.fromClipID = owner;
+        info.toClipID = transition.partner ? static_cast<VEClipID>(transition.partner->id.value()) : 0;
+        break;
+    case TransitionRole::FadeOut:
+        info.fromClipID = owner;
+        info.toClipID = 0;
+        break;
+    case TransitionRole::FadeIn:
+        info.fromClipID = 0;
+        info.toClipID = owner;
+        break;
     }
+    info.start = transition.range.start;
+    info.end = transition.range.end;
+    info.duration = transition.range.duration();
+    info.shareBeforeCut = transition.cut - transition.range.start;
+    info.shareAfterCut = transition.range.end - transition.cut;
     return info;
 }
 
@@ -721,8 +839,16 @@ VESequenceInfo *makeSequenceInfo(const Sequence &sequence) {
         [audio addObject:@(static_cast<VETrackID>(t.id.value()))];
     }
     NSMutableArray<VETransitionInfo *> *transitions = [NSMutableArray array];
-    for (const Transition &t : sequence.transitions) {
-        [transitions addObject:makeTransitionInfo(t, sequence)];
+    for (const auto *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (const Track &track : *list) {
+            for (const Clip &clip : track.clips) {
+                const EffectSpan *tail = clip.transitionAt(ClipEdge::Tail);
+                const auto placement = tail ? placeTransition(track, clip, *tail) : std::nullopt;
+                if (placement && placement->role == TransitionRole::CrossDissolve && placement->partner) {
+                    [transitions addObject:makeTransitionInfo(*placement)];
+                }
+            }
+        }
     }
     info.videoTrackIDs = video;
     info.audioTrackIDs = audio;
@@ -783,52 +909,58 @@ VEEditErrorCode toVE(EditError error) {
     case EditError::InsideTransition: return VEEditErrorInsideTransition;
     case EditError::NotRepresentable: return VEEditErrorNotRepresentable;
     case EditError::InvariantViolation: return VEEditErrorInvariantViolation;
-    case EditError::KeyframeNotFound: return VEEditErrorKeyframeNotFound;
+    case EditError::SpanNotFound: return VEEditErrorSpanNotFound;
     }
     return VEEditErrorInvariantViolation;
 }
 
-VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *created, NSString *note) {
+VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *created, NSString *note,
+                             VEEffectSpan *span) {
     if (!result.ok()) {
         NSString *message = toNS(result.message);
-        return [VEEditResult failureWithCode:toVE(result.error)
-                                     message:message.length > 0 ? message : @(nameOf(result.error))];
+        const CMTimeRange free = result.freeRange ? result.freeRange->toCMTimeRange() : kCMTimeRangeInvalid;
+        return [[VEEditResult alloc] initWithCode:toVE(result.error)
+                                          message:message.length > 0 ? message : @(nameOf(result.error))
+                                       createdIDs:@[]
+                                          dropped:@[]
+                                     droppedSpans:@[]
+                                        freeRange:free
+                                             span:nil
+                                             note:@""];
     }
     NSMutableArray<NSNumber *> *dropped = [NSMutableArray arrayWithCapacity:result.droppedTransitionIds.size()];
-    for (TransitionId id : result.droppedTransitionIds) {
+    for (SpanId id : result.droppedTransitionIds) {
         [dropped addObject:@(static_cast<VETransitionID>(id.value()))];
     }
+    NSMutableArray<NSNumber *> *droppedSpans = [NSMutableArray arrayWithCapacity:result.droppedSpanIds.size()];
+    for (SpanId id : result.droppedSpanIds) {
+        [droppedSpans addObject:@(static_cast<VESpanID>(id.value()))];
+    }
     NSString *text = note ?: @"";
+    auto append = [&](NSString *sentence) {
+        text = text.length > 0 ? [NSString stringWithFormat:@"%@ %@", text, sentence] : sentence;
+    };
     if (dropped.count > 0) {
-        NSString *removed =
-            dropped.count == 1
-                ? @"1 transition was removed because its cut no longer exists."
-                : [NSString stringWithFormat:@"%lu transitions were removed because their cuts no longer exist.",
-                                             (unsigned long)dropped.count];
-        text = text.length > 0 ? [NSString stringWithFormat:@"%@ %@", text, removed] : removed;
+        append(dropped.count == 1
+                   ? @"1 transition was removed because its cut no longer exists."
+                   : [NSString stringWithFormat:@"%lu transitions were removed because their cuts no longer exist.",
+                                                (unsigned long)dropped.count]);
+    }
+    if (droppedSpans.count > 0) {
+        append(droppedSpans.count == 1
+                   ? @"1 effect span was removed because nothing of it is left in its clip."
+                   : [NSString stringWithFormat:@"%lu effect spans were removed because nothing of them is left in "
+                                                @"their clips.",
+                                                (unsigned long)droppedSpans.count]);
     }
     return [[VEEditResult alloc] initWithCode:VEEditErrorNone
                                       message:@""
                                    createdIDs:created ?: @[]
                                       dropped:dropped
+                                 droppedSpans:droppedSpans
+                                    freeRange:kCMTimeRangeInvalid
+                                         span:span
                                          note:text];
-}
-
-VEKeyframeGroup *makeKeyframeGroup(ClipId clipId, CMTime frame, const std::vector<MotionParameter> &parameters,
-                                   CMTime earliestFrame, CMTime latestFrame, NSString *refusal) {
-    VEKeyframeGroup *info = [[VEKeyframeGroup alloc] initInternal];
-    info.clipID = static_cast<VEClipID>(clipId.value());
-    info.frameTime = frame;
-    NSMutableArray<NSNumber *> *list = [NSMutableArray arrayWithCapacity:parameters.size()];
-    for (MotionParameter parameter : parameters) {
-        [list addObject:@(toVE(parameter))];
-    }
-    info.parameters = list;
-    info.canMove = refusal.length == 0;
-    info.reason = refusal ?: @"";
-    info.earliestFrame = info.canMove ? earliestFrame : frame;
-    info.latestFrame = info.canMove ? latestFrame : frame;
-    return info;
 }
 
 VETransitionLimit *makeTransitionLimit(const TransitionLimit &limit) {

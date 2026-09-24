@@ -27,7 +27,9 @@ struct AssetDetails {
 
 VEVideoParams toVE(const VideoParams &params);
 VideoParams fromVE(const VEVideoParams &params);
-VEAudioParams toVE(const AudioParams &params);
+/// The clip's gain and the lengths of its lane-0 fades.
+VEAudioParams audioParamsOf(const Clip &clip);
+/// The static gain of `params` (its fades are lane-0 spans: see ClipParamsChange).
 AudioParams fromVE(const VEAudioParams &params);
 VEMotionParameter toVE(MotionParameter parameter);
 /// Nullopt for a value outside the enumeration.
@@ -35,25 +37,29 @@ std::optional<MotionParameter> fromVE(VEMotionParameter parameter);
 VEKeyframeInterpolation toVE(KeyframeInterpolation interpolation);
 /// Nullopt for a value outside the enumeration.
 std::optional<KeyframeInterpolation> fromVE(VEKeyframeInterpolation interpolation);
+VESpanKind toVE(SpanKind kind);
+/// Nullopt for a value outside the enumeration.
+std::optional<SpanKind> fromVE(VESpanKind kind);
+VETransitionStyle toVE(TransitionRole role);
+/// The value of `parameter` in `values`.
+double spanValueIn(const VESpanValues &values, SpanParameter parameter);
 
 VEAssetInfo *makeAssetInfo(const MediaAsset &asset, const AssetDetails *details, bool missing, NSInteger useCount);
-/// `frameDuration`: the sequence's (keyframe queries map frames to source spans).
-VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project, CMTime frameDuration);
+VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project, const Sequence &sequence);
 VETrackInfo *makeTrackInfo(const Track &track, NSInteger index);
-VETransitionInfo *makeTransitionInfo(const Transition &transition, const Sequence &sequence);
+VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Track &track, const Sequence &sequence);
+VETransitionInfo *makeTransitionInfo(const TransitionPlacement &transition);
 VESequenceInfo *makeSequenceInfo(const Sequence &sequence);
 VEHardwareCaps *makeHardwareCaps();
 VEWaveform *makeWaveform(AssetId asset, const std::shared_ptr<const thumbs::WaveformPeaks> &peaks);
 
 VEEditErrorCode toVE(EditError error);
-/// The facade's result for an engine edit result (`note` may be nil). Dropped transitions are
-/// listed and mentioned in the note.
-VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *created,
-                             NSString *note);
+/// The facade's result for an engine edit result (`note` may be nil, `span` the span after a
+/// successful span edit). Dropped transitions and spans are listed and mentioned in the note; a
+/// refusal's free range is passed on.
+VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *created, NSString *note,
+                             VEEffectSpan *span = nil);
 VETransitionLimit *makeTransitionLimit(const TransitionLimit &limit);
-/// A keyframe group snapshot; `refusal` (nil or "" when the group can move) makes it fixed on `frame`.
-VEKeyframeGroup *makeKeyframeGroup(ClipId clipId, CMTime frame, const std::vector<MotionParameter> &parameters,
-                                   CMTime earliestFrame, CMTime latestFrame, NSString *refusal);
 VEPlaybackState playbackStateToVE(playback::PlaybackState state);
 VEPlaybackStatus *makePlaybackStatus(const playback::PlaybackStatus &status);
 VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats, const playback::PresentedFrame &presented);

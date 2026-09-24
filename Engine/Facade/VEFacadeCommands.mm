@@ -3,7 +3,6 @@
 #include "../Edit/EditPrimitives.h"
 
 #include <algorithm>
-#include <map>
 #include <set>
 
 namespace ve::facade {
@@ -105,10 +104,16 @@ EditResult CompositeCommand::apply(Project &project) {
             return result;
         }
         // Every child's side effects are the composite's.
-        for (TransitionId id : result.droppedTransitionIds) {
+        for (SpanId id : result.droppedTransitionIds) {
             if (std::find(combined.droppedTransitionIds.begin(), combined.droppedTransitionIds.end(), id) ==
                 combined.droppedTransitionIds.end()) {
                 combined.droppedTransitionIds.push_back(id);
+            }
+        }
+        for (SpanId id : result.droppedSpanIds) {
+            if (std::find(combined.droppedSpanIds.begin(), combined.droppedSpanIds.end(), id) ==
+                combined.droppedSpanIds.end()) {
+                combined.droppedSpanIds.push_back(id);
             }
         }
     }
@@ -255,19 +260,8 @@ EditResult MoveClips::perform(const Project &, Sequence &sequence, IdGenerator &
             }
         }
     }
-    // Transitions whose two clips land on the same track move there with them: the whole move
-    // shares one delta, so the cut between them is intact.
-    std::map<ClipId, TrackId> destinationOf;
-    for (const Placement &p : placements) {
-        destinationOf[p.clip.id] = p.destination;
-    }
-    for (Transition &transition : sequence.transitions) {
-        auto from = destinationOf.find(transition.fromClipId);
-        auto to = destinationOf.find(transition.toClipId);
-        if (from != destinationOf.end() && to != destinationOf.end() && from->second == to->second) {
-            transition.trackId = from->second;
-        }
-    }
+    // A clip's spans move with it: a transition whose two clips land on the same track, still
+    // touching, keeps working there (the whole move shares one delta, so the cut is intact).
     SplitList splits;
     for (Placement &p : placements) {
         Track &target = *sequence.findTrack(p.destination);

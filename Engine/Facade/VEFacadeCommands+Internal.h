@@ -112,9 +112,9 @@ class FreshIds final : public Command {
 /// clip never cuts another clip of the same move. `delta` (snapped to the sequence frame grid)
 /// applies to every moved clip; `trackOffset` moves the listed clips on tracks of `offsetKind`
 /// (every kind when nullopt) that many tracks within their kind. Other clips, and linked
-/// partners that are not listed, keep their track and follow in time. A transition whose two
-/// clips both land on the same track moves there with them (its cut still exists); one whose
-/// cut the move breaks is dropped and reported. Refused when a destination track does not exist
+/// partners that are not listed, keep their track and follow in time. Spans move with their
+/// clips: a transition whose two clips both land on the same track still touching moves there with
+/// them (its cut still exists); one whose cut the move breaks is dropped and reported. Refused when a destination track does not exist
 /// or is locked, a clip would start before zero, or two moved clips would overlap each other.
 class MoveClips final : public SequenceCommand {
   public:

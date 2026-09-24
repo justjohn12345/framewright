@@ -155,12 +155,10 @@ typedef NS_OPTIONS(NSUInteger, VETransitionOptions) {
 NS_SWIFT_UI_ACTOR
 @interface VEClipParamsBatch : NSObject
 /// Sets the static video parameters of a clip on a video track (replaces an earlier entry for it);
-/// the clip's Motion keyframes stay.
+/// the clip's spans stay (they compose onto the static values).
 - (void)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID;
-/// Sets the video parameters of a clip on a video track and removes its Motion keyframes (a
-/// reset of the whole Video section).
-- (void)setVideoParams:(VEVideoParams)params clearingKeyframesForClip:(VEClipID)clipID;
-/// Sets the audio parameters of a clip on an audio track (replaces an earlier entry for it).
+/// Sets the audio parameters of a clip on an audio track (replaces an earlier entry for it): its
+/// gain and its lane-0 fades (see VEAudioParams).
 - (void)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID;
 /// Number of clips in the batch.
 @property (nonatomic, readonly) NSUInteger count;
@@ -360,9 +358,10 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)rippleDeleteClips:(NSArray<NSNumber *> *)clipIDs;
 /// Tracks that move with ripple edits (ripple delete, speed changes, insert). Default AllTracks.
 @property (nonatomic) VERippleScope rippleScope;
-/// Sets the clip's static video parameters (VEClipInfo.videoParams); its Motion keyframes stay (a
-/// parameter with keyframes is changed with setMotionValue:parameter:clip:atTime:).
+/// Sets the clip's static video parameters (VEClipInfo.videoParams); its spans stay and compose
+/// onto them.
 - (VEEditResult *)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID;
+/// Sets the clip's gain and its lane-0 fades (see VEAudioParams), in one undo step.
 - (VEEditResult *)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID;
 /// Constant speed (0.01...100, approximated by a fraction with a denominator <= 1000); later
 /// clips ripple by the change in duration (see rippleScope).
@@ -384,6 +383,16 @@ NS_SWIFT_UI_ACTOR
                            forClips:(NSArray<NSNumber *> *)clipIDs
                              ripple:(BOOL)ripple
                               scope:(VERippleScope)scope;
+// MARK: Transitions
+//
+// A transition is a lane-0 span of the clip that owns it (VEEffectSpan, VETransitionStyle): at a
+// clip's end it covers a range from inside the clip past its end, a cross dissolve (video) or a
+// constant-power crossfade (audio) into the clip touching that end, whose share of each side is the
+// range's split at the cut (70/30, all after the cut, ...), limited by the two clips' media beyond
+// the cut; ending on the cut it is a fade out to black or silence. At a clip's start it is a fade in,
+// allowed only where no clip touches that start (a cut belongs to its outgoing clip). Transition ids
+// are span ids. Every call is one undo step and joins a coalescing group like any other edit.
+
 /// Adds a cross dissolve (video track) or constant-power crossfade (audio track), centred on the
 /// cut where `fromClipID` ends and `toClipID` starts. A refusal for lack of media or length says
 /// what limits the cut and the longest transition it allows.
@@ -394,17 +403,31 @@ NS_SWIFT_UI_ACTOR
                                  toClip:(VEClipID)toClipID
                                duration:(CMTime)duration
                                 options:(VETransitionOptions)options;
+/// Adds a transition at `edge` of `clipID` of `duration` (whole frames): at the clip's end a cross
+/// dissolve centred on the cut when a clip touches that end (as addTransitionFromClip:), else a
+/// fade out to black / silence over the clip's last `duration`; at its start a fade in from black /
+/// silence (refused when a clip touches that start). FitToCut shortens it to what fits;
+/// IncludeLinked adds the same transition at the same edge of the linked partner (fitted to its own
+/// clip and cut), in the same undo step.
+- (VEEditResult *)addTransitionAtEdge:(VEClipEdge)edge
+                               ofClip:(VEClipID)clipID
+                             duration:(CMTime)duration
+                              options:(VETransitionOptions)options
+    NS_SWIFT_NAME(addTransition(at:of:duration:options:));
 /// The longest transition the cut between the two clips can take and what stops a longer one
 /// (maximumFrames 0 with the reason when none fits, e.g. the cut already has a transition).
 - (VETransitionLimit *)transitionLimitFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID;
-/// The longest duration an existing transition can be given.
+/// The longest duration an existing transition can be given (keeping its share before the cut as
+/// setDuration:forTransition: does; a fade: the clip's length less its other fade).
 - (VETransitionLimit *)transitionLimitForTransition:(VETransitionID)transitionID;
 - (VEEditResult *)removeTransition:(VETransitionID)transitionID;
+/// Sets the transition's length (whole frames). A centred cross dissolve stays centred; one with an
+/// uneven share keeps its share before the cut in proportion (rounded down); a fade keeps its edge.
 /// Refused beyond the cut's limit with the same explanation as adding.
 - (VEEditResult *)setDuration:(CMTime)duration forTransition:(VETransitionID)transitionID;
 /// A dissolve and its linked audio crossfade: the transition on the cut between the linked
-/// partners of `transitionID`'s two clips (either way round), or 0 when there is none (a clip is
-/// unlinked, the partners do not meet at a cut, or no transition joins them).
+/// partners of `transitionID`'s two clips (either way round), or the same fade at the same edge of
+/// the owner's linked partner; 0 when there is none.
 - (VETransitionID)linkedTransitionForTransition:(VETransitionID)transitionID;
 /// Removes the transition and, with `includingLinked`, its linked transition too, as one undo
 /// step ("Remove Transitions"). A linked transition on a locked track is kept (the note says so).
@@ -417,142 +440,98 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)setDuration:(CMTime)duration
                 forTransition:(VETransitionID)transitionID
               includingLinked:(BOOL)includingLinked;
+/// Sets the timeline range a transition covers (asymmetric: its edges move independently; whole
+/// frames). A tail transition's range starts at or before its cut: each side is fitted to what the
+/// clips allow (their lengths, the media beyond the cut, the neighbouring transitions) and the note
+/// names a shortening; a range that no longer reaches past the cut becomes a fade out to black /
+/// silence, and one reaching past it into a touching clip becomes a cross dissolve again (the note
+/// says so). A fade in's range starts at its clip's start. With `includingLinked` the linked
+/// transition gets the same range relative to its cut, fitted to its own clips. Refused:
+/// VEEditErrorTransitionNotFound, VEEditErrorInvalidTime (a range that does not start inside the
+/// clip, or is empty), VEEditErrorTrackLocked, and what AddTransition refuses when not even one
+/// frame fits.
+- (VEEditResult *)setRangeOfTransition:(VETransitionID)transitionID
+                                 range:(CMTimeRange)range
+                       includingLinked:(BOOL)includingLinked
+    NS_SWIFT_NAME(setTransitionRange(_:range:includingLinked:));
 
-// MARK: Keyframed Motion
+// MARK: Effect spans
 //
-// A clip on a video track can animate its Motion (VEMotionParameter): each parameter has its
-// static value (VEClipInfo.videoParams) until it gets keyframes, and then follows them (before
-// the first keyframe it holds the first value, after the last the last one, as in Premiere Pro).
-// Keyframes live on the clip's source time, so trims, speed changes and splits keep them on the
-// pictures they were set on (a split interpolates the cut: neither piece's pictures change).
-// Playback, the output view and export evaluate them for every frame. Times passed here are
-// timeline times (the playhead); a keyframe "at" a time is the one the sequence frame containing
-// it shows (VEKeyframe.frameTime). Every call is one undo step and joins a coalescing group like
-// any other edit (slider drags, keyboard nudges). Refusals: VEEditErrorClipNotFound,
-// VEEditErrorTrackKindMismatch (an audio clip), VEEditErrorInvalidTime (the playhead is not over
-// the clip), VEEditErrorAlreadyExists, VEEditErrorKeyframeNotFound, VEEditErrorInvalidArgument
-// (a value out of range: scale below 0, opacity outside 0...1), VEEditErrorTrackLocked, and
-// VEEditErrorNotRepresentable (the frame's source time has no time form a keyframe can take; only
-// with pathological speed and timescale combinations).
-//
-// Frames and keyframes: a keyframe set on a frame goes on the frame's start (its exact source time,
-// or the next 1/kPreciseTimescale tick when that has no time form), and the frame's picture is
-// evaluated at that same time (videoParamsAtTime:), so a frame shows the value set on it.
+// A clip's lanes 1-3 hold effect spans (VEEffectSpan): Motion and Opacity on video clips, Gain on
+// audio clips. A span is a range of the clip with start and end values; the values compose onto the
+// clip's static values (position and rotation add, scale and opacity multiply, gain adds in dB) and
+// act only within the span's range (in a transition's handles the value at the clip's edge holds).
+// Spans of one lane never overlap. Ranges passed here are timeline times, rounded to whole frames;
+// a span stays on its pictures when the clip is trimmed or its speed changes, a trim through it
+// clips it, a split divides it. Every call is one undo step (joins coalescing groups: drags pass the
+// whole change on every step) and returns the span as it is after the edit (VEEditResult.span).
+// Refusals: VEEditErrorSpanNotFound, VEEditErrorClipNotFound, VEEditErrorTrackKindMismatch (a
+// Motion or Opacity span on an audio clip, a Gain span on a video clip), VEEditErrorInvalidArgument
+// (a lane outside 1-3, values outside their range: scale below 0, opacity outside 0...1, a
+// parameter of another kind), VEEditErrorInvalidTime (a range outside the clip or shorter than a
+// frame), VEEditErrorOverlap (another span of the lane is there; VEEditResult.freeRange is the
+// nearest free range), VEEditErrorTrackLocked, VEEditErrorNotRepresentable.
 
-/// Adds a keyframe to `parameter` on the frame at `time`, with the value the parameter has there,
-/// without reshaping the segment it lands in, so no frame's picture changes: inside a Hold segment
-/// it is a Hold, inside a Linear one Linear, inside an eased (or Custom) one the segment is divided
-/// into its two exact parts (both Custom); before the first keyframe, after the last one or on a
-/// parameter without keyframes it is Linear.
-- (VEEditResult *)addKeyframeToClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time
-    NS_SWIFT_NAME(addKeyframe(clip:parameter:at:));
-/// Removes the keyframe of `parameter` on the frame at `time`; the last one leaves its value as the
-/// static value.
-- (VEEditResult *)removeKeyframeFromClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time
-    NS_SWIFT_NAME(removeKeyframe(clip:parameter:at:));
-/// Sets `parameter` to `value` (VEVideoParams units): a parameter without keyframes gets a new
-/// static value (whatever `time`); an animated one changes the keyframe on the frame at `time`, or
-/// gets a new keyframe there (Premiere's behaviour while the animation stopwatch is on; added like
-/// addKeyframeToClip:, then given the value). Either way the frame then shows exactly `value`: when
-/// the keyframe the frame shows is not on the frame's start (a split's out point, or inside a frame
-/// of a sped-up clip), the value goes on a keyframe on the frame's start and the frame's other
-/// keyframes give way to it, lending it the interpolation of the last of them (one step, "Change
-/// Keyframe").
-- (VEEditResult *)setMotionValue:(double)value
-                       parameter:(VEMotionParameter)parameter
-                            clip:(VEClipID)clipID
-                          atTime:(CMTime)time NS_SWIFT_NAME(setMotionValue(_:parameter:clip:at:));
-/// Sets the interpolation of the segment starting at the keyframe on the frame at `time` (Custom
-/// cannot be set).
-- (VEEditResult *)setKeyframeInterpolation:(VEKeyframeInterpolation)interpolation
-                                 parameter:(VEMotionParameter)parameter
-                                      clip:(VEClipID)clipID
-                                    atTime:(CMTime)time
-    NS_SWIFT_NAME(setKeyframeInterpolation(_:parameter:clip:at:));
-/// Moves the keyframe on the frame at `from` to the frame at `to` (both frames of the clip). It
-/// finds the keyframe in the model as it is now, so it is not for drags in a Replace coalescing
-/// group (a second step would look for the keyframe where the first step moved it, but the group
-/// undoes the first step before applying the second):
-/// drags use moveKeyframeGroupOfClip:fromTime:toTime:, which plans each step inside the command.
-- (VEEditResult *)moveKeyframeOfClip:(VEClipID)clipID
-                           parameter:(VEMotionParameter)parameter
-                            fromTime:(CMTime)from
-                              toTime:(CMTime)to NS_SWIFT_NAME(moveKeyframe(clip:parameter:from:to:));
-/// The keyframes the timeline's marker on the sequence frame containing `time` stands for (every
-/// Motion parameter's keyframe that frame shows) and the frames they can move to together; nil
-/// when that frame shows no keyframe of the clip (or it is not a frame of a video clip). Read it
-/// before a marker drag starts (it describes the model as it is now).
-- (nullable VEKeyframeGroup *)keyframeGroupOfClip:(VEClipID)clipID
-                                          atTime:(CMTime)time NS_SWIFT_NAME(keyframeGroup(clip:at:));
-/// Moves the keyframes of the marker on the frame containing `from` (keyframeGroupOfClip:atTime:)
-/// to the frame containing `to`, together, each to that frame's start with its value and
-/// interpolation: a keyframe marker dragged in the timeline. One undo step ("Move Keyframe", or
-/// "Move Keyframes" for several parameters). Inside a (Replace) coalescing group each step starts
-/// from the model before the group, so a drag passes its original frame as `from` on every step and
-/// is one undo step; cancelCoalescing puts the keyframes back. `to` equal to `from` changes nothing.
-/// Refused: VEEditErrorInvalidTime (`to` outside the group's earliestFrame...latestFrame, or a time
-/// not over the clip), VEEditErrorKeyframeNotFound, VEEditErrorInvalidArgument (several keyframes of
-/// one parameter on the frame), VEEditErrorTrackLocked, and the other Motion refusals.
-- (VEEditResult *)moveKeyframeGroupOfClip:(VEClipID)clipID
-                                 fromTime:(CMTime)from
-                                   toTime:(CMTime)to NS_SWIFT_NAME(moveKeyframeGroup(clip:from:to:));
-/// Removes every keyframe of `parameter`; it keeps the value it has at `time` (the clip's nearest
-/// frame when `time` is outside it) as its static value.
-- (VEEditResult *)removeAnimationFromClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time
-    NS_SWIFT_NAME(removeAnimation(clip:parameter:at:));
-/// The Ken Burns move (Final Cut Pro) over the whole clip: position and scale keyframes on the
-/// clip's first frame (`start`) and last frame (`end`), the segment between them with
-/// `interpolation` (Ease In and Out is FCP's default). Replaces the clip's position and scale
-/// keyframes; rotation and opacity are kept. Refused for a one-frame clip. The same as the ranged
-/// call below from the clip's start for its whole duration.
-- (VEEditResult *)applyKenBurnsToClip:(VEClipID)clipID
+/// The clip's spans (lane 0 first, then lanes 1-3, each in time order); empty for an unknown clip.
+- (NSArray<VEEffectSpan *> *)spansForClip:(VEClipID)clipID NS_SWIFT_NAME(spans(forClip:));
+/// The spans of every clip of the track, in clip order.
+- (NSArray<VEEffectSpan *> *)spansForTrack:(VETrackID)trackID NS_SWIFT_NAME(spans(forTrack:));
+/// The span with that id, or nil.
+- (nullable VEEffectSpan *)spanInfo:(VESpanID)spanID;
+/// The number of lanes the track's clips use: the highest lane any of its spans is on, plus one
+/// (so 1 for a track without spans, lane 0 included; at most 4).
+- (NSInteger)laneCountForTrack:(VETrackID)trackID NS_SWIFT_NAME(laneCount(forTrack:));
+/// Adds a Motion, Opacity (video) or Gain (audio) span on `lane` (1-3) of the clip over `range`,
+/// starting neutral (it changes nothing until its values are set: the picture keeps the clip's
+/// framing at the range's edges). createdIDs holds its id and `span` the span.
+- (VEEditResult *)addSpanOfKind:(VESpanKind)kind
+                           lane:(NSInteger)lane
+                           clip:(VEClipID)clipID
+                          range:(CMTimeRange)range NS_SWIFT_NAME(addSpan(kind:lane:clip:range:));
+/// Moves the span's edges to `range` (a trim of one edge, or a move of the whole span within its
+/// clip): a trim stretches its start and end values over the new range.
+- (VEEditResult *)setRangeOfSpan:(VESpanID)spanID range:(CMTimeRange)range NS_SWIFT_NAME(setSpanRange(_:range:));
+/// Sets the span's start and/or end values (NaN fields unchanged; see VESpanValues).
+- (VEEditResult *)setValuesOfSpan:(VESpanID)spanID
+                            start:(VESpanValues)start
+                              end:(VESpanValues)end NS_SWIFT_NAME(setSpanValues(_:start:end:));
+/// Sets how the span moves from its start to its end values (Custom cannot be set).
+- (VEEditResult *)setInterpolationOfSpan:(VESpanID)spanID
+                           interpolation:(VEKeyframeInterpolation)interpolation
+    NS_SWIFT_NAME(setSpanInterpolation(_:interpolation:));
+/// Moves the span to another lane (1-3) of its clip.
+- (VEEditResult *)moveSpan:(VESpanID)spanID toLane:(NSInteger)lane NS_SWIFT_NAME(moveSpan(_:toLane:));
+/// Removes a span (a transition too; removeTransition:includingLinked: also removes its linked one).
+- (VEEditResult *)removeSpan:(VESpanID)spanID NS_SWIFT_NAME(removeSpan(_:));
+/// Makes the span continue its clip's touching neighbour: VEClipEdgeStart sets its start values so
+/// the clip's first frame shows what the previous clip's last frame shows (motion(at:) / gainDb(at:),
+/// everything else composing there taken into account); VEClipEdgeEnd sets its end values from the
+/// next clip's first frame. When nothing would change it succeeds without an undo step and the note
+/// says so. Refused: VEEditErrorNotAdjacent (no clip touches that edge), VEEditErrorInvalidArgument
+/// (a transition, or a span that does not reach that frame of its clip), and the span refusals.
+- (VEEditResult *)matchSpanEdge:(VESpanID)spanID
+          toAdjacentClipAtEdge:(VEClipEdge)edge NS_SWIFT_NAME(matchSpanEdge(_:toAdjacentClipAt:));
+/// The Ken Burns move on a Motion span: its Position X/Y and Scale start and end values set in one
+/// step so the picture shows the framing `start` on the span's first frame and `end` at its end
+/// (the framings as the monitor shows them: the clip's static values and its other lanes are taken
+/// into account), moving with `interpolation` (Ease In and Out is FCP's default; Custom is refused).
+- (VEEditResult *)applyKenBurnsToSpan:(VESpanID)spanID
                                 start:(VEMotionFraming)start
                                   end:(VEMotionFraming)end
                         interpolation:(VEKeyframeInterpolation)interpolation
-    NS_SWIFT_NAME(applyKenBurns(clip:start:end:interpolation:));
-/// The Ken Burns move over part of the clip: it covers `duration` of timeline (rounded to whole
-/// sequence frames) from the sequence frame containing `rangeStart` (a timeline time, like the
-/// other keyframe calls), with the `start` keyframes on the range's first frame and the `end`
-/// keyframes on its last frame. Before the move the picture holds the start framing and after it
-/// the end framing (the evaluation holds the first and last keyframes), so a 5 s move at the head
-/// of a 30 s clip holds its end framing for the other 25 s. Position and scale keyframes on the
-/// range's frames are replaced; ones outside it are kept, so a second move can follow later in the
-/// clip (keyframes a trim hid are replaced only beyond an end of the clip the range reaches). When
-/// a kept keyframe leads into or out of the move from another framing, the picture changes
-/// between it and the move instead of holding, and the note says where. Rotation and opacity are
-/// kept. One undo step ("Ken Burns"). Refused: VEEditErrorInvalidTime when the range starts outside
-/// the clip or runs past its end, VEEditErrorInvalidArgument when it is shorter than two frames
-/// (or the interpolation is Custom), and the other Motion refusals.
-- (VEEditResult *)applyKenBurnsToClip:(VEClipID)clipID
-                                start:(VEMotionFraming)start
-                                  end:(VEMotionFraming)end
-                        interpolation:(VEKeyframeInterpolation)interpolation
-                           rangeStart:(CMTime)rangeStart
-                             duration:(CMTime)duration
-    NS_SWIFT_NAME(applyKenBurns(clip:start:end:interpolation:from:duration:));
-/// Add Motion Keyframe (Clip menu, Control-K) on the sequence frame containing `time`: when every
-/// Motion parameter (position X and Y, scale, rotation, opacity) already has a keyframe on that
-/// frame, removes all five ("Remove Keyframes"; a parameter left without keyframes keeps the value
-/// the frame showed); otherwise adds a keyframe to each parameter that has none there like
-/// addKeyframeToClip: (the value it has there, the segment keeping its shape), so no frame's
-/// picture changes ("Add Keyframes"). One undo step (one
-/// SequenceCommand). The note says "Keyframes added on N parameters" or "Keyframes removed".
-/// Refused like addKeyframeToClip: (VEEditErrorInvalidTime when `time` is not over the clip).
-- (VEEditResult *)toggleMotionKeyframesOfClip:(VEClipID)clipID
-                                       atTime:(CMTime)time NS_SWIFT_NAME(toggleMotionKeyframes(clip:at:));
+    NS_SWIFT_NAME(applyKenBurns(span:start:end:interpolation:));
 /// The clip on the same track touching `clipID` at `edge`: the one ending exactly where it starts
 /// (VEClipEdgeStart) or starting exactly where it ends (VEClipEdgeEnd); 0 when there is none (a
 /// gap, the end of the track, an unknown clip).
 - (VEClipID)adjacentClipOfClip:(VEClipID)clipID atEdge:(VEClipEdge)edge NS_SWIFT_NAME(adjacentClip(of:at:));
-/// Matches the clip's Motion to its touching neighbour on the same track: VEClipEdgeStart copies
-/// the previous clip's position, scale, rotation and opacity as its last frame shows them
-/// (videoParamsAtTime:, what the monitors draw) onto this clip's first frame; VEClipEdgeEnd copies
-/// the next clip's first frame onto this clip's last frame. A parameter this clip animates gets a
-/// keyframe on that frame (the keyframe already there changes its value); a static parameter gets
-/// the value as its static value (the whole clip shows it). The note says which. One undo step
-/// ("Match Previous Clip" / "Match Next Clip"); when nothing would change it succeeds without an
-/// undo step and the note says so. Refused: VEEditErrorNotAdjacent (no clip touches that edge),
-/// VEEditErrorTrackKindMismatch (an audio clip), VEEditErrorTrackLocked, VEEditErrorClipNotFound.
+/// Matches the clip's static Motion to its touching neighbour on the same track: VEClipEdgeStart
+/// sets the static position, scale, rotation and opacity so the clip's first frame shows what the
+/// previous clip's last frame shows (motion(at:)), the clip's spans acting on that frame taken into
+/// account; VEClipEdgeEnd matches the clip's last frame to the next clip's first frame. One undo
+/// step ("Match Previous Clip" / "Match Next Clip"); when nothing would change it succeeds without an
+/// undo step and the note says so. Refused: VEEditErrorNotAdjacent, VEEditErrorTrackKindMismatch (an
+/// audio clip), VEEditErrorTrackLocked, VEEditErrorClipNotFound, VEEditErrorInvalidArgument (the
+/// clip's spans make scale or opacity 0 there, so no static value can match).
 - (VEEditResult *)matchMotionOfClip:(VEClipID)clipID
                    toAdjacentAtEdge:(VEClipEdge)edge NS_SWIFT_NAME(matchMotion(clip:toAdjacentAt:));
 

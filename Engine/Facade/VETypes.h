@@ -19,8 +19,11 @@ NS_ASSUME_NONNULL_BEGIN
 typedef int64_t VEAssetID;
 typedef int64_t VEClipID;
 typedef int64_t VETrackID;
+/// A transition: the id of its lane-0 span (VESpanID).
 typedef int64_t VETransitionID;
 typedef int64_t VESequenceID;
+/// An effect span (transitions included: a transition is a lane-0 span).
+typedef int64_t VESpanID;
 
 typedef NS_ENUM(NSInteger, VEAssetKind) {
     VEAssetKindVideo = 0,      ///< Video only.
@@ -44,7 +47,7 @@ typedef struct {
     double opacity;
 } VEVideoParams;
 
-/// A keyframeable Motion parameter (a field of VEVideoParams).
+/// A Motion parameter (a field of VEVideoParams).
 typedef NS_ENUM(NSInteger, VEMotionParameter) {
     VEMotionParameterPositionX = 0, ///< VEVideoParams.x (sequence pixels)
     VEMotionParameterPositionY = 1, ///< VEVideoParams.y (sequence pixels, +y down)
@@ -53,23 +56,70 @@ typedef NS_ENUM(NSInteger, VEMotionParameter) {
     VEMotionParameterOpacity = 4,   ///< VEVideoParams.opacity (0...1)
 };
 
-/// How a parameter moves from a keyframe to the next one (the interpolation belongs to the
-/// segment that starts at the keyframe). The ease names follow Premiere Pro and Final Cut Pro.
+/// How an effect span moves from its start values to its end values. The ease names follow
+/// Premiere Pro and Final Cut Pro.
 typedef NS_ENUM(NSInteger, VEKeyframeInterpolation) {
-    /// The value stays until the next keyframe, then jumps.
+    /// The start values hold until the span's end, then the end values apply.
     VEKeyframeInterpolationHold = 0,
-    /// Constant rate (the default for a new keyframe before the first, after the last, or on a
-    /// parameter without keyframes; one added inside a segment keeps that segment's shape).
+    /// Constant rate (the default for a new span).
     VEKeyframeInterpolationLinear = 1,
-    /// Leaves the keyframe slowly, then speeds up.
+    /// Leaves the start values slowly, then speeds up.
     VEKeyframeInterpolationEaseOut = 2,
-    /// Slows down to arrive at the next keyframe.
+    /// Slows down to arrive at the end values.
     VEKeyframeInterpolationEaseIn = 3,
     /// Both (the Ken Burns default).
     VEKeyframeInterpolationEaseInOut = 4,
-    /// The exact part of an eased curve left on this segment when the segment was divided: by a
-    /// split, or by a keyframe added inside it (read only: set one of the others to replace it).
+    /// The exact part of an eased curve left on a span that a split divided, or segments that
+    /// differ (a span migrated from keyframes); read only: set one of the others to replace it.
     VEKeyframeInterpolationCustom = 5,
+};
+
+/// What an effect span changes (see VEEffectSpan).
+typedef NS_ENUM(NSInteger, VESpanKind) {
+    /// Lane 0: a cross dissolve / crossfade across a cut, or a fade to or from black / silence.
+    VESpanKindTransition = 0,
+    /// Video, lanes 1-3: position X/Y, scale and rotation, composed onto the clip's values.
+    VESpanKindMotion = 1,
+    /// Video, lanes 1-3: opacity, a factor on the clip's opacity (a video fade).
+    VESpanKindOpacity = 2,
+    /// Audio, lanes 1-3: gain in dB added to the clip's gain.
+    VESpanKindGain = 3,
+};
+
+/// A parameter an effect span animates (a field of VESpanValues).
+typedef NS_ENUM(NSInteger, VESpanParameter) {
+    VESpanParameterPositionX = 0, ///< pixels added to the clip's x
+    VESpanParameterPositionY = 1, ///< pixels added to the clip's y (+y down)
+    VESpanParameterScale = 2,     ///< factor on the clip's scale
+    VESpanParameterRotation = 3,  ///< degrees added to the clip's rotation
+    VESpanParameterOpacity = 4,   ///< factor on the clip's opacity (0...1)
+    VESpanParameterGain = 5,      ///< dB added to the clip's gain
+};
+
+/// Values of an effect span's parameters at one of its ends. A field the span's kind does not
+/// animate is NaN when read; when passed to an edit, NaN means "unchanged" (and a number for a
+/// parameter of another kind is refused).
+typedef struct {
+    double x;
+    double y;
+    double scale;
+    double rotationDegrees;
+    double opacity;
+    double gainDb;
+} VESpanValues;
+
+/// Every field NaN (nothing to change).
+FOUNDATION_EXPORT VESpanValues VESpanValuesUnchanged(void);
+
+/// What a transition span does where it sits.
+typedef NS_ENUM(NSInteger, VETransitionStyle) {
+    /// Across the cut at its clip's end into the clip touching it (video: cross dissolve; audio:
+    /// constant-power crossfade).
+    VETransitionStyleCrossDissolve = 0,
+    /// To black (video) or silence (audio) at its clip's end.
+    VETransitionStyleFadeOut = 1,
+    /// From black / silence at its clip's start (only where no clip touches that start).
+    VETransitionStyleFadeIn = 2,
 };
 
 /// A framing of the picture for the Ken Burns helper: the position and scale that make a chosen
@@ -88,7 +138,11 @@ typedef NS_ENUM(NSInteger, VEClipEdge) {
     VEClipEdgeEnd = 1,
 };
 
-/// Clip audio settings: gain in dB and linear fade durations at the clip's ends.
+/// Clip audio settings: gain in dB and the lengths of the clip's linear fades. The fades are the
+/// clip's lane-0 transition spans (a fade in at its head, a tail span ending on the cut): reading
+/// reports their lengths (0 when there is none; a crossfade at the tail is not a fade), setting
+/// them adds, changes or removes those spans (a fade in is refused on a clip whose start another
+/// clip touches, a fade out on a clip that ends in a crossfade).
 typedef struct {
     double gainDb;
     CMTime fadeInDuration;
@@ -145,25 +199,41 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
-/// A Motion keyframe of a clip (a snapshot, like VEClipInfo).
-@interface VEKeyframe : NSObject
-@property (nonatomic, readonly) VEMotionParameter parameter;
-/// The keyframe's time: a source time of the clip (for a still, the time into the clip). Keyframes
-/// stay with the pictures they were set on when the clip is trimmed, its speed changes or it is
-/// split (see the engine's Keyframes.h).
-@property (nonatomic, readonly) CMTime sourceTime;
-/// Where it plays on the timeline with the clip's current start and speed (exact when
-/// representable, else rounded); may lie outside the clip when a trim cut it off.
-@property (nonatomic, readonly) CMTime timelineTime;
-/// The sequence frame that shows it: the frame whose source span contains the keyframe (the
-/// clip's last frame also owns a keyframe on the clip's out point, where a split leaves one).
-/// Meaningful when isInsideClip.
-@property (nonatomic, readonly) CMTime frameTime;
-/// A frame of the clip shows the keyframe (false for keyframes a trim cut off).
-@property (nonatomic, readonly) BOOL isInsideClip;
-/// In VEVideoParams units (pixels, scale factor, degrees, opacity 0...1).
-@property (nonatomic, readonly) double value;
+/// An effect span of a clip (a snapshot, like VEClipInfo): a range on one of the clip's lanes with
+/// start and end values for what it changes. Lane 0 holds transitions (cross dissolves / crossfades
+/// and fades), lanes 1-3 Motion and Opacity spans (video) or Gain spans (audio), which compose onto
+/// the clip's static values: position and rotation add, scale and opacity multiply, gain adds (dB).
+@interface VEEffectSpan : NSObject
+@property (nonatomic, readonly) VESpanID spanID;
+@property (nonatomic, readonly) VEClipID clipID;
+@property (nonatomic, readonly) VETrackID trackID;
+/// 0 (transitions) to 3.
+@property (nonatomic, readonly) NSInteger lane;
+@property (nonatomic, readonly) VESpanKind kind;
+/// The range clip-relative: for an effect span the source times of the clip it covers (for a
+/// still, the time into the clip; spans stay on their pictures through trims and speed changes);
+/// for a transition the offsets from its edge (a tail span [-before, after] around the cut at the
+/// clip's end, a head span [0, length]).
+@property (nonatomic, readonly) CMTime clipRelativeStart;
+@property (nonatomic, readonly) CMTime clipRelativeEnd;
+/// The timeline range it covers (exact when representable, else rounded).
+@property (nonatomic, readonly) CMTime start;
+@property (nonatomic, readonly) CMTime end;
+/// Values at its start and end (NaN for parameters of other kinds; all NaN for a transition).
+@property (nonatomic, readonly) VESpanValues startValues;
+@property (nonatomic, readonly) VESpanValues endValues;
+/// How it moves from start to end (Linear for a transition).
 @property (nonatomic, readonly) VEKeyframeInterpolation interpolation;
+/// Transitions: what it does (else CrossDissolve), its length, its share before and after the cut
+/// (a fade out lies before its cut, a fade in after its clip's start), the clip on the other side
+/// of a cross dissolve (0 for a fade) and the linked transition (the dissolve's audio crossfade or
+/// the other way round; 0 when none).
+@property (nonatomic, readonly) VETransitionStyle transitionStyle;
+@property (nonatomic, readonly) CMTime duration;
+@property (nonatomic, readonly) CMTime shareBeforeCut;
+@property (nonatomic, readonly) CMTime shareAfterCut;
+@property (nonatomic, readonly) VEClipID partnerClipID;
+@property (nonatomic, readonly) VESpanID linkedSpanID;
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
@@ -189,47 +259,32 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 @property (nonatomic, readonly) BOOL isStill;
 /// Linked partner, or 0.
 @property (nonatomic, readonly) VEClipID linkedClipID;
-/// The static Motion values: what a parameter without keyframes shows (an animated parameter's
-/// static value is not used; see videoParamsAtTime:).
+/// The static Motion values: what the clip shows where no span acts (its Motion and Opacity spans
+/// compose onto them; see videoParamsAtTime:).
 @property (nonatomic, readonly) VEVideoParams videoParams;
+/// The static gain and the lengths of the clip's lane-0 fades (see VEAudioParams).
 @property (nonatomic, readonly) VEAudioParams audioParams;
-/// Whether any Motion parameter has keyframes.
-@property (nonatomic, readonly) BOOL hasKeyframes;
-/// Every keyframe of every parameter, in time order (then parameter order).
-@property (nonatomic, readonly, copy) NSArray<VEKeyframe *> *allKeyframes;
-/// Whether `parameter` has keyframes.
-- (BOOL)isAnimated:(VEMotionParameter)parameter;
-/// The keyframes of `parameter` in time order (keyframes a trim cut off included).
-- (NSArray<VEKeyframe *> *)keyframesForParameter:(VEMotionParameter)parameter;
-/// The Motion the picture has at timeline time `time` (keyframes evaluated at the exact source
-/// time; the static value where a parameter has none), as the monitors and export draw it.
+/// The clip's spans: lane 0 (transitions) first, then lanes 1-3, each in time order.
+@property (nonatomic, readonly, copy) NSArray<VEEffectSpan *> *spans;
+/// Whether the clip has spans on lanes 1-3.
+@property (nonatomic, readonly) BOOL hasEffectSpans;
+/// The Motion the picture has at timeline time `time` (the static values with the spans acting
+/// there composed onto them, evaluated at the frame's exact source time), as the monitors and
+/// export draw it.
 - (VEVideoParams)videoParamsAtTime:(CMTime)time NS_SWIFT_NAME(motion(at:));
-/// The keyframe of `parameter` shown by the sequence frame containing `time` (see
-/// VEKeyframe.frameTime), or nil.
-- (nullable VEKeyframe *)keyframeForParameter:(VEMotionParameter)parameter atTime:(CMTime)time;
-- (instancetype)init NS_UNAVAILABLE;
-@end
-
-/// The keyframes a keyframe marker in the timeline stands for: every Motion parameter's keyframe
-/// that one sequence frame of a clip shows (VEEngine keyframeGroupOfClip:atTime:), and the frames
-/// they can be moved to together (moveKeyframeGroupOfClip:fromTime:toTime:). A snapshot.
-@interface VEKeyframeGroup : NSObject
-@property (nonatomic, readonly) VEClipID clipID;
-/// The sequence frame that shows them (its start, a timeline time).
-@property (nonatomic, readonly) CMTime frameTime;
-/// The Motion parameters with a keyframe on that frame (VEMotionParameter values), in parameter
-/// order.
-@property (nonatomic, readonly, copy) NSArray<NSNumber *> *parameters;
-/// The first and last frames (timeline times, frame starts) they can move to: after the frame
-/// showing the previous keyframe and before the frame showing the next one of each of those
-/// parameters (keyframes stay in order, a frame apart), within the clip's frames. Both are
-/// frameTime when they cannot move.
-@property (nonatomic, readonly) CMTime earliestFrame;
-@property (nonatomic, readonly) CMTime latestFrame;
-/// Whether they can be moved (not on a locked track, not several keyframes of one parameter on
-/// the frame); `reason` says why not ("" when they can).
-@property (nonatomic, readonly) BOOL canMove;
-@property (nonatomic, readonly, copy) NSString *reason;
+/// The clip's audio level in dB at timeline time `time` (the static gain plus its Gain spans).
+- (double)gainDbAtTime:(CMTime)time NS_SWIFT_NAME(gainDb(at:));
+/// The Motion an edge of the clip's Motion span `spanID` shows, as applyKenBurns(span:) sets it:
+/// at its start (`atEnd` NO) everything composed at the span's first instant; at its end the
+/// clip's other spans composed at the span's last frame (the sequence frame, `frameDuration` long,
+/// before its end) with the span at its end values. So the framings a Ken Burns move applied read
+/// back exactly (motion(at:) of the last frame shows the move one frame short of its end). Returns
+/// NO, leaving `motion` unchanged, for an unknown span, one of another kind or a time with no exact
+/// form.
+- (BOOL)getMotion:(VEVideoParams *)motion
+     atEdgeOfSpan:(VESpanID)spanID
+            atEnd:(BOOL)atEnd
+    frameDuration:(CMTime)frameDuration NS_SWIFT_NAME(getMotion(_:atEdgeOfSpan:atEnd:frameDuration:));
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
@@ -248,16 +303,21 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
-/// A cross dissolve between two adjacent clips of one track.
+/// A transition: a lane-0 span of the clip that owns it (see VEEffectSpan for the full detail).
 @interface VETransitionInfo : NSObject
 @property (nonatomic, readonly) VETransitionID transitionID;
 @property (nonatomic, readonly) VETrackID trackID;
+/// A cross dissolve: the outgoing clip (the owner) and the incoming one. A fade out: the owner and
+/// 0; a fade in: 0 and the owner.
 @property (nonatomic, readonly) VEClipID fromClipID;
 @property (nonatomic, readonly) VEClipID toClipID;
+@property (nonatomic, readonly) VETransitionStyle style;
 @property (nonatomic, readonly) CMTime duration;
-/// Timeline range covered (centred on the cut).
+/// Timeline range covered, and how much of it lies before and after the cut.
 @property (nonatomic, readonly) CMTime start;
 @property (nonatomic, readonly) CMTime end;
+@property (nonatomic, readonly) CMTime shareBeforeCut;
+@property (nonatomic, readonly) CMTime shareAfterCut;
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
@@ -275,6 +335,8 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 @property (nonatomic, readonly, copy) NSArray<NSNumber *> *videoTrackIDs;
 /// Audio track ids, first (A1) to last.
 @property (nonatomic, readonly, copy) NSArray<NSNumber *> *audioTrackIDs;
+/// The cross dissolves / crossfades (transitions across a cut), in track order then time order.
+/// Fades are spans of their clips (VEClipInfo.spans; for audio also VEAudioParams).
 @property (nonatomic, readonly, copy) NSArray<VETransitionInfo *> *transitions;
 - (instancetype)init NS_UNAVAILABLE;
 @end
@@ -308,8 +370,8 @@ typedef NS_ENUM(NSInteger, VEEditErrorCode) {
     VEEditErrorInvariantViolation,
     /// Refused by the facade itself (e.g. an edit while another gesture's edit is in progress).
     VEEditErrorBusy,
-    /// The parameter has no keyframe at that time.
-    VEEditErrorKeyframeNotFound,
+    /// No effect span with that id.
+    VEEditErrorSpanNotFound,
 };
 
 /// Outcome of an edit. A refused edit changes nothing; `message` says why.
@@ -321,8 +383,16 @@ typedef NS_ENUM(NSInteger, VEEditErrorCode) {
 /// transition), in the order the engine reports them.
 @property (nonatomic, readonly, copy) NSArray<NSNumber *> *createdIDs;
 /// Transitions a successful edit removed as a side effect (their cut no longer exists or lacks
-/// the media they need). Undo restores them.
+/// the media they need, or a fade in whose clip's start another clip now touches). Undo restores them.
 @property (nonatomic, readonly, copy) NSArray<NSNumber *> *droppedTransitionIDs;
+/// Effect spans (lanes 1-3) a successful edit removed as a side effect: a trim or overwrite left
+/// nothing of them inside their clip. Undo restores them.
+@property (nonatomic, readonly, copy) NSArray<NSNumber *> *droppedSpanIDs;
+/// A span edit refused for overlapping another span of the lane (VEEditErrorOverlap): the free
+/// range of that lane nearest the requested one, in timeline time (kCMTimeRangeInvalid otherwise).
+@property (nonatomic, readonly) CMTimeRange freeRange;
+/// A successful span edit: the span as it is after the edit (nil otherwise).
+@property (nonatomic, readonly, nullable) VEEffectSpan *span;
 /// Something the user should know about a successful edit ("" when nothing): a ripple that fell
 /// back to the synced tracks, removed transitions.
 @property (nonatomic, readonly, copy) NSString *note;
