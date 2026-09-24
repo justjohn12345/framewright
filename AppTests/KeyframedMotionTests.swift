@@ -541,6 +541,155 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(try clip(id).keyframes(for: .scale).map(\.frameTime), [frames(0), frames(149)])
     }
 
+    // MARK: Neighbour matching
+
+    /// V1: A [0, 60), B [60, 120) touching it, C [150, 210) after a gap. B is selected.
+    private func neighbours() async throws -> (a: VEClipID, b: VEClipID, c: VEClipID) {
+        let (movie, _) = try await fixture.importMedia()
+        let a = try fixture.placeMovie(movie, at: 0)
+        let b = try fixture.placeMovie(movie, at: 2)
+        let c = try fixture.placeMovie(movie, at: 5)
+        store.selection = [b]
+        return (a, b, c)
+    }
+
+    func testMatchIsEnabledNextToATouchingClip() async throws {
+        let (a, b, c) = try await neighbours()
+        XCTAssertEqual(store.adjacentClip(to: b, at: .start)?.clipID, a)
+        XCTAssertNil(store.adjacentClip(to: b, at: .end), "a gap")
+        XCTAssertTrue(inspector.canMatch(.start))
+        XCTAssertFalse(inspector.canMatch(.end))
+        store.selection = [a]
+        XCTAssertFalse(inspector.canMatch(.start))
+        XCTAssertTrue(inspector.canMatch(.end))
+        store.selection = [c]
+        XCTAssertFalse(inspector.canMatch(.start))
+        XCTAssertFalse(inspector.canMatch(.end))
+        store.selection = [a, b]
+        XCTAssertFalse(inspector.canMatch(.start), "a single video clip only")
+        XCTAssertFalse(inspector.canMatch(.end))
+    }
+
+    func testMatchingCopiesTheNeighboursFramingAsStaticValuesOrKeyframes() async throws {
+        let (a, b, _) = try await neighbours()
+        let placed = VEVideoParams(x: 100, y: -20, scale: 1.5, rotationDegrees: 10, opacity: 0.5)
+        XCTAssertTrue(store.engine.setVideoParams(placed, forClip: a).ok)
+
+        // An unanimated clip: static values.
+        inspector.matchAdjacent(.start)
+        XCTAssertEqual(store.undoActionName, "Match Previous Clip")
+        XCTAssertEqual(inspector.message, "Matched the previous clip's end: set as this clip's static values.")
+        let matched = try clip(b).videoParams
+        XCTAssertEqual(matched.x, 100)
+        XCTAssertEqual(matched.y, -20)
+        XCTAssertEqual(matched.scale, 1.5)
+        XCTAssertEqual(matched.rotationDegrees, 10)
+        XCTAssertEqual(matched.opacity, 0.5)
+        store.undo()
+        XCTAssertEqual(try clip(b).videoParams.x, 0, "one undo step")
+
+        // An animated clip: a keyframe on its first frame for what it animates.
+        store.playheadTime = frames(60)
+        inspector.toggleKeyframe(.opacity)
+        store.playheadTime = frames(100)
+        inspector.setValue(.opacity, 20)
+        inspector.matchAdjacent(.start)
+        XCTAssertEqual(inspector.message, "Matched the previous clip's end: Opacity got keyframes on this clip's "
+            + "first frame; Position X, Position Y, Scale and Rotation became static values.")
+        let opacity = try clip(b).keyframes(for: .opacity)
+        XCTAssertEqual(opacity.map(\.frameTime), [frames(60), frames(100)])
+        XCTAssertEqual(opacity[0].value, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(try clip(b).motion(at: frames(60)).scale, 1.5)
+        XCTAssertEqual(try clip(b).motion(at: frames(100)).opacity, 0.2, accuracy: 1e-12, "the rest stays")
+
+        // The next clip's start onto A's last frame: B starts exactly as A is, so nothing changes.
+        store.selection = [a]
+        inspector.matchAdjacent(.end)
+        XCTAssertEqual(inspector.message, "This clip already matches the next clip's start.")
+        XCTAssertEqual(store.undoActionName, "Match Previous Clip", "no undo step")
+        // With A turned back, it takes B's first frame again (A is static: static values).
+        XCTAssertTrue(store.engine.setVideoParams(VEVideoParamsIdentity(), forClip: a).ok)
+        inspector.matchAdjacent(.end)
+        XCTAssertEqual(store.undoActionName, "Match Next Clip")
+        XCTAssertEqual(try clip(a).videoParams.opacity, 0.5, accuracy: 1e-12, "B's first frame")
+        XCTAssertEqual(try clip(a).videoParams.x, 100)
+        XCTAssertEqual(try clip(a).videoParams.rotationDegrees, 10)
+    }
+
+    func testMatchingFollowsAnAnimatedNeighbourAndIsRefusedDuringAGesture() async throws {
+        let (a, b, _) = try await neighbours()
+        let end = VEMotionFraming(x: -120, y: 60, scale: 1.8)
+        XCTAssertTrue(store.engine.applyKenBurns(clip: a, start: VEMotionFraming(x: 0, y: 0, scale: 1), end: end,
+                                                 interpolation: .easeInOut).ok)
+        // During a slider drag nothing happens, with a reason.
+        store.selection = [b]
+        inspector.beginSliderDrag(.rotation)
+        XCTAssertTrue(store.isGestureActive)
+        inspector.matchAdjacent(.start)
+        XCTAssertEqual(inspector.message, "Finish the current drag first.")
+        XCTAssertEqual(try clip(b).videoParams.scale, 1)
+        inspector.endSliderDrag()
+        inspector.matchAdjacent(.start)
+        let first = try clip(b).motion(at: frames(60))
+        XCTAssertEqual(first.x, -120, accuracy: 1e-9, "A's last frame")
+        XCTAssertEqual(first.y, 60, accuracy: 1e-9)
+        XCTAssertEqual(first.scale, 1.8, accuracy: 1e-12)
+    }
+
+    func testKenBurnsContinuesFromAnAnimatedPreviousClipAndLeadsIntoTheNext() async throws {
+        let (a, b, _) = try await neighbours()
+        let (movie, _) = try await fixture.importMedia()
+        let d = try fixture.placeMovie(movie, at: 4) // touches B's end: [120, 180)
+        store.selection = [b]
+
+        // Unmoved neighbours: both off, the push in as before.
+        store.beginKenBurns(clip: b)
+        var model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.previous?.clipID, a)
+        XCTAssertEqual(model.next?.clipID, d)
+        XCTAssertFalse(model.continuesFromPrevious)
+        XCTAssertFalse(model.leadsIntoNext)
+        XCTAssertEqual(model.start, CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        XCTAssertEqual(model.end.width, 1920 * KenBurnsModel.defaultEndFraction, accuracy: 1e-9)
+        store.cancelKenBurns()
+
+        // A pushes into its bottom-right quarter; D starts at 150 %.
+        XCTAssertTrue(store.engine.applyKenBurns(clip: a, start: VEMotionFraming(x: 0, y: 0, scale: 1),
+                                                 end: VEMotionFraming(x: -960, y: -540, scale: 2),
+                                                 interpolation: .easeInOut).ok)
+        XCTAssertTrue(store.engine.setVideoParams(VEVideoParams(x: 0, y: 0, scale: 1.5, rotationDegrees: 0, opacity: 1),
+                                                  forClip: d).ok)
+        store.beginKenBurns(clip: b)
+        model = try XCTUnwrap(store.kenBurns)
+        XCTAssertTrue(model.continuesFromPrevious, "the previous clip is animated")
+        XCTAssertTrue(model.leadsIntoNext, "the next clip is not at the identity")
+        XCTAssertEqual(model.start.minX, 960, accuracy: 1e-6, "A's end framing")
+        XCTAssertEqual(model.start.width, 960, accuracy: 1e-6)
+        XCTAssertEqual(model.end.width, 1280, accuracy: 1e-6, "D's 150 %")
+        XCTAssertEqual(model.end.midX, 960, accuracy: 1e-6)
+        XCTAssertNil(model.neighbourNote)
+        // Off: the default comes back; on again: the neighbour's framing, even after a drag.
+        model.continuesFromPrevious = false
+        XCTAssertEqual(model.start, CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        model.move(.start, from: model.start, by: CGSize(width: 0, height: 0))
+        model.continuesFromPrevious = true
+        XCTAssertEqual(model.start.width, 960, accuracy: 1e-6)
+        // Applied, B starts where A ends and ends where D starts.
+        XCTAssertTrue(store.applyKenBurns())
+        let info = try clip(b)
+        XCTAssertEqual(info.motion(at: frames(60)).x, try clip(a).motion(at: frames(59)).x, accuracy: 1e-6)
+        XCTAssertEqual(info.motion(at: frames(60)).scale, 2, accuracy: 1e-9)
+        XCTAssertEqual(info.motion(at: frames(119)).scale, 1.5, accuracy: 1e-9)
+
+        // A neighbour that goes away turns its toggle off.
+        store.beginKenBurns(clip: b)
+        model = try XCTUnwrap(store.kenBurns)
+        XCTAssertTrue(model.leadsIntoNext)
+        XCTAssertTrue(store.engine.removeClips([NSNumber(value: d)]).ok)
+        XCTAssertNil(model.next)
+        XCTAssertFalse(model.leadsIntoNext)
+    }
+
     // MARK: Timeline markers
 
     func testTimelineMarkersFollowSpeedAndAClickMovesThePlayhead() async throws {

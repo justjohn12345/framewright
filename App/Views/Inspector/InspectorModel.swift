@@ -589,6 +589,34 @@ final class InspectorModel: ObservableObject {
                mode: .single, clampNote: nil)
     }
 
+    // MARK: Neighbours
+
+    /// The clip touching the single video clip at `edge` on its track (the previous one ending where
+    /// it starts, the next one starting where it ends), or nil.
+    func adjacentClip(_ edge: VEClipEdge) -> VEClipInfo? {
+        motionTarget.flatMap { store.adjacentClip(to: $0.clipID, at: edge) }
+    }
+
+    /// Whether "Match Previous Clip's End" (`.start`) or "Match Next Clip's Start" (`.end`) applies.
+    func canMatch(_ edge: VEClipEdge) -> Bool {
+        adjacentClip(edge) != nil
+    }
+
+    /// Copies the touching neighbour's position, scale, rotation and opacity at the cut (as its
+    /// boundary frame shows them) onto the single video clip's first (`.start`) or last (`.end`)
+    /// frame: a keyframe there for what the clip animates, its static value for the rest (the note
+    /// says which). One undo step; refused during a gesture.
+    func matchAdjacent(_ edge: VEClipEdge) {
+        guard let clip = motionTarget else { return }
+        guard !store.isGestureActive else {
+            message = "Finish the current drag first."
+            store.statusMessage = message
+            return
+        }
+        endNudgeBurst()
+        handle(engine.matchMotion(clip: clip.clipID, toAdjacentAt: edge), mode: .single, clampNote: nil)
+    }
+
     /// The Transition section's Delete buttons: remove the selected transition (with its linked
     /// transition unless `includingLinked` is false) whichever panel has the focus (Delete in the
     /// media bin removes an asset instead).

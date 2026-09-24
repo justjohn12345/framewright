@@ -237,7 +237,8 @@ final class ProjectStore: ObservableObject {
         }
         if let kenBurns {
             if let clip = byID[kenBurns.clipID] {
-                kenBurns.update(clip: clip)
+                kenBurns.update(clip: clip, previous: adjacentClip(to: clip.clipID, at: .start),
+                                next: adjacentClip(to: clip.clipID, at: .end))
             } else {
                 self.kenBurns = nil
             }
@@ -784,6 +785,15 @@ final class ProjectStore: ObservableObject {
         requestInspectorFocus(.transitionDuration)
     }
 
+    // MARK: Neighbours
+
+    /// The clip on the same track touching `id` at `edge`: the previous clip ending exactly where it
+    /// starts (`.start`) or the next one starting exactly where it ends (`.end`); nil for a gap.
+    func adjacentClip(to id: VEClipID, at edge: VEClipEdge) -> VEClipInfo? {
+        let other = engine.adjacentClip(of: id, at: edge)
+        return other != 0 ? clips[other] : nil
+    }
+
     // MARK: Ken Burns
 
     /// The inspector's Ken Burns… button: shows the start and end rectangles of `clip` on the
@@ -800,7 +810,8 @@ final class ProjectStore: ObservableObject {
         let picture = KenBurnsPictureLoader(assetID: info.assetID, cache: thumbnails)
         guard let model = KenBurnsModel(clip: clip, asset: info, sequence: sequence, playhead: playheadTime,
                                         durationDisplay: editingPreferences.durationDisplay, picture: picture,
-                                        reason: &reason) else {
+                                        previous: adjacentClip(to: id, at: .start),
+                                        next: adjacentClip(to: id, at: .end), reason: &reason) else {
             statusMessage = reason
             return
         }

@@ -62,6 +62,7 @@ struct InspectorView: View {
                                 .controlSize(.small)
                                 .help("Pan and zoom from a start framing to an end framing, drawn on the program monitor")
                                 .accessibilityIdentifier("KenBurns")
+                            matchMenu
                             Spacer()
                         }
                     }
@@ -81,6 +82,25 @@ struct InspectorView: View {
             Text("Nothing selected")
                 .foregroundStyle(.secondary)
         }
+    }
+
+    /// Match Previous Clip's End / Match Next Clip's Start (enabled next to a touching clip).
+    private var matchMenu: some View {
+        let previous = inspector.canMatch(.start)
+        let next = inspector.canMatch(.end)
+        return Menu("Match") {
+            Button("Match Previous Clip's End") { inspector.matchAdjacent(.start) }
+                .disabled(!previous)
+                .help("Copy the position, scale, rotation and opacity of the previous clip's last frame to this clip's first frame")
+            Button("Match Next Clip's Start") { inspector.matchAdjacent(.end) }
+                .disabled(!next)
+                .help("Copy the position, scale, rotation and opacity of the next clip's first frame to this clip's last frame")
+        }
+        .controlSize(.small)
+        .fixedSize()
+        .disabled(!previous && !next)
+        .help("Match the framing of a clip touching this one on its track")
+        .accessibilityIdentifier("MatchNeighbour")
     }
 
     @ViewBuilder

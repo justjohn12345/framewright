@@ -16,6 +16,15 @@ import FramewrightEngine
 /// the move the picture holds the start framing and after it the end framing, so a 5 s push in at
 /// the head of a 30 s clip holds its end framing for the other 25 s.
 ///
+/// Neighbours: with a clip touching this one's start on its track, "Continue from previous clip"
+/// (`continuesFromPrevious`) puts the start rectangle on the framing the previous clip ends with;
+/// with one touching its end, "Lead into next clip" (`leadsIntoNext`) puts the end rectangle on the
+/// framing the next clip starts with (position and scale; the rectangle is drawn with this clip's
+/// rotation and kept inside its picture, `neighbourNote` says when that changed the framing). Each is
+/// on by default when that neighbour animates its position or scale or its framing there is not the
+/// identity (centred, 100 %): then continuing it is what keeps the cut smooth; next to an unmoved
+/// clip the push in stays the default. Turning one on or off resets that rectangle.
+///
 /// The picture under the rectangles follows the playhead, as in FCP: the clip's unanimated frame at
 /// the playhead, or at its first or last frame while the playhead is before or after it
 /// (`pictureSeconds`, loaded and paced by `KenBurnsPictureLoader`).
@@ -62,6 +71,34 @@ final class KenBurnsModel: ObservableObject {
         }
     }
 
+    /// A touching neighbour's framing at the cut (its last frame before this clip, its first after).
+    struct Neighbour: Equatable {
+        let clipID: VEClipID
+        let framing: VEMotionFraming
+        /// It animates its position or scale.
+        let isAnimated: Bool
+
+        /// The framing is the identity (centred, 100 %).
+        var isIdentity: Bool { framing.x == 0 && framing.y == 0 && framing.scale == 1 }
+        /// "Continue" / "Lead into" is on by default next to this neighbour.
+        var isFollowedByDefault: Bool { isAnimated || !isIdentity }
+
+        static func == (a: Neighbour, b: Neighbour) -> Bool {
+            a.clipID == b.clipID && a.isAnimated == b.isAnimated && a.framing.x == b.framing.x
+                && a.framing.y == b.framing.y && a.framing.scale == b.framing.scale
+        }
+
+        /// `clip`'s framing on its last frame (`atEnd`) or its first, as the monitor shows it.
+        init?(_ clip: VEClipInfo?, atEnd: Bool, frameDuration: CMTime) {
+            guard let clip, clip.trackKind == .video else { return nil }
+            let frame = atEnd ? CMTimeSubtract(clip.timelineEnd, frameDuration) : clip.timelineStart
+            let motion = clip.motion(at: frame)
+            clipID = clip.clipID
+            framing = VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale)
+            isAnimated = clip.isAnimated(.positionX) || clip.isAnimated(.positionY) || clip.isAnimated(.scale)
+        }
+    }
+
     /// The interpolations the helper offers (FCP's smoothing choices).
     static let interpolations: [VEKeyframeInterpolation] = [.easeInOut, .easeOut, .easeIn, .linear]
     /// The smallest rectangle, as a fraction of the frame's width (a 1000 % zoom).
@@ -103,6 +140,25 @@ final class KenBurnsModel: ObservableObject {
     @Published private(set) var durationNote: String?
     /// The program playhead (where "From playhead" starts).
     @Published private(set) var playhead: CMTime
+    /// The clip touching this one's start / end on its track (nil when there is none).
+    @Published private(set) var previous: Neighbour?
+    @Published private(set) var next: Neighbour?
+    /// The start rectangle shows the framing the previous clip ends with.
+    @Published var continuesFromPrevious = false {
+        didSet {
+            guard continuesFromPrevious != oldValue else { return }
+            editedStart = false
+            rangeChanged()
+        }
+    }
+    /// The end rectangle shows the framing the next clip starts with.
+    @Published var leadsIntoNext = false {
+        didSet {
+            guard leadsIntoNext != oldValue else { return }
+            editedEnd = false
+            rangeChanged()
+        }
+    }
 
     /// The duration typed for a partial range (frames, at least 2), or nil for the default.
     private var requestedFrames: Int64?
@@ -116,7 +172,7 @@ final class KenBurnsModel: ObservableObject {
     /// one frame long); `reason` says why.
     init?(clip: VEClipInfo, asset: VEAssetInfo, sequence: VESequenceInfo, playhead: CMTime,
           durationDisplay: DurationDisplay = .timecode, picture: KenBurnsPictureLoader? = nil,
-          reason: inout String) {
+          previous: VEClipInfo? = nil, next: VEClipInfo? = nil, reason: inout String) {
         guard clip.trackKind == .video, asset.hasVideo, asset.width > 0, asset.height > 0 else {
             reason = "Ken Burns works on a clip with a picture."
             return nil
@@ -139,6 +195,10 @@ final class KenBurnsModel: ObservableObject {
                                            in: sequenceSize)
         start = .zero
         end = .zero
+        self.previous = Neighbour(previous, atEnd: true, frameDuration: frame)
+        self.next = Neighbour(next, atEnd: false, frameDuration: frame)
+        continuesFromPrevious = self.previous?.isFollowedByDefault ?? false
+        leadsIntoNext = self.next?.isFollowedByDefault ?? false
         rangeChanged()
     }
 
@@ -277,9 +337,16 @@ final class KenBurnsModel: ObservableObject {
 
     /// The clip changed while the helper is open (a trim, an undo): the range and the rectangles
     /// the user has not moved follow it.
-    func update(clip: VEClipInfo) {
+    func update(clip: VEClipInfo, previous: VEClipInfo? = nil, next: VEClipInfo? = nil) {
         guard clip.clipID == self.clip.clipID else { return }
         self.clip = clip
+        let before = Neighbour(previous, atEnd: true, frameDuration: frameDuration)
+        let after = Neighbour(next, atEnd: false, frameDuration: frameDuration)
+        if before != self.previous { self.previous = before }
+        if after != self.next { self.next = after }
+        // A neighbour that went away cannot be followed (the didSet refreshes the rectangle).
+        if before == nil, continuesFromPrevious { continuesFromPrevious = false }
+        if after == nil, leadsIntoNext { leadsIntoNext = false }
         rangeChanged()
     }
 
@@ -294,6 +361,12 @@ final class KenBurnsModel: ObservableObject {
     /// The rectangle `which` has before the user moves it: the clip's framing at that end of the
     /// range when the clip is placed, else the whole picture (start) pushing in gently (end).
     func defaultRect(_ which: Framing) -> CGRect {
+        if which == .start, continuesFromPrevious, let previous {
+            return constrained(Self.rect(for: previous.framing, sequence: sequenceSize, rotationDegrees: startRotation))
+        }
+        if which == .end, leadsIntoNext, let next {
+            return constrained(Self.rect(for: next.framing, sequence: sequenceSize, rotationDegrees: endRotation))
+        }
         let first = clip.motion(at: rangeStart)
         let placed = clip.isAnimated(.positionX) || clip.isAnimated(.positionY) || clip.isAnimated(.scale)
             || first.scale != 1 || first.x != 0 || first.y != 0
@@ -304,6 +377,27 @@ final class KenBurnsModel: ObservableObject {
         let motion = which == .start ? first : clip.motion(at: rangeLastFrame)
         return constrained(Self.rect(for: VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale),
                                      sequence: sequenceSize, rotationDegrees: motion.rotationDegrees))
+    }
+
+    /// Says when a followed neighbour's framing could not be kept exactly (it shows past this clip's
+    /// picture, or zooms in further than the helper allows, so its rectangle was kept inside).
+    var neighbourNote: String? {
+        var parts: [String] = []
+        if continuesFromPrevious, let previous, !editedStart, !Self.sameFraming(startFraming, previous.framing) {
+            parts.append("the previous clip's end")
+        }
+        if leadsIntoNext, let next, !editedEnd, !Self.sameFraming(endFraming, next.framing) {
+            parts.append("the next clip's start")
+        }
+        guard !parts.isEmpty else { return nil }
+        return "The framing of \(parts.joined(separator: " and ")) reaches past this picture: its rectangle "
+            + "was kept inside it."
+    }
+
+    /// Two framings the same within a millionth (the engine's `motionValuesMatch`).
+    static func sameFraming(_ a: VEMotionFraming, _ b: VEMotionFraming) -> Bool {
+        func same(_ u: Double, _ v: Double) -> Bool { abs(u - v) <= 1e-6 * max(1, abs(u), abs(v)) }
+        return same(a.x, b.x) && same(a.y, b.y) && same(a.scale, b.scale)
     }
 
     /// The clip's rotation at the range's first and last frames (kept by the move).

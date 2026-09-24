@@ -178,8 +178,48 @@ struct KenBurnsOverlay: View {
         }
     }
 
-    /// The move's range: which part of the clip, its duration and where it starts and ends.
+    /// The move's range (which part of the clip, its duration and where it starts and ends) and,
+    /// next to touching clips, whether the rectangles follow them.
     private var rangeControls: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            rangeRow
+            if model.previous != nil || model.next != nil {
+                neighbourRow
+            }
+        }
+        .font(.caption)
+        .controlSize(.small)
+        .padding(.horizontal, 8)
+        .padding(.top, 5)
+        .background(.bar)
+    }
+
+    private var neighbourRow: some View {
+        HStack(spacing: 12) {
+            if model.previous != nil {
+                Toggle("Continue from previous clip", isOn: $model.continuesFromPrevious)
+                    .toggleStyle(.checkbox)
+                    .help("Start from the framing the previous clip ends with (the green rectangle)")
+                    .accessibilityIdentifier("KenBurnsContinuePrevious")
+            }
+            if model.next != nil {
+                Toggle("Lead into next clip", isOn: $model.leadsIntoNext)
+                    .toggleStyle(.checkbox)
+                    .help("End on the framing the next clip starts with (the red rectangle)")
+                    .accessibilityIdentifier("KenBurnsLeadIntoNext")
+            }
+            if let note = model.neighbourNote {
+                Text(note)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(note)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var rangeRow: some View {
         HStack(spacing: 8) {
             Picker("Move", selection: $model.range) {
                 ForEach(KenBurnsModel.MoveRange.allCases) { choice in
@@ -218,11 +258,6 @@ struct KenBurnsOverlay: View {
             }
             Spacer(minLength: 0)
         }
-        .font(.caption)
-        .controlSize(.small)
-        .padding(.horizontal, 8)
-        .padding(.top, 5)
-        .background(.bar)
     }
 
     private var controls: some View {
