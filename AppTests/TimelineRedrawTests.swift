@@ -105,6 +105,123 @@ final class TimelineRedrawTests: XCTestCase {
         XCTAssertGreaterThan(TimelineDiagnostics.canvasDraws, afterDraws)
     }
 
+    /// While the Ken Burns helper is open, its range moving with the playhead ("From playhead") and
+    /// with typing (Custom) redraws the band overlay only: the timeline model is not rebuilt and the
+    /// clips' canvas is not redrawn. The timeline is hosted alone (the helper's picture loads through
+    /// the thumbnail cache, whose landings redraw the canvas for their own reason), and the test
+    /// feeds the playhead to the helper as the program monitor's overlay does.
+    func testAKenBurnsRangeChangeRedrawsOnlyItsBand() async throws {
+        try await makeTwentyClipSequence()
+        let store = fixture.store
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 400),
+                              styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: TimelineView(store: store))
+        window.contentView = host
+        window.orderFront(nil)
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        let clip = try XCTUnwrap(store.clips.values.filter { $0.trackKind == .video }
+            .min { $0.timelineStart < $1.timelineStart })
+        // The first 1 s clip: a 10-frame range from the playhead, moved over its first 19 frames.
+        store.playheadTime = CMTime(value: 0, timescale: 30)
+        store.beginKenBurns(clip: clip.clipID)
+        let model = try XCTUnwrap(store.kenBurns)
+        model.range = .fromPlayhead
+        model.durationText = "10f"
+        XCTAssertTrue(model.commitDuration())
+        var lastDraws = -1
+        for _ in 0 ..< 50 where lastDraws != TimelineDiagnostics.canvasDraws {
+            lastDraws = TimelineDiagnostics.canvasDraws
+            await Self.display(host)
+            await StoreFixture.wait(until: { false }, timeout: 0.1)
+        }
+        // Positive control: a change the canvas shows redraws it, and the band draws.
+        let controlDraws = TimelineDiagnostics.canvasDraws
+        store.snapIndicator = 0.5
+        await Self.display(host)
+        store.snapIndicator = nil
+        await Self.display(host)
+        guard TimelineDiagnostics.canvasDraws > controlDraws, TimelineDiagnostics.kenBurnsBandUpdates > 0 else {
+            throw XCTSkip("the timeline does not draw in this test host")
+        }
+
+        let builds = store.timelineBuildCount
+        let canvasDraws = TimelineDiagnostics.canvasDraws
+        let bandUpdates = TimelineDiagnostics.kenBurnsBandUpdates
+        var ranges: Set<Double> = []
+        for frame in 1 ... 19 {
+            let time = CMTime(value: CMTimeValue(frame), timescale: 30)
+            store.playhead.setTime(time)
+            model.setPlayhead(time)
+            ranges.insert(try XCTUnwrap(store.kenBurnsBand.range).start)
+            await Self.display(host)
+        }
+        model.startText = "00:00:00:05"
+        XCTAssertTrue(model.commitStart())
+        await Self.display(host)
+        model.endText = "00:00:00:25"
+        XCTAssertTrue(model.commitEnd())
+        await Self.display(host)
+        let rebuilt = store.timelineBuildCount - builds
+        let redrawn = TimelineDiagnostics.canvasDraws - canvasDraws
+        let banded = TimelineDiagnostics.kenBurnsBandUpdates - bandUpdates
+        print("21 Ken Burns range changes: timeline model builds \(rebuilt), canvas draws \(redrawn), band updates \(banded)")
+        XCTAssertEqual(ranges.count, 19, "the range followed the playhead")
+        XCTAssertEqual(rebuilt, 0, "the timeline model is not rebuilt for a range change")
+        XCTAssertLessThanOrEqual(redrawn, 2, "the clips are not redrawn for a range change")
+        XCTAssertGreaterThanOrEqual(banded, 21, "the band follows every range change")
+
+        // Closing the helper hides the band.
+        store.cancelKenBurns()
+        await Self.display(host)
+        XCTAssertNil(store.kenBurnsBand.range)
+    }
+
+    /// The band is painted over the clip: accent inside, the start edge green and the end edge red.
+    func testTheKenBurnsBandIsPainted() async throws {
+        let store = fixture.store
+        let (movie, _) = try await fixture.importMedia()
+        let id = try fixture.placeMovie(movie, at: 1) // timeline 1 s to 3 s
+        store.pixelsPerSecond = 200
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        model.startText = "00:00:01:15"
+        XCTAssertTrue(model.commitStart())
+        model.endText = "00:00:02:14"
+        XCTAssertTrue(model.commitEnd())
+        let range = try XCTUnwrap(store.kenBurnsBand.range)
+        XCTAssertEqual(range.start, 1.5, accuracy: 1e-12)
+        XCTAssertEqual(range.end, 2.5, accuracy: 1e-12)
+
+        let size = CGSize(width: 1000, height: 300)
+        let renderer = ImageRenderer(content: TimelineView(store: store)
+            .frame(width: size.width, height: size.height)
+            .background(Color.white)
+            .environment(\.colorScheme, .light))
+        renderer.scale = 1
+        let bitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(renderer.cgImage))
+        let timeline = store.timelineModel
+        let rect = try XCTUnwrap(KenBurnsBandView.rect(for: range, in: timeline))
+        func pixel(_ x: CGFloat, _ y: CGFloat) -> (r: CGFloat, g: CGFloat, b: CGFloat) {
+            let px = Int(TimelineView.headerWidth + 1 + x)
+            let py = Int(TimelineView.rulerHeight + 1 + y)
+            guard let color = bitmap.colorAt(x: px, y: py)?.usingColorSpace(.sRGB) else { return (0, 0, 0) }
+            return (color.redComponent, color.greenComponent, color.blueComponent)
+        }
+        let start = pixel(rect.minX + 1, rect.midY)
+        XCTAssertGreaterThan(start.g, start.r + 0.3, "green start edge: \(start)")
+        let end = pixel(rect.maxX - 1, rect.midY)
+        XCTAssertGreaterThan(end.r, end.g + 0.3, "red end edge: \(end)")
+        // Inside the band the clip is tinted by the accent; outside the range it is not.
+        let inside = pixel(rect.midX, rect.maxY - 20)
+        let outside = pixel(timeline.x(forTime: 2.8), rect.maxY - 20)
+        XCTAssertNotEqual(inside.b, outside.b, accuracy: 0.02, "the band tints the clip: \(inside) vs \(outside)")
+        store.cancelKenBurns()
+    }
+
     /// Lets SwiftUI process the pending updates (one main-queue turn), then makes the window
     /// lay out and display now, and renders the hosting view into a bitmap (which draws the
     /// SwiftUI content even while the window server does not composite the window).

@@ -113,7 +113,21 @@ final class ProjectStore: ObservableObject {
     /// An export is running (the engine's `isExporting`, republished).
     @Published private(set) var isExporting = false
     /// The Ken Burns helper drawn on the program monitor while it edits a clip (nil otherwise).
-    @Published private(set) var kenBurns: KenBurnsModel?
+    @Published private(set) var kenBurns: KenBurnsModel? {
+        didSet {
+            guard kenBurns !== oldValue else { return }
+            // The timeline marks the open helper's range; closing it (Apply, Cancel, selection...)
+            // hides the band.
+            kenBurnsBandForwarding = kenBurns?.$bandRange.sink { [weak band = kenBurnsBand] range in
+                // Published on the main actor, where the model changes.
+                MainActor.assumeIsolated { band?.show(range) }
+            }
+            if kenBurns == nil { kenBurnsBand.show(nil) }
+        }
+    }
+    /// The Ken Burns range the timeline highlights while the helper is open.
+    let kenBurnsBand = KenBurnsTimelineBand()
+    private var kenBurnsBandForwarding: AnyCancellable?
     /// Asks the inspector to focus a field (double-clicking a transition focuses its duration).
     @Published private(set) var inspectorFocusRequest: InspectorFocusRequest?
     /// The coalescing group of the inspector's keyboard-nudge burst, while one is open. Unlike a

@@ -43,13 +43,18 @@ import FramewrightEngine
 /// shows a keyframe (where the keyframe plays with the clip's speed); clicking one moves the
 /// playhead to that frame (and selects the clip), dragging from it moves the clip.
 ///
+/// While the Ken Burns helper is open, the clip it edits shows the move's range as an accent band
+/// with a green start edge and a red end edge (the rectangles' colours), following the range as it
+/// changes (`KenBurnsBandView`).
+///
 /// Durations (transition labels, drop feedback) follow Settings > Editing > "Show durations as"
 /// and re-format as soon as it changes (`ProjectStore.preferences`).
 ///
 /// Redraw budget: the canvas depends on the model (`ProjectStore`, rebuilt once per model change),
 /// the viewport and the Editing preferences, never on the playhead. The playhead line, the ruler
 /// marker and the timecode are overlays observing `PlayheadModel` alone, so playback at the
-/// display rate does not redraw the clips.
+/// display rate does not redraw the clips; the Ken Burns band observes `KenBurnsTimelineBand`
+/// alone, so a range moving with the playhead or with typing does not either.
 struct TimelineView: View {
     @ObservedObject var store: ProjectStore
     @ObservedObject var viewport: TimelineViewport
@@ -205,6 +210,10 @@ struct TimelineView: View {
         }
         .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
         .overlay(alignment: .topLeading) {
+            KenBurnsBandView(band: store.kenBurnsBand, model: model)
+                .allowsHitTesting(false)
+        }
+        .overlay(alignment: .topLeading) {
             PlayheadMarker(playhead: store.playhead, viewport: viewport, style: .line)
                 .allowsHitTesting(false)
         }
@@ -353,6 +362,60 @@ struct PlayheadMarker: View {
             }
         }
         .allowsHitTesting(false)
+    }
+}
+
+/// The Ken Burns helper's range on its clip in the timeline: a translucent accent band over the
+/// clip's row from the range's first frame to the end of its last, the start edge green and the end
+/// edge red (the helper's rectangles). It observes only the band (the range), and takes the
+/// timeline's geometry as a value from the timeline's body, which is evaluated when the model or
+/// the viewport changes: a range change redraws this overlay alone.
+struct KenBurnsBandView: View {
+    @ObservedObject var band: KenBurnsTimelineBand
+    let model: TimelineViewModel
+
+    /// Width of the start and end edges.
+    static let edgeWidth: CGFloat = 2
+    /// Size of the flags on top of the edges.
+    static let flagSize: CGFloat = 6
+
+    var body: some View {
+        let _ = TimelineDiagnostics.kenBurnsBandUpdates += 1
+        if let range = band.range, let rect = Self.rect(for: range, in: model) {
+            Canvas { context, _ in
+                Self.draw(rect, in: &context)
+            }
+            .accessibilityIdentifier("KenBurnsTimelineBand")
+        }
+    }
+
+    /// The band's rectangle in the track area: the clip's row, from x of the range's start to x of
+    /// its end (`TimelineViewModel.x(forTime:)`). Nil when the clip is not in the model.
+    static func rect(for range: KenBurnsBandRange, in model: TimelineViewModel) -> CGRect? {
+        guard let clip = model.clip(id: range.clipID), let row = model.layout(forTrack: clip.trackID) else { return nil }
+        let x0 = model.x(forTime: range.start)
+        let x1 = model.x(forTime: range.end)
+        return CGRect(x: x0, y: row.y - model.scrollY, width: max(1, x1 - x0), height: row.height)
+    }
+
+    private static func draw(_ rect: CGRect, in context: inout GraphicsContext) {
+        context.fill(Path(rect), with: .color(Color.accentColor.opacity(0.28)))
+        var outline = Path()
+        outline.move(to: CGPoint(x: rect.minX, y: rect.minY + 0.5))
+        outline.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + 0.5))
+        outline.move(to: CGPoint(x: rect.minX, y: rect.maxY - 0.5))
+        outline.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - 0.5))
+        context.stroke(outline, with: .color(.accentColor), lineWidth: 1)
+        for (x, color, pointsRight) in [(rect.minX, Color.green, true), (rect.maxX, Color.red, false)] {
+            let edge = CGRect(x: pointsRight ? x : x - edgeWidth, y: rect.minY, width: edgeWidth, height: rect.height)
+            context.fill(Path(edge), with: .color(color))
+            var flag = Path()
+            flag.move(to: CGPoint(x: x, y: rect.minY))
+            flag.addLine(to: CGPoint(x: x + (pointsRight ? flagSize : -flagSize), y: rect.minY))
+            flag.addLine(to: CGPoint(x: x, y: rect.minY + flagSize))
+            flag.closeSubpath()
+            context.fill(flag, with: .color(color))
+        }
     }
 }
 

@@ -41,6 +41,9 @@ import FramewrightEngine
 /// identity (centred, 100 %): then continuing it is what keeps the cut smooth; next to an unmoved
 /// clip the push in stays the default. Turning one on or off resets that rectangle.
 ///
+/// While the helper is open the timeline marks the range on the clip (`bandRange`, forwarded by the
+/// store to `KenBurnsTimelineBand`).
+///
 /// The picture under the rectangles follows the playhead, as in FCP: the clip's unanimated frame at
 /// the playhead, or at its first or last frame while the playhead is before or after it
 /// (`pictureSeconds`, loaded and paced by `KenBurnsPictureLoader`).
@@ -204,6 +207,9 @@ final class KenBurnsModel: ObservableObject {
     /// Why the last typed Start, End or Duration was refused or limited (nil when it was taken as
     /// typed).
     @Published private(set) var rangeNote: String?
+    /// The range as the timeline marks it (nil while it cannot be applied); changes only when the
+    /// range does.
+    @Published private(set) var bandRange: KenBurnsBandRange?
     /// The program playhead (where "From playhead" starts).
     @Published private(set) var playhead: CMTime
     /// The move already on the clip (updated with every clip change while the helper is open).
@@ -380,7 +386,7 @@ final class KenBurnsModel: ObservableObject {
     }
 
     /// The whole clip as a span.
-    private var wholeSpan: FrameSpan { FrameSpan(first: 0, last: max(1, clipFrames - 1)) }
+    private var wholeSpan: FrameSpan { FrameSpan(first: 0, last: max(0, clipFrames - 1)) }
 
     /// The existing move's frames, kept within the clip's; nil without one.
     private var existingSpan: FrameSpan? {
@@ -477,10 +483,17 @@ final class KenBurnsModel: ObservableObject {
         DurationFormat.string(frames: frames, frameDuration: frameDuration, display: durationDisplay)
     }
 
-    /// The Start and End fields' committed values: the range's first and last frames as timeline
-    /// times in the user's duration format (the ruler's timecode by default).
-    var startString: String { durationString(frames: frameIndex(rangeStart)) }
-    var endString: String { durationString(frames: frameIndex(rangeLastFrame)) }
+    /// The span the Start and End fields show and edit: the range's, or the whole clip's while the
+    /// range cannot be applied ("From playhead" with the playhead off the clip).
+    private var fieldSpan: FrameSpan {
+        guard rangeProblem == nil, let span = currentSpan else { return wholeSpan }
+        return span
+    }
+
+    /// The Start and End fields' committed values: the first and last frames of `fieldSpan` as
+    /// timeline times in the user's duration format (the ruler's timecode by default).
+    var startString: String { durationString(frames: frameIndex(clip.timelineStart) + fieldSpan.first) }
+    var endString: String { durationString(frames: frameIndex(clip.timelineStart) + fieldSpan.last) }
 
     /// A field's text differs from its committed value: Return commits it instead of pressing Apply.
     var hasUncommittedText: Bool {
@@ -505,9 +518,10 @@ final class KenBurnsModel: ObservableObject {
     /// Takes the Start (`.start`) or End field's text: a timeline time parsed like the Duration
     /// field (`DurationFormat.parseFrames`: timecode, 150f, 5s, or a bare number in the display's
     /// unit), as the sequence frame from zero. Unchanged text changes nothing. Otherwise the range
-    /// becomes Custom with that end moved and the other kept, the moved end limited to the clip's
-    /// frames and to at least two frames of range (`rangeNote` says when). Returns false for text
-    /// that is not a time (`rangeNote` says why; the range stays).
+    /// becomes Custom with that end moved and the other kept (`fieldSpan`: the whole clip's while
+    /// the range cannot be applied), the moved end limited to the clip's frames and to at least two
+    /// frames of range (`rangeNote` says when). Returns false for text that is not a time
+    /// (`rangeNote` says why; the range stays).
     private func commitBoundary(_ which: Framing) -> Bool {
         let typed = (which == .start ? startText : endText).trimmingCharacters(in: .whitespacesAndNewlines)
         guard typed != (which == .start ? startString : endString) else { return true }
@@ -522,7 +536,7 @@ final class KenBurnsModel: ObservableObject {
         }
         let clipStart = frameIndex(clip.timelineStart)
         let lastFrame = clipFrames - 1
-        let current = FrameSpan(first: frameIndex(rangeStart) - clipStart, last: frameIndex(rangeLastFrame) - clipStart)
+        let current = fieldSpan
         var offset = frame - clipStart
         var note: String?
         if offset < 0 {
@@ -640,6 +654,11 @@ final class KenBurnsModel: ObservableObject {
         durationText = durationString(frames: durationFrames)
         startText = startString
         endText = endString
+        let band = rangeProblem == nil
+            ? KenBurnsBandRange(clipID: clip.clipID, start: rangeStart.secondsOrZero,
+                                end: CMTimeAdd(rangeLastFrame, frameDuration).secondsOrZero)
+            : nil
+        if band != bandRange { bandRange = band }
         if !editedStart { start = defaultRect(.start) }
         if !editedEnd { end = defaultRect(.end) }
     }
@@ -838,6 +857,28 @@ final class KenBurnsModel: ObservableObject {
 
     var endFraming: VEMotionFraming {
         Self.framing(for: end, sequence: sequenceSize, rotationDegrees: endRotation)
+    }
+}
+
+/// The Ken Burns range as the timeline marks it: the clip and the timeline seconds from the range's
+/// first frame's start to its last frame's end.
+struct KenBurnsBandRange: Equatable {
+    let clipID: VEClipID
+    let start: Double
+    let end: Double
+}
+
+/// The range the timeline highlights while the Ken Burns helper is open (nil otherwise). A separate
+/// object observed only by the timeline's band overlay (`KenBurnsBandView`), so a range that moves
+/// with the playhead or with typing redraws that overlay alone: never the clips' canvas, never the
+/// timeline model.
+@MainActor
+final class KenBurnsTimelineBand: ObservableObject {
+    @Published private(set) var range: KenBurnsBandRange?
+
+    /// Shows `range` (nil hides the band); publishes only a change.
+    func show(_ range: KenBurnsBandRange?) {
+        if range != self.range { self.range = range }
     }
 }
 

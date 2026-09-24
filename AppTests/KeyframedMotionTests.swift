@@ -872,6 +872,59 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(store.statusMessage?.contains("is not a time"), true)
     }
 
+    // MARK: Ken Burns: the range in the timeline
+
+    func testTheTimelineMarksTheRangeWhileTheHelperIsOpen() async throws {
+        let id = try await longClipAtTwoSeconds()
+        let band = store.kenBurnsBand
+        XCTAssertNil(band.range, "no helper, no band")
+        store.playheadTime = frames(100)
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        // Whole clip: from the start of its first frame to the end of its last.
+        XCTAssertEqual(band.range, KenBurnsBandRange(clipID: id, start: 2, end: 12))
+        // From playhead: follows the playhead, and hides while the playhead is off the clip.
+        model.range = .fromPlayhead
+        XCTAssertEqual(band.range, KenBurnsBandRange(clipID: id, start: 100.0 / 30, end: 250.0 / 30))
+        model.setPlayhead(frames(130))
+        XCTAssertEqual(band.range?.start ?? 0, 130.0 / 30, accuracy: 1e-12)
+        XCTAssertEqual(band.range?.end ?? 0, 280.0 / 30, accuracy: 1e-12)
+        model.setPlayhead(frames(20))
+        XCTAssertNil(band.range, "nothing to apply: no band")
+        // Custom: follows typing.
+        model.startText = "00:00:04:00"
+        XCTAssertTrue(model.commitStart())
+        model.endText = "00:00:05:29"
+        XCTAssertTrue(model.commitEnd())
+        XCTAssertEqual(band.range, KenBurnsBandRange(clipID: id, start: 4, end: 6))
+
+        // Geometry: the clip's row, x through the timeline model at its zoom and scroll.
+        store.pixelsPerSecond = 80
+        store.scrollX = 40
+        let timeline = store.timelineModel
+        let range = try XCTUnwrap(band.range)
+        let rect = try XCTUnwrap(KenBurnsBandView.rect(for: range, in: timeline))
+        let row = try XCTUnwrap(timeline.layout(forTrack: try clip(id).trackID))
+        XCTAssertEqual(rect.minX, timeline.x(forTime: 4), accuracy: 1e-9)
+        XCTAssertEqual(rect.minX, 4 * 80 - 40, accuracy: 1e-9)
+        XCTAssertEqual(rect.maxX, timeline.x(forTime: 6), accuracy: 1e-9)
+        XCTAssertEqual(rect.minY, row.y - timeline.scrollY)
+        XCTAssertEqual(rect.height, row.height)
+        XCTAssertNil(KenBurnsBandView.rect(for: KenBurnsBandRange(clipID: 9999, start: 0, end: 1), in: timeline))
+
+        // Hidden when the helper closes: Cancel, Apply, and a selection that drops the clip.
+        store.cancelKenBurns()
+        XCTAssertNil(band.range)
+        store.beginKenBurns(clip: id)
+        XCTAssertNotNil(band.range)
+        XCTAssertTrue(store.applyKenBurns())
+        XCTAssertNil(band.range)
+        store.beginKenBurns(clip: id)
+        XCTAssertEqual(band.range, KenBurnsBandRange(clipID: id, start: 2, end: 12), "the existing move: the whole clip")
+        store.selection = []
+        XCTAssertNil(band.range)
+    }
+
     // MARK: Neighbour matching
 
     /// V1: A [0, 60), B [60, 120) touching it, C [150, 210) after a gap. B is selected.

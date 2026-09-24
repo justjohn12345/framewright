@@ -8,6 +8,8 @@ enum TimelineDiagnostics {
     static var canvasDraws = 0
     /// Playhead overlay body evaluations.
     static var playheadUpdates = 0
+    /// Ken Burns range band body evaluations (`KenBurnsBandView`).
+    static var kenBurnsBandUpdates = 0
 }
 
 /// Draws the track area of the timeline into a SwiftUI `GraphicsContext`: rows, clips with
