@@ -161,12 +161,10 @@ struct KeyframeControlState: Equatable {
 ///
 /// Targets: video parameters apply to every selected clip on a video track, audio parameters to
 /// every selected clip on an audio track, each change as one undoable batch
-/// (`VEEngine.applyClipParams`). Keyframed Motion: with a single video clip (`motionTarget`) the
-/// Video values are the ones the picture has at the playhead, and a change goes through
-/// `VEEngine.setMotionValue`: an animated parameter changes the keyframe under the playhead (or
-/// gets a new one there, as in Premiere), a static one its static value. Several clips at once
-/// can change only parameters none of them animates. Each Video parameter has a keyframe toggle,
-/// previous/next keyframe navigation and the interpolation of the keyframe under the playhead.
+/// (`VEEngine.applyClipParams`). The Video values are the clips' static values, what their effect
+/// spans compose onto (the span section that edits spans comes with the effect lanes UI; the old
+/// keyframe controls are inert until then). With a single video clip (`motionTarget`) the Match
+/// menu copies a neighbour's framing.
 /// Speed applies to a single clip (or linked pair); the Speed/Duration sheet handles several. The
 /// transition section edits the selected transition.
 ///
@@ -200,7 +198,7 @@ final class InspectorModel: ObservableObject {
     // MARK: Targets
 
     var videoTargets: [VEClipInfo] { store.selectedClips.filter { $0.trackKind == .video } }
-    /// The clip whose Motion keyframes the inspector shows: the only selected video clip.
+    /// The only selected video clip (Match Previous/Next, the Ken Burns helper).
     var motionTarget: VEClipInfo? {
         let targets = videoTargets
         return targets.count == 1 ? targets[0] : nil
@@ -284,8 +282,8 @@ final class InspectorModel: ObservableObject {
     func value(_ parameter: InspectorParameter, of clip: VEClipInfo) -> Double {
         let video = clip.videoParams
         let audio = clip.audioParams
-        let motion = parameter.motionParameter != nil && clip.hasKeyframes
-            ? clip.motion(at: store.playheadTime) : video
+        // The Video rows edit the clip's static values (what its effect spans compose onto).
+        let motion = video
         switch parameter {
         case .positionX: return motion.x
         case .positionY: return motion.y
@@ -498,7 +496,7 @@ final class InspectorModel: ObservableObject {
         case .video:
             let batch = VEClipParamsBatch()
             for clip in videoTargets {
-                batch.setVideoParams(VEVideoParamsIdentity(), clearingKeyframesForClip: clip.clipID)
+                batch.setVideoParams(VEVideoParamsIdentity(), forClip: clip.clipID)
             }
             guard batch.count > 0 else { return }
             handle(engine.applyClipParams(batch), mode: .single, clampNote: nil)
@@ -519,93 +517,70 @@ final class InspectorModel: ObservableObject {
     }
 
     // MARK: Keyframes
+    //
+    // Motion keyframes became effect spans (VEEffectSpan) in the engine; the inspector's span section
+    // replaces these controls in the next round. Until then they are inert: no keyframe controls are
+    // shown, and the actions refuse with a message.
 
-    /// Whether the Motion keyframe controls apply to `parameter` (a Video parameter with a single
-    /// video clip selected).
+    /// Why the keyframe controls do nothing now.
+    static let keyframesMovedMessage = "Motion keyframes are now Motion spans on the clip's effect lanes."
+
+    /// Whether the Motion keyframe controls apply to `parameter` (never: see above).
     func hasKeyframeControls(_ parameter: InspectorParameter) -> Bool {
-        parameter.motionParameter != nil && motionTarget != nil
+        false
     }
 
-    /// Whether the single video clip animates `parameter`.
+    /// Whether the single video clip animates `parameter` through keyframes (never: see above).
     func isAnimated(_ parameter: InspectorParameter) -> Bool {
-        guard let motion = parameter.motionParameter, let clip = motionTarget else { return false }
-        return clip.isAnimated(motion)
+        false
     }
 
-    /// The keyframe of `parameter` the frame under the playhead shows, if any.
-    func keyframeAtPlayhead(_ parameter: InspectorParameter) -> VEKeyframe? {
-        guard let motion = parameter.motionParameter, let clip = motionTarget else { return nil }
-        return clip.keyframe(for: motion, at: store.playheadTime)
-    }
-
-    /// The frames (timeline times) of `parameter`'s keyframes that the clip shows, in order.
+    /// The frames of `parameter`'s keyframes (none: see above).
     func keyframeFrames(_ parameter: InspectorParameter) -> [CMTime] {
-        guard let motion = parameter.motionParameter, let clip = motionTarget else { return [] }
-        return clip.keyframes(for: motion).filter(\.isInsideClip).map(\.frameTime)
+        []
     }
 
-    /// The nearest keyframe frame before the playhead's frame, or nil.
+    /// The nearest keyframe frame before the playhead's frame (none: see above).
     func previousKeyframeTime(_ parameter: InspectorParameter) -> CMTime? {
-        let playhead = store.frameTime(store.playheadTime.secondsOrZero)
-        return keyframeFrames(parameter).last { $0 < playhead }
+        nil
     }
 
-    /// The nearest keyframe frame after the playhead's frame, or nil.
+    /// The nearest keyframe frame after the playhead's frame (none: see above).
     func nextKeyframeTime(_ parameter: InspectorParameter) -> CMTime? {
-        let playhead = store.frameTime(store.playheadTime.secondsOrZero)
-        return keyframeFrames(parameter).first { $0 > playhead }
+        nil
     }
 
-    /// Moves the playhead to the previous (`forward` false) or next keyframe of `parameter`.
-    func goToKeyframe(_ parameter: InspectorParameter, forward: Bool) {
-        guard let time = forward ? nextKeyframeTime(parameter) : previousKeyframeTime(parameter) else { return }
-        store.playheadTime = time
-    }
+    /// Moves the playhead to the previous or next keyframe (there are none: see above).
+    func goToKeyframe(_ parameter: InspectorParameter, forward: Bool) {}
 
-    /// The keyframe toggle: removes the keyframe under the playhead, or adds one there with the
-    /// value the parameter has (the picture does not change). One undo step.
+    /// The keyframe toggle: refused with a message (see above).
     func toggleKeyframe(_ parameter: InspectorParameter) {
-        guard canEdit(), let motion = parameter.motionParameter, let clip = motionTarget else { return }
-        endNudgeBurst()
-        let time = store.playheadTime
-        let result = keyframeAtPlayhead(parameter) != nil
-            ? engine.removeKeyframe(clip: clip.clipID, parameter: motion, at: time)
-            : engine.addKeyframe(clip: clip.clipID, parameter: motion, at: time)
-        handle(result, mode: .single, clampNote: nil)
+        refuseKeyframeEdit()
     }
 
-    /// Everything the keyframe controls of `parameter` show (nil when it has none: not a Video
-    /// parameter, or not a single video clip).
+    /// The keyframe controls' state (nil: none are shown).
     func keyframeControlState(_ parameter: InspectorParameter) -> KeyframeControlState? {
-        guard hasKeyframeControls(parameter) else { return nil }
-        let keyframe = keyframeAtPlayhead(parameter)
-        return KeyframeControlState(hasKeyframeAtPlayhead: keyframe != nil, interpolation: keyframe?.interpolation,
-                                    isAnimated: isAnimated(parameter),
-                                    hasPrevious: previousKeyframeTime(parameter) != nil,
-                                    hasNext: nextKeyframeTime(parameter) != nil)
+        nil
     }
 
-    /// The interpolation of the keyframe under the playhead (nil when there is none).
+    /// The interpolation of the keyframe under the playhead (none: see above).
     func interpolation(_ parameter: InspectorParameter) -> VEKeyframeInterpolation? {
-        keyframeAtPlayhead(parameter)?.interpolation
+        nil
     }
 
-    /// Sets the interpolation of the keyframe under the playhead. One undo step.
+    /// Setting a keyframe's interpolation: refused with a message (see above).
     func setInterpolation(_ interpolation: VEKeyframeInterpolation, for parameter: InspectorParameter) {
-        guard canEdit(), let motion = parameter.motionParameter, let clip = motionTarget else { return }
-        endNudgeBurst()
-        handle(engine.setKeyframeInterpolation(interpolation, parameter: motion, clip: clip.clipID,
-                                               at: store.playheadTime),
-               mode: .single, clampNote: nil)
+        refuseKeyframeEdit()
     }
 
-    /// Removes every keyframe of `parameter` (Premiere's stopwatch off): it keeps the value it has
-    /// at the playhead. One undo step.
+    /// Removing a parameter's keyframes: refused with a message (see above).
     func removeAnimation(_ parameter: InspectorParameter) {
-        guard canEdit(), let motion = parameter.motionParameter, let clip = motionTarget else { return }
-        endNudgeBurst()
-        handle(engine.removeAnimation(clip: clip.clipID, parameter: motion, at: store.playheadTime),
-               mode: .single, clampNote: nil)
+        refuseKeyframeEdit()
+    }
+
+    private func refuseKeyframeEdit() {
+        message = Self.keyframesMovedMessage
+        store.statusMessage = message
     }
 
     // MARK: Neighbours
@@ -622,9 +597,9 @@ final class InspectorModel: ObservableObject {
     }
 
     /// Copies the touching neighbour's position, scale, rotation and opacity at the cut (as its
-    /// boundary frame shows them) onto the single video clip's first (`.start`) or last (`.end`)
-    /// frame: a keyframe there for what the clip animates, its static value for the rest (the note
-    /// says which). One undo step; refused during a gesture.
+    /// boundary frame shows them) onto the single video clip's static values, so its first (`.start`)
+    /// or last (`.end`) frame shows them (its effect spans there taken into account). One undo step;
+    /// refused during a gesture.
     func matchAdjacent(_ edge: VEClipEdge) {
         guard let clip = motionTarget else { return }
         guard !store.isGestureActive else {
@@ -703,18 +678,6 @@ final class InspectorModel: ObservableObject {
     }
 
     private func applyClipParameter(_ parameter: InspectorParameter, mode: Mode, transform: (Double) -> Double) {
-        if let motion = parameter.motionParameter {
-            let targets = videoTargets
-            if let clip = motionTarget {
-                applyMotion(parameter, motion, clip: clip, mode: mode, transform: transform)
-                return
-            }
-            if targets.contains(where: { $0.isAnimated(motion) }) {
-                message = "\(parameter.label) is animated on a selected clip: select that clip alone to change its keyframes."
-                store.statusMessage = message
-                return
-            }
-        }
         let batch = VEClipParamsBatch()
         var clamped = false
         let targets = parameter.section == .video ? videoTargets : audioTargets
@@ -753,21 +716,6 @@ final class InspectorModel: ObservableObject {
         guard batch.count > 0 else { return }
         let note = clamped ? limitNote(parameter, range(parameter)) : nil
         handle(perform(mode) { self.engine.applyClipParams(batch) }, mode: mode, clampNote: note)
-    }
-
-    /// A Video value of the single video clip: its keyframe under the playhead (or a new one) when
-    /// the parameter is animated, else its static value.
-    private func applyMotion(_ parameter: InspectorParameter, _ motion: VEMotionParameter, clip: VEClipInfo,
-                             mode: Mode, transform: (Double) -> Double) {
-        let requested = transform(value(parameter, of: clip))
-        let bounds = range(parameter)
-        let newValue = min(bounds.upperBound, max(bounds.lowerBound, requested))
-        let note = abs(newValue - requested) > 1e-9 ? limitNote(parameter, bounds) : nil
-        let engineValue = newValue / parameter.displayFactor
-        let time = store.playheadTime
-        let id = clip.clipID
-        handle(perform(mode) { self.engine.setMotionValue(engineValue, parameter: motion, clip: id, at: time) },
-               mode: mode, clampNote: note)
     }
 
     private func applySpeed(_ ratio: SpeedRatio, mode: Mode, clampNote: String? = nil) {

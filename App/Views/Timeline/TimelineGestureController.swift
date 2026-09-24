@@ -19,11 +19,9 @@ import FramewrightEngine
 /// held; the drag then scrubs like the ruler (clip edges and bodies keep their own gestures
 /// without Option). Every press also takes keyboard focus back from a text field.
 ///
-/// A keyframe marker dragged horizontally moves its keyframes in time (`VEEngine.keyframeGroup`:
-/// every Motion parameter's keyframe on that frame, together, one coalesced undo step; whole
-/// sequence frames, kept between the neighbouring keyframes of those parameters and on the clip's
-/// frames; the status line shows where). A click on a marker still moves the playhead there; to
-/// move the clip, drag its body above the markers (Option keeps meaning the playhead).
+/// Keyframe markers are gone with Motion keyframes (they became effect spans, drawn on lanes by the
+/// effect lanes UI): a click on a marker would still move the playhead there, but no marker is
+/// drawn, and dragging one starts nothing.
 @MainActor
 final class TimelineGestureController: ObservableObject {
     enum DragState: Equatable {
@@ -44,11 +42,6 @@ final class TimelineGestureController: ObservableObject {
         case fading(clip: Int64, fadeIn: Bool)
         /// Dragging an audio clip's gain line (`gain`: the value so far; Option drags finely).
         case gain(clip: Int64, lastY: CGFloat, gain: Double)
-        /// Dragging a keyframe marker: the `count` keyframes shown by the frame starting at `frame`
-        /// (seconds) move by the pointer's movement, within [earliest, latest] (frame starts,
-        /// seconds); `current` is the frame they are on now.
-        case movingKeyframes(clip: Int64, origin: CGPoint, frame: Double, earliest: Double, latest: Double,
-                             count: Int, current: Double)
         /// Dragging the playhead (see the type's comment).
         case scrubbing
         /// Escape pressed: the rest of the gesture is ignored.
@@ -65,7 +58,6 @@ final class TimelineGestureController: ObservableObject {
     static let transitionGroup = "timeline.transition"
     static let fadeGroup = "timeline.fade"
     static let gainGroup = "timeline.gain"
-    static let keyframeGroup = "timeline.keyframes"
 
     @Published private(set) var drag: DragState = .idle
     @Published private(set) var marquee: CGRect?
@@ -183,9 +175,6 @@ final class TimelineGestureController: ObservableObject {
             fade(clip, fadeIn: fadeIn, location: location, model: model)
         case let .gain(clip, lastY, gain):
             dragGain(clip, lastY: lastY, gain: gain, location: location, fine: modifiers.contains(.option), model: model)
-        case let .movingKeyframes(clip, origin, frame, earliest, latest, count, current):
-            moveKeyframes(clip, origin: origin, location: location, frame: frame, earliest: earliest, latest: latest,
-                          count: count, current: current, model: model)
         case let .marquee(origin, base):
             let rect = CGRect(x: origin.x, y: origin.y, width: location.x - origin.x,
                               height: location.y - origin.y).standardized
@@ -210,7 +199,7 @@ final class TimelineGestureController: ObservableObject {
                 if !extend, wasSelected { store.select(clip: id, extend: false) }
                 store.setPlayhead(seconds: seconds)
             }
-        case .moving, .trimmingHead, .trimmingTail, .resizingTransition, .fading, .gain, .movingKeyframes:
+        case .moving, .trimmingHead, .trimmingTail, .resizingTransition, .fading, .gain:
             endGroup()
         case .scrubbing:
             store.endScrub()
@@ -227,13 +216,12 @@ final class TimelineGestureController: ObservableObject {
         }
     }
 
-    private static let dragGroups: Set<String> = [moveGroup, trimGroup, transitionGroup, fadeGroup, gainGroup,
-                                                  keyframeGroup]
+    private static let dragGroups: Set<String> = [moveGroup, trimGroup, transitionGroup, fadeGroup, gainGroup]
 
     /// Escape / Cmd+Z: reverts the drag's edits; the rest of the gesture is ignored.
     func cancel() {
         switch drag {
-        case .moving, .trimmingHead, .trimmingTail, .resizingTransition, .fading, .gain, .movingKeyframes:
+        case .moving, .trimmingHead, .trimmingTail, .resizingTransition, .fading, .gain:
             if let key = store.engine.coalescingKey, Self.dragGroups.contains(key) {
                 store.engine.cancelCoalescing()
             }
@@ -354,23 +342,10 @@ final class TimelineGestureController: ObservableObject {
     /// The pointer moved past the threshold: start moving or trimming.
     private func startDrag(hit: TimelineViewModel.Hit, origin: CGPoint, extend: Bool, model: TimelineViewModel) {
         switch hit {
-        case let .keyframe(id, seconds):
-            // Dragging a keyframe marker moves its keyframes (all the parameters keyed on that frame).
-            guard let group = store.engine.keyframeGroup(clip: id, at: store.frameTime(seconds)) else {
-                drag = .cancelled
-                return
-            }
-            guard group.canMove else {
-                store.statusMessage = group.reason
-                drag = .cancelled
-                return
-            }
-            snapshot = model
-            store.engine.beginCoalescing(withKey: Self.keyframeGroup)
-            let frame = group.frameTime.secondsOrZero
-            drag = .movingKeyframes(clip: id, origin: origin, frame: frame, earliest: group.earliestFrame.secondsOrZero,
-                                    latest: group.latestFrame.secondsOrZero, count: group.parameters.count,
-                                    current: frame)
+        case .keyframe:
+            // Motion keyframes became effect spans: a marker drag moves nothing.
+            store.statusMessage = InspectorModel.keyframesMovedMessage
+            drag = .cancelled
         case let .clipBody(id):
             guard store.selection.contains(id), let anchor = model.clip(id: id),
                   let row = model.layout(forTrack: anchor.trackID) else {
@@ -447,33 +422,6 @@ final class TimelineGestureController: ObservableObject {
             store.engine.moveClips(ids.map { NSNumber(value: $0) }, by: deltaTime, trackOffset: trackOffset, of: kind)
         }
         store.statusMessage = result.ok ? nil : result.message
-    }
-
-    /// A step of a keyframe marker drag: its keyframes go to the sequence frame under the pointer's
-    /// movement, kept within the frames they can reach (every step from the frame the drag started
-    /// on: the coalescing group replaces the previous step).
-    private func moveKeyframes(_ id: Int64, origin: CGPoint, location: CGPoint, frame: Double, earliest: Double,
-                               latest: Double, count: Int, current: Double, model: TimelineViewModel) {
-        let requested = model.snapToFrame(frame + model.time(forX: location.x) - model.time(forX: origin.x))
-        let target = min(max(requested, earliest), latest)
-        let from = store.frameTime(frame)
-        let to = store.frameTime(target)
-        if abs(target - current) > model.frameSeconds / 2 {
-            let result = store.engine.performInCoalescingGroup(Self.keyframeGroup) {
-                store.engine.moveKeyframeGroup(clip: id, from: from, to: to)
-            }
-            guard handleStep(result) else { return }
-            drag = .movingKeyframes(clip: id, origin: origin, frame: frame, earliest: earliest, latest: latest,
-                                    count: count, current: target)
-        }
-        let noun = count == 1 ? "Keyframe" : "Keyframes"
-        var message = "\(noun) at \(Timecode.string(to, frameDuration: store.frameDuration))"
-        if abs(requested - target) > model.frameSeconds / 2 {
-            message += " (as far as \(count == 1 ? "it goes" : "they go"): keyframes stay in order, a frame apart, "
-                + "on the clip's frames)"
-        }
-        // Set only when it changes: every assignment re-runs everything that observes the store.
-        if store.statusMessage != message { store.statusMessage = message }
     }
 
     /// Moves the playhead to the pointer (snapping to clip edges, never to itself).
@@ -678,14 +626,12 @@ final class TimelineGestureController: ObservableObject {
                     store.showSpeedSheet()
                 },
             ]
-            // A video clip under the pointer: Add Motion Keyframe on it at the playhead.
+            // A video clip under the pointer: Add Motion Keyframe, as the Clip menu has it (disabled
+            // while Motion keyframes are effect spans; see ProjectStore.motionKeyframeMenuState).
             if let clip = store.motionKeyframeClip(id) {
-                let playhead = store.playheadTime
-                let over = clip.timelineStart <= playhead && playhead < clip.timelineEnd
-                let all = store.hasAllMotionKeyframesAtPlayhead(clip)
+                let state = store.motionKeyframeMenuState(at: store.playheadTime)
                 items.append(.separator)
-                items.append(ContextMenuItem(title: all ? "Remove Motion Keyframes  ⌃K" : "Add Motion Keyframe  ⌃K",
-                                             isEnabled: over) {
+                items.append(ContextMenuItem(title: state.title, isEnabled: state.enabled) {
                     store.toggleMotionKeyframes(clip: clip.clipID)
                 })
             }

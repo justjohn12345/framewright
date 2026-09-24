@@ -222,13 +222,9 @@ private struct ParameterSection<Extra: View>: View {
                     .accessibilityIdentifier("Reset.\(section.rawValue)")
             }
             if section == .video {
-                // One view whatever the clip's animation, so a clip gaining its first keyframe keeps
-                // the rows (their focus and typed text); only an animated clip's rows observe the
-                // playhead (a still one's observe a playhead that never moves).
-                let animated = inspector.motionTarget?.hasKeyframes == true
-                VideoParameterRows(store: store, inspector: inspector,
-                                   playhead: animated ? store.playhead : VideoParameterRows.stillPlayhead,
-                                   followsPlayhead: animated)
+                // The rows show the clips' static values, which do not follow the playhead.
+                VideoParameterRows(store: store, inspector: inspector, playhead: VideoParameterRows.stillPlayhead,
+                                   followsPlayhead: false)
             } else {
                 ForEach(InspectorParameter.parameters(in: section)) { parameter in
                     ParameterRow(store: store, inspector: inspector, parameter: parameter)

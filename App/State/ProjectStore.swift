@@ -349,7 +349,7 @@ final class ProjectStore: ObservableObject {
                                           isAudio: $0.trackKind == .audio, gainDb: audio.gainDb,
                                           fadeIn: audio.fadeInDuration.secondsOrZero,
                                           fadeOut: audio.fadeOutDuration.secondsOrZero,
-                                          keyframes: Self.keyframeFrames(of: $0))
+                                          keyframes: [])
         }.sorted { $0.start < $1.start }
         model.transitions = sequence.transitions.map {
             TimelineViewModel.Transition(id: $0.transitionID, trackID: $0.trackID, start: $0.start.secondsOrZero,
@@ -357,17 +357,6 @@ final class ProjectStore: ObservableObject {
         }
         cachedTimeline = (changeCount, collapsedTrackIDs, model)
         return model
-    }
-
-    /// The frames (seconds) of a video clip that show a Motion keyframe, one per frame, in order;
-    /// keyframes a trim cut off are left out.
-    static func keyframeFrames(of clip: VEClipInfo) -> [Double] {
-        guard clip.trackKind == .video, clip.hasKeyframes else { return [] }
-        var frames: [CMTime] = []
-        for keyframe in clip.allKeyframes where keyframe.isInsideClip {
-            if !frames.contains(keyframe.frameTime) { frames.append(keyframe.frameTime) }
-        }
-        return frames.sorted().map(\.secondsOrZero)
     }
 
     /// Converts seconds to a CMTime on the sequence frame grid.
@@ -821,40 +810,27 @@ final class ProjectStore: ObservableObject {
         return video.count == 1 ? video[0] : nil
     }
 
-    /// Whether every Motion parameter of `clip` has a keyframe on the frame under the playhead (Add
-    /// Motion Keyframe then removes them).
+    /// Whether every Motion parameter of `clip` has a keyframe on the frame under the playhead. Motion
+    /// keyframes became Motion spans (the effect lanes UI brings "Add Motion Span at Playhead" in their
+    /// place), so never.
     func hasAllMotionKeyframesAtPlayhead(_ clip: VEClipInfo, at time: CMTime? = nil) -> Bool {
-        let time = time ?? playheadTime
-        return ([.positionX, .positionY, .scale, .rotation, .opacity] as [VEMotionParameter]).allSatisfy {
-            clip.keyframe(for: $0, at: time) != nil
-        }
+        false
     }
 
-    /// Clip > Add Motion Keyframe with the playhead at `time`: "Remove Motion Keyframes" when all
-    /// five are on that frame; enabled only for a single selected video clip under the playhead.
+    /// Clip > Add Motion Keyframe with the playhead at `time`: disabled (Motion keyframes became
+    /// Motion spans; see `hasAllMotionKeyframesAtPlayhead`).
     func motionKeyframeMenuState(at time: CMTime) -> (title: String, enabled: Bool) {
-        guard let clip = motionKeyframeClip(), clip.timelineStart <= time, time < clip.timelineEnd else {
-            return ("Add Motion Keyframe  ⌃K", false)
-        }
-        return (hasAllMotionKeyframesAtPlayhead(clip, at: time) ? "Remove Motion Keyframes  ⌃K"
-            : "Add Motion Keyframe  ⌃K", true)
+        ("Add Motion Keyframe  ⌃K", false)
     }
 
-    /// Clip > Add Motion Keyframe (Control-K), also in the timeline's context menu: on the frame under
-    /// the playhead, adds keyframes to the Motion parameters of the clip that have none there (the
-    /// picture does not change), or, when all five have one, removes them. One undo step; the status
-    /// line says "Keyframes added on N parameters" or "Keyframes removed", or why nothing happened.
+    /// Clip > Add Motion Keyframe (Control-K), also in the timeline's context menu: refused with a
+    /// message until the effect lanes UI replaces it (Motion keyframes became Motion spans).
     func toggleMotionKeyframes(clip id: VEClipID? = nil) {
         guard !isGestureActive else {
             statusMessage = "Finish the current drag first."
             return
         }
-        guard let clip = motionKeyframeClip(id) else {
-            statusMessage = "Select a single video clip to add Motion keyframes."
-            return
-        }
-        inspector.endNudgeBurst()
-        report(engine.toggleMotionKeyframes(clip: clip.clipID, at: playheadTime))
+        statusMessage = InspectorModel.keyframesMovedMessage
     }
 
     // MARK: Neighbours
@@ -869,11 +845,10 @@ final class ProjectStore: ObservableObject {
     // MARK: Ken Burns
 
     /// The inspector's Ken Burns… button: shows the start and end rectangles of `clip` on the
-    /// program monitor. A clip with a move (position or scale keyframes on two of its frames) opens
-    /// on that move ("Existing move": its range, its framing at the range's ends, its smoothing), so
-    /// Apply edits it in place; otherwise the range is the whole clip and the rectangles show its
-    /// position and scale at its first and last frames, or a gentle push in when it has none.
-    /// Nothing changes until `applyKenBurns()`.
+    /// program monitor. A clip with a Motion span opens on its first one ("Existing move": its range,
+    /// its framing at the range's ends, its smoothing), so Apply edits it in place; otherwise the
+    /// range is the whole clip and the rectangles show its position and scale at its first and last
+    /// frames, or a gentle push in when it has none. Nothing changes until `applyKenBurns()`.
     func beginKenBurns(clip id: VEClipID) {
         guard !isGestureActive else {
             statusMessage = "Finish the current drag first."
@@ -897,10 +872,11 @@ final class ProjectStore: ObservableObject {
         kenBurns = model
     }
 
-    /// Applies the Ken Burns rectangles as position and scale keyframes on the first and last frames
-    /// of the helper's range (one undo step) and closes the helper. A Start, End or Duration still
-    /// being typed is taken first. Returns whether it was applied (a refusal is reported and the
-    /// helper stays).
+    /// Applies the Ken Burns rectangles to a Motion span over the helper's range (one undo step) and
+    /// closes the helper: the clip's Motion span over exactly that range, or a new one on the first
+    /// effect lane with room there (`VEEngine.addSpan` then `applyKenBurns(span:)` in one Accumulate
+    /// group). A Start, End or Duration still being typed is taken first. Returns whether it was
+    /// applied (a refusal is reported and the helper stays).
     @discardableResult
     func applyKenBurns() -> Bool {
         guard let model = kenBurns else { return false }
@@ -916,12 +892,49 @@ final class ProjectStore: ObservableObject {
             statusMessage = problem
             return false
         }
-        let result = engine.applyKenBurns(clip: model.clipID, start: model.startFraming, end: model.endFraming,
-                                          interpolation: model.interpolation, from: model.rangeStart,
-                                          duration: model.rangeDuration)
-        guard report(result) else { return false }
+        guard report(applyKenBurns(model)) else { return false }
         kenBurns = nil
         return true
+    }
+
+    /// The Ken Burns helper's move as one undo step over the new engine API (see `applyKenBurns()`).
+    private func applyKenBurns(_ model: KenBurnsModel) -> VEEditResult {
+        // Taken before the edits: adding the span updates the helper's clip (and with it the
+        // rectangles it would offer for an untouched range).
+        let clipID = model.clipID
+        let range = CMTimeRange(start: model.rangeStart, duration: model.rangeDuration)
+        let start = model.startFraming
+        let end = model.endFraming
+        let interpolation = model.interpolation
+        let existing = engine.spans(forClip: clipID).first {
+            $0.kind == .motion && $0.start == range.start && $0.end == range.end
+        }
+        let key = "kenBurns.apply"
+        engine.beginCoalescing(withKey: key, mode: .accumulate)
+        var spanID = existing?.spanID ?? 0
+        if spanID == 0 {
+            var added = VEEditResult.failure(withMessage: "No effect lane of the clip has room for the move there.")
+            for lane in 1 ... 3 {
+                added = engine.performInCoalescingGroup(key) {
+                    self.engine.addSpan(kind: .motion, lane: lane, clip: clipID, range: range)
+                }
+                if added.ok || added.errorCode != .overlap { break }
+            }
+            guard added.ok, let span = added.span else {
+                engine.cancelCoalescing()
+                return added
+            }
+            spanID = span.spanID
+        }
+        let result = engine.performInCoalescingGroup(key) {
+            self.engine.applyKenBurns(span: spanID, start: start, end: end, interpolation: interpolation)
+        }
+        if result.ok {
+            engine.endCoalescing()
+        } else {
+            engine.cancelCoalescing()
+        }
+        return result
     }
 
     /// Closes the Ken Burns helper without changing anything.

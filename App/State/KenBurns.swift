@@ -150,7 +150,7 @@ final class KenBurnsModel: ObservableObject {
             let motion = clip.motion(at: frame)
             clipID = clip.clipID
             framing = VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale)
-            isAnimated = clip.isAnimated(.positionX) || clip.isAnimated(.positionY) || clip.isAnimated(.scale)
+            isAnimated = clip.spans.contains { $0.kind == .motion }
         }
     }
 
@@ -162,8 +162,9 @@ final class KenBurnsModel: ObservableObject {
     static let defaultEndFraction = 0.8
     /// The default length of a move that does not cover the whole clip.
     static let defaultRangeSeconds = 5.0
-    /// The caption shown while the move ends before the clip does.
-    static let holdCaption = "Holds the end framing until the clip ends"
+    /// The caption shown while the move ends before the clip does (a Motion span acts over its own
+    /// range only).
+    static let holdCaption = "After the move the clip returns to its framing without it"
     /// The caption shown when the clip's position and scale keyframes are all hidden by a trim.
     static let hiddenMoveCaption = "The clip's position and scale keyframes are all in parts a trim hid: "
         + "the move covers the whole clip (Apply replaces them)"
@@ -301,11 +302,13 @@ final class KenBurnsModel: ObservableObject {
             range = .existingMove
             interpolation = move.interpolation ?? interpolation
             let lastFrame = max(0, clipFrames - 1)
+            let span = Self.moveSpan(in: clip)
             continuesFromPrevious = self.previous.map {
-                move.first == 0 && Self.sameFraming(framing(atFrame: 0), $0.framing)
+                move.first == 0 && Self.sameFraming(edgeFraming(of: span, atEnd: false) ?? framing(atFrame: 0), $0.framing)
             } ?? false
             leadsIntoNext = self.next.map {
-                move.last == lastFrame && Self.sameFraming(framing(atFrame: lastFrame), $0.framing)
+                move.last == lastFrame
+                    && Self.sameFraming(edgeFraming(of: span, atEnd: true) ?? framing(atFrame: lastFrame), $0.framing)
             } ?? false
         } else {
             continuesFromPrevious = self.previous?.isFollowedByDefault ?? false
@@ -323,32 +326,25 @@ final class KenBurnsModel: ObservableObject {
         return Int64((time.secondsOrZero / frame + 1e-6).rounded(.down))
     }
 
-    /// The move already on `clip`: the span of the frames that show its position X, position Y and
-    /// scale keyframes (`VEKeyframe.frameTime`), from the earliest to the latest. Keyframes a trim hid
-    /// are ignored unless they are the only ones (`.hiddenOnly`); keyframes all on one frame are no
-    /// move (`.none`).
+    /// The move already on `clip`: its first Motion span (the frames it covers, counted from the clip's
+    /// first frame, and its smoothing when the helper offers it). A span of a single frame is no move
+    /// (`.none`). (Motion keyframes became Motion spans; `.hiddenOnly` no longer occurs: a trim clips a
+    /// span instead of hiding it.)
     static func detectMove(in clip: VEClipInfo, frameDuration: CMTime) -> MoveDetection {
-        guard clip.trackKind == .video, clip.hasKeyframes else { return .none }
+        guard let span = moveSpan(in: clip) else { return .none }
         let clipStart = frameIndex(clip.timelineStart, frameDuration: frameDuration)
-        var shown: [(frame: Int64, keyframe: VEKeyframe)] = [] // in parameter order, then time
-        var hidden = false
-        for parameter: VEMotionParameter in [.positionX, .positionY, .scale] {
-            for keyframe in clip.keyframes(for: parameter) {
-                if keyframe.isInsideClip {
-                    shown.append((frameIndex(keyframe.frameTime, frameDuration: frameDuration) - clipStart, keyframe))
-                } else {
-                    hidden = true
-                }
-            }
-        }
-        guard let first = shown.map(\.frame).min(), let last = shown.map(\.frame).max() else {
-            return hidden ? .hiddenOnly : .none
-        }
+        let first = frameIndex(span.start, frameDuration: frameDuration) - clipStart
+        let last = frameIndex(CMTimeSubtract(span.end, frameDuration), frameDuration: frameDuration) - clipStart
         guard last > first else { return .none }
-        let opening = shown.first { $0.frame == first }?.keyframe.interpolation
-        return .move(ExistingMove(first: first, last: last,
-                                  hasKeyframesBetween: shown.contains { $0.frame > first && $0.frame < last },
-                                  interpolation: opening.flatMap { interpolations.contains($0) ? $0 : nil }))
+        return .move(ExistingMove(first: first, last: last, hasKeyframesBetween: false,
+                                  interpolation: interpolations.contains(span.interpolation) ? span.interpolation : nil))
+    }
+
+    /// The Motion span `detectMove` takes as the clip's move: its first by start (nil for an audio
+    /// clip or one without Motion spans).
+    static func moveSpan(in clip: VEClipInfo) -> VEEffectSpan? {
+        guard clip.trackKind == .video else { return nil }
+        return clip.spans.filter { $0.kind == .motion }.min { $0.start < $1.start }
     }
 
     /// The move already on the clip, if any.
@@ -363,6 +359,17 @@ final class KenBurnsModel: ObservableObject {
     }
 
     /// The clip's position and scale on its frame `offset` frames from its first.
+    /// The framing an edge of the Motion span `span` shows: what a Ken Burns move applied to it
+    /// (`VEClipInfo.getMotion(_:atEdgeOfSpan:)`; its end framing is reached at the span's end).
+    private func edgeFraming(of span: VEEffectSpan?, atEnd: Bool) -> VEMotionFraming? {
+        guard let span else { return nil }
+        var motion = VEVideoParams()
+        guard clip.getMotion(&motion, atEdgeOfSpan: span.spanID, atEnd: atEnd, frameDuration: frameDuration) else {
+            return nil
+        }
+        return VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale)
+    }
+
     private func framing(atFrame offset: Int64) -> VEMotionFraming {
         let motion = clip.motion(at: CMTimeAdd(clip.timelineStart, time(frames: offset)))
         return VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale)
@@ -767,14 +774,13 @@ final class KenBurnsModel: ObservableObject {
         if which == .end, leadsIntoNext, let next {
             return constrained(Self.rect(for: next.framing, sequence: sequenceSize, rotationDegrees: endRotation))
         }
-        let first = clip.motion(at: rangeStart)
-        let placed = clip.isAnimated(.positionX) || clip.isAnimated(.positionY) || clip.isAnimated(.scale)
-            || first.scale != 1 || first.x != 0 || first.y != 0
+        let first = rangeMotion(atEnd: false)
+        let placed = clip.spans.contains { $0.kind == .motion } || first.scale != 1 || first.x != 0 || first.y != 0
         let largest = Self.largestRect(in: pictureBounds, aspect: aspect)
         guard placed else {
             return which == .start ? largest : Self.scaled(largest, by: Self.defaultEndFraction)
         }
-        let motion = which == .start ? first : clip.motion(at: rangeLastFrame)
+        let motion = which == .start ? first : rangeMotion(atEnd: true)
         return constrained(Self.rect(for: VEMotionFraming(x: motion.x, y: motion.y, scale: motion.scale),
                                      sequence: sequenceSize, rotationDegrees: motion.rotationDegrees))
     }
@@ -801,8 +807,28 @@ final class KenBurnsModel: ObservableObject {
     }
 
     /// The clip's rotation at the range's first and last frames (kept by the move).
-    var startRotation: Double { clip.motion(at: rangeStart).rotationDegrees }
-    var endRotation: Double { clip.motion(at: rangeLastFrame).rotationDegrees }
+    var startRotation: Double { rangeMotion(atEnd: false).rotationDegrees }
+    var endRotation: Double { rangeMotion(atEnd: true).rotationDegrees }
+
+    /// The clip's Motion span over exactly the helper's range, if any (what Apply edits in place).
+    private var rangeSpan: VEEffectSpan? {
+        let end = CMTimeAdd(rangeStart, rangeDuration)
+        return clip.spans.first { $0.kind == .motion && $0.start == rangeStart && $0.end == end }
+    }
+
+    /// The Motion at the range's start or end: for a Motion span over exactly the range, the
+    /// framings a move applied to it (`VEClipInfo.getMotion(_:atEdgeOfSpan:)`: the span's end values
+    /// are reached at its end, one frame after its last frame); otherwise what the range's first or
+    /// last frame shows.
+    private func rangeMotion(atEnd: Bool) -> VEVideoParams {
+        if let span = rangeSpan {
+            var motion = VEVideoParams()
+            if clip.getMotion(&motion, atEdgeOfSpan: span.spanID, atEnd: atEnd, frameDuration: frameDuration) {
+                return motion
+            }
+        }
+        return clip.motion(at: atEnd ? rangeLastFrame : rangeStart)
+    }
 
     /// The clip's frame the picture under the rectangles shows: the one under the playhead, or the
     /// clip's first or last frame while the playhead is before or after the clip (timeline time).

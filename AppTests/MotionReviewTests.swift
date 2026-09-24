@@ -9,9 +9,10 @@ import XCTest
 /// which rectangle a press grabs when they overlap or coincide (12), a click without movement and
 /// the drag reducer (16), a duration typed with the playhead off the clip (17), a neighbour going
 /// away after a rectangle was moved (18), held Control-K through the key monitor (15), the Clip
-/// menu's item following the playhead (25), the helper staying open on the same clip and closing on
-/// a multi-selection, durations following the display preference, the marker zone near trim edges,
-/// abandoning a marker drag, a crowded frame and a split's out-point keyframe at app level.
+/// menu's item (25; both inert since Motion keyframes became effect spans), the helper staying open
+/// on the same clip and closing on a multi-selection, durations following the display preference,
+/// no keyframe markers at the trim edges, and a nudge on a split piece whose Motion span ends on its
+/// out point.
 /// The movie is 2 s (60 frames) at 320x180 on a 1920x1080 30 fps sequence; 50 pt/s, V1 at y 66...130.
 @MainActor
 final class MotionReviewTests: XCTestCase {
@@ -193,12 +194,18 @@ final class MotionReviewTests: XCTestCase {
 
     func testAClickWithoutMovementDoesNotPinARectangle() async throws {
         let id = try await longClip()
-        // The clip moves right over its length and is zoomed in: the rectangles show its framing at
-        // the range's ends, so they move with the range.
-        XCTAssertTrue(store.engine.addKeyframe(clip: id, parameter: .scale, at: frames(0)).ok)
-        XCTAssertTrue(store.engine.setMotionValue(2, parameter: .scale, clip: id, at: frames(0)).ok)
-        XCTAssertTrue(store.engine.addKeyframe(clip: id, parameter: .positionX, at: frames(0)).ok)
-        XCTAssertTrue(store.engine.setMotionValue(300, parameter: .positionX, clip: id, at: frames(299)).ok)
+        // The clip moves right over its length and is zoomed in (a Motion span over the whole clip):
+        // the rectangles show its framing at the range's ends, so they move with the range.
+        let added = store.engine.addSpan(kind: .motion, lane: 1, clip: id,
+                                         range: CMTimeRange(start: .zero, duration: frames(300)))
+        let span = try XCTUnwrap(added.span, added.message)
+        var start = VESpanValuesUnchanged()
+        start.x = 0
+        start.scale = 2
+        var end = VESpanValuesUnchanged()
+        end.x = 300
+        end.scale = 2
+        XCTAssertTrue(store.engine.setSpanValues(span.spanID, start: start, end: end).ok)
         store.refreshModel()
         store.beginKenBurns(clip: id)
         let model = try XCTUnwrap(store.kenBurns)
@@ -278,111 +285,76 @@ final class MotionReviewTests: XCTestCase {
                                            windowNumber: 0, context: nil, characters: "\u{b}",
                                            charactersIgnoringModifiers: "k", isARepeat: repeating, keyCode: 40))
         }
-        XCTAssertTrue(keyboard.handle(try controlK(repeating: false), window: window))
         let changes = store.changeCount
+        XCTAssertTrue(keyboard.handle(try controlK(repeating: false), window: window))
+        XCTAssertEqual(store.statusMessage, InspectorModel.keyframesMovedMessage,
+                       "Motion keyframes became effect spans: refused with the reason")
         for _ in 0 ..< 5 {
             XCTAssertTrue(keyboard.handle(try controlK(repeating: true), window: window), "swallowed")
         }
-        XCTAssertEqual(store.changeCount, changes, "auto-repeat adds and removes nothing")
-        XCTAssertTrue(store.hasAllMotionKeyframesAtPlayhead(try clip(id)))
-        XCTAssertEqual(store.undoActionName, "Add Keyframes")
+        XCTAssertEqual(store.changeCount, changes, "neither the press nor its auto-repeat edits anything")
+        XCTAssertFalse(store.hasAllMotionKeyframesAtPlayhead(try clip(id)))
+        XCTAssertTrue(try clip(id).spans.isEmpty)
         store.editorWindow = nil
     }
 
-    func testTheClipMenuItemFollowsThePlayhead() async throws {
+    func testTheClipMenuItemIsDisabledNowThatKeyframesAreSpans() async throws {
         let id = try await placedClip()
         store.playheadTime = frames(10)
-        XCTAssertEqual(store.motionKeyframeMenuState(at: frames(10)).title, "Add Motion Keyframe  ⌃K")
-        XCTAssertTrue(store.motionKeyframeMenuState(at: frames(10)).enabled)
+        for time in [frames(10), frames(11), try clip(id).timelineEnd] {
+            XCTAssertEqual(store.motionKeyframeMenuState(at: time).title, "Add Motion Keyframe  ⌃K")
+            XCTAssertFalse(store.motionKeyframeMenuState(at: time).enabled)
+        }
+        let changes = store.changeCount
         store.toggleMotionKeyframes()
-        XCTAssertEqual(store.motionKeyframeMenuState(at: frames(10)).title, "Remove Motion Keyframes  ⌃K")
-        XCTAssertEqual(store.motionKeyframeMenuState(at: frames(11)).title, "Add Motion Keyframe  ⌃K",
-                       "the next frame has none")
-        let end = try clip(id).timelineEnd
-        XCTAssertFalse(store.motionKeyframeMenuState(at: end).enabled, "off the clip")
-        XCTAssertFalse(store.motionKeyframeMenuState(at: CMTimeAdd(end, frames(30))).enabled)
-        store.selection = []
-        XCTAssertFalse(store.motionKeyframeMenuState(at: frames(10)).enabled, "no single video clip")
+        XCTAssertEqual(store.statusMessage, InspectorModel.keyframesMovedMessage)
+        XCTAssertEqual(store.changeCount, changes)
     }
 
     // MARK: Timeline markers (test gap 4)
 
-    func testATrimEdgeNearerThanAMarkerKeepsThePress() async throws {
+    func testAClipWithMotionSpansHasNoKeyframeMarkersAndItsTrimEdgesKeepThePress() async throws {
         let id = try await placedClip()
-        store.playheadTime = frames(0)
-        inspector.toggleKeyframe(.scale)
-        store.playheadTime = frames(59)
-        inspector.toggleKeyframe(.scale)
+        let added = store.engine.addSpan(kind: .motion, lane: 1, clip: id,
+                                         range: CMTimeRange(start: .zero, duration: frames(60)))
+        XCTAssertTrue(added.ok, added.message)
+        store.refreshModel()
         let model = store.timelineModel
         let timelineClip = try XCTUnwrap(model.clip(id: id))
+        XCTAssertEqual(timelineClip.keyframes, [], "Motion keyframes became effect spans: no markers")
         let rect = try XCTUnwrap(model.rect(forClip: timelineClip))
-        let first = try XCTUnwrap(model.keyframeMarkerCenter(forClip: timelineClip, time: 0))
-        let last = try XCTUnwrap(model.keyframeMarkerCenter(forClip: timelineClip, time: 59.0 / 30.0))
-        let y = first.y
-        XCTAssertEqual(model.hitTest(CGPoint(x: rect.minX + 0.5, y: y)), .clipHead(id), "the head trim in the marker zone")
-        XCTAssertEqual(model.hitTest(CGPoint(x: rect.maxX - 0.5, y: y)), .clipTail(id), "the tail trim too")
-        XCTAssertEqual(model.hitTest(first), .keyframe(id, 0), "the marker itself")
-        XCTAssertEqual(model.hitTest(last), .keyframe(id, 59.0 / 30.0))
+        let y = rect.maxY - 4 // where the marker zone was
+        XCTAssertEqual(model.hitTest(CGPoint(x: rect.minX + 0.5, y: y)), .clipHead(id))
+        XCTAssertEqual(model.hitTest(CGPoint(x: rect.maxX - 0.5, y: y)), .clipTail(id))
+        XCTAssertEqual(model.hitTest(CGPoint(x: rect.midX, y: y)), .clipBody(id))
     }
 
-    func testAnAbandonedMarkerDragPutsTheKeyframesBack() async throws {
+    func testANudgeOnASplitPieceMovesTheStaticValueUnderItsSpan() async throws {
         let id = try await placedClip()
-        for frame: Int64 in [0, 20] {
-            store.playheadTime = frames(frame)
-            inspector.toggleKeyframe(.scale)
-        }
-        let model = store.timelineModel
-        let marker = try XCTUnwrap(model.keyframeMarkerCenter(forClip: try XCTUnwrap(model.clip(id: id)),
-                                                              time: 20.0 / 30.0))
-        let gestures = TimelineGestureController(store: store)
-        gestures.changed(location: marker, startLocation: marker, modifiers: [])
-        gestures.changed(location: CGPoint(x: marker.x + 30, y: marker.y), startLocation: marker, modifiers: [])
-        let message = store.statusMessage
-        XCTAssertNotNil(message)
-        // The pointer leaves the window while the drag goes on: nothing new to say, nothing reassigned.
-        var assignments = 0
-        let observation = store.$statusMessage.dropFirst().sink { _ in assignments += 1 }
-        gestures.changed(location: CGPoint(x: marker.x + 30, y: marker.y + 400), startLocation: marker, modifiers: [])
-        XCTAssertEqual(assignments, 0, "the same status is not assigned again")
-        observation.cancel()
-        // The system ends the gesture without a release.
-        gestures.abandon()
-        XCTAssertFalse(store.isGestureActive)
-        XCTAssertEqual(try clip(id).keyframes(for: .scale).map(\.frameTime), [frames(0), frames(20)])
-    }
-
-    func testACrowdedFrameIsRefusedWithTheReasonInTheApp() async throws {
-        let id = try await placedClip()
-        for frame: Int64 in [30, 31] {
-            store.playheadTime = frames(frame)
-            inspector.toggleKeyframe(.rotation)
-        }
-        XCTAssertTrue(store.engine.setSpeedNumerator(3, denominator: 1, forClip: id).ok)
-        let model = store.timelineModel
-        let marker = try XCTUnwrap(model.keyframeMarkerCenter(forClip: try XCTUnwrap(model.clip(id: id)),
-                                                              time: 10.0 / 30.0))
-        let gestures = TimelineGestureController(store: store)
-        gestures.changed(location: marker, startLocation: marker, modifiers: [])
-        gestures.changed(location: CGPoint(x: marker.x + 20, y: marker.y), startLocation: marker, modifiers: [])
-        gestures.ended()
-        XCTAssertEqual(store.statusMessage?.contains("several Rotation keyframes"), true, store.statusMessage ?? "")
-        XCTAssertEqual(try clip(id).keyframes(for: .rotation).count, 2)
-    }
-
-    func testANudgeOnASplitsLastFrameShowsExactlyWhatWasTyped() async throws {
-        let id = try await placedClip()
-        store.playheadTime = frames(0)
-        inspector.toggleKeyframe(.positionX)
-        store.playheadTime = frames(59)
-        inspector.setValue(.positionX, -150)
+        // A Motion span moving the clip left by 150 over its 60 frames, then a split at frame 30: the
+        // left piece keeps the span's first half, which ends on its out point.
+        let added = store.engine.addSpan(kind: .motion, lane: 1, clip: id,
+                                         range: CMTimeRange(start: .zero, duration: frames(60)))
+        let span = try XCTUnwrap(added.span, added.message)
+        var start = VESpanValuesUnchanged()
+        start.x = 0
+        var end = VESpanValuesUnchanged()
+        end.x = -150
+        XCTAssertTrue(store.engine.setSpanValues(span.spanID, start: start, end: end).ok)
         XCTAssertTrue(store.engine.splitClip(id, at: frames(30)).ok)
         store.selection = [id]
-        store.playheadTime = frames(29) // the left piece's last frame: its keyframe is on the out point
-        let shown = try XCTUnwrap(inspector.value(.positionX))
+        store.playheadTime = frames(29) // the left piece's last frame
+        let pieceSpan = try XCTUnwrap(store.engine.spans(forClip: id).first { $0.kind == .motion })
+        XCTAssertEqual(pieceSpan.end, frames(30), "the span ends on the piece's out point")
+        XCTAssertEqual(pieceSpan.endValues.x, -75, accuracy: 1e-9, "cut exactly at the split")
+        let shownBefore = try clip(id).motion(at: frames(29)).x
+        // The row edits the static value (what the span composes onto), whatever the playhead shows.
+        XCTAssertEqual(try XCTUnwrap(inspector.value(.positionX)), 0, accuracy: 1e-12)
         inspector.nudge(.positionX, steps: 1)
         inspector.endNudgeBurst()
-        let now = try XCTUnwrap(inspector.value(.positionX))
-        XCTAssertEqual(now, shown + 1, accuracy: 1e-9, "the frame shows the nudged value")
-        XCTAssertEqual(try clip(id).motion(at: frames(29)).x, shown + 1, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(inspector.value(.positionX)), 1, accuracy: 1e-9)
+        XCTAssertEqual(try clip(id).videoParams.x, 1, accuracy: 1e-9)
+        XCTAssertEqual(try clip(id).motion(at: frames(29)).x, shownBefore + 1, accuracy: 1e-9,
+                       "the frame shows the span plus the nudged static value")
     }
 }
