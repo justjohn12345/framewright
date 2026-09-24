@@ -20,6 +20,11 @@ namespace ve {
 
 class Scheduler {
   public:
+    // An eased Gain span ramp (not linear in dB) is followed by AudioSegments of at most this
+    // length, each linear in dB between the ramp's exact values at its ends.
+    static constexpr double kEasedGainStep = 0.005; // seconds
+
+
     // The layers visible at `time` (snapped down to the sequence frame containing it).
     static RenderGraph renderGraphAt(const Sequence &sequence, const Project &project, CMTime time);
 
@@ -36,9 +41,10 @@ class Scheduler {
     // Clips covering `time` on every track, video tracks bottom to top then audio tracks.
     static std::vector<ClipId> clipsAt(const Sequence &sequence, CMTime time);
 
-    // The clip's Motion at sequence time `time`: its keyframes evaluated at the exact source time
-    // the frame maps to (Clip::exactSourceTimeAt, also in transition handles), or its static
-    // values. Without keyframes. Playback, the output view and export all get it from here.
+    // The clip's Motion at sequence time `time`: its static values with its Motion and Opacity
+    // spans composed onto them (motionValuesAt), evaluated at the exact source time the frame maps
+    // to (held at the clip's edge in transition handles). Playback, the output view and export all
+    // get it from here.
     static VideoParams motionAt(const Clip &clip, CMTime time);
 
     // Source frame time for `clip` at sequence time `time`: exact speed mapping, then the start

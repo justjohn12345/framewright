@@ -433,7 +433,7 @@ struct FrameLog {
     VideoLayer outgoing = makeLayer(1);
     VideoLayer incoming = makeLayer(2);
     LayerTransition t;
-    t.transitionId = TransitionId{77};
+    t.transitionId = SpanId{77};
     t.mix = mix;
     t.isIncoming = false;
     t.partnerClipId = incoming.clipId;

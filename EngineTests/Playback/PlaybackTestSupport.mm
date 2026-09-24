@@ -9,6 +9,7 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <stdexcept>
 #include <cmath>
 #include <thread>
 
@@ -307,13 +308,56 @@ void PlaybackHarness::link(ClipId a, ClipId b) {
 }
 
 void PlaybackHarness::addTransition(TrackId track, ClipId from, ClipId to, int64_t frames) {
-    Transition t;
-    t.id = project.ids.make<TransitionId>();
-    t.trackId = track;
-    t.fromClipId = from;
-    t.toClipId = to;
-    t.duration = frames30(frames);
-    sequence().transitions.push_back(t);
+    // A cross dissolve centred on the cut: a lane-0 span of the outgoing clip.
+    const Track &t = *sequence().findTrack(track);
+    const Clip &owner = *sequence().findClip(from);
+    if (t.find(to) == nullptr || owner.timelineEnd() != t.find(to)->timelineStart) {
+        throw std::logic_error("addTransition: the clips do not meet at a cut on the track");
+    }
+    addTailTransition(from, frames / 2, frames - frames / 2);
+}
+
+SpanId PlaybackHarness::addTailTransition(ClipId clip, int64_t before, int64_t after) {
+    EffectSpan span;
+    span.id = project.ids.make<SpanId>();
+    span.lane = kTransitionLane;
+    span.kind = SpanKind::Transition;
+    span.edge = ClipEdge::Tail;
+    span.start = -frames30(before);
+    span.end = frames30(after);
+    Clip &owner = *sequence().findClip(clip);
+    owner.spans.push_back(span);
+    owner.sortSpans();
+    return span.id;
+}
+
+SpanId PlaybackHarness::addFade(ClipId clip, ClipEdge edge, int64_t frames) {
+    EffectSpan span;
+    span.id = project.ids.make<SpanId>();
+    span.lane = kTransitionLane;
+    span.kind = SpanKind::Transition;
+    span.edge = edge;
+    span.start = edge == ClipEdge::Head ? kCMTimeZero : -frames30(frames);
+    span.end = edge == ClipEdge::Head ? frames30(frames) : kCMTimeZero;
+    Clip &owner = *sequence().findClip(clip);
+    owner.spans.push_back(span);
+    owner.sortSpans();
+    return span.id;
+}
+
+SpanId PlaybackHarness::addSpan(ClipId clip, SpanKind kind, int lane, CMTime start, CMTime end,
+                                const SpanTracks &tracks) {
+    EffectSpan span;
+    span.id = project.ids.make<SpanId>();
+    span.lane = lane;
+    span.kind = kind;
+    span.start = start;
+    span.end = end;
+    span.tracks = tracks;
+    Clip &owner = *sequence().findClip(clip);
+    owner.spans.push_back(span);
+    owner.sortSpans();
+    return span.id;
 }
 
 void PlaybackHarness::setClipGain(ClipId clip, double gainDb) {

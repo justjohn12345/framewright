@@ -103,7 +103,16 @@ class PlaybackHarness {
     /// A speed-1 clip; times in 30 fps sequence frames, `sourceIn` in source time.
     ClipId addClip(TrackId track, AssetId asset, int64_t startFrame, int64_t durationFrames, CMTime sourceIn);
     void link(ClipId a, ClipId b);
+    /// A cross dissolve of `frames` centred on the cut between `from` and `to` (a lane-0 tail span of
+    /// `from`).
     void addTransition(TrackId track, ClipId from, ClipId to, int64_t frames);
+    /// A cross dissolve at the end of `clip` with `before` frames before the cut and `after` past it.
+    SpanId addTailTransition(ClipId clip, int64_t before, int64_t after);
+    /// A lane-0 fade of `frames` at `edge` of `clip` (head: from black or silence; tail: to it).
+    SpanId addFade(ClipId clip, ClipEdge edge, int64_t frames);
+    /// An effect span of `kind` on `lane` of `clip` over source times [start, end) with `tracks`
+    /// (keyframe times relative to `start`).
+    SpanId addSpan(ClipId clip, SpanKind kind, int lane, CMTime start, CMTime end, const SpanTracks &tracks);
     // Model edits (then publishEdit()).
     void setClipGain(ClipId clip, double gainDb);
     /// Moves `clip` to `track` keeping its times.

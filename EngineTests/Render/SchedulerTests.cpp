@@ -1,6 +1,6 @@
 #include "../../Engine/Edit/EditOps.h"
 #include "../../Engine/Render/Scheduler.h"
-#include "../Model/ModelFixtures.h"
+#include "../Edit/EditTestSupport.h"
 
 #include <cmath>
 
@@ -129,7 +129,7 @@ TEST_CASE("Scheduler: short dissolves are symmetric and match the audio crossfad
         fx.addTransition(fx.v1, a, b, frames);
         fx.addTransition(fx.a1, aa, ab, frames);
         fx.requireValid();
-        const TimeRange range = *fx.sequence().transitionRange(fx.sequence().transitions[0]);
+        const TimeRange range = findTransition(fx.sequence(), fx.clip(a).transitionAt(ClipEdge::Tail)->id)->range;
         const std::int64_t first = frameIndexAt(range.start, f30(1), SnapMode::Floor);
         for (std::int64_t k = 0; k < frames; ++k) {
             const RenderGraph g = graphAt(fx, first + k);
@@ -319,7 +319,9 @@ TEST_CASE("Scheduler: reverse lookup helpers") {
 TEST_CASE("Scheduler: audio graph gain, fades and source ranges") {
     Fixture fx;
     const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 30, 60, 90); // [30, 90), source 90..150
-    fx.sequence().findClip(c)->audio = AudioParams{-6.0, f30(10), f30(20)};
+    fx.sequence().findClip(c)->audio = AudioParams{-6.0};
+    fx.addFade(c, ClipEdge::Head, f30(10));
+    fx.addFade(c, ClipEdge::Tail, f30(20));
     fx.requireValid();
 
     const AudioGraph whole = audioFor(fx, 0, 120);
@@ -331,7 +333,9 @@ TEST_CASE("Scheduler: audio graph gain, fades and source ranges") {
     CHECK(segments[2]->timelineRange == TimeRange{f30(70), f30(90)});
     CHECK(segments[0]->sourceRange == TimeRange{f30(90), f30(100)});
     CHECK(segments[2]->sourceRange == TimeRange{f30(130), f30(150)});
-    CHECK(segments[0]->gain == doctest::Approx(std::pow(10.0, -6.0 / 20.0)));
+    CHECK(segments[0]->level.start == -6.0);
+    CHECK(segments[0]->level.isConstant());
+    CHECK(decibelsToGain(segments[0]->level.start) == doctest::Approx(std::pow(10.0, -6.0 / 20.0)));
     CHECK(segments[0]->fade.start == 0.0);
     CHECK(segments[0]->fade.end == doctest::Approx(1.0));
     CHECK(segments[1]->fade.isUnity());
@@ -364,10 +368,7 @@ TEST_CASE("Scheduler: audio crossfade ramps both clips linearly across the trans
     Fixture fx;
     const ClipId a = fx.addClip(fx.a1, fx.audioOnly, 0, 60, 30);
     const ClipId b = fx.addClip(fx.a1, fx.audioOnly, 60, 60, 300);
-    // Own fades on the transition edges are replaced by the crossfade.
-    fx.sequence().findClip(a)->audio.fadeOutDuration = f30(15);
-    fx.sequence().findClip(b)->audio.fadeInDuration = f30(15);
-    const TransitionId t = fx.addTransition(fx.a1, a, b, 20); // [50, 70)
+    const SpanId t = fx.addTransition(fx.a1, a, b, 20); // [50, 70)
     fx.requireValid();
 
     const AudioGraph g = audioFor(fx, 40, 80);
@@ -424,15 +425,18 @@ TEST_CASE("Scheduler: fade envelopes are exactly linear per segment because fade
     const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 0, 30);
     // Overlapping fades (20 in + 20 out on 30 frames) are not a valid model: their product is
     // not linear on [10, 20) (it peaks at 0.5625), so validation refuses them.
-    fx.sequence().findClip(c)->audio = AudioParams{0, f30(20), f30(20)};
-    CHECK(problemOf(fx.project).find("overlap") != std::string::npos);
-    SetAudioParams overlap(fx.seq, c, AudioParams{0, f30(20), f30(20)});
-    fx.sequence().findClip(c)->audio = AudioParams{};
+    const SpanId in = fx.addFade(c, ClipEdge::Head, f30(20));
+    const SpanId out = fx.addFade(c, ClipEdge::Tail, f30(20));
+    CHECK(problemOf(fx.project).find("meets the fade in") != std::string::npos);
+    fx.sequence().findSpan(out)->start = -f30(10);
+    ClipParamsChange overlapping{c, std::nullopt, std::nullopt};
+    overlapping.fadeOut = f30(20);
+    SetClipsParams overlap(fx.seq, {overlapping});
     applyRefused(fx.project, overlap, EditError::InvalidTime);
 
     // Fades that meet exactly: every segment is one linear ramp of the true envelope.
-    fx.sequence().findClip(c)->audio = AudioParams{0, f30(20), f30(10)};
     fx.requireValid();
+    (void)in;
     const AudioGraph g = audioFor(fx, 0, 30);
     const auto segments = segmentsOf(g, c);
     REQUIRE(segments.size() == 2);
@@ -450,13 +454,15 @@ TEST_CASE("Scheduler: fade envelopes are exactly linear per segment because fade
 TEST_CASE("Scheduler: fades of split pieces fit their pieces") {
     Fixture fx;
     const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 0, 300);
-    fx.sequence().findClip(c)->audio = AudioParams{0, f30(90), f30(60)};
+    fx.addFade(c, ClipEdge::Head, f30(90));
+    fx.addFade(c, ClipEdge::Tail, f30(60));
     fx.requireValid();
-    SplitClip split(fx.seq, c, f30(30));
-    applyReversible(fx.project, split);
-    const ClipId right = split.createdClipIds()[0];
-    CHECK(fx.clip(c).audio.fadeInDuration == f30(30)); // was 90 on a 30-frame piece
-    CHECK(fx.clip(right).audio.fadeOutDuration == f30(60));
+    // An insert splits the clip inside its fade in (a user split there is refused).
+    InsertClip insert(fx.seq, f30(30), {place(fx.a1, fx.audioOnly, 600, 610)}, InsertOptions{false, RippleScope::SyncedTracks});
+    applyReversible(fx.project, insert);
+    const ClipId right = fx.sequence().findTrack(fx.a1)->clips.back().id;
+    CHECK(clipFadeLength(fx.clip(c), ClipEdge::Head) == f30(30)); // was 90 on a 30-frame piece
+    CHECK(clipFadeLength(fx.clip(right), ClipEdge::Tail) == f30(60));
     // The left piece's gain ramps 0 -> 1 over its whole length and never jumps.
     const AudioGraph g = audioFor(fx, 0, 30);
     const auto segments = segmentsOf(g, c);
@@ -508,27 +514,23 @@ TEST_CASE("Scheduler: audio respects speed, mute and solo") {
     CHECK(audioFor(fx, 0, 30).segments.size() == 1);
 }
 
-TEST_CASE("Scheduler: layers carry the Motion keyframes evaluate to at each frame") {
+TEST_CASE("Scheduler: layers carry the clip's Motion and Opacity spans at each frame, held in dissolve handles") {
     Fixture fx;
     // V1: a clip from source frame 30 at timeline 0 (60 frames) cutting to a second one at 60;
     // a 10-frame dissolve on the cut shows the first clip's handle past its out point.
     const ClipId first = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
     const ClipId second = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
     fx.addTransition(fx.v1, first, second, 10);
-    Clip &clip = *fx.sequence().findClip(first);
-    auto key = [](CMTime t, double v, KeyframeInterpolation i) {
-        Keyframe k;
-        k.time = t;
-        k.value = v;
-        k.interpolation = i;
-        return k;
-    };
-    // Source frames 30 and 90 (the out point): x linear 0 -> 600, scale holds 1 then 2 at 60,
-    // opacity eases out from 1 to 0 over [60, 90).
-    clip.video.keyframes.x = {key(f30(30), 0, KeyframeInterpolation::Linear), key(f30(90), 600, KeyframeInterpolation::Linear)};
-    clip.video.keyframes.scale = {key(f30(30), 1, KeyframeInterpolation::Hold), key(f30(60), 2, KeyframeInterpolation::Linear)};
-    clip.video.keyframes.opacity = {key(f30(60), 1, KeyframeInterpolation::EaseOut), key(f30(90), 0, KeyframeInterpolation::Linear)};
-    clip.video.y = 25;
+    // A Motion span over the whole clip (source frames [30, 90)): x linear 0 -> 600, scale holds
+    // 1 then 2 at source frame 60; an Opacity span easing out from 1 to 0 over [60, 90).
+    SpanTracks motion;
+    motion.x = {key(f30(0), 0, KeyframeInterpolation::Linear), key(f30(60), 600)};
+    motion.scale = {key(f30(0), 1, KeyframeInterpolation::Hold), key(f30(30), 2)};
+    fx.addSpan(first, SpanKind::Motion, 1, f30(30), f30(90), motion);
+    SpanTracks opacity;
+    opacity.opacity = {key(f30(0), 1, KeyframeInterpolation::EaseOut), key(f30(30), 0)};
+    fx.addSpan(first, SpanKind::Opacity, 2, f30(60), f30(90), opacity);
+    fx.sequence().findClip(first)->video.y = 25;
     fx.requireValid();
 
     for (std::int64_t frame = 0; frame < 55; ++frame) {
@@ -539,12 +541,12 @@ TEST_CASE("Scheduler: layers carry the Motion keyframes evaluate to at each fram
         CHECK(layer.transform.x == doctest::Approx(10.0 * double(frame)).epsilon(1e-12));
         CHECK(layer.transform.y == 25);
         CHECK(layer.transform.scale == (frame < 30 ? 1.0 : 2.0));
-        CHECK(layer.transform.keyframes.empty());
         const double u = frame < 30 ? 0.0 : double(frame - 30) / 30.0;
         CHECK(layer.opacity == doctest::Approx(1.0 - timingCurveFor(KeyframeInterpolation::EaseOut).valueAt(u)).epsilon(1e-12));
         CHECK(layer.opacity == layer.transform.opacity);
     }
-    // In the dissolve, past the first clip's out point (its handle), x holds the last value.
+    // In the dissolve, past the first clip's out point (its handle), the spans that reach the out
+    // point hold their end values.
     const RenderGraph mixed = graphAt(fx, 63);
     REQUIRE(mixed.layers.size() == 2);
     CHECK(mixed.layers[0].clipId == first);
@@ -554,32 +556,26 @@ TEST_CASE("Scheduler: layers carry the Motion keyframes evaluate to at each fram
 
     // The same evaluation for a still, on its time into the clip.
     const ClipId still = fx.addClip(fx.v2, fx.still, 30, 30);
-    fx.sequence().findClip(still)->video.keyframes.rotation = {key(f30(0), 0, KeyframeInterpolation::Linear),
-                                                              key(f30(29), 290, KeyframeInterpolation::Linear)};
+    SpanTracks turn;
+    turn.rotation = {key(f30(0), 0), key(f30(29), 290)};
+    fx.addSpan(still, SpanKind::Motion, 1, f30(0), f30(30), turn);
     fx.requireValid();
     const RenderGraph withStill = graphAt(fx, 40);
     REQUIRE(withStill.layers.size() == 2);
     CHECK(withStill.layers[1].transform.rotationDegrees == doctest::Approx(100).epsilon(1e-12));
 }
 
-TEST_CASE("Scheduler: a Ken Burns move over the first 5 s of a 30 s clip holds its end framing to the clip's end") {
+TEST_CASE("Scheduler: a Motion span over the first 5 s of a 30 s clip acts on those frames only") {
     Fixture fx;
     // V1: a 30 s clip (900 frames) of av30, and after it a second clip that must stay unanimated.
     const ClipId clip = fx.addClip(fx.v1, fx.av30, 0, 900);
     const ClipId next = fx.addClip(fx.v1, fx.av30, 900, 60, 900);
-    fx.sequence().findClip(clip)->video.rotationDegrees = 12; // kept by the move
-    MotionMoveRequest request;
-    request.firstFrame = f30(0);
-    request.lastFrame = f30(149);
-    request.start = MotionFraming{0, 0, 1};
-    request.end = MotionFraming{-240, 90, 1.6};
-    request.interpolation = KeyframeInterpolation::EaseInOut;
-    MotionMovePlan plan;
-    REQUIRE(planMotionMove(fx.clip(clip), f30(1), request, plan).ok());
-    for (const MotionTrackChange &change : plan.changes) {
-        fx.sequence().findClip(clip)->video.keyframes.track(change.parameter) = change.keyframes;
-        fx.sequence().findClip(clip)->video.setStaticValue(change.parameter, change.staticValue);
-    }
+    fx.sequence().findClip(clip)->video.rotationDegrees = 12; // the clip's static value
+    SpanTracks move;
+    move.x = {key(f30(0), 0, KeyframeInterpolation::EaseInOut), key(f30(150), -240)};
+    move.y = {key(f30(0), 0, KeyframeInterpolation::EaseInOut), key(f30(150), 90)};
+    move.scale = {key(f30(0), 1, KeyframeInterpolation::EaseInOut), key(f30(150), 1.6)};
+    fx.addSpan(clip, SpanKind::Motion, 1, f30(0), f30(150), move);
     fx.requireValid();
 
     const TimingCurve ease = timingCurveFor(KeyframeInterpolation::EaseInOut);
@@ -594,14 +590,15 @@ TEST_CASE("Scheduler: a Ken Burns move over the first 5 s of a 30 s clip holds i
             continue;
         }
         CHECK(shown.rotationDegrees == 12);
-        if (frame >= 149) {
-            // The end framing, exactly, on every frame from the move's last to the clip's end.
-            CHECK(shown.x == -240);
-            CHECK(shown.y == 90);
-            CHECK(shown.scale == 1.6);
+        if (frame >= 150) {
+            // After the span: the clip's own framing (a span acts only within its range).
+            CHECK(shown.x == 0);
+            CHECK(shown.y == 0);
+            CHECK(shown.scale == 1);
         } else {
-            const double u = ease.valueAt(double(frame) / 149.0);
+            const double u = ease.valueAt(double(frame) / 150.0);
             CHECK(shown.x == doctest::Approx(-240.0 * u).epsilon(1e-9));
+            CHECK(shown.y == doctest::Approx(90.0 * u).epsilon(1e-9));
             CHECK(shown.scale == doctest::Approx(1.0 + 0.6 * u).epsilon(1e-9));
         }
     }

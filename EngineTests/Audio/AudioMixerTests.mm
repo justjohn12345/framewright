@@ -13,6 +13,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <stdexcept>
 #include <thread>
 
 using namespace ve;
@@ -75,14 +76,59 @@ struct MixFixture {
         return *t.find(clip.id);
     }
 
+    // A cross dissolve of `frames` centred on the cut at the end of `from` (which `to` touches),
+    // owned by `from` as a lane-0 tail span.
     void addTransition(TrackId track, ClipId from, ClipId to, int frames) {
-        Transition t;
-        t.id = project.ids.make<TransitionId>();
-        t.trackId = track;
-        t.fromClipId = from;
-        t.toClipId = to;
-        t.duration = CMTimeMake(frames, 30);
-        sequence().transitions.push_back(t);
+        const Track &t = *sequence().findTrack(track);
+        if (t.find(from) == nullptr || t.find(to) == nullptr ||
+            !(t.find(from)->timelineEnd() == t.find(to)->timelineStart)) {
+            throw std::logic_error("addTransition: the clips do not meet on the track");
+        }
+        EffectSpan span;
+        span.id = project.ids.make<SpanId>();
+        span.lane = kTransitionLane;
+        span.kind = SpanKind::Transition;
+        span.edge = ClipEdge::Tail;
+        span.start = CMTimeMake(-(frames / 2), 30);
+        span.end = CMTimeMake(frames - frames / 2, 30);
+        Clip &clip = *sequence().findClip(from);
+        clip.spans.push_back(span);
+        clip.sortSpans();
+    }
+
+    // A Gain span over source [start, end) of `clip` moving from `from` to `to` dB with
+    // `interpolation`.
+    void addGainSpan(Clip &clip, int lane, CMTime start, CMTime end, double from, double to,
+                     KeyframeInterpolation interpolation) {
+        EffectSpan span;
+        span.id = project.ids.make<SpanId>();
+        span.lane = lane;
+        span.kind = SpanKind::Gain;
+        span.start = start;
+        span.end = end;
+        Keyframe first;
+        first.time = kCMTimeZero;
+        first.value = from;
+        first.interpolation = interpolation;
+        Keyframe last = first;
+        last.time = CMTimeSubtract(end, start);
+        last.value = to;
+        span.tracks.gain = {first, last};
+        clip.spans.push_back(span);
+        clip.sortSpans();
+    }
+
+    // A lane-0 fade of `length` at `edge` of `clip` (head: fade in; tail: fade out ending on its end).
+    void addFade(Clip &clip, ClipEdge edge, CMTime length) {
+        EffectSpan span;
+        span.id = project.ids.make<SpanId>();
+        span.lane = kTransitionLane;
+        span.kind = SpanKind::Transition;
+        span.edge = edge;
+        span.start = edge == ClipEdge::Head ? kCMTimeZero : CMTimeMultiply(length, -1);
+        span.end = edge == ClipEdge::Head ? length : kCMTimeZero;
+        clip.spans.push_back(span);
+        clip.sortSpans();
     }
 
     void plan(CMTime from, CMTime to) {
@@ -141,8 +187,8 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
     const AssetId tone = fx.addTone("tone://sine440", sineSignal(440, amplitude));
     Clip &clip = fx.addClip(fx.a1, tone, CMTimeMake(6, 30), CMTimeMake(18, 30), CMTimeMake(1, 1));
     clip.audio.gainDb = 20.0 * std::log10(0.5);
-    clip.audio.fadeInDuration = CMTimeMake(3, 30);  // 0.1 s
-    clip.audio.fadeOutDuration = CMTimeMake(6, 30); // 0.2 s
+    fx.addFade(clip, ClipEdge::Head, CMTimeMake(3, 30)); // 0.1 s
+    fx.addFade(clip, ClipEdge::Tail, CMTimeMake(6, 30)); // 0.2 s
     fx.plan(kCMTimeZero, CMTimeMake(2, 1));
     fx.start(kCMTimeZero);
     const std::vector<float> out = fx.render(48000);
@@ -165,6 +211,67 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
     XCTAssertEqual(out[38400 * 2], 0.0f);
     XCTAssertEqual(fx.mixer->stats().underruns, 0u);
     NSLog(@"gain+fades: max |mixer - model| = %.3g over 48000 samples", worst);
+}
+
+- (void)testGainSpansAreSampleAccurateInDecibels {
+    MixFixture fx;
+    const double amplitude = 0.5;
+    const AssetId tone = fx.addTone("tone://sine330", sineSignal(330, amplitude));
+    // The clip plays source [1 s, 2.5 s) at timeline [0.25 s, 1.75 s) at -3 dB. Lane 1: a linear
+    // ramp to -18 dB over source [1.25 s, 1.75 s); lane 2: an eased swell of +6 dB over source
+    // [1.5 s, 2.25 s) (followed in 5 ms steps, linear in dB within each).
+    Clip &clip = fx.addClip(fx.a1, tone, CMTimeMake(1, 4), CMTimeMake(45, 30), CMTimeMake(1, 1));
+    clip.audio.gainDb = -3;
+    fx.addGainSpan(clip, 1, CMTimeMake(5, 4), CMTimeMake(7, 4), 0, -18, KeyframeInterpolation::Linear);
+    fx.addGainSpan(clip, 2, CMTimeMake(3, 2), CMTimeMake(9, 4), 0, 6, KeyframeInterpolation::EaseInOut);
+    fx.plan(kCMTimeZero, CMTimeMake(2, 1));
+    fx.start(kCMTimeZero);
+    const std::vector<float> out = fx.render(96000);
+
+    // Independent model: the level in dB at each sample from the spans' definitions; the eased
+    // swell's Core Animation curve (0.42, 0, 0.58, 1) by bisection on x(t).
+    auto easeInOut = [](double u) {
+        auto bez = [](double p1, double p2, double t) {
+            const double v = 1 - t;
+            return 3 * v * v * t * p1 + 3 * v * t * t * p2 + t * t * t;
+        };
+        double lo = 0, hi = 1;
+        for (int i = 0; i < 60; ++i) {
+            const double mid = (lo + hi) / 2;
+            (bez(0.42, 0.58, mid) < u ? lo : hi) = mid;
+        }
+        return bez(0.0, 1.0, (lo + hi) / 2);
+    };
+    std::vector<double> expected(out.size(), 0.0);
+    for (int64_t n = 12000; n < 84000; ++n) {
+        const double source = 1.0 + static_cast<double>(n - 12000) / kSr;
+        double db = -3;
+        if (source >= 1.25 && source < 1.75) {
+            db += -18 * (source - 1.25) / 0.5;
+        }
+        if (source >= 1.5 && source < 2.25) {
+            db += 6 * easeInOut((source - 1.5) / 0.75);
+        }
+        const int64_t s = n - 12000 + 48000;
+        const double v = std::pow(10.0, db / 20.0) * amplitude * std::sin(2.0 * M_PI * 330.0 * static_cast<double>(s) / kSr);
+        expected[static_cast<size_t>(n) * 2] = v;
+        expected[static_cast<size_t>(n) * 2 + 1] = v;
+    }
+    // Linear in dB: sample accurate outside the eased swell.
+    double worstLinear = 0;
+    double worstEased = 0;
+    for (int64_t n = 0; n < 96000; ++n) {
+        const double source = 1.0 + static_cast<double>(n - 12000) / kSr;
+        const double d = std::fabs(static_cast<double>(out[static_cast<size_t>(n) * 2]) - expected[static_cast<size_t>(n) * 2]);
+        double &worst = source >= 1.5 && source < 2.25 ? worstEased : worstLinear;
+        worst = std::max(worst, d);
+    }
+    // Within the swell each 5 ms step is linear in dB between exact values: the level is off by at
+    // most a few thousandths of a dB, a relative gain error below 0.1 %.
+    XCTAssertLessThan(worstLinear, 2e-6, @"linear ramp: max deviation %g", worstLinear);
+    XCTAssertLessThan(worstEased, 1e-3 * amplitude, @"eased swell: max deviation %g", worstEased);
+    XCTAssertEqual(fx.mixer->stats().underruns, 0u);
+    NSLog(@"gain spans: max |mixer - model| = %.3g (linear), %.3g (eased)", worstLinear, worstEased);
 }
 
 - (void)testCrossfadeIsConstantPowerAndSampleAccurate {
@@ -317,14 +424,14 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
     // Gain change and a tail trim: same media mapping, same source.
     Clip *clip = fx.sequence().findClip(id);
     clip->audio.gainDb = -3;
-    XCTAssertTrue(clip->setTimelineEnd(CMTimeMake(120, 30)));
+    XCTAssertTrue(clip->setTimelineEnd(CMTimeMake(120, 30)) == RetimeResult::Ok);
     fx.plan(kCMTimeZero, CMTimeMake(5, 1));
     XCTAssertEqual(fx.mixer->stats().sourcesCreated, 1u);
     // Split into two pieces: still continuous media on the same track.
     Clip right = *clip;
     right.id = fx.project.ids.make<ClipId>();
-    XCTAssertTrue(clip->setTimelineEnd(CMTimeMake(60, 30)));
-    XCTAssertTrue(right.setTimelineStartKeepingEnd(CMTimeMake(60, 30)));
+    XCTAssertTrue(clip->setTimelineEnd(CMTimeMake(60, 30)) == RetimeResult::Ok);
+    XCTAssertTrue(right.setTimelineStartKeepingEnd(CMTimeMake(60, 30)) == RetimeResult::Ok);
     fx.sequence().audioTracks[0].clips.push_back(right);
     fx.plan(kCMTimeZero, CMTimeMake(5, 1));
     XCTAssertEqual(fx.mixer->stats().sourcesCreated, 1u);
@@ -592,7 +699,7 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
     const AssetId left = fx.addTone("tone://left", sineSignal(300, 0.4));
     const AssetId right = fx.addTone("tone://right", sineSignal(500, 0.4));
     Clip &p = fx.addClip(fx.a1, left, kCMTimeZero, CMTimeMake(30, 30), kCMTimeZero);
-    p.audio.fadeInDuration = CMTimeMake(5, 30);
+    fx.addFade(p, ClipEdge::Head, CMTimeMake(5, 30));
     const ClipId pid = p.id;
     const ClipId qid = fx.addClip(fx.a1, right, CMTimeMake(30, 30), CMTimeMake(60, 30), CMTimeMake(1, 1)).id;
     fx.addTransition(fx.a1, pid, qid, 10);

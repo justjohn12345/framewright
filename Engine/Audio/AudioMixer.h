@@ -24,13 +24,16 @@
 //   Segment edges are rounded to the nearest sample (exact for 23.976/24/25/29.97/30/50/60 fps
 //   grids at 48 kHz except 29.97's fractional 1601.6-sample frames, rounded).
 //
-// Envelopes (sample-accurate): sample gain = clipGain * fade(t) * crossfadeShape(c(t)), where
-// fade and c are the linear ramps of AudioSegment and crossfadeShape(c) = sin(c * pi / 2): the
-// constant-power law (outgoing sin((1 - f) pi/2) = cos(f pi/2), incoming sin(f pi/2); the powers
-// sum to 1 across the transition). That is the audio half of TransitionKind::CrossDissolve,
-// the only transition kind (Transition.h, and constantPowerGain in RenderGraph.h); should the
-// model add other kinds or curves, AudioSegment has to carry the choice and PlanSegment select
-// the shape here. Ramps are evaluated per sample with vDSP_vramp / vvsinf.
+// Envelopes (sample-accurate): sample gain = decibelsToGain(level(t)) * fade(t) *
+// crossfadeShape(c(t)), where level (dB), fade and c are the linear ramps of AudioSegment and
+// crossfadeShape(c) = sin(c * pi / 2): the constant-power law (outgoing sin((1 - f) pi/2) =
+// cos(f pi/2), incoming sin(f pi/2); the powers sum to 1 across the transition). That is the audio
+// half of TransitionKind::CrossDissolve, the only transition kind (Transition.h, and
+// constantPowerGain in RenderGraph.h); a lane-0 fade in or out is the linear `fade` ramp and a Gain
+// span the `level` ramp; should the model add other kinds or curves, AudioSegment has to carry the
+// choice and PlanSegment select the shape here. A constant level is folded into the linear gain
+// ramp; a changing one is evaluated per sample (exp of the dB ramp). Ramps are evaluated per sample
+// with vDSP_vramp / vvsinf / vvexpf.
 //
 // De-clicking (config.rampSeconds, 5 ms by default)
 // - stop(): the running transport keeps rendering for one ramp with a linear fade to silence,
@@ -231,8 +234,11 @@ class AudioMixer {
     struct PlanSegment {
         int64_t start = 0; // sequence samples [start, end)
         int64_t end = 0;
-        double gainStart = 1.0; // clip gain * fade, linear over the segment
+        double gainStart = 1.0; // fade (times the level when it is constant), linear over the segment
         double gainEnd = 1.0;
+        bool levelRamp = false;  // the level changes over the segment (else folded into gainStart/End)
+        double levelStart = 0.0; // dB, linear over the segment (levelRamp only)
+        double levelEnd = 0.0;
         bool crossfade = false;
         double crossfadeStart = 1.0; // linear crossfade parameter c, shaped by sin(c pi / 2)
         double crossfadeEnd = 1.0;

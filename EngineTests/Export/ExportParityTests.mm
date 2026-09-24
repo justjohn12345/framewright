@@ -8,12 +8,17 @@
 //   edge by up to about 20 codes; over 16 pixels, about 11: the bound is 14); another frame differs
 //   far more, which shows the measure tells frames apart.
 // - Sound: the playback mixer's output (captured from a real-time NullAudioOutput) and the offline
-//   renderer's mix are compared sample by sample over a sequence with speed 3/2, a fade in, a
-//   constant-power crossfade, two tracks summed and a +12 dB clip that drives the sum into clipping.
-// - Keyframed Motion (open finding 8): a clip whose position, scale, rotation and opacity are
-//   animated (ease in and out, linear, hold) under a still whose scale is keyframed exports the
-//   pictures the program monitor shows frame by frame; the monitor's layers carry the values the
-//   keyframes give at each frame (so the comparison is over moving pictures).
+//   renderer's mix are compared sample by sample over a sequence with speed 3/2, a fade in, a 70/30
+//   constant-power crossfade (7 frames before the cut, 3 after), a fade out, two tracks summed, a
+//   Gain span ramping one clip down and a +12 dB clip that drives the sum into clipping.
+// - Effect spans on two lanes (effect lanes, open finding 8 before them): a clip whose position,
+//   scale, rotation and opacity are animated by Motion spans on two lanes and an Opacity span on a
+//   third (ease in and out, linear, hold; composed onto a static offset), under a still whose scale
+//   a Motion span steps (hold), exports the pictures the program monitor shows frame by frame; the
+//   monitor's layers carry the composed values at each frame (so the comparison is over moving
+//   pictures).
+// - Fades from and to black: a clip with a lane-0 fade at each end exports the monitor's pictures,
+//   and the pictures go from black and back to it.
 // - Variable frame rate (UX round review, test gap 1): a VFR clip through each backend exports the
 //   same source frames the monitor shows, and both are the frames containing the exact source time.
 
@@ -436,17 +441,29 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
     a2.kind = TrackKind::Audio;
     a2.name = "A2";
     h.sequence().audioTracks.push_back(a2);
-    // A1: X at speed 3/2 (4.5 s of source from 0.5 s) with a fade in, then Y from 5 s, joined by a
-    // 10-frame constant-power crossfade. A2: the movie from 1 s at +12 dB: its beep (at 2 s, so at
-    // 1 s on the timeline) and the tone on top of A1 clip.
+    // A1: X at speed 3/2 (4.5 s of source from 0.5 s) with a fade in, then Y from 5 s with a fade out,
+    // joined by a 70/30 constant-power crossfade (7 frames before the cut, 3 after). A2: the movie
+    // from 1 s at +12 dB: its beep (at 2 s, so at 1 s on the timeline) and the tone on top of the A1
+    // clips, ramped down 18 dB by a Gain span over its last two seconds (an ease in).
     const ClipId x = h.addClip(h.a1, movie, 0, 90, CMTimeMake(1, 2));
     Clip &xc = *h.sequence().findClip(x);
     xc.speed = Ratio{3, 2};
-    xc.audio.fadeInDuration = frames30(15);
+    h.addFade(x, ClipEdge::Head, 15);
     const ClipId y = h.addClip(h.a1, movie, 90, 60, CMTimeMake(5, 1));
-    h.addTransition(h.a1, x, y, 10);
+    h.addTailTransition(x, 7, 3);
+    h.addFade(y, ClipEdge::Tail, 20);
     const ClipId loud = h.addClip(a2.id, movie, 0, 120, CMTimeMake(1, 1));
     h.sequence().findClip(loud)->audio.gainDb = 12.0;
+    SpanTracks duck;
+    Keyframe level;
+    level.time = kCMTimeZero;
+    level.value = 0;
+    level.interpolation = KeyframeInterpolation::EaseIn;
+    Keyframe ducked;
+    ducked.time = CMTimeMake(2, 1);
+    ducked.value = -18;
+    duck.gain = {level, ducked};
+    h.addSpan(loud, SpanKind::Gain, 1, CMTimeMake(3, 1), CMTimeMake(5, 1), duck);
     XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
     h.load();
 
@@ -493,6 +510,20 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
           count, from, worst, worstAt, clipped);
     XCTAssertLessThan(worst, 1e-5, @"the export's mix differs from playback at sample %lld", worstAt);
     XCTAssertGreaterThan(clipped, 100, @"the +12 dB beep drove the sum into clipping");
+    // The fade out ends in silence: over Y's last 10 ms (only Y plays then) the level is below 1/25
+    // of what it is before the fade.
+    auto peak = [&](int64_t first, int64_t last) {
+        double p = 0;
+        for (int64_t i = first; i < last; ++i) {
+            p = std::max(p, double(std::fabs(mixed[size_t(i * 2)])));
+        }
+        return p;
+    };
+    const double before = peak(4 * 48000 - 9600, 4 * 48000 + 16000); // Y at full level, [3.8, 4.33) s
+    const double end = peak(5 * 48000 - 480, 5 * 48000);
+    NSLog(@"PARITY audio: Y peaks at %.4f before its fade out, %.5f in its last 10 ms", before, end);
+    XCTAssertGreaterThan(before, 0.05);
+    XCTAssertLessThan(end, before / 25);
 }
 
 - (void)testAnAnimatedClipExportsTheMonitorsPictures {
@@ -514,24 +545,38 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
         k.interpolation = interpolation;
         return k;
     };
-    // V1: the movie from 1 s for 40 frames, a Ken Burns-like push in with a turn and a fade.
+    // V1: the movie from 1 s for 40 frames, offset right by a static 30 points. Lane 1: a Ken
+    // Burns-like push in over the whole clip (source [30, 70) frames) with a turn from its frame 10.
+    // Lane 2: a Motion span over source [45, 60) that grows it a further 20% (scale multiplies) and
+    // turns it 10 degrees more (rotation adds). Lane 3: an Opacity span over source [30, 60) holding
+    // full opacity, then fading to 0.6.
     const ClipId clip = h.addClip(h.v1, movie, 0, 40, CMTimeMake(1, 1));
-    VideoParams &motion = h.sequence().findClip(clip)->video;
-    motion.keyframes.scale = {key(frames30(30), 1, KeyframeInterpolation::EaseInOut), key(frames30(69), 2.2, KeyframeInterpolation::Linear)};
-    motion.keyframes.x = {key(frames30(30), 0, KeyframeInterpolation::EaseInOut), key(frames30(69), -150, KeyframeInterpolation::Linear)};
-    motion.keyframes.y = {key(frames30(30), 0, KeyframeInterpolation::Linear), key(frames30(69), 60, KeyframeInterpolation::Linear)};
-    motion.keyframes.rotation = {key(frames30(40), 0, KeyframeInterpolation::Linear), key(frames30(60), 25, KeyframeInterpolation::Linear)};
-    motion.keyframes.opacity = {key(frames30(30), 1, KeyframeInterpolation::Hold), key(frames30(50), 0.6, KeyframeInterpolation::Linear)};
-    // V2: the half-transparent still over it, growing in steps (hold).
+    h.sequence().findClip(clip)->video.x = 30;
+    SpanTracks push;
+    push.scale = {key(frames30(0), 1, KeyframeInterpolation::EaseInOut), key(frames30(39), 2.2, KeyframeInterpolation::Linear)};
+    push.x = {key(frames30(0), 0, KeyframeInterpolation::EaseInOut), key(frames30(39), -150, KeyframeInterpolation::Linear)};
+    push.y = {key(frames30(0), 0, KeyframeInterpolation::Linear), key(frames30(39), 60, KeyframeInterpolation::Linear)};
+    push.rotation = {key(frames30(10), 0, KeyframeInterpolation::Linear), key(frames30(30), 25, KeyframeInterpolation::Linear)};
+    h.addSpan(clip, SpanKind::Motion, 1, frames30(30), frames30(70), push);
+    SpanTracks grow;
+    grow.scale = {key(frames30(0), 1, KeyframeInterpolation::Linear), key(frames30(15), 1.2, KeyframeInterpolation::Linear)};
+    grow.rotation = {key(frames30(0), 0, KeyframeInterpolation::Linear), key(frames30(15), 10, KeyframeInterpolation::Linear)};
+    const SpanId growId = h.addSpan(clip, SpanKind::Motion, 2, frames30(45), frames30(60), grow);
+    SpanTracks fade;
+    fade.opacity = {key(frames30(0), 1, KeyframeInterpolation::Hold), key(frames30(20), 0.6, KeyframeInterpolation::Linear)};
+    h.addSpan(clip, SpanKind::Opacity, 3, frames30(30), frames30(60), fade);
+    // V2: the half-transparent still over it, growing in steps (hold) by a Motion span over the
+    // still's first 30 frames (a still's span times are its own timeline offsets).
     const ClipId overlay = h.addClip(h.v2, still, 5, 30, kCMTimeZero);
     Clip &overlayClip = *h.sequence().findClip(overlay);
     overlayClip.isStill = true;
     overlayClip.video.x = 150;
-    overlayClip.video.keyframes.scale = {key(frames30(0), 0.2, KeyframeInterpolation::Hold), key(frames30(10), 0.35, KeyframeInterpolation::Hold),
-                                         key(frames30(20), 0.5, KeyframeInterpolation::Linear)};
+    SpanTracks steps;
+    steps.scale = {key(frames30(0), 0.2, KeyframeInterpolation::Hold), key(frames30(10), 0.35, KeyframeInterpolation::Hold),
+                   key(frames30(20), 0.5, KeyframeInterpolation::Linear)};
+    h.addSpan(overlay, SpanKind::Motion, 1, kCMTimeZero, frames30(30), steps);
     XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
     h.load();
-
     ex::ExportRequest request;
     request.project = std::make_shared<const Project>(h.project);
     request.sequenceId = h.sequenceId;
@@ -575,8 +620,8 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
         const PlaybackHarness::Sample sample = h.presentExact();
         XCTAssertEqual(sample.presented.frameIndex, f);
         const render::PreviewFrame &frame = h.frame();
-        // The monitor's layers show the Motion the keyframes give this frame (found by clip, not by
-        // position in the graph).
+        // The monitor's layers show the Motion the spans compose for this frame (found by clip, not
+        // by position in the graph).
         const VideoParams expected = motionValuesAt(animated, frames30(f));
         std::optional<std::size_t> v1Layer;
         std::optional<std::size_t> v2Layer;
@@ -594,6 +639,26 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
         XCTAssertEqualWithAccuracy(shown.y, expected.y, 1e-12, @"frame %lld", f);
         XCTAssertEqualWithAccuracy(shown.rotationDegrees, expected.rotationDegrees, 1e-12, @"frame %lld", f);
         XCTAssertEqualWithAccuracy(frame.graph.layers[*v1Layer].opacity, expected.opacity, 1e-12, @"frame %lld", f);
+        // Composition, checked against the lanes one at a time: without the lane-2 span the scale
+        // is lane 1's alone and the rotation 10 degrees times its progress less.
+        const auto at = spanEvaluationTime(animated, frames30(f));
+        XCTAssertTrue(at.has_value());
+        if (at) {
+            const VideoParams withoutGrow = composeMotion(animated, *at, growId);
+            const EffectSpan &growSpan = *animated.findSpan(growId);
+            const bool growing = spanActiveAt(animated, growSpan, *at);
+            XCTAssertEqual(growing, f >= 15 && f < 30, @"frame %lld", f);
+            const double factor = growing ? spanValueAt(growSpan, SpanParameter::Scale, *at) : 1.0;
+            const double turn = growing ? spanValueAt(growSpan, SpanParameter::Rotation, *at) : 0.0;
+            XCTAssertEqualWithAccuracy(shown.scale, withoutGrow.scale * factor, 1e-12, @"frame %lld", f);
+            XCTAssertEqualWithAccuracy(shown.rotationDegrees, withoutGrow.rotationDegrees + turn, 1e-12, @"frame %lld", f);
+            if (growing) {
+                // Frame f shows source frame 30 + f, lane 2's frame f - 15 of its 15.
+                XCTAssertEqualWithAccuracy(factor, 1.0 + 0.2 * double(f - 15) / 15.0, 1e-12, @"frame %lld", f);
+            }
+            XCTAssertEqualWithAccuracy(shown.x, withoutGrow.x, 1e-12, @"frame %lld: lane 2 moves nothing", f);
+            XCTAssertGreaterThanOrEqual(shown.x, -120.0 - 1e-9, @"frame %lld: the static offset still applies", f);
+        }
         // The V2 still's scale holds each keyframe's value until the next (clip-relative times: the
         // still starts at frame 5), then grows linearly after the last hold.
         XCTAssertEqual(v2Layer.has_value(), f >= 5 && f < 35, @"frame %lld", f);
@@ -622,16 +687,16 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
         };
         const std::vector<double> monitor = render(frame.graph);
         // The same frame with V1's animation taken away (its static values; V2 as it is): what the
-        // picture would be without the keyframes, from the same decoded pictures.
+        // picture would be without the spans, from the same decoded pictures.
         auto unanimated = frame.graph;
-        unanimated.layers[*v1Layer].transform = animated.video.staticValues();
+        unanimated.layers[*v1Layer].transform = animated.video;
         unanimated.layers[*v1Layer].opacity = animated.video.opacity;
         const double animationEffect = compare(render(unanimated), monitor).maxBlock;
         if (f == 0) {
-            // The first keyframes are the identity at full opacity: the control, nothing to see.
+            // The spans start at the identity at full opacity: the control, nothing to see.
             XCTAssertLessThan(animationEffect, 1.0, @"frame 0 shows the unanimated picture");
         } else if (expected.scale >= 1.2) {
-            XCTAssertGreaterThan(animationEffect, 40.0, @"frame %lld: the keyframes move the picture visibly", f);
+            XCTAssertGreaterThan(animationEffect, 40.0, @"frame %lld: the spans move the picture visibly", f);
             ++movingFramesChecked;
         }
         XCTAssertTrue(decoder->decoder->seek(frames30(f)).ok());
@@ -647,7 +712,130 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
         XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
         XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
     }
-    XCTAssertGreaterThanOrEqual(movingFramesChecked, 5, @"the comparison covered frames the keyframes move");
+    XCTAssertGreaterThanOrEqual(movingFramesChecked, 5, @"the comparison covered frames the spans move");
+}
+
+- (void)testFadesFromAndToBlackExportTheMonitorsPictures {
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    h.sequence().width = 640;
+    h.sequence().height = 360;
+    const AssetId movie = h.importAsset("h264_1080p30.mp4");
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    // V1: the movie from 1 s for 30 frames, fading in from black over its first 10 frames and out to
+    // black over its last 10.
+    const ClipId clip = h.addClip(h.v1, movie, 0, 30, CMTimeMake(1, 1));
+    const SpanId in = h.addFade(clip, ClipEdge::Head, 10);
+    const SpanId out = h.addFade(clip, ClipEdge::Tail, 10);
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+
+    ex::ExportRequest request;
+    request.project = std::make_shared<const Project>(h.project);
+    request.sequenceId = h.sequenceId;
+    request.encode.container = media::ContainerFormat::MOV;
+    media::VideoEncodeSettings v;
+    v.codec = media::VideoCodec::ProRes422;
+    v.width = 640;
+    v.height = 360;
+    request.encode.video = v;
+    request.outputPath = _dir + "/fades-parity.mov";
+    ex::ExportServices services;
+    services.router = h.router;
+    services.cache = std::make_shared<media::FrameCache>();
+    services.routing = routingOf(h.project, *h.router);
+    std::string error;
+    auto result = runExport(request, services, error);
+    XCTAssertTrue(result.has_value(), @"%s", error.c_str());
+    if (!result || !result->ok()) {
+        XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
+        return;
+    }
+    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
+    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, 640, 360);
+    auto routed = h.router->probe(request.outputPath);
+    XCTAssertTrue(created.ok() && pool.ok() && routed.ok());
+    if (!created.ok() || !pool.ok() || !routed.ok()) {
+        return;
+    }
+    media::DecodeOptions bgra;
+    bgra.pixelFormat = kCVPixelFormatType_32BGRA;
+    auto decoder = h.router->makeVideoDecoder(*routed, -1, bgra);
+    XCTAssertTrue(decoder.ok());
+    if (!decoder.ok()) {
+        return;
+    }
+    auto meanOf = [](const std::vector<double> &blocks) {
+        double sum = 0;
+        for (const double b : blocks) {
+            sum += b;
+        }
+        return blocks.empty() ? 0.0 : sum / double(blocks.size());
+    };
+    std::map<int64_t, double> brightness;
+    for (int64_t f : {0, 4, 9, 10, 15, 19, 20, 25, 29}) {
+        h.controller->seek(frames30(f));
+        const PlaybackHarness::Sample sample = h.presentExact();
+        XCTAssertEqual(sample.presented.frameIndex, f);
+        const render::PreviewFrame &frame = h.frame();
+        XCTAssertEqual(frame.graph.layers.size(), 1u, @"frame %lld", f);
+        if (frame.graph.layers.size() != 1) {
+            continue;
+        }
+        // The layer carries the fade the frame is in, with the linear progress at the frame's centre
+        // (frame k of a 10-frame fade: (k + 0.5) / 10).
+        const std::optional<LayerTransition> &fade = frame.graph.layers[0].transition;
+        if (f < 10) {
+            XCTAssertTrue(fade && fade->role == TransitionRole::FadeIn && fade->transitionId == in && fade->isIncoming,
+                          @"frame %lld", f);
+            XCTAssertEqualWithAccuracy(fade ? fade->weight() : -1, (double(f) + 0.5) / 10.0, 1e-12, @"frame %lld", f);
+        } else if (f >= 20) {
+            XCTAssertTrue(fade && fade->role == TransitionRole::FadeOut && fade->transitionId == out && !fade->isIncoming,
+                          @"frame %lld", f);
+            XCTAssertEqualWithAccuracy(fade ? fade->weight() : -1, 1.0 - (double(f - 20) + 0.5) / 10.0, 1e-12,
+                                       @"frame %lld", f);
+        } else {
+            XCTAssertFalse(fade.has_value(), @"frame %lld is between the fades", f);
+        }
+        auto buffer = pool->makeBuffer();
+        XCTAssertTrue(buffer.ok());
+        if (!buffer.ok()) {
+            continue;
+        }
+        auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &texture) {
+            if (index >= frame.textures.size() || !frame.textures[index]) {
+                return false;
+            }
+            texture = frame.textures[index];
+            return true;
+        };
+        auto rendered = created.value()->renderAndWait(frame.graph, lookup, render::PixelBufferTarget{buffer.value()});
+        XCTAssertTrue(rendered.ok() && rendered->status.ok() && rendered->skippedLayers.empty(), @"frame %lld", f);
+        const std::vector<double> monitor = blockMeans(buffer.value().get());
+        brightness[f] = meanOf(monitor);
+
+        XCTAssertTrue(decoder->decoder->seek(frames30(f)).ok());
+        auto decoded = decoder->decoder->next();
+        XCTAssertTrue(decoded.ok() && decoded.value(), @"exported frame %lld", f);
+        if (!decoded.ok() || !decoded.value()) {
+            continue;
+        }
+        const Difference d = compare(monitor, blockMeans(decoded.value()->image.get()));
+        NSLog(@"PARITY fade frame %lld: mean level %.2f; blocks differ by at most %.2f, on average %.3f", f,
+              brightness[f], d.maxBlock, d.meanBlock);
+        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
+        XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
+    }
+    // From black and back to it: the picture brightens through the fade in and darkens through the
+    // fade out, starting and ending far darker than between the fades.
+    XCTAssertLessThan(brightness[0], brightness[4]);
+    XCTAssertLessThan(brightness[4], brightness[9]);
+    XCTAssertGreaterThan(brightness[20], brightness[25]);
+    XCTAssertGreaterThan(brightness[25], brightness[29]);
+    XCTAssertLessThan(brightness[0], brightness[15] / 2);
+    XCTAssertLessThan(brightness[29], brightness[15] / 2);
 }
 
 @end

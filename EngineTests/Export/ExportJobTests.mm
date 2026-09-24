@@ -46,6 +46,7 @@
 #include <mutex>
 #include <optional>
 #include <chrono>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -168,14 +169,35 @@ class ExportRig {
         clip(a).linkedClipId = b;
         clip(b).linkedClipId = a;
     }
+    // A cross dissolve of `frames` centred on the cut between `from` and `to`: a lane-0 tail span
+    // of `from`.
     void addTransition(TrackId track, ClipId from, ClipId to, int64_t frames) {
-        Transition t;
-        t.id = project.ids.make<TransitionId>();
-        t.trackId = track;
-        t.fromClipId = from;
-        t.toClipId = to;
-        t.duration = CMTimeMake(frames, 30);
-        sequence().transitions.push_back(t);
+        const Track &t = *sequence().findTrack(track);
+        if (t.find(from) == nullptr || t.find(to) == nullptr ||
+            !(clip(from).timelineEnd() == clip(to).timelineStart)) {
+            throw std::logic_error("addTransition: the clips do not meet at a cut on the track");
+        }
+        EffectSpan span;
+        span.id = project.ids.make<SpanId>();
+        span.lane = kTransitionLane;
+        span.kind = SpanKind::Transition;
+        span.edge = ClipEdge::Tail;
+        span.start = CMTimeMake(-(frames / 2), 30);
+        span.end = CMTimeMake(frames - frames / 2, 30);
+        clip(from).spans.push_back(span);
+        clip(from).sortSpans();
+    }
+    // A lane-0 fade of `frames` at `edge` of `id` (head: from silence or black; tail: to it).
+    void addFade(ClipId id, ClipEdge edge, int64_t frames) {
+        EffectSpan span;
+        span.id = project.ids.make<SpanId>();
+        span.lane = kTransitionLane;
+        span.kind = SpanKind::Transition;
+        span.edge = edge;
+        span.start = edge == ClipEdge::Head ? kCMTimeZero : CMTimeMake(-frames, 30);
+        span.end = edge == ClipEdge::Head ? CMTimeMake(frames, 30) : kCMTimeZero;
+        clip(id).spans.push_back(span);
+        clip(id).sortSpans();
     }
 
     ex::ExportRequest request(media::VideoCodec codec, media::ContainerFormat container,
@@ -470,9 +492,9 @@ double rms(const std::vector<float> &interleaved, int64_t from, int64_t count) {
     rig.clip(pip).video.y = 300;
     const ClipId aa = rig.addClip(rig.a1, movie, 0, 60, CMTimeMake(1, 2));
     const ClipId ba = rig.addClip(rig.a1, movie, 60, 90, CMTimeMake(5, 1));
-    rig.clip(aa).audio.fadeInDuration = CMTimeMake(15, 30);
+    rig.addFade(aa, ClipEdge::Head, 15);
     rig.clip(ba).audio.gainDb = -6.0;
-    rig.clip(ba).audio.fadeOutDuration = CMTimeMake(30, 30);
+    rig.addFade(ba, ClipEdge::Tail, 30);
     rig.link(a, aa);
     rig.link(b, ba);
     const auto problem = validateProject(rig.project);

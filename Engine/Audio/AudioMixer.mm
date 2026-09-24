@@ -14,6 +14,8 @@ namespace ve::audio {
 namespace {
 
 constexpr float kHalfPi = static_cast<float>(M_PI / 2.0);
+/// ln(10) / 20: decibels to the natural log of the linear gain.
+constexpr double kDecibelsToNaturalLog = 0.11512925464970228420;
 constexpr int kDecimatorTaps = 63;
 
 /// Half-band low-pass (cutoff at a quarter of the input rate) for 2:1 decimation: a
@@ -205,8 +207,17 @@ void AudioMixer::setGraph(const AudioGraph &graph, CMTime sequenceTime) {
         PlanSegment ps;
         ps.start = start;
         ps.end = end;
-        ps.gainStart = segment.gain * segment.fade.start;
-        ps.gainEnd = segment.gain * segment.fade.end;
+        if (segment.level.isConstant()) {
+            const double gain = decibelsToGain(segment.level.start);
+            ps.gainStart = gain * segment.fade.start;
+            ps.gainEnd = gain * segment.fade.end;
+        } else {
+            ps.gainStart = segment.fade.start;
+            ps.gainEnd = segment.fade.end;
+            ps.levelRamp = true;
+            ps.levelStart = segment.level.start;
+            ps.levelEnd = segment.level.end;
+        }
         if (segment.transitionId) {
             ps.crossfade = true;
             ps.crossfadeStart = segment.crossfade.start;
@@ -593,6 +604,16 @@ void AudioMixer::envelope(const Plan &plan, const PlanSource &ps, int64_t a, int
         const float g0 = static_cast<float>(seg.gainStart + (seg.gainEnd - seg.gainStart) * into / length);
         const float gStep = static_cast<float>((seg.gainEnd - seg.gainStart) / length);
         vDSP_vramp(&g0, &gStep, ramp, 1, k);
+        if (seg.levelRamp) {
+            // gain = 10^(dB / 20) = exp(dB * ln(10) / 20), per sample along the dB ramp.
+            const float l0 = static_cast<float>((seg.levelStart + (seg.levelEnd - seg.levelStart) * into / length) *
+                                                kDecibelsToNaturalLog);
+            const float lStep = static_cast<float>((seg.levelEnd - seg.levelStart) / length * kDecibelsToNaturalLog);
+            vDSP_vramp(&l0, &lStep, shape, 1, k);
+            const int count = static_cast<int>(k);
+            vvexpf(shape, shape, &count);
+            vDSP_vmul(ramp, 1, shape, 1, ramp, 1, k);
+        }
         if (seg.crossfade) {
             const float c0 =
                 static_cast<float>(seg.crossfadeStart + (seg.crossfadeEnd - seg.crossfadeStart) * into / length);

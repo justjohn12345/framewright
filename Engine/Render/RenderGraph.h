@@ -17,23 +17,29 @@
 
 namespace ve {
 
-// Transition state of a layer. The two clips of a transition are emitted as consecutive layers
-// (outgoing first); `partnerLayerIndex` points at the other one.
+// Transition state of a layer (a lane-0 span acting on this frame, Transition.h). The two clips
+// of a cross dissolve are emitted as consecutive layers (outgoing first) and point at each other
+// through `partnerLayerIndex`; a fade to or from black is a single layer whose `partnerLayerIndex`
+// is its own index (no partner), faded by weight() over the black (or the tracks below).
 struct LayerTransition {
-    TransitionId transitionId;
+    SpanId transitionId;
     TransitionKind kind = TransitionKind::CrossDissolve;
-    // Linear progress through the transition sampled at the centre of this output frame: frame
-    // k of an n-frame transition has mix (k + 0.5) / n, so the first frame already shows some of
-    // the incoming clip and the last some of the outgoing one, and a 1-frame dissolve is an even
-    // mix. This equals the audio crossfade's linear progress (AudioSegment::crossfade) at the
-    // frame's midpoint, so picture and sound cross over together.
+    TransitionRole role = TransitionRole::CrossDissolve;
+    // Linear progress through the transition's range sampled at the centre of this output frame:
+    // frame k of an n-frame range has mix (k + 0.5) / n (in general the fraction of the range at the
+    // frame's centre), so the first frame already shows some of the incoming picture and the last
+    // some of the outgoing one, and a 1-frame dissolve is an even mix. This equals the audio
+    // crossfade's (or fade's) linear progress at the frame's midpoint, so picture and sound cross
+    // over together.
     double mix = 0.0;
-    bool isIncoming = false; // false: the outgoing clip (before the cut)
-    ClipId partnerClipId;
+    // Cross dissolve: whether this layer is the incoming clip. Fades: true for a fade in (the
+    // picture appears as mix grows), false for a fade out.
+    bool isIncoming = false;
+    ClipId partnerClipId; // invalid for a fade
     std::size_t partnerLayerIndex = 0;
 
-    // Contribution of this layer in a cross dissolve: 1 - mix for the outgoing clip, mix for
-    // the incoming clip.
+    // Contribution of this layer: 1 - mix for the outgoing clip or a fade out, mix for the
+    // incoming clip or a fade in.
     double weight() const {
         return isIncoming ? mix : 1.0 - mix;
     }
@@ -51,7 +57,8 @@ struct VideoLayer {
     // The asset's container rotation (MediaAsset::rotationDegrees): degrees clockwise to rotate
     // the decoded storage-orientation frame before the clip transform is applied.
     std::int32_t sourceRotationDegrees = 0;
-    // The clip's Motion at this frame (keyframes evaluated by Scheduler::motionAt; no keyframes).
+    // The clip's Motion at this frame: its static values with its Motion and Opacity spans applied
+    // (Scheduler::motionAt).
     VideoParams transform;
     double opacity = 1.0; // the clip's opacity at this frame (transition weight is separate)
     std::optional<LayerTransition> transition;
@@ -86,16 +93,32 @@ struct GainRamp {
     }
 };
 
+// The clip's level in decibels across a segment: linear in dB from `start` to `end` (constant when
+// they are equal).
+struct DecibelRamp {
+    double start = 0.0;
+    double end = 0.0;
+
+    bool isConstant() const {
+        return start == end;
+    }
+};
+
+// `db` decibels as a linear gain.
+inline double decibelsToGain(double db) {
+    return std::pow(10.0, db / 20.0);
+}
+
 // One clip's contribution over a sub-span of the requested range. Segments are split wherever
-// an envelope has a corner (fade or transition boundaries). A clip's fades never overlap
-// (validateSequence requires fadeIn + fadeOut <= duration), so within a segment the fade is one
-// linear ramp and `fade` is exact at every sample; the crossfade progress is linear too.
-// The sample gain at time t is
-//   gain * fade(t)                                  outside transitions (transitionId empty)
-//   gain * fade(t) * constantPowerGain(crossfade(t)) inside a transition
-// where fade(t) and crossfade(t) interpolate their ramps linearly. `crossfade` is therefore the
-// linear progress of the transition for this clip (outgoing 1 -> 0, incoming 0 -> 1), not a
-// gain; this is what AudioMixer implements.
+// an envelope has a corner: the clip's edges, its fades and transitions, and the edges and
+// keyframes of its Gain spans. The sample gain at time t is
+//   decibelsToGain(level(t)) * fade(t)                                  outside cross dissolves
+//   decibelsToGain(level(t)) * fade(t) * constantPowerGain(crossfade(t)) inside one
+// where level, fade and crossfade interpolate their ramps linearly across the segment. `level` is
+// the clip's gain plus its Gain spans in dB (a Linear gain ramp is linear in dB; an eased one is
+// followed in steps of at most Scheduler::kEasedGainStep). `fade` is the clip's lane-0 fade in / fade
+// out (linear, a gain). `crossfade` is the linear progress of a cross dissolve for this clip
+// (outgoing 1 -> 0, incoming 0 -> 1), not a gain; this is what AudioMixer implements.
 struct AudioSegment {
     ClipId clipId;
     AssetId assetId;
@@ -106,10 +129,10 @@ struct AudioSegment {
     TimeRange sourceRange;
     double speed = 1.0;     // speedRatio as a double
     Ratio speedRatio{1, 1}; // the clip's exact speed
-    double gain = 1.0;      // linear, from the clip's gainDb
+    DecibelRamp level;      // the clip's gain plus its Gain spans, in dB
     GainRamp fade;          // the clip's own fade in / fade out (a gain)
-    GainRamp crossfade;     // transition progress (see above); unity outside transitions
-    std::optional<TransitionId> transitionId;
+    GainRamp crossfade;     // cross dissolve progress (see above); unity outside one
+    std::optional<SpanId> transitionId; // the cross dissolve's span
     std::optional<ClipId> crossfadePartner;
 };
 
