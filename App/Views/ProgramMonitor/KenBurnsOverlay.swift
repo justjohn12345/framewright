@@ -5,8 +5,8 @@ import FramewrightEngine
 /// The Ken Burns helper over the program monitor (see `KenBurnsModel`): the whole picture of the
 /// clip, unanimated, with the start rectangle (green) and the end rectangle (red), an arrow showing
 /// the direction of travel (as in FCP), and a bar with the move's range (Whole clip, From playhead,
-/// From clip start, Existing move when the clip has one, a Duration field and the range as
-/// timecodes), the smoothing, Swap, Cancel and Apply. Drag a rectangle to pan, drag a corner to
+/// From clip start, Existing move when the clip has one, Custom; Start, End and Duration fields),
+/// the smoothing, Swap, Cancel and Apply. Drag a rectangle to pan, drag a corner to
 /// zoom (the aspect ratio stays the frame's). The picture is the clip's unanimated frame at the
 /// playhead (its first or last frame while the playhead is outside it) and follows every playhead
 /// change, loaded through the thumbnail cache by `KenBurnsPictureLoader` (one fetch at a time, the
@@ -22,7 +22,12 @@ struct KenBurnsOverlay: View {
     let thumbnails: ThumbnailCache
     /// The rectangle as it was when the current drag started.
     @State private var dragOrigin: CGRect?
-    @FocusState private var durationFocused: Bool
+    @FocusState private var focusedField: RangeField?
+
+    /// The bar's text fields.
+    enum RangeField: Hashable {
+        case start, end, duration
+    }
 
     static let handleSize: CGFloat = 9
 
@@ -179,11 +184,14 @@ struct KenBurnsOverlay: View {
         }
     }
 
-    /// The move's range (which part of the clip, its duration and where it starts and ends) and,
-    /// next to touching clips, whether the rectangles follow them.
+    /// The move's range (which part of the clip, where it starts and ends, its duration), what it
+    /// means (or why it was limited) and, next to touching clips, whether the rectangles follow them.
     private var rangeControls: some View {
         VStack(alignment: .leading, spacing: 4) {
             rangeRow
+            if model.rangeNote != nil || model.rangeCaption != nil {
+                captionRow
+            }
             if model.previous != nil || model.next != nil {
                 neighbourRow
             }
@@ -230,28 +238,57 @@ struct KenBurnsOverlay: View {
             .fixedSize()
             .help("The part of the clip the move covers; before and after it the framing holds")
             .accessibilityIdentifier("KenBurnsRange")
-            Text("Duration")
-                .foregroundStyle(model.isDurationEditable ? .primary : .secondary)
-            TextField("Duration", text: $model.durationText)
+            field("Start", text: $model.startText, field: .start, enabled: true,
+                  help: "The move's first frame, as a timeline time (the ruler's); typing one makes the range Custom")
+            field("End", text: $model.endText, field: .end, enabled: true,
+                  help: "The move's last frame, where the end keyframes go, as a timeline time; typing one makes "
+                      + "the range Custom")
+            field("Duration", text: $model.durationText, field: .duration, enabled: model.isDurationEditable,
+                  help: "How long the move lasts: frames (45f), seconds (2.5s) or timecode")
+            Spacer(minLength: 0)
+        }
+        .help(model.rangeTimecodes)
+    }
+
+    /// A labelled field of the bar: Return and leaving the field commit it (see `commit(_:)`).
+    private func field(_ title: String, text: Binding<String>, field: RangeField, enabled: Bool,
+                       help: String) -> some View {
+        HStack(spacing: 4) {
+            Text(title)
+                .foregroundStyle(enabled ? .primary : .secondary)
+            TextField(title, text: text)
                 .labelsHidden()
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 92)
-                .disabled(!model.isDurationEditable)
-                .focused($durationFocused)
-                .onSubmit { model.commitDuration() }
-                .onChange(of: durationFocused) { _, focused in
-                    if !focused { model.commitDuration() }
-                }
-                .help("How long the move lasts: frames (45f), seconds (2.5s) or timecode")
-                .accessibilityIdentifier("KenBurnsDuration")
-            Text(model.rangeTimecodes)
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .help("The frames of the start and end keyframes")
-                .accessibilityIdentifier("KenBurnsRangeTimecodes")
-            if let note = model.durationNote ?? model.rangeCaption {
+                .frame(width: 92)
+                .disabled(!enabled)
+                .focused($focusedField, equals: field)
+                .onSubmit { commit(field) }
+        }
+        .help(help)
+        .accessibilityIdentifier("KenBurns\(title)")
+        .onChange(of: focusedField) { old, new in
+            if old == field, new != field { commit(field) }
+        }
+    }
+
+    /// Commits a field's text. Return does this without pressing Apply while the text differs from
+    /// the committed value (Apply's default-button shortcut is off then: `hasUncommittedText`);
+    /// once committed, Return presses Apply.
+    private func commit(_ field: RangeField) {
+        switch field {
+        case .start: model.commitStart()
+        case .end: model.commitEnd()
+        case .duration: model.commitDuration()
+        }
+    }
+
+    /// Why a typed value was refused or limited (orange), else what the range means.
+    private var captionRow: some View {
+        HStack(spacing: 8) {
+            if let note = model.rangeNote ?? model.rangeCaption {
                 Text(note)
-                    .foregroundStyle(model.rangeProblem != nil || model.durationNote != nil ? .orange : .secondary)
+                    .foregroundStyle(model.rangeProblem != nil || model.rangeNote != nil ? .orange : .secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .help(note)
@@ -284,7 +321,8 @@ struct KenBurnsOverlay: View {
             Button("Cancel") { store.cancelKenBurns() }
                 .keyboardShortcut(.cancelAction)
             Button("Apply") { store.applyKenBurns() }
-                .keyboardShortcut(.defaultAction)
+                // Return in a field with text still being typed commits the field only.
+                .keyboardShortcut(model.hasUncommittedText ? nil : .defaultAction)
                 .disabled(model.rangeProblem != nil)
                 .accessibilityIdentifier("KenBurnsApply")
         }

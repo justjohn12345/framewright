@@ -452,21 +452,21 @@ final class KeyframedMotionTests: XCTestCase {
             model.durationText = typed
             XCTAssertTrue(model.commitDuration(), typed)
             XCTAssertEqual(model.durationFrames, expected, typed)
-            XCTAssertNil(model.durationNote, typed)
+            XCTAssertNil(model.rangeNote, typed)
             XCTAssertEqual(model.durationText, store.durationString(frames: expected), "shown in the project's format")
         }
         model.durationText = "soon"
         XCTAssertFalse(model.commitDuration())
-        XCTAssertEqual(model.durationNote?.contains("not a duration"), true)
+        XCTAssertEqual(model.rangeNote?.contains("not a duration"), true)
         XCTAssertEqual(model.durationFrames, 75, "unchanged")
         model.durationText = "1f"
         XCTAssertTrue(model.commitDuration())
         XCTAssertEqual(model.durationFrames, 2)
-        XCTAssertEqual(model.durationNote, "A move is at least two frames long.")
+        XCTAssertEqual(model.rangeNote, "A move is at least two frames long.")
         model.durationText = "20s"
         XCTAssertTrue(model.commitDuration())
         XCTAssertEqual(model.durationFrames, 300)
-        XCTAssertEqual(model.durationNote, "Limited to the 00:00:10:00 left in the clip.")
+        XCTAssertEqual(model.rangeNote, "Limited to the 00:00:10:00 left in the clip.")
         // Apply takes a duration still being typed (Return also presses Apply).
         model.durationText = "3s"
         XCTAssertTrue(store.applyKenBurns())
@@ -574,13 +574,13 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(model.detection, .move(KenBurnsModel.ExistingMove(first: 60, last: 209, hasKeyframesBetween: false,
                                                                          interpolation: .easeIn)))
         XCTAssertEqual(model.range, .existingMove)
-        XCTAssertEqual(model.rangeChoices, [.wholeClip, .fromPlayhead, .fromClipStart, .existingMove])
+        XCTAssertEqual(model.rangeChoices, [.wholeClip, .fromPlayhead, .fromClipStart, .existingMove, .custom])
         XCTAssertEqual(model.rangeStart, frames(60))
         XCTAssertEqual(model.durationFrames, 150)
         XCTAssertEqual(model.rangeTimecodes, "00:00:02:00 – 00:00:06:29")
         XCTAssertEqual(model.rangeCaption, "Editing the move from 00:00:02:00 to 00:00:06:29")
         XCTAssertEqual(model.interpolation, .easeIn, "the move's own smoothing")
-        XCTAssertFalse(model.isDurationEditable)
+        XCTAssertTrue(model.isDurationEditable, "a typed duration makes it Custom")
         for (rect, expected) in [(model.start, CGRect(x: 240, y: 135, width: 1440, height: 810)),
                                  (model.end, CGRect(x: 960, y: 540, width: 960, height: 540))] {
             XCTAssertEqual(rect.minX, expected.minX, accuracy: 1e-6)
@@ -642,7 +642,8 @@ final class KeyframedMotionTests: XCTestCase {
         var model = try XCTUnwrap(store.kenBurns)
         XCTAssertEqual(model.detection, .none)
         XCTAssertEqual(model.range, .wholeClip)
-        XCTAssertEqual(model.rangeChoices, [.wholeClip, .fromPlayhead, .fromClipStart], "no Existing move to offer")
+        XCTAssertEqual(model.rangeChoices, [.wholeClip, .fromPlayhead, .fromClipStart, .custom],
+                       "no Existing move to offer")
         XCTAssertEqual(model.interpolation, .easeInOut)
         XCTAssertEqual(model.start, CGRect(x: 0, y: 0, width: 1920, height: 1080))
         XCTAssertEqual(model.end.width, 1920 * KenBurnsModel.defaultEndFraction, accuracy: 1e-9, "the push in")
@@ -703,6 +704,172 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(model.detection, .none)
         XCTAssertEqual(model.range, .wholeClip)
         XCTAssertFalse(model.rangeChoices.contains(.existingMove))
+    }
+
+    // MARK: Ken Burns: Custom range
+
+    /// The long movie (300 frames) on V1 at 2 s, i.e. timeline frames 60...359, selected alone.
+    private func longClipAtTwoSeconds() async throws -> VEClipID {
+        let url = fixture.directory.appendingPathComponent("long.mov")
+        try TestMediaFactory.writeMovie(to: url, frames: 300)
+        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([url]) { continuation.resume(returning: $0) }
+        }
+        let id = try fixture.placeMovie(try XCTUnwrap(imported.first), at: 2)
+        store.selection = [id]
+        XCTAssertEqual(try clip(id).timelineStart, frames(60))
+        return id
+    }
+
+    func testStartAndEndFieldsShowTimelineTimesAndParseLikeTheDurationField() async throws {
+        let id = try await longClipAtTwoSeconds()
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        // Whole clip: the fields show the timeline times of its first and last frames (the ruler's).
+        XCTAssertEqual(model.startText, "00:00:02:00")
+        XCTAssertEqual(model.endText, "00:00:11:29")
+        XCTAssertFalse(model.hasUncommittedText)
+        // Every duration form, as a timeline time: timecode, short timecode, frames, seconds.
+        for (typed, frame) in [("00:00:05:00", Int64(150)), ("4:15", 135), ("200f", 200), ("3.5s", 105), ("90", 90)] {
+            model.startText = typed
+            XCTAssertTrue(model.hasUncommittedText, typed)
+            XCTAssertTrue(model.commitStart(), typed)
+            XCTAssertEqual(model.range, .custom, typed)
+            XCTAssertEqual(model.rangeStart, frames(frame), typed)
+            XCTAssertEqual(model.rangeLastFrame, frames(359), "\(typed): the end is kept")
+            XCTAssertEqual(model.startText, store.durationString(frames: frame), "shown in the project's format")
+            XCTAssertNil(model.rangeNote, typed)
+            XCTAssertFalse(model.hasUncommittedText, typed)
+        }
+        model.endText = "00:00:08:00"
+        XCTAssertTrue(model.commitEnd())
+        XCTAssertEqual(model.rangeTimecodes, "00:00:03:00 – 00:00:08:00")
+        XCTAssertEqual(model.durationFrames, 151)
+        XCTAssertEqual(model.durationText, "00:00:05:01")
+        XCTAssertEqual(model.rangeCaption, KenBurnsModel.holdCaption)
+        // Not a time: refused with a reason, the range stays.
+        model.endText = "later"
+        XCTAssertFalse(model.commitEnd())
+        XCTAssertEqual(model.rangeNote?.contains("is not a time"), true)
+        XCTAssertEqual(model.rangeLastFrame, frames(240))
+        // Unchanged text changes nothing (no mode switch from another range).
+        model.range = .fromClipStart
+        model.startText = model.startString
+        XCTAssertTrue(model.commitStart())
+        XCTAssertEqual(model.range, .fromClipStart)
+
+        // The frames display: a bare number is frames, shown as "150f".
+        var reason = ""
+        let framesModel = try XCTUnwrap(KenBurnsModel(clip: try clip(id), asset: try XCTUnwrap(store.asset(try clip(id).assetID)),
+                                                      sequence: store.sequence, playhead: .zero,
+                                                      durationDisplay: .frames, reason: &reason))
+        XCTAssertEqual(framesModel.startText, "60f")
+        framesModel.endText = "300"
+        XCTAssertTrue(framesModel.commitEnd())
+        XCTAssertEqual(framesModel.rangeLastFrame, frames(300))
+        XCTAssertEqual(framesModel.endText, "300f")
+    }
+
+    func testTypedStartAndEndAreClampedToTheClipAndTwoFrames() async throws {
+        let id = try await longClipAtTwoSeconds()
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        model.startText = "00:00:00:10"
+        XCTAssertTrue(model.commitStart())
+        XCTAssertEqual(model.rangeStart, frames(60))
+        XCTAssertEqual(model.rangeNote, "Limited to the clip's first frame, 00:00:02:00.")
+        model.endText = "00:01:00:00"
+        XCTAssertTrue(model.commitEnd())
+        XCTAssertEqual(model.rangeLastFrame, frames(359))
+        XCTAssertEqual(model.rangeNote, "Limited to the clip's last frame, 00:00:11:29.")
+        model.endText = "00:00:06:00"
+        XCTAssertTrue(model.commitEnd())
+        XCTAssertNil(model.rangeNote, "taken as typed")
+        // A start at or after the end stops a frame before it; an end at or before the start a
+        // frame after it (a move is at least two frames).
+        model.startText = "00:00:09:00"
+        XCTAssertTrue(model.commitStart())
+        XCTAssertEqual(model.rangeStart, frames(179))
+        XCTAssertEqual(model.rangeLastFrame, frames(180))
+        XCTAssertEqual(model.rangeNote,
+                       "A move is at least two frames long: the start is 00:00:05:29, a frame before the end.")
+        model.endText = "00:00:01:00"
+        XCTAssertTrue(model.commitEnd())
+        XCTAssertEqual(model.rangeLastFrame, frames(180))
+        XCTAssertEqual(model.rangeNote,
+                       "A move is at least two frames long: the end is 00:00:06:00, a frame after the start.")
+        XCTAssertEqual(model.durationFrames, 2)
+        XCTAssertNil(model.rangeProblem)
+        // A typed duration in Custom moves the end, within what is left of the clip.
+        model.durationText = "20s"
+        XCTAssertTrue(model.commitDuration())
+        XCTAssertEqual(model.rangeLastFrame, frames(359))
+        XCTAssertEqual(model.rangeNote, "Limited to the 00:00:06:01 left in the clip.")
+        // A trim while the helper is open keeps the span inside the clip.
+        XCTAssertTrue(store.engine.trimClipTail(id, to: frames(200), clamp: false).ok)
+        XCTAssertTrue(store.kenBurns === model)
+        XCTAssertEqual(model.rangeTimecodes, "00:00:05:29 – 00:00:06:19")
+    }
+
+    func testTypingInAFieldSwitchesToCustomFromEveryRange() async throws {
+        let id = try await longClipAtTwoSeconds()
+        store.playheadTime = frames(100)
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        // From playhead: the fields show its computed range and stay editable; an edit keeps the
+        // other end.
+        model.range = .fromPlayhead
+        XCTAssertEqual(model.startText, "00:00:03:10")
+        XCTAssertEqual(model.endText, "00:00:08:09")
+        model.endText = "00:00:07:00"
+        XCTAssertTrue(model.commitEnd())
+        XCTAssertEqual(model.range, .custom)
+        XCTAssertEqual(model.rangeTimecodes, "00:00:03:10 – 00:00:07:00")
+        // The playhead no longer moves a Custom range.
+        model.setPlayhead(frames(200))
+        XCTAssertEqual(model.rangeTimecodes, "00:00:03:10 – 00:00:07:00")
+        // Choosing Custom in the menu keeps the current range.
+        model.range = .fromClipStart
+        model.range = .custom
+        XCTAssertEqual(model.rangeTimecodes, "00:00:02:00 – 00:00:06:29")
+        // Existing move: a typed duration keeps its start.
+        XCTAssertTrue(store.applyKenBurns())
+        store.beginKenBurns(clip: id)
+        let again = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(again.range, .existingMove)
+        again.durationText = "2s"
+        XCTAssertTrue(again.commitDuration())
+        XCTAssertEqual(again.range, .custom)
+        XCTAssertEqual(again.rangeTimecodes, "00:00:02:00 – 00:00:03:29")
+        // Whole clip: a typed start keeps the clip's last frame as the end.
+        again.range = .wholeClip
+        again.startText = "00:00:10:00"
+        XCTAssertTrue(again.commitStart())
+        XCTAssertEqual(again.rangeTimecodes, "00:00:10:00 – 00:00:11:29")
+    }
+
+    func testApplyWithATypedRangePutsTheKeyframesOnExactlyThoseFrames() async throws {
+        let id = try await longClipAtTwoSeconds()
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        model.startText = "00:00:04:10"
+        XCTAssertTrue(model.commitStart())
+        // Return with the End still being typed commits it and does not press Apply; Apply (the
+        // button) takes a value still being typed.
+        model.endText = "00:00:07:05"
+        XCTAssertTrue(model.hasUncommittedText, "Return commits the field instead of pressing Apply")
+        XCTAssertTrue(store.applyKenBurns())
+        let info = try clip(id)
+        for parameter: VEMotionParameter in [.positionX, .positionY, .scale] {
+            XCTAssertEqual(info.keyframes(for: parameter).map(\.frameTime), [frames(130), frames(215)])
+        }
+        // A start being typed that is not a time refuses Apply and keeps the helper open.
+        store.beginKenBurns(clip: id)
+        let again = try XCTUnwrap(store.kenBurns)
+        again.startText = "soon"
+        XCTAssertFalse(store.applyKenBurns())
+        XCTAssertNotNil(store.kenBurns)
+        XCTAssertEqual(store.statusMessage?.contains("is not a time"), true)
     }
 
     // MARK: Neighbour matching

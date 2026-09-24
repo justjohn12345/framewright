@@ -861,8 +861,9 @@ final class ProjectStore: ObservableObject {
     }
 
     /// Applies the Ken Burns rectangles as position and scale keyframes on the first and last frames
-    /// of the helper's range (one undo step) and closes the helper. A duration still being typed is
-    /// taken first. Returns whether it was applied (a refusal is reported and the helper stays).
+    /// of the helper's range (one undo step) and closes the helper. A Start, End or Duration still
+    /// being typed is taken first. Returns whether it was applied (a refusal is reported and the
+    /// helper stays).
     @discardableResult
     func applyKenBurns() -> Bool {
         guard let model = kenBurns else { return false }
@@ -870,8 +871,8 @@ final class ProjectStore: ObservableObject {
             statusMessage = "Finish the current drag first."
             return false
         }
-        guard model.commitDuration() else {
-            statusMessage = model.durationNote
+        guard model.commitFields() else {
+            statusMessage = model.rangeNote
             return false
         }
         if let problem = model.rangeProblem {

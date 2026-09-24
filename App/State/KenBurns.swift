@@ -11,10 +11,18 @@ import FramewrightEngine
 /// and Out by default as in FCP (Linear, Ease Out and Ease In can be chosen). Swap exchanges the
 /// two framings, like FCP's swap button.
 ///
-/// Range (`MoveRange`): the whole clip (the default, FCP's behaviour), or `durationFrames` from the
-/// playhead or from the clip's start, 5 s by default (clamped to what is left of the clip). Before
-/// the move the picture holds the start framing and after it the end framing, so a 5 s push in at
-/// the head of a 30 s clip holds its end framing for the other 25 s.
+/// Range (`MoveRange`): the whole clip (the default, FCP's behaviour), `durationFrames` from the
+/// playhead or from the clip's start (5 s by default, clamped to what is left of the clip), or a
+/// Custom span. Before the move the picture holds the start framing and after it the end framing,
+/// so a 5 s push in at the head of a 30 s clip holds its end framing for the other 25 s.
+///
+/// Start and End fields (`startText`, `endText`) show the range's first and last frames as timeline
+/// times (the ruler's), in the user's duration format, whatever the range; committing a different
+/// value (`commitStart()`, `commitEnd()`) makes the range Custom with that end moved and the other
+/// kept, clamped to the clip's frames and at least two frames long (`rangeNote` says when it was
+/// limited). A typed Duration in Custom (or Existing move) moves the end. A field whose text is
+/// still being typed is committed by Return (which then does not press Apply:
+/// `hasUncommittedText`) and by Apply.
 ///
 /// Editing a move: when the clip already has position or scale keyframes on its frames
 /// (`detectMove(in:frameDuration:)`), the helper opens on that move ("Existing move"): the range is
@@ -70,6 +78,9 @@ final class KenBurnsModel: ObservableObject {
         /// The move already on the clip (`existingMove`): from its first to its last position or
         /// scale keyframe. Offered only while the clip has one.
         case existingMove
+        /// A span typed in the Start and End fields (`customSpan`, counted from the clip's first
+        /// frame).
+        case custom
 
         var id: String { rawValue }
 
@@ -79,6 +90,7 @@ final class KenBurnsModel: ObservableObject {
             case .fromPlayhead: return "From playhead"
             case .fromClipStart: return "From clip start"
             case .existingMove: return "Existing move"
+            case .custom: return "Custom"
             }
         }
     }
@@ -94,6 +106,12 @@ final class KenBurnsModel: ObservableObject {
         /// The smoothing of the move's first keyframe (position X, else Y, else scale), when it is
         /// one of `interpolations`; else nil.
         let interpolation: VEKeyframeInterpolation?
+    }
+
+    /// A range's first and last frames, counted from the clip's first frame.
+    struct FrameSpan: Equatable {
+        var first: Int64
+        var last: Int64
     }
 
     /// What `detectMove(in:frameDuration:)` finds on a clip.
@@ -162,19 +180,30 @@ final class KenBurnsModel: ObservableObject {
     @Published var start: CGRect
     @Published var end: CGRect
     @Published var interpolation: VEKeyframeInterpolation = .easeInOut
-    /// The part of the clip the move covers (a change resets the duration to its default).
+    /// The part of the clip the move covers (a change resets the duration to its default; choosing
+    /// Custom keeps the current span).
     @Published var range: MoveRange = .wholeClip {
+        willSet {
+            if newValue == .custom, range != .custom {
+                customSpan = currentSpan ?? wholeSpan
+            }
+        }
         didSet {
             guard range != oldValue else { return }
             requestedFrames = nil
-            durationNote = nil
+            rangeNote = nil
             rangeChanged()
         }
     }
     /// The Duration field's text (committed by `commitDuration()`).
     @Published var durationText = ""
-    /// Why the last typed duration was refused or limited (nil when it was taken as typed).
-    @Published private(set) var durationNote: String?
+    /// The Start and End fields' text: the range's first and last frames as timeline times
+    /// (committed by `commitStart()` / `commitEnd()`).
+    @Published var startText = ""
+    @Published var endText = ""
+    /// Why the last typed Start, End or Duration was refused or limited (nil when it was taken as
+    /// typed).
+    @Published private(set) var rangeNote: String?
     /// The program playhead (where "From playhead" starts).
     @Published private(set) var playhead: CMTime
     /// The move already on the clip (updated with every clip change while the helper is open).
@@ -201,6 +230,8 @@ final class KenBurnsModel: ObservableObject {
 
     /// The duration typed for a partial range (frames, at least 2), or nil for the default.
     private var requestedFrames: Int64?
+    /// The Custom range as chosen (kept within the clip by `clamped(_:)` when used).
+    private var customSpan = FrameSpan(first: 0, last: 1)
     /// Rectangles the user moved or resized (they keep their place when the range changes).
     private var editedStart = false
     private var editedEnd = false
@@ -336,14 +367,32 @@ final class KenBurnsModel: ObservableObject {
             return offset >= 0 && offset < clipFrames ? offset : nil
         case .existingMove:
             return existingSpan?.first ?? 0
+        case .custom:
+            return clamped(customSpan).first
         }
     }
 
-    /// The existing move's frames, kept within the clip's (first before last); nil without one.
-    private var existingSpan: (first: Int64, last: Int64)? {
-        guard let move = existingMove, clipFrames >= 2 else { return nil }
-        let first = min(max(0, move.first), clipFrames - 2)
-        return (first, min(max(first + 1, move.last), clipFrames - 1))
+    /// `span` kept within the clip's frames, first before last (for a clip of at least two frames).
+    private func clamped(_ span: FrameSpan) -> FrameSpan {
+        guard clipFrames >= 2 else { return FrameSpan(first: 0, last: max(0, clipFrames - 1)) }
+        let first = min(max(0, span.first), clipFrames - 2)
+        return FrameSpan(first: first, last: min(max(first + 1, span.last), clipFrames - 1))
+    }
+
+    /// The whole clip as a span.
+    private var wholeSpan: FrameSpan { FrameSpan(first: 0, last: max(1, clipFrames - 1)) }
+
+    /// The existing move's frames, kept within the clip's; nil without one.
+    private var existingSpan: FrameSpan? {
+        guard let move = existingMove else { return nil }
+        return clamped(FrameSpan(first: move.first, last: move.last))
+    }
+
+    /// The range's first and last frames (counted from the clip's first frame); nil when "From
+    /// playhead" has the playhead outside the clip.
+    var currentSpan: FrameSpan? {
+        guard let offset = rangeOffset else { return nil }
+        return FrameSpan(first: offset, last: offset + max(1, durationFrames) - 1)
     }
 
     /// Frames of the clip from the range's first frame to its end.
@@ -366,6 +415,9 @@ final class KenBurnsModel: ObservableObject {
             return min(requestedFrames ?? defaultFrames, remainingFrames)
         case .existingMove:
             guard let span = existingSpan else { return clipFrames }
+            return span.last - span.first + 1
+        case .custom:
+            let span = clamped(customSpan)
             return span.last - span.first + 1
         }
     }
@@ -416,18 +468,108 @@ final class KenBurnsModel: ObservableObject {
         return durationFrames < remainingFrames ? Self.holdCaption : nil
     }
 
-    /// Whether the Duration field can be edited (not for the whole clip or the existing move).
-    var isDurationEditable: Bool { range != .wholeClip && range != .existingMove }
+    /// Whether the Duration field can be edited (not for the whole clip; in Existing move a typed
+    /// duration makes the range Custom).
+    var isDurationEditable: Bool { range != .wholeClip }
 
     /// `frames` in the user's duration format.
     func durationString(frames: Int64) -> String {
         DurationFormat.string(frames: frames, frameDuration: frameDuration, display: durationDisplay)
     }
 
+    /// The Start and End fields' committed values: the range's first and last frames as timeline
+    /// times in the user's duration format (the ruler's timecode by default).
+    var startString: String { durationString(frames: frameIndex(rangeStart)) }
+    var endString: String { durationString(frames: frameIndex(rangeLastFrame)) }
+
+    /// A field's text differs from its committed value: Return commits it instead of pressing Apply.
+    var hasUncommittedText: Bool {
+        startText != startString || endText != endString
+            || (isDurationEditable && durationText != durationString(frames: durationFrames))
+    }
+
+    /// Commits the Start, End and Duration fields (Apply takes what is still being typed). False
+    /// when one holds text that is not a time or duration (`rangeNote` says why).
+    func commitFields() -> Bool {
+        commitStart() && commitEnd() && commitDuration()
+    }
+
+    /// Takes the Start field's text: the timeline frame the move starts on (see `commitBoundary`).
+    @discardableResult
+    func commitStart() -> Bool { commitBoundary(.start) }
+
+    /// Takes the End field's text: the timeline frame of the end keyframes (see `commitBoundary`).
+    @discardableResult
+    func commitEnd() -> Bool { commitBoundary(.end) }
+
+    /// Takes the Start (`.start`) or End field's text: a timeline time parsed like the Duration
+    /// field (`DurationFormat.parseFrames`: timecode, 150f, 5s, or a bare number in the display's
+    /// unit), as the sequence frame from zero. Unchanged text changes nothing. Otherwise the range
+    /// becomes Custom with that end moved and the other kept, the moved end limited to the clip's
+    /// frames and to at least two frames of range (`rangeNote` says when). Returns false for text
+    /// that is not a time (`rangeNote` says why; the range stays).
+    private func commitBoundary(_ which: Framing) -> Bool {
+        let typed = (which == .start ? startText : endText).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard typed != (which == .start ? startString : endString) else { return true }
+        guard let frame = DurationFormat.parseFrames(typed, frameDuration: frameDuration, display: durationDisplay)
+        else {
+            rangeNote = "“\(typed)” is not a time (use timecode like 00:00:05:00, frames like 150f or seconds like 5s)."
+            return false
+        }
+        guard clipFrames >= 2 else {
+            rangeNote = rangeProblem
+            return false
+        }
+        let clipStart = frameIndex(clip.timelineStart)
+        let lastFrame = clipFrames - 1
+        let current = FrameSpan(first: frameIndex(rangeStart) - clipStart, last: frameIndex(rangeLastFrame) - clipStart)
+        var offset = frame - clipStart
+        var note: String?
+        if offset < 0 {
+            offset = 0
+            note = "Limited to the clip's first frame, \(timeText(offset: 0))."
+        } else if offset > lastFrame {
+            offset = lastFrame
+            note = "Limited to the clip's last frame, \(timeText(offset: lastFrame))."
+        }
+        var span = current
+        if which == .start {
+            if offset > current.last - 1 {
+                offset = max(0, current.last - 1)
+                note = "A move is at least two frames long: the start is \(timeText(offset: offset)), a frame "
+                    + "before the end."
+            }
+            span.first = offset
+        } else {
+            if offset < current.first + 1 {
+                offset = min(lastFrame, current.first + 1)
+                note = "A move is at least two frames long: the end is \(timeText(offset: offset)), a frame "
+                    + "after the start."
+            }
+            span.last = offset
+        }
+        setCustom(span, note: note)
+        return true
+    }
+
+    /// The timeline time of the clip's frame `offset` frames from its first, in the user's format.
+    private func timeText(offset: Int64) -> String {
+        durationString(frames: frameIndex(clip.timelineStart) + offset)
+    }
+
+    /// Makes the range Custom over `span` (clip frames), with `note` explaining a limit.
+    private func setCustom(_ span: FrameSpan, note: String?) {
+        if range != .custom { range = .custom } // prefills customSpan, then refreshes
+        customSpan = clamped(span)
+        rangeNote = note
+        rangeChanged()
+    }
+
     /// Takes the Duration field's text: parsed like every duration field
     /// (`DurationFormat.parseFrames`), at least two frames and at most what is left of the clip
-    /// (`durationNote` says when it was limited). Returns false for text that is not a duration
-    /// (`durationNote` says why; the duration stays). The whole clip has no duration to type.
+    /// (`rangeNote` says when it was limited). In Custom and Existing move it moves the range's end
+    /// (the range becomes Custom). Returns false for text that is not a duration (`rangeNote` says
+    /// why; the duration stays). The whole clip has no duration to type.
     @discardableResult
     func commitDuration() -> Bool {
         guard isDurationEditable else {
@@ -438,7 +580,7 @@ final class KenBurnsModel: ObservableObject {
         guard typed != durationString(frames: durationFrames) else { return true }
         guard let frames = DurationFormat.parseFrames(typed, frameDuration: frameDuration, display: durationDisplay)
         else {
-            durationNote = "“\(typed)” is not a duration (use frames like 45f, seconds like 2.5s, or timecode)."
+            rangeNote = "“\(typed)” is not a duration (use frames like 45f, seconds like 2.5s, or timecode)."
             return false
         }
         var taken = frames
@@ -451,9 +593,15 @@ final class KenBurnsModel: ObservableObject {
             taken = remainingFrames
             note = "Limited to the \(durationString(frames: remainingFrames)) left in the clip."
         }
-        requestedFrames = taken
-        durationNote = note
-        rangeChanged()
+        switch range {
+        case .existingMove, .custom:
+            let first = rangeOffset ?? 0
+            setCustom(FrameSpan(first: first, last: first + taken - 1), note: note)
+        case .wholeClip, .fromPlayhead, .fromClipStart:
+            requestedFrames = taken
+            rangeNote = note
+            rangeChanged()
+        }
         return true
     }
 
@@ -486,10 +634,12 @@ final class KenBurnsModel: ObservableObject {
         }
     }
 
-    /// The range, the playhead or the clip changed: reformat the duration and move the rectangles
-    /// the user has not touched to their defaults.
+    /// The range, the playhead or the clip changed: reformat the Start, End and Duration fields and
+    /// move the rectangles the user has not touched to their defaults.
     private func rangeChanged() {
         durationText = durationString(frames: durationFrames)
+        startText = startString
+        endText = endString
         if !editedStart { start = defaultRect(.start) }
         if !editedEnd { end = defaultRect(.end) }
     }
