@@ -353,6 +353,99 @@ CMTime frames30(int64_t n) {
     XCTAssertEqual(CMTimeCompare(x.lastObject.frameTime, frames30(329)), 0);
 }
 
+- (void)testMatchingANeighboursFramingIsOneUndoStep {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    // V1: A [0, 60) and B [60, 120) touch; C [150, 180) after a gap.
+    const VEClipID a = [self place:engine asset:asset at:0 from:0 to:60].first;
+    const auto bPair = [self place:engine asset:asset at:60 from:100 to:160];
+    const VEClipID b = bPair.first;
+    const VEClipID c = [self place:engine asset:asset at:150 from:0 to:30].first;
+    XCTAssertEqual([engine adjacentClipOfClip:b atEdge:VEClipEdgeStart], a);
+    XCTAssertEqual([engine adjacentClipOfClip:a atEdge:VEClipEdgeEnd], b);
+    XCTAssertEqual([engine adjacentClipOfClip:b atEdge:VEClipEdgeEnd], 0);
+    XCTAssertEqual([engine adjacentClipOfClip:c atEdge:VEClipEdgeStart], 0);
+    XCTAssertEqual([engine adjacentClipOfClip:a atEdge:VEClipEdgeStart], 0);
+
+    // An unanimated clip takes the previous clip's end as its static values.
+    const VEVideoParams placed{100, -20, 1.5, 10, 0.5};
+    XCTAssertTrue([engine setVideoParams:placed forClip:a].ok);
+    VEEditResult *r = [engine matchMotionOfClip:b toAdjacentAtEdge:VEClipEdgeStart];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(engine.undoActionName, @"Match Previous Clip");
+    XCTAssertEqualObjects(r.note, @"Matched the previous clip's end: set as this clip's static values.");
+    VEVideoParams shown = [engine clipInfo:b].videoParams;
+    XCTAssertEqual(shown.x, 100);
+    XCTAssertEqual(shown.y, -20);
+    XCTAssertEqual(shown.scale, 1.5);
+    XCTAssertEqual(shown.rotationDegrees, 10);
+    XCTAssertEqual(shown.opacity, 0.5);
+    XCTAssertFalse([engine clipInfo:b].hasKeyframes);
+    XCTAssertTrue([engine undo]);
+    XCTAssertEqual([engine clipInfo:b].videoParams.x, 0, @"one undo step takes it all back");
+    XCTAssertEqual([engine clipInfo:b].videoParams.opacity, 1);
+
+    // An animated clip takes it as a keyframe on its first frame for what it animates (Scale), as
+    // static values for the rest; the value comes from A's last frame as the monitor shows it.
+    const VEMotionFraming unmoved{0, 0, 1};
+    const VEMotionFraming pushed{-120, 60, 1.8};
+    r = [engine applyKenBurnsToClip:a start:unmoved end:pushed interpolation:VEKeyframeInterpolationEaseInOut];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertTrue([engine addKeyframeToClip:b parameter:VEMotionParameterScale atTime:frames30(60)].ok);
+    r = [engine setKeyframeInterpolation:VEKeyframeInterpolationEaseOut
+                               parameter:VEMotionParameterScale
+                                    clip:b
+                                  atTime:frames30(60)];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertTrue([engine setMotionValue:2 parameter:VEMotionParameterScale clip:b atTime:frames30(100)].ok);
+    r = [engine matchMotionOfClip:b toAdjacentAtEdge:VEClipEdgeStart];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(r.note, @"Matched the previous clip's end: Scale got keyframes on this clip's first frame; "
+                                  @"Position X, Position Y, Rotation and Opacity became static values.");
+    VEClipInfo *info = [engine clipInfo:b];
+    NSArray<VEKeyframe *> *scale = [info keyframesForParameter:VEMotionParameterScale];
+    XCTAssertEqual(scale.count, 2u);
+    XCTAssertEqual(scale[0].value, 1.8);
+    XCTAssertEqual(scale[0].interpolation, VEKeyframeInterpolationEaseOut, @"the keyframe keeps its interpolation");
+    const VEVideoParams end = [[engine clipInfo:a] videoParamsAtTime:frames30(59)];
+    const VEVideoParams start = [info videoParamsAtTime:frames30(60)];
+    XCTAssertEqual(start.x, end.x);
+    XCTAssertEqual(start.y, end.y);
+    XCTAssertEqual(start.scale, end.scale);
+    XCTAssertEqual(start.rotationDegrees, end.rotationDegrees);
+    XCTAssertEqual(start.opacity, end.opacity);
+    XCTAssertEqual([info videoParamsAtTime:frames30(100)].scale, 2, @"the rest of the animation stays");
+    // Nothing left to match: success without an undo step.
+    const uint64_t changes = engine.changeCount;
+    r = [engine matchMotionOfClip:b toAdjacentAtEdge:VEClipEdgeStart];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(r.note, @"This clip already matches the previous clip's end.");
+    XCTAssertEqual(engine.changeCount, changes);
+    XCTAssertTrue([engine undo]);
+    XCTAssertEqual([[engine clipInfo:b] keyframesForParameter:VEMotionParameterScale][0].value, 1,
+                   @"one undo step");
+    XCTAssertEqual([engine clipInfo:b].videoParams.x, 0);
+
+    // The next clip's start onto A's last frame: A animates position and scale there.
+    r = [engine matchMotionOfClip:a toAdjacentAtEdge:VEClipEdgeEnd];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(engine.undoActionName, @"Match Next Clip");
+    XCTAssertEqual([[engine clipInfo:a] videoParamsAtTime:frames30(59)].scale, 1, @"B's first frame");
+    XCTAssertEqual([[engine clipInfo:a] keyframesForParameter:VEMotionParameterScale].count, 2u);
+
+    // Refusals.
+    r = [engine matchMotionOfClip:c toAdjacentAtEdge:VEClipEdgeStart];
+    XCTAssertEqual(r.errorCode, VEEditErrorNotAdjacent);
+    XCTAssertTrue([r.message containsString:@"No clip ends where this clip starts"], @"%@", r.message);
+    r = [engine matchMotionOfClip:bPair.second toAdjacentAtEdge:VEClipEdgeStart];
+    XCTAssertEqual(r.errorCode, VEEditErrorTrackKindMismatch);
+    XCTAssertTrue([engine setTrack:engine.sequence.videoTrackIDs[0].longLongValue locked:YES].ok);
+    r = [engine matchMotionOfClip:b toAdjacentAtEdge:VEClipEdgeStart];
+    XCTAssertEqual(r.errorCode, VEEditErrorTrackLocked);
+    r = [engine matchMotionOfClip:a toAdjacentAtEdge:VEClipEdgeEnd];
+    XCTAssertEqual(r.errorCode, VEEditErrorTrackLocked, @"also when nothing would change");
+}
+
 - (void)testStaticSettersKeepKeyframesAndAVideoResetClearsThem {
     VEAssetInfo *asset = nil;
     VEEngine *engine = [self engineWithAsset:&asset];

@@ -79,6 +79,14 @@ typedef struct {
     double scale;
 } VEMotionFraming;
 
+/// An end of a clip on the timeline.
+typedef NS_ENUM(NSInteger, VEClipEdge) {
+    /// Its first frame (where the previous clip on its track ends).
+    VEClipEdgeStart = 0,
+    /// Its last frame (where the next clip on its track starts).
+    VEClipEdgeEnd = 1,
+};
+
 /// Clip audio settings: gain in dB and linear fade durations at the clip's ends.
 typedef struct {
     double gainDb;

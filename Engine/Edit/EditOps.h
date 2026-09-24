@@ -423,11 +423,11 @@ struct MotionTrackChange {
 };
 
 // Replaces whole keyframe tracks (and static values) of one clip as one edit: the Ken Burns
-// helper (position and scale from a start and an end framing, planned by planMotionMove) and
-// turning a parameter's animation off. Each track is validated like the model
-// (keyframeTrackProblem); a keyframe of a non-empty track must lie within the clip's used source
-// range unless the clip's track already has that very keyframe (one a trim hid, which a partial
-// Ken Burns move keeps).
+// helper (position and scale from a start and an end framing, planned by planMotionMove),
+// matching a neighbour's framing (planMotionAtFrame) and turning a parameter's animation off. Each
+// track is validated like the model (keyframeTrackProblem); a keyframe of a non-empty track must
+// lie within the clip's used source range unless the clip's track already has that very keyframe
+// (one a trim hid, which a partial Ken Burns move keeps).
 class SetMotionTracks final : public SequenceCommand {
   public:
     SetMotionTracks(SequenceId sequenceId, ClipId clipId, std::vector<MotionTrackChange> changes,
@@ -445,7 +445,7 @@ class SetMotionTracks final : public SequenceCommand {
     std::string name_;
 };
 
-// ----- Ken Burns moves over part of a clip (plans for SetMotionTracks) -----
+// ----- Ken Burns moves and matching a neighbour's framing (plans for SetMotionTracks) -----
 
 // Position and scale of a framing (VEMotionFraming in the facade).
 struct MotionFraming {
@@ -506,9 +506,24 @@ struct MotionMovePlan {
 EditResult planMotionMove(const Clip &clip, CMTime frameDuration, const MotionMoveRequest &request,
                           MotionMovePlan &plan);
 
+// Plans setting all five Motion values of `clip` to `values` (its static values; its keyframes
+// are ignored) on the frame starting at `frame` (a frame of the clip): an animated parameter gets
+// a keyframe on the frame's start (keyframeTimeForFrame), so the frame shows exactly that value;
+// the keyframes the frame showed (keyframeIndexForFrame's rule, e.g. one on the out point) are
+// replaced by it, and it takes the first one's interpolation (Linear when there was none). A
+// static parameter gets the value as its static value, so the whole clip shows it. The changes
+// list every parameter in MotionParameter order. Refused like planMotionMove.
+EditResult planMotionAtFrame(const Clip &clip, CMTime frameDuration, CMTime frame, const VideoParams &values,
+                             std::vector<MotionTrackChange> &changes);
+
 // Whether two values of `parameter` are the same for the picture: equal within a millionth of the
 // larger magnitude (at least 1, so within a millionth of a pixel near the centre).
 bool motionValuesMatch(MotionParameter parameter, double a, double b);
+
+// The clip on the same track that touches `clipId` at `edge`: the one ending exactly where it
+// starts (Head) or starting exactly where it ends (Tail); nullptr when there is none (a gap, the
+// track's end, or no such clip).
+const Clip *adjacentClip(const Sequence &sequence, ClipId clipId, ClipEdge edge);
 
 struct SpeedOptions {
     bool includeLinked = true;

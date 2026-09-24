@@ -1394,6 +1394,72 @@ EditResult planMotionMove(const Clip &clip, CMTime frameDuration, const MotionMo
     return EditResult::success();
 }
 
+EditResult planMotionAtFrame(const Clip &clip, CMTime frameDuration, CMTime frame, const VideoParams &values,
+                             std::vector<MotionTrackChange> &changes) {
+    changes.clear();
+    if (EditResult r = requireClipFrame(clip, frameDuration, frame, "the frame"); !r) {
+        return r;
+    }
+    const std::optional<CMTime> time = keyframeTimeForFrame(clip, frame);
+    if (!time) {
+        return notRepresentable(clip.id, frame);
+    }
+    for (MotionParameter parameter : kMotionParameters) {
+        const double value = values.staticValue(parameter);
+        if (EditResult r = checkMotionValue(parameter, value); !r) {
+            return r;
+        }
+        MotionTrackChange change;
+        change.parameter = parameter;
+        if (!clip.video.isAnimated(parameter)) {
+            change.staticValue = value;
+            changes.push_back(std::move(change));
+            continue;
+        }
+        change.staticValue = clip.video.staticValue(parameter);
+        // The keyframe goes on the frame's start, where the frame's picture is evaluated, so the
+        // frame shows exactly `value`; keyframes elsewhere in the frame's span (on the out point, or
+        // inside a frame of a sped-up clip) give way to it, lending it their interpolation.
+        Keyframe keyframe;
+        keyframe.time = *time;
+        keyframe.value = value;
+        bool replaced = false;
+        for (const Keyframe &existing : clip.video.keyframes.track(parameter)) {
+            const std::optional<CMTime> shownBy = frameShowingSourceTime(clip, existing.time, frameDuration);
+            if (shownBy && *shownBy == frame) {
+                if (!replaced) {
+                    keyframe.interpolation = existing.interpolation;
+                    keyframe.curve = existing.curve;
+                    replaced = true;
+                }
+                continue;
+            }
+            change.keyframes.push_back(existing);
+        }
+        upsertKeyframe(change.keyframes, keyframe);
+        changes.push_back(std::move(change));
+    }
+    return EditResult::success();
+}
+
+const Clip *adjacentClip(const Sequence &sequence, ClipId clipId, ClipEdge edge) {
+    const Track *track = sequence.trackOfClip(clipId);
+    const Clip *clip = track != nullptr ? track->find(clipId) : nullptr;
+    if (clip == nullptr) {
+        return nullptr;
+    }
+    for (const Clip &other : track->clips) {
+        if (other.id == clipId) {
+            continue;
+        }
+        if (edge == ClipEdge::Head ? other.timelineEnd() == clip->timelineStart
+                                   : other.timelineStart == clip->timelineEnd()) {
+            return &other;
+        }
+    }
+    return nullptr;
+}
+
 // ----- Transitions -----
 
 AddTransition::AddTransition(SequenceId sequenceId, ClipId fromClipId, ClipId toClipId, CMTime duration,

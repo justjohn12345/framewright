@@ -553,3 +553,67 @@ TEST_CASE("planMotionMove refuses frames outside the clip, fewer than two frames
     CHECK(planMotionMove(clip, f30(1), moveRequest(30, 31, framing, framing), plan).ok()); // two frames
     CHECK(plan.changes.size() == 3);
 }
+
+TEST_CASE("planMotionAtFrame: animated parameters get a keyframe on the frame, static ones a static value") {
+    Animated a;
+    Fixture &fx = a.fx;
+    // x: keyframes on source 60 (frame 30) and 150 (the out point: the last frame); y static;
+    // scale: 60 and 100; rotation: 60 and 149 (the last frame); opacity static 0.8.
+    const VideoParams values(10, 20, 1.5, 45, 0.5);
+    std::vector<MotionTrackChange> changes;
+
+    SUBCASE("the first frame") {
+        REQUIRE(planMotionAtFrame(fx.clip(a.clip), f30(1), f30(30), values, changes).ok());
+        REQUIRE(changes.size() == 5);
+        SetMotionTracks set(fx.seq, a.clip, changes, "Match Previous Clip");
+        applyReversible(fx.project, set);
+        const Clip &clip = fx.clip(a.clip);
+        CHECK(timesOf(clip.video.keyframes.x) == std::vector<CMTime>{f30(60), f30(150)});
+        CHECK(clip.video.keyframes.x[0].value == 10);
+        CHECK(clip.video.keyframes.x[0].interpolation == KeyframeInterpolation::EaseInOut); // kept
+        CHECK(clip.video.keyframes.scale[0].interpolation == KeyframeInterpolation::Hold);
+        CHECK(clip.video.keyframes.y.empty());
+        CHECK(clip.video.y == 20);
+        CHECK(clip.video.keyframes.opacity.empty());
+        CHECK(clip.video.opacity == 0.5);
+        const VideoParams shown = Scheduler::motionAt(clip, f30(30));
+        CHECK(shown == values);
+        CHECK(clip.video.keyframes.x[1].value == 300); // the rest of the animation is kept
+    }
+    SUBCASE("the last frame: the out point's keyframe moves to the frame's start, scale gets a new one") {
+        fx.sequence().findClip(a.clip)->video.keyframes.x[1].interpolation = KeyframeInterpolation::EaseIn;
+        REQUIRE(planMotionAtFrame(fx.clip(a.clip), f30(1), f30(119), values, changes).ok());
+        SetMotionTracks set(fx.seq, a.clip, changes, "Match Next Clip");
+        applyReversible(fx.project, set);
+        const Clip &clip = fx.clip(a.clip);
+        CHECK(timesOf(clip.video.keyframes.x) == std::vector<CMTime>{f30(60), f30(149)});
+        CHECK(clip.video.keyframes.x[1].value == 10);
+        CHECK(clip.video.keyframes.x[1].interpolation == KeyframeInterpolation::EaseIn);
+        CHECK(timesOf(clip.video.keyframes.scale) == std::vector<CMTime>{f30(60), f30(100), f30(149)});
+        CHECK(clip.video.keyframes.scale[2].interpolation == KeyframeInterpolation::Linear);
+        CHECK(timesOf(clip.video.keyframes.rotation) == std::vector<CMTime>{f30(60), f30(149)});
+        checkSameMotion(Scheduler::motionAt(clip, f30(119)), values);
+    }
+    CHECK(planMotionAtFrame(fx.clip(a.clip), f30(1), f30(120), values, changes).error == EditError::InvalidTime);
+    CHECK(planMotionAtFrame(fx.clip(a.clip), f30(1), f30(30), VideoParams(0, 0, 1, 0, 2), changes).error ==
+          EditError::InvalidArgument);
+}
+
+TEST_CASE("adjacentClip finds the touching clip on the same track") {
+    Fixture fx;
+    const ClipId first = fx.addClip(fx.v1, fx.av30, 0, 60);
+    const ClipId second = fx.addClip(fx.v1, fx.av30, 60, 60, 100);
+    const ClipId apart = fx.addClip(fx.v1, fx.av30, 130, 30);
+    const ClipId above = fx.addClip(fx.v2, fx.av30, 120, 10);
+    fx.requireValid();
+    CHECK(adjacentClip(fx.sequence(), second, ClipEdge::Head)->id == first);
+    CHECK(adjacentClip(fx.sequence(), first, ClipEdge::Tail)->id == second);
+    CHECK(adjacentClip(fx.sequence(), first, ClipEdge::Head) == nullptr);
+    CHECK(adjacentClip(fx.sequence(), second, ClipEdge::Tail) == nullptr); // a 10-frame gap
+    CHECK(adjacentClip(fx.sequence(), apart, ClipEdge::Head) == nullptr);  // V2's clip is on another track
+    CHECK(adjacentClip(fx.sequence(), above, ClipEdge::Tail) == nullptr);
+    CHECK(adjacentClip(fx.sequence(), ClipId(9999), ClipEdge::Head) == nullptr);
+    CHECK(motionValuesMatch(MotionParameter::X, 100, 100 + 1e-5));
+    CHECK_FALSE(motionValuesMatch(MotionParameter::X, 100, 100.01));
+    CHECK(motionValuesMatch(MotionParameter::Scale, 1, 1 + 5e-7));
+}

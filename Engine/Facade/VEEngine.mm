@@ -2180,6 +2180,75 @@ static NSString *keyframePlace(const Clip &clip, CMTime time, CMTime frameDurati
                  note:notes.count > 0 ? [notes componentsJoinedByString:@" "] : nil];
 }
 
+- (VEClipID)adjacentClipOfClip:(VEClipID)clipID atEdge:(VEClipEdge)edge {
+    VE_ASSERT_MAIN();
+    const Clip *neighbour = adjacentClip([self activeSequence], ClipId(static_cast<ClipId::ValueType>(clipID)),
+                                         edge == VEClipEdgeStart ? ClipEdge::Head : ClipEdge::Tail);
+    return neighbour != nullptr ? static_cast<VEClipID>(neighbour->id.value()) : 0;
+}
+
+- (VEEditResult *)matchMotionOfClip:(VEClipID)clipID toAdjacentAtEdge:(VEClipEdge)edge {
+    VE_ASSERT_MAIN();
+    const Clip *clip = nullptr;
+    CMTime unused = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID
+                                                      atTime:kCMTimeInvalid
+                                                  needsFrame:NO
+                                                        clip:&clip
+                                                       frame:&unused]) {
+        return refusal;
+    }
+    const bool previous = edge == VEClipEdgeStart;
+    const Sequence &sequence = [self activeSequence];
+    const CMTime fd = sequence.frameDuration;
+    const Clip *neighbour = adjacentClip(sequence, clip->id, previous ? ClipEdge::Head : ClipEdge::Tail);
+    if (neighbour == nullptr) {
+        return [VEEditResult failureWithCode:VEEditErrorNotAdjacent
+                                     message:previous ? @"No clip ends where this clip starts on its track."
+                                                      : @"No clip starts where this clip ends on its track."];
+    }
+    // The neighbour's frame at the cut, as the monitors and export draw it; this clip's frame there.
+    const CMTime neighbourFrame = previous ? neighbour->timelineEnd() - fd : neighbour->timelineStart;
+    const CMTime frame = previous ? clip->timelineStart : clip->timelineEnd() - fd;
+    const VideoParams values = Scheduler::motionAt(*neighbour, neighbourFrame);
+    std::vector<MotionTrackChange> changes;
+    if (EditResult planned = planMotionAtFrame(*clip, fd, frame, values, changes); !planned) {
+        return toVE(planned);
+    }
+    std::vector<MotionParameter> keyframed;
+    std::vector<MotionParameter> statics;
+    bool changesAnything = false;
+    for (const MotionTrackChange &change : changes) {
+        (change.keyframes.empty() ? statics : keyframed).push_back(change.parameter);
+        if (change.keyframes != clip->video.keyframes.track(change.parameter) ||
+            change.staticValue != clip->video.staticValue(change.parameter)) {
+            changesAnything = true;
+        }
+    }
+    NSString *what = previous ? @"the previous clip's end" : @"the next clip's start";
+    if (!changesAnything) {
+        if (const Track *track = sequence.trackOfClip(clip->id); track != nullptr && track->locked) {
+            return [VEEditResult failureWithCode:VEEditErrorTrackLocked
+                                         message:[NSString stringWithFormat:@"Track %s is locked.", track->name.c_str()]];
+        }
+        return toVE(EditResult::success(), @[], [NSString stringWithFormat:@"This clip already matches %@.", what]);
+    }
+    NSString *frameName = previous ? @"first frame" : @"last frame";
+    NSString *note;
+    if (keyframed.empty()) {
+        note = [NSString stringWithFormat:@"Matched %@: set as this clip's static values.", what];
+    } else if (statics.empty()) {
+        note = [NSString stringWithFormat:@"Matched %@: set as keyframes on this clip's %@.", what, frameName];
+    } else {
+        note = [NSString stringWithFormat:@"Matched %@: %@ got keyframes on this clip's %@; %@ became static values.",
+                                          what, parameterList(keyframed), frameName, parameterList(statics)];
+    }
+    return [self push:std::make_unique<SetMotionTracks>([self sequenceId], clip->id, std::move(changes),
+                                                        previous ? "Match Previous Clip" : "Match Next Clip")
+              created:nil
+                 note:note];
+}
+
 - (VEEditResult *)setSpeed:(double)speed forClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
     if (!std::isfinite(speed) || speed <= 0) {

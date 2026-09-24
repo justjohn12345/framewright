@@ -489,6 +489,21 @@ NS_SWIFT_UI_ACTOR
                            rangeStart:(CMTime)rangeStart
                              duration:(CMTime)duration
     NS_SWIFT_NAME(applyKenBurns(clip:start:end:interpolation:from:duration:));
+/// The clip on the same track touching `clipID` at `edge`: the one ending exactly where it starts
+/// (VEClipEdgeStart) or starting exactly where it ends (VEClipEdgeEnd); 0 when there is none (a
+/// gap, the end of the track, an unknown clip).
+- (VEClipID)adjacentClipOfClip:(VEClipID)clipID atEdge:(VEClipEdge)edge NS_SWIFT_NAME(adjacentClip(of:at:));
+/// Matches the clip's Motion to its touching neighbour on the same track: VEClipEdgeStart copies
+/// the previous clip's position, scale, rotation and opacity as its last frame shows them
+/// (videoParamsAtTime:, what the monitors draw) onto this clip's first frame; VEClipEdgeEnd copies
+/// the next clip's first frame onto this clip's last frame. A parameter this clip animates gets a
+/// keyframe on that frame (the keyframe already there changes its value); a static parameter gets
+/// the value as its static value (the whole clip shows it). The note says which. One undo step
+/// ("Match Previous Clip" / "Match Next Clip"); when nothing would change it succeeds without an
+/// undo step and the note says so. Refused: VEEditErrorNotAdjacent (no clip touches that edge),
+/// VEEditErrorTrackKindMismatch (an audio clip), VEEditErrorTrackLocked, VEEditErrorClipNotFound.
+- (VEEditResult *)matchMotionOfClip:(VEClipID)clipID
+                   toAdjacentAtEdge:(VEClipEdge)edge NS_SWIFT_NAME(matchMotion(clip:toAdjacentAt:));
 
 - (VEEditResult *)linkClip:(VEClipID)clipID withClip:(VEClipID)otherClipID;
 - (VEEditResult *)unlinkClip:(VEClipID)clipID;
