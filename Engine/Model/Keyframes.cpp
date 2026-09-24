@@ -70,38 +70,6 @@ double segmentValue(const Keyframe &from, const Keyframe &to, double fraction) {
 
 } // namespace
 
-const char *nameOf(MotionParameter parameter) {
-    switch (parameter) {
-    case MotionParameter::X:
-        return "x";
-    case MotionParameter::Y:
-        return "y";
-    case MotionParameter::Scale:
-        return "scale";
-    case MotionParameter::Rotation:
-        return "rotation";
-    case MotionParameter::Opacity:
-        return "opacity";
-    }
-    return "x";
-}
-
-const char *displayNameOf(MotionParameter parameter) {
-    switch (parameter) {
-    case MotionParameter::X:
-        return "Position X";
-    case MotionParameter::Y:
-        return "Position Y";
-    case MotionParameter::Scale:
-        return "Scale";
-    case MotionParameter::Rotation:
-        return "Rotation";
-    case MotionParameter::Opacity:
-        return "Opacity";
-    }
-    return "Position X";
-}
-
 const char *nameOf(KeyframeInterpolation interpolation) {
     switch (interpolation) {
     case KeyframeInterpolation::Hold:
@@ -186,37 +154,9 @@ bool operator==(const Keyframe &a, const Keyframe &b) {
     return identical(a.time, b.time) && a.value == b.value && a.interpolation == b.interpolation && a.curve == b.curve;
 }
 
-KeyframeTrack &MotionKeyframes::track(MotionParameter parameter) {
-    switch (parameter) {
-    case MotionParameter::X:
-        return x;
-    case MotionParameter::Y:
-        return y;
-    case MotionParameter::Scale:
-        return scale;
-    case MotionParameter::Rotation:
-        return rotation;
-    case MotionParameter::Opacity:
-        return opacity;
-    }
-    return x;
-}
-
-const KeyframeTrack &MotionKeyframes::track(MotionParameter parameter) const {
-    return const_cast<MotionKeyframes *>(this)->track(parameter);
-}
-
-bool MotionKeyframes::empty() const {
-    return x.empty() && y.empty() && scale.empty() && rotation.empty() && opacity.empty();
-}
-
-std::size_t MotionKeyframes::count() const {
-    return x.size() + y.size() + scale.size() + rotation.size() + opacity.size();
-}
-
-double evaluateTrack(const KeyframeTrack &track, double staticValue, const ExactTime &time) {
+double evaluateTrack(const KeyframeTrack &track, double emptyValue, const ExactTime &time) {
     if (track.empty()) {
-        return staticValue;
+        return emptyValue;
     }
     if (time.compare(track.front().time) <= 0) {
         return track.front().value;
@@ -237,6 +177,19 @@ double evaluateTrack(const KeyframeTrack &track, double staticValue, const Exact
         return from.value; // only on 128-bit overflow of the exact arithmetic
     }
     return segmentValue(from, to, std::clamp(ratio(*into, *length), 0.0, 1.0));
+}
+
+double evaluateTrackFromLeft(const KeyframeTrack &track, double emptyValue, const ExactTime &time) {
+    if (track.size() >= 2 && time.compare(track.front().time) > 0 && time.compare(track.back().time) <= 0) {
+        // The keyframe the segment ending at `time` leads to, when `time` is on one.
+        const auto on = std::lower_bound(track.begin(), track.end(), time, [](const Keyframe &k, const ExactTime &t) {
+            return t.compare(k.time) > 0;
+        });
+        if (on != track.end() && time.compare(on->time) == 0 && on != track.begin()) {
+            return segmentValue(*(on - 1), *on, 1.0);
+        }
+    }
+    return evaluateTrack(track, emptyValue, time);
 }
 
 std::optional<std::size_t> keyframeIndexAt(const KeyframeTrack &track, CMTime time) {
@@ -267,7 +220,7 @@ void upsertKeyframe(KeyframeTrack &track, const Keyframe &keyframe) {
     }
 }
 
-std::size_t insertKeyframeKeepingValues(KeyframeTrack &track, double staticValue, CMTime time) {
+std::size_t insertKeyframeKeepingValues(KeyframeTrack &track, double emptyValue, CMTime time) {
     if (const auto existing = keyframeIndexAt(track, time)) {
         return *existing;
     }
@@ -275,7 +228,7 @@ std::size_t insertKeyframeKeepingValues(KeyframeTrack &track, double staticValue
     keyframe.time = time;
     keyframe.interpolation = KeyframeInterpolation::Linear;
     if (track.empty()) {
-        keyframe.value = staticValue;
+        keyframe.value = emptyValue;
         track.push_back(keyframe);
         return 0;
     }
@@ -293,7 +246,7 @@ std::size_t insertKeyframeKeepingValues(KeyframeTrack &track, double staticValue
         return track.size() - 1;
     }
     // Inside a segment: divide it exactly as a split would (the boundary once).
-    TrackSplit pieces = splitTrack(track, staticValue, time);
+    TrackSplit pieces = splitTrack(track, emptyValue, time);
     const std::size_t index = pieces.left.size() - 1;
     KeyframeTrack merged = std::move(pieces.left);
     merged.insert(merged.end(), pieces.right.begin() + 1, pieces.right.end());
@@ -301,10 +254,10 @@ std::size_t insertKeyframeKeepingValues(KeyframeTrack &track, double staticValue
     return index;
 }
 
-TrackSplit splitTrack(const KeyframeTrack &track, double staticValue, CMTime at) {
+TrackSplit splitTrack(const KeyframeTrack &track, double emptyValue, CMTime at) {
     TrackSplit split;
-    split.leftStatic = staticValue;
-    split.rightStatic = staticValue;
+    split.leftStatic = emptyValue;
+    split.rightStatic = emptyValue;
     if (track.empty()) {
         return split;
     }
@@ -382,25 +335,59 @@ bool shiftTrack(KeyframeTrack &track, CMTime delta) {
     return true;
 }
 
-bool isValidMotionValue(MotionParameter parameter, double value) {
-    if (!std::isfinite(value)) {
-        return false;
+std::optional<KeyframeTrack> rescaleTrack(const KeyframeTrack &track, CMTime numerator, CMTime denominator) {
+    const auto num = ExactTime::from(numerator);
+    const auto den = ExactTime::from(denominator);
+    if (!num || !den || num->numerator() <= 0 || den->numerator() <= 0) {
+        return std::nullopt;
     }
-    switch (parameter) {
-    case MotionParameter::Scale:
-        return value >= 0.0;
-    case MotionParameter::Opacity:
-        return value >= 0.0 && value <= 1.0;
-    case MotionParameter::X:
-    case MotionParameter::Y:
-    case MotionParameter::Rotation:
-        break;
+    // factor = num / den as an exact fraction: (a/b) / (c/d) = (a d) / (b c).
+    Int128 factorNum = 0;
+    Int128 factorDen = 0;
+    if (__builtin_mul_overflow(num->numerator(), den->denominator(), &factorNum) ||
+        __builtin_mul_overflow(num->denominator(), den->numerator(), &factorDen)) {
+        return std::nullopt;
     }
-    return true;
+    const auto factor = ExactTime::fraction(factorNum, factorDen);
+    if (!factor) {
+        return std::nullopt;
+    }
+    KeyframeTrack scaled = track;
+    for (Keyframe &keyframe : scaled) {
+        const auto time = ExactTime::from(keyframe.time);
+        if (!time) {
+            return std::nullopt;
+        }
+        Int128 productNum = 0;
+        Int128 productDen = 0;
+        if (__builtin_mul_overflow(time->numerator(), factor->numerator(), &productNum) ||
+            __builtin_mul_overflow(time->denominator(), factor->denominator(), &productDen)) {
+            return std::nullopt;
+        }
+        const auto product = ExactTime::fraction(productNum, productDen);
+        if (!product) {
+            return std::nullopt;
+        }
+        if (const auto exact = product->toTime()) {
+            keyframe.time = *exact;
+        } else {
+            const auto tick = product->frameIndex(CMTimeMake(1, kPreciseTimescale), SnapMode::Round);
+            const auto rounded = tick ? checkedTimeForFrame(*tick, CMTimeMake(1, kPreciseTimescale)) : std::nullopt;
+            if (!rounded) {
+                return std::nullopt;
+            }
+            keyframe.time = *rounded;
+        }
+    }
+    for (std::size_t i = 1; i < scaled.size(); ++i) {
+        if (!(scaled[i - 1].time < scaled[i].time)) {
+            return std::nullopt;
+        }
+    }
+    return scaled;
 }
 
-std::optional<std::string> keyframeTrackProblem(const KeyframeTrack &track, MotionParameter parameter) {
-    const std::string what = std::string(displayNameOf(parameter)) + " keyframe";
+std::optional<std::string> keyframeTimesProblem(const KeyframeTrack &track, const std::string &what) {
     for (std::size_t i = 0; i < track.size(); ++i) {
         const Keyframe &keyframe = track[i];
         if (auto problem = modelTimeProblem(keyframe.time, what + " time")) {
@@ -410,8 +397,8 @@ std::optional<std::string> keyframeTrackProblem(const KeyframeTrack &track, Moti
             return what + " times must increase strictly (" + describe(track[i - 1].time) + " then " +
                    describe(keyframe.time) + ")";
         }
-        if (!isValidMotionValue(parameter, keyframe.value)) {
-            return what + " at " + describe(keyframe.time) + " has the invalid value " + std::to_string(keyframe.value);
+        if (!std::isfinite(keyframe.value)) {
+            return what + " at " + describe(keyframe.time) + " has a non-finite value";
         }
         if (keyframe.interpolation == KeyframeInterpolation::Bezier && !keyframe.curve.isValid()) {
             return what + " at " + describe(keyframe.time) + " has an invalid timing curve";
@@ -423,20 +410,6 @@ std::optional<std::string> keyframeTrackProblem(const KeyframeTrack &track, Moti
         }
     }
     return std::nullopt;
-}
-
-double clampMotionValue(MotionParameter parameter, double value) {
-    switch (parameter) {
-    case MotionParameter::Scale:
-        return std::max(0.0, value);
-    case MotionParameter::Opacity:
-        return std::clamp(value, 0.0, 1.0);
-    case MotionParameter::X:
-    case MotionParameter::Y:
-    case MotionParameter::Rotation:
-        break;
-    }
-    return value;
 }
 
 } // namespace ve

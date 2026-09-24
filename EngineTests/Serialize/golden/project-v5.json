@@ -1,0 +1,653 @@
+{
+  "activeSequenceId": 6,
+  "assets": [
+    {
+      "audioChannels": 2,
+      "audioSampleRate": 48000,
+      "backendHint": "apple",
+      "duration": {
+        "timescale": 600,
+        "value": 36000
+      },
+      "frameDuration": {
+        "timescale": 600,
+        "value": 20
+      },
+      "hardwareDecode": true,
+      "height": 1080,
+      "id": 1,
+      "isVFR": false,
+      "kind": "av",
+      "name": "av30.mov",
+      "rotationDegrees": 90,
+      "url": "file:///media/av30.mov",
+      "videoDuration": null,
+      "width": 1920
+    },
+    {
+      "audioChannels": 2,
+      "audioSampleRate": 48000,
+      "backendHint": "",
+      "duration": {
+        "timescale": 24000,
+        "value": 480000
+      },
+      "frameDuration": {
+        "timescale": 24000,
+        "value": 1001
+      },
+      "hardwareDecode": false,
+      "height": 2160,
+      "id": 2,
+      "isVFR": false,
+      "kind": "av",
+      "name": "av24.mp4",
+      "rotationDegrees": 0,
+      "url": "file:///media/av24.mp4",
+      "videoDuration": null,
+      "width": 3840
+    },
+    {
+      "audioChannels": 0,
+      "audioSampleRate": 0,
+      "backendHint": "ffmpeg",
+      "duration": {
+        "timescale": 60,
+        "value": 600
+      },
+      "frameDuration": {
+        "timescale": 60,
+        "value": 1
+      },
+      "hardwareDecode": false,
+      "height": 720,
+      "id": 3,
+      "isVFR": true,
+      "kind": "video",
+      "name": "video60.mkv",
+      "rotationDegrees": 0,
+      "url": "file:///media/video60.mkv",
+      "videoDuration": null,
+      "width": 1280
+    },
+    {
+      "audioChannels": 2,
+      "audioSampleRate": 48000,
+      "backendHint": "",
+      "duration": {
+        "timescale": 48000,
+        "value": 1440000
+      },
+      "frameDuration": {
+        "flags": 17,
+        "timescale": 0,
+        "value": 0
+      },
+      "hardwareDecode": false,
+      "height": 0,
+      "id": 4,
+      "isVFR": false,
+      "kind": "audio",
+      "name": "music.m4a",
+      "rotationDegrees": 0,
+      "url": "file:///media/music.m4a",
+      "videoDuration": null,
+      "width": 0
+    },
+    {
+      "audioChannels": 0,
+      "audioSampleRate": 0,
+      "backendHint": "",
+      "duration": null,
+      "frameDuration": null,
+      "hardwareDecode": false,
+      "height": 1080,
+      "id": 5,
+      "isVFR": false,
+      "kind": "still",
+      "name": "title.png",
+      "rotationDegrees": 0,
+      "url": "file:///media/title.png",
+      "videoDuration": null,
+      "width": 1920
+    }
+  ],
+  "name": "Round trip ✓",
+  "nextId": 28,
+  "schemaVersion": 5,
+  "sequences": [
+    {
+      "audioSampleRate": 48000,
+      "audioTracks": [
+        {
+          "clips": [
+            {
+              "assetId": 1,
+              "audio": {
+                "gainDb": 0.0
+              },
+              "duration": {
+                "timescale": 30,
+                "value": 60
+              },
+              "id": 12,
+              "isStill": false,
+              "linkedClipId": 11,
+              "sourceIn": {
+                "timescale": 30,
+                "value": 30
+              },
+              "speed": {
+                "den": 1,
+                "num": 1
+              },
+              "timelineStart": {
+                "timescale": 30,
+                "value": 0
+              },
+              "trackId": 9,
+              "video": {
+                "opacity": 1.0,
+                "rotationDegrees": 0.0,
+                "scale": 1.0,
+                "x": 0.0,
+                "y": 0.0
+              }
+            }
+          ],
+          "id": 9,
+          "kind": "audio",
+          "locked": true,
+          "muted": false,
+          "name": "Dialogue \"main\"",
+          "solo": false
+        },
+        {
+          "clips": [
+            {
+              "assetId": 4,
+              "audio": {
+                "gainDb": -4.5
+              },
+              "duration": {
+                "timescale": 30,
+                "value": 90
+              },
+              "id": 20,
+              "isStill": false,
+              "linkedClipId": null,
+              "sourceIn": {
+                "timescale": 30,
+                "value": 0
+              },
+              "spans": [
+                {
+                  "edge": "head",
+                  "end": {
+                    "timescale": 30,
+                    "value": 10
+                  },
+                  "id": 21,
+                  "kind": "transition",
+                  "lane": 0,
+                  "start": {
+                    "timescale": 1,
+                    "value": 0
+                  },
+                  "transition": "crossDissolve"
+                },
+                {
+                  "edge": "tail",
+                  "end": {
+                    "timescale": 1,
+                    "value": 0
+                  },
+                  "id": 22,
+                  "kind": "transition",
+                  "lane": 0,
+                  "start": {
+                    "timescale": 48000,
+                    "value": -7
+                  },
+                  "transition": "crossDissolve"
+                },
+                {
+                  "end": {
+                    "timescale": 2,
+                    "value": 1
+                  },
+                  "id": 23,
+                  "kind": "gain",
+                  "lane": 1,
+                  "start": {
+                    "timescale": 6,
+                    "value": 1
+                  },
+                  "tracks": {
+                    "gain": [
+                      {
+                        "interpolation": "easeIn",
+                        "time": {
+                          "timescale": 1,
+                          "value": 0
+                        },
+                        "value": 0.0
+                      },
+                      {
+                        "interpolation": "linear",
+                        "time": {
+                          "timescale": 3,
+                          "value": 1
+                        },
+                        "value": -12.0
+                      }
+                    ]
+                  }
+                }
+              ],
+              "speed": {
+                "den": 3,
+                "num": 1
+              },
+              "timelineStart": {
+                "timescale": 30,
+                "value": 0
+              },
+              "trackId": 10,
+              "video": {
+                "opacity": 1.0,
+                "rotationDegrees": 0.0,
+                "scale": 1.0,
+                "x": 0.0,
+                "y": 0.0
+              }
+            }
+          ],
+          "id": 10,
+          "kind": "audio",
+          "locked": false,
+          "muted": false,
+          "name": "A2",
+          "solo": false
+        }
+      ],
+      "frameDuration": {
+        "timescale": 30,
+        "value": 1
+      },
+      "height": 1080,
+      "id": 6,
+      "name": "Main",
+      "videoTracks": [
+        {
+          "clips": [
+            {
+              "assetId": 1,
+              "audio": {
+                "gainDb": 0.0
+              },
+              "duration": {
+                "timescale": 30,
+                "value": 60
+              },
+              "id": 11,
+              "isStill": false,
+              "linkedClipId": 12,
+              "sourceIn": {
+                "timescale": 30,
+                "value": 30
+              },
+              "spans": [
+                {
+                  "edge": "tail",
+                  "end": {
+                    "timescale": 30,
+                    "value": 4
+                  },
+                  "id": 14,
+                  "kind": "transition",
+                  "lane": 0,
+                  "start": {
+                    "timescale": 30,
+                    "value": -8
+                  },
+                  "transition": "crossDissolve"
+                },
+                {
+                  "end": {
+                    "timescale": 30,
+                    "value": 80
+                  },
+                  "id": 24,
+                  "kind": "motion",
+                  "lane": 1,
+                  "start": {
+                    "timescale": 30,
+                    "value": 40
+                  },
+                  "tracks": {
+                    "x": [
+                      {
+                        "curve": [
+                          0.40099591877152363,
+                          0.0,
+                          0.7131155429287429,
+                          0.43784066698373864
+                        ],
+                        "interpolation": "bezier",
+                        "time": {
+                          "timescale": 1,
+                          "value": 0
+                        },
+                        "value": -120.5
+                      },
+                      {
+                        "curve": [
+                          0.30863819677842214,
+                          0.4172711984918015,
+                          0.5685975512629142,
+                          1.0
+                        ],
+                        "interpolation": "bezier",
+                        "time": {
+                          "timescale": 30,
+                          "value": 15
+                        },
+                        "value": -14.956125743169011
+                      },
+                      {
+                        "interpolation": "linear",
+                        "time": {
+                          "timescale": 30,
+                          "value": 40
+                        },
+                        "value": 240.0
+                      }
+                    ],
+                    "y": [
+                      {
+                        "interpolation": "hold",
+                        "time": {
+                          "timescale": 1,
+                          "value": 0
+                        },
+                        "value": 10.0
+                      },
+                      {
+                        "interpolation": "linear",
+                        "time": {
+                          "timescale": 30,
+                          "value": 40
+                        },
+                        "value": -10.0
+                      }
+                    ]
+                  }
+                },
+                {
+                  "end": {
+                    "timescale": 30,
+                    "value": 60
+                  },
+                  "id": 25,
+                  "kind": "opacity",
+                  "lane": 2,
+                  "start": {
+                    "timescale": 30,
+                    "value": 30
+                  },
+                  "tracks": {
+                    "opacity": [
+                      {
+                        "curve": [
+                          0.3,
+                          0.1,
+                          0.6,
+                          0.95
+                        ],
+                        "interpolation": "bezier",
+                        "time": {
+                          "timescale": 1,
+                          "value": 0
+                        },
+                        "value": 0.2
+                      },
+                      {
+                        "interpolation": "linear",
+                        "time": {
+                          "timescale": 30,
+                          "value": 30
+                        },
+                        "value": 1.0
+                      }
+                    ]
+                  }
+                }
+              ],
+              "speed": {
+                "den": 1,
+                "num": 1
+              },
+              "timelineStart": {
+                "timescale": 30,
+                "value": 0
+              },
+              "trackId": 7,
+              "video": {
+                "opacity": 0.8,
+                "rotationDegrees": 33.3,
+                "scale": 1.1,
+                "x": 12.25,
+                "y": -8.5
+              }
+            },
+            {
+              "assetId": 1,
+              "audio": {
+                "gainDb": 0.0
+              },
+              "duration": {
+                "timescale": 30,
+                "value": 60
+              },
+              "id": 13,
+              "isStill": false,
+              "linkedClipId": null,
+              "sourceIn": {
+                "timescale": 30,
+                "value": 300
+              },
+              "speed": {
+                "den": 1,
+                "num": 1
+              },
+              "timelineStart": {
+                "timescale": 30,
+                "value": 60
+              },
+              "trackId": 7,
+              "video": {
+                "opacity": 1.0,
+                "rotationDegrees": 0.0,
+                "scale": 1.0,
+                "x": 0.0,
+                "y": 0.0
+              }
+            }
+          ],
+          "id": 7,
+          "kind": "video",
+          "locked": false,
+          "muted": false,
+          "name": "V1",
+          "solo": false
+        },
+        {
+          "clips": [
+            {
+              "assetId": 3,
+              "audio": {
+                "gainDb": 0.0
+              },
+              "duration": {
+                "timescale": 30,
+                "value": 45
+              },
+              "id": 15,
+              "isStill": false,
+              "linkedClipId": null,
+              "sourceIn": {
+                "timescale": 30,
+                "value": 0
+              },
+              "speed": {
+                "den": 2,
+                "num": 1
+              },
+              "timelineStart": {
+                "timescale": 30,
+                "value": 30
+              },
+              "trackId": 8,
+              "video": {
+                "opacity": 1.0,
+                "rotationDegrees": 0.0,
+                "scale": 1.0,
+                "x": 0.0,
+                "y": 0.0
+              }
+            },
+            {
+              "assetId": 5,
+              "audio": {
+                "gainDb": 0.0
+              },
+              "duration": {
+                "timescale": 30,
+                "value": 150
+              },
+              "id": 16,
+              "isStill": true,
+              "linkedClipId": null,
+              "sourceIn": {
+                "timescale": 1,
+                "value": 0
+              },
+              "spans": [
+                {
+                  "edge": "head",
+                  "end": {
+                    "timescale": 30,
+                    "value": 12
+                  },
+                  "id": 17,
+                  "kind": "transition",
+                  "lane": 0,
+                  "start": {
+                    "timescale": 1,
+                    "value": 0
+                  },
+                  "transition": "crossDissolve"
+                },
+                {
+                  "edge": "tail",
+                  "end": {
+                    "timescale": 1,
+                    "value": 0
+                  },
+                  "id": 18,
+                  "kind": "transition",
+                  "lane": 0,
+                  "start": {
+                    "timescale": 30,
+                    "value": -20
+                  },
+                  "transition": "crossDissolve"
+                },
+                {
+                  "end": {
+                    "timescale": 30,
+                    "value": 90
+                  },
+                  "id": 19,
+                  "kind": "motion",
+                  "lane": 3,
+                  "start": {
+                    "timescale": 30,
+                    "value": 30
+                  },
+                  "tracks": {
+                    "rotation": [
+                      {
+                        "interpolation": "easeOut",
+                        "time": {
+                          "timescale": 1,
+                          "value": 0
+                        },
+                        "value": 0.0
+                      },
+                      {
+                        "interpolation": "linear",
+                        "time": {
+                          "timescale": 30,
+                          "value": 60
+                        },
+                        "value": 45.0
+                      }
+                    ]
+                  }
+                }
+              ],
+              "speed": {
+                "den": 1,
+                "num": 1
+              },
+              "timelineStart": {
+                "timescale": 30,
+                "value": 100
+              },
+              "trackId": 8,
+              "video": {
+                "opacity": 1.0,
+                "rotationDegrees": 0.0,
+                "scale": 1.0,
+                "x": 0.0,
+                "y": 0.0
+              }
+            }
+          ],
+          "id": 8,
+          "kind": "video",
+          "locked": false,
+          "muted": true,
+          "name": "V2",
+          "solo": true
+        }
+      ],
+      "width": 1920
+    },
+    {
+      "audioSampleRate": 48000,
+      "audioTracks": [],
+      "frameDuration": {
+        "timescale": 30000,
+        "value": 1001
+      },
+      "height": 720,
+      "id": 26,
+      "name": "Second",
+      "videoTracks": [
+        {
+          "clips": [],
+          "id": 27,
+          "kind": "video",
+          "locked": false,
+          "muted": false,
+          "name": "V1",
+          "solo": false
+        }
+      ],
+      "width": 1280
+    }
+  ]
+}

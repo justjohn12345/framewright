@@ -93,31 +93,56 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
     if (auto problem = videoParamsProblem(clip.video)) {
         return where + ": " + *problem;
     }
-    if (track.kind != TrackKind::Video && clip.video.isAnimated()) {
-        return where + ": only clips on video tracks have Motion keyframes";
-    }
-    const AudioParams &a = clip.audio;
-    if (!std::isfinite(a.gainDb)) {
+    if (!std::isfinite(clip.audio.gainDb)) {
         return where + ": non-finite gain";
     }
-    for (const auto &[fade, what] : {std::pair{a.fadeInDuration, "fade-in"}, std::pair{a.fadeOutDuration, "fade-out"}}) {
-        if (auto problem = modelTimeProblem(fade, what)) {
+    int heads = 0;
+    int tails = 0;
+    for (const EffectSpan &span : clip.spans) {
+        if (span.isTransition() || span.lane == kTransitionLane) {
+            if (!span.isTransition() || span.lane != kTransitionLane) {
+                return where + ": span " + std::to_string(span.id.value()) +
+                       (span.isTransition() ? ": a transition lies on lane 0 only, found lane " + std::to_string(span.lane)
+                                            : std::string(": lane 0 holds transitions only"));
+            }
+            if (!span.id) {
+                return where + ": a transition span has an invalid id";
+            }
+            if (++(span.edge == ClipEdge::Head ? heads : tails) > 1) {
+                return where + ": more than one transition at its " + nameOf(span.edge);
+            }
+            continue;
+        }
+        if (auto problem = effectSpanProblem(span, clip, track.kind)) {
             return where + ": " + *problem;
         }
-        if (fade < kCMTimeZero) {
-            return where + ": " + what + " " + describe(fade) + " is negative";
+    }
+    // Spans of one lane never overlap (effect spans are sorted by start within a lane).
+    for (std::size_t i = 0; i < clip.spans.size(); ++i) {
+        const EffectSpan &a = clip.spans[i];
+        if (a.isTransition()) {
+            continue;
         }
-        if (fade > clip.timelineDuration) {
-            return where + ": " + what + " " + describe(fade) + " is longer than the clip (" +
-                   describe(clip.timelineDuration) + ")";
+        for (std::size_t j = i + 1; j < clip.spans.size(); ++j) {
+            const EffectSpan &b = clip.spans[j];
+            if (b.isTransition() || b.lane != a.lane) {
+                continue;
+            }
+            if (a.start < b.end && b.start < a.end) {
+                return where + ": spans " + std::to_string(a.id.value()) + " and " + std::to_string(b.id.value()) +
+                       " overlap on lane " + std::to_string(a.lane);
+            }
         }
     }
-    const auto fadeIn = ExactTime::from(a.fadeInDuration);
-    const auto fadeOut = ExactTime::from(a.fadeOutDuration);
-    const auto fades = fadeIn && fadeOut ? fadeIn->plus(*fadeOut) : std::nullopt;
-    if (!fades || fades->compare(clip.timelineDuration) > 0) {
-        return where + ": fade-in " + describe(a.fadeInDuration) + " and fade-out " + describe(a.fadeOutDuration) +
-               " overlap (together longer than the clip, " + describe(clip.timelineDuration) + ")";
+    for (std::size_t i = 1; i < clip.spans.size(); ++i) {
+        const EffectSpan &a = clip.spans[i - 1];
+        const EffectSpan &b = clip.spans[i];
+        const bool ordered = a.lane < b.lane ||
+                             (a.lane == b.lane && (a.isTransition() ? a.edge == ClipEdge::Head && b.edge == ClipEdge::Tail
+                                                                    : a.start < b.start));
+        if (!ordered) {
+            return where + ": spans are not in lane and time order";
+        }
     }
     if (clip.linkedClipId) {
         const ClipId partnerId = *clip.linkedClipId;
@@ -161,12 +186,42 @@ std::optional<std::string> videoParamsProblem(const VideoParams &v) {
     if (v.scale < 0.0 || v.opacity < 0.0 || v.opacity > 1.0) {
         return std::string("video scale must be >= 0 and opacity within [0, 1]");
     }
-    for (const MotionParameter parameter : kMotionParameters) {
-        if (auto problem = keyframeTrackProblem(v.keyframes.track(parameter), parameter)) {
-            return problem;
+    return std::nullopt;
+}
+
+std::optional<std::string> effectSpanProblem(const EffectSpan &span, const Clip &clip, TrackKind kind) {
+    const std::string where = "span " + std::to_string(span.id.value());
+    if (!span.id) {
+        return where + ": invalid id";
+    }
+    if (span.isTransition() || span.lane < kFirstEffectLane || span.lane > kLastLane) {
+        return where + ": lane " + std::to_string(span.lane) + " is not an effect lane (1 to " +
+               std::to_string(kLastLane) + ")";
+    }
+    const bool videoKind = span.kind == SpanKind::Motion || span.kind == SpanKind::Opacity;
+    if (videoKind != (kind == TrackKind::Video)) {
+        return where + ": a " + nameOf(span.kind) + " span on " + nameOf(kind) + " track";
+    }
+    if (span.edge != ClipEdge::Tail || span.transition != TransitionKind::CrossDissolve) {
+        return where + ": an effect span has no transition edge or kind";
+    }
+    for (const auto &[time, what] : {std::pair{span.start, "start"}, std::pair{span.end, "end"}}) {
+        if (auto problem = modelTimeProblem(time, what)) {
+            return where + ": " + *problem;
         }
     }
-    return std::nullopt;
+    if (!(span.start < span.end)) {
+        return where + ": its range " + describe(span.start) + " - " + describe(span.end) + " is empty";
+    }
+    const auto bounds = clip.spanBounds();
+    if (!bounds) {
+        return where + ": its clip's source range overflows exact arithmetic";
+    }
+    if (span.start < bounds->first || bounds->second < span.end) {
+        return where + ": " + describe(span.start) + " - " + describe(span.end) + " is outside its clip's source range (" +
+               describe(bounds->first) + " - " + describe(bounds->second) + ")";
+    }
+    return spanTracksProblem(span);
 }
 
 std::optional<std::string> validateAsset(const MediaAsset &asset) {
@@ -229,58 +284,100 @@ CMTime mediaEndFor(const MediaAsset &asset, TrackKind kind) {
     return kind == TrackKind::Video ? asset.videoEnd() : asset.duration;
 }
 
-std::optional<TransitionIssue> checkTransition(const Sequence &sequence, const Project &project,
-                                               const Transition &transition) {
+std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const Track &track, const Clip &owner,
+                                                   const EffectSpan &span, CMTime frameDuration) {
     using K = TransitionIssueKind;
-    const std::string where = "transition " + std::to_string(transition.id.value());
-    if (!transition.id) {
-        return TransitionIssue{K::Structure, where + ": invalid id"};
+    const std::string where = "transition " + std::to_string(span.id.value());
+    if (!span.isTransition() || span.lane != kTransitionLane || !span.tracks.empty()) {
+        return TransitionIssue{K::Structure, where + ": not a lane-0 transition span without keyframes"};
     }
-    const Track *track = sequence.findTrack(transition.trackId);
-    if (!track) {
-        return TransitionIssue{K::Structure, where + ": unknown track " + std::to_string(transition.trackId.value())};
-    }
-    if (transition.fromClipId == transition.toClipId) {
-        return TransitionIssue{K::Structure, where + ": joins a clip to itself"};
-    }
-    const Clip *from = track->find(transition.fromClipId);
-    const Clip *to = track->find(transition.toClipId);
-    if (!from || !to) {
-        return TransitionIssue{K::Structure,
-                               where + ": its clips are not both on track " + std::to_string(track->id.value())};
-    }
-    if (from->timelineEnd() != to->timelineStart) {
-        return TransitionIssue{K::NotAdjacent,
-                               where + ": " + clipName(from->id) + " and " + clipName(to->id) + " are not adjacent"};
-    }
-    if (!isExactModelTime(transition.duration) || !isPositive(transition.duration) ||
-        !isOnFrameGrid(transition.duration, sequence.frameDuration)) {
-        return TransitionIssue{K::BadDuration, where + ": duration " + describe(transition.duration) +
-                                                   " is not a positive whole number of frames"};
-    }
-    const auto range = sequence.transitionRange(transition);
-    if (!range) {
-        return TransitionIssue{K::Structure, where + ": cannot compute its range"};
-    }
-    if (range->start < from->timelineStart || range->end > to->timelineEnd()) {
-        return TransitionIssue{K::TooLong, where + ": longer than the clips it joins"};
-    }
-    if (!from->isStill) {
-        const MediaAsset *asset = project.findAsset(from->assetId);
-        const auto sourceEnd = from->exactSourceTimeAt(range->end);
-        const CMTime mediaEnd = asset ? mediaEndFor(*asset, track->kind) : kCMTimeInvalid;
-        if (!asset || !isNumeric(mediaEnd) || !sourceEnd || sourceEnd->compare(mediaEnd) > 0) {
-            return TransitionIssue{K::InsufficientHandles,
-                                   where + ": " + clipName(from->id) + " lacks media after its out point for the transition",
-                                   from->id};
+    for (const auto &[time, what] : {std::pair{span.start, "start"}, std::pair{span.end, "end"}}) {
+        if (auto problem = modelTimeProblem(time, what)) {
+            return TransitionIssue{K::BadDuration, where + ": " + *problem};
         }
     }
-    if (!to->isStill) {
-        const auto sourceStart = to->exactSourceTimeAt(range->start);
+    if (!(span.start < span.end)) {
+        return TransitionIssue{K::BadDuration, where + ": its range " + describe(span.start) + " - " +
+                                                   describe(span.end) + " is empty"};
+    }
+    const CMTime length = owner.timelineDuration;
+    const auto placement = placeTransition(track, owner, span);
+    if (!placement) {
+        return TransitionIssue{K::Structure, where + ": cannot compute its range"};
+    }
+    const EffectSpan *other = owner.transitionAt(span.edge == ClipEdge::Head ? ClipEdge::Tail : ClipEdge::Head);
+    if (span.edge == ClipEdge::Head) {
+        if (span.start != kCMTimeZero) {
+            return TransitionIssue{K::Structure, where + ": a fade in starts at its clip's start"};
+        }
+        if (length < span.end) {
+            return TransitionIssue{K::TooLong, where + ": longer than its clip"};
+        }
+        if (touchingClip(track, owner, ClipEdge::Head) != nullptr) {
+            return TransitionIssue{K::Touching, where + ": another clip touches the start of clip " +
+                                                    std::to_string(owner.id.value()) +
+                                                    ", so the cut belongs to that clip (a fade in needs nothing "
+                                                    "before it)"};
+        }
+        return std::nullopt;
+    }
+    if (kCMTimeZero < span.start || span.end < kCMTimeZero) {
+        return TransitionIssue{K::Structure, where + ": a tail transition starts at or before its clip's end and "
+                                                 "ends at or after it"};
+    }
+    const auto inside = checkedNegate(span.start);
+    if (!inside || length < *inside) {
+        return TransitionIssue{K::TooLong, where + ": longer than its clip"};
+    }
+    if (other != nullptr) {
+        const auto room = checkedSubtract(length, *inside);
+        if (!room || *room < other->end) {
+            return TransitionIssue{K::Overlap, where + ": meets the fade in at the start of clip " +
+                                                   std::to_string(owner.id.value())};
+        }
+    }
+    if (placement->role == TransitionRole::FadeOut) {
+        return std::nullopt;
+    }
+    // A cross dissolve into the clip touching the owner's end.
+    const Clip *partner = placement->partner;
+    if (partner == nullptr) {
+        return TransitionIssue{K::NotAdjacent, where + ": runs past the end of clip " + std::to_string(owner.id.value()) +
+                                                   " but no clip touches that end"};
+    }
+    if (!isOnFrameGrid(span.start, frameDuration) || !isOnFrameGrid(span.end, frameDuration)) {
+        return TransitionIssue{K::BadDuration, where + ": a cross dissolve covers whole sequence frames on each side "
+                                                   "of its cut (" + describe(span.start) + " - " +
+                                                   describe(span.end) + ")"};
+    }
+    if (partner->timelineDuration < span.end) {
+        return TransitionIssue{K::TooLong, where + ": longer than clip " + std::to_string(partner->id.value())};
+    }
+    if (const EffectSpan *partnerTail = partner->transitionAt(ClipEdge::Tail)) {
+        const auto partnerRoom = checkedAdd(partner->timelineDuration, partnerTail->start);
+        if (!partnerRoom || *partnerRoom < span.end) {
+            return TransitionIssue{K::Overlap, where + ": meets the transition at the end of clip " +
+                                                   std::to_string(partner->id.value())};
+        }
+    }
+    if (!owner.isStill) {
+        const MediaAsset *asset = project.findAsset(owner.assetId);
+        const auto sourceEnd = owner.exactSourceTimeAt(placement->range.end);
+        const CMTime mediaEnd = asset ? mediaEndFor(*asset, track.kind) : kCMTimeInvalid;
+        if (!asset || !isNumeric(mediaEnd) || !sourceEnd || sourceEnd->compare(mediaEnd) > 0) {
+            return TransitionIssue{K::InsufficientHandles,
+                                   where + ": clip " + std::to_string(owner.id.value()) +
+                                       " lacks media after its out point for the transition",
+                                   owner.id};
+        }
+    }
+    if (!partner->isStill) {
+        const auto sourceStart = partner->exactSourceTimeAt(placement->range.start);
         if (!sourceStart || sourceStart->compare(kCMTimeZero) < 0) {
             return TransitionIssue{K::InsufficientHandles,
-                                   where + ": " + clipName(to->id) + " lacks media before its in point for the transition",
-                                   to->id};
+                                   where + ": clip " + std::to_string(partner->id.value()) +
+                                       " lacks media before its in point for the transition",
+                                   partner->id};
         }
     }
     return std::nullopt;
@@ -335,26 +432,22 @@ std::optional<std::string> validateSequence(const Sequence &sequence, const Proj
         }
     }
 
-    std::unordered_set<TransitionId> transitionIds;
-    std::unordered_map<ClipId, TimeRange> outgoingRanges; // clip -> range of the transition at its end
-    std::unordered_map<ClipId, TimeRange> incomingRanges; // clip -> range of the transition at its start
-    for (const Transition &transition : sequence.transitions) {
-        if (!transitionIds.insert(transition.id).second) {
-            return where + ": duplicate transition id " + std::to_string(transition.id.value());
-        }
-        if (auto issue = checkTransition(sequence, project, transition)) {
-            return where + ": " + issue->message;
-        }
-        const TimeRange range = *sequence.transitionRange(transition);
-        if (!outgoingRanges.emplace(transition.fromClipId, range).second ||
-            !incomingRanges.emplace(transition.toClipId, range).second) {
-            return where + ": more than one transition on the cut at " + describe(range.start);
-        }
-    }
-    for (const auto &[clipId, tailRange] : outgoingRanges) {
-        const auto head = incomingRanges.find(clipId);
-        if (head != incomingRanges.end() && head->second.end > tailRange.start) {
-            return where + ": transitions overlap on " + clipName(clipId);
+    std::unordered_set<SpanId> spanIds;
+    for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
+        for (const Track &track : sequence.tracks(kind)) {
+            for (const Clip &clip : track.clips) {
+                for (const EffectSpan &span : clip.spans) {
+                    if (!spanIds.insert(span.id).second) {
+                        return where + ": duplicate span id " + std::to_string(span.id.value());
+                    }
+                    if (!span.isTransition()) {
+                        continue;
+                    }
+                    if (auto issue = checkTransitionSpan(project, track, clip, span, sequence.frameDuration)) {
+                        return where + ": " + issue->message;
+                    }
+                }
+            }
         }
     }
     return std::nullopt;
@@ -395,12 +488,12 @@ std::optional<std::string> validateProject(const Project &project) {
                     if (auto problem = claim(clip.id.value(), "clip " + std::to_string(clip.id.value()))) {
                         return problem;
                     }
+                    for (const EffectSpan &span : clip.spans) {
+                        if (auto problem = claim(span.id.value(), "span " + std::to_string(span.id.value()))) {
+                            return problem;
+                        }
+                    }
                 }
-            }
-        }
-        for (const Transition &transition : sequence.transitions) {
-            if (auto problem = claim(transition.id.value(), "transition " + std::to_string(transition.id.value()))) {
-                return problem;
             }
         }
         if (auto problem = validateSequence(sequence, project)) {

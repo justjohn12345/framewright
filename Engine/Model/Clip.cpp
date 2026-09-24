@@ -1,10 +1,48 @@
 #include "Clip.h"
 
+#include <algorithm>
+
 namespace ve {
 
 bool isValidSpeed(Ratio speed) {
     return speed.isReduced() && speed.num > 0 && speed.den <= kMaxSpeedDenominator && !(speed < Ratio{1, 100}) &&
            !(Ratio{100, 1} < speed);
+}
+
+const char *nameOf(MotionParameter parameter) {
+    switch (parameter) {
+    case MotionParameter::X:
+        return "x";
+    case MotionParameter::Y:
+        return "y";
+    case MotionParameter::Scale:
+        return "scale";
+    case MotionParameter::Rotation:
+        return "rotation";
+    case MotionParameter::Opacity:
+        return "opacity";
+    }
+    return "x";
+}
+
+const char *displayNameOf(MotionParameter parameter) {
+    return displayNameOf(spanParameterOf(parameter));
+}
+
+SpanParameter spanParameterOf(MotionParameter parameter) {
+    switch (parameter) {
+    case MotionParameter::X:
+        return SpanParameter::X;
+    case MotionParameter::Y:
+        return SpanParameter::Y;
+    case MotionParameter::Scale:
+        return SpanParameter::Scale;
+    case MotionParameter::Rotation:
+        return SpanParameter::Rotation;
+    case MotionParameter::Opacity:
+        return SpanParameter::Opacity;
+    }
+    return SpanParameter::X;
 }
 
 double VideoParams::staticValue(MotionParameter parameter) const {
@@ -43,44 +81,11 @@ void VideoParams::setStaticValue(MotionParameter parameter, double value) {
     }
 }
 
-double VideoParams::valueAt(MotionParameter parameter, const ExactTime &time) const {
-    const KeyframeTrack &track = keyframes.track(parameter);
-    if (track.empty()) {
-        return staticValue(parameter);
-    }
-    return clampMotionValue(parameter, evaluateTrack(track, staticValue(parameter), time));
-}
-
-VideoParams VideoParams::valuesAt(const ExactTime &time) const {
-    VideoParams values = staticValues();
-    if (!keyframes.empty()) {
-        for (const MotionParameter parameter : kMotionParameters) {
-            values.setStaticValue(parameter, valueAt(parameter, time));
-        }
-    }
-    return values;
-}
-
-VideoParams VideoParams::staticValues() const {
-    VideoParams values;
-    values.x = x;
-    values.y = y;
-    values.scale = scale;
-    values.rotationDegrees = rotationDegrees;
-    values.opacity = opacity;
-    return values;
-}
-
-bool operator==(const AudioParams &a, const AudioParams &b) {
-    return a.gainDb == b.gainDb && identical(a.fadeInDuration, b.fadeInDuration) &&
-           identical(a.fadeOutDuration, b.fadeOutDuration);
-}
-
 bool operator==(const Clip &a, const Clip &b) {
     return a.id == b.id && a.assetId == b.assetId && a.trackId == b.trackId &&
            identical(a.timelineStart, b.timelineStart) && identical(a.timelineDuration, b.timelineDuration) &&
            identical(a.sourceIn, b.sourceIn) && a.speed == b.speed && a.isStill == b.isStill &&
-           a.linkedClipId == b.linkedClipId && a.video == b.video && a.audio == b.audio;
+           a.linkedClipId == b.linkedClipId && a.video == b.video && a.audio == b.audio && a.spans == b.spans;
 }
 
 std::optional<ExactTime> Clip::exactSourceTimeAt(CMTime t) const {
@@ -136,81 +141,214 @@ CMTime Clip::timelineTimeAt(CMTime s) const {
     return exact ? exact->toTimeRounded() : kCMTimeInvalid;
 }
 
-bool Clip::setTimelineStartKeepingEnd(CMTime newStart) {
+std::optional<std::pair<CMTime, CMTime>> Clip::spanBounds() const {
+    if (isStill) {
+        return std::make_pair(kCMTimeZero, timelineDuration);
+    }
+    const auto out = exactSourceOut();
+    if (!out) {
+        return std::nullopt;
+    }
+    if (const auto exact = out->toTime()) {
+        return std::make_pair(sourceIn, *exact);
+    }
+    // No CMTime form: the tick before the out point (no frame of the clip starts after it).
+    const CMTime tick = CMTimeMake(1, kPreciseTimescale);
+    const auto index = out->frameIndex(tick, SnapMode::Floor);
+    const auto bound = index ? checkedTimeForFrame(*index, tick) : std::nullopt;
+    if (!bound) {
+        return std::nullopt;
+    }
+    return std::make_pair(sourceIn, *bound);
+}
+
+RetimeResult Clip::setTimelineStartKeepingEnd(CMTime newStart) {
     const auto delta = checkedSubtract(newStart, timelineStart);
     if (!delta) {
-        return false;
+        return RetimeResult::NotRepresentable;
     }
     const auto duration = checkedSubtract(timelineDuration, *delta);
     if (!duration) {
-        return false;
+        return RetimeResult::NotRepresentable;
     }
-    CMTime in = kCMTimeZero;
-    std::optional<MotionKeyframes> shifted;
-    if (isStill && !video.keyframes.empty()) {
+    Clip moved = *this;
+    if (isStill) {
+        // A still's source time is measured from its start: its effect spans move back by the
+        // change so they keep their timeline positions.
         const auto back = checkedNegate(*delta);
         if (!back) {
-            return false;
+            return RetimeResult::NotRepresentable;
         }
-        shifted = video.keyframes;
-        for (const MotionParameter parameter : kMotionParameters) {
-            if (!shiftTrack(shifted->track(parameter), *back)) {
-                return false;
+        for (EffectSpan &span : moved.spans) {
+            if (span.isTransition()) {
+                continue;
             }
+            const auto start = checkedAdd(span.start, *back);
+            const auto end = checkedAdd(span.end, *back);
+            if (!start || !end || !isExactModelTime(*start) || !isExactModelTime(*end)) {
+                return RetimeResult::NotRepresentable;
+            }
+            span.start = *start;
+            span.end = *end;
         }
-    }
-    if (!isStill) {
+    } else {
         const auto scaled = checkedScale(*delta, speed);
-        const auto moved = scaled ? checkedAdd(sourceIn, *scaled) : std::nullopt;
-        if (!moved) {
-            return false;
+        const auto in = scaled ? checkedAdd(sourceIn, *scaled) : std::nullopt;
+        if (!in || !isExactModelTime(*in)) {
+            return RetimeResult::NotRepresentable;
         }
-        in = *moved;
+        moved.sourceIn = *in;
     }
-    timelineStart = newStart;
-    timelineDuration = *duration;
-    sourceIn = in;
-    if (shifted) {
-        video.keyframes = std::move(*shifted);
+    moved.timelineStart = newStart;
+    moved.timelineDuration = *duration;
+    if (const RetimeResult fitted = moved.fitSpans(ClipEdge::Head); fitted != RetimeResult::Ok) {
+        return fitted;
     }
-    fitFades(ClipEdge::Head);
-    return true;
+    *this = std::move(moved);
+    return RetimeResult::Ok;
 }
 
-bool Clip::setTimelineEnd(CMTime newEnd) {
+RetimeResult Clip::setTimelineEnd(CMTime newEnd) {
     const auto duration = checkedSubtract(newEnd, timelineStart);
     if (!duration) {
-        return false;
+        return RetimeResult::NotRepresentable;
     }
-    timelineDuration = *duration;
+    Clip moved = *this;
+    moved.timelineDuration = *duration;
     if (isStill) {
-        sourceIn = kCMTimeZero;
+        moved.sourceIn = kCMTimeZero;
     }
-    fitFades(ClipEdge::Tail);
-    return true;
+    if (const RetimeResult fitted = moved.fitSpans(ClipEdge::Tail); fitted != RetimeResult::Ok) {
+        return fitted;
+    }
+    *this = std::move(moved);
+    return RetimeResult::Ok;
 }
 
-void Clip::fitFades(ClipEdge editedEdge) {
-    CMTime &fadeIn = audio.fadeInDuration;
-    CMTime &fadeOut = audio.fadeOutDuration;
+RetimeResult Clip::fitSpans(ClipEdge editedEdge) {
+    const auto bounds = spanBounds();
+    if (!bounds) {
+        return RetimeResult::NotRepresentable;
+    }
+    std::vector<EffectSpan> fitted;
+    fitted.reserve(spans.size());
+    for (const EffectSpan &span : spans) {
+        if (span.isTransition()) {
+            fitted.push_back(span);
+            continue;
+        }
+        SpanCutProblem problem = SpanCutProblem::None;
+        if (auto clipped = clipSpan(span, bounds->first, bounds->second, &problem)) {
+            fitted.push_back(std::move(*clipped));
+        } else if (problem == SpanCutProblem::CurveOvershoot) {
+            return RetimeResult::SpanCurveOvershoot;
+        } else if (problem == SpanCutProblem::NotRepresentable) {
+            return RetimeResult::NotRepresentable;
+        }
+        // Otherwise nothing of the span is left inside the clip: it goes.
+    }
+
+    // Lane-0 fades fit the clip: a head fade and the inside part of the tail span together at
+    // most its length. Fades give way to a cross dissolve (which is never shortened here); between
+    // two fades the one at the edited edge gives way first.
+    EffectSpan *head = nullptr;
+    EffectSpan *tail = nullptr;
+    for (EffectSpan &span : fitted) {
+        if (span.isTransition()) {
+            (span.edge == ClipEdge::Head ? head : tail) = &span;
+        }
+    }
     const CMTime length = maxTime(timelineDuration, kCMTimeZero);
-    if (fadeIn > length) {
-        fadeIn = length;
+    const bool tailIsFade = tail != nullptr && tail->end == kCMTimeZero;
+    CMTime headLength = head != nullptr ? minTime(head->end, length) : kCMTimeZero;
+    CMTime tailInside = kCMTimeZero;
+    if (tail != nullptr) {
+        const auto inside = checkedNegate(tail->start);
+        if (!inside) {
+            return RetimeResult::NotRepresentable;
+        }
+        tailInside = tailIsFade ? minTime(*inside, length) : *inside;
     }
-    if (fadeOut > length) {
-        fadeOut = length;
+    const auto together = ExactTime::from(headLength) && ExactTime::from(tailInside)
+                              ? ExactTime::from(headLength)->plus(*ExactTime::from(tailInside))
+                              : std::nullopt;
+    if (!together) {
+        return RetimeResult::NotRepresentable;
     }
-    const auto in = ExactTime::from(fadeIn);
-    const auto out = ExactTime::from(fadeOut);
-    const auto total = in && out ? in->plus(*out) : std::nullopt;
-    if (!total || total->compare(length) <= 0) {
-        return;
+    if (together->compare(length) > 0) {
+        const bool headGivesWay = head != nullptr && (!tailIsFade || editedEdge == ClipEdge::Head);
+        if (headGivesWay) {
+            const auto rest = checkedSubtract(length, tailInside);
+            if (!rest) {
+                return RetimeResult::NotRepresentable;
+            }
+            headLength = maxTime(*rest, kCMTimeZero);
+        } else if (tailIsFade) {
+            const auto rest = checkedSubtract(length, headLength);
+            if (!rest) {
+                return RetimeResult::NotRepresentable;
+            }
+            tailInside = maxTime(*rest, kCMTimeZero);
+        }
     }
-    // Overlapping fades: the fade at the edited edge gives way. When the remainder has no exact
-    // CMTime form (only with pathological timescales) that fade is removed instead.
-    CMTime &yielding = editedEdge == ClipEdge::Head ? fadeIn : fadeOut;
-    const CMTime &kept = editedEdge == ClipEdge::Head ? fadeOut : fadeIn;
-    yielding = checkedSubtract(length, kept).value_or(kCMTimeZero);
+    if (head != nullptr) {
+        head->end = headLength;
+    }
+    if (tailIsFade) {
+        const auto start = checkedNegate(tailInside);
+        if (!start) {
+            return RetimeResult::NotRepresentable;
+        }
+        tail->start = *start;
+    }
+    std::erase_if(fitted, [](const EffectSpan &span) {
+        return span.isTransition() && !(span.start < span.end); // a fade shortened to nothing
+    });
+    spans = std::move(fitted);
+    return RetimeResult::Ok;
+}
+
+void Clip::sortSpans() {
+    auto key = [](const EffectSpan &span) { return std::make_pair(span.lane, span.edge == ClipEdge::Head ? 0 : 1); };
+    std::stable_sort(spans.begin(), spans.end(), [&](const EffectSpan &a, const EffectSpan &b) {
+        if (a.lane != b.lane) {
+            return a.lane < b.lane;
+        }
+        if (a.isTransition() || b.isTransition()) {
+            return key(a) < key(b);
+        }
+        return a.start < b.start;
+    });
+}
+
+const EffectSpan *Clip::findSpan(SpanId spanId) const {
+    for (const EffectSpan &span : spans) {
+        if (span.id == spanId) {
+            return &span;
+        }
+    }
+    return nullptr;
+}
+
+EffectSpan *Clip::findSpan(SpanId spanId) {
+    return const_cast<EffectSpan *>(static_cast<const Clip *>(this)->findSpan(spanId));
+}
+
+const EffectSpan *Clip::transitionAt(ClipEdge edge) const {
+    for (const EffectSpan &span : spans) {
+        if (span.isTransition() && span.edge == edge) {
+            return &span;
+        }
+    }
+    return nullptr;
+}
+
+EffectSpan *Clip::transitionAt(ClipEdge edge) {
+    return const_cast<EffectSpan *>(static_cast<const Clip *>(this)->transitionAt(edge));
+}
+
+bool Clip::hasEffectSpans() const {
+    return std::any_of(spans.begin(), spans.end(), [](const EffectSpan &span) { return !span.isTransition(); });
 }
 
 std::optional<CMTime> frameShowingSourceTime(const Clip &clip, CMTime sourceTime, CMTime frameDuration) {
@@ -236,33 +374,6 @@ std::optional<CMTime> frameShowingSourceTime(const Clip &clip, CMTime sourceTime
     return frame;
 }
 
-std::optional<std::size_t> keyframeIndexForFrame(const Clip &clip, MotionParameter parameter, CMTime frameStart,
-                                                 CMTime frameDuration) {
-    const KeyframeTrack &track = clip.video.keyframes.track(parameter);
-    if (track.empty() || !isPositive(frameDuration) || !isNumeric(frameStart) || frameStart < clip.timelineStart ||
-        frameStart >= clip.timelineEnd()) {
-        return std::nullopt;
-    }
-    const auto frameEnd = checkedAdd(frameStart, frameDuration);
-    const auto from = clip.exactSourceTimeAt(frameStart);
-    const auto to = frameEnd ? clip.exactSourceTimeAt(*frameEnd) : std::nullopt;
-    if (!from || !to) {
-        return std::nullopt;
-    }
-    if (const auto index = firstKeyframeIn(track, *from, *to)) {
-        return index;
-    }
-    if (*frameEnd >= clip.timelineEnd()) {
-        // The last frame also owns a keyframe on the out point.
-        for (std::size_t i = 0; i < track.size(); ++i) {
-            if (to->compare(track[i].time) == 0) {
-                return i;
-            }
-        }
-    }
-    return std::nullopt;
-}
-
 namespace {
 
 // The first kPreciseTimescale tick at or after `source` (which has no CMTime form): inside the
@@ -284,23 +395,130 @@ std::optional<ExactTime> motionTimeAt(const Clip &clip, CMTime t) {
     return tick ? ExactTime::from(*tick) : std::nullopt;
 }
 
-std::optional<CMTime> keyframeTimeForFrame(const Clip &clip, CMTime frameStart) {
-    const auto source = clip.exactSourceTimeAt(frameStart);
-    if (!source) {
+std::optional<CMTime> spanTimeAt(const Clip &clip, CMTime t) {
+    const auto source = clip.exactSourceTimeAt(t);
+    const auto bounds = clip.spanBounds();
+    if (!source || !bounds) {
         return std::nullopt;
     }
-    if (const auto exact = source->toTime()) {
-        return exact;
+    std::optional<CMTime> time = source->toTime();
+    if (!time) {
+        time = tickAtOrAfter(*source);
     }
-    return tickAtOrAfter(*source); // the time motionTimeAt evaluates the frame at
+    if (!time) {
+        return std::nullopt;
+    }
+    return clampTime(*time, bounds->first, bounds->second);
+}
+
+std::optional<ExactTime> spanEvaluationTime(const Clip &clip, CMTime t) {
+    const auto time = motionTimeAt(clip, t);
+    const auto bounds = clip.spanBounds();
+    const auto in = bounds ? ExactTime::from(bounds->first) : std::nullopt;
+    const auto out = bounds ? ExactTime::from(bounds->second) : std::nullopt;
+    if (!time || !in || !out) {
+        return std::nullopt;
+    }
+    if (time->compare(*in) < 0) {
+        return in;
+    }
+    if (time->compare(*out) > 0) {
+        return out;
+    }
+    return time;
+}
+
+bool spanActiveAt(const Clip &clip, const EffectSpan &span, const ExactTime &time) {
+    if (span.isTransition() || time.compare(span.start) < 0) {
+        return false;
+    }
+    if (time.compare(span.end) < 0) {
+        return true;
+    }
+    // A span reaching the clip's out bound also acts on the bound itself (a tail handle's time).
+    const auto bounds = clip.spanBounds();
+    return bounds && span.end == bounds->second && time.compare(bounds->second) == 0;
+}
+
+VideoParams composeMotion(const Clip &clip, const ExactTime &time, std::optional<SpanId> except) {
+    VideoParams values = clip.video;
+    for (int lane = kFirstEffectLane; lane <= kLastLane; ++lane) {
+        for (const EffectSpan &span : clip.spans) {
+            if (span.lane != lane || (except && span.id == *except) || !spanActiveAt(clip, span, time)) {
+                continue;
+            }
+            if (span.kind == SpanKind::Motion) {
+                values.x += spanValueAt(span, SpanParameter::X, time);
+                values.y += spanValueAt(span, SpanParameter::Y, time);
+                values.scale *= spanValueAt(span, SpanParameter::Scale, time);
+                values.rotationDegrees += spanValueAt(span, SpanParameter::Rotation, time);
+            } else if (span.kind == SpanKind::Opacity) {
+                values.opacity *= spanValueAt(span, SpanParameter::Opacity, time);
+            }
+        }
+    }
+    return values;
+}
+
+double composeGainDb(const Clip &clip, const ExactTime &time, std::optional<SpanId> except) {
+    double gainDb = clip.audio.gainDb;
+    for (int lane = kFirstEffectLane; lane <= kLastLane; ++lane) {
+        for (const EffectSpan &span : clip.spans) {
+            if (span.lane == lane && span.kind == SpanKind::Gain && !(except && span.id == *except) &&
+                spanActiveAt(clip, span, time)) {
+                gainDb += spanValueAt(span, SpanParameter::Gain, time);
+            }
+        }
+    }
+    return gainDb;
 }
 
 VideoParams motionValuesAt(const Clip &clip, CMTime t) {
-    if (!clip.video.isAnimated()) {
-        return clip.video.staticValues();
+    if (!clip.hasEffectSpans()) {
+        return clip.video;
     }
-    const auto time = motionTimeAt(clip, t);
-    return time ? clip.video.valuesAt(*time) : clip.video.staticValues();
+    const auto time = spanEvaluationTime(clip, t);
+    return time ? composeMotion(clip, *time) : clip.video;
+}
+
+double gainDbAt(const Clip &clip, CMTime t) {
+    if (!clip.hasEffectSpans()) {
+        return clip.audio.gainDb;
+    }
+    const auto time = spanEvaluationTime(clip, t);
+    return time ? composeGainDb(clip, *time) : clip.audio.gainDb;
+}
+
+std::optional<ExactTime> spanEdgeFrameTime(const Clip &clip, const EffectSpan &span, CMTime frameDuration, bool atEnd) {
+    if (!atEnd) {
+        return ExactTime::from(span.start);
+    }
+    const auto end = clip.exactTimelineTimeAt(span.end);
+    if (!end) {
+        return std::nullopt;
+    }
+    const std::int64_t endFrame = frameIndexAt(end->toTimeRounded(), frameDuration, SnapMode::Ceil);
+    const auto last = checkedTimeForFrame(endFrame - 1, frameDuration);
+    if (!last) {
+        return std::nullopt;
+    }
+    return spanEvaluationTime(clip, maxTime(*last, clip.timelineStart));
+}
+
+std::optional<VideoParams> spanEdgeMotion(const Clip &clip, const EffectSpan &span, CMTime frameDuration, bool atEnd) {
+    if (span.kind != SpanKind::Motion) {
+        return std::nullopt;
+    }
+    const auto time = spanEdgeFrameTime(clip, span, frameDuration, atEnd);
+    if (!time) {
+        return std::nullopt;
+    }
+    VideoParams values = composeMotion(clip, *time, span.id);
+    values.x += spanEdgeValue(span, SpanParameter::X, atEnd);
+    values.y += spanEdgeValue(span, SpanParameter::Y, atEnd);
+    values.scale *= spanEdgeValue(span, SpanParameter::Scale, atEnd);
+    values.rotationDegrees += spanEdgeValue(span, SpanParameter::Rotation, atEnd);
+    return values;
 }
 
 } // namespace ve

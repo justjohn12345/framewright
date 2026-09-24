@@ -3,6 +3,7 @@
 #include "../Model/Validation.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <utility>
@@ -37,29 +38,41 @@ json keyframeToJson(const Keyframe &k) {
 }
 
 json videoParamsToJson(const VideoParams &v) {
-    json j{{"x", v.x}, {"y", v.y}, {"scale", v.scale}, {"rotationDegrees", v.rotationDegrees}, {"opacity", v.opacity}};
-    if (v.isAnimated()) {
-        json keyframes = json::object();
-        for (const MotionParameter parameter : kMotionParameters) {
-            const KeyframeTrack &track = v.keyframes.track(parameter);
-            if (track.empty()) {
-                continue;
-            }
-            json list = json::array();
-            for (const Keyframe &keyframe : track) {
-                list.push_back(keyframeToJson(keyframe));
-            }
-            keyframes[nameOf(parameter)] = std::move(list);
-        }
-        j["keyframes"] = std::move(keyframes);
-    }
-    return j;
+    return json{{"x", v.x}, {"y", v.y}, {"scale", v.scale}, {"rotationDegrees", v.rotationDegrees}, {"opacity", v.opacity}};
 }
 
 json audioParamsToJson(const AudioParams &a) {
-    return json{{"gainDb", a.gainDb},
-                {"fadeInDuration", timeToJson(a.fadeInDuration)},
-                {"fadeOutDuration", timeToJson(a.fadeOutDuration)}};
+    return json{{"gainDb", a.gainDb}};
+}
+
+json keyframeTrackToJson(const KeyframeTrack &track) {
+    json list = json::array();
+    for (const Keyframe &keyframe : track) {
+        list.push_back(keyframeToJson(keyframe));
+    }
+    return list;
+}
+
+json spanToJson(const EffectSpan &span) {
+    json j{{"id", idToJson(span.id)},
+           {"lane", span.lane},
+           {"kind", nameOf(span.kind)},
+           {"start", timeToJson(span.start)},
+           {"end", timeToJson(span.end)}};
+    if (span.isTransition()) {
+        j["edge"] = nameOf(span.edge);
+        j["transition"] = nameOf(span.transition);
+        return j;
+    }
+    json tracks = json::object();
+    for (const SpanParameter parameter : kSpanParameters) {
+        const KeyframeTrack &track = span.tracks.track(parameter);
+        if (!track.empty()) {
+            tracks[nameOf(parameter)] = keyframeTrackToJson(track);
+        }
+    }
+    j["tracks"] = std::move(tracks);
+    return j;
 }
 
 json assetToJson(const MediaAsset &asset) {
@@ -81,7 +94,7 @@ json assetToJson(const MediaAsset &asset) {
 }
 
 json clipToJson(const Clip &clip) {
-    return json{{"id", idToJson(clip.id)},
+    json j{{"id", idToJson(clip.id)},
                 {"assetId", idToJson(clip.assetId)},
                 {"trackId", idToJson(clip.trackId)},
                 {"timelineStart", timeToJson(clip.timelineStart)},
@@ -92,6 +105,14 @@ json clipToJson(const Clip &clip) {
                 {"linkedClipId", optionalIdToJson(clip.linkedClipId)},
                 {"video", videoParamsToJson(clip.video)},
                 {"audio", audioParamsToJson(clip.audio)}};
+    if (!clip.spans.empty()) {
+        json spans = json::array();
+        for (const EffectSpan &span : clip.spans) {
+            spans.push_back(spanToJson(span));
+        }
+        j["spans"] = std::move(spans);
+    }
+    return j;
 }
 
 json trackToJson(const Track &track) {
@@ -104,15 +125,6 @@ json trackToJson(const Track &track) {
                 {"clips", std::move(clips)}};
 }
 
-json transitionToJson(const Transition &transition) {
-    return json{{"id", idToJson(transition.id)},
-                {"trackId", idToJson(transition.trackId)},
-                {"kind", nameOf(transition.kind)},
-                {"fromClipId", idToJson(transition.fromClipId)},
-                {"toClipId", idToJson(transition.toClipId)},
-                {"duration", timeToJson(transition.duration)}};
-}
-
 json sequenceToJson(const Sequence &sequence) {
     json videoTracks = json::array();
     for (const Track &track : sequence.videoTracks) {
@@ -122,10 +134,6 @@ json sequenceToJson(const Sequence &sequence) {
     for (const Track &track : sequence.audioTracks) {
         audioTracks.push_back(trackToJson(track));
     }
-    json transitions = json::array();
-    for (const Transition &transition : sequence.transitions) {
-        transitions.push_back(transitionToJson(transition));
-    }
     return json{{"id", idToJson(sequence.id)},
                 {"name", sequence.name},
                 {"frameDuration", timeToJson(sequence.frameDuration)},
@@ -133,8 +141,7 @@ json sequenceToJson(const Sequence &sequence) {
                 {"height", sequence.height},
                 {"audioSampleRate", sequence.audioSampleRate},
                 {"videoTracks", std::move(videoTracks)},
-                {"audioTracks", std::move(audioTracks)},
-                {"transitions", std::move(transitions)}};
+                {"audioTracks", std::move(audioTracks)}};
 }
 
 // ----- Reading -----
@@ -392,7 +399,7 @@ Keyframe parseKeyframe(const Node &node, Warnings &warnings) {
     return keyframe;
 }
 
-VideoParams parseVideoParams(const Node &node, Warnings &warnings) {
+VideoParams parseVideoParams(const Node &node) {
     node.requireObject();
     VideoParams v;
     v.x = node.doubleOr("x", v.x);
@@ -400,29 +407,6 @@ VideoParams parseVideoParams(const Node &node, Warnings &warnings) {
     v.scale = node.doubleOr("scale", v.scale);
     v.rotationDegrees = node.doubleOr("rotationDegrees", v.rotationDegrees);
     v.opacity = node.doubleOr("opacity", v.opacity);
-    if (node.has("keyframes")) {
-        const Node keyframes = node.field("keyframes");
-        keyframes.requireObject();
-        // A parameter this version does not know (from a newer one) cannot be kept: say so.
-        for (const auto &entry : keyframes.value().items()) {
-            const bool known = std::any_of(kMotionParameters.begin(), kMotionParameters.end(),
-                                           [&](MotionParameter p) { return entry.key() == nameOf(p); });
-            if (!known) {
-                warnings.push_back(keyframes.path() + ": unknown Motion parameter \"" + entry.key() +
-                                   "\"; its keyframes were dropped");
-            }
-        }
-        for (const MotionParameter parameter : kMotionParameters) {
-            if (!keyframes.has(nameOf(parameter))) {
-                continue;
-            }
-            const Node list = keyframes.field(nameOf(parameter));
-            KeyframeTrack &track = v.keyframes.track(parameter);
-            for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
-                track.push_back(parseKeyframe(list.element(i), warnings));
-            }
-        }
-    }
     return v;
 }
 
@@ -430,9 +414,73 @@ AudioParams parseAudioParams(const Node &node) {
     node.requireObject();
     AudioParams a;
     a.gainDb = node.doubleOr("gainDb", a.gainDb);
-    a.fadeInDuration = node.timeOr("fadeInDuration", a.fadeInDuration);
-    a.fadeOutDuration = node.timeOr("fadeOutDuration", a.fadeOutDuration);
     return a;
+}
+
+KeyframeTrack parseKeyframeTrack(const Node &list, Warnings &warnings) {
+    KeyframeTrack track;
+    for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
+        track.push_back(parseKeyframe(list.element(i), warnings));
+    }
+    return track;
+}
+
+ClipEdge parseClipEdge(const Node &node) {
+    const std::string s = node.asString();
+    for (const ClipEdge edge : {ClipEdge::Head, ClipEdge::Tail}) {
+        if (s == nameOf(edge)) {
+            return edge;
+        }
+    }
+    node.fail("unknown clip edge \"" + s + "\"");
+}
+
+// A span of a kind this version does not know (from a newer one) cannot be kept: nullopt, with a
+// warning.
+std::optional<EffectSpan> parseSpan(const Node &node, Warnings &warnings) {
+    node.requireObject();
+    const Node kindNode = node.field("kind");
+    const std::string kindName = kindNode.asString();
+    std::optional<SpanKind> kind;
+    for (const SpanKind candidate : {SpanKind::Transition, SpanKind::Motion, SpanKind::Opacity, SpanKind::Gain}) {
+        if (kindName == nameOf(candidate)) {
+            kind = candidate;
+        }
+    }
+    if (!kind) {
+        warnings.push_back(kindNode.path() + ": unknown span kind \"" + kindName + "\"; the span was dropped");
+        return std::nullopt;
+    }
+    EffectSpan span;
+    span.id = node.field("id").asId<SpanId>();
+    span.kind = *kind;
+    span.lane = node.field("lane").asInt32();
+    span.start = node.field("start").asTime();
+    span.end = node.field("end").asTime();
+    if (span.isTransition()) {
+        span.edge = parseClipEdge(node.field("edge"));
+        span.transition = node.has("transition") ? parseTransitionKind(node.field("transition"), warnings)
+                                                 : TransitionKind::CrossDissolve;
+        return span;
+    }
+    if (node.has("tracks")) {
+        const Node tracks = node.field("tracks");
+        tracks.requireObject();
+        for (const auto &entry : tracks.value().items()) {
+            const bool known = std::any_of(kSpanParameters.begin(), kSpanParameters.end(),
+                                           [&](SpanParameter p) { return entry.key() == nameOf(p); });
+            if (!known) {
+                warnings.push_back(tracks.path() + ": unknown span parameter \"" + entry.key() +
+                                   "\"; its keyframes were dropped");
+            }
+        }
+        for (const SpanParameter parameter : kSpanParameters) {
+            if (tracks.has(nameOf(parameter))) {
+                span.tracks.track(parameter) = parseKeyframeTrack(tracks.field(nameOf(parameter)), warnings);
+            }
+        }
+    }
+    return span;
 }
 
 Clip parseClip(const Node &node, Warnings &warnings) {
@@ -459,10 +507,18 @@ Clip parseClip(const Node &node, Warnings &warnings) {
         clip.linkedClipId = node.field("linkedClipId").asId<ClipId>();
     }
     if (node.has("video")) {
-        clip.video = parseVideoParams(node.field("video"), warnings);
+        clip.video = parseVideoParams(node.field("video"));
     }
     if (node.has("audio")) {
         clip.audio = parseAudioParams(node.field("audio"));
+    }
+    if (node.has("spans")) {
+        const Node spans = node.field("spans");
+        for (std::size_t i = 0, n = spans.arraySize(); i < n; ++i) {
+            if (auto span = parseSpan(spans.element(i), warnings)) {
+                clip.spans.push_back(std::move(*span));
+            }
+        }
     }
     return clip;
 }
@@ -485,18 +541,6 @@ Track parseTrack(const Node &node, Warnings &warnings) {
     return track;
 }
 
-Transition parseTransition(const Node &node, Warnings &warnings) {
-    node.requireObject();
-    Transition transition;
-    transition.id = node.field("id").asId<TransitionId>();
-    transition.trackId = node.field("trackId").asId<TrackId>();
-    transition.kind = parseTransitionKind(node.field("kind"), warnings);
-    transition.fromClipId = node.field("fromClipId").asId<ClipId>();
-    transition.toClipId = node.field("toClipId").asId<ClipId>();
-    transition.duration = node.field("duration").asTime();
-    return transition;
-}
-
 Sequence parseSequence(const Node &node, Warnings &warnings) {
     node.requireObject();
     Sequence sequence;
@@ -514,12 +558,6 @@ Sequence parseSequence(const Node &node, Warnings &warnings) {
         std::vector<Track> &tracks = std::string(key) == "videoTracks" ? sequence.videoTracks : sequence.audioTracks;
         for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
             tracks.push_back(parseTrack(list.element(i), warnings));
-        }
-    }
-    if (node.has("transitions")) {
-        const Node list = node.field("transitions");
-        for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
-            sequence.transitions.push_back(parseTransition(list.element(i), warnings));
         }
     }
     return sequence;
@@ -621,17 +659,15 @@ void migrateClipV1(json &clip, const Node &node, CMTime frameDuration, Warnings 
     const auto fadeOutExact = ExactTime::from(fadeOut);
     const auto total = fadeInExact && fadeOutExact ? fadeInExact->plus(*fadeOutExact) : std::nullopt;
     if (total && total->compare(duration) > 0) {
-        // Version 1 allowed the fades to overlap; the fade-out gives way.
-        Clip fitted;
-        fitted.timelineDuration = duration;
-        fitted.audio.fadeInDuration = fadeIn;
-        fitted.audio.fadeOutDuration = fadeOut;
-        fitted.fitFades(ClipEdge::Tail);
+        // Version 1 allowed the fades to overlap; the fade-out gives way (each is first limited to
+        // the clip; a remainder without an exact CMTime form removes the fade-out).
+        const CMTime length = maxTime(duration, kCMTimeZero);
+        const CMTime fittedIn = minTime(fadeIn, length);
+        const CMTime fittedOut = checkedSubtract(length, fittedIn).value_or(kCMTimeZero);
         warnings.push_back(audioNode.path() + ": fade-in " + describe(fadeIn) + " and fade-out " + describe(fadeOut) +
-                           " overlapped; now " + describe(fitted.audio.fadeInDuration) + " and " +
-                           describe(fitted.audio.fadeOutDuration));
-        audio["fadeInDuration"] = timeToJson(fitted.audio.fadeInDuration);
-        audio["fadeOutDuration"] = timeToJson(fitted.audio.fadeOutDuration);
+                           " overlapped; now " + describe(fittedIn) + " and " + describe(fittedOut));
+        audio["fadeInDuration"] = timeToJson(fittedIn);
+        audio["fadeOutDuration"] = timeToJson(fittedOut);
     }
 }
 
@@ -726,6 +762,364 @@ void migrateV3ToV4(json &document, Warnings &) {
     Node(document, "").requireObject();
 }
 
+// ----- Version 4 -> 5: effect spans -----
+
+// A keyframe track of version 4 (source times of the clip) as a span track over the clip's
+// source range [in, out]: re-based to `in` and cut exactly at both ends (splitTrack), a side left
+// without keyframes holding the value it had. Values a custom curve takes outside the parameter's
+// range at a cut are limited, with a warning.
+KeyframeTrack rebasedTrack(const KeyframeTrack &track, SpanParameter parameter, CMTime in, CMTime out,
+                           const std::string &path, Warnings &warnings) {
+    KeyframeTrack relative = track;
+    const auto back = checkedNegate(in);
+    const auto length = checkedSubtract(out, in);
+    if (!back || !length || !shiftTrack(relative, *back)) {
+        throw ParseError{path + ": the keyframes cannot be re-based to the clip's source range"};
+    }
+    auto constant = [](double value) {
+        Keyframe keyframe;
+        keyframe.value = value;
+        return KeyframeTrack{keyframe};
+    };
+    const double neutral = neutralValue(parameter);
+    if (relative.front().time < kCMTimeZero) {
+        TrackSplit pieces = splitTrack(relative, neutral, kCMTimeZero);
+        relative = pieces.right.empty() ? constant(pieces.rightStatic) : std::move(pieces.right);
+    }
+    if (*length < relative.back().time) {
+        TrackSplit pieces = splitTrack(relative, neutral, *length);
+        relative = pieces.left.empty() ? constant(pieces.leftStatic) : std::move(pieces.left);
+    }
+    for (Keyframe &keyframe : relative) {
+        if (!isValidSpanValue(parameter, keyframe.value)) {
+            const double limited = clampSpanValue(parameter, keyframe.value);
+            warnings.push_back(path + ": a custom curve took " + displayNameOf(parameter) + " to " +
+                               std::to_string(keyframe.value) + " at the clip's edge; limited to " +
+                               std::to_string(limited));
+            keyframe.value = limited;
+        }
+    }
+    return relative;
+}
+
+// One clip of a version 4 sequence, read for the migration.
+struct LegacyClip {
+    json *document = nullptr; // the clip's JSON (updated in place)
+    std::string path;
+    Clip clip; // timing only
+    TrackKind trackKind = TrackKind::Video;
+    std::size_t trackIndex = 0; // among the tracks of its kind
+    std::array<KeyframeTrack, 5> keyframes; // MotionParameter order
+    CMTime fadeIn = kCMTimeZero;
+    CMTime fadeOut = kCMTimeZero;
+};
+
+LegacyClip readLegacyClip(json &clipJson, const Node &node, TrackKind kind, std::size_t trackIndex,
+                          Warnings &warnings) {
+    node.requireObject();
+    LegacyClip legacy;
+    legacy.document = &clipJson;
+    legacy.path = node.path();
+    legacy.trackKind = kind;
+    legacy.trackIndex = trackIndex;
+    Clip &clip = legacy.clip;
+    clip.id = node.field("id").asId<ClipId>();
+    clip.timelineStart = node.field("timelineStart").asTime();
+    clip.timelineDuration = node.field("duration").asTime();
+    clip.sourceIn = node.field("sourceIn").asTime();
+    clip.isStill = node.boolOr("isStill", false);
+    if (node.has("speed")) {
+        const Node speed = node.field("speed");
+        const std::int64_t den = speed.field("den").asInt64();
+        if (den <= 0) {
+            speed.field("den").fail("speed denominator must be positive");
+        }
+        clip.speed = Ratio{speed.field("num").asInt64(), den};
+    }
+    if (node.has("video") && node.field("video").has("keyframes")) {
+        const Node keyframes = node.field("video").field("keyframes");
+        keyframes.requireObject();
+        for (const auto &entry : keyframes.value().items()) {
+            const bool known = std::any_of(kMotionParameters.begin(), kMotionParameters.end(),
+                                           [&](MotionParameter p) { return entry.key() == nameOf(p); });
+            if (!known) {
+                warnings.push_back(keyframes.path() + ": unknown Motion parameter \"" + entry.key() +
+                                   "\"; its keyframes were dropped");
+            }
+        }
+        for (std::size_t p = 0; p < kMotionParameters.size(); ++p) {
+            const char *name = nameOf(kMotionParameters[p]);
+            if (keyframes.has(name)) {
+                legacy.keyframes[p] = parseKeyframeTrack(keyframes.field(name), warnings);
+            }
+        }
+    }
+    if (node.has("audio")) {
+        const Node audio = node.field("audio");
+        audio.requireObject();
+        legacy.fadeIn = audio.timeOr("fadeInDuration", kCMTimeZero);
+        legacy.fadeOut = audio.timeOr("fadeOutDuration", kCMTimeZero);
+    }
+    return legacy;
+}
+
+struct LegacyTransition {
+    SpanId id;
+    ClipId from;
+    ClipId to;
+    CMTime duration = kCMTimeZero;
+    TransitionKind kind = TransitionKind::CrossDissolve;
+    std::string path;
+};
+
+void migrateSequenceV4ToV5(json &sequenceJson, const Node &sequence, std::uint64_t &nextId, Warnings &warnings) {
+    sequence.requireObject();
+    const CMTime frameDuration = sequence.field("frameDuration").asTime();
+    if (!isPositive(frameDuration)) {
+        sequence.field("frameDuration").fail("expected a positive frame duration");
+    }
+    // Clips per track, in the file's (timeline) order.
+    std::vector<std::vector<LegacyClip>> tracks;
+    for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
+        const char *key = kind == TrackKind::Video ? "videoTracks" : "audioTracks";
+        if (!sequence.has(key)) {
+            continue;
+        }
+        const Node list = sequence.field(key);
+        for (std::size_t t = 0, tn = list.arraySize(); t < tn; ++t) {
+            const Node track = list.element(t);
+            track.requireObject();
+            std::vector<LegacyClip> clips;
+            if (track.has("clips")) {
+                const Node clipList = track.field("clips");
+                for (std::size_t c = 0, cn = clipList.arraySize(); c < cn; ++c) {
+                    json &clipJson = sequenceJson[key][t]["clips"][c];
+                    clips.push_back(readLegacyClip(clipJson, Node(clipJson, clipList.element(c).path()), kind, t,
+                                                   warnings));
+                }
+            }
+            std::stable_sort(clips.begin(), clips.end(), [](const LegacyClip &a, const LegacyClip &b) {
+                return a.clip.timelineStart < b.clip.timelineStart;
+            });
+            tracks.push_back(std::move(clips));
+        }
+    }
+    std::vector<LegacyTransition> transitions;
+    if (sequence.has("transitions")) {
+        const Node list = sequence.field("transitions");
+        for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
+            const Node node = list.element(i);
+            node.requireObject();
+            LegacyTransition transition;
+            transition.path = node.path();
+            transition.id = node.field("id").asId<SpanId>();
+            transition.from = node.field("fromClipId").asId<ClipId>();
+            transition.to = node.field("toClipId").asId<ClipId>();
+            transition.duration = node.field("duration").asTime();
+            transition.kind = parseTransitionKind(node.field("kind"), warnings);
+            transitions.push_back(transition);
+        }
+    }
+    auto outgoing = [&](ClipId id) -> const LegacyTransition * {
+        for (const LegacyTransition &t : transitions) {
+            if (t.from == id) {
+                return &t;
+            }
+        }
+        return nullptr;
+    };
+    auto incoming = [&](ClipId id) -> const LegacyTransition * {
+        for (const LegacyTransition &t : transitions) {
+            if (t.to == id) {
+                return &t;
+            }
+        }
+        return nullptr;
+    };
+    for (const LegacyTransition &transition : transitions) {
+        bool found = false;
+        for (const std::vector<LegacyClip> &clips : tracks) {
+            for (const LegacyClip &clip : clips) {
+                found = found || clip.clip.id == transition.from;
+            }
+        }
+        if (!found) {
+            Node(sequenceJson, transition.path).fail("its outgoing clip " + std::to_string(transition.from.value()) +
+                                                     " does not exist");
+        }
+    }
+
+    for (std::vector<LegacyClip> &clips : tracks) {
+        for (std::size_t i = 0; i < clips.size(); ++i) {
+            LegacyClip &legacy = clips[i];
+            const Clip &clip = legacy.clip;
+            json &clipJson = *legacy.document;
+            std::vector<EffectSpan> spans;
+
+            // The transition at the clip's end, centred on the cut as version 4 drew it.
+            std::optional<EffectSpan> tail;
+            if (const LegacyTransition *transition = outgoing(clip.id)) {
+                const std::int64_t frames = frameIndexAt(transition->duration, frameDuration, SnapMode::Round);
+                const auto before = checkedTimeForFrame(frames / 2, frameDuration);
+                const auto after = checkedTimeForFrame(frames - frames / 2, frameDuration);
+                const auto start = before ? checkedNegate(*before) : std::nullopt;
+                if (!start || !after) {
+                    Node(sequenceJson, transition->path).fail("its duration cannot be converted");
+                }
+                EffectSpan span;
+                span.id = transition->id;
+                span.lane = kTransitionLane;
+                span.kind = SpanKind::Transition;
+                span.edge = ClipEdge::Tail;
+                span.transition = transition->kind;
+                span.start = *start;
+                span.end = *after;
+                tail = span;
+            }
+
+            // Motion and opacity keyframes: spans over the clip's source range.
+            const bool animated = std::any_of(legacy.keyframes.begin(), legacy.keyframes.end(),
+                                              [](const KeyframeTrack &track) { return !track.empty(); });
+            json &video = clipJson["video"];
+            if (animated) {
+                const auto bounds = clip.spanBounds();
+                if (!bounds) {
+                    Node(clipJson, legacy.path).fail("its source range overflows exact arithmetic");
+                }
+                EffectSpan motion;
+                motion.kind = SpanKind::Motion;
+                motion.lane = kFirstEffectLane;
+                motion.start = bounds->first;
+                motion.end = bounds->second;
+                EffectSpan opacity = motion;
+                opacity.kind = SpanKind::Opacity;
+                bool hasMotion = false;
+                for (std::size_t p = 0; p < kMotionParameters.size(); ++p) {
+                    const KeyframeTrack &track = legacy.keyframes[p];
+                    if (track.empty()) {
+                        continue;
+                    }
+                    const MotionParameter parameter = kMotionParameters[p];
+                    const SpanParameter spanParameter = spanParameterOf(parameter);
+                    const std::string path = legacy.path + ".video.keyframes." + nameOf(parameter);
+                    KeyframeTrack rebased =
+                        rebasedTrack(track, spanParameter, bounds->first, bounds->second, path, warnings);
+                    // The span now carries the whole value: the static value (unused by version 4)
+                    // becomes neutral.
+                    video[parameter == MotionParameter::Rotation ? "rotationDegrees" : nameOf(parameter)] =
+                        neutralValue(spanParameter);
+                    if (parameter == MotionParameter::Opacity) {
+                        opacity.tracks.opacity = std::move(rebased);
+                    } else {
+                        motion.tracks.track(spanParameter) = std::move(rebased);
+                        hasMotion = true;
+                    }
+                }
+                if (hasMotion) {
+                    motion.id = SpanId{nextId++};
+                    spans.push_back(std::move(motion));
+                }
+                if (!opacity.tracks.empty()) {
+                    opacity.id = SpanId{nextId++};
+                    opacity.lane = hasMotion ? kFirstEffectLane + 1 : kFirstEffectLane;
+                    spans.push_back(std::move(opacity));
+                }
+            }
+            if (video.is_object()) {
+                video.erase("keyframes");
+            }
+
+            // Fades: audio clips only (version 4 never applied them to video), and not on an edge
+            // with a crossfade (version 4 ignored the fade there).
+            std::optional<EffectSpan> head;
+            if (legacy.trackKind == TrackKind::Audio) {
+                const bool touchedAtHead = i > 0 && clips[i - 1].clip.timelineEnd() == clip.timelineStart;
+                if (kCMTimeZero < legacy.fadeIn && incoming(clip.id) == nullptr) {
+                    if (touchedAtHead) {
+                        warnings.push_back(legacy.path + ".audio.fadeInDuration: the fade in (" +
+                                           describe(legacy.fadeIn) + ") was dropped: another clip touches the "
+                                           "clip's start, and the cut there belongs to that clip");
+                    } else {
+                        EffectSpan span;
+                        span.id = SpanId{nextId++};
+                        span.lane = kTransitionLane;
+                        span.kind = SpanKind::Transition;
+                        span.edge = ClipEdge::Head;
+                        span.start = kCMTimeZero;
+                        span.end = legacy.fadeIn;
+                        head = span;
+                    }
+                }
+                if (kCMTimeZero < legacy.fadeOut && !tail) {
+                    const auto start = checkedNegate(legacy.fadeOut);
+                    if (!start) {
+                        Node(clipJson, legacy.path).fail("its fade out cannot be converted");
+                    }
+                    EffectSpan span;
+                    span.id = SpanId{nextId++};
+                    span.lane = kTransitionLane;
+                    span.kind = SpanKind::Transition;
+                    span.edge = ClipEdge::Tail;
+                    span.start = *start;
+                    span.end = kCMTimeZero;
+                    tail = span;
+                }
+            }
+            if (head && tail && kCMTimeZero < tail->end) {
+                // Version 4 applied a fade in under a crossfade at the other end; a fade span must
+                // leave room for the crossfade's part inside the clip.
+                const auto room = checkedAdd(clip.timelineDuration, tail->start);
+                if (!room || !(head->end <= *room)) {
+                    const CMTime kept = room ? maxTime(*room, kCMTimeZero) : kCMTimeZero;
+                    warnings.push_back(legacy.path + ".audio.fadeInDuration: the fade in (" + describe(head->end) +
+                                       ") would meet the crossfade at the clip's end; " +
+                                       (kCMTimeZero < kept ? "shortened to " + describe(kept) : std::string("dropped")));
+                    head->end = kept;
+                    if (!(kCMTimeZero < kept)) {
+                        head.reset();
+                    }
+                }
+            }
+            if (head) {
+                spans.push_back(*head);
+            }
+            if (tail) {
+                spans.push_back(*tail);
+            }
+            json &audio = clipJson["audio"];
+            if (audio.is_object()) {
+                audio.erase("fadeInDuration");
+                audio.erase("fadeOutDuration");
+            }
+            Clip ordered;
+            ordered.spans = std::move(spans);
+            ordered.sortSpans();
+            if (!ordered.spans.empty()) {
+                json list = json::array();
+                for (const EffectSpan &span : ordered.spans) {
+                    list.push_back(spanToJson(span));
+                }
+                clipJson["spans"] = std::move(list);
+            }
+        }
+    }
+    sequenceJson.erase("transitions");
+}
+
+void migrateV4ToV5(json &document, Warnings &warnings) {
+    const Node root(document, "");
+    root.requireObject();
+    std::uint64_t nextId = root.field("nextId").asUInt64();
+    if (root.has("sequences")) {
+        const Node sequences = root.field("sequences");
+        for (std::size_t s = 0, sn = sequences.arraySize(); s < sn; ++s) {
+            json &sequenceJson = document["sequences"][s];
+            migrateSequenceV4ToV5(sequenceJson, Node(sequenceJson, sequences.element(s).path()), nextId, warnings);
+        }
+    }
+    document["nextId"] = nextId;
+}
+
 struct MigrationStep {
     int fromVersion;
     void (*apply)(json &document, Warnings &warnings);
@@ -736,6 +1130,7 @@ constexpr MigrationStep kMigrations[] = {
     {1, migrateV1ToV2},
     {2, migrateV2ToV3},
     {3, migrateV3ToV4},
+    {4, migrateV4ToV5},
 };
 static_assert(sizeof(kMigrations) / sizeof(kMigrations[0]) == kProjectSchemaVersion - 1,
               "every schema version below the current one needs a migration step");

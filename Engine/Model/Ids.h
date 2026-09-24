@@ -39,13 +39,14 @@ template <class Tag> class Id {
 struct AssetIdTag {};
 struct TrackIdTag {};
 struct ClipIdTag {};
-struct TransitionIdTag {};
+struct SpanIdTag {};
 struct SequenceIdTag {};
 
 using AssetId = Id<AssetIdTag>;
 using TrackId = Id<TrackIdTag>;
 using ClipId = Id<ClipIdTag>;
-using TransitionId = Id<TransitionIdTag>;
+// Effect spans (EffectSpan.h), transitions included: a transition is a lane-0 span.
+using SpanId = Id<SpanIdTag>;
 using SequenceId = Id<SequenceIdTag>;
 
 // Monotonic id source shared by all id kinds of one Project. Its state is part of the

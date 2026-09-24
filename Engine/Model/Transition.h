@@ -1,42 +1,42 @@
-// A transition across the cut between two adjacent clips on one track.
+// Transitions: what a lane-0 effect span (EffectSpan.h, SpanKind::Transition) does.
 //
-// The transition is centred on the cut: with n = duration in sequence frames it starts
-// floor(n/2) frames before the cut and ends ceil(n/2) frames after it (see
-// Sequence::transitionRange). Invariants (validateSequence): both clips are on `trackId`, the
-// outgoing clip ends exactly where the incoming clip starts, the duration is a positive whole
-// number of frames (an exact model time), the range lies inside the two clips, each clip has
-// enough media beyond its edge ("handles") to cover the range, and transitions on a clip do not
-// overlap. Edits never split a clip inside a transition range unless asked to (SplitClip's
-// allowBreakingTransitions); transitions an edit invalidates are removed and reported in
-// EditResult::droppedTransitionIds.
+// A transition is a span on lane 0 of the clip that owns it. Where it sits decides its role:
+// - At the clip's tail (ClipEdge::Tail) it covers the timeline range [cut + start, cut + end]
+//   around the cut at the clip's end (start <= 0 <= end, offsets in sequence time). When it runs
+//   past the cut (end > 0) it overlays the clip that touches the owner's end on the same track: a
+//   cross dissolve (video) or a constant-power crossfade (audio) whose share of each side is the
+//   range's split at the cut, using the owner's media after its out point and the next clip's
+//   media before its in point (the handles). A tail span ending on the cut (end == 0) is a fade
+//   out to black (video) or silence (audio) inside the clip, touching neighbour or not.
+// - At the clip's head (ClipEdge::Head) it is a fade in from black or silence over
+//   [clip start, clip start + end] (start == 0), allowed only when no clip touches the owner's
+//   start: a cut between two touching clips belongs to the outgoing (left) clip, so it takes one
+//   transition at most, the outgoing clip's.
+// Validation lives in Validation.h (checkTransitionSpan).
 
 #pragma once
 
-#include "Ids.h"
-#include "TimeUtil.h"
-
 namespace ve {
 
+// The kind of transition a lane-0 span makes. The only kind: a linear dissolve for video
+// (LayerTransition::mix) and a constant-power crossfade for audio (constantPowerGain, applied to
+// the linear progress), or a linear fade against black / silence where no clip is on the other
+// side.
 enum class TransitionKind {
-    // Video: a linear dissolve (see LayerTransition::mix). Audio: a constant-power crossfade
-    // (see AudioSegment::crossfade, whose linear progress the mixer shapes with sin(c * pi / 2)).
     CrossDissolve,
 };
 
+// "crossDissolve".
 const char *nameOf(TransitionKind kind);
 
-struct Transition {
-    TransitionId id;
-    TrackId trackId;
-    TransitionKind kind = TransitionKind::CrossDissolve;
-    ClipId fromClipId; // outgoing clip (before the cut)
-    ClipId toClipId;   // incoming clip (after the cut)
-    CMTime duration = kCMTimeZero;
+// What a transition span does where it sits (see the top of this file).
+enum class TransitionRole {
+    CrossDissolve, // across the cut into the touching next clip
+    FadeOut,       // to black / silence at the owner's end
+    FadeIn,        // from black / silence at the owner's start
 };
 
-inline bool operator==(const Transition &a, const Transition &b) {
-    return a.id == b.id && a.trackId == b.trackId && a.kind == b.kind && a.fromClipId == b.fromClipId &&
-           a.toClipId == b.toClipId && identical(a.duration, b.duration);
-}
+// "crossDissolve", "fadeOut", "fadeIn".
+const char *nameOf(TransitionRole role);
 
 } // namespace ve

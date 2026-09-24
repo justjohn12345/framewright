@@ -1,6 +1,6 @@
-// Keyframed Motion model (Keyframes.h, VideoParams, the frame/keyframe mapping in Clip.h):
-// evaluation at exact source times for every interpolation, timing curves and their exact
-// division, track splits, validation, and which sequence frame shows a keyframe.
+// The keyframe machinery inside effect spans (Keyframes.h): evaluation at exact times for every
+// interpolation, the limit from the left, timing curves and their exact division, track splits and
+// rescaling, validation, and which sequence frame shows a source time (Clip.h).
 
 #include "ModelFixtures.h"
 
@@ -13,14 +13,6 @@ namespace {
 
 ExactTime exact(CMTime t) {
     return *ExactTime::from(t);
-}
-
-Keyframe key(CMTime time, double value, KeyframeInterpolation interpolation = KeyframeInterpolation::Linear) {
-    Keyframe k;
-    k.time = time;
-    k.value = value;
-    k.interpolation = interpolation;
-    return k;
 }
 
 // Reference for a timing curve: Newton's method on x(t) from the fraction (a different solver
@@ -47,7 +39,7 @@ double referenceCurve(const TimingCurve &c, double u) {
 
 } // namespace
 
-TEST_CASE("Keyframes: a parameter without keyframes has its static value; with keyframes the ends hold") {
+TEST_CASE("Keyframes: an empty track has its neutral value; with keyframes the ends hold") {
     const KeyframeTrack none;
     CHECK(evaluateTrack(none, 7.5, exact(f30(3))) == 7.5);
 
@@ -81,6 +73,14 @@ TEST_CASE("Keyframes: hold keeps the value until the next keyframe, then jumps")
     CHECK(evaluateTrack(track, 0, exact(f30(10))) == 50);
     CHECK(evaluateTrack(track, 0, exact(f30(19))) == 50);
     CHECK(evaluateTrack(track, 0, exact(f30(20))) == 80);
+    // The limit from the left, where a ramp over [9, 10) ends: the held value, not the jump.
+    CHECK(evaluateTrackFromLeft(track, 0, exact(f30(10))) == 5);
+    CHECK(evaluateTrackFromLeft(track, 0, exact(f30(20))) == 50);
+    CHECK(evaluateTrackFromLeft(track, 0, exact(f30(15))) == 50); // between keyframes: the value
+    CHECK(evaluateTrackFromLeft(track, 0, exact(f30(0))) == 5);   // on the first: nothing before it
+    CHECK(evaluateTrackFromLeft(track, 0, exact(f30(30))) == 80);
+    const KeyframeTrack ramp{key(f30(0), 0), key(f30(10), 10)};
+    CHECK(evaluateTrackFromLeft(ramp, 0, exact(f30(10))) == 10); // a ramp arrives at its end value
 }
 
 TEST_CASE("Keyframes: the eases follow Premiere and FCP naming with Core Animation's curves") {
@@ -183,8 +183,8 @@ TEST_CASE("Keyframes: splitting a track keeps every value on both sides") {
             CAPTURE(cut);
             CAPTURE(static_cast<int>(kind));
             const TrackSplit split = splitTrack(track, 9, f30(cut));
-            CHECK_FALSE(keyframeTrackProblem(split.left, MotionParameter::X).has_value());
-            CHECK_FALSE(keyframeTrackProblem(split.right, MotionParameter::X).has_value());
+            CHECK_FALSE(keyframeTimesProblem(split.left, "X keyframe").has_value());
+            CHECK_FALSE(keyframeTimesProblem(split.right, "X keyframe").has_value());
             for (std::int64_t frame = 0; frame < 100; ++frame) {
                 const double expected = evaluateTrack(track, 9, exact(f30(frame)));
                 const double actual = frame < cut ? evaluateTrack(split.left, split.leftStatic, exact(f30(frame)))
@@ -224,66 +224,52 @@ TEST_CASE("Keyframes: splitting a track keeps every value on both sides") {
     }
 }
 
-TEST_CASE("Keyframes: validation") {
-    CHECK_FALSE(keyframeTrackProblem({key(f30(0), 1), key(f30(1), 2)}, MotionParameter::Scale).has_value());
-    CHECK(keyframeTrackProblem({key(f30(1), 1), key(f30(1), 2)}, MotionParameter::X).has_value());
-    CHECK(keyframeTrackProblem({key(f30(2), 1), key(f30(1), 2)}, MotionParameter::X).has_value());
-    CHECK(keyframeTrackProblem({key(f30(0), -0.5)}, MotionParameter::Scale).has_value());
-    CHECK(keyframeTrackProblem({key(f30(0), 1.5)}, MotionParameter::Opacity).has_value());
-    CHECK(keyframeTrackProblem({key(f30(0), NAN)}, MotionParameter::Rotation).has_value());
+TEST_CASE("Keyframes: validation of times and curves") {
+    CHECK_FALSE(keyframeTimesProblem({key(f30(0), 1), key(f30(1), 2)}, "k").has_value());
+    CHECK(keyframeTimesProblem({key(f30(1), 1), key(f30(1), 2)}, "k").has_value());
+    CHECK(keyframeTimesProblem({key(f30(2), 1), key(f30(1), 2)}, "k").has_value());
+    CHECK(keyframeTimesProblem({key(f30(0), NAN)}, "k").has_value());
     CMTime rounded = f30(1);
     rounded.flags |= kCMTimeFlags_HasBeenRounded;
-    CHECK(keyframeTrackProblem({key(rounded, 1)}, MotionParameter::X).has_value());
+    CHECK(keyframeTimesProblem({key(rounded, 1)}, "k").has_value());
     Keyframe bent = key(f30(0), 1, KeyframeInterpolation::Bezier);
     bent.curve = TimingCurve{1.5, 0, 0.5, 1};
-    CHECK(keyframeTrackProblem({bent}, MotionParameter::X).has_value());
+    CHECK(keyframeTimesProblem({bent}, "k").has_value());
     // Control points that run backwards in time (x1 > x2): splitCurve could not keep their parts.
     CHECK_FALSE(TimingCurve({0.9, 0, 0.1, 1}).isValid());
     bent.curve = TimingCurve{0.9, 0, 0.1, 1};
-    CHECK(keyframeTrackProblem({bent}, MotionParameter::X).has_value());
+    CHECK(keyframeTimesProblem({bent}, "k").has_value());
     CHECK(TimingCurve({0.5, 0, 0.5, 1}).isValid());
     CHECK(TimingCurve({0.5 + 1e-16, 0, 0.5, 1}).isValid()); // rounding of a split part
     // Only a custom keyframe keeps a curve.
     Keyframe straight = key(f30(0), 1);
     straight.curve = TimingCurve{0.42, 0, 0.58, 1};
-    CHECK(keyframeTrackProblem({straight}, MotionParameter::X).has_value());
-
-    // A clip's keyframes are part of the model's invariants; audio clips have none.
-    Fixture fx;
-    const auto [video, audio] = fx.addLinkedPair(0, 60);
-    fx.sequence().findClip(video)->video.keyframes.opacity = {key(f30(0), 0.2), key(f30(10), 1.2)};
-    CHECK(problemOf(fx.project).find("Opacity keyframe") != std::string::npos);
-    fx.sequence().findClip(video)->video.keyframes.opacity = {key(f30(0), 0.2)};
-    fx.requireValid();
-    fx.sequence().findClip(audio)->video.keyframes.x = {key(f30(0), 1)};
-    CHECK(problemOf(fx.project).find("only clips on video tracks") != std::string::npos);
+    CHECK(keyframeTimesProblem({straight}, "k").has_value());
 }
 
-TEST_CASE("Keyframes: VideoParams evaluates animated parameters and keeps the others static") {
-    VideoParams params{10, 20, 0.5, 45, 0.75};
-    params.keyframes.scale = {key(f30(0), 1), key(f30(30), 2)};
-    params.keyframes.opacity = {key(f30(0), 0.5, KeyframeInterpolation::Bezier), key(f30(30), 1)};
-    // A custom curve that overshoots: the value is limited to the parameter's range.
-    params.keyframes.opacity[0].curve = TimingCurve{0.2, 3.0, 0.8, 3.0};
-    const VideoParams values = params.valuesAt(exact(f30(15)));
-    CHECK(values.x == 10);
-    CHECK(values.y == 20);
-    CHECK(values.rotationDegrees == 45);
-    CHECK(values.scale == doctest::Approx(1.5));
-    CHECK(values.opacity == 1.0);
-    CHECK(values.keyframes.empty());
-    CHECK(params.staticValues() == VideoParams{10, 20, 0.5, 45, 0.75});
-    CHECK(params.isAnimated(MotionParameter::Scale));
-    CHECK_FALSE(params.isAnimated(MotionParameter::X));
+TEST_CASE("Keyframes: rescaling a track keeps each keyframe's place in the span") {
+    const KeyframeTrack track{key(f30(0), 1, KeyframeInterpolation::EaseInOut), key(f30(10), 2), key(f30(30), 3)};
+    // Stretched from 30 to 45 frames: 0, 15, 45.
+    const auto longer = rescaleTrack(track, f30(45), f30(30));
+    REQUIRE(longer.has_value());
+    CHECK((*longer)[1].time == f30(15));
+    CHECK((*longer)[2].time == f30(45));
+    CHECK((*longer)[0].interpolation == KeyframeInterpolation::EaseInOut);
+    CHECK((*longer)[1].value == 2);
+    // A factor whose products have no CMTime form lands on the nearest precise tick.
+    const auto odd = rescaleTrack(track, CMTimeMake(1001, 30000), CMTimeMake(1, 44100));
+    REQUIRE(odd.has_value());
+    CHECK(isExactModelTime((*odd)[1].time));
+    CHECK(std::fabs(toSeconds((*odd)[1].time) - (10.0 / 30.0) * (1001.0 / 30000.0) * 44100.0) < 1e-9);
+    CHECK_FALSE(rescaleTrack(track, kCMTimeZero, f30(30)).has_value());
+    CHECK_FALSE(rescaleTrack(track, f30(30), kCMTimeInvalid).has_value());
 }
 
-TEST_CASE("Keyframes: which sequence frame shows a keyframe, through speed changes") {
+TEST_CASE("Keyframes: which sequence frame shows a source time; span edges on frames") {
     Fixture fx;
     // A clip at 2x from source frame 30 (1 s), on timeline frames [60, 90).
     const ClipId id = fx.addClip(fx.v1, fx.av30, 60, 30, 30, 2.0);
-    Clip &clip = *fx.sequence().findClip(id);
-    clip.video.keyframes.x = {key(f30(30), 0), key(f30(31), 1), key(f30(90), 2), key(f30(200), 3)};
-    fx.requireValid();
+    const Clip &clip = fx.clip(id);
     const CMTime fd = f30(1);
     // Source frame 30 plays at timeline frame 60; source frame 31 (half a sequence frame later at
     // 2x) is still shown by frame 60; source frame 90 is the out point, owned by the last frame (89).
@@ -293,15 +279,12 @@ TEST_CASE("Keyframes: which sequence frame shows a keyframe, through speed chang
     CHECK(frameShowingSourceTime(clip, f30(90), fd) == f30(89));
     CHECK_FALSE(frameShowingSourceTime(clip, f30(200), fd).has_value()); // trimmed off
     CHECK_FALSE(frameShowingSourceTime(clip, f30(29), fd).has_value());
-    CHECK(keyframeIndexForFrame(clip, MotionParameter::X, f30(60), fd) == std::optional<std::size_t>(0));
-    CHECK(keyframeIndexForFrame(clip, MotionParameter::X, f30(89), fd) == std::optional<std::size_t>(2));
-    CHECK_FALSE(keyframeIndexForFrame(clip, MotionParameter::X, f30(70), fd).has_value());
-    CHECK_FALSE(keyframeIndexForFrame(clip, MotionParameter::X, f30(90), fd).has_value()); // after the clip
-    CHECK(keyframeTimeForFrame(clip, f30(70)) == f30(50));
+    CHECK(spanTimeAt(clip, f30(70)) == f30(50));
+    CHECK(spanTimeAt(clip, f30(90)) == f30(90)); // the clip's end: its out point
 
-    // 999/1000 speed at 29.97 fps: the frame's exact source time has no CMTime form, so the
-    // keyframe time is the first time on kPreciseTimescale at or after it, unflagged, and still
-    // shown by that frame (the nearest one could fall on the frame before).
+    // 999/1000 speed at 29.97 fps: the frame's exact source time has no CMTime form, so a span edge
+    // there is the first time on kPreciseTimescale at or after it, unflagged, still shown by that
+    // frame (the nearest one could fall on the frame before), and the frame is evaluated there.
     Fixture ntsc;
     ntsc.sequence().frameDuration = CMTimeMake(1001, 30000);
     Clip slow;
@@ -309,33 +292,66 @@ TEST_CASE("Keyframes: which sequence frame shows a keyframe, through speed chang
     slow.assetId = ntsc.av24;
     slow.trackId = ntsc.v1;
     slow.timelineStart = CMTimeMake(0, 30000);
-    slow.timelineDuration = CMTimeMake(1001 * 100, 30000);
+    slow.timelineDuration = CMTimeMake(1001 * 101, 30000); // its out point has no CMTime form either
     slow.sourceIn = CMTimeMake(44101, 44100);
     slow.speed = Ratio{999, 1000};
     const CMTime frame = CMTimeMake(1001 * 7, 30000);
     REQUIRE_FALSE(slow.exactSourceTimeAt(frame)->toTime().has_value());
-    const auto time = keyframeTimeForFrame(slow, frame);
+    const auto time = spanTimeAt(slow, frame);
     REQUIRE(time.has_value());
     CHECK(isExactModelTime(*time));
     CHECK(time->timescale == kPreciseTimescale);
     CHECK(frameShowingSourceTime(slow, *time, CMTimeMake(1001, 30000)) == frame);
+    CHECK(motionTimeAt(slow, frame)->compare(*time) == 0);
+    // The clip's out point has no CMTime form either: its bound is the tick before it.
+    REQUIRE_FALSE(slow.exactSourceOut()->toTime().has_value());
+    const auto bounds = slow.spanBounds();
+    REQUIRE(bounds.has_value());
+    CHECK(slow.exactSourceOut()->compare(bounds->second) > 0);
+    CHECK(spanTimeAt(slow, slow.timelineEnd()) == bounds->second);
 }
 
-TEST_CASE("Keyframes: a still's keyframes keep their timeline positions when its start moves") {
+TEST_CASE("Spans: a still's spans keep their timeline positions when its start moves; a movie's stay put") {
     Fixture fx;
     const ClipId id = fx.addClip(fx.v1, fx.still, 30, 90);
     Clip clip = fx.clip(id);
-    clip.video.keyframes.scale = {key(f30(0), 1, KeyframeInterpolation::EaseInOut), key(f30(89), 2)};
-    const VideoParams before = clip.video.valuesAt(*clip.exactSourceTimeAt(f30(70)));
-    REQUIRE(clip.setTimelineStartKeepingEnd(f30(50)));
-    CHECK(clip.video.keyframes.scale[0].time == f30(-20)); // now before the clip: hidden
-    CHECK(clip.video.keyframes.scale[1].time == f30(69));
-    CHECK(clip.video.valuesAt(*clip.exactSourceTimeAt(f30(70))) == before);
-    // A video clip's keyframes are source times: the trim does not touch them.
+    SpanTracks tracks;
+    tracks.scale = {key(f30(0), 1, KeyframeInterpolation::EaseInOut), key(f30(60), 2)};
+    EffectSpan span;
+    span.id = SpanId{500};
+    span.kind = SpanKind::Motion;
+    span.start = f30(20);
+    span.end = f30(80);
+    span.tracks = tracks;
+    clip.spans = {span};
+    const VideoParams before = motionValuesAt(clip, f30(70));
+    REQUIRE(clip.setTimelineStartKeepingEnd(f30(40)) == RetimeResult::Ok);
+    // Moved back by the 10 frames the start moved: still at timeline frames [50, 110).
+    CHECK(clip.spans[0].start == f30(10));
+    CHECK(clip.spans[0].end == f30(70));
+    CHECK(clip.spans[0].tracks == tracks);
+    CHECK(motionValuesAt(clip, f30(70)) == before);
+    // A trim past the span's start clips it, the value at the new edge evaluated exactly: every
+    // remaining frame shows what it showed.
+    std::vector<double> remaining;
+    for (std::int64_t f = 60; f < 120; ++f) {
+        remaining.push_back(motionValuesAt(clip, f30(f)).scale);
+    }
+    REQUIRE(clip.setTimelineStartKeepingEnd(f30(60)) == RetimeResult::Ok);
+    CHECK(clip.spans[0].start == kCMTimeZero);
+    CHECK(clip.spans[0].end == f30(50));
+    for (std::int64_t f = 60; f < 120; ++f) {
+        CAPTURE(f);
+        CHECK(motionValuesAt(clip, f30(f)).scale == doctest::Approx(remaining[std::size_t(f - 60)]).epsilon(1e-12));
+    }
+
+    // A video clip's spans are source times: the trim does not move them.
     const ClipId movie = fx.addClip(fx.v2, fx.av30, 30, 90, 10);
     Clip video = fx.clip(movie);
-    video.video.keyframes.x = {key(f30(10), 1), key(f30(40), 2)};
-    const KeyframeTrack kept = video.video.keyframes.x;
-    REQUIRE(video.setTimelineStartKeepingEnd(f30(50)));
-    CHECK(video.video.keyframes.x == kept);
+    EffectSpan moving = span;
+    moving.start = f30(40);
+    moving.end = f30(90);
+    video.spans = {moving};
+    REQUIRE(video.setTimelineStartKeepingEnd(f30(50)) == RetimeResult::Ok);
+    CHECK(video.spans[0] == moving);
 }

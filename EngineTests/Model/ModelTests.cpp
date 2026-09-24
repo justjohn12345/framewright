@@ -41,10 +41,10 @@ TEST_CASE("Model: the timeline duration is authoritative; source times derive fr
     CHECK(clip.timelineTimeAt(CMTimeMake(3, 1)) == CMTimeMake(4, 1));
     CHECK(clip.sourceTimeAt(CMTimeMake(2, 1)) == CMTimeMake(-1, 1)); // handles before the clip
 
-    REQUIRE(clip.setTimelineStartKeepingEnd(CMTimeMake(5, 1)));
+    REQUIRE(clip.setTimelineStartKeepingEnd(CMTimeMake(5, 1)) == RetimeResult::Ok);
     CHECK(clip.timelineEnd() == CMTimeMake(8, 1));
     CHECK(clip.sourceIn == CMTimeMake(5, 1));
-    REQUIRE(clip.setTimelineEnd(CMTimeMake(7, 1)));
+    REQUIRE(clip.setTimelineEnd(CMTimeMake(7, 1)) == RetimeResult::Ok);
     CHECK(clip.sourceOut() == CMTimeMake(9, 1));
     CHECK(clip.duration() == CMTimeMake(2, 1));
 }
@@ -76,25 +76,47 @@ TEST_CASE("Model: derived source times are exact even when no CMTime can hold th
 
     // A trim whose new in point would need that timescale is refused rather than rounded.
     Clip trimmed = clip;
-    CHECK_FALSE(trimmed.setTimelineStartKeepingEnd(CMTimeMake(1001 * 8, 30000)));
+    CHECK(trimmed.setTimelineStartKeepingEnd(CMTimeMake(1001 * 8, 30000)) == RetimeResult::NotRepresentable);
     CHECK(trimmed == clip);
 }
 
-TEST_CASE("Model: fades shrink to fit when a clip gets shorter") {
+TEST_CASE("Model: lane-0 fades shrink to fit when a clip gets shorter") {
     Clip clip;
     clip.timelineDuration = CMTimeMake(30, 30);
-    clip.audio.fadeInDuration = CMTimeMake(20, 30);
-    clip.audio.fadeOutDuration = CMTimeMake(10, 30);
-    REQUIRE(clip.setTimelineEnd(CMTimeMake(25, 30)));
-    CHECK(clip.audio.fadeInDuration == CMTimeMake(20, 30));
-    CHECK(clip.audio.fadeOutDuration == CMTimeMake(5, 30)); // the edited edge gives way
-    REQUIRE(clip.setTimelineStartKeepingEnd(CMTimeMake(10, 30)));
+    EffectSpan in;
+    in.id = SpanId{1};
+    in.lane = kTransitionLane;
+    in.kind = SpanKind::Transition;
+    in.edge = ClipEdge::Head;
+    in.end = CMTimeMake(20, 30);
+    EffectSpan out = in;
+    out.id = SpanId{2};
+    out.edge = ClipEdge::Tail;
+    out.start = CMTimeMake(-10, 30);
+    out.end = kCMTimeZero;
+    clip.spans = {in, out};
+    REQUIRE(clip.setTimelineEnd(CMTimeMake(25, 30)) == RetimeResult::Ok);
+    CHECK(clipFadeLength(clip, ClipEdge::Head) == CMTimeMake(20, 30));
+    CHECK(clipFadeLength(clip, ClipEdge::Tail) == CMTimeMake(5, 30)); // the edited edge gives way
+    REQUIRE(clip.setTimelineStartKeepingEnd(CMTimeMake(10, 30)) == RetimeResult::Ok);
     CHECK(clip.duration() == CMTimeMake(15, 30));
-    CHECK(clip.audio.fadeOutDuration == CMTimeMake(5, 30));
-    CHECK(clip.audio.fadeInDuration == CMTimeMake(10, 30));
-    REQUIRE(clip.setTimelineEnd(CMTimeMake(13, 30)));
-    CHECK(clip.audio.fadeInDuration == CMTimeMake(3, 30)); // each fade at most the duration
-    CHECK(clip.audio.fadeOutDuration == kCMTimeZero);
+    CHECK(clipFadeLength(clip, ClipEdge::Tail) == CMTimeMake(5, 30));
+    CHECK(clipFadeLength(clip, ClipEdge::Head) == CMTimeMake(10, 30));
+    REQUIRE(clip.setTimelineEnd(CMTimeMake(13, 30)) == RetimeResult::Ok);
+    CHECK(clipFadeLength(clip, ClipEdge::Head) == CMTimeMake(3, 30)); // each fade at most the duration
+    CHECK(clipFadeLength(clip, ClipEdge::Tail) == kCMTimeZero);
+    CHECK(clip.spans.size() == 1); // a fade shortened to nothing is removed
+    SUBCASE("a fade gives way to a cross dissolve at the other end, whichever edge was edited") {
+        Clip both;
+        both.timelineDuration = CMTimeMake(30, 30);
+        EffectSpan dissolve = out;
+        dissolve.start = CMTimeMake(-12, 30);
+        dissolve.end = CMTimeMake(12, 30);
+        both.spans = {in, dissolve};
+        REQUIRE(both.setTimelineEnd(CMTimeMake(28, 30)) == RetimeResult::Ok);
+        CHECK(clipFadeLength(both, ClipEdge::Head) == CMTimeMake(16, 30));
+        CHECK(both.transitionAt(ClipEdge::Tail)->start == CMTimeMake(-12, 30)); // never shortened here
+    }
 }
 
 TEST_CASE("Model: still clips measure their source range in timeline time") {
@@ -105,11 +127,11 @@ TEST_CASE("Model: still clips measure their source range in timeline time") {
     still.timelineStart = CMTimeMake(2, 1);
     CHECK(still.duration() == CMTimeMake(5, 1));
     CHECK(still.sourceOut() == CMTimeMake(5, 1));
-    REQUIRE(still.setTimelineStartKeepingEnd(CMTimeMake(1, 1)));
+    REQUIRE(still.setTimelineStartKeepingEnd(CMTimeMake(1, 1)) == RetimeResult::Ok);
     CHECK(still.sourceIn == kCMTimeZero);
     CHECK(still.duration() == CMTimeMake(6, 1));
     CHECK(still.timelineEnd() == CMTimeMake(7, 1));
-    REQUIRE(still.setTimelineEnd(CMTimeMake(3, 1)));
+    REQUIRE(still.setTimelineEnd(CMTimeMake(3, 1)) == RetimeResult::Ok);
     CHECK(still.duration() == CMTimeMake(2, 1));
     CHECK(still.speedRatio() == Ratio{1, 1});
 }
@@ -165,11 +187,11 @@ TEST_CASE("Model: track lookup by time and invariant checks") {
     CHECK(wrongTrack.checkInvariants().has_value());
 }
 
-TEST_CASE("Model: sequence lookups and transition ranges") {
+TEST_CASE("Model: sequence lookups and transition placement") {
     Fixture fx;
     const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
     const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
-    const TransitionId t = fx.addTransition(fx.v1, a, b, 15);
+    const SpanId t = fx.addTransition(fx.v1, a, b, 15);
     fx.requireValid();
     const Sequence &s = fx.sequence();
     const auto location = s.locateClip(b);
@@ -178,18 +200,31 @@ TEST_CASE("Model: sequence lookups and transition ranges") {
     CHECK(location->trackIndex == 0);
     CHECK(location->clipIndex == 1);
     CHECK(s.trackOfClip(a)->id == fx.v1);
-    CHECK(s.findTransition(t)->fromClipId == a);
-    CHECK(s.transitionFrom(a)->id == t);
-    CHECK(s.transitionTo(b)->id == t);
-    CHECK(s.transitionFrom(b) == nullptr);
+    const Clip *owner = nullptr;
+    const Track *track = nullptr;
+    const EffectSpan *span = s.findSpan(t, &owner, &track);
+    REQUIRE(span != nullptr);
+    CHECK(owner->id == a);
+    CHECK(track->id == fx.v1);
+    CHECK(s.findSpan(SpanId{999}) == nullptr);
+    CHECK(touchingClip(*track, fx.clip(a), ClipEdge::Tail)->id == b);
+    CHECK(touchingClip(*track, fx.clip(b), ClipEdge::Head)->id == a);
+    CHECK(touchingClip(*track, fx.clip(a), ClipEdge::Head) == nullptr);
     // 15 frames: 7 before the cut, 8 after.
-    const auto range = s.transitionRange(*s.findTransition(t));
-    REQUIRE(range.has_value());
-    CHECK(range->start == f30(53));
-    CHECK(range->end == f30(68));
-    CHECK(s.transitionAt(fx.v1, f30(53))->id == t);
-    CHECK(s.transitionAt(fx.v1, f30(68)) == nullptr);
-    CHECK(s.transitionAt(fx.v2, f30(60)) == nullptr);
+    const auto placed = placeTransition(*track, *owner, *span);
+    REQUIRE(placed.has_value());
+    CHECK(placed->role == TransitionRole::CrossDissolve);
+    CHECK(placed->partner->id == b);
+    CHECK(placed->cut == f30(60));
+    CHECK(placed->range.start == f30(53));
+    CHECK(placed->range.end == f30(68));
+    CHECK(transitionAt(*track, f30(53))->span->id == t);
+    CHECK(transitionAt(*track, f30(59))->span->id == t);
+    CHECK(transitionAt(*track, f30(60))->span->id == t); // the part over B, found from B
+    CHECK(transitionAt(*track, f30(67))->span->id == t);
+    CHECK_FALSE(transitionAt(*track, f30(68)).has_value());
+    CHECK_FALSE(transitionAt(*track, f30(52)).has_value());
+    CHECK_FALSE(transitionAt(*s.findTrack(fx.v2), f30(60)).has_value());
 }
 
 TEST_CASE("Model: validateProject catches broken invariants") {
@@ -282,6 +317,16 @@ TEST_CASE("Model: validateProject catches broken invariants") {
         expectProblem(fx, "still asset but clip is not marked still");
     }
     SUBCASE("non-finite or out-of-range video parameters, non-finite gain, bad fades") {
+        auto fade = [](ClipEdge edge, CMTime start, CMTime end) {
+            EffectSpan span;
+            span.id = SpanId{edge == ClipEdge::Head ? 900u : 901u};
+            span.lane = kTransitionLane;
+            span.kind = SpanKind::Transition;
+            span.edge = edge;
+            span.start = start;
+            span.end = end;
+            return span;
+        };
         Fixture fx;
         const ClipId a = fx.addClip(fx.a1, fx.av30, 0, 30);
         Clip &clip = *fx.sequence().findClip(a);
@@ -296,23 +341,28 @@ TEST_CASE("Model: validateProject catches broken invariants") {
         clip.audio.gainDb = INFINITY;
         expectProblem(fx, "non-finite gain");
         clip.audio.gainDb = 0;
-        clip.audio.fadeInDuration = f30(-1);
-        expectProblem(fx, "negative");
-        clip.audio.fadeInDuration = f30(31);
-        expectProblem(fx, "longer than the clip");
-        clip.audio.fadeInDuration = f30(20);
-        clip.audio.fadeOutDuration = f30(11);
-        expectProblem(fx, "overlap");
-        clip.audio.fadeOutDuration = f30(10);
+        fx.project.ids.reserveThrough(1000);
+        clip.spans = {fade(ClipEdge::Head, kCMTimeZero, f30(-1))};
+        expectProblem(fx, "is empty");
+        clip.spans = {fade(ClipEdge::Head, kCMTimeZero, f30(31))};
+        expectProblem(fx, "longer than its clip");
+        clip.spans = {fade(ClipEdge::Head, kCMTimeZero, f30(20)), fade(ClipEdge::Tail, -f30(11), kCMTimeZero)};
+        expectProblem(fx, "meets the fade in");
+        clip.spans = {fade(ClipEdge::Head, kCMTimeZero, f30(20)), fade(ClipEdge::Tail, -f30(10), kCMTimeZero)};
         fx.requireValid(); // fades may meet exactly
-        clip.audio.fadeOutDuration = kCMTimeInvalid;
+        clip.spans = {fade(ClipEdge::Head, kCMTimeZero, f30(20)), fade(ClipEdge::Tail, kCMTimeInvalid, kCMTimeZero)};
         expectProblem(fx, "not a numeric time");
+        clip.spans = {fade(ClipEdge::Tail, -f30(10), kCMTimeZero), fade(ClipEdge::Head, kCMTimeZero, f30(20))};
+        expectProblem(fx, "lane and time order");
     }
     SUBCASE("rounded times and epochs are rejected everywhere") {
         Fixture fx;
         const ClipId a = fx.addClip(fx.a1, fx.av30, 0, 30);
         const ClipId b = fx.addClip(fx.a1, fx.av30, 30, 30, 300);
         fx.addTransition(fx.a1, a, b, 4);
+        SpanTracks gain;
+        gain.gain = {key(kCMTimeZero, 0), key(f30(10), -6)};
+        fx.addSpan(a, SpanKind::Gain, 1, f30(0), f30(10), gain);
         fx.requireValid();
         auto withRound = [](CMTime t) {
             t.flags |= kCMTimeFlags_HasBeenRounded;
@@ -323,16 +373,18 @@ TEST_CASE("Model: validateProject catches broken invariants") {
             return t;
         };
         for (auto modify : {+withRound, +withEpoch}) {
-            for (int field = 0; field < 9; ++field) {
+            for (int field = 0; field < 10; ++field) {
                 Fixture copy = fx;
                 Clip &clip = *copy.sequence().findClip(a);
+                EffectSpan &dissolve = *clip.transitionAt(ClipEdge::Tail);
                 switch (field) {
                 case 0: clip.timelineStart = modify(clip.timelineStart); break;
                 case 1: clip.timelineDuration = modify(clip.timelineDuration); break;
                 case 2: clip.sourceIn = modify(clip.sourceIn); break;
-                case 3: clip.audio.fadeInDuration = modify(clip.audio.fadeInDuration); break;
-                case 4: clip.audio.fadeOutDuration = modify(clip.audio.fadeOutDuration); break;
-                case 5: copy.sequence().transitions[0].duration = modify(copy.sequence().transitions[0].duration); break;
+                case 3: dissolve.start = modify(dissolve.start); break;
+                case 4: dissolve.end = modify(dissolve.end); break;
+                case 5: copy.sequence().findClip(a)->spans[1].tracks.gain[1].time = modify(copy.sequence().findClip(a)->spans[1].tracks.gain[1].time); break;
+                case 9: copy.sequence().findClip(a)->spans[1].end = modify(copy.sequence().findClip(a)->spans[1].end); break;
                 case 6: copy.sequence().frameDuration = modify(copy.sequence().frameDuration); break;
                 case 7: copy.project.findAsset(copy.av30)->duration = modify(copy.project.findAsset(copy.av30)->duration); break;
                 default:
@@ -442,39 +494,102 @@ TEST_CASE("Model: validateProject catches broken invariants") {
         const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
         fx.addTransition(fx.v1, a, b, 10);
         expectProblem(fx, "lacks media after");
+        fx.sequence().findClip(a)->sourceIn = f30(30);
+        fx.sequence().findClip(b)->sourceIn = f30(4);
+        expectProblem(fx, "lacks media before");
     }
-    SUBCASE("transition not adjacent, too long, bad duration, duplicated on a cut, unknown track") {
+    SUBCASE("transition not adjacent, too long, off the grid, duplicated on an edge, on the wrong lane") {
         Fixture fx;
         const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
         const ClipId b = fx.addClip(fx.v1, fx.av30, 61, 60, 300);
-        fx.addTransition(fx.v1, a, b, 10);
-        expectProblem(fx, "are not adjacent");
+        fx.addTailTransition(a, 5, 5);
+        expectProblem(fx, "no clip touches that end");
         fx.sequence().findClip(b)->timelineStart = f30(60);
         fx.requireValid();
-        fx.sequence().transitions[0].duration = f30(130);
-        expectProblem(fx, "longer than the clips");
-        fx.sequence().transitions[0].duration = CMTimeMake(1, 60);
-        expectProblem(fx, "whole number of frames");
-        fx.sequence().transitions[0].duration = kCMTimeZero;
-        expectProblem(fx, "whole number of frames");
-        fx.sequence().transitions[0].duration = f30(10);
-        fx.addTransition(fx.v1, a, b, 4);
-        expectProblem(fx, "more than one transition");
-        fx.sequence().transitions.pop_back();
-        fx.sequence().transitions[0].trackId = TrackId{999};
-        expectProblem(fx, "unknown track");
-        fx.sequence().transitions[0].trackId = fx.v1;
-        fx.sequence().transitions[0].toClipId = a;
-        expectProblem(fx, "joins a clip to itself");
+        EffectSpan &t = *fx.sequence().findClip(a)->transitionAt(ClipEdge::Tail);
+        t.end = f30(61);
+        expectProblem(fx, "longer than clip");
+        t.end = f30(5);
+        t.start = -f30(61);
+        expectProblem(fx, "longer than its clip");
+        t.start = -f30(5);
+        t.end = CMTimeMake(1, 60);
+        expectProblem(fx, "whole sequence frames");
+        t.end = f30(5);
+        t.start = kCMTimeZero;
+        t.end = kCMTimeZero;
+        expectProblem(fx, "is empty");
+        t.start = f30(2);
+        t.end = f30(5);
+        expectProblem(fx, "starts at or before its clip's end");
+        t.start = -f30(5);
+        fx.requireValid();
+        fx.addTailTransition(a, 2, 0);
+        expectProblem(fx, "more than one transition at its tail");
+        fx.sequence().findClip(a)->spans.pop_back();
+        fx.sequence().findClip(a)->spans[0].lane = 1;
+        expectProblem(fx, "lane 0 only");
+        fx.sequence().findClip(a)->spans[0].lane = 0;
+        fx.requireValid();
+        fx.addSpan(a, SpanKind::Motion, 0, f30(30), f30(40));
+        expectProblem(fx, "lane 0 holds transitions only");
+    }
+    SUBCASE("a fade in on a clip whose start another clip touches") {
+        Fixture fx;
+        const ClipId a = fx.addClip(fx.a1, fx.av30, 0, 60, 30);
+        const ClipId b = fx.addClip(fx.a1, fx.av30, 60, 60, 300);
+        fx.addFade(b, ClipEdge::Head, f30(10));
+        expectProblem(fx, "the cut belongs to that clip");
+        fx.sequence().findClip(a)->timelineDuration = f30(59);
+        fx.requireValid(); // a one-frame gap: nothing touches B any more
     }
     SUBCASE("overlapping transitions on one clip") {
         Fixture fx;
         const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 30, 100);
         const ClipId b = fx.addClip(fx.v1, fx.av30, 30, 10, 300);
-        const ClipId c = fx.addClip(fx.v1, fx.av30, 40, 30, 500);
-        fx.addTransition(fx.v1, a, b, 12);
-        fx.addTransition(fx.v1, b, c, 12);
-        expectProblem(fx, "overlap");
+        fx.addClip(fx.v1, fx.av30, 40, 30, 500);
+        fx.addTransition(fx.v1, a, b, 12); // 6 frames into B
+        fx.addTailTransition(b, 6, 6);     // 6 frames before B's end: they meet in B
+        expectProblem(fx, "meets the transition at the end of clip");
+    }
+    SUBCASE("effect spans: lanes, kinds, ranges, tracks and overlap") {
+        Fixture fx;
+        const ClipId v = fx.addClip(fx.v1, fx.av30, 0, 60, 30); // source frames [30, 90)
+        const ClipId a = fx.addClip(fx.a1, fx.av30, 0, 60, 30);
+        SpanTracks motion;
+        motion.x = {key(kCMTimeZero, 0), key(f30(30), 100)};
+        const SpanId s = fx.addSpan(v, SpanKind::Motion, 1, f30(30), f30(60), motion);
+        fx.requireValid();
+        EffectSpan &span = *fx.sequence().findSpan(s);
+        span.lane = 4;
+        expectProblem(fx, "not an effect lane");
+        span.lane = 1;
+        span.start = f30(20);
+        expectProblem(fx, "outside its clip's source range");
+        span.start = f30(30);
+        span.end = f30(91);
+        expectProblem(fx, "outside its clip's source range");
+        span.end = f30(60);
+        span.tracks.x.push_back(key(f30(31), 1));
+        expectProblem(fx, "within the span");
+        span.tracks.x.pop_back();
+        span.tracks.gain = {key(kCMTimeZero, 1)};
+        expectProblem(fx, "has no Gain keyframes");
+        span.tracks.gain.clear();
+        span.tracks.scale = {key(kCMTimeZero, -1)};
+        expectProblem(fx, "invalid value");
+        span.tracks.scale.clear();
+        fx.requireValid();
+        fx.addSpan(v, SpanKind::Opacity, 1, f30(50), f30(70));
+        expectProblem(fx, "overlap on lane 1");
+        fx.sequence().findClip(v)->spans.back().lane = 2;
+        fx.requireValid(); // spans on different lanes may overlap
+        fx.addSpan(a, SpanKind::Motion, 1, f30(30), f30(40));
+        expectProblem(fx, "motion span on audio track");
+        fx.sequence().findClip(a)->spans.back().kind = SpanKind::Gain;
+        fx.requireValid();
+        fx.addSpan(v, SpanKind::Gain, 3, f30(30), f30(40));
+        expectProblem(fx, "gain span on video track");
     }
     SUBCASE("missing active sequence") {
         Fixture fx;

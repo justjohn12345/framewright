@@ -1,11 +1,11 @@
-// A sequence (timeline): video and audio tracks plus the transitions between their clips.
+// A sequence (timeline): video and audio tracks. Transitions are lane-0 spans of the clips that own
+// them (Transition.h); placeTransition resolves one in its sequence.
 
 #pragma once
 
 #include "Ids.h"
 #include "TimeUtil.h"
 #include "Track.h"
-#include "Transition.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -31,7 +31,6 @@ struct Sequence {
     std::int32_t audioSampleRate = 48000;
     std::vector<Track> videoTracks; // bottom to top (later tracks draw over earlier ones)
     std::vector<Track> audioTracks;
-    std::vector<Transition> transitions;
 
     // End of the last clip on any track.
     CMTime duration() const;
@@ -53,19 +52,37 @@ struct Sequence {
     const Track *trackOfClip(ClipId clipId) const;
     Track *trackOfClip(ClipId clipId);
 
-    const Transition *findTransition(TransitionId transitionId) const;
-    // The transition on the cut where `clipId` is the outgoing / incoming clip.
-    const Transition *transitionFrom(ClipId clipId) const;
-    const Transition *transitionTo(ClipId clipId) const;
-
-    // Timeline range covered by a transition, or nullopt when its outgoing clip is missing.
-    std::optional<TimeRange> transitionRange(const Transition &transition) const;
-
-    // Transition on `trackId` whose range contains `t`, if any.
-    const Transition *transitionAt(TrackId trackId, CMTime t) const;
+    // The span with `spanId` on any clip, or nullptr; `owner` / `track` receive where it lives.
+    const EffectSpan *findSpan(SpanId spanId, const Clip **owner = nullptr, const Track **track = nullptr) const;
+    EffectSpan *findSpan(SpanId spanId, Clip **owner = nullptr, Track **track = nullptr);
 };
 
 // Bit-for-bit equality of every field.
 bool operator==(const Sequence &a, const Sequence &b);
+
+// The clip of `track` touching `clip` at `edge`: the one ending exactly where it starts (Head) or
+// starting exactly where it ends (Tail); nullptr when there is none (a gap, the track's end).
+const Clip *touchingClip(const Track &track, const Clip &clip, ClipEdge edge);
+
+// A transition span resolved in its sequence.
+struct TransitionPlacement {
+    const Track *track = nullptr;
+    const Clip *owner = nullptr;
+    const EffectSpan *span = nullptr;
+    TransitionRole role = TransitionRole::FadeOut;
+    // CrossDissolve: the clip touching the owner's end (nullptr when none touches it: the span is
+    // then invalid, see checkTransitionSpan).
+    const Clip *partner = nullptr;
+    CMTime cut = kCMTimeZero; // the owner's end (tail span) or start (head span)
+    TimeRange range;          // the timeline range the span covers
+};
+
+// Where the lane-0 span `span` of `owner` (on `track`) acts. Nullopt when the times cannot be
+// added (only for invalid spans).
+std::optional<TransitionPlacement> placeTransition(const Track &track, const Clip &owner, const EffectSpan &span);
+
+// The transition acting at timeline time `t` on `track`: the tail span of the clip at `t` or of the
+// clip touching its start, or its head span, whose range contains `t`; nullopt when none does.
+std::optional<TransitionPlacement> transitionAt(const Track &track, CMTime t);
 
 } // namespace ve

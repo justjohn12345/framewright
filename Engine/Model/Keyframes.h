@@ -1,18 +1,13 @@
-// Keyframed Motion: keyframe tracks for a clip's picture placement (VideoParams in Clip.h).
+// Keyframe tracks: the animation machinery inside effect spans (EffectSpan.h).
 //
-// Time base: a keyframe's time is a source time of its clip, the time Clip::exactSourceTimeAt
-// maps a timeline time to (for a still, the time into the clip measured from its start). Keyframes
-// therefore stay attached to the pictures they were set on: a head or tail trim leaves them where
-// they are (keyframes the trim cut off are kept, hidden, and come back when the clip is extended
-// again), a speed change moves them on the timeline with their pictures, and a split gives each
-// piece the keyframes on its side (see splitTrack). Stills have no source timing, so an edit that
-// moves a still's start keeping its end shifts its keyframes to keep them at the same timeline
-// positions (Clip::setTimelineStartKeepingEnd).
+// Time base: a keyframe's time is relative to the start of the span that holds it (EffectSpan
+// times are source times of the clip, so keyframes stay on the pictures they were set on through
+// trims and speed changes). A span's tracks start with a keyframe at 0 (the span's start value)
+// and one at the span's length (its end value); the model allows more in between.
 //
-// Values: a parameter without keyframes has its static value. With keyframes the static value is
-// not used (as in Premiere Pro): before the first keyframe the parameter holds the first
-// keyframe's value, after the last it holds the last one's, and in between it moves from each
-// keyframe to the next as the keyframe's interpolation says.
+// Values: before a track's first keyframe the value holds the first keyframe's value, after the
+// last it holds the last one's, and in between it moves from each keyframe to the next as the
+// keyframe's interpolation says. An empty track has its parameter's neutral value.
 //
 // Interpolation belongs to the segment that starts at the keyframe. The ease names follow Premiere
 // Pro and Final Cut Pro (not CSS): Ease Out leaves the keyframe slowly and speeds up, Ease In
@@ -27,31 +22,12 @@
 
 #include "TimeUtil.h"
 
-#include <array>
 #include <cstddef>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace ve {
-
-// The keyframeable parameters of VideoParams.
-enum class MotionParameter {
-    X,
-    Y,
-    Scale,
-    Rotation,
-    Opacity,
-};
-
-inline constexpr std::array<MotionParameter, 5> kMotionParameters{
-    MotionParameter::X, MotionParameter::Y, MotionParameter::Scale, MotionParameter::Rotation,
-    MotionParameter::Opacity};
-
-// "x", "y", "scale", "rotation", "opacity" (the project file's keys).
-const char *nameOf(MotionParameter parameter);
-// "Position X", "Position Y", "Scale", "Rotation", "Opacity" (messages).
-const char *displayNameOf(MotionParameter parameter);
 
 enum class KeyframeInterpolation {
     Hold,      // the value stays until the next keyframe, then jumps
@@ -97,8 +73,8 @@ struct CurveSplit {
 CurveSplit splitCurve(const TimingCurve &curve, double fraction);
 
 struct Keyframe {
-    CMTime time = kCMTimeZero; // source time (see the top of this file); an exact model time
-    double value = 0.0;        // in VideoParams units (pixels, scale factor, degrees, 0...1)
+    CMTime time = kCMTimeZero; // relative to the span's start (see the top of this file); an exact model time
+    double value = 0.0;        // in the parameter's units (pixels, factor, degrees, dB; SpanParameter)
     KeyframeInterpolation interpolation = KeyframeInterpolation::Linear;
     TimingCurve curve; // used when interpolation is Bezier; the straight line otherwise
 };
@@ -109,27 +85,15 @@ bool operator==(const Keyframe &a, const Keyframe &b);
 // Keyframes of one parameter in strictly increasing time order.
 using KeyframeTrack = std::vector<Keyframe>;
 
-struct MotionKeyframes {
-    KeyframeTrack x;
-    KeyframeTrack y;
-    KeyframeTrack scale;
-    KeyframeTrack rotation;
-    KeyframeTrack opacity;
+// The value of a parameter with keyframes `track` at `time` (on the track's time base), or
+// `emptyValue` when the track is empty (see the top of this file). The fraction of a segment is
+// computed exactly and converted to a double once.
+double evaluateTrack(const KeyframeTrack &track, double emptyValue, const ExactTime &time);
 
-    KeyframeTrack &track(MotionParameter parameter);
-    const KeyframeTrack &track(MotionParameter parameter) const;
-    // No parameter has keyframes.
-    bool empty() const;
-    // Total number of keyframes.
-    std::size_t count() const;
-
-    friend bool operator==(const MotionKeyframes &, const MotionKeyframes &) = default;
-};
-
-// The value of a parameter with keyframes `track` and static value `staticValue` at source time
-// `time` (see the top of this file). The fraction of a segment is computed exactly and converted
-// to a double once.
-double evaluateTrack(const KeyframeTrack &track, double staticValue, const ExactTime &time);
+// The value the track approaches as time rises to `time` (the limit from the left): the same as
+// evaluateTrack except exactly on a keyframe after a Hold segment, where it is the held value (the
+// value just before the jump). The end value of a ramp that ends on a keyframe.
+double evaluateTrackFromLeft(const KeyframeTrack &track, double emptyValue, const ExactTime &time);
 
 // Index of the keyframe at exactly `time` (numeric comparison), or nullopt.
 std::optional<std::size_t> keyframeIndexAt(const KeyframeTrack &track, CMTime time);
@@ -145,40 +109,41 @@ void upsertKeyframe(KeyframeTrack &track, const Keyframe &keyframe);
 // it (splitTrack): the new keyframe gets the value there, a hold stays a hold, a linear segment
 // stays linear and an eased or custom segment becomes its two exact Bezier parts (shown as Custom).
 // Before the first keyframe, after the last one, or on an empty track (where it takes
-// `staticValue`) the new keyframe holds that value and is Linear, the default for new keyframes.
+// `emptyValue`) the new keyframe holds that value and is Linear, the default for new keyframes.
 // Set an explicit value or interpolation on the returned keyframe afterwards. The value can lie
 // outside a parameter's range where a custom curve from a project file overshoots it; callers
-// validate the track (keyframeTrackProblem).
-std::size_t insertKeyframeKeepingValues(KeyframeTrack &track, double staticValue, CMTime time);
+// validate the track (spanTrackProblem).
+std::size_t insertKeyframeKeepingValues(KeyframeTrack &track, double emptyValue, CMTime time);
 
-// A track cut at source time `at` for the two pieces of a split clip: the left piece keeps the
-// keyframes before `at`, the right piece those from `at` on. Where the cut falls between two
-// keyframes both pieces get a keyframe at `at` with the value there, and an eased segment's curve
-// is divided exactly (splitCurve), so every frame of both pieces shows the value it showed before.
-// A piece with no keyframe on its side has a constant value there: it gets no keyframes and that
-// value as its static value.
+// A track cut at `at` (on the track's time base) for the two pieces of a split span: the left
+// piece keeps the keyframes before `at`, the right piece those from `at` on (times unchanged).
+// Where the cut falls between two keyframes both pieces get a keyframe at `at` with the value
+// there, and an eased segment's curve is divided exactly (splitCurve), so every frame of both
+// pieces shows the value it showed before. A piece with no keyframe on its side has a constant
+// value there: it gets no keyframes and that value as `leftStatic` / `rightStatic` (an empty
+// track gives `emptyValue` to both).
 struct TrackSplit {
     KeyframeTrack left;
     KeyframeTrack right;
     double leftStatic = 0.0;
     double rightStatic = 0.0;
 };
-TrackSplit splitTrack(const KeyframeTrack &track, double staticValue, CMTime at);
+TrackSplit splitTrack(const KeyframeTrack &track, double emptyValue, CMTime at);
 
 // Every keyframe time moved by `delta`. Returns false, changing nothing, when a result has no exact
 // CMTime form.
 [[nodiscard]] bool shiftTrack(KeyframeTrack &track, CMTime delta);
 
-// Why `track` is not a valid track for `parameter` (times exact model times in strictly
-// increasing order, finite values within the parameter's range, valid curves on Bezier keyframes
-// and the default curve on the others), or nullopt.
-std::optional<std::string> keyframeTrackProblem(const KeyframeTrack &track, MotionParameter parameter);
+// `track` with every keyframe time multiplied by `numerator / denominator` (both positive
+// exact times, e.g. a span's new and old length): the keyframes keep their places relative to
+// the span. A time without an exact CMTime form goes to the nearest kPreciseTimescale tick (at
+// most 0.7 ns away). Nullopt when the times would no longer increase strictly or on overflow.
+std::optional<KeyframeTrack> rescaleTrack(const KeyframeTrack &track, CMTime numerator, CMTime denominator);
 
-// Whether `value` is allowed for `parameter` (finite; scale >= 0; opacity within [0, 1]).
-bool isValidMotionValue(MotionParameter parameter, double value);
-
-// `value` limited to the parameter's range (scale >= 0, opacity within [0, 1]): a custom timing
-// curve may overshoot its keyframes' values.
-double clampMotionValue(MotionParameter parameter, double value);
+// Why the times and curves of `track` are not valid (times exact model times in strictly
+// increasing order, valid curves on Bezier keyframes and the default curve on the others), or
+// nullopt. `what` names the track in the message ("Scale keyframe"). Values are checked by the
+// caller (EffectSpan.h, spanTrackProblem).
+std::optional<std::string> keyframeTimesProblem(const KeyframeTrack &track, const std::string &what);
 
 } // namespace ve

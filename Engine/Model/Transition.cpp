@@ -10,4 +10,16 @@ const char *nameOf(TransitionKind kind) {
     return "unknown";
 }
 
+const char *nameOf(TransitionRole role) {
+    switch (role) {
+    case TransitionRole::CrossDissolve:
+        return "crossDissolve";
+    case TransitionRole::FadeOut:
+        return "fadeOut";
+    case TransitionRole::FadeIn:
+        return "fadeIn";
+    }
+    return "unknown";
+}
+
 } // namespace ve

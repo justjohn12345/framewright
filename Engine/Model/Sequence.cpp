@@ -5,7 +5,7 @@ namespace ve {
 bool operator==(const Sequence &a, const Sequence &b) {
     return a.id == b.id && a.name == b.name && identical(a.frameDuration, b.frameDuration) && a.width == b.width &&
            a.height == b.height && a.audioSampleRate == b.audioSampleRate && a.videoTracks == b.videoTracks &&
-           a.audioTracks == b.audioTracks && a.transitions == b.transitions;
+           a.audioTracks == b.audioTracks;
 }
 
 CMTime Sequence::duration() const {
@@ -73,56 +73,113 @@ Track *Sequence::trackOfClip(ClipId clipId) {
     return const_cast<Track *>(static_cast<const Sequence *>(this)->trackOfClip(clipId));
 }
 
-const Transition *Sequence::findTransition(TransitionId transitionId) const {
-    for (const Transition &transition : transitions) {
-        if (transition.id == transitionId) {
-            return &transition;
+const EffectSpan *Sequence::findSpan(SpanId spanId, const Clip **owner, const Track **track) const {
+    for (const std::vector<Track> *list : {&videoTracks, &audioTracks}) {
+        for (const Track &t : *list) {
+            for (const Clip &clip : t.clips) {
+                if (const EffectSpan *span = clip.findSpan(spanId)) {
+                    if (owner != nullptr) {
+                        *owner = &clip;
+                    }
+                    if (track != nullptr) {
+                        *track = &t;
+                    }
+                    return span;
+                }
+            }
         }
     }
     return nullptr;
 }
 
-const Transition *Sequence::transitionFrom(ClipId clipId) const {
-    for (const Transition &transition : transitions) {
-        if (transition.fromClipId == clipId) {
-            return &transition;
-        }
+EffectSpan *Sequence::findSpan(SpanId spanId, Clip **owner, Track **track) {
+    const Clip *constOwner = nullptr;
+    const Track *constTrack = nullptr;
+    const EffectSpan *span = static_cast<const Sequence *>(this)->findSpan(spanId, &constOwner, &constTrack);
+    if (owner != nullptr) {
+        *owner = const_cast<Clip *>(constOwner);
     }
-    return nullptr;
+    if (track != nullptr) {
+        *track = const_cast<Track *>(constTrack);
+    }
+    return const_cast<EffectSpan *>(span);
 }
 
-const Transition *Sequence::transitionTo(ClipId clipId) const {
-    for (const Transition &transition : transitions) {
-        if (transition.toClipId == clipId) {
-            return &transition;
-        }
+const Clip *touchingClip(const Track &track, const Clip &clip, ClipEdge edge) {
+    const auto index = track.indexOf(clip.id);
+    if (!index) {
+        return nullptr;
     }
-    return nullptr;
+    if (edge == ClipEdge::Head) {
+        if (*index == 0) {
+            return nullptr;
+        }
+        const Clip &previous = track.clips[*index - 1];
+        return previous.timelineEnd() == clip.timelineStart ? &previous : nullptr;
+    }
+    if (*index + 1 >= track.clips.size()) {
+        return nullptr;
+    }
+    const Clip &next = track.clips[*index + 1];
+    return next.timelineStart == clip.timelineEnd() ? &next : nullptr;
 }
 
-std::optional<TimeRange> Sequence::transitionRange(const Transition &transition) const {
-    const Clip *from = findClip(transition.fromClipId);
-    if (!from || !isPositive(frameDuration)) {
+std::optional<TransitionPlacement> placeTransition(const Track &track, const Clip &owner, const EffectSpan &span) {
+    if (!span.isTransition()) {
         return std::nullopt;
     }
-    const CMTime cut = from->timelineEnd();
-    const std::int64_t frames = frameIndexAt(transition.duration, frameDuration, SnapMode::Round);
-    const CMTime before = timeForFrame(frames / 2, frameDuration);
-    const CMTime after = timeForFrame(frames - frames / 2, frameDuration);
-    return TimeRange{cut - before, cut + after};
-}
-
-const Transition *Sequence::transitionAt(TrackId trackId, CMTime t) const {
-    for (const Transition &transition : transitions) {
-        if (transition.trackId != trackId) {
-            continue;
-        }
-        const auto range = transitionRange(transition);
-        if (range && range->contains(t)) {
-            return &transition;
+    TransitionPlacement placement;
+    placement.track = &track;
+    placement.owner = &owner;
+    placement.span = &span;
+    if (span.edge == ClipEdge::Head) {
+        placement.role = TransitionRole::FadeIn;
+        placement.cut = owner.timelineStart;
+    } else {
+        placement.cut = owner.timelineEnd();
+        placement.role = kCMTimeZero < span.end ? TransitionRole::CrossDissolve : TransitionRole::FadeOut;
+        if (placement.role == TransitionRole::CrossDissolve) {
+            placement.partner = touchingClip(track, owner, ClipEdge::Tail);
         }
     }
-    return nullptr;
+    const auto start = checkedAdd(placement.cut, span.start);
+    const auto end = checkedAdd(placement.cut, span.end);
+    if (!start || !end) {
+        return std::nullopt;
+    }
+    placement.range = TimeRange{*start, *end};
+    return placement;
+}
+
+std::optional<TransitionPlacement> transitionAt(const Track &track, CMTime t) {
+    const auto index = track.clipIndexAt(t);
+    if (!index) {
+        return std::nullopt;
+    }
+    const Clip &clip = track.clips[*index];
+    auto covering = [&](const Clip &owner, ClipEdge edge) -> std::optional<TransitionPlacement> {
+        const EffectSpan *span = owner.transitionAt(edge);
+        if (span == nullptr) {
+            return std::nullopt;
+        }
+        auto placement = placeTransition(track, owner, *span);
+        if (placement && placement->range.contains(t)) {
+            return placement;
+        }
+        return std::nullopt;
+    };
+    if (auto own = covering(clip, ClipEdge::Tail)) {
+        return own;
+    }
+    if (auto head = covering(clip, ClipEdge::Head)) {
+        return head;
+    }
+    if (const Clip *previous = touchingClip(track, clip, ClipEdge::Head)) {
+        if (auto incoming = covering(*previous, ClipEdge::Tail)) {
+            return incoming;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace ve

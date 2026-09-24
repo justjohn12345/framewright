@@ -64,22 +64,37 @@ inline bool hasInexactTime(const Project &project) {
         for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
             for (const Track &track : sequence.tracks(kind)) {
                 for (const Clip &clip : track.clips) {
-                    for (const CMTime t : {clip.timelineStart, clip.timelineDuration, clip.sourceIn,
-                                           clip.audio.fadeInDuration, clip.audio.fadeOutDuration}) {
+                    for (const CMTime t : {clip.timelineStart, clip.timelineDuration, clip.sourceIn}) {
                         if (inexact(t)) {
                             return true;
+                        }
+                    }
+                    for (const EffectSpan &span : clip.spans) {
+                        if (inexact(span.start) || inexact(span.end)) {
+                            return true;
+                        }
+                        for (const SpanParameter parameter : kSpanParameters) {
+                            for (const Keyframe &keyframe : span.tracks.track(parameter)) {
+                                if (inexact(keyframe.time)) {
+                                    return true;
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        for (const Transition &transition : sequence.transitions) {
-            if (inexact(transition.duration)) {
-                return true;
-            }
-        }
     }
     return false;
+}
+
+// A keyframe for span tracks (times relative to the span's start).
+inline Keyframe key(CMTime time, double value, KeyframeInterpolation interpolation = KeyframeInterpolation::Linear) {
+    Keyframe k;
+    k.time = time;
+    k.value = value;
+    k.interpolation = interpolation;
+    return k;
 }
 
 // A project with one 30 fps 1920x1080 sequence (V1, V2, A1, A2) and a set of assets.
@@ -208,15 +223,63 @@ struct Fixture {
         return {v, a};
     }
 
-    TransitionId addTransition(TrackId trackId, ClipId from, ClipId to, std::int64_t frames) {
-        Transition t;
-        t.id = project.ids.make<TransitionId>();
-        t.trackId = trackId;
-        t.fromClipId = from;
-        t.toClipId = to;
-        t.duration = f30(frames);
-        sequence().transitions.push_back(t);
-        return t.id;
+    // A cross dissolve of `frames` centred on the cut at the end of `from` (floor(n/2) frames before
+    // it), as version 4 drew transitions; `to` must touch `from`'s end on `trackId`.
+    SpanId addTransition(TrackId trackId, ClipId from, ClipId to, std::int64_t frames) {
+        const Track &t = track(trackId);
+        REQUIRE(t.find(from) != nullptr);
+        REQUIRE(t.find(to) != nullptr);
+        REQUIRE(t.find(from)->timelineEnd() == t.find(to)->timelineStart);
+        return addTailTransition(from, frames / 2, frames - frames / 2);
+    }
+
+    // A tail transition span on `clip`: `before` frames inside it, `after` past its end.
+    SpanId addTailTransition(ClipId clip, std::int64_t before, std::int64_t after) {
+        EffectSpan span;
+        span.id = project.ids.make<SpanId>();
+        span.lane = kTransitionLane;
+        span.kind = SpanKind::Transition;
+        span.edge = ClipEdge::Tail;
+        span.start = -f30(before);
+        span.end = f30(after);
+        Clip &c = *sequence().findClip(clip);
+        c.spans.push_back(span);
+        c.sortSpans();
+        return span.id;
+    }
+
+    // A lane-0 fade of `length` at `edge` of `clip` (head: fade in; tail: fade out ending on the cut).
+    SpanId addFade(ClipId clip, ClipEdge edge, CMTime length) {
+        EffectSpan span;
+        span.id = project.ids.make<SpanId>();
+        span.lane = kTransitionLane;
+        span.kind = SpanKind::Transition;
+        span.edge = edge;
+        span.start = edge == ClipEdge::Head ? kCMTimeZero : -length;
+        span.end = edge == ClipEdge::Head ? length : kCMTimeZero;
+        Clip &c = *sequence().findClip(clip);
+        c.spans.push_back(span);
+        c.sortSpans();
+        return span.id;
+    }
+
+    // An effect span on `clip` over source times [start, end) with `tracks` (times relative to start).
+    SpanId addSpan(ClipId clip, SpanKind kind, int lane, CMTime start, CMTime end, SpanTracks tracks = {}) {
+        EffectSpan span;
+        span.id = project.ids.make<SpanId>();
+        span.lane = lane;
+        span.kind = kind;
+        span.start = start;
+        span.end = end;
+        span.tracks = std::move(tracks);
+        Clip &c = *sequence().findClip(clip);
+        c.spans.push_back(span);
+        c.sortSpans();
+        return span.id;
+    }
+
+    const EffectSpan *span(SpanId id) const {
+        return sequence().findSpan(id);
     }
 
     void requireValid() const {
@@ -249,6 +312,7 @@ inline EditResult applyReversible(Project &project, Command &command) {
     const EditResult again = command.apply(project);
     REQUIRE(again.ok());
     CHECK(again.droppedTransitionIds == result.droppedTransitionIds);
+    CHECK(again.droppedSpanIds == result.droppedSpanIds);
     CHECK(project == after);
     CHECK(toJsonString(project) == afterJson);
     return result;
