@@ -617,3 +617,43 @@ TEST_CASE("adjacentClip finds the touching clip on the same track") {
     CHECK_FALSE(motionValuesMatch(MotionParameter::X, 100, 100.01));
     CHECK(motionValuesMatch(MotionParameter::Scale, 1, 1 + 5e-7));
 }
+
+TEST_CASE("planMotionKeyframeToggle adds the missing keyframes on a frame, or removes all five") {
+    Animated a;
+    Fixture &fx = a.fx;
+    // Frame 50 shows source 80: x (eased 60 -> 150) and rotation (60 -> 149) move there, scale holds 1
+    // (hold from 60), y and opacity are static.
+    const VideoParams before = Scheduler::motionAt(fx.clip(a.clip), f30(50));
+    const VideoParams atStart = Scheduler::motionAt(fx.clip(a.clip), f30(30));
+    MotionKeyframeToggle plan;
+    REQUIRE(planMotionKeyframeToggle(fx.clip(a.clip), f30(1), f30(50), plan).ok());
+    CHECK_FALSE(plan.removing);
+    REQUIRE(plan.changes.size() == 5);
+    SetMotionTracks add(fx.seq, a.clip, plan.changes, "Add Keyframes");
+    applyReversible(fx.project, add);
+    for (MotionParameter parameter : kMotionParameters) {
+        CAPTURE(nameOf(parameter));
+        CHECK(keyframeIndexForFrame(fx.clip(a.clip), parameter, f30(50), f30(1)).has_value());
+    }
+    checkSameMotion(Scheduler::motionAt(fx.clip(a.clip), f30(50)), before); // the picture does not change
+    CHECK(fx.clip(a.clip).video.keyframes.opacity.front().value == doctest::Approx(0.8));
+
+    // All five there: the toggle removes them; y and opacity become static again at their values.
+    REQUIRE(planMotionKeyframeToggle(fx.clip(a.clip), f30(1), f30(50), plan).ok());
+    CHECK(plan.removing);
+    SetMotionTracks remove(fx.seq, a.clip, plan.changes, "Remove Keyframes");
+    applyReversible(fx.project, remove);
+    CHECK(fx.clip(a.clip).video.keyframes.y.empty());
+    CHECK(fx.clip(a.clip).video.keyframes.opacity.empty());
+    CHECK(fx.clip(a.clip).video.opacity == doctest::Approx(0.8));
+    CHECK(timesOf(fx.clip(a.clip).video.keyframes.x) == std::vector<CMTime>{f30(60), f30(150)});
+    checkSameMotion(Scheduler::motionAt(fx.clip(a.clip), f30(30)), atStart);
+
+    // Only some there (frame 30 has x, scale and rotation keyframes): adds y and opacity only.
+    REQUIRE(planMotionKeyframeToggle(fx.clip(a.clip), f30(1), f30(30), plan).ok());
+    CHECK_FALSE(plan.removing);
+    REQUIRE(plan.changes.size() == 2);
+    CHECK(plan.changes[0].parameter == MotionParameter::Y);
+    CHECK(plan.changes[1].parameter == MotionParameter::Opacity);
+    CHECK(planMotionKeyframeToggle(fx.clip(a.clip), f30(1), f30(120), plan).error == EditError::InvalidTime);
+}

@@ -1442,6 +1442,55 @@ EditResult planMotionAtFrame(const Clip &clip, CMTime frameDuration, CMTime fram
     return EditResult::success();
 }
 
+EditResult planMotionKeyframeToggle(const Clip &clip, CMTime frameDuration, CMTime frame, MotionKeyframeToggle &plan) {
+    plan = MotionKeyframeToggle{};
+    if (EditResult r = requireClipFrame(clip, frameDuration, frame, "the frame"); !r) {
+        return r;
+    }
+    const std::optional<CMTime> time = keyframeTimeForFrame(clip, frame);
+    const std::optional<ExactTime> shown = clip.exactSourceTimeAt(frame);
+    if (!time || !shown) {
+        return notRepresentable(clip.id, frame);
+    }
+    bool all = true;
+    for (MotionParameter parameter : kMotionParameters) {
+        if (!keyframeIndexForFrame(clip, parameter, frame, frameDuration)) {
+            all = false;
+            break;
+        }
+    }
+    plan.removing = all;
+    for (MotionParameter parameter : kMotionParameters) {
+        const KeyframeTrack &track = clip.video.keyframes.track(parameter);
+        MotionTrackChange change;
+        change.parameter = parameter;
+        change.staticValue = clip.video.staticValue(parameter);
+        if (all) {
+            // Every keyframe this frame shows goes (a sped-up frame can show several).
+            for (const Keyframe &keyframe : track) {
+                const std::optional<CMTime> shownBy = frameShowingSourceTime(clip, keyframe.time, frameDuration);
+                if (!shownBy || *shownBy != frame) {
+                    change.keyframes.push_back(keyframe);
+                }
+            }
+            if (change.keyframes.empty()) {
+                change.staticValue = clampMotionValue(parameter, clip.video.valueAt(parameter, *shown));
+            }
+        } else {
+            if (keyframeIndexForFrame(clip, parameter, frame, frameDuration)) {
+                continue; // already has one on this frame
+            }
+            change.keyframes = track;
+            Keyframe keyframe;
+            keyframe.time = *time;
+            keyframe.value = clampMotionValue(parameter, clip.video.valueAt(parameter, *ExactTime::from(*time)));
+            upsertKeyframe(change.keyframes, keyframe);
+        }
+        plan.changes.push_back(std::move(change));
+    }
+    return EditResult::success();
+}
+
 const Clip *adjacentClip(const Sequence &sequence, ClipId clipId, ClipEdge edge) {
     const Track *track = sequence.trackOfClip(clipId);
     const Clip *clip = track != nullptr ? track->find(clipId) : nullptr;

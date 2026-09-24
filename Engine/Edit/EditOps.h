@@ -516,6 +516,19 @@ EditResult planMotionMove(const Clip &clip, CMTime frameDuration, const MotionMo
 EditResult planMotionAtFrame(const Clip &clip, CMTime frameDuration, CMTime frame, const VideoParams &values,
                              std::vector<MotionTrackChange> &changes);
 
+// The Add Motion Keyframe toggle on the frame starting at `frame` (a frame of the clip). When every
+// Motion parameter has a keyframe that frame shows (keyframeIndexForFrame), it plans removing them
+// all: a track left without keyframes keeps the value the frame showed as its static value, so that
+// frame's picture does not change. Otherwise it plans adding a Linear keyframe on the frame's start
+// (keyframeTimeForFrame) to each parameter without one there, with the value it has there (like
+// AddKeyframe: the picture does not change). `changes` lists only the parameters that change, in
+// MotionParameter order; `removing` says which way it went. Refused like planMotionAtFrame.
+struct MotionKeyframeToggle {
+    std::vector<MotionTrackChange> changes;
+    bool removing = false;
+};
+EditResult planMotionKeyframeToggle(const Clip &clip, CMTime frameDuration, CMTime frame, MotionKeyframeToggle &plan);
+
 // Whether two values of `parameter` are the same for the picture: equal within a millionth of the
 // larger magnitude (at least 1, so within a millionth of a pixel near the centre).
 bool motionValuesMatch(MotionParameter parameter, double a, double b);

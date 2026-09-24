@@ -489,6 +489,15 @@ NS_SWIFT_UI_ACTOR
                            rangeStart:(CMTime)rangeStart
                              duration:(CMTime)duration
     NS_SWIFT_NAME(applyKenBurns(clip:start:end:interpolation:from:duration:));
+/// Add Motion Keyframe (Clip menu, Control-K) on the sequence frame containing `time`: when every
+/// Motion parameter (position X and Y, scale, rotation, opacity) already has a keyframe on that
+/// frame, removes all five ("Remove Keyframes"; a parameter left without keyframes keeps the value
+/// the frame showed); otherwise adds a keyframe to each parameter that has none there, with the value
+/// it has there, so the picture does not change ("Add Keyframes"). One undo step (one
+/// SequenceCommand). The note says "Keyframes added on N parameters" or "Keyframes removed".
+/// Refused like addKeyframeToClip: (VEEditErrorInvalidTime when `time` is not over the clip).
+- (VEEditResult *)toggleMotionKeyframesOfClip:(VEClipID)clipID
+                                       atTime:(CMTime)time NS_SWIFT_NAME(toggleMotionKeyframes(clip:at:));
 /// The clip on the same track touching `clipID` at `edge`: the one ending exactly where it starts
 /// (VEClipEdgeStart) or starting exactly where it ends (VEClipEdgeEnd); 0 when there is none (a
 /// gap, the end of the track, an unknown clip).

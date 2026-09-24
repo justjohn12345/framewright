@@ -446,6 +446,41 @@ CMTime frames30(int64_t n) {
     XCTAssertEqual(r.errorCode, VEEditErrorTrackLocked, @"also when nothing would change");
 }
 
+- (void)testTheMotionKeyframeToggleAddsTheMissingOnesOrRemovesAllInOneStep {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    const auto clip = [self place:engine asset:asset at:30 from:0 to:90];
+    XCTAssertTrue([engine setMotionValue:0.5 parameter:VEMotionParameterOpacity clip:clip.first atTime:frames30(40)].ok);
+    XCTAssertTrue([engine addKeyframeToClip:clip.first parameter:VEMotionParameterScale atTime:frames30(40)].ok);
+
+    VEEditResult *r = [engine toggleMotionKeyframesOfClip:clip.first atTime:CMTimeMake(81, 60)];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(r.note, @"Keyframes added on 4 parameters", @"scale had one already");
+    XCTAssertEqualObjects(engine.undoActionName, @"Add Keyframes");
+    VEClipInfo *info = [engine clipInfo:clip.first];
+    for (VEMotionParameter p : {VEMotionParameterPositionX, VEMotionParameterPositionY, VEMotionParameterScale,
+                                VEMotionParameterRotation, VEMotionParameterOpacity}) {
+        XCTAssertNotNil([info keyframeForParameter:p atTime:frames30(40)], @"parameter %ld", static_cast<long>(p));
+    }
+    XCTAssertEqual([info keyframeForParameter:VEMotionParameterOpacity atTime:frames30(40)].value, 0.5);
+
+    r = [engine toggleMotionKeyframesOfClip:clip.first atTime:frames30(40)];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(r.note, @"Keyframes removed");
+    XCTAssertEqualObjects(engine.undoActionName, @"Remove Keyframes");
+    XCTAssertFalse([engine clipInfo:clip.first].hasKeyframes);
+    XCTAssertEqual([engine clipInfo:clip.first].videoParams.opacity, 0.5);
+    XCTAssertTrue([engine undo]);
+    XCTAssertEqual([engine clipInfo:clip.first].allKeyframes.count, 5u, @"one undo step brings all five back");
+    XCTAssertTrue([engine undo]);
+    XCTAssertEqual([engine clipInfo:clip.first].allKeyframes.count, 1u, @"and one takes the four added away");
+
+    r = [engine toggleMotionKeyframesOfClip:clip.first atTime:frames30(10)];
+    XCTAssertEqual(r.errorCode, VEEditErrorInvalidTime);
+    r = [engine toggleMotionKeyframesOfClip:clip.second atTime:frames30(40)];
+    XCTAssertEqual(r.errorCode, VEEditErrorTrackKindMismatch);
+}
+
 - (void)testStaticSettersKeepKeyframesAndAVideoResetClearsThem {
     VEAssetInfo *asset = nil;
     VEEngine *engine = [self engineWithAsset:&asset];

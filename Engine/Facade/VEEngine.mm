@@ -2180,6 +2180,28 @@ static NSString *keyframePlace(const Clip &clip, CMTime time, CMTime frameDurati
                  note:notes.count > 0 ? [notes componentsJoinedByString:@" "] : nil];
 }
 
+- (VEEditResult *)toggleMotionKeyframesOfClip:(VEClipID)clipID atTime:(CMTime)time {
+    VE_ASSERT_MAIN();
+    const Clip *clip = nullptr;
+    CMTime frame = kCMTimeInvalid;
+    if (VEEditResult *refusal = [self refuseMotionEditOfClip:clipID atTime:time needsFrame:YES clip:&clip frame:&frame]) {
+        return refusal;
+    }
+    MotionKeyframeToggle plan;
+    if (EditResult planned = planMotionKeyframeToggle(*clip, [self activeSequence].frameDuration, frame, plan); !planned) {
+        return toVE(planned);
+    }
+    const NSUInteger count = plan.changes.size();
+    NSString *note = plan.removing ? @"Keyframes removed"
+                                   : [NSString stringWithFormat:@"%@ added on %lu parameter%@",
+                                                                count == 1 ? @"Keyframe" : @"Keyframes",
+                                                                static_cast<unsigned long>(count), count == 1 ? @"" : @"s"];
+    return [self push:std::make_unique<SetMotionTracks>([self sequenceId], clip->id, std::move(plan.changes),
+                                                        plan.removing ? "Remove Keyframes" : "Add Keyframes")
+              created:nil
+                 note:note];
+}
+
 - (VEClipID)adjacentClipOfClip:(VEClipID)clipID atEdge:(VEClipEdge)edge {
     VE_ASSERT_MAIN();
     const Clip *neighbour = adjacentClip([self activeSequence], ClipId(static_cast<ClipId::ValueType>(clipID)),
