@@ -216,6 +216,15 @@ Each phase ends with something runnable and its tests green. Playback and A/V sy
 - Preferences: hardware capability table, backend preference, cache size.
 - Instruments profiling pass; HUD kept behind a debug menu.
 
+### Effect lanes (2026-09-24; plan in `docs/plans/2026-09-24-effect-lanes.md`)
+- Effects become spans on lanes under each clip: lane 0 holds transitions (cross dissolve / crossfade across a
+  cut with any split of its sides, fades to and from black or silence), lanes 1-3 Motion, Opacity and Gain spans
+  with start and end values that compose onto the clip's static values. Replaces per-parameter keyframes.
+- Round 1 (engine): schema v5 with the v4 migration (v4 files render identically), Scheduler and mixer on spans,
+  span edit ops and facade, parity tests. The app keeps working with its keyframe controls inert.
+- Round 2 (app): lanes in the timeline, the inspector's span section, the Ken Burns editor on a lane range,
+  transitions dragged on lane 0.
+
 ## Key risks and mitigations
 - **A/V drift**: audio clock is master; video never blocks; burn-in media tests in phase 4.
 - **Two backends diverging**: one conformance suite run against both; router decisions are visible in the UI and HUD.

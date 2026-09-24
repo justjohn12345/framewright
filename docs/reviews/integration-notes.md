@@ -330,6 +330,8 @@ in the history table of `README.md`.
   changes there.
 
 ## Keyframed Motion (feature request 8)
+Superseded by "Effect lanes round 1" below: keyframes now live inside effect spans; the keyframe edits, facade
+calls and app controls described here are gone. Kept for the history of the evaluation and split rules spans reuse.
 - Model (`Engine/Model/Keyframes.{h,cpp}`, `Clip.h`): `VideoParams` has `MotionKeyframes keyframes`
   (tracks `x`, `y`, `scale`, `rotation`, `opacity`; `MotionParameter`). A keyframe's time is a source
   time of its clip (`Clip::exactSourceTimeAt`; for a still, the time into the clip), so trims leave
@@ -648,3 +650,81 @@ in the history table of `README.md`.
   is regenerated when incomplete or outdated (`testMediaIsComplete`); older versions are pruned
   (`pruneTestMediaVersions`); the slow-motion clip's frame times are in the manifest (`frameTicks960`).
 
+
+## Effect lanes round 1 (engine; plan `docs/plans/2026-09-24-effect-lanes.md`)
+- Model (schema 5; `Engine/Model/EffectSpan.{h,cpp}`, `Clip.h`, `Transition.h`, `Sequence.h`). A clip's
+  `spans` are `EffectSpan { id (SpanId), lane 0-3, kind (Transition, Motion, Opacity, Gain), start, end, edge,
+  transition, tracks }`, sorted lane 0 (head, tail) then lanes 1-3 by start. Effect spans (lanes 1-3; Motion
+  and Opacity on video clips, Gain on audio clips) cover `[start, end)` in the clip's source-time base (a
+  still's: time into the clip), so trims cut them (`clipSpan`, the value at a new edge evaluated exactly;
+  extending does not restore), speed changes carry them with their pictures and a split divides them exactly
+  (`splitSpan`: the left part keeps the id, the right part gets a new one; a span wholly on one side keeps
+  its id). Their `tracks` hold keyframes of their kind's parameters only, times relative to `start`
+  (normally one at 0 and one at the length). Values are relative: x, y and rotation add to the clip's static
+  values, scale and opacity multiply, gain adds dB; neutral values (0, 1, 0 dB) change nothing.
+  `VideoParams` is the static values only; `AudioParams` is `gainDb` only (fades are lane-0 spans).
+- Activity: a span acts where the frame's evaluation time (`spanEvaluationTime`: the exact source time, or the
+  first kPreciseTimescale tick after it; held at the clip's edges in transition handles) is in `[start, end)`,
+  plus the out bound itself for a span ending there (a tail handle keeps its end value). The end value is
+  reached at the span's end: the span's last frame shows the move a frame short, so a move ending on a cut
+  continues into a span starting there without repeating a framing. Composition (`composeMotion`,
+  `motionValuesAt`, `composeGainDb`, `gainDbAt`) applies lanes 1, 2, 3 in order; `Scheduler::motionAt` and
+  the facade's `motion(at:)` return `motionValuesAt`.
+- Transitions (lane 0, kind Transition; `TransitionRole` CrossDissolve / FadeOut / FadeIn from
+  `placeTransition`): offsets in sequence time from their edge. A tail span `[-before, after]` around its
+  clip's end: `after > 0` crosses into the clip touching that end (a cross dissolve / constant-power
+  crossfade, shares = the split at the cut), `after == 0` is a fade out to black / silence. A head span
+  `[0, length]` is a fade in, allowed only where no clip touches the start (the cut belongs to the outgoing
+  clip). At most one per edge; a head fade and the tail span may touch but not overlap; `transitionLimit`
+  and `transitionSideLimits` bound each side by the handles, the clips' lengths and the neighbouring
+  transitions. Linked A/V dissolves keep the same range relative to their cuts (`linkedTransition`). The
+  mix is sampled at frame centres (`frameCentreFraction`); fades are one layer weighted `mix` / `1 - mix`
+  over black. Audio: `AudioSegment::level` (a `DecibelRamp`, linear in dB; eased Gain spans are followed in
+  steps of at most `Scheduler::kEasedGainStep`, 5 ms), `fade` (linear gain) and `crossfade` (progress,
+  constant power in the mixer).
+- Validation (`effectSpanProblem`, `checkTransitionSpan`, `validateClip`): lanes and kinds, one transition
+  per edge, no overlap within a lane, spans inside `spanBounds()`, lane and time order, unique span ids.
+- Migration v4 -> v5 (`migrateV4ToV5`): Motion keyframes become a Motion span on lane 1 (x, y, scale,
+  rotation) and opacity keyframes an Opacity span on lane 2 (lane 1 when there is no Motion span), each over
+  the clip's whole source range with the tracks re-based and cut exactly at the clip's edges (a hold before
+  the first or after the last keyframe then renders as before); the animated static values become neutral.
+  Audio fades become lane-0 spans (dropped with a warning when another clip touches the start; dropped
+  silently on an edge with a crossfade, which version 4 ignored; a fade in shortened, with a warning, to leave
+  room for a crossfade at the clip's end; video fades never sounded and are dropped). Transitions keep their
+  ids as centred tail spans of their outgoing clip. New span ids come from `nextId`. Proven by
+  `MigrationRenderTests.cpp`: every frame's layers and every 1/240 s's gains of the golden v4 project and
+  `project-v4-render.json` equal what the schema-4 engine recorded (`*.expected.json`).
+- Edit ops (`EditOps.h`; single `SequenceCommand`s, coalescing keys `spanRange:<id>`, `spanValues:<id>`,
+  `spanInterpolation:<id>`, `spanLane:<id>`, `transitionRanges:<ids>`): `AddSpan` (neutral values, so no frame
+  changes), `SetSpanRange` (a move keeps keyframes, a trim stretches them), `SetSpanValues` (optionally with
+  an interpolation: the Ken Burns step), `SetSpanInterpolation`, `MoveSpanLane`, `RemoveSpans`,
+  `AddTransitionSpans`, `SetTransitionRanges` (`durationChange` names it "Change Transition Duration(s)");
+  refusals carry `EditError` and a reason; an overlap sets `EditResult::freeRange` (`nearestFreeRange`).
+  `planKenBurns` / `spanEdgeMotion` (Clip.h) are inverses; `planMatchSpanEdge`; `setClipFade` /
+  `clipFadeLength` for the audio fades. `EditResult::droppedSpanIds` lists effect spans an edit removed as a
+  side effect; `droppedTransitionIds` transitions.
+- Facade: `VEEffectSpan` (`spanID`, `clipID`, `trackID`, `lane`, `kind`, clip-relative and timeline ranges,
+  `startValues` / `endValues` (`VESpanValues`, NaN where not animated), `interpolation`, transition style,
+  shares and partner, `linkedSpanID`); `spans(forClip:)`, `spans(forTrack:)`, `spanInfo`,
+  `laneCount(forTrack:)` (highest used lane + 1, at least 1), `addSpan(kind:lane:clip:range:)`,
+  `setSpanRange(_:range:)`, `setSpanValues(_:start:end:)`, `setSpanInterpolation(_:interpolation:)`,
+  `moveSpan(_:toLane:)`, `removeSpan(_:)`, `matchSpanEdge(_:toAdjacentClipAt:)`,
+  `applyKenBurns(span:start:end:interpolation:)`, `addTransition(at:of:duration:options:)`,
+  `setTransitionRange(_:range:includingLinked:)`; `VEClipInfo.spans`, `hasEffectSpans`, `motion(at:)`,
+  `gainDb(at:)`, `getMotion(_:atEdgeOfSpan:atEnd:frameDuration:)` (the framings a Ken Burns move set);
+  `VEEditResult.span`, `freeRange`, `droppedSpanIDs`; `VEEditErrorSpanNotFound`. Every call asserts the main
+  thread and pushes one command. The keyframe API (`VEKeyframe`, `VEKeyframeGroup`, add/remove/move
+  keyframe, `setMotionValue`, the ranged Ken Burns call) is gone.
+- App spots changed mechanically (round 2 replaces them): the inspector's Video rows edit static values and
+  its keyframe controls are inert (`InspectorModel.keyframesMovedMessage`); Add Motion Keyframe (Control-K,
+  Clip menu, timeline context menu) is disabled or refuses with that message; no keyframe markers are drawn
+  and a marker drag starts nothing; the Ken Burns helper applies to the clip's Motion span over exactly its
+  range, or adds one on the first lane with room (`addSpan` then `applyKenBurns(span:)` in one Accumulate
+  group, whose undo step is named after its first edit, "Add Motion Span"), reads an existing move's
+  framings from the span's edges, and its caption for a move ending before the clip says the clip returns to
+  its own framing (spans act over their range only).
+- Round 2 needs: lanes in the timeline (`laneCount(forTrack:)`, `spans(forTrack:)`), selection, drag, trim
+  and Delete of spans with coalescing groups and `freeRange` for refusals, the inspector's span section
+  (start / end values, interpolation, match), the Ken Burns editor on a lane range, transitions on lane 0
+  with independently draggable edges (`setTransitionRange`), fades on video clips (the engine and exports
+  support them; the app has no control yet).

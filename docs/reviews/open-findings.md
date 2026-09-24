@@ -4,6 +4,10 @@ Only what is still open. Fixed findings are in the history table of `README.md` 
 the full reports are in git history at the commits the table names.
 
 ## Keyframed Motion, Ken Burns and Photos drops (2026-09-24 review; report in git history at b9add9f)
+Effect lanes round 1 removed the keyframe API with its tests (`KeyframeInsertTests.cpp`, `KeyframeEditTests.cpp`,
+`KeyframeRefusalTests.cpp`, `VEEngineKeyframe*Tests.mm` and the keyframe app tests): the same guarantees for spans
+(no frame changes on a split, a cut or an added span; exact values against a Newton reference) are in
+`EffectSpanTests.cpp`, `SpanEditTests.cpp`, `SpanPictureTests.cpp` and `SchedulerSpanTests.cpp`.
 All twenty-six findings are fixed and test gaps 1-5 are covered, except the items listed under the UI-test section
 below (see `integration-notes.md`, "Motion/Photos review fix round"):
 1. Adding a keyframe keeps every frame (`insertKeyframeKeepingValues`): `KeyframeInsertTests.cpp` (AddKeyframe, the
@@ -119,6 +123,13 @@ server's drag session, so these are covered at the model level only:
   configuration, stale-sheet recovery and result handling are tested), the folder panel in the real sandbox (writing
   next to a project the sandbox granted only as a file falls back to it; simulated with a read-only folder), and a
   security-scoped Media folder bookmark going stale (a plain bookmark's rewrite is tested).
+
+## Effect lanes round 1: by hand
+- Open a project saved by the previous version with keyframed Motion, audio fades and dissolves: the program
+  monitor, playback and an export look and sound as before (the render is proven equal frame by frame in
+  `MigrationRenderTests`; this checks the app path end to end on real media).
+- Ken Burns in the app: apply over the whole clip and over a part, reopen (the rectangles are the applied
+  framings), edit in place, undo (one step), and the inspector's inactive keyframe controls say why.
 
 ## Test gaps that need media or a performance scheme (phase 7)
 - Gap 8, size estimate against a real export in quality mode: the estimate is a bits-per-pixel heuristic (labelled "≈");

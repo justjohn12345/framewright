@@ -33,19 +33,17 @@ audited the code line by line.
   Effects tab with the transitions (drag onto a cut, or "+" at the playhead). View > Program
   Monitor on Second Display shows the program full screen on another display, mirrored and in
   sync with the in-window monitor.
-- Keyframed Motion: position, scale, rotation and opacity animate with keyframes (a keyframe
-  toggle per parameter at the playhead, previous/next, hold, linear and ease interpolation;
-  Control-K keys all five parameters at the playhead, or removes them; a keyframe added inside a
-  hold or an eased move keeps its shape, so no frame changes),
-  shown as markers on the clip in the timeline that can be dragged to another frame (all the
-  parameters keyed on that frame move together); keyframes stay on their pictures through trims,
-  speed changes and splits. A Ken Burns helper (as in Final Cut Pro) draws a start and an end
-  rectangle over the picture at the playhead and turns them into an eased pan and zoom over the
-  whole clip, a set duration from the playhead or the clip's start (the end framing then holds) or
-  a range typed as Start and End timecodes, marked on the clip in the timeline while it is open;
-  reopened on a clip with a move it edits that move in place; optionally continuing from the
-  previous clip's framing and leading into the next one's; Match Previous Clip's End / Match Next
-  Clip's Start copy a touching clip's framing across the cut.
+- Effect spans (effect lanes, engine round): position, scale, rotation, opacity and gain animate as spans on
+  lanes under each clip, each with start and end values that compose onto the clip's own (lanes combine: a pan
+  on one, a zoom on another); transitions are lane-0 spans whose share of each side of the cut can differ
+  (70/30), or fades to and from black or silence; projects from earlier versions open with their keyframes and
+  fades as spans and look and sound the same. The lanes are drawn in the timeline in the next round; until then
+  the keyframe controls are inactive. A Ken Burns helper (as in Final Cut Pro) draws a start and an end
+  rectangle over the picture at the playhead and turns them into an eased pan and zoom (a Motion span) over the
+  whole clip, a set duration from the playhead or the clip's start, or a range typed as Start and End
+  timecodes; reopened on a clip with a move it edits that move in place; optionally continuing from the
+  previous clip's framing and leading into the next one's; Match Previous Clip's End / Match Next Clip's Start
+  copy a touching clip's framing across the cut.
 - Inspector for position, scale, rotation, opacity, gain, fades and exact speed; cross
   dissolves and constant-power crossfades with duration handles, kept together with their linked
   partner (Delete removes both, Option-Delete one; a duration change also changes the linked one
