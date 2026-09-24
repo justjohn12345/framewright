@@ -30,7 +30,8 @@ VideoParams fromVE(const VEVideoParams &params);
 VEAudioParams toVE(const AudioParams &params);
 AudioParams fromVE(const VEAudioParams &params);
 VEMotionParameter toVE(MotionParameter parameter);
-MotionParameter fromVE(VEMotionParameter parameter);
+/// Nullopt for a value outside the enumeration.
+std::optional<MotionParameter> fromVE(VEMotionParameter parameter);
 VEKeyframeInterpolation toVE(KeyframeInterpolation interpolation);
 /// Nullopt for a value outside the enumeration.
 std::optional<KeyframeInterpolation> fromVE(VEKeyframeInterpolation interpolation);

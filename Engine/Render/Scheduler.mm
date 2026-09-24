@@ -37,13 +37,10 @@ double dbToLinear(double db) {
 } // namespace
 
 VideoParams Scheduler::motionAt(const Clip &clip, CMTime time) {
-    if (!clip.video.isAnimated()) {
-        return clip.video.staticValues();
-    }
-    // The exact source time the frame shows (not snapped to the asset's frame grid): animation
-    // moves at the sequence's frame rate, also over a slower source or a still.
-    const auto source = clip.exactSourceTimeAt(time);
-    return source ? clip.video.valuesAt(*source) : clip.video.staticValues();
+    // The exact source time the frame shows (not snapped to the asset's frame grid), or the tick
+    // after it where it has no CMTime form (motionTimeAt): animation moves at the sequence's frame
+    // rate, also over a slower source or a still, and a keyframe set on a frame shows on it.
+    return motionValuesAt(clip, time);
 }
 
 bool Scheduler::isTrackActive(const Sequence &sequence, const Track &track) {

@@ -312,14 +312,18 @@ class SetClipsParams final : public SequenceCommand {
 // (EditError::TrackKindMismatch otherwise). Every command is one SequenceCommand, so an
 // Accumulate coalescing group (keyboard nudges) merges successive steps into one undo step.
 
-// Adds a keyframe to `parameter` at `time` with `value` (default: the value the parameter has
-// there now, so the picture does not change) and `interpolation` (default Linear, Premiere's
-// default). Refused with AlreadyExists when the parameter has a keyframe at `time`.
+// Adds a keyframe to `parameter` at `time` without reshaping the segment it lands in
+// (insertKeyframeKeepingValues: the value the parameter has there now, a hold stays a hold, an eased
+// segment is divided into its two exact Custom parts, a keyframe before the first or after the last
+// one is Linear), so no frame's picture changes; then applies `value` and `interpolation` when given.
+// Refused with AlreadyExists when the parameter has a keyframe at `time`, and with InvalidArgument
+// when a custom curve from a project file overshoots the parameter's range there (and no value is
+// given).
 class AddKeyframe final : public SequenceCommand {
   public:
     AddKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime time,
                 std::optional<double> value = std::nullopt,
-                KeyframeInterpolation interpolation = KeyframeInterpolation::Linear);
+                std::optional<KeyframeInterpolation> interpolation = std::nullopt);
     std::string name() const override {
         return "Add Keyframe";
     }
@@ -332,13 +336,14 @@ class AddKeyframe final : public SequenceCommand {
     MotionParameter parameter_;
     CMTime time_;
     std::optional<double> value_;
-    KeyframeInterpolation interpolation_;
+    std::optional<KeyframeInterpolation> interpolation_;
 };
 
 // Sets a Motion value. With `keyframeTime` the keyframe at that time gets `value` (and
-// `interpolation`, when given), and when there is none one is added there (Linear unless
-// `interpolation` says otherwise): what the inspector does for an animated parameter. Without a
-// time the static value is set (the value of a parameter that has no keyframes).
+// `interpolation`, when given), and when there is none one is added there like AddKeyframe (the
+// segment it lands in keeps its shape: a hold stays a hold, an eased segment is divided exactly)
+// and then given `value` and `interpolation`: what the inspector does for an animated parameter.
+// Without a time the static value is set (the value of a parameter that has no keyframes).
 class SetMotionValue final : public SequenceCommand {
   public:
     SetMotionValue(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, std::optional<CMTime> keyframeTime,
@@ -532,19 +537,30 @@ EditResult planMotionMove(const Clip &clip, CMTime frameDuration, const MotionMo
 // Plans setting all five Motion values of `clip` to `values` (its static values; its keyframes
 // are ignored) on the frame starting at `frame` (a frame of the clip): an animated parameter gets
 // a keyframe on the frame's start (keyframeTimeForFrame), so the frame shows exactly that value;
-// the keyframes the frame showed (keyframeIndexForFrame's rule, e.g. one on the out point) are
-// replaced by it, and it takes the first one's interpolation (Linear when there was none). A
-// static parameter gets the value as its static value, so the whole clip shows it. The changes
-// list every parameter in MotionParameter order. Refused like planMotionMove.
+// it is added like AddKeyframe (the segment it lands in keeps its shape) and then given the value;
+// the other keyframes the frame showed (keyframeIndexForFrame's rule, e.g. one on the out point)
+// give way to it, and it takes the interpolation of the last of them (the segment leaving the
+// frame). A static parameter gets the value as its static value, so the whole clip shows it. The
+// changes list every parameter in MotionParameter order. Refused like planMotionMove.
 EditResult planMotionAtFrame(const Clip &clip, CMTime frameDuration, CMTime frame, const VideoParams &values,
                              std::vector<MotionTrackChange> &changes);
+
+// Plans setting `value` for the animated `parameter` on the frame starting at `frame`, like
+// planMotionAtFrame does for each animated parameter: a keyframe on the frame's start with `value`
+// (the one there, or one added without reshaping its segment), the frame's other keyframes giving
+// way. What the facade's setMotionValue does when the keyframe the frame shows is not on the
+// frame's start (a split's out point, or inside a frame of a sped-up clip), so the frame shows
+// exactly `value`. `change` is one SetMotionTracks change. Refused like planMotionAtFrame, and with
+// InvalidArgument when the parameter is not animated or the value is invalid.
+EditResult planMotionValueAtFrame(const Clip &clip, CMTime frameDuration, CMTime frame, MotionParameter parameter,
+                                  double value, MotionTrackChange &change);
 
 // The Add Motion Keyframe toggle on the frame starting at `frame` (a frame of the clip). When every
 // Motion parameter has a keyframe that frame shows (keyframeIndexForFrame), it plans removing them
 // all: a track left without keyframes keeps the value the frame showed as its static value, so that
-// frame's picture does not change. Otherwise it plans adding a Linear keyframe on the frame's start
-// (keyframeTimeForFrame) to each parameter without one there, with the value it has there (like
-// AddKeyframe: the picture does not change). `changes` lists only the parameters that change, in
+// frame's picture does not change. Otherwise it plans adding a keyframe on the frame's start
+// (keyframeTimeForFrame) to each parameter without one there, like AddKeyframe (the value it has
+// there, the segment keeping its shape: no frame's picture changes). `changes` lists only the parameters that change, in
 // MotionParameter order; `removing` says which way it went. Refused like planMotionAtFrame.
 struct MotionKeyframeToggle {
     std::vector<MotionTrackChange> changes;

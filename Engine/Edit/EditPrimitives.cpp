@@ -65,6 +65,16 @@ EditResult splitClipAt(Sequence &sequence, Track &track, std::size_t index, CMTi
         }
         for (const MotionParameter parameter : kMotionParameters) {
             TrackSplit pieces = splitTrack(left.video.keyframes.track(parameter), left.video.staticValue(parameter), *cut);
+            if (!pieces.right.empty() && !isValidMotionValue(parameter, pieces.right.front().value)) {
+                // A custom curve from a project file overshoots the parameter's range at the cut: the
+                // pieces' keyframe there cannot take that value, and the limited one would change
+                // the frames around the cut.
+                return EditResult::failure(EditError::InvalidArgument,
+                                           "clip " + std::to_string(left.id.value()) + " cannot be split at " +
+                                               describe(at) + ": " + displayNameOf(parameter) +
+                                               "'s custom timing curve goes outside its range there, so a split "
+                                               "would change the picture");
+            }
             left.video.keyframes.track(parameter) = std::move(pieces.left);
             left.video.setStaticValue(parameter, pieces.leftStatic);
             right.video.keyframes.track(parameter) = std::move(pieces.right);

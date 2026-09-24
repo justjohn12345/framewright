@@ -186,7 +186,20 @@ std::optional<std::size_t> keyframeIndexForFrame(const Clip &clip, MotionParamet
 
 // The time a keyframe set on the frame starting at `frameStart` gets: the exact source time the
 // frame starts on, or, when that has no CMTime form, the first kPreciseTimescale tick after it
-// (under 1.5 ns later, well inside the frame's span). Nullopt only on overflow.
+// (under 1.5 ns later, well inside the frame's span). Nullopt only on overflow. This is also the
+// time the frame's Motion is evaluated at (motionTimeAt), so the frame shows the keyframe's value.
 std::optional<CMTime> keyframeTimeForFrame(const Clip &clip, CMTime frameStart);
+
+// The source time at which the clip's Motion at timeline time `t` is evaluated: the exact source
+// time when it has a CMTime form, else the first kPreciseTimescale tick after it, the time
+// keyframeTimeForFrame gives a keyframe set there. Evaluating at the exact time instead would show
+// the previous value on the keyframe's own frame after a Hold (the keyframe lies up to 1.5 ns
+// later). Nullopt only for a non-numeric time or on overflow.
+std::optional<ExactTime> motionTimeAt(const Clip &clip, CMTime t);
+
+// The five Motion values the clip shows at timeline time `t`, without keyframes (its static values
+// when it is not animated, or when `t` has no source time). Scheduler::motionAt and the facade's
+// VEClipInfo motion(at:) both return this.
+VideoParams motionValuesAt(const Clip &clip, CMTime t);
 
 } // namespace ve

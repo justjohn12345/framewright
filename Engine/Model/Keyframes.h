@@ -76,7 +76,8 @@ struct TimingCurve {
 
     friend bool operator==(const TimingCurve &, const TimingCurve &) = default;
 
-    // x1 and x2 within [0, 1], y1 and y2 finite.
+    // x1 and x2 within [0, 1] with x1 <= x2 (up to rounding), y1 and y2 finite. With x1 > x2 the
+    // parts splitCurve renormalises can have control points outside [0, 1], which it cannot keep.
     bool isValid() const;
     // y at time fraction `fraction` (clamped to [0, 1]).
     double valueAt(double fraction) const;
@@ -139,6 +140,17 @@ std::optional<std::size_t> firstKeyframeIn(const KeyframeTrack &track, const Exa
 // Inserts or replaces (same time) `keyframe`, keeping the track sorted.
 void upsertKeyframe(KeyframeTrack &track, const Keyframe &keyframe);
 
+// Adds a keyframe at `time` that changes no value of the track, and returns its index (a keyframe
+// already at `time` is left as it is). Inside a segment the segment is divided as a split divides
+// it (splitTrack): the new keyframe gets the value there, a hold stays a hold, a linear segment
+// stays linear and an eased or custom segment becomes its two exact Bezier parts (shown as Custom).
+// Before the first keyframe, after the last one, or on an empty track (where it takes
+// `staticValue`) the new keyframe holds that value and is Linear, the default for new keyframes.
+// Set an explicit value or interpolation on the returned keyframe afterwards. The value can lie
+// outside a parameter's range where a custom curve from a project file overshoots it; callers
+// validate the track (keyframeTrackProblem).
+std::size_t insertKeyframeKeepingValues(KeyframeTrack &track, double staticValue, CMTime time);
+
 // A track cut at source time `at` for the two pieces of a split clip: the left piece keeps the
 // keyframes before `at`, the right piece those from `at` on. Where the cut falls between two
 // keyframes both pieces get a keyframe at `at` with the value there, and an eased segment's curve
@@ -158,7 +170,8 @@ TrackSplit splitTrack(const KeyframeTrack &track, double staticValue, CMTime at)
 [[nodiscard]] bool shiftTrack(KeyframeTrack &track, CMTime delta);
 
 // Why `track` is not a valid track for `parameter` (times exact model times in strictly
-// increasing order, finite values within the parameter's range, valid curves), or nullopt.
+// increasing order, finite values within the parameter's range, valid curves on Bezier keyframes
+// and the default curve on the others), or nullopt.
 std::optional<std::string> keyframeTrackProblem(const KeyframeTrack &track, MotionParameter parameter);
 
 // Whether `value` is allowed for `parameter` (finite; scale >= 0; opacity within [0, 1]).

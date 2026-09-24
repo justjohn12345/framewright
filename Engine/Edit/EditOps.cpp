@@ -1046,16 +1046,62 @@ EditResult keyframeNotFound(ClipId clipId, MotionParameter parameter, CMTime tim
 EditResult checkInterpolation(KeyframeInterpolation interpolation) {
     if (interpolation == KeyframeInterpolation::Bezier) {
         return EditResult::failure(EditError::InvalidArgument,
-                                   "a custom curve comes only from splitting an eased segment; choose hold, linear or "
-                                   "an ease");
+                                   "a custom curve comes only from dividing an eased segment (a split, or a keyframe "
+                                   "added inside it); choose hold, linear or an ease");
     }
     return EditResult::success();
+}
+
+// Refusal when the keyframe `insertKeyframeKeepingValues` added at `time` has a value outside the
+// parameter's range: a custom curve from a project file overshoots there, and a keyframe with the
+// limited value would change the frames around it.
+EditResult checkInsertedValue(MotionParameter parameter, const Keyframe &keyframe) {
+    if (isValidMotionValue(parameter, keyframe.value)) {
+        return EditResult::success();
+    }
+    return EditResult::failure(EditError::InvalidArgument,
+                               std::string(displayNameOf(parameter)) + "'s custom timing curve goes outside its range at " +
+                                   describe(keyframe.time) +
+                                   ", so a keyframe there would change the picture; set a value there instead");
+}
+
+// Sets `value` on the frame starting at `frame` of `parameter` (an animated parameter of `clip`):
+// the keyframe goes on the frame's start `time` (keyframeTimeForFrame), where the frame's picture is
+// evaluated, so the frame shows exactly `value`. It is added without reshaping the segment it lands
+// in (insertKeyframeKeepingValues: a hold stays a hold, an eased segment is divided exactly) and
+// then given the value. Other keyframes the frame shows (keyframeIndexForFrame's rule: one on the
+// out point, or inside a frame of a sped-up clip) give way to it, and it takes the interpolation and
+// curve of the last of them, whose segment is the one leaving the frame.
+KeyframeTrack trackWithValueOnFrame(const Clip &clip, CMTime frameDuration, CMTime frame, CMTime time,
+                                    MotionParameter parameter, double value) {
+    KeyframeTrack track = clip.video.keyframes.track(parameter);
+    insertKeyframeKeepingValues(track, clip.video.staticValue(parameter), time);
+    std::optional<Keyframe> lender;
+    KeyframeTrack kept;
+    kept.reserve(track.size());
+    for (const Keyframe &keyframe : track) {
+        if (!(keyframe.time == time)) {
+            const std::optional<CMTime> shownBy = frameShowingSourceTime(clip, keyframe.time, frameDuration);
+            if (shownBy && *shownBy == frame) {
+                lender = keyframe; // in time order: the last one wins
+                continue;
+            }
+        }
+        kept.push_back(keyframe);
+    }
+    Keyframe &target = kept[*keyframeIndexAt(kept, time)];
+    target.value = value;
+    if (lender) {
+        target.interpolation = lender->interpolation;
+        target.curve = lender->curve;
+    }
+    return kept;
 }
 
 } // namespace
 
 AddKeyframe::AddKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime time,
-                         std::optional<double> value, KeyframeInterpolation interpolation)
+                         std::optional<double> value, std::optional<KeyframeInterpolation> interpolation)
     : SequenceCommand(sequenceId), clipId_(clipId), parameter_(parameter), time_(time), value_(value),
       interpolation_(interpolation) {
     setCoalescingKey(motionKey("addKeyframe", clipId, parameter));
@@ -1069,22 +1115,34 @@ EditResult AddKeyframe::perform(const Project &, Sequence &sequence, IdGenerator
     if (EditResult r = requireInsideClip(*clip, time_); !r) {
         return r;
     }
-    if (EditResult r = checkInterpolation(interpolation_); !r) {
-        return r;
+    if (interpolation_) {
+        if (EditResult r = checkInterpolation(*interpolation_); !r) {
+            return r;
+        }
     }
     KeyframeTrack &track = clip->video.keyframes.track(parameter_);
     if (keyframeIndexAt(track, time_)) {
         return EditResult::failure(EditError::AlreadyExists, std::string(displayNameOf(parameter_)) +
                                                                  " already has a keyframe at " + describe(time_));
     }
-    Keyframe keyframe;
-    keyframe.time = time_;
-    keyframe.interpolation = interpolation_;
-    keyframe.value = value_.value_or(clip->video.valueAt(parameter_, *ExactTime::from(time_)));
-    if (EditResult r = checkMotionValue(parameter_, keyframe.value); !r) {
+    if (value_) {
+        if (EditResult r = checkMotionValue(parameter_, *value_); !r) {
+            return r;
+        }
+    }
+    // Added without reshaping the segment it lands in, then given what was asked for.
+    KeyframeTrack updated = track;
+    Keyframe &keyframe = updated[insertKeyframeKeepingValues(updated, clip->video.staticValue(parameter_), time_)];
+    if (value_) {
+        keyframe.value = *value_;
+    } else if (EditResult r = checkInsertedValue(parameter_, keyframe); !r) {
         return r;
     }
-    upsertKeyframe(track, keyframe);
+    if (interpolation_) {
+        keyframe.interpolation = *interpolation_;
+        keyframe.curve = TimingCurve{};
+    }
+    track = std::move(updated);
     return EditResult::success();
 }
 
@@ -1134,11 +1192,14 @@ EditResult SetMotionValue::perform(const Project &, Sequence &sequence, IdGenera
     if (EditResult r = requireInsideClip(*clip, *keyframeTime_); !r) {
         return r;
     }
-    Keyframe keyframe;
-    keyframe.time = *keyframeTime_;
+    // Added without reshaping the segment it lands in (a hold stays a hold, an eased segment is
+    // divided exactly), then given the value and, when asked for, the interpolation.
+    Keyframe &keyframe = track[insertKeyframeKeepingValues(track, clip->video.staticValue(parameter_), *keyframeTime_)];
     keyframe.value = value_;
-    keyframe.interpolation = interpolation_.value_or(KeyframeInterpolation::Linear);
-    upsertKeyframe(track, keyframe);
+    if (interpolation_) {
+        keyframe.interpolation = *interpolation_;
+        keyframe.curve = TimingCurve{};
+    }
     added_ = true;
     return EditResult::success();
 }
@@ -1442,28 +1503,33 @@ EditResult planMotionAtFrame(const Clip &clip, CMTime frameDuration, CMTime fram
             continue;
         }
         change.staticValue = clip.video.staticValue(parameter);
-        // The keyframe goes on the frame's start, where the frame's picture is evaluated, so the
-        // frame shows exactly `value`; keyframes elsewhere in the frame's span (on the out point, or
-        // inside a frame of a sped-up clip) give way to it, lending it their interpolation.
-        Keyframe keyframe;
-        keyframe.time = *time;
-        keyframe.value = value;
-        bool replaced = false;
-        for (const Keyframe &existing : clip.video.keyframes.track(parameter)) {
-            const std::optional<CMTime> shownBy = frameShowingSourceTime(clip, existing.time, frameDuration);
-            if (shownBy && *shownBy == frame) {
-                if (!replaced) {
-                    keyframe.interpolation = existing.interpolation;
-                    keyframe.curve = existing.curve;
-                    replaced = true;
-                }
-                continue;
-            }
-            change.keyframes.push_back(existing);
-        }
-        upsertKeyframe(change.keyframes, keyframe);
+        change.keyframes = trackWithValueOnFrame(clip, frameDuration, frame, *time, parameter, value);
         changes.push_back(std::move(change));
     }
+    return EditResult::success();
+}
+
+EditResult planMotionValueAtFrame(const Clip &clip, CMTime frameDuration, CMTime frame, MotionParameter parameter,
+                                  double value, MotionTrackChange &change) {
+    change = MotionTrackChange{};
+    change.parameter = parameter;
+    if (EditResult r = requireClipFrame(clip, frameDuration, frame, "the frame"); !r) {
+        return r;
+    }
+    if (EditResult r = checkMotionValue(parameter, value); !r) {
+        return r;
+    }
+    if (!clip.video.isAnimated(parameter)) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   std::string(displayNameOf(parameter)) + " of clip " + idString(clip.id.value()) +
+                                       " is not animated");
+    }
+    const std::optional<CMTime> time = keyframeTimeForFrame(clip, frame);
+    if (!time) {
+        return notRepresentable(clip.id, frame);
+    }
+    change.staticValue = clip.video.staticValue(parameter);
+    change.keyframes = trackWithValueOnFrame(clip, frameDuration, frame, *time, parameter, value);
     return EditResult::success();
 }
 
@@ -1473,7 +1539,7 @@ EditResult planMotionKeyframeToggle(const Clip &clip, CMTime frameDuration, CMTi
         return r;
     }
     const std::optional<CMTime> time = keyframeTimeForFrame(clip, frame);
-    const std::optional<ExactTime> shown = clip.exactSourceTimeAt(frame);
+    const std::optional<ExactTime> shown = motionTimeAt(clip, frame);
     if (!time || !shown) {
         return notRepresentable(clip.id, frame);
     }
@@ -1505,11 +1571,12 @@ EditResult planMotionKeyframeToggle(const Clip &clip, CMTime frameDuration, CMTi
             if (keyframeIndexForFrame(clip, parameter, frame, frameDuration)) {
                 continue; // already has one on this frame
             }
+            // Added without reshaping the segment it lands in (like AddKeyframe).
             change.keyframes = track;
-            Keyframe keyframe;
-            keyframe.time = *time;
-            keyframe.value = clampMotionValue(parameter, clip.video.valueAt(parameter, *ExactTime::from(*time)));
-            upsertKeyframe(change.keyframes, keyframe);
+            const std::size_t index = insertKeyframeKeepingValues(change.keyframes, change.staticValue, *time);
+            if (EditResult r = checkInsertedValue(parameter, change.keyframes[index]); !r) {
+                return r;
+            }
         }
         plan.changes.push_back(std::move(change));
     }

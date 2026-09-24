@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace ve {
 
@@ -120,8 +121,10 @@ const char *nameOf(KeyframeInterpolation interpolation) {
 }
 
 bool TimingCurve::isValid() const {
+    // Splitting an ordered curve (x1 <= x2) gives ordered parts up to rounding: allow a few ulps.
+    constexpr double kOrderTolerance = 8 * std::numeric_limits<double>::epsilon();
     return std::isfinite(x1) && std::isfinite(x2) && std::isfinite(y1) && std::isfinite(y2) && x1 >= 0.0 &&
-           x1 <= 1.0 && x2 >= 0.0 && x2 <= 1.0;
+           x1 <= 1.0 && x2 >= 0.0 && x2 <= 1.0 && x1 <= x2 + kOrderTolerance;
 }
 
 double TimingCurve::valueAt(double fraction) const {
@@ -262,6 +265,40 @@ void upsertKeyframe(KeyframeTrack &track, const Keyframe &keyframe) {
     } else {
         track.insert(it, keyframe);
     }
+}
+
+std::size_t insertKeyframeKeepingValues(KeyframeTrack &track, double staticValue, CMTime time) {
+    if (const auto existing = keyframeIndexAt(track, time)) {
+        return *existing;
+    }
+    Keyframe keyframe;
+    keyframe.time = time;
+    keyframe.interpolation = KeyframeInterpolation::Linear;
+    if (track.empty()) {
+        keyframe.value = staticValue;
+        track.push_back(keyframe);
+        return 0;
+    }
+    if (time < track.front().time) {
+        // Before the first keyframe the track holds its value: the new segment is flat.
+        keyframe.value = track.front().value;
+        track.insert(track.begin(), keyframe);
+        return 0;
+    }
+    if (time > track.back().time) {
+        // After the last keyframe the track holds its value; the old last keyframe's
+        // interpolation now spans two equal values, which is flat whatever it is.
+        keyframe.value = track.back().value;
+        track.push_back(keyframe);
+        return track.size() - 1;
+    }
+    // Inside a segment: divide it exactly as a split would (the boundary once).
+    TrackSplit pieces = splitTrack(track, staticValue, time);
+    const std::size_t index = pieces.left.size() - 1;
+    KeyframeTrack merged = std::move(pieces.left);
+    merged.insert(merged.end(), pieces.right.begin() + 1, pieces.right.end());
+    track = std::move(merged);
+    return index;
 }
 
 TrackSplit splitTrack(const KeyframeTrack &track, double staticValue, CMTime at) {

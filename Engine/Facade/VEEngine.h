@@ -426,10 +426,19 @@ NS_SWIFT_UI_ACTOR
 // any other edit (slider drags, keyboard nudges). Refusals: VEEditErrorClipNotFound,
 // VEEditErrorTrackKindMismatch (an audio clip), VEEditErrorInvalidTime (the playhead is not over
 // the clip), VEEditErrorAlreadyExists, VEEditErrorKeyframeNotFound, VEEditErrorInvalidArgument
-// (a value out of range: scale below 0, opacity outside 0...1), VEEditErrorTrackLocked.
+// (a value out of range: scale below 0, opacity outside 0...1), VEEditErrorTrackLocked, and
+// VEEditErrorNotRepresentable (the frame's source time has no time form a keyframe can take; only
+// with pathological speed and timescale combinations).
+//
+// Frames and keyframes: a keyframe set on a frame goes on the frame's start (its exact source time,
+// or the next 1/kPreciseTimescale tick when that has no time form), and the frame's picture is
+// evaluated at that same time (videoParamsAtTime:), so a frame shows the value set on it.
 
-/// Adds a keyframe to `parameter` on the frame at `time`, with the value the parameter has there
-/// (the picture does not change) and linear interpolation.
+/// Adds a keyframe to `parameter` on the frame at `time`, with the value the parameter has there,
+/// without reshaping the segment it lands in, so no frame's picture changes: inside a Hold segment
+/// it is a Hold, inside a Linear one Linear, inside an eased (or Custom) one the segment is divided
+/// into its two exact parts (both Custom); before the first keyframe, after the last one or on a
+/// parameter without keyframes it is Linear.
 - (VEEditResult *)addKeyframeToClip:(VEClipID)clipID parameter:(VEMotionParameter)parameter atTime:(CMTime)time
     NS_SWIFT_NAME(addKeyframe(clip:parameter:at:));
 /// Removes the keyframe of `parameter` on the frame at `time`; the last one leaves its value as the
@@ -438,7 +447,12 @@ NS_SWIFT_UI_ACTOR
     NS_SWIFT_NAME(removeKeyframe(clip:parameter:at:));
 /// Sets `parameter` to `value` (VEVideoParams units): a parameter without keyframes gets a new
 /// static value (whatever `time`); an animated one changes the keyframe on the frame at `time`, or
-/// gets a new keyframe there (Premiere's behaviour while the animation stopwatch is on).
+/// gets a new keyframe there (Premiere's behaviour while the animation stopwatch is on; added like
+/// addKeyframeToClip:, then given the value). Either way the frame then shows exactly `value`: when
+/// the keyframe the frame shows is not on the frame's start (a split's out point, or inside a frame
+/// of a sped-up clip), the value goes on a keyframe on the frame's start and the frame's other
+/// keyframes give way to it, lending it the interpolation of the last of them (one step, "Change
+/// Keyframe").
 - (VEEditResult *)setMotionValue:(double)value
                        parameter:(VEMotionParameter)parameter
                             clip:(VEClipID)clipID
@@ -450,7 +464,11 @@ NS_SWIFT_UI_ACTOR
                                       clip:(VEClipID)clipID
                                     atTime:(CMTime)time
     NS_SWIFT_NAME(setKeyframeInterpolation(_:parameter:clip:at:));
-/// Moves the keyframe on the frame at `from` to the frame at `to` (both frames of the clip).
+/// Moves the keyframe on the frame at `from` to the frame at `to` (both frames of the clip). It
+/// finds the keyframe in the model as it is now, so it is not for drags in a Replace coalescing
+/// group (a second step would look for the keyframe where the first step moved it, but the group
+/// undoes the first step before applying the second):
+/// drags use moveKeyframeGroupOfClip:fromTime:toTime:, which plans each step inside the command.
 - (VEEditResult *)moveKeyframeOfClip:(VEClipID)clipID
                            parameter:(VEMotionParameter)parameter
                             fromTime:(CMTime)from
@@ -510,8 +528,9 @@ NS_SWIFT_UI_ACTOR
 /// Add Motion Keyframe (Clip menu, Control-K) on the sequence frame containing `time`: when every
 /// Motion parameter (position X and Y, scale, rotation, opacity) already has a keyframe on that
 /// frame, removes all five ("Remove Keyframes"; a parameter left without keyframes keeps the value
-/// the frame showed); otherwise adds a keyframe to each parameter that has none there, with the value
-/// it has there, so the picture does not change ("Add Keyframes"). One undo step (one
+/// the frame showed); otherwise adds a keyframe to each parameter that has none there like
+/// addKeyframeToClip: (the value it has there, the segment keeping its shape), so no frame's
+/// picture changes ("Add Keyframes"). One undo step (one
 /// SequenceCommand). The note says "Keyframes added on N parameters" or "Keyframes removed".
 /// Refused like addKeyframeToClip: (VEEditErrorInvalidTime when `time` is not over the clip).
 - (VEEditResult *)toggleMotionKeyframesOfClip:(VEClipID)clipID

@@ -251,7 +251,8 @@ static NSString *describeTime(CMTime t) {
 
 namespace {
 
-ve::MotionParameter motionParameterFrom(VEMotionParameter parameter) {
+/// Nullopt for a value outside the enumeration.
+std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter parameter) {
     switch (parameter) {
     case VEMotionParameterPositionX:
         return ve::MotionParameter::X;
@@ -264,7 +265,7 @@ ve::MotionParameter motionParameterFrom(VEMotionParameter parameter) {
     case VEMotionParameterOpacity:
         return ve::MotionParameter::Opacity;
     }
-    return ve::MotionParameter::X;
+    return std::nullopt;
 }
 
 VEKeyframe *makeKeyframe(const ve::Clip &clip, ve::MotionParameter parameter, const ve::Keyframe &keyframe,
@@ -291,10 +292,15 @@ VEKeyframe *makeKeyframe(const ve::Clip &clip, ve::MotionParameter parameter, co
     return _clip.video.isAnimated();
 }
 - (BOOL)isAnimated:(VEMotionParameter)parameter {
-    return _clip.video.isAnimated(motionParameterFrom(parameter));
+    const std::optional<ve::MotionParameter> p = motionParameterFrom(parameter);
+    return p && _clip.video.isAnimated(*p);
 }
 - (NSArray<VEKeyframe *> *)keyframesForParameter:(VEMotionParameter)parameter {
-    const ve::MotionParameter p = motionParameterFrom(parameter);
+    const std::optional<ve::MotionParameter> known = motionParameterFrom(parameter);
+    if (!known) {
+        return @[];
+    }
+    const ve::MotionParameter p = *known;
     const ve::KeyframeTrack &track = _clip.video.keyframes.track(p);
     NSMutableArray<VEKeyframe *> *keyframes = [NSMutableArray arrayWithCapacity:track.size()];
     for (const ve::Keyframe &keyframe : track) {
@@ -317,11 +323,14 @@ VEKeyframe *makeKeyframe(const ve::Clip &clip, ve::MotionParameter parameter, co
     return all;
 }
 - (VEVideoParams)videoParamsAtTime:(CMTime)time {
-    const auto source = _clip.exactSourceTimeAt(time);
-    return ve::facade::toVE(source ? _clip.video.valuesAt(*source) : _clip.video.staticValues());
+    return ve::facade::toVE(ve::motionValuesAt(_clip, time));
 }
 - (nullable VEKeyframe *)keyframeForParameter:(VEMotionParameter)parameter atTime:(CMTime)time {
-    const ve::MotionParameter p = motionParameterFrom(parameter);
+    const std::optional<ve::MotionParameter> known = motionParameterFrom(parameter);
+    if (!known) {
+        return nil;
+    }
+    const ve::MotionParameter p = *known;
     const CMTime frame = ve::snapToFrame(time, _frameDuration, ve::SnapMode::Floor);
     const auto index = ve::keyframeIndexForFrame(_clip, p, frame, _frameDuration);
     return index ? makeKeyframe(_clip, p, _clip.video.keyframes.track(p)[*index], _frameDuration) : nil;
@@ -595,7 +604,7 @@ VEMotionParameter toVE(MotionParameter parameter) {
     return VEMotionParameterPositionX;
 }
 
-MotionParameter fromVE(VEMotionParameter parameter) {
+std::optional<MotionParameter> fromVE(VEMotionParameter parameter) {
     return motionParameterFrom(parameter);
 }
 

@@ -51,7 +51,10 @@ EditResult notRepresentable(ClipId clipId, CMTime at);
 // shortened to fit its piece); a transition at the clip's end moves to the right piece. Motion
 // keyframes are divided at the cut (splitTrack), so both pieces show exactly what the clip showed.
 // Stores the right piece's id in `rightId`. Fails (changing nothing) with NotRepresentable when
-// the right piece's source in point has no exact CMTime form.
+// the right piece's source in point has no exact CMTime form (for any clip, animated or not: a
+// clip's in point must be exact, so keyframeTimeForFrame's tick fallback has no counterpart here),
+// and with InvalidArgument when a custom timing curve (from a project file) overshoots a Motion
+// parameter's range at the cut.
 EditResult splitClipAt(Sequence &sequence, Track &track, std::size_t index, CMTime at, IdGenerator &ids,
                        ClipId &rightId);
 

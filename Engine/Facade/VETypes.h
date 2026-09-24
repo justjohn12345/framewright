@@ -58,7 +58,8 @@ typedef NS_ENUM(NSInteger, VEMotionParameter) {
 typedef NS_ENUM(NSInteger, VEKeyframeInterpolation) {
     /// The value stays until the next keyframe, then jumps.
     VEKeyframeInterpolationHold = 0,
-    /// Constant rate (the default for new keyframes).
+    /// Constant rate (the default for a new keyframe before the first, after the last, or on a
+    /// parameter without keyframes; one added inside a segment keeps that segment's shape).
     VEKeyframeInterpolationLinear = 1,
     /// Leaves the keyframe slowly, then speeds up.
     VEKeyframeInterpolationEaseOut = 2,
@@ -66,8 +67,8 @@ typedef NS_ENUM(NSInteger, VEKeyframeInterpolation) {
     VEKeyframeInterpolationEaseIn = 3,
     /// Both (the Ken Burns default).
     VEKeyframeInterpolationEaseInOut = 4,
-    /// The exact part of an eased curve a split left on this segment (read only: set one of the
-    /// others to replace it).
+    /// The exact part of an eased curve left on this segment when the segment was divided: by a
+    /// split, or by a keyframe added inside it (read only: set one of the others to replace it).
     VEKeyframeInterpolationCustom = 5,
 };
 

@@ -263,6 +263,27 @@ std::optional<std::size_t> keyframeIndexForFrame(const Clip &clip, MotionParamet
     return std::nullopt;
 }
 
+namespace {
+
+// The first kPreciseTimescale tick at or after `source` (which has no CMTime form): inside the
+// frame's span (the nearest tick could fall just before it, on the previous frame).
+std::optional<CMTime> tickAtOrAfter(const ExactTime &source) {
+    const CMTime tick = CMTimeMake(1, kPreciseTimescale);
+    const auto index = source.frameIndex(tick, SnapMode::Ceil);
+    return index ? checkedTimeForFrame(*index, tick) : std::nullopt;
+}
+
+} // namespace
+
+std::optional<ExactTime> motionTimeAt(const Clip &clip, CMTime t) {
+    const auto source = clip.exactSourceTimeAt(t);
+    if (!source || source->toTime()) {
+        return source;
+    }
+    const auto tick = tickAtOrAfter(*source);
+    return tick ? ExactTime::from(*tick) : std::nullopt;
+}
+
 std::optional<CMTime> keyframeTimeForFrame(const Clip &clip, CMTime frameStart) {
     const auto source = clip.exactSourceTimeAt(frameStart);
     if (!source) {
@@ -271,11 +292,15 @@ std::optional<CMTime> keyframeTimeForFrame(const Clip &clip, CMTime frameStart) 
     if (const auto exact = source->toTime()) {
         return exact;
     }
-    // The first kPreciseTimescale tick at or after the exact time: inside the frame's span (the
-    // nearest tick could fall just before it, on the previous frame).
-    const CMTime tick = CMTimeMake(1, kPreciseTimescale);
-    const auto index = source->frameIndex(tick, SnapMode::Ceil);
-    return index ? checkedTimeForFrame(*index, tick) : std::nullopt;
+    return tickAtOrAfter(*source); // the time motionTimeAt evaluates the frame at
+}
+
+VideoParams motionValuesAt(const Clip &clip, CMTime t) {
+    if (!clip.video.isAnimated()) {
+        return clip.video.staticValues();
+    }
+    const auto time = motionTimeAt(clip, t);
+    return time ? clip.video.valuesAt(*time) : clip.video.staticValues();
 }
 
 } // namespace ve
