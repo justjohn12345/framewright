@@ -568,38 +568,72 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
         return;
     }
     const Clip &animated = *h.sequence().findClip(clip);
-    std::vector<double> previous;
-    double smallestStep = 1e9;
+    const Clip &overlayed = *h.sequence().findClip(overlay);
+    int64_t movingFramesChecked = 0;
     for (int64_t f : {0, 4, 9, 14, 19, 24, 29, 34, 39}) {
         h.controller->seek(frames30(f));
         const PlaybackHarness::Sample sample = h.presentExact();
         XCTAssertEqual(sample.presented.frameIndex, f);
         const render::PreviewFrame &frame = h.frame();
-        // The monitor's layer shows the Motion the keyframes give this frame.
-        const VideoParams expected = animated.video.valuesAt(*animated.exactSourceTimeAt(frames30(f)));
-        XCTAssertFalse(frame.graph.layers.empty());
-        if (!frame.graph.layers.empty()) {
-            const VideoParams &shown = frame.graph.layers[0].transform;
-            XCTAssertEqualWithAccuracy(shown.scale, expected.scale, 1e-12, @"frame %lld", f);
-            XCTAssertEqualWithAccuracy(shown.x, expected.x, 1e-12, @"frame %lld", f);
-            XCTAssertEqualWithAccuracy(shown.rotationDegrees, expected.rotationDegrees, 1e-12, @"frame %lld", f);
-            XCTAssertEqualWithAccuracy(frame.graph.layers[0].opacity, expected.opacity, 1e-12, @"frame %lld", f);
+        // The monitor's layers show the Motion the keyframes give this frame (found by clip, not by
+        // position in the graph).
+        const VideoParams expected = motionValuesAt(animated, frames30(f));
+        std::optional<std::size_t> v1Layer;
+        std::optional<std::size_t> v2Layer;
+        for (std::size_t i = 0; i < frame.graph.layers.size(); ++i) {
+            if (frame.graph.layers[i].clipId == clip) v1Layer = i;
+            if (frame.graph.layers[i].clipId == overlay) v2Layer = i;
         }
-        auto buffer = pool->makeBuffer();
-        XCTAssertTrue(buffer.ok());
-        if (!buffer.ok()) {
+        XCTAssertTrue(v1Layer.has_value(), @"frame %lld", f);
+        if (!v1Layer) {
             continue;
         }
-        auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &out) {
-            if (index >= frame.textures.size() || !frame.textures[index]) {
-                return false;
+        const VideoParams &shown = frame.graph.layers[*v1Layer].transform;
+        XCTAssertEqualWithAccuracy(shown.scale, expected.scale, 1e-12, @"frame %lld", f);
+        XCTAssertEqualWithAccuracy(shown.x, expected.x, 1e-12, @"frame %lld", f);
+        XCTAssertEqualWithAccuracy(shown.y, expected.y, 1e-12, @"frame %lld", f);
+        XCTAssertEqualWithAccuracy(shown.rotationDegrees, expected.rotationDegrees, 1e-12, @"frame %lld", f);
+        XCTAssertEqualWithAccuracy(frame.graph.layers[*v1Layer].opacity, expected.opacity, 1e-12, @"frame %lld", f);
+        // The V2 still's scale holds each keyframe's value until the next (clip-relative times: the
+        // still starts at frame 5), then grows linearly after the last hold.
+        XCTAssertEqual(v2Layer.has_value(), f >= 5 && f < 35, @"frame %lld", f);
+        if (v2Layer) {
+            const double overlayScale = frame.graph.layers[*v2Layer].transform.scale;
+            const double held = f < 15 ? 0.2 : f < 25 ? 0.35 : 0.5;
+            XCTAssertEqual(overlayScale, held, @"frame %lld: a hold keeps the keyframe's exact value", f);
+            XCTAssertEqual(overlayScale, motionValuesAt(overlayed, frames30(f)).scale);
+        }
+        auto render = [&](const auto &graph) -> std::vector<double> {
+            auto buffer = pool->makeBuffer();
+            XCTAssertTrue(buffer.ok());
+            if (!buffer.ok()) {
+                return {};
             }
-            out = frame.textures[index];
-            return true;
+            auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &out) {
+                if (index >= frame.textures.size() || !frame.textures[index]) {
+                    return false;
+                }
+                out = frame.textures[index];
+                return true;
+            };
+            auto rendered = created.value()->renderAndWait(graph, lookup, render::PixelBufferTarget{buffer.value()});
+            XCTAssertTrue(rendered.ok() && rendered->status.ok() && rendered->skippedLayers.empty(), @"frame %lld", f);
+            return blockMeans(buffer.value().get());
         };
-        auto rendered = created.value()->renderAndWait(frame.graph, lookup, render::PixelBufferTarget{buffer.value()});
-        XCTAssertTrue(rendered.ok() && rendered->status.ok() && rendered->skippedLayers.empty(), @"frame %lld", f);
-        const std::vector<double> monitor = blockMeans(buffer.value().get());
+        const std::vector<double> monitor = render(frame.graph);
+        // The same frame with V1's animation taken away (its static values; V2 as it is): what the
+        // picture would be without the keyframes, from the same decoded pictures.
+        auto unanimated = frame.graph;
+        unanimated.layers[*v1Layer].transform = animated.video.staticValues();
+        unanimated.layers[*v1Layer].opacity = animated.video.opacity;
+        const double animationEffect = compare(render(unanimated), monitor).maxBlock;
+        if (f == 0) {
+            // The first keyframes are the identity at full opacity: the control, nothing to see.
+            XCTAssertLessThan(animationEffect, 1.0, @"frame 0 shows the unanimated picture");
+        } else if (expected.scale >= 1.2) {
+            XCTAssertGreaterThan(animationEffect, 40.0, @"frame %lld: the keyframes move the picture visibly", f);
+            ++movingFramesChecked;
+        }
         XCTAssertTrue(decoder->decoder->seek(frames30(f)).ok());
         auto decoded = decoder->decoder->next();
         XCTAssertTrue(decoded.ok() && decoded.value(), @"exported frame %lld", f);
@@ -607,16 +641,13 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
             continue;
         }
         const Difference d = compare(monitor, blockMeans(decoded.value()->image.get()));
-        NSLog(@"PARITY animated frame %lld: blocks differ by at most %.2f, on average %.3f", f, d.maxBlock, d.meanBlock);
+        NSLog(@"PARITY animated frame %lld: blocks differ by at most %.2f, on average %.3f; the animation changes "
+              @"blocks by up to %.2f",
+              f, d.maxBlock, d.meanBlock, animationEffect);
         XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
         XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
-        if (!previous.empty()) {
-            smallestStep = std::min(smallestStep, compare(previous, monitor).maxBlock);
-        }
-        previous = monitor;
     }
-    // Every compared frame moved visibly from the one before: the comparison was over motion.
-    XCTAssertGreaterThan(smallestStep, 40.0);
+    XCTAssertGreaterThanOrEqual(movingFramesChecked, 5, @"the comparison covered frames the keyframes move");
 }
 
 @end
