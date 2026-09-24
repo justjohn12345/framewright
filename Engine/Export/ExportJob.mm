@@ -757,11 +757,16 @@ void ExportJob::scheduleProgress() {
       if (!job) {
           return;
       }
+      // The delivery time is published before the pending flag is cleared: a progress change on
+      // another thread that sees no delivery pending then also sees this one's time, so it waits a
+      // full interval (clearing the flag first let it schedule a second delivery at once).
+      if (!job->completed_.load(std::memory_order_acquire)) {
+          job->lastProgressDelivery_.store(now(), std::memory_order_release);
+      }
       job->progressPending_.store(false, std::memory_order_release);
       if (job->completed_.load(std::memory_order_acquire)) {
           return;
       }
-      job->lastProgressDelivery_.store(now(), std::memory_order_release);
       job->progressHandler_(job->progress());
     });
 }
