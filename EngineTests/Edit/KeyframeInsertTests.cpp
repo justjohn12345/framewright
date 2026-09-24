@@ -13,6 +13,7 @@
 
 #include <cmath>
 #include <functional>
+#include <map>
 #include <vector>
 
 using namespace vetest;
@@ -455,4 +456,98 @@ TEST_CASE("Keyframe on the next precise tick: its own frame shows it after a hol
     REQUIRE(planMotionKeyframeToggle(clip, fd, frame7, plan).ok());
     CHECK_FALSE(plan.removing);
     CHECK(plan.changes.size() == 4);
+}
+
+// ----- Other edits on animated clips keep every picture (test gap 2) -----
+
+namespace {
+
+// What V1 shows on each timeline frame of [from, to), by timeline frame (no clip there: absent).
+std::map<std::int64_t, VideoParams> timelinePictures(const Fixture &fx, std::int64_t from, std::int64_t to) {
+    std::map<std::int64_t, VideoParams> pictures;
+    for (std::int64_t f = from; f < to; ++f) {
+        if (const Clip *clip = fx.sequence().findTrack(fx.v1)->clipAt(f30(f))) {
+            pictures[f] = Scheduler::motionAt(*clip, f30(f));
+        }
+    }
+    return pictures;
+}
+
+void checkSameAt(const std::map<std::int64_t, VideoParams> &after, const std::map<std::int64_t, VideoParams> &before,
+                 std::int64_t shift = 0) {
+    for (const auto &[frame, shown] : after) {
+        CAPTURE(frame);
+        const auto was = before.find(frame - shift);
+        REQUIRE(was != before.end());
+        checkClose(shown.x, was->second.x);
+        checkClose(shown.y, was->second.y);
+        checkClose(shown.scale, was->second.scale);
+        checkClose(shown.rotationDegrees, was->second.rotationDegrees);
+        checkClose(shown.opacity, was->second.opacity);
+    }
+}
+
+} // namespace
+
+TEST_CASE("Animated clips: a split at 1.5x, an overwrite inside, a move onto and a ripple keep the pictures") {
+    Fixture fx;
+    // 60 timeline frames at 3/2 from source frame 30: every parameter animated with its own kind.
+    const ClipId id = fx.addClip(fx.v1, fx.av30, 30, 60, 30, 1.5);
+    Clip &c = *fx.sequence().findClip(id);
+    c.video.keyframes.x = {key(f30(30), 0, KeyframeInterpolation::EaseInOut), key(f30(120), 300)};
+    c.video.keyframes.scale = {key(f30(30), 1, KeyframeInterpolation::Hold), key(f30(75), 2, KeyframeInterpolation::EaseIn),
+                               key(f30(120), 0.5)};
+    c.video.keyframes.opacity = {custom(f30(40), 0.3, kCustomCurve), key(f30(100), 1)};
+    fx.requireValid();
+    const auto before = timelinePictures(fx, 0, 200);
+    REQUIRE(before.size() == 60);
+
+    SUBCASE("a split at speed 1.5, then each piece split again (a custom part divided again)") {
+        SplitClip split(fx.seq, id, f30(47));
+        applyReversible(fx.project, split);
+        checkSameAt(timelinePictures(fx, 0, 200), before);
+        const ClipId right = split.createdClipIds().front();
+        SplitClip again(fx.seq, right, f30(71));
+        applyReversible(fx.project, again);
+        SplitClip left(fx.seq, id, f30(33));
+        applyReversible(fx.project, left);
+        checkSameAt(timelinePictures(fx, 0, 200), before);
+    }
+    SUBCASE("an overwrite inside it leaves both remaining parts as they were") {
+        ClipPlacement other = place(fx.v1, fx.av24, 0, 10);
+        OverwriteClip overwrite(fx.seq, f30(50), {other}, false);
+        applyReversible(fx.project, overwrite);
+        auto after = timelinePictures(fx, 0, 200);
+        for (std::int64_t f = 50; f < 50 + 9; ++f) {
+            after.erase(f); // the other clip's frames
+        }
+        const ClipId inserted = overwrite.createdClipIds().front();
+        for (auto it = after.begin(); it != after.end();) {
+            it = fx.sequence().findTrack(fx.v1)->clipAt(f30(it->first))->id == inserted ? after.erase(it) : std::next(it);
+        }
+        CHECK(after.size() >= 50);
+        checkSameAt(after, before);
+    }
+    SUBCASE("another clip moved onto it cuts it without changing what is left") {
+        const ClipId mover = fx.addClip(fx.v2, fx.av24, 100, 12, 0);
+        fx.requireValid();
+        MoveClip move(fx.seq, mover, fx.v1, f30(60), false);
+        applyReversible(fx.project, move);
+        auto after = timelinePictures(fx, 0, 200);
+        for (auto it = after.begin(); it != after.end();) {
+            it = fx.sequence().findTrack(fx.v1)->clipAt(f30(it->first))->id == mover ? after.erase(it) : std::next(it);
+        }
+        CHECK(after.size() == 48);
+        checkSameAt(after, before);
+    }
+    SUBCASE("a ripple delete before it moves its pictures with it") {
+        const ClipId earlier = fx.addClip(fx.v1, fx.av24, 10, 20, 0);
+        fx.requireValid();
+        RippleOptions options;
+        options.includeLinked = false;
+        RippleDelete ripple(fx.seq, {earlier}, options);
+        applyReversible(fx.project, ripple);
+        CHECK(fx.clip(id).timelineStart == f30(10));
+        checkSameAt(timelinePictures(fx, 0, 200), before, -20);
+    }
 }

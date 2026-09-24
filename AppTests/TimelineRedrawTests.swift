@@ -144,9 +144,9 @@ final class TimelineRedrawTests: XCTestCase {
         await Self.display(host)
         store.snapIndicator = nil
         await Self.display(host)
-        guard TimelineDiagnostics.canvasDraws > controlDraws, TimelineDiagnostics.kenBurnsBandUpdates > 0 else {
-            throw XCTSkip("the timeline does not draw in this test host")
-        }
+        // Asserted, not skipped: a host that does not draw would make the counts below meaningless.
+        XCTAssertGreaterThan(TimelineDiagnostics.canvasDraws, controlDraws, "the canvas draws in this host")
+        XCTAssertGreaterThan(TimelineDiagnostics.kenBurnsBandUpdates, 0, "the band draws in this host")
 
         let builds = store.timelineBuildCount
         let canvasDraws = TimelineDiagnostics.canvasDraws
