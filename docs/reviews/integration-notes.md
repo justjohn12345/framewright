@@ -380,7 +380,8 @@ in the history table of `README.md`.
   animated), `KenBurnsModel` (`App/State/KenBurns.swift`: rect <-> framing, limits, swap) with
   `KenBurnsOverlay` on the program monitor (`store.beginKenBurns/applyKenBurns/cancelKenBurns`; closes on
   selection change, clip removal, New/Open), timeline markers (`TimelineViewModel.Clip.keyframes`,
-  `Hit.keyframe`, a click seeks, a drag moves the clip). New edit commands that reach keyframes from
+  `Hit.keyframe`, a click seeks; a drag moves the marker's keyframes since "Ken Burns editing" below).
+  New edit commands that reach keyframes from
   keys or menus must keep the `isGestureActive` guard.
 
 ### Ken Burns range and neighbour matching
@@ -396,10 +397,11 @@ in the history table of `README.md`.
   `SetMotionTracks` now accepts a keyframe outside the clip's source range only if the clip already has
   that exact keyframe (hidden ones kept); new ones there are still refused.
 - App: `KenBurnsModel.range` (`MoveRange`: whole clip, from playhead, from clip start), `durationText` /
-  `commitDuration()` (`DurationFormat.parseFrames`, 2 frames to what is left, `durationNote`),
+  `commitDuration()` (`DurationFormat.parseFrames`, 2 frames to what is left, `durationNote`, now `rangeNote`),
   `rangeStart`, `rangeDuration`, `rangeTimecodes`, `rangeCaption` ("Holds the end framing until the clip
   ends", or `rangeProblem`). `store.applyKenBurns()` commits a duration being typed first (Return also
-  presses Apply). Rectangles the user moved keep their place when the range changes; the others show the
+  presses Apply; since "Ken Burns editing", Return with text still being typed only commits the field).
+  Rectangles the user moved keep their place when the range changes; the others show the
   clip's framing at the range's ends (or the push in). `store.refreshModel()` passes clip changes to the
   open helper (`update(clip:)`).
 - Picture: follows the playhead, as in FCP (this replaced "the picture at the range start" from the
