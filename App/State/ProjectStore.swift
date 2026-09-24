@@ -1094,33 +1094,82 @@ final class ProjectStore: ObservableObject {
     }
 
     /// Imports dropped files and places them on the timeline where they were dropped (one after
-    /// another, in drop order) once they are imported.
+    /// another, in drop order) once they are imported, unless the timeline changed meanwhile (see
+    /// `place(imported:from:at:timelineChanged:emptyRangeOnly:)`).
     func importAndPlace(_ urls: [URL], at placement: IncomingMedia.Placement) {
         guard !urls.isEmpty else { return }
         importMedia(urls) { [weak self] imported in
-            self?.place(imported: imported, from: urls, at: placement)
+            guard let self else { return }
+            // The import itself is one change (ImportAssets); anything else changed the timeline.
+            let own: UInt64 = urls.contains { url in imported.contains { Self.samePath($0.path, url.path) } } ? 1 : 0
+            let changed = self.engine.changeCount != placement.changeCount + own
+            self.place(imported: imported, from: urls, at: placement, timelineChanged: changed, emptyRangeOnly: false)
         }
     }
 
     /// Places the assets imported from `files` on the timeline at `placement`: the first at the drop
     /// point on the drop row (its partner on the matching track), each next one where the previous
-    /// ends; overwrite, or insert when Command was held. Skipped, with a message, while a drag or
-    /// another gesture is in progress (the media stays in the bin).
-    func place(imported assets: [VEAssetInfo], from files: [URL], at placement: IncomingMedia.Placement) {
+    /// ends; overwrite, or insert when Command was held. The media stays in the bin, with a message
+    /// saying why, when a drag, a nudge burst or another gesture is in progress, when
+    /// `timelineChanged` (the user edited since the drop: placing it now could overwrite those
+    /// edits), when the drop's track no longer exists, or when the engine refuses the placement.
+    /// With `emptyRangeOnly` (media that arrived after a wait, like Photos items) a drop point that
+    /// is not empty takes the media as an insert, so nothing there is overwritten.
+    func place(imported assets: [VEAssetInfo], from files: [URL], at placement: IncomingMedia.Placement,
+               timelineChanged: Bool, emptyRangeOnly: Bool) {
         let ordered = files.compactMap { url in assets.first { Self.samePath($0.path, url.path) } }
         guard !ordered.isEmpty else { return }
-        guard !isGestureActive else {
-            statusMessage = "The dropped media is in the media bin: a drag was in progress when it arrived."
+        let what = ordered.count == 1 ? "“\(ordered[0].name)” is" : "The \(ordered.count) dropped items are"
+        guard !isGestureActive, engine.coalescingKey == nil else {
+            statusMessage = "\(what) in the media bin: a drag or a nudge was in progress when it arrived."
             return
+        }
+        guard !timelineChanged else {
+            statusMessage = "\(what) in the media bin: the timeline changed after the drop, so it was not placed "
+                + "(drag it to the timeline)."
+            return
+        }
+        guard track(placement.trackID) != nil else {
+            statusMessage = "\(what) in the media bin: the track it was dropped on no longer exists."
+            return
+        }
+        var insert = placement.insert
+        if emptyRangeOnly, !insert, !isRangeEmpty(for: ordered, on: placement.trackID, from: placement.seconds) {
+            insert = true
         }
         var seconds = placement.seconds
         for asset in ordered {
-            guard dropAsset(asset.assetID, onTrack: placement.trackID, at: seconds, overwrite: !placement.insert) else {
-                break
+            guard dropAsset(asset.assetID, onTrack: placement.trackID, at: seconds, overwrite: !insert) else {
+                let reason = statusMessage ?? "it could not be placed"
+                statusMessage = "“\(asset.name)” is in the media bin: \(reason)"
+                return
             }
             seconds = selection.compactMap { clips[$0]?.timelineEnd.secondsOrZero }.max() ?? seconds
         }
+        if insert, !placement.insert {
+            statusMessage = "Inserted where it was dropped: the timeline there was no longer empty."
+        }
     }
+
+    /// Whether the time `assets` take, placed one after another from `seconds` on the row
+    /// `trackID` and its partner row, holds no clip.
+    private func isRangeEmpty(for assets: [VEAssetInfo], on trackID: VETrackID, from seconds: Double) -> Bool {
+        guard let dropped = track(trackID) else { return false }
+        let video = dropped.kind == .video ? trackID : matchingVideoTrack(forAudio: trackID)
+        let audio = dropped.kind == .audio ? trackID : matchingAudioTrack(forVideo: trackID)
+        let length = assets.reduce(0.0) { total, asset in
+            total + (asset.isStill ? Self.stillSeconds : max(asset.duration.secondsOrZero, frameDuration.secondsOrZero))
+        }
+        let end = seconds + length
+        let epsilon = 1e-6
+        return !clips.values.contains { clip in
+            (clip.trackID == video || clip.trackID == audio)
+                && clip.timelineStart.secondsOrZero < end - epsilon && clip.timelineEnd.secondsOrZero > seconds + epsilon
+        }
+    }
+
+    /// The length a still gets when placed (the engine's default).
+    static let stillSeconds = 5.0
 
     /// Whether two paths name the same file (symbolic links such as /var -> /private/var resolved).
     static func samePath(_ a: String, _ b: String) -> Bool {
@@ -1156,6 +1205,8 @@ final class ProjectStore: ObservableObject {
 
     func save(to url: URL) throws {
         cancelActiveGesture?()
+        // Saved elsewhere (Save As): the Media folder next to the old location is not the new one's.
+        mediaFolder.projectWillMove(to: url, engine: engine)
         try engine.saveProject(to: url)
         refreshModel()
     }

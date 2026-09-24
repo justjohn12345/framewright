@@ -3,244 +3,6 @@ import Foundation
 import UniformTypeIdentifiers
 import FramewrightEngine
 
-extension UTType {
-    /// AppKit's file promise types (`NSFilePromiseReceiver.readableDraggedTypes`): what Photos, Mail
-    /// and other apps put on a drag pasteboard instead of file URLs. Declared as imported types in
-    /// Info.plist.
-    static let filePromiseItemMetadata = UTType(importedAs: "com.apple.NSFilePromiseItemMetaData")
-    /// `kPasteboardTypeFileURLPromise`.
-    static let filePromiseURL = UTType(importedAs: "com.apple.pasteboard.promised-file-url")
-    /// Photos' Live Photo bundle (a folder with the still and the movie), offered by PHPicker.
-    static let livePhotoBundle = UTType(importedAs: "com.apple.live-photo-bundle")
-
-    /// The file promise types drop targets accept alongside file URLs: every type AppKit's promise
-    /// receiver reads from a drag pasteboard (`NSFilePromiseReceiver.readableDraggedTypes`: the
-    /// promise metadata, the promised content type and the legacy promise type) and the promised
-    /// file URL.
-    static let filePromiseTypes: [UTType] = {
-        var types = NSFilePromiseReceiver.readableDraggedTypes.map { UTType($0) ?? UTType(importedAs: $0) }
-        for required in [UTType.filePromiseItemMetadata, .filePromiseURL] where !types.contains(required) {
-            types.append(required)
-        }
-        return types
-    }()
-}
-
-/// A file another process promised to deliver (a Photos drag, a PHPicker result): delivered into a
-/// directory of our choosing, possibly after a long wait (an iCloud item downloads first), and
-/// cancellable meanwhile.
-@MainActor
-protocol PromisedFile: AnyObject {
-    /// What to call it while it arrives.
-    var displayName: String { get }
-    /// Called on the main actor with the fraction received (0...1) when the source reports it.
-    var onProgress: ((Double) -> Void)? { get set }
-    /// Starts delivering into `directory`. `completion` runs once on the main actor with the files
-    /// that arrived (a promise may deliver more than one, e.g. a Live Photo's still and movie), or
-    /// the error; never after `cancel()`.
-    func receive(into directory: URL, completion: @escaping @MainActor (Result<[URL], Error>) -> Void)
-    /// Stops waiting; a file that still arrives is deleted.
-    func cancel()
-}
-
-/// File operations shared by the promises.
-enum ReceivedFiles {
-    /// A name in `directory` that is not taken: `name`, else "stem 2.ext", "stem 3.ext", ...
-    static func uniqueURL(in directory: URL, name: String) -> URL {
-        let fileManager = FileManager.default
-        let candidate = directory.appendingPathComponent(name)
-        guard fileManager.fileExists(atPath: candidate.path) else { return candidate }
-        let stem = (name as NSString).deletingPathExtension
-        let ext = (name as NSString).pathExtension
-        var index = 2
-        while true {
-            let numbered = ext.isEmpty ? "\(stem) \(index)" : "\(stem) \(index).\(ext)"
-            let url = directory.appendingPathComponent(numbered)
-            if !fileManager.fileExists(atPath: url.path) { return url }
-            index += 1
-        }
-    }
-
-    /// Moves (or, when that fails, copies) `source` into `directory` under `name` (or the source's
-    /// own name), keeping the source's extension. Returns where it went.
-    static func adopt(_ source: URL, into directory: URL, name: String?) throws -> URL {
-        var fileName = source.lastPathComponent
-        if let name, !name.isEmpty {
-            let ext = source.pathExtension
-            fileName = ext.isEmpty || (name as NSString).pathExtension.lowercased() == ext.lowercased()
-                ? name : "\(name).\(ext)"
-        }
-        let destination = uniqueURL(in: directory, name: fileName)
-        do {
-            try FileManager.default.moveItem(at: source, to: destination)
-        } catch {
-            try FileManager.default.copyItem(at: source, to: destination)
-        }
-        return destination
-    }
-
-    static func remove(_ urls: [URL]) {
-        for url in urls {
-            try? FileManager.default.removeItem(at: url)
-        }
-    }
-}
-
-/// A promise carried by an `NSItemProvider` (SwiftUI drops, PHPicker results): the provider's file
-/// representation of its media type is loaded (the system fulfils a file promise, downloading an
-/// iCloud original first) and moved into the destination. Cancelling cancels the load's Progress.
-@MainActor
-final class ItemProviderPromise: PromisedFile {
-    let provider: NSItemProvider
-    let typeIdentifier: String
-    var onProgress: ((Double) -> Void)?
-    private var progress: Progress?
-    private var observation: NSKeyValueObservation?
-    private var cancelled = false
-
-    /// The media type to load, in order of preference: a Live Photo bundle (so the user can choose
-    /// its movie or its still), a movie, an image (HEIC before JPEG: the original), audio. Nil when
-    /// the provider offers no media.
-    static func mediaTypeIdentifier(of provider: NSItemProvider) -> String? {
-        let registered = provider.registeredTypeIdentifiers
-        if registered.contains(UTType.livePhotoBundle.identifier) {
-            return UTType.livePhotoBundle.identifier
-        }
-        let types = registered.compactMap { UTType($0) }
-        let order: [(UTType) -> Bool] = [
-            { $0.conforms(to: .movie) },
-            { $0.conforms(to: .heic) || $0.conforms(to: .heif) },
-            { $0.conforms(to: .image) },
-            { $0.conforms(to: .audio) },
-            { $0.conforms(to: .audiovisualContent) },
-        ]
-        for matches in order {
-            if let type = types.first(where: matches) { return type.identifier }
-        }
-        return nil
-    }
-
-    init?(provider: NSItemProvider) {
-        guard let type = Self.mediaTypeIdentifier(of: provider) else { return nil }
-        self.provider = provider
-        typeIdentifier = type
-    }
-
-    var displayName: String {
-        if let name = provider.suggestedName, !name.isEmpty { return name }
-        return UTType(typeIdentifier)?.localizedDescription ?? "Media"
-    }
-
-    func receive(into directory: URL, completion: @escaping @MainActor (Result<[URL], Error>) -> Void) {
-        let name = provider.suggestedName
-        let loading = provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { [weak self] url, error in
-            // The file only exists until this handler returns: take it now (off the main thread).
-            let result: Result<[URL], Error>
-            if let url {
-                do {
-                    result = .success([try ReceivedFiles.adopt(url, into: directory, name: name)])
-                } catch {
-                    result = .failure(error)
-                }
-            } else {
-                result = .failure(error ?? CocoaError(.fileReadUnknown))
-            }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self, !self.cancelled else {
-                        if case let .success(urls) = result { ReceivedFiles.remove(urls) }
-                        return
-                    }
-                    self.observation = nil
-                    completion(result)
-                }
-            }
-        }
-        progress = loading
-        observation = loading.observe(\.fractionCompleted, options: [.new]) { [weak self] progress, _ in
-            let fraction = progress.fractionCompleted
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self, !self.cancelled else { return }
-                    self.onProgress?(fraction)
-                }
-            }
-        }
-    }
-
-    func cancel() {
-        cancelled = true
-        observation = nil
-        progress?.cancel()
-    }
-}
-
-/// A promise read from a drag pasteboard as an `NSFilePromiseReceiver` (AppKit's file promise
-/// API): the promising app writes its files into the destination on a background queue, one
-/// reader call per file. There is no progress; cancelling ignores (and deletes) what arrives later.
-@MainActor
-final class PasteboardFilePromise: PromisedFile {
-    let receiver: NSFilePromiseReceiver
-    var onProgress: ((Double) -> Void)?
-    private var cancelled = false
-    private let queue: OperationQueue = {
-        let queue = OperationQueue()
-        queue.name = "Framewright file promises"
-        queue.qualityOfService = .userInitiated
-        return queue
-    }()
-
-    init(receiver: NSFilePromiseReceiver) {
-        self.receiver = receiver
-    }
-
-    /// The receivers of the current drag (`NSPasteboard(name: .drag)`), read while a drop is
-    /// performed.
-    static func fromDragPasteboard() -> [PasteboardFilePromise] {
-        let receivers = NSPasteboard(name: .drag).readObjects(forClasses: [NSFilePromiseReceiver.self], options: nil)
-        return (receivers as? [NSFilePromiseReceiver] ?? []).map(PasteboardFilePromise.init)
-    }
-
-    var displayName: String {
-        receiver.fileTypes.first.flatMap { UTType($0)?.localizedDescription } ?? "Promised file"
-    }
-
-    func receive(into directory: URL, completion: @escaping @MainActor (Result<[URL], Error>) -> Void) {
-        let expected = max(1, receiver.fileTypes.count)
-        var arrived: [URL] = []
-        var failure: Error?
-        var calls = 0
-        receiver.receivePromisedFiles(atDestination: directory, options: [:], operationQueue: queue) { [weak self] url, error in
-            // On `queue`, one call per promised file.
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    calls += 1
-                    if let error {
-                        failure = error
-                    } else {
-                        arrived.append(url)
-                    }
-                    guard calls == expected else { return }
-                    guard let self, !self.cancelled else {
-                        ReceivedFiles.remove(arrived)
-                        return
-                    }
-                    self.onProgress?(1)
-                    if arrived.isEmpty {
-                        completion(.failure(failure ?? CocoaError(.fileReadUnknown)))
-                    } else {
-                        completion(.success(arrived))
-                    }
-                }
-            }
-        }
-    }
-
-    func cancel() {
-        cancelled = true
-    }
-}
-
 /// Live Photos: a still and a short movie that belong together, delivered together by one promise
 /// (Photos names them alike: IMG_1234.HEIC and IMG_1234.MOV; PHPicker hands a bundle folder holding
 /// both). Files of different promises are never paired, however alike their names (camera names
@@ -395,110 +157,20 @@ enum LivePhotoImportSetting: String, CaseIterable, Identifiable {
     }
 }
 
-/// Where the media received from Photos goes: a "Media" folder next to the project file (created
-/// when the app may write there), else a folder the user picks once (always for an untitled
-/// project). The choice is kept for the session and stored in the project
-/// (`VEEngine.mediaFolderBookmark`, saved with it); New/Open forget it (`reset()`).
-@MainActor
-final class ImportedMediaFolder {
-    static let folderName = "Media"
-
-    /// Asks for a folder (`suggested` to start in, `message` to explain); nil when cancelled.
-    /// Tests replace it.
-    var chooseFolder: (_ suggested: URL?, _ message: String) -> URL? = { suggested, message in
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.canCreateDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = suggested
-        panel.prompt = "Keep Media Here"
-        panel.message = message
-        return panel.runModal() == .OK ? panel.url : nil
-    }
-
-    /// The folder in use for this project (nil until first needed).
-    private(set) var folder: URL?
-    /// Times the user was asked (diagnostics and tests).
-    private(set) var promptCount = 0
-    private var accessing: URL?
-
-    /// Forgets the folder (the project changed).
-    func reset() {
-        accessing?.stopAccessingSecurityScopedResource()
-        accessing = nil
-        folder = nil
-    }
-
-    /// The folder for `engine`'s project, asking when needed; nil when the user cancelled.
-    func resolve(for engine: VEEngine) -> URL? {
-        if let folder, Self.isWritableDirectory(folder) { return folder }
-        if let data = engine.mediaFolderBookmark, let url = resolveBookmark(data) {
-            folder = url
-            return url
-        }
-        if let project = engine.projectURL {
-            let candidate = project.deletingLastPathComponent().appendingPathComponent(Self.folderName, isDirectory: true)
-            if (try? FileManager.default.createDirectory(at: candidate, withIntermediateDirectories: true)) != nil,
-               Self.isWritableDirectory(candidate) {
-                adopt(candidate, engine: engine)
-                return candidate
-            }
-        }
-        let message = engine.projectURL == nil
-            ? "Choose where to keep media imported from Photos for this untitled project. The folder is saved with the project."
-            : "Framewright cannot create a “\(Self.folderName)” folder next to “\(engine.projectName)”. "
-                + "Choose where to keep media imported from Photos."
-        promptCount += 1
-        guard let chosen = chooseFolder(engine.projectURL?.deletingLastPathComponent(), message) else { return nil }
-        if chosen.startAccessingSecurityScopedResource() {
-            accessing?.stopAccessingSecurityScopedResource()
-            accessing = chosen
-        }
-        guard Self.isWritableDirectory(chosen) else { return nil }
-        adopt(chosen, engine: engine)
-        return chosen
-    }
-
-    private func adopt(_ url: URL, engine: VEEngine) {
-        folder = url
-        let bookmark = (try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil,
-                                              relativeTo: nil))
-            ?? (try? url.bookmarkData())
-        if let bookmark, bookmark != engine.mediaFolderBookmark {
-            engine.mediaFolderBookmark = bookmark
-        }
-    }
-
-    private func resolveBookmark(_ data: Data) -> URL? {
-        var stale = false
-        let url = (try? URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI, .withoutMounting],
-                            relativeTo: nil, bookmarkDataIsStale: &stale))
-            ?? (try? URL(resolvingBookmarkData: data, options: [.withoutUI, .withoutMounting], relativeTo: nil,
-                         bookmarkDataIsStale: &stale))
-        guard let url else { return nil }
-        if url.startAccessingSecurityScopedResource() {
-            accessing?.stopAccessingSecurityScopedResource()
-            accessing = url
-        }
-        return Self.isWritableDirectory(url) ? url : nil
-    }
-
-    static func isWritableDirectory(_ url: URL) -> Bool {
-        var isDirectory: ObjCBool = false
-        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
-            && FileManager.default.isWritableFile(atPath: url.path)
-    }
-}
 
 /// Media arriving from Photos (drops of file promises and "Import from Photos…"): each dropped or
 /// picked batch is received into the project's Media folder (`ImportedMediaFolder`), shown in the
 /// media bin while it arrives (with progress where the source reports it, and Cancel), then
 /// imported through the normal import path (`ProjectStore.importMedia`) once every item of the
-/// batch has arrived, failed or been cancelled. Live Photos (a still and its movie) are imported
-/// as the part the user chooses (asked once per batch unless a choice was remembered). A batch
-/// dropped on the timeline is placed where it was dropped, the items one after another in drop
-/// order. Nothing here blocks: an iCloud item that downloads for minutes just stays "receiving".
+/// batch has arrived, failed or been cancelled; a received file the import refuses is deleted from
+/// the Media folder. Live Photos (a still and its movie delivered by one promise) are imported as
+/// the part the user chooses (asked once per batch unless Settings > Media > Live Photos says
+/// which). Questions wait while a drag or another gesture is in progress and never stack: batches
+/// that settle meanwhile queue behind the one being asked about. A batch dropped on the timeline is
+/// placed where it was dropped, the items one after another in drop order, unless the timeline
+/// changed since the drop (then, like when a gesture is in progress, the media stays in the bin
+/// with a message); a drop point that is no longer empty takes the media as an insert. Nothing here
+/// blocks: an iCloud item that downloads for minutes just stays "receiving".
 @MainActor
 final class IncomingMedia: ObservableObject {
     enum State: Equatable {
@@ -513,7 +185,7 @@ final class IncomingMedia: ObservableObject {
     struct Item: Identifiable, Equatable {
         let id: UUID
         let batchID: UUID
-        let name: String
+        var name: String
         var fraction: Double?
         var state: State
     }
@@ -523,11 +195,14 @@ final class IncomingMedia: ObservableObject {
         let trackID: VETrackID
         let seconds: Double
         let insert: Bool
+        /// The engine's `changeCount` when the drop was made (after the drop's own bookkeeping): a
+        /// different count when the media arrives means the timeline changed meanwhile.
+        var changeCount: UInt64 = 0
     }
 
     private final class Batch {
         let id = UUID()
-        let placement: Placement?
+        var placement: Placement?
         var order: [UUID] = []
         var promises: [UUID: PromisedFile] = [:]
         var files: [UUID: [URL]] = [:]
@@ -537,23 +212,47 @@ final class IncomingMedia: ObservableObject {
         }
     }
 
+    /// A settled batch waiting for its Live Photo question and its import.
+    private struct Settlement {
+        /// Each promise's files (Live Photos pair only within one).
+        let deliveries: [[URL]]
+        let placement: Placement?
+
+        var hasLivePhotos: Bool {
+            deliveries.contains { !LivePhotos.pairs(in: $0).pairs.isEmpty }
+        }
+    }
+
     /// Everything still arriving or waiting for its batch, in arrival order (the bin lists them).
     @Published private(set) var items: [Item] = []
     /// Asks which part of Live Photos to import (count of pairs); nil cancels them. Tests replace it.
     var askLivePhoto: (_ count: Int, _ defaults: UserDefaults) -> LivePhotos.Choice? = { count, defaults in
         LivePhotos.ask(count: count, defaults: defaults)
     }
-    /// Batches completed (diagnostics and tests).
+    /// How long a question waits before looking again whether the gesture in progress has ended.
+    var questionRetryInterval: TimeInterval = 0.25
+    /// Batches completed, and questions put off because a gesture was in progress (diagnostics and
+    /// tests).
     private(set) var completedBatches = 0
+    private(set) var deferredQuestions = 0
 
     private unowned let store: ProjectStore
+    /// Bumped by `discardAll()`: late files of an earlier project's promises are deleted, not imported.
+    private var generation = 0
     private var batches: [UUID: Batch] = [:]
+    private var settlements: [Settlement] = []
+    private var isAsking = false
+    private var retryScheduled = false
 
     init(store: ProjectStore) {
         self.store = store
     }
 
-    var isReceiving: Bool { !items.isEmpty }
+    /// Whether anything is still arriving or waiting to be imported.
+    var isReceiving: Bool { !items.isEmpty || !settlements.isEmpty }
+
+    /// Items still arriving (not yet received, failed or cancelled).
+    var arrivingCount: Int { items.filter { $0.state == .receiving }.count }
 
     /// Starts receiving `promises` as one batch. Returns false (receiving nothing) when there is
     /// nothing to receive or no folder to receive into (the user cancelled the folder question).
@@ -564,18 +263,34 @@ final class IncomingMedia: ObservableObject {
             store.statusMessage = "Nothing was imported: no folder was chosen for the media."
             return false
         }
+        let scope = store.mediaFolder.lease
+        var placement = placement
+        // Choosing the folder may have been an unsaved change of the project: the timeline is as
+        // dropped from here on.
+        placement?.changeCount = store.engine.changeCount
         let batch = Batch(placement: placement)
-        batches[batch.id] = batch
+        let batchID = batch.id
+        batches[batchID] = batch
         for promise in promises {
             let id = UUID()
             batch.order.append(id)
             batch.promises[id] = promise
-            items.append(Item(id: id, batchID: batch.id, name: promise.displayName, fraction: nil, state: .receiving))
+            items.append(Item(id: id, batchID: batchID, name: promise.displayName, fraction: nil, state: .receiving))
+            promise.securityScope = scope
             promise.onProgress = { [weak self] fraction in self?.update(id) { $0.fraction = fraction } }
+            promise.onRename = { [weak self] name in self?.update(id) { $0.name = name } }
+            let generation = self.generation
+            promise.onLateFiles = { [weak self] urls in
+                guard let self, self.generation == generation else {
+                    ReceivedFiles.remove(urls) // the project they were for is gone
+                    return
+                }
+                self.importLate(urls)
+            }
         }
         for id in batch.order {
             batch.promises[id]?.receive(into: folder) { [weak self] result in
-                self?.finished(id, in: batch.id, result: result)
+                self?.finished(id, in: batchID, result: result)
             }
         }
         return true
@@ -597,8 +312,9 @@ final class IncomingMedia: ObservableObject {
         }
     }
 
-    /// Drops every batch without importing anything (the project is being replaced): what is
-    /// still arriving is cancelled and what arrived is deleted from the Media folder.
+    /// Drops every batch without importing anything (the project is being replaced, or the app
+    /// quits): what is still arriving is cancelled (what arrives later is deleted) and what arrived
+    /// is deleted from the Media folder, also the batches waiting for a question.
     func discardAll() {
         for batch in batches.values {
             for (id, promise) in batch.promises where items.first(where: { $0.id == id })?.state == .receiving {
@@ -606,8 +322,13 @@ final class IncomingMedia: ObservableObject {
             }
             ReceivedFiles.remove(batch.files.values.flatMap { $0 })
         }
+        for settlement in settlements {
+            ReceivedFiles.remove(settlement.deliveries.flatMap { $0 })
+        }
         batches.removeAll()
         items.removeAll()
+        settlements.removeAll()
+        generation += 1
     }
 
     private func update(_ id: UUID, _ change: (inout Item) -> Void) {
@@ -617,7 +338,10 @@ final class IncomingMedia: ObservableObject {
 
     private func finished(_ id: UUID, in batchID: UUID, result: Result<[URL], Error>) {
         guard let batch = batches[batchID], let item = items.first(where: { $0.id == id }),
-              item.state == .receiving else { return }
+              item.state == .receiving else {
+            if case let .success(urls) = result { ReceivedFiles.remove(urls) } // no longer wanted
+            return
+        }
         switch result {
         case let .success(urls):
             batch.files[id] = urls
@@ -641,19 +365,73 @@ final class IncomingMedia: ObservableObject {
         items.removeAll { $0.batchID == batch.id }
         batches[batch.id] = nil
         completedBatches += 1
-        // Live Photos pair only within what one promise delivered (one receiver's files, or a
-        // PHPicker bundle): never across the items of a batch.
-        let deliveries = batch.order.map { LivePhotos.expand(batch.files[$0] ?? []) }
-        let files = choosingLivePhotoParts(deliveries)
         if !failures.isEmpty {
             store.statusMessage = failures.joined(separator: "\n")
         }
+        // Live Photos pair only within what one promise delivered (one receiver's files, or a
+        // PHPicker bundle): never across the items of a batch.
+        let deliveries = batch.order.map { LivePhotos.expand(batch.files[$0] ?? []) }.filter { !$0.isEmpty }
+        guard !deliveries.isEmpty else { return }
+        settlements.append(Settlement(deliveries: deliveries, placement: batch.placement))
+        processSettlements()
+    }
+
+    /// Handles the settled batches in order, one question at a time: a batch that needs the Live
+    /// Photo question waits while a gesture is in progress (the question would appear mid-drag),
+    /// and batches settling while a question is up wait behind it.
+    private func processSettlements() {
+        guard !isAsking else { return }
+        while let next = settlements.first {
+            let asks = next.hasLivePhotos && LivePhotos.rememberedChoice(in: store.defaults) == nil
+            if asks && store.isGestureActive {
+                deferredQuestions += 1
+                scheduleRetry()
+                return
+            }
+            settlements.removeFirst()
+            isAsking = asks
+            let files = choosingLivePhotoParts(next.deliveries)
+            isAsking = false
+            importSettled(files, placement: next.placement)
+        }
+    }
+
+    private func scheduleRetry() {
+        guard !retryScheduled else { return }
+        retryScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + questionRetryInterval) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.retryScheduled = false
+                self.processSettlements()
+            }
+        }
+    }
+
+    /// Imports a settled batch's files; a file the import refuses (not media after all) is deleted
+    /// from the Media folder. A batch dropped on the timeline is then placed (`ProjectStore.place`),
+    /// unless the timeline changed since the drop.
+    private func importSettled(_ files: [URL], placement: Placement?) {
         guard !files.isEmpty else { return }
-        let placement = batch.placement
         let store = self.store
+        let before = store.engine.changeCount
+        let unchangedSinceDrop = placement.map { $0.changeCount == before } ?? true
         store.importMedia(files) { imported in
+            let importedFiles = files.filter { file in imported.contains { ProjectStore.samePath($0.path, file.path) } }
+            ReceivedFiles.remove(files.filter { !importedFiles.contains($0) })
             guard let placement else { return }
-            store.place(imported: imported, from: files, at: placement)
+            // The import itself is one change (ImportAssets); anything else changed the timeline.
+            let own: UInt64 = importedFiles.isEmpty ? 0 : 1
+            let changed = !unchangedSinceDrop || store.engine.changeCount != before + own
+            store.place(imported: imported, from: files, at: placement, timelineChanged: changed, emptyRangeOnly: true)
+        }
+    }
+
+    /// Files a promise delivered beyond what it promised: imported into the bin.
+    private func importLate(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        store.importMedia(urls) { imported in
+            ReceivedFiles.remove(urls.filter { url in !imported.contains { ProjectStore.samePath($0.path, url.path) } })
         }
     }
 
@@ -680,6 +458,67 @@ final class IncomingMedia: ObservableObject {
     }
 }
 
+/// What a real drop's drag pasteboard holds, partitioned once by pasteboard item: an item with a
+/// file URL is a file (the Finder), an item that carries a file promise and no file URL is a promise
+/// (Photos), in pasteboard order. Promises of anything but media (a Mail PDF) are left out and
+/// counted.
+struct DragContents {
+    var fileURLs: [URL] = []
+    var promises: [PasteboardFilePromise] = []
+    var refusedPromises = 0
+
+    /// Reads `pasteboard` (the drag pasteboard during a drop); nil when it holds no items.
+    @MainActor
+    static func read(from pasteboard: NSPasteboard) -> DragContents? {
+        guard let items = pasteboard.pasteboardItems, !items.isEmpty else { return nil }
+        let promiseTypes = Set(NSFilePromiseReceiver.readableDraggedTypes.map { NSPasteboard.PasteboardType(rawValue: $0) })
+        let descriptions = items.map { item -> ItemDescription in
+            let types = Set(item.types)
+            let url = item.string(forType: .fileURL).flatMap { URL(string: $0) }.flatMap { $0.isFileURL ? $0 : nil }
+            return ItemDescription(fileURL: url, carriesPromise: !types.isDisjoint(with: promiseTypes))
+        }
+        // One receiver per item that can be read as one, in item order.
+        let receivers = pasteboard.readObjects(forClasses: [NSFilePromiseReceiver.self], options: nil)
+            as? [NSFilePromiseReceiver] ?? []
+        return partition(descriptions, receivers: receivers)
+    }
+
+    struct ItemDescription {
+        let fileURL: URL?
+        let carriesPromise: Bool
+    }
+
+    /// The partition of `items` (the pasteboard's items, in order) with `receivers` (one per item
+    /// that carries a promise, in the same order).
+    @MainActor
+    static func partition(_ items: [ItemDescription], receivers: [FilePromiseReceiving]) -> DragContents {
+        var contents = DragContents()
+        var receiverIndex = 0
+        var promised: [FilePromiseReceiving] = []
+        for item in items {
+            var receiver: FilePromiseReceiving?
+            if item.carriesPromise, receiverIndex < receivers.count {
+                receiver = receivers[receiverIndex]
+                receiverIndex += 1
+            }
+            if let url = item.fileURL {
+                contents.fileURLs.append(url) // a file the Finder hands over, whatever else it carries
+            } else if let receiver {
+                if PasteboardFilePromise.promisesMedia(receiver) {
+                    promised.append(receiver)
+                } else {
+                    contents.refusedPromises += 1
+                }
+            }
+        }
+        let session = PromiseDropSession()
+        contents.promises = promised.enumerated().map { index, receiver in
+            PasteboardFilePromise(receiver: receiver, session: session, index: index, count: promised.count)
+        }
+        return contents
+    }
+}
+
 /// Drops of media files: Finder file URLs and file promises (Photos), on the media bin and the
 /// timeline. Works with any `TimelineDropInfo` (SwiftUI's `DropInfo`, or a test double).
 @MainActor
@@ -694,19 +533,39 @@ enum MediaDrop {
     /// Imports the drop: files right away (through `ProjectStore.importMedia`, or placed on the
     /// timeline at `placement`), promises through `ProjectStore.incoming` into the Media folder
     /// (starting on the next main-queue turn).
-    /// `pasteboardPromises` reads the drag pasteboard's `NSFilePromiseReceiver`s for a real drop;
-    /// providers that carry promise types stand in when it has none (a test double, or a source
-    /// the pasteboard does not describe). Returns whether anything is being imported.
+    /// `dragContents` reads a real drop's drag pasteboard (`DragContents.read`), partitioned once by
+    /// item; without it (a test double, or a pasteboard with no items) the item providers are
+    /// partitioned instead, each once: a provider with a file URL is a file, one with only promise
+    /// types a promise. Returns whether anything is being imported.
     @discardableResult
     static func perform(_ info: some TimelineDropInfo, store: ProjectStore, placement: IncomingMedia.Placement?,
-                        pasteboardPromises: () -> [PromisedFile] = { [] }) -> Bool {
-        let fileProviders = info.itemProviders(for: [.fileURL])
-        let promiseProviders = info.itemProviders(for: UTType.filePromiseTypes).filter { provider in
-            !fileProviders.contains { $0 === provider }
+                        dragContents: () -> DragContents? = { nil }) -> Bool {
+        var fileURLs: [URL] = []
+        var fileProviders: [NSItemProvider] = []
+        var promises: [PromisedFile] = []
+        var refused = 0
+        if let contents = dragContents(), !contents.fileURLs.isEmpty || !contents.promises.isEmpty
+            || contents.refusedPromises > 0 {
+            fileURLs = contents.fileURLs
+            promises = contents.promises
+            refused = contents.refusedPromises
+        } else {
+            for provider in info.itemProviders(for: types) {
+                if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                    fileProviders.append(provider)
+                } else if let promise = ItemProviderPromise(provider: provider) {
+                    promises.append(promise)
+                } else {
+                    refused += 1
+                }
+            }
+        }
+        if refused > 0 {
+            store.statusMessage = "Some dropped items are not media Framewright can import."
         }
         var started = false
-        if !fileProviders.isEmpty {
-            loadFileURLs(fileProviders) { urls in
+        if !fileURLs.isEmpty || !fileProviders.isEmpty {
+            let place: @MainActor ([URL]) -> Void = { urls in
                 guard !urls.isEmpty else { return }
                 if let placement {
                     store.importAndPlace(urls, at: placement)
@@ -714,28 +573,23 @@ enum MediaDrop {
                     store.importMedia(urls)
                 }
             }
+            if fileProviders.isEmpty {
+                place(fileURLs)
+            } else {
+                loadFileURLs(fileProviders) { urls in place(fileURLs + urls) }
+            }
             started = true
         }
-        if !promiseProviders.isEmpty {
-            // The pasteboard's promises are read now, while the drop is performed; receiving them
-            // (which may ask for the Media folder in a modal panel) starts on the next main-queue
-            // turn, so the drag session completes first.
-            var promises = pasteboardPromises()
-            if promises.isEmpty {
-                promises = promiseProviders.compactMap { ItemProviderPromise(provider: $0) }
-                if promises.count < promiseProviders.count {
-                    store.statusMessage = "Some dropped items are not media Framewright can import."
+        if !promises.isEmpty {
+            // Receiving (which may ask for the Media folder in a modal panel) starts on the next
+            // main-queue turn, so the drag session completes first.
+            let incoming = store.incoming
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    _ = incoming.receive(promises, placement: placement)
                 }
             }
-            if !promises.isEmpty {
-                let incoming = store.incoming
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        _ = incoming.receive(promises, placement: placement)
-                    }
-                }
-                started = true
-            }
+            started = true
         }
         return started
     }

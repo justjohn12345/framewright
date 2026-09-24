@@ -46,6 +46,7 @@ struct AppCommands: Commands {
     @ObservedObject var documents: DocumentController
     @ObservedObject var layout: WindowLayoutModel
     @ObservedObject var output: OutputDisplayController
+    @ObservedObject var photosPicker: PhotosImportPicker
     @AppStorage(PlaybackHUD.defaultsKey) private var showPlaybackHUD = false
     @Environment(\.openWindow) private var openWindow
 
@@ -54,6 +55,7 @@ struct AppCommands: Commands {
         self.documents = documents
         layout = store.layout
         output = store.outputDisplay
+        photosPicker = store.photosPicker
     }
 
     var body: some Commands {
@@ -76,8 +78,9 @@ struct AppCommands: Commands {
             Divider()
             Button("Import Media…") { presentImportPanel(store: store) }
                 .keyboardShortcut("i")
-            Button("Import from Photos…") { store.photosPicker.present() }
+            Button("Import from Photos…") { photosPicker.present() }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
+                .disabled(photosPicker.isPresenting)
         }
         CommandGroup(replacing: .saveItem) {
             Button("Save") { documents.save() }

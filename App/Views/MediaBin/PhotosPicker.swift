@@ -7,10 +7,16 @@ import FramewrightEngine
 /// Several items can be picked; each arrives through the same path as a Photos drop (the project's
 /// Media folder, the bin's progress list, Live Photo choice, then the normal import).
 @MainActor
-final class PhotosImportPicker: NSObject, PHPickerViewControllerDelegate {
+final class PhotosImportPicker: NSObject, ObservableObject, PHPickerViewControllerDelegate {
     private unowned let store: ProjectStore
-    /// The picker on screen, if any.
-    private(set) var picker: PHPickerViewController?
+    /// The picker shown, if any.
+    @Published private(set) var picker: PHPickerViewController?
+    /// Shows the picker as a sheet of `host` (tests replace it).
+    var presentSheet: (_ picker: PHPickerViewController, _ host: NSViewController) -> Void = { picker, host in
+        host.presentAsSheet(picker)
+    }
+    /// Pickers presented (diagnostics and tests).
+    private(set) var presentations = 0
 
     init(store: ProjectStore) {
         self.store = store
@@ -26,8 +32,17 @@ final class PhotosImportPicker: NSObject, PHPickerViewControllerDelegate {
         return configuration
     }
 
+    /// Whether the picker is on screen (File > Import from Photos… is disabled meanwhile). A picker
+    /// whose sheet went away without telling its delegate is not.
+    var isPresenting: Bool {
+        picker?.presentingViewController != nil
+    }
+
     /// Shows the picker as a sheet on the editor window.
     func present() {
+        if picker != nil, !isPresenting {
+            picker = nil // its sheet went away without the delegate hearing of it
+        }
         guard picker == nil else { return }
         guard !store.isGestureActive else {
             store.statusMessage = "Finish the current drag first."
@@ -40,14 +55,25 @@ final class PhotosImportPicker: NSObject, PHPickerViewControllerDelegate {
         let controller = PHPickerViewController(configuration: Self.configuration())
         controller.delegate = self
         picker = controller
-        host.presentAsSheet(controller)
+        presentations += 1
+        presentSheet(controller, host)
     }
 
     nonisolated func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
         MainActor.assumeIsolated {
             picker.dismiss(nil)
-            self.picker = nil
-            receivePicked(results.map(\.itemProvider))
+            if self.picker === picker { self.picker = nil }
+            finishPicking(results.map(\.itemProvider))
+        }
+    }
+
+    /// What was picked, received once the sheet has gone: receiving may ask for the Media folder in
+    /// a modal panel, which must not run while the sheet is still dismissing.
+    func finishPicking(_ providers: [NSItemProvider]) {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                self?.receivePicked(providers)
+            }
         }
     }
 

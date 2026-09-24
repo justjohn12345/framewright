@@ -268,7 +268,8 @@ final class TimelineGestureController: ObservableObject {
         guard let row = model.layout(atY: location.y), location.x >= 0 else { return nil }
         var seconds = model.time(forX: location.x)
         if let snap = model.snap(seconds) { seconds = snap.time }
-        return IncomingMedia.Placement(trackID: row.track.id, seconds: max(0, seconds), insert: insert)
+        return IncomingMedia.Placement(trackID: row.track.id, seconds: max(0, seconds), insert: insert,
+                                       changeCount: store.engine.changeCount)
     }
 
     /// Media dropped from the bin: lands at the drop position and row (overwrite; `insert`

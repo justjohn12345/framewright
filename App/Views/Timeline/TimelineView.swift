@@ -462,7 +462,7 @@ struct TimelineDropDelegate: DropDelegate {
     func dropUpdated(info: DropInfo) -> DropProposal? { handleUpdated(info) }
     func dropExited(info: DropInfo) { handleExited(info) }
     func performDrop(info: DropInfo) -> Bool {
-        handlePerform(info, pasteboardPromises: { PasteboardFilePromise.fromDragPasteboard() })
+        handlePerform(info, dragContents: { DragContents.read(from: NSPasteboard(name: .drag)) })
     }
 
     func handleValidate(_ info: some TimelineDropInfo) -> Bool {
@@ -484,9 +484,9 @@ struct TimelineDropDelegate: DropDelegate {
         gestures.transitionDragExited()
     }
 
-    /// `pasteboardPromises`: the drag pasteboard's file promises (a real drop); see `MediaDrop`.
+    /// `dragContents`: the drag pasteboard's files and promises (a real drop); see `MediaDrop`.
     func handlePerform(_ info: some TimelineDropInfo,
-                       pasteboardPromises: () -> [PromisedFile] = { [] }) -> Bool {
+                       dragContents: () -> DragContents? = { nil }) -> Bool {
         isAssetTargeted = false
         if let kind = Self.transitionKind(info) {
             return gestures.dropTransition(kind: kind, at: info.location)
@@ -498,7 +498,7 @@ struct TimelineDropDelegate: DropDelegate {
                 gestures.store.statusMessage = "Drop media on a track to place it; it is imported into the media bin."
             }
             return MediaDrop.perform(info, store: gestures.store, placement: placement,
-                                     pasteboardPromises: pasteboardPromises)
+                                     dragContents: dragContents)
         }
         let location = info.location
         let insert = commandHeld()

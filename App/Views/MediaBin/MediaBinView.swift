@@ -116,7 +116,7 @@ struct MediaBinDropDelegate: DropDelegate {
     func dropEntered(info: DropInfo) { handleEntered(info) }
     func dropExited(info: DropInfo) { handleExited(info) }
     func performDrop(info: DropInfo) -> Bool {
-        handlePerform(info, pasteboardPromises: { PasteboardFilePromise.fromDragPasteboard() })
+        handlePerform(info, dragContents: { DragContents.read(from: NSPasteboard(name: .drag)) })
     }
 
     func handleValidate(_ info: some TimelineDropInfo) -> Bool {
@@ -131,9 +131,9 @@ struct MediaBinDropDelegate: DropDelegate {
         isTargeted = false
     }
 
-    func handlePerform(_ info: some TimelineDropInfo, pasteboardPromises: () -> [PromisedFile] = { [] }) -> Bool {
+    func handlePerform(_ info: some TimelineDropInfo, dragContents: () -> DragContents? = { nil }) -> Bool {
         isTargeted = false
-        return MediaDrop.perform(info, store: store, placement: nil, pasteboardPromises: pasteboardPromises)
+        return MediaDrop.perform(info, store: store, placement: nil, dragContents: dragContents)
     }
 }
 

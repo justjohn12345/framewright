@@ -17,118 +17,6 @@ import XCTest
 /// PHPicker panel itself are by hand (see open-findings).
 @MainActor
 final class PhotosDropTests: XCTestCase {
-    /// A drop's providers (SwiftUI's DropInfo cannot be made outside a drag).
-    private struct FakeDropInfo: TimelineDropInfo {
-        var location: CGPoint
-        var providers: [NSItemProvider]
-
-        func hasItemsConforming(to contentTypes: [UTType]) -> Bool {
-            providers.contains { provider in
-                contentTypes.contains { provider.hasItemConformingToTypeIdentifier($0.identifier) }
-            }
-        }
-
-        func itemProviders(for contentTypes: [UTType]) -> [NSItemProvider] {
-            providers.filter { provider in
-                contentTypes.contains { provider.hasItemConformingToTypeIdentifier($0.identifier) }
-            }
-        }
-    }
-
-    /// A Photos drag item: the file promise types plus a file representation of `type` whose load
-    /// waits until `deliver()` (or is cancelled). Its state is only touched on the main queue.
-    private final class FakePromiseProvider: @unchecked Sendable {
-        let provider = NSItemProvider()
-        private(set) var loadRequested = false
-        private(set) var cancelled = false
-        private var pending: (() -> Void)?
-
-        init(name: String, file: URL, type: UTType) {
-            provider.suggestedName = name
-            for promise in UTType.filePromiseTypes {
-                provider.registerDataRepresentation(forTypeIdentifier: promise.identifier, visibility: .all) { done in
-                    done(Data(), nil)
-                    return nil
-                }
-            }
-            provider.registerFileRepresentation(forTypeIdentifier: type.identifier, fileOptions: [],
-                                                visibility: .all) { [weak self] completion in
-                let progress = Progress(totalUnitCount: 100)
-                let delivery = {
-                    // Like a promise keeper: a fresh temporary file the receiver takes over.
-                    let temporary = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("promise-\(UUID().uuidString).\(file.pathExtension)")
-                    do {
-                        try FileManager.default.copyItem(at: file, to: temporary)
-                        progress.completedUnitCount = 100
-                        completion(temporary, false, nil)
-                    } catch {
-                        completion(nil, false, error)
-                    }
-                }
-                progress.cancellationHandler = {
-                    DispatchQueue.main.async { self?.cancelled = true }
-                    completion(nil, false, CocoaError(.userCancelled))
-                }
-                DispatchQueue.main.async {
-                    self?.loadRequested = true
-                    self?.pending = delivery
-                }
-                return progress
-            }
-        }
-
-        /// Delivers the file (the promise is fulfilled).
-        func deliver() {
-            pending?()
-            pending = nil
-        }
-    }
-
-    /// A promise implemented directly (no provider): progress, success or failure on demand.
-    private final class ScriptedPromise: PromisedFile {
-        let displayName: String
-        var onProgress: ((Double) -> Void)?
-        private var completion: (@MainActor (Result<[URL], Error>) -> Void)?
-        private(set) var cancelled = false
-        private(set) var directory: URL?
-
-        init(name: String) {
-            displayName = name
-        }
-
-        func receive(into directory: URL, completion: @escaping @MainActor (Result<[URL], Error>) -> Void) {
-            self.directory = directory
-            self.completion = completion
-        }
-
-        func cancel() {
-            cancelled = true
-            completion = nil
-        }
-
-        func progress(_ fraction: Double) {
-            onProgress?(fraction)
-        }
-
-        /// Writes copies of `files` into the destination and reports them.
-        func deliver(_ files: [URL]) throws {
-            guard let directory, let completion else { return }
-            let urls = try files.map { file -> URL in
-                let target = directory.appendingPathComponent(file.lastPathComponent)
-                try FileManager.default.copyItem(at: file, to: target)
-                return target
-            }
-            self.completion = nil
-            completion(.success(urls))
-        }
-
-        func fail(_ message: String) {
-            completion?(.failure(NSError(domain: "Test", code: 1, userInfo: [NSLocalizedDescriptionKey: message])))
-            completion = nil
-        }
-    }
-
     private var fixture: StoreFixture!
     private var store: ProjectStore { fixture.store }
     /// Folder the untitled project's question answers with, and how often it was asked.
@@ -219,7 +107,9 @@ final class PhotosDropTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: expected.path))
         XCTAssertTrue(store.incoming.items.isEmpty)
         XCTAssertEqual(folderQuestions, 0, "a saved project's Media folder is made without asking")
-        XCTAssertNotNil(store.engine.mediaFolderBookmark, "kept with the project")
+        XCTAssertTrue(ImportedMediaFolder.hasMarker(expected.deletingLastPathComponent()), "the app's own folder")
+        XCTAssertNil(store.engine.mediaFolderBookmark,
+                     "derived from where the project is, never stored (Save As and copies use their own)")
     }
 
     func testACancelledItemIsNotImportedAndTheRestOfItsBatchIs() async throws {
@@ -289,8 +179,9 @@ final class PhotosDropTests: XCTestCase {
         let v1 = try XCTUnwrap(store.videoTracks.first).trackID
         XCTAssertEqual(clip.trackID, v1)
         XCTAssertEqual(clip.timelineStart.secondsOrZero, 2, accuracy: 1e-9)
-        let expected = chosenFolder.appendingPathComponent("IMG_0003.mov")
-        XCTAssertNotNil(asset(at: expected), "received into the chosen folder")
+        let expected = chosenFolder.appendingPathComponent("Media/IMG_0003.mov")
+        XCTAssertNotNil(asset(at: expected), "received into a Media folder inside the chosen folder")
+        XCTAssertTrue(ImportedMediaFolder.hasMarker(expected.deletingLastPathComponent()))
 
         // Asked once per project: a second drop uses the same folder.
         let second = FakePromiseProvider(name: "IMG_0004", file: fixture.movieURL, type: .quickTimeMovie)
@@ -308,7 +199,8 @@ final class PhotosDropTests: XCTestCase {
         let third = ScriptedPromise(name: "Third")
         XCTAssertTrue(store.incoming.receive([third]))
         XCTAssertEqual(folderQuestions, 1)
-        XCTAssertEqual(third.directory?.resolvingSymlinksInPath().path, chosenFolder.resolvingSymlinksInPath().path)
+        XCTAssertEqual(third.directory?.resolvingSymlinksInPath().path,
+                       chosenFolder.appendingPathComponent("Media").resolvingSymlinksInPath().path)
         store.incoming.cancelAll()
     }
 

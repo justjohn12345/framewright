@@ -44,13 +44,15 @@ final class DocumentController: ObservableObject {
     // MARK: Actions
 
     func newProject() {
-        guard confirmStoppingExport(because: "Starting a new project"), confirmDiscardingChanges() else { return }
+        guard confirmStoppingExport(because: "Starting a new project"),
+              confirmDiscardingChanges(because: "Starting a new project") else { return }
         store.newProject()
         stopAccessingProject()
     }
 
     func openWithPanel() {
-        guard confirmStoppingExport(because: "Opening another project"), confirmDiscardingChanges() else { return }
+        guard confirmStoppingExport(because: "Opening another project"),
+              confirmDiscardingChanges(because: "Opening another project") else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.framewrightProject]
         panel.allowsMultipleSelection = false
@@ -60,7 +62,8 @@ final class DocumentController: ObservableObject {
     }
 
     func openRecent(_ url: URL) {
-        guard confirmStoppingExport(because: "Opening another project"), confirmDiscardingChanges() else { return }
+        guard confirmStoppingExport(because: "Opening another project"),
+              confirmDiscardingChanges(because: "Opening another project") else { return }
         open(url)
     }
 
@@ -113,9 +116,11 @@ final class DocumentController: ObservableObject {
         }
     }
 
-    /// Asks to save unsaved changes. Returns true when it is fine to continue (saved or
-    /// discarded), false when the user cancelled.
-    func confirmDiscardingChanges() -> Bool {
+    /// Asks to stop media still arriving from Photos (`confirmStoppingIncomingMedia`), then to save
+    /// unsaved changes. Returns true when it is fine to continue (saved or discarded), false when
+    /// the user cancelled.
+    func confirmDiscardingChanges(because action: String = "Closing the project") -> Bool {
+        guard confirmStoppingIncomingMedia(because: action) else { return false }
         guard store.isDirty else { return true }
         let alert = NSAlert()
         alert.messageText = "Do you want to save the changes made to “\(store.projectName)”?"
@@ -136,7 +141,8 @@ final class DocumentController: ObservableObject {
     /// The window is closing: asks about unsaved changes; the answer also covers the app
     /// quitting right after (the last window closed).
     func confirmClosingWindow() -> Bool {
-        guard confirmStoppingExport(because: "Closing the window"), confirmDiscardingChanges() else { return false }
+        guard confirmStoppingExport(because: "Closing the window"),
+              confirmDiscardingChanges(because: "Closing the window") else { return false }
         closeConfirmedAtChange = store.changeCount
         return true
     }
@@ -144,11 +150,35 @@ final class DocumentController: ObservableObject {
     /// The app is quitting: asks about unsaved changes unless the user just answered for this
     /// exact state when closing the window.
     func shouldTerminate() -> Bool {
-        guard confirmStoppingExport(because: "Quitting") else { return false }
+        guard confirmStoppingExport(because: "Quitting"), confirmStoppingIncomingMedia(because: "Quitting") else {
+            return false
+        }
         if let confirmed = closeConfirmedAtChange, confirmed == store.changeCount {
             return true
         }
-        return confirmDiscardingChanges()
+        return confirmDiscardingChanges(because: "Quitting")
+    }
+
+    /// Media from Photos is still arriving (or waiting to be imported with its batch): asks whether
+    /// to stop. Stop discards it (what is still arriving is cancelled, and what arrived is deleted
+    /// from the Media folder: it was never imported); Keep Waiting cancels the action. Returns true
+    /// when nothing is arriving or the user chose Stop.
+    func confirmStoppingIncomingMedia(because action: String) -> Bool {
+        let incoming = store.incoming
+        guard incoming.isReceiving else { return true }
+        let arriving = incoming.arrivingCount
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Media from Photos is still arriving."
+        let what = arriving == 1 ? "the item still arriving" : arriving > 1 ? "the \(arriving) items still arriving"
+            : "the media waiting to be imported"
+        alert.informativeText = "\(action) stops receiving \(what). What has arrived but is not imported yet is "
+            + "removed from the Media folder."
+        alert.addButton(withTitle: "Stop")
+        alert.addButton(withTitle: "Keep Waiting")
+        guard runAlert(alert) == .alertFirstButtonReturn else { return false }
+        incoming.discardAll()
+        return true
     }
 
     /// Longest wait for a stopped export to end. A cancel ends an export within about 100 ms, also
