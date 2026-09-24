@@ -41,7 +41,9 @@ import FramewrightEngine
 ///
 /// Video clips with Motion keyframes show a diamond along their bottom edge for every frame that
 /// shows a keyframe (where the keyframe plays with the clip's speed); clicking one moves the
-/// playhead to that frame (and selects the clip), dragging from it moves the clip.
+/// playhead to that frame (and selects the clip), dragging it sideways moves its keyframes (every
+/// parameter keyed on that frame, together) to another frame between their neighbours, one undo
+/// step (Escape cancels). The clip is moved by dragging its body above the markers.
 ///
 /// While the Ken Burns helper is open, the clip it edits shows the move's range as an accent band
 /// with a green start edge and a red end edge (the rectangles' colours), following the range as it
@@ -392,7 +394,9 @@ struct KenBurnsBandView: View {
     /// The band's rectangle in the track area: the clip's row, from x of the range's start to x of
     /// its end (`TimelineViewModel.x(forTime:)`). Nil when the clip is not in the model.
     static func rect(for range: KenBurnsBandRange, in model: TimelineViewModel) -> CGRect? {
-        guard let clip = model.clip(id: range.clipID), let row = model.layout(forTrack: clip.trackID) else { return nil }
+        guard let clip = model.clip(id: range.clipID), let row = model.layout(forTrack: clip.trackID) else {
+            return nil
+        }
         let x0 = model.x(forTime: range.start)
         let x1 = model.x(forTime: range.end)
         return CGRect(x: x0, y: row.y - model.scrollY, width: max(1, x1 - x0), height: row.height)

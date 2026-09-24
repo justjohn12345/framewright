@@ -168,7 +168,8 @@ final class TimelineRedrawTests: XCTestCase {
         let rebuilt = store.timelineBuildCount - builds
         let redrawn = TimelineDiagnostics.canvasDraws - canvasDraws
         let banded = TimelineDiagnostics.kenBurnsBandUpdates - bandUpdates
-        print("21 Ken Burns range changes: timeline model builds \(rebuilt), canvas draws \(redrawn), band updates \(banded)")
+        print("21 Ken Burns range changes: timeline model builds \(rebuilt), canvas draws \(redrawn), "
+            + "band updates \(banded)")
         XCTAssertEqual(ranges.count, 19, "the range followed the playhead")
         XCTAssertEqual(rebuilt, 0, "the timeline model is not rebuilt for a range change")
         XCTAssertLessThanOrEqual(redrawn, 2, "the clips are not redrawn for a range change")

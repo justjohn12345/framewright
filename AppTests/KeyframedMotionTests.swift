@@ -571,7 +571,8 @@ final class KeyframedMotionTests: XCTestCase {
         store.playheadTime = frames(250)
         store.beginKenBurns(clip: id)
         let model = try XCTUnwrap(store.kenBurns)
-        XCTAssertEqual(model.detection, .move(KenBurnsModel.ExistingMove(first: 60, last: 209, hasKeyframesBetween: false,
+        XCTAssertEqual(model.detection, .move(KenBurnsModel.ExistingMove(first: 60, last: 209,
+                                                                         hasKeyframesBetween: false,
                                                                          interpolation: .easeIn)))
         XCTAssertEqual(model.range, .existingMove)
         XCTAssertEqual(model.rangeChoices, [.wholeClip, .fromPlayhead, .fromClipStart, .existingMove, .custom])
@@ -611,8 +612,8 @@ final class KeyframedMotionTests: XCTestCase {
     func testSeveralMovesAreEditedAsOneSpanAndTheCaptionSaysSo() async throws {
         let id = try await longClip()
         XCTAssertTrue(store.engine.applyKenBurns(clip: id, start: VEMotionFraming(x: 0, y: 0, scale: 1),
-                                                 end: VEMotionFraming(x: -960, y: -540, scale: 2), interpolation: .linear,
-                                                 from: .zero, duration: frames(150)).ok)
+                                                 end: VEMotionFraming(x: -960, y: -540, scale: 2),
+                                                 interpolation: .linear, from: .zero, duration: frames(150)).ok)
         XCTAssertTrue(store.engine.applyKenBurns(clip: id, start: VEMotionFraming(x: -960, y: -540, scale: 2),
                                                  end: VEMotionFraming(x: 0, y: 0, scale: 1.5),
                                                  interpolation: .easeOut, from: frames(200), duration: frames(100)).ok)
@@ -694,7 +695,8 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(model.interpolation, .easeInOut, "Hold is not offered: the default")
         // The end keyframes move two frames earlier (all three parameters): the range follows.
         for parameter: VEMotionParameter in [.positionX, .positionY, .scale] {
-            XCTAssertTrue(store.engine.moveKeyframe(clip: id, parameter: parameter, from: frames(209), to: frames(207)).ok)
+            XCTAssertTrue(store.engine.moveKeyframe(clip: id, parameter: parameter, from: frames(209),
+                                                    to: frames(207)).ok)
         }
         XCTAssertTrue(store.kenBurns === model)
         XCTAssertEqual(model.rangeTimecodes, "00:00:02:00 – 00:00:06:27")
@@ -760,9 +762,9 @@ final class KeyframedMotionTests: XCTestCase {
 
         // The frames display: a bare number is frames, shown as "150f".
         var reason = ""
-        let framesModel = try XCTUnwrap(KenBurnsModel(clip: try clip(id), asset: try XCTUnwrap(store.asset(try clip(id).assetID)),
-                                                      sequence: store.sequence, playhead: .zero,
-                                                      durationDisplay: .frames, reason: &reason))
+        let asset = try XCTUnwrap(store.asset(try clip(id).assetID))
+        let framesModel = try XCTUnwrap(KenBurnsModel(clip: try clip(id), asset: asset, sequence: store.sequence,
+                                                      playhead: .zero, durationDisplay: .frames, reason: &reason))
         XCTAssertEqual(framesModel.startText, "60f")
         framesModel.endText = "300"
         XCTAssertTrue(framesModel.commitEnd())
@@ -920,7 +922,8 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertTrue(store.applyKenBurns())
         XCTAssertNil(band.range)
         store.beginKenBurns(clip: id)
-        XCTAssertEqual(band.range, KenBurnsBandRange(clipID: id, start: 2, end: 12), "the existing move: the whole clip")
+        XCTAssertEqual(band.range, KenBurnsBandRange(clipID: id, start: 2, end: 12),
+                       "the existing move: the whole clip")
         store.selection = []
         XCTAssertNil(band.range)
     }
@@ -1229,12 +1232,157 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(store.selection, [id], "the click selects the clip too")
         XCTAssertEqual(gestures.drag, .idle)
 
-        // A drag that starts on a marker moves the clip, like its body.
+        // A drag that starts on a marker moves its keyframes (not the clip): 10 pt at 50 pt/s is 6
+        // frames, so the keyframes shown by timeline frame 10 go to frame 16, source frame 32 at 2x.
         gestures.changed(location: center, startLocation: center, modifiers: [])
-        gestures.changed(location: CGPoint(x: center.x + 50, y: center.y), startLocation: center, modifiers: [])
+        gestures.changed(location: CGPoint(x: center.x + 10, y: center.y), startLocation: center, modifiers: [])
         gestures.ended()
-        XCTAssertEqual(try clip(id).timelineStart.secondsOrZero, 1, accuracy: 1e-9)
-        XCTAssertEqual(store.undoActionName, "Move Clip")
+        XCTAssertEqual(try clip(id).timelineStart, .zero, "the clip stays")
+        XCTAssertEqual(store.undoActionName, "Move Keyframes")
+        XCTAssertEqual(try clip(id).keyframes(for: .scale).map(\.sourceTime), [frames(0), frames(32)])
+        XCTAssertEqual(try clip(id).keyframes(for: .opacity).map(\.sourceTime), [frames(32)])
+        XCTAssertEqual(try XCTUnwrap(store.timelineModel.clip(id: id)).keyframes.last ?? 0, 16.0 / 30.0, accuracy: 1e-9)
+    }
+
+    /// V1: the movie at 0 s (60 frames) with scale keyed on frames 0 and 20, opacity on 20 (one
+    /// marker for both) and rotation on 40; the gesture controller and the marker on frame 20.
+    private func markedClip() async throws -> (id: VEClipID, gestures: TimelineGestureController, marker: CGPoint) {
+        let id = try await placedClip()
+        for frame: Int64 in [0, 20] {
+            store.playheadTime = frames(frame)
+            inspector.toggleKeyframe(.scale)
+        }
+        store.playheadTime = frames(20)
+        inspector.toggleKeyframe(.opacity)
+        store.playheadTime = frames(40)
+        inspector.toggleKeyframe(.rotation)
+        let model = store.timelineModel
+        let timelineClip = try XCTUnwrap(model.clip(id: id))
+        XCTAssertEqual(timelineClip.keyframes.count, 3)
+        let marker = try XCTUnwrap(model.keyframeMarkerCenter(forClip: timelineClip, time: 20.0 / 30.0))
+        XCTAssertEqual(model.hitTest(marker), .keyframe(id, 20.0 / 30.0))
+        return (id, TimelineGestureController(store: store), marker)
+    }
+
+    /// Frame starts of `parameter`'s keyframes.
+    private func keyedFrames(_ id: VEClipID, _ parameter: VEMotionParameter) throws -> [CMTime] {
+        try clip(id).keyframes(for: parameter).map(\.frameTime)
+    }
+
+    func testDraggingAMarkerMovesItsKeyframesTogetherAsOneUndoStep() async throws {
+        let (id, gestures, marker) = try await markedClip()
+        let frame = 50.0 / 30.0 // points per frame at 50 pt/s
+        gestures.changed(location: marker, startLocation: marker, modifiers: [])
+        gestures.changed(location: CGPoint(x: marker.x + 4 * frame, y: marker.y + 30), startLocation: marker,
+                         modifiers: [])
+        XCTAssertTrue(store.isGestureActive, "other commands wait for the drag")
+        XCTAssertEqual(store.statusMessage, "Keyframes at 00:00:00:24")
+        XCTAssertEqual(try keyedFrames(id, .scale), [frames(0), frames(24)], "horizontal only")
+        gestures.changed(location: CGPoint(x: marker.x + 10 * frame, y: marker.y), startLocation: marker, modifiers: [])
+        XCTAssertEqual(store.statusMessage, "Keyframes at 00:00:01:00")
+        gestures.ended()
+        XCTAssertFalse(store.isGestureActive)
+        XCTAssertEqual(try keyedFrames(id, .scale), [frames(0), frames(30)])
+        XCTAssertEqual(try keyedFrames(id, .opacity), [frames(30)])
+        XCTAssertEqual(try keyedFrames(id, .rotation), [frames(40)], "another marker's keyframe stays")
+        XCTAssertEqual(try clip(id).keyframes(for: .scale).last?.value ?? 0, 1, accuracy: 1e-12, "values kept")
+        XCTAssertEqual(store.undoActionName, "Move Keyframes")
+        XCTAssertEqual(try clip(id).timelineStart, .zero)
+        store.undo()
+        XCTAssertEqual(try keyedFrames(id, .scale), [frames(0), frames(20)], "one undo step")
+        XCTAssertEqual(try keyedFrames(id, .opacity), [frames(20)])
+
+        // A single parameter's marker ("Move Keyframe"); the cursor over a marker is the sideways one.
+        let model = store.timelineModel
+        let rotation = try XCTUnwrap(model.keyframeMarkerCenter(forClip: try XCTUnwrap(model.clip(id: id)),
+                                                                time: 40.0 / 30.0))
+        var cursors: [TimelineGestureController.PointerCursor] = []
+        gestures.applyCursor = { cursors.append($0) }
+        gestures.hover(at: rotation)
+        XCTAssertEqual(cursors, [.resizeLeftRight])
+        gestures.hover(at: nil)
+        gestures.changed(location: rotation, startLocation: rotation, modifiers: [])
+        gestures.changed(location: CGPoint(x: rotation.x - 5 * frame, y: rotation.y), startLocation: rotation,
+                         modifiers: [])
+        gestures.ended()
+        XCTAssertEqual(store.undoActionName, "Move Keyframe")
+        XCTAssertEqual(store.statusMessage, "Keyframe at 00:00:01:05")
+        XCTAssertEqual(try keyedFrames(id, .rotation), [frames(35)])
+    }
+
+    func testAMarkerDragStopsAtItsNeighboursAndTheClipsEndsAndEscapeRevertsIt() async throws {
+        let (id, gestures, marker) = try await markedClip()
+        // Left: scale's keyframe on frame 0 stops the group a frame after it.
+        gestures.changed(location: marker, startLocation: marker, modifiers: [])
+        gestures.changed(location: CGPoint(x: marker.x - 300, y: marker.y), startLocation: marker, modifiers: [])
+        XCTAssertEqual(try keyedFrames(id, .scale), [frames(0), frames(1)])
+        XCTAssertEqual(store.statusMessage, "Keyframes at 00:00:00:01 (as far as they go: keyframes stay in order, "
+            + "a frame apart, on the clip's frames)")
+        // Right: nothing follows on scale or opacity, so the clip's last frame (rotation's keyframe on
+        // frame 40 belongs to another parameter).
+        gestures.changed(location: CGPoint(x: marker.x + 300, y: marker.y), startLocation: marker, modifiers: [])
+        XCTAssertEqual(try keyedFrames(id, .scale), [frames(0), frames(59)])
+        XCTAssertEqual(try keyedFrames(id, .opacity), [frames(59)])
+        // Escape puts them back; the rest of the gesture is ignored.
+        gestures.cancel()
+        XCTAssertEqual(gestures.drag, .cancelled)
+        XCTAssertFalse(store.isGestureActive)
+        XCTAssertEqual(try keyedFrames(id, .scale), [frames(0), frames(20)])
+        XCTAssertEqual(try keyedFrames(id, .opacity), [frames(20)])
+        gestures.changed(location: CGPoint(x: marker.x + 40, y: marker.y), startLocation: marker, modifiers: [])
+        gestures.ended()
+        XCTAssertEqual(try keyedFrames(id, .scale), [frames(0), frames(20)])
+        XCTAssertEqual(gestures.drag, .idle)
+
+        // The marker on frame 0: the clip's first frame stops it on the left.
+        let model = store.timelineModel
+        let first = try XCTUnwrap(model.keyframeMarkerCenter(forClip: try XCTUnwrap(model.clip(id: id)), time: 0))
+        let changes = store.changeCount
+        gestures.changed(location: first, startLocation: first, modifiers: [])
+        gestures.changed(location: CGPoint(x: first.x - 40, y: first.y), startLocation: first, modifiers: [])
+        gestures.ended()
+        XCTAssertEqual(try keyedFrames(id, .scale), [frames(0), frames(20)], "already on the first frame")
+        XCTAssertEqual(store.changeCount, changes, "no edit, no undo step")
+        XCTAssertEqual(store.undoActionName, "Add Keyframe")
+
+        // A click without movement still moves the playhead and selects the clip.
+        store.playheadTime = frames(50)
+        store.selection = []
+        gestures.changed(location: marker, startLocation: marker, modifiers: [])
+        gestures.ended()
+        XCTAssertEqual(store.playheadTime, frames(20))
+        XCTAssertEqual(store.selection, [id])
+
+        // A locked track: the drag is refused with the reason, the keyframes stay.
+        let track = try clip(id).trackID
+        XCTAssertTrue(store.engine.setTrack(track, locked: true).ok)
+        gestures.changed(location: marker, startLocation: marker, modifiers: [])
+        gestures.changed(location: CGPoint(x: marker.x + 20, y: marker.y), startLocation: marker, modifiers: [])
+        gestures.ended()
+        XCTAssertEqual(store.statusMessage?.hasSuffix("is locked."), true)
+        XCTAssertEqual(try keyedFrames(id, .scale), [frames(0), frames(20)])
+    }
+
+    func testTheKenBurnsRangeFollowsItsKeyframesDraggedInTheTimeline() async throws {
+        let id = try await longClip()
+        try applyPartialMove(id) // frames 60...209
+        store.beginKenBurns(clip: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.range, .existingMove)
+        let end = model.end
+        let timeline = store.timelineModel
+        let marker = try XCTUnwrap(timeline.keyframeMarkerCenter(forClip: try XCTUnwrap(timeline.clip(id: id)),
+                                                                 time: 209.0 / 30.0))
+        let gestures = TimelineGestureController(store: store)
+        gestures.changed(location: marker, startLocation: marker, modifiers: [])
+        gestures.changed(location: CGPoint(x: marker.x + 50, y: marker.y), startLocation: marker, modifiers: [])
+        XCTAssertEqual(model.rangeTimecodes, "00:00:02:00 – 00:00:07:29", "follows while dragging")
+        XCTAssertEqual(store.kenBurnsBand.range?.end ?? 0, 8, accuracy: 1e-9, "and so does the band")
+        gestures.ended()
+        XCTAssertTrue(store.kenBurns === model, "the helper stays open")
+        XCTAssertEqual(model.rangeTimecodes, "00:00:02:00 – 00:00:07:29")
+        XCTAssertEqual(model.end.minX, end.minX, accuracy: 1e-6, "the end framing moved with its keyframes")
+        XCTAssertEqual(model.end.width, end.width, accuracy: 1e-6)
     }
 
     func testClipsWithoutKeyframesHaveNoMarkers() async throws {

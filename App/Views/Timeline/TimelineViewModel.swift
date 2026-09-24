@@ -86,7 +86,8 @@ struct TimelineViewModel: Equatable {
         case fadeOut(Int64)
         /// The horizontal gain line of an audio clip.
         case gainLine(Int64)
-        /// A keyframe marker of a video clip: the start (seconds) of the frame that shows it.
+        /// A keyframe marker of a video clip: the start (seconds) of the frame that shows it (a
+        /// click seeks there, a drag moves its keyframes).
         case keyframe(Int64, Double)
         /// Empty space on a track.
         case track(Int64)

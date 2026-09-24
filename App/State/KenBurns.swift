@@ -527,7 +527,8 @@ final class KenBurnsModel: ObservableObject {
         guard typed != (which == .start ? startString : endString) else { return true }
         guard let frame = DurationFormat.parseFrames(typed, frameDuration: frameDuration, display: durationDisplay)
         else {
-            rangeNote = "“\(typed)” is not a time (use timecode like 00:00:05:00, frames like 150f or seconds like 5s)."
+            rangeNote = "“\(typed)” is not a time (use timecode like 00:00:05:00, frames like 150f or seconds "
+                + "like 5s)."
             return false
         }
         guard clipFrames >= 2 else {
