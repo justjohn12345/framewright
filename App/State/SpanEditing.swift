@@ -411,10 +411,12 @@ extension ProjectStore {
 
     /// Moves an effect span's edges to [start, end) (timeline times, whole frames: the Start, End
     /// and Duration fields), limited to its clip and to the free space of its lane around it, at
-    /// least a frame long. Returns the note saying what was limited (nil when taken as asked), or
-    /// the refusal. One undo step (none when nothing changes).
+    /// least a frame long: when the range would be shorter, the edge that was typed (`typed`: its
+    /// start or its end; nil for both) gives way to the other, which stays. Returns the note saying
+    /// what was limited (nil when taken as asked), or the refusal. One undo step (none when nothing
+    /// changes).
     @discardableResult
-    func setSpanRange(_ id: VESpanID, start: CMTime, end: CMTime) -> (ok: Bool, note: String?) {
+    func setSpanRange(_ id: VESpanID, start: CMTime, end: CMTime, typed: VEClipEdge? = nil) -> (ok: Bool, note: String?) {
         guard !isGestureActive else { return (false, "Finish the current drag first.") }
         guard let span = engine.spanInfo(id), span.kind != .transition, let limits = spanLimits(span) else {
             return (false, "The span no longer exists.")
@@ -423,22 +425,26 @@ extension ProjectStore {
         var from = frameTime(start.secondsOrZero)
         var to = frameTime(end.secondsOrZero)
         var notes: [String] = []
-        if from < limits.lower || to > limits.upper {
+        if from < limits.lower || to > limits.upper || from >= limits.upper || to <= limits.lower {
             let clip = clips[span.clipID]
             let byClip = limits.lower == clip?.timelineStart && limits.upper == clip?.timelineEnd
-            from = CMTimeMaximum(from, limits.lower)
-            to = CMTimeMinimum(to, limits.upper)
+            from = CMTimeMinimum(CMTimeMaximum(from, limits.lower), limits.upper)
+            to = CMTimeMaximum(CMTimeMinimum(to, limits.upper), limits.lower)
             notes.append((byClip ? "Limited to the clip, " : "Limited to the free space on lane \(span.lane), ")
                 + rangeString(start: limits.lower, end: limits.upper) + ".")
         }
-        if to <= from {
-            // Keep the edge that was typed within the limits, the other a frame away.
-            if to == CMTimeMinimum(frameTime(end.secondsOrZero), limits.upper), to != span.end {
+        if CMTimeSubtract(to, from) < frame {
+            if typed == .start {
                 from = CMTimeMaximum(limits.lower, CMTimeSubtract(to, frame))
+                to = CMTimeMinimum(limits.upper, CMTimeAdd(from, frame))
+                notes.append("A span is at least a frame long: the start is \(timelineTimeString(from)), a frame "
+                    + "before the end.")
             } else {
                 to = CMTimeMinimum(limits.upper, CMTimeAdd(from, frame))
+                from = CMTimeMaximum(limits.lower, CMTimeSubtract(to, frame))
+                notes.append("A span is at least a frame long: the end is \(timelineTimeString(to)), a frame "
+                    + "after the start.")
             }
-            notes.append("A span is at least a frame long.")
         }
         let note = notes.isEmpty ? nil : notes.joined(separator: " ")
         guard from != span.start || to != span.end else { return (true, note) }

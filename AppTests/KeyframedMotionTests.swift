@@ -78,53 +78,6 @@ final class KeyframedMotionTests: XCTestCase {
 
     // MARK: Inspector
 
-    func testTheVideoRowsEditStaticValuesAndTheKeyframeControlsAreInert() async throws {
-        let id = try await placedClip()
-        XCTAssertFalse(inspector.hasKeyframeControls(.scale), "Motion keyframes became effect spans")
-        XCTAssertNil(inspector.keyframeControlState(.scale))
-
-        // A value is the static value, wherever the playhead is.
-        store.playheadTime = frames(10)
-        inspector.setValue(.scale, 150)
-        XCTAssertEqual(try clip(id).videoParams.scale, 1.5, accuracy: 1e-12)
-        XCTAssertTrue(try clip(id).spans.isEmpty)
-
-        // The keyframe actions change nothing and say why.
-        let changes = store.changeCount
-        for action in [{ self.inspector.toggleKeyframe(.scale) }, { self.inspector.setInterpolation(.hold, for: .scale) },
-                       { self.inspector.removeAnimation(.scale) }] {
-            store.statusMessage = nil
-            action()
-            XCTAssertEqual(inspector.message, InspectorModel.keyframesMovedMessage)
-            XCTAssertEqual(store.statusMessage, InspectorModel.keyframesMovedMessage)
-        }
-        XCTAssertEqual(store.changeCount, changes)
-        XCTAssertFalse(inspector.isAnimated(.scale))
-        XCTAssertNil(inspector.interpolation(.scale))
-        XCTAssertNil(inspector.previousKeyframeTime(.scale))
-        XCTAssertNil(inspector.nextKeyframeTime(.scale))
-        inspector.goToKeyframe(.scale, forward: true)
-        XCTAssertEqual(store.playheadTime, frames(10))
-
-        // With a Motion span on the clip the rows still show and edit the static values; the
-        // picture composes the span onto them (scale multiplies).
-        let added = store.engine.addSpan(kind: .motion, lane: 1, clip: id,
-                                         range: CMTimeRange(start: .zero, duration: frames(60)))
-        let span = try XCTUnwrap(added.span, added.message)
-        var end = VESpanValuesUnchanged()
-        end.scale = 2 // a factor on the static scale
-        XCTAssertTrue(store.engine.setSpanValues(span.spanID, start: VESpanValuesUnchanged(), end: end).ok)
-        store.refreshModel()
-        XCTAssertEqual(span.lane, 1)
-        store.playheadTime = frames(30)
-        XCTAssertEqual(try XCTUnwrap(inspector.value(.scale)), 150, accuracy: 1e-9, "the static value")
-        XCTAssertEqual(try clip(id).motion(at: frames(30)).scale, 1.5 * 1.5, accuracy: 1e-9, "halfway, linear")
-        inspector.commitText(.scale, "200 %")
-        XCTAssertEqual(try clip(id).videoParams.scale, 2, accuracy: 1e-12)
-        XCTAssertEqual(try clip(id).motion(at: frames(30)).scale, 2 * 1.5, accuracy: 1e-9)
-        XCTAssertEqual(motionSpans(id).count, 1, "the span stays")
-    }
-
     func testASliderDragIsOneUndoStepOnTheStaticValue() async throws {
         let id = try await placedClip()
         store.playheadTime = frames(30)

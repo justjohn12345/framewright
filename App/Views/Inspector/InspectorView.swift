@@ -2,18 +2,18 @@ import CoreMedia
 import SwiftUI
 import FramewrightEngine
 
-/// Properties of the selection: the selected clips' video and audio parameters (multi-selection
-/// edits apply to every selected clip of the matching kind), a single clip's speed, the selected
-/// transition, or the selected media.
+/// Properties of the selection: the selected span (an effect span's range, interpolation, lane and
+/// start and end values; a transition's duration and shares of its cut), or the selected clips'
+/// video and audio parameters (multi-selection edits apply to every selected clip of the matching
+/// kind), a single clip's speed, or the selected media.
 ///
-/// Every parameter can be dragged (slider: one undo step per drag), typed with or without its
+/// Every clip parameter can be dragged (slider: one undo step per drag), typed with or without its
 /// unit (Return applies it, clamped to the parameter's range) and nudged from its field with
 /// Up/Down (±1) and Shift+Up/Down (±10; a burst of nudges is one undo step). Each parameter and
-/// each section has a reset button. With one video clip selected each Video parameter also has
-/// keyframe controls (previous keyframe, the keyframe toggle at the playhead, next keyframe, the
-/// interpolation menu) and the values shown are the ones at the playhead; "Ken Burns…" opens the
-/// start/end rectangles on the program monitor. Refused edits show a message at the top (see
-/// `InspectorModel`, which holds the logic).
+/// each section has a reset button. The Video values are the clip's static values (what its effect
+/// spans compose onto; they do not follow the playhead). A span's fields work the same way (typed,
+/// nudged); its values are what its start and end show (see `InspectorModel`). Refused edits show a
+/// message at the top (see `InspectorModel`, which holds the logic).
 struct InspectorView: View {
     @ObservedObject var store: ProjectStore
     @ObservedObject var inspector: InspectorModel
@@ -43,7 +43,9 @@ struct InspectorView: View {
 
     @ViewBuilder
     private var content: some View {
-        if let transition = inspector.transition {
+        if let span = inspector.span {
+            SpanInspector(store: store, inspector: inspector, span: span)
+        } else if let transition = inspector.transition {
             TransitionInspector(store: store, inspector: inspector, transition: transition)
         } else if !store.selection.isEmpty {
             if let clip = primaryClip {
@@ -56,12 +58,15 @@ struct InspectorView: View {
             if inspector.isAvailable(.positionX) {
                 ParameterSection(store: store, inspector: inspector, section: .video,
                                  subtitle: inspector.videoTargets.count > 1 ? "\(inspector.videoTargets.count) video clips" : nil) {
-                    if let clip = inspector.motionTarget {
+                    if let note = spanNote {
+                        Text(note)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("VideoSpansNote")
+                    }
+                    if inspector.motionTarget != nil {
                         HStack {
-                            Button("Ken Burns…") { store.beginKenBurns(clip: clip.clipID) }
-                                .controlSize(.small)
-                                .help("Pan and zoom from a start framing to an end framing, drawn on the program monitor")
-                                .accessibilityIdentifier("KenBurns")
                             matchMenu
                             Spacer()
                         }
@@ -82,6 +87,17 @@ struct InspectorView: View {
             Text("Nothing selected")
                 .foregroundStyle(.secondary)
         }
+    }
+
+    /// Says that the clips' effect spans compose onto the static values shown (nil when none has
+    /// any).
+    private var spanNote: String? {
+        let count = inspector.videoTargets.reduce(0) { total, clip in
+            total + clip.spans.filter { $0.kind == .motion || $0.kind == .opacity }.count
+        }
+        guard count > 0 else { return nil }
+        return (count == 1 ? "1 effect span composes" : "\(count) effect spans compose")
+            + " onto these values over time; select a span on the clip's lanes to edit it."
     }
 
     /// Match Previous Clip's End / Match Next Clip's Start (enabled next to a touching clip).
@@ -221,14 +237,9 @@ private struct ParameterSection<Extra: View>: View {
                     .help("Reset every \(section.title.lowercased()) setting of the selection")
                     .accessibilityIdentifier("Reset.\(section.rawValue)")
             }
-            if section == .video {
-                // The rows show the clips' static values, which do not follow the playhead.
-                VideoParameterRows(store: store, inspector: inspector, playhead: VideoParameterRows.stillPlayhead,
-                                   followsPlayhead: false)
-            } else {
-                ForEach(InspectorParameter.parameters(in: section)) { parameter in
-                    ParameterRow(store: store, inspector: inspector, parameter: parameter)
-                }
+            // The Video rows show the clips' static values, which do not follow the playhead.
+            ForEach(InspectorParameter.parameters(in: section)) { parameter in
+                ParameterRow(store: store, inspector: inspector, parameter: parameter)
             }
             extra
         }
@@ -242,34 +253,12 @@ extension ParameterSection where Extra == EmptyView {
     }
 }
 
-/// The Video rows. For an animated clip they observe the program playhead, since the values shown
-/// (and the keyframe under the playhead) change with it; otherwise `stillPlayhead`, which never
-/// changes, so a still clip's rows are not redrawn while the playhead moves.
-private struct VideoParameterRows: View {
-    @MainActor static let stillPlayhead = PlayheadModel()
-
-    @ObservedObject var store: ProjectStore
-    let inspector: InspectorModel
-    @ObservedObject var playhead: PlayheadModel
-    let followsPlayhead: Bool
-
-    var body: some View {
-        ForEach(InspectorParameter.parameters(in: .video)) { parameter in
-            ParameterRow(store: store, inspector: inspector, parameter: parameter,
-                         displayTime: followsPlayhead ? playhead.time : .invalid)
-        }
-    }
-}
-
-/// One parameter: label, typed field (with nudges), reset button and slider; Video parameters of a
-/// single clip also have the keyframe controls (see `KeyframeControls`).
+/// One parameter: label, typed field (with nudges), reset button and slider.
 private struct ParameterRow: View {
     @ObservedObject var store: ProjectStore
     let inspector: InspectorModel
     let parameter: InspectorParameter
     var focusSerial = 0
-    /// The playhead the row was drawn for (a new time re-evaluates the row of an animated clip).
-    var displayTime: CMTime = .invalid
     @State private var dragging = false
 
     var body: some View {
@@ -295,23 +284,18 @@ private struct ParameterRow: View {
                 .help("Reset \(parameter.label)")
             }
             .font(.caption)
-            HStack(spacing: 4) {
-                Slider(value: Binding(get: { inspector.value(parameter) ?? parameter.defaultValue },
-                                      set: { inspector.sliderChanged(parameter, $0) }),
-                       in: inspector.sliderRange(parameter)) { editing in
-                    if editing {
-                        inspector.beginSliderDrag(parameter)
-                        dragging = true
-                    } else {
-                        inspector.endSliderDrag()
-                        dragging = false
-                    }
-                }
-                .controlSize(.mini)
-                if let state = inspector.keyframeControlState(parameter) {
-                    KeyframeControls(state: state, parameter: parameter, inspector: inspector)
+            Slider(value: Binding(get: { inspector.value(parameter) ?? parameter.defaultValue },
+                                  set: { inspector.sliderChanged(parameter, $0) }),
+                   in: inspector.sliderRange(parameter)) { editing in
+                if editing {
+                    inspector.beginSliderDrag(parameter)
+                    dragging = true
+                } else {
+                    inspector.endSliderDrag()
+                    dragging = false
                 }
             }
+            .controlSize(.mini)
         }
         .onDisappear {
             // The selection changed mid-drag: commit what the drag did.
@@ -323,83 +307,11 @@ private struct ParameterRow: View {
     }
 }
 
-/// A Video parameter's keyframe controls (Premiere's Effect Controls): previous keyframe, the
-/// keyframe toggle at the playhead (filled when the frame under the playhead has one; adds or
-/// removes it), next keyframe, and, on a keyframe, its interpolation and "Remove All Keyframes".
-/// Drawn only from `state` (see `KeyframeControlState`); `inspector` performs the actions.
-private struct KeyframeControls: View {
-    let state: KeyframeControlState
-    let parameter: InspectorParameter
-    let inspector: InspectorModel
-
-    var body: some View {
-        let hasKeyframe = state.hasKeyframeAtPlayhead
-        let animated = state.isAnimated
-        HStack(spacing: 1) {
-            Button {
-                inspector.goToKeyframe(parameter, forward: false)
-            } label: {
-                Image(systemName: "chevron.left")
-            }
-            .disabled(!state.hasPrevious)
-            .help("Previous \(parameter.label) keyframe")
-            .accessibilityIdentifier("PreviousKeyframe.\(parameter.rawValue)")
-            Button {
-                inspector.toggleKeyframe(parameter)
-            } label: {
-                Image(systemName: hasKeyframe ? "diamond.fill" : "diamond")
-                    .foregroundStyle(animated ? Color.accentColor : Color.secondary)
-            }
-            .help(hasKeyframe ? "Remove the \(parameter.label) keyframe at the playhead"
-                                  : "Add a \(parameter.label) keyframe at the playhead")
-            .accessibilityIdentifier("ToggleKeyframe.\(parameter.rawValue)")
-            Button {
-                inspector.goToKeyframe(parameter, forward: true)
-            } label: {
-                Image(systemName: "chevron.right")
-            }
-            .disabled(!state.hasNext)
-            .help("Next \(parameter.label) keyframe")
-            .accessibilityIdentifier("NextKeyframe.\(parameter.rawValue)")
-            Menu {
-                ForEach(VEKeyframeInterpolation.choices, id: \.rawValue) { choice in
-                    Button {
-                        inspector.setInterpolation(choice, for: parameter)
-                    } label: {
-                        if state.interpolation == choice {
-                            Label(choice.title, systemImage: "checkmark")
-                        } else {
-                            Text(choice.title)
-                        }
-                    }
-                    .disabled(!hasKeyframe)
-                    .help(choice.explanation)
-                }
-                if state.interpolation == .custom {
-                    Text(VEKeyframeInterpolation.custom.title)
-                }
-                Divider()
-                Button("Remove All \(parameter.label) Keyframes") { inspector.removeAnimation(parameter) }
-                    .disabled(!animated)
-            } label: {
-                Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .disabled(!animated)
-            .help(state.interpolation.map { "Interpolation: \($0.title). \($0.explanation)" }
-                ?? "Interpolation of the keyframe under the playhead")
-            .accessibilityIdentifier("KeyframeInterpolation.\(parameter.rawValue)")
-        }
-        .buttonStyle(.borderless)
-        .controlSize(.mini)
-    }
-}
-
-/// The selected transition: kind, alignment, where it sits on its cut, its duration (bounded by
-/// the cut's media) and, for a dissolve with its linked crossfade (or the other way round),
-/// whether a duration change also changes the linked one and which of them Delete removes.
+/// The selected transition (a lane-0 span): what it does (a cross dissolve / crossfade across the
+/// cut, a fade from or to black / silence), where it sits on its cut, its duration (bounded by the
+/// cut's media), the share of each side of the cut (editable, keeping the duration) and, for a
+/// dissolve with its linked crossfade (or the other way round), whether a change also changes the
+/// linked one and which of them Delete removes.
 private struct TransitionInspector: View {
     @ObservedObject var store: ProjectStore
     let inspector: InspectorModel
@@ -414,8 +326,7 @@ private struct TransitionInspector: View {
                     .controlSize(.small)
                     .help("Back to the default duration (Settings > Editing)")
             }
-            row("Kind", inspector.transitionKind?.title ?? "Cross Dissolve")
-            row("Alignment", "Centred on cut")
+            row("Kind", kindTitle)
             if let timing = inspector.transitionTiming {
                 HStack(alignment: .firstTextBaseline) {
                     Text(timing.cutText(frameDuration: store.frameDuration))
@@ -431,6 +342,9 @@ private struct TransitionInspector: View {
             }
             ParameterRow(store: store, inspector: inspector, parameter: .transitionDuration,
                          focusSerial: focusSerial)
+            if inspector.transitionShares != nil {
+                shares
+            }
             let linked = inspector.linkedTransition
             if linked != nil {
                 Toggle("Also change the linked transition",
@@ -470,6 +384,183 @@ private struct TransitionInspector: View {
     private var focusSerial: Int {
         guard let request = store.inspectorFocusRequest, request.field == .transitionDuration else { return 0 }
         return request.serial
+    }
+
+    private var kindTitle: String {
+        let audio = inspector.transitionKind == .audioCrossfade
+        switch transition.style {
+        case .fadeIn: return audio ? "Fade In from Silence" : "Fade In from Black"
+        case .fadeOut: return audio ? "Fade Out to Silence" : "Fade Out to Black"
+        default: return inspector.transitionKind?.title ?? "Cross Dissolve"
+        }
+    }
+
+    /// The share of each side of the cut, in percent: typing one moves the split, keeping the
+    /// duration (↑/↓ move it a frame).
+    private var shares: some View {
+        HStack(spacing: 4) {
+            Text("Before cut").foregroundStyle(.secondary)
+            NumericField(text: inspector.shareText(before: true), placeholder: "",
+                         commit: { inspector.commitShare(before: true, $0) },
+                         nudge: { inspector.nudgeShare(before: true, steps: $0) },
+                         accessibilityIdentifier: "TransitionShareBefore")
+                .frame(width: 64, height: 20)
+            Spacer()
+            Text("After").foregroundStyle(.secondary)
+            NumericField(text: inspector.shareText(before: false), placeholder: "",
+                         commit: { inspector.commitShare(before: false, $0) },
+                         nudge: { inspector.nudgeShare(before: false, steps: $0) },
+                         accessibilityIdentifier: "TransitionShareAfter")
+                .frame(width: 64, height: 20)
+        }
+        .font(.caption)
+        .help("How much of the transition lies before and after the cut; drag its edges on lane 0 too")
+    }
+}
+
+/// The selected effect span (lanes 1-3): its kind and clip, its range (Start, End, Duration as
+/// timeline times; limited to the clip and the free space of its lane, with a note), its
+/// interpolation and lane, and per parameter the values its start and end show, absolute (the
+/// base the rest of the clip composes to there with the span's own value on it; see
+/// `InspectorModel`). Match Previous Clip's End / Match Next Clip's Start, Ken Burns… (a Motion
+/// span: the editor on the program monitor) and Remove. Every value is read from the store as it is
+/// now: the view observes the store, so an edit of an earlier span, an undo or a trim re-reads them.
+private struct SpanInspector: View {
+    @ObservedObject var store: ProjectStore
+    let inspector: InspectorModel
+    let span: VEEffectSpan
+
+    private var clip: VEClipInfo? { store.clips[span.clipID] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(ProjectStore.title(of: span, isAudio: false) + " Span",
+                      systemImage: SpanInspector.systemImage(span.kind))
+                    .font(.subheadline.weight(.semibold))
+                    .accessibilityIdentifier("SpanKind")
+                Spacer()
+                Button("Remove") { inspector.removeSpan() }
+                    .controlSize(.small)
+                    .help("Remove the span (⌫)")
+                    .accessibilityIdentifier("RemoveSpan")
+            }
+            if let clip {
+                Text("On “\(clip.name)”, lane \(span.lane)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            rangeRows
+            HStack(spacing: 4) {
+                Text("Interpolation").foregroundStyle(.secondary)
+                Spacer()
+                Picker("Interpolation", selection: Binding(get: { span.interpolation },
+                                                           set: { inspector.setSpanInterpolation($0) })) {
+                    ForEach(VEKeyframeInterpolation.choices, id: \.rawValue) { choice in
+                        Text(choice.title).tag(choice)
+                    }
+                    if span.interpolation == .custom {
+                        Text(VEKeyframeInterpolation.custom.title).tag(VEKeyframeInterpolation.custom)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                .help(span.interpolation.explanation)
+                .accessibilityIdentifier("SpanInterpolation")
+            }
+            .font(.caption)
+            HStack(spacing: 4) {
+                Text("Lane").foregroundStyle(.secondary)
+                Spacer()
+                Picker("Lane", selection: Binding(get: { span.lane }, set: { inspector.moveSpan(toLane: $0) })) {
+                    ForEach(1 ... TimelineViewModel.maxEffectLanes, id: \.self) { lane in
+                        Text("Lane \(lane)").tag(lane)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                .accessibilityIdentifier("SpanLane")
+            }
+            .font(.caption)
+            Divider()
+            valueRows
+            HStack(spacing: 6) {
+                Button("Match Previous Clip's End") { inspector.matchSpan(.start) }
+                    .disabled(!inspector.canMatchSpan(.start))
+                    .help("Set the start so the clip's first frame shows what the previous clip's last frame shows")
+                    .accessibilityIdentifier("MatchSpanPrevious")
+                Button("Match Next Clip's Start") { inspector.matchSpan(.end) }
+                    .disabled(!inspector.canMatchSpan(.end))
+                    .help("Set the end so the clip's last frame shows what the next clip's first frame shows")
+                    .accessibilityIdentifier("MatchSpanNext")
+            }
+            .controlSize(.small)
+            Text(SpanInspector.holdNote(span.kind))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        Divider()
+    }
+
+    static func systemImage(_ kind: VESpanKind) -> String {
+        switch kind {
+        case .motion: return "arrow.up.left.and.arrow.down.right"
+        case .opacity: return "circle.lefthalf.filled"
+        case .gain: return "speaker.wave.2"
+        default: return "square.on.square.dashed"
+        }
+    }
+
+    /// The hold-after rule for the span's kind.
+    static func holdNote(_ kind: VESpanKind) -> String {
+        let what = kind == .gain ? "level" : kind == .opacity ? "opacity" : "framing"
+        return "Before its start the span changes nothing; after its end its end \(what) holds until the clip ends. "
+            + "A later span applies on top of it. Values are what the picture or sound shows at each end."
+    }
+
+    private var rangeRows: some View {
+        HStack(spacing: 6) {
+            ForEach(InspectorModel.SpanRangeField.allCases, id: \.self) { field in
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(field.label).foregroundStyle(.secondary)
+                    NumericField(text: inspector.spanRangeText(field, of: span), placeholder: "",
+                                 commit: { inspector.commitSpanRange(field, $0) },
+                                 nudge: { inspector.nudgeSpanRange(field, steps: $0) },
+                                 accessibilityIdentifier: "SpanRange.\(field.rawValue)")
+                        .frame(height: 20)
+                }
+            }
+        }
+        .font(.caption)
+        .help("The span's first instant and its end (where the end values are reached), as timeline times; "
+            + "↑/↓ move by a frame")
+    }
+
+    private var valueRows: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Spacer()
+                Text("Start").frame(width: 84, alignment: .trailing)
+                Text("End").frame(width: 84, alignment: .trailing)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            ForEach(SpanParameter.parameters(for: span.kind)) { parameter in
+                HStack(spacing: 4) {
+                    Text(parameter.label).foregroundStyle(.secondary)
+                    Spacer()
+                    ForEach([false, true], id: \.self) { atEnd in
+                        NumericField(text: inspector.spanText(parameter, atEnd: atEnd, of: span), placeholder: "",
+                                     commit: { inspector.commitSpanValue(parameter, atEnd: atEnd, $0) },
+                                     nudge: { inspector.nudgeSpanValue(parameter, atEnd: atEnd, steps: $0) },
+                                     accessibilityIdentifier: "SpanValue.\(parameter.rawValue).\(atEnd ? "end" : "start")")
+                            .frame(width: 84, height: 20)
+                    }
+                }
+                .font(.caption)
+            }
+        }
     }
 }
 

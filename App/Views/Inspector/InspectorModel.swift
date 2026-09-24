@@ -111,8 +111,9 @@ enum InspectorParameter: String, CaseIterable, Identifiable {
     }
 }
 
-/// The interpolations the inspector offers for a keyframe's segment (Custom, the part of an eased
-/// segment that a split or a keyframe added inside it leaves, is shown but cannot be chosen).
+/// The interpolations the inspector and the span menus offer for how a span moves from its start
+/// to its end values (Custom, the exact part of an eased span a split leaves or a span migrated
+/// from keyframes, is shown but cannot be chosen).
 extension VEKeyframeInterpolation {
     static let choices: [VEKeyframeInterpolation] = [.linear, .hold, .easeOut, .easeIn, .easeInOut]
 
@@ -128,33 +129,18 @@ extension VEKeyframeInterpolation {
         }
     }
 
-    /// What it does, for help tags (Premiere and FCP naming: out of a keyframe, into the next).
+    /// What it does, for help tags (Premiere and FCP naming).
     var explanation: String {
         switch self {
-        case .hold: return "The value stays until the next keyframe, then jumps."
-        case .linear: return "Constant rate to the next keyframe."
-        case .easeOut: return "Leaves this keyframe slowly, then speeds up."
-        case .easeIn: return "Slows down to arrive at the next keyframe."
+        case .hold: return "The start values stay until the span's end, then the end values apply."
+        case .linear: return "Constant rate from the start values to the end values."
+        case .easeOut: return "Leaves the start values slowly, then speeds up."
+        case .easeIn: return "Slows down to arrive at the end values."
         case .easeInOut: return "Leaves slowly and arrives slowly."
-        case .custom: return "The part of an eased move left when a keyframe was added inside it or the clip was split."
+        case .custom: return "The exact part of an eased move left when the clip was split."
         @unknown default: return ""
         }
     }
-}
-
-/// What a Video parameter's keyframe controls show, derived from the model. `KeyframeControls` draws
-/// only from this value (a stored, Equatable property), so SwiftUI redraws the controls whenever it
-/// changes: a view that kept only a reference to `InspectorModel` would compare equal after every
-/// edit and keep showing the old diamond and interpolation.
-struct KeyframeControlState: Equatable {
-    /// The frame under the playhead shows a keyframe of the parameter.
-    var hasKeyframeAtPlayhead = false
-    /// That keyframe's interpolation.
-    var interpolation: VEKeyframeInterpolation?
-    /// The parameter has keyframes.
-    var isAnimated = false
-    var hasPrevious = false
-    var hasNext = false
 }
 
 /// The inspector's editing logic, separate from SwiftUI so it can be tested.
@@ -162,11 +148,20 @@ struct KeyframeControlState: Equatable {
 /// Targets: video parameters apply to every selected clip on a video track, audio parameters to
 /// every selected clip on an audio track, each change as one undoable batch
 /// (`VEEngine.applyClipParams`). The Video values are the clips' static values, what their effect
-/// spans compose onto (the span section that edits spans comes with the effect lanes UI; the old
-/// keyframe controls are inert until then). With a single video clip (`motionTarget`) the Match
-/// menu copies a neighbour's framing.
+/// spans compose onto; they do not follow the playhead. With a single video clip (`motionTarget`)
+/// the Match menu copies a neighbour's framing onto them.
 /// Speed applies to a single clip (or linked pair); the Speed/Duration sheet handles several. The
-/// transition section edits the selected transition.
+/// transition section edits the selected transition (its duration and the share of each side of
+/// its cut).
+///
+/// The span section edits the selected effect span (`span`): its range (Start, End and Duration as
+/// timeline times in the duration format, limited to the clip and the free space of its lane, with
+/// a note), its interpolation, its lane, and per parameter the values its start and end show,
+/// absolute (Position X/Y, Scale, Rotation of a Motion span; the Opacity of a fade; the Gain of an
+/// audio span). They are read from the clip every time (`ProjectStore.spanEdge`: the base the rest
+/// of the clip composes to there, and the span's own relative value) and written back as relative
+/// values (`ProjectStore.setSpanValue`), since span values are relative and cumulative: an edit of
+/// an earlier span changes what a later one shows, never what it stores.
 ///
 /// Edits: a typed value (with or without its unit) is clamped to the parameter's range and
 /// applied as one undo step; a slider drag is one coalesced step (Replace group, ended on
@@ -516,71 +511,235 @@ final class InspectorModel: ObservableObject {
         message = nil
     }
 
-    // MARK: Keyframes
-    //
-    // Motion keyframes became effect spans (VEEffectSpan) in the engine; the inspector's span section
-    // replaces these controls in the next round. Until then they are inert: no keyframe controls are
-    // shown, and the actions refuse with a message.
+    // MARK: Spans
 
-    /// Why the keyframe controls do nothing now.
-    static let keyframesMovedMessage = "Motion keyframes are now Motion spans on the clip's effect lanes."
+    /// The selected effect span (the span section; a transition has its own section).
+    var span: VEEffectSpan? { store.selectedEffectSpan }
 
-    /// Whether the Motion keyframe controls apply to `parameter` (never: see above).
-    func hasKeyframeControls(_ parameter: InspectorParameter) -> Bool {
-        false
+    /// The fields of a span's range.
+    enum SpanRangeField: String, CaseIterable {
+        case start, end, duration
+
+        var label: String {
+            switch self {
+            case .start: return "Start"
+            case .end: return "End"
+            case .duration: return "Duration"
+            }
+        }
     }
 
-    /// Whether the single video clip animates `parameter` through keyframes (never: see above).
-    func isAnimated(_ parameter: InspectorParameter) -> Bool {
-        false
+    /// The field's value in the duration format: the span's start and end as timeline times (the
+    /// end is where the end values are reached), and its length.
+    func spanRangeText(_ field: SpanRangeField, of span: VEEffectSpan) -> String {
+        switch field {
+        case .start: return store.timelineTimeString(span.start)
+        case .end: return store.timelineTimeString(span.end)
+        case .duration: return store.durationString(frames: store.frames(CMTimeSubtract(span.end, span.start)))
+        }
     }
 
-    /// The frames of `parameter`'s keyframes (none: see above).
-    func keyframeFrames(_ parameter: InspectorParameter) -> [CMTime] {
-        []
+    /// Takes a typed Start, End or Duration (timecode, 150f, 5s, a bare number in the display's
+    /// unit): the other end stays (a Duration moves the end), limited to the clip and the free space
+    /// of the lane (`ProjectStore.setSpanRange`; the note says so). Text that is not a time is refused
+    /// with a message.
+    func commitSpanRange(_ field: SpanRangeField, _ text: String) {
+        guard let span else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        guard let frames = DurationFormat.parseFrames(trimmed, frameDuration: store.frameDuration,
+                                                      display: store.editingPreferences.durationDisplay) else {
+            message = "“\(trimmed)” is not a time (use timecode like 00:00:05:00, frames like 150f or seconds like 5s)."
+            store.statusMessage = message
+            return
+        }
+        setSpanRange(field, frames: frames, of: span)
     }
 
-    /// The nearest keyframe frame before the playhead's frame (none: see above).
-    func previousKeyframeTime(_ parameter: InspectorParameter) -> CMTime? {
-        nil
+    /// Up/Down in a range field: that end (or, for Duration, the end) moves by `steps` frames.
+    func nudgeSpanRange(_ field: SpanRangeField, steps: Double) {
+        guard let span else { return }
+        let current: Int64
+        switch field {
+        case .start: current = store.frames(span.start)
+        case .end: current = store.frames(span.end)
+        case .duration: current = store.frames(CMTimeSubtract(span.end, span.start))
+        }
+        setSpanRange(field, frames: max(0, current + Int64(steps)), of: span)
     }
 
-    /// The nearest keyframe frame after the playhead's frame (none: see above).
-    func nextKeyframeTime(_ parameter: InspectorParameter) -> CMTime? {
-        nil
+    private func setSpanRange(_ field: SpanRangeField, frames: Int64, of span: VEEffectSpan) {
+        guard canEdit() else { return }
+        endNudgeBurst()
+        var start = span.start
+        var end = span.end
+        switch field {
+        case .start: start = store.time(frames: frames)
+        case .end: end = store.time(frames: frames)
+        case .duration: end = CMTimeAdd(span.start, store.time(frames: frames))
+        }
+        let (ok, note) = store.setSpanRange(span.spanID, start: start, end: end, typed: field == .start ? .start : .end)
+        message = ok ? note : note ?? "The span's range could not be changed."
+        if let message { store.statusMessage = message }
     }
 
-    /// Moves the playhead to the previous or next keyframe (there are none: see above).
-    func goToKeyframe(_ parameter: InspectorParameter, forward: Bool) {}
-
-    /// The keyframe toggle: refused with a message (see above).
-    func toggleKeyframe(_ parameter: InspectorParameter) {
-        refuseKeyframeEdit()
+    /// The value an edge of the span shows for `parameter`, absolute, in display units (nil when the
+    /// span is gone).
+    func spanValue(_ parameter: SpanParameter, atEnd: Bool, of span: VEEffectSpan) -> Double? {
+        store.spanEdge(span, atEnd: atEnd).map { $0.absolute(parameter) * parameter.displayFactor }
     }
 
-    /// The keyframe controls' state (nil: none are shown).
-    func keyframeControlState(_ parameter: InspectorParameter) -> KeyframeControlState? {
-        nil
+    /// The field's text for an edge's value ("" when unavailable).
+    func spanText(_ parameter: SpanParameter, atEnd: Bool, of span: VEEffectSpan) -> String {
+        guard let value = spanValue(parameter, atEnd: atEnd, of: span) else { return "" }
+        return Self.format(value, unit: parameter.unit)
     }
 
-    /// The interpolation of the keyframe under the playhead (none: see above).
-    func interpolation(_ parameter: InspectorParameter) -> VEKeyframeInterpolation? {
-        nil
+    /// A number with up to two decimals and its unit ("150 %", "-12.5 px").
+    static func format(_ value: Double, unit: String) -> String {
+        let number: String
+        if abs(value - value.rounded()) < 1e-9 {
+            number = String(format: "%.0f", value)
+        } else if abs(value * 10 - (value * 10).rounded()) < 1e-6 {
+            number = String(format: "%.1f", value)
+        } else {
+            number = String(format: "%.2f", value)
+        }
+        return unit.isEmpty ? number : number + " " + unit
     }
 
-    /// Setting a keyframe's interpolation: refused with a message (see above).
-    func setInterpolation(_ interpolation: VEKeyframeInterpolation, for parameter: InspectorParameter) {
-        refuseKeyframeEdit()
+    /// Takes a typed value for an edge (display units, the unit optional): what that edge will show,
+    /// written back as the span's relative value, one undo step. Invalid text is refused.
+    func commitSpanValue(_ parameter: SpanParameter, atEnd: Bool, _ text: String) {
+        guard let span else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        let (number, unit) = DurationFormat.splitNumber(trimmed.replacingOccurrences(of: ",", with: "."))
+        guard let value = Double(number), value.isFinite, unit.isEmpty || parameter.acceptedUnits.contains(unit) else {
+            message = "“\(trimmed)” is not a valid \(parameter.label.lowercased()) in \(parameter.unit)."
+            store.statusMessage = message
+            return
+        }
+        guard canEdit() else { return }
+        endNudgeBurst()
+        let (result, note) = store.setSpanValue(parameter, absolute: value / parameter.displayFactor, of: span,
+                                                atEnd: atEnd)
+        handle(result, mode: .single, clampNote: note)
     }
 
-    /// Removing a parameter's keyframes: refused with a message (see above).
-    func removeAnimation(_ parameter: InspectorParameter) {
-        refuseKeyframeEdit()
+    /// Up/Down in an edge's field: ±`steps` display units; a burst is one undo step.
+    func nudgeSpanValue(_ parameter: SpanParameter, atEnd: Bool, steps: Double) {
+        guard canEdit(), let span, let current = spanValue(parameter, atEnd: atEnd, of: span) else { return }
+        let group = "inspector.span.\(span.spanID).\(parameter.rawValue).\(atEnd ? "end" : "start")"
+        if engine.coalescingKey != group {
+            endNudgeBurst()
+            engine.beginCoalescing(withKey: group, mode: .accumulate)
+            store.nudgeGroup = group
+        }
+        let (result, note) = store.setSpanValue(parameter, absolute: (current + steps) / parameter.displayFactor,
+                                                of: span, atEnd: atEnd, group: group)
+        handle(result, mode: .burst(group), clampNote: note)
+        scheduleBurstEnd(group)
     }
 
-    private func refuseKeyframeEdit() {
-        message = Self.keyframesMovedMessage
-        store.statusMessage = message
+    /// Sets how the span moves from its start to its end values (one undo step).
+    func setSpanInterpolation(_ interpolation: VEKeyframeInterpolation) {
+        guard canEdit(), let span else { return }
+        endNudgeBurst()
+        if !store.setSpanInterpolation(span.spanID, interpolation) { message = store.statusMessage }
+    }
+
+    /// Moves the span to another effect lane of its clip (one undo step; refused with the free range
+    /// when that lane has a span there).
+    func moveSpan(toLane lane: Int) {
+        guard canEdit(), let span, lane != span.lane else { return }
+        endNudgeBurst()
+        if !store.moveSpan(span.spanID, toLane: lane) { message = store.statusMessage }
+    }
+
+    /// Whether "Match Previous Clip's End" (`.start`) or "Match Next Clip's Start" (`.end`) applies to
+    /// the span: a clip touches that edge of its clip (and the span starts on its clip's first frame
+    /// for `.start`).
+    func canMatchSpan(_ edge: VEClipEdge) -> Bool {
+        span.map { store.canMatchSpan($0, edge) } ?? false
+    }
+
+    /// Makes the span's start continue the previous clip's last frame, or its end lead into the next
+    /// clip's first frame (`VEEngine.matchSpanEdge`). One undo step; refused during a gesture.
+    func matchSpan(_ edge: VEClipEdge) {
+        guard let span else { return }
+        guard !store.isGestureActive else {
+            message = "Finish the current drag first."
+            store.statusMessage = message
+            return
+        }
+        endNudgeBurst()
+        let result = store.matchSpanEdge(span.spanID, edge)
+        message = result.ok ? (result.note.isEmpty ? nil : result.note) : result.message
+    }
+
+    /// The span section's Remove button.
+    func removeSpan() {
+        guard let span else { return }
+        endNudgeBurst()
+        if !store.removeSpan(span.spanID) { message = store.statusMessage }
+    }
+
+    // MARK: Transition shares
+
+    /// The selected transition's frames before and after its cut (nil for none or a fade, whose
+    /// frames are all on one side).
+    var transitionShares: (before: Int64, after: Int64)? {
+        guard let transition, transition.style == .crossDissolve else { return nil }
+        return (store.frames(transition.shareBeforeCut), store.frames(transition.shareAfterCut))
+    }
+
+    /// The share of a side of the cut in percent ("70 %").
+    func shareText(before: Bool) -> String {
+        guard let shares = transitionShares else { return "" }
+        let total = max(1, shares.before + shares.after)
+        return Self.format(Double(before ? shares.before : shares.after) * 100 / Double(total), unit: "%")
+    }
+
+    /// Takes a typed share of one side of the cut (percent; "70", "70 %"): the duration stays, the
+    /// split moves (whole frames), the linked transition follows per the preference. One undo step.
+    func commitShare(before: Bool, _ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, let shares = transitionShares else { return }
+        let (number, unit) = DurationFormat.splitNumber(trimmed.replacingOccurrences(of: ",", with: "."))
+        guard let percent = Double(number), percent.isFinite, unit.isEmpty || unit == "%" else {
+            message = "“\(trimmed)” is not a share (a percentage like 70 %)."
+            store.statusMessage = message
+            return
+        }
+        let total = shares.before + shares.after
+        let clamped = min(100, max(0, percent))
+        let side = Int64((Double(total) * clamped / 100).rounded())
+        setShares(before: before ? side : total - side, total: total, clampNote: clamped != percent
+            ? "A share is 0 % to 100 %." : nil)
+    }
+
+    /// Up/Down in a share field: that side of the cut gets `steps` frames more (the other fewer).
+    func nudgeShare(before: Bool, steps: Double) {
+        guard let shares = transitionShares else { return }
+        let total = shares.before + shares.after
+        let side = (before ? shares.before : shares.after) + Int64(steps)
+        let clamped = min(total, max(0, side))
+        setShares(before: before ? clamped : total - clamped, total: total, clampNote: nil)
+    }
+
+    private func setShares(before: Int64, total: Int64, clampNote: String?) {
+        guard canEdit(), let transition else { return }
+        guard !store.isGestureActive else {
+            message = "Finish the current drag first."
+            return
+        }
+        endNudgeBurst()
+        let cut = CMTimeAdd(transition.start, transition.shareBeforeCut)
+        let start = CMTimeSubtract(cut, store.time(frames: before))
+        let end = CMTimeAdd(start, store.time(frames: total))
+        handle(store.setTransitionRange(transition.transitionID, start: start, end: end), mode: .single,
+               clampNote: clampNote)
     }
 
     // MARK: Neighbours
