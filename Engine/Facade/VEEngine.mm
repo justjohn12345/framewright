@@ -787,14 +787,25 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     }
 
     NSData *mediaFolderBookmark = nil;
+    bool unreadableMediaFolder = false;
     if (json.is_object()) {
         auto it = json.find(kMediaFolderBookmarkKey);
         if (it != json.end() && it->is_string()) {
             mediaFolderBookmark = [[NSData alloc] initWithBase64EncodedString:toNS(it->get<std::string>()) options:0];
+            unreadableMediaFolder = mediaFolderBookmark == nil || mediaFolderBookmark.length == 0;
+            if (unreadableMediaFolder) {
+                mediaFolderBookmark = nil;
+            }
+        } else if (it != json.end() && !it->is_null()) {
+            unreadableMediaFolder = true;
         }
     }
 
     std::vector<std::string> warnings = std::move(loaded.warnings);
+    if (unreadableMediaFolder) {
+        warnings.push_back(std::string(kMediaFolderBookmarkKey) +
+                           ": the folder for media received from Photos could not be read; it will be asked for again");
+    }
     [self installProject:std::move(project) url:url];
     _mediaFolderBookmark = mediaFolderBookmark;
     NSMutableArray<NSString *> *warningStrings = [NSMutableArray arrayWithCapacity:warnings.size()];

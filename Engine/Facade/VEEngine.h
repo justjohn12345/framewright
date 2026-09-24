@@ -234,7 +234,12 @@ NS_SWIFT_UI_ACTOR
 /// A bookmark (security-scoped where possible) of the folder the app keeps media received from
 /// Photos in, stored with the project (saved next to the asset bookmarks, read back on open) so
 /// the app need not ask again; nil when none was chosen. New and Open reset it; setting a
-/// different value is an unsaved change of the project (not an undo step).
+/// different value is an unsaved change of the project (not an undo step). A value that cannot be
+/// read on open is left out with a load warning. The engine saves whatever is set; the app stores
+/// only a folder the user chose (the "Media" folder next to the project is derived from
+/// `projectURL` every time and never stored, so a project saved elsewhere or a copied project
+/// folder uses its own) and clears a stored folder that is the Media folder next to the project's
+/// old location before a Save As to another folder.
 @property (nonatomic, copy, nullable) NSData *mediaFolderBookmark;
 
 // MARK: Snapshots

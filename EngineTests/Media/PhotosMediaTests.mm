@@ -180,6 +180,39 @@ using namespace ve::test;
     XCTAssertEqualObjects(resolved.URLByResolvingSymlinksInPath.path, folder.URLByResolvingSymlinksInPath.path);
     [reopened newProjectWithName:@"Next"];
     XCTAssertNil(reopened.mediaFolderBookmark, @"New forgets it");
+
+    // Save As keeps what is set (the app decides what to store); opening a project without the key
+    // after one with it leaves none.
+    XCTAssertTrue([engine openProjectAtURL:url error:&error], @"%@", error);
+    NSURL *copy = [_scratch URLByAppendingPathComponent:@"copy.framewright"];
+    XCTAssertTrue([engine saveProjectToURL:copy error:&error], @"%@", error);
+    NSString *copied = [NSString stringWithContentsOfURL:copy encoding:NSUTF8StringEncoding error:nil];
+    XCTAssertTrue([copied containsString:@"\"mediaFolderBookmark\""]);
+    engine.mediaFolderBookmark = nil;
+    NSURL *without = [_scratch URLByAppendingPathComponent:@"without.framewright"];
+    XCTAssertTrue([engine saveProjectToURL:without error:&error], @"%@", error);
+    XCTAssertFalse([[NSString stringWithContentsOfURL:without encoding:NSUTF8StringEncoding error:nil]
+        containsString:@"mediaFolderBookmark"]);
+    XCTAssertTrue([reopened openProjectAtURL:url error:&error], @"%@", error);
+    XCTAssertNotNil(reopened.mediaFolderBookmark);
+    XCTAssertTrue([reopened openProjectAtURL:without error:&error], @"%@", error);
+    XCTAssertNil(reopened.mediaFolderBookmark, @"nothing carried over from the previous project");
+    XCTAssertEqual(reopened.loadWarnings.count, 0u);
+
+    // A value that is not base64 (a hand edit) is left out with a warning.
+    NSString *text = [NSString stringWithContentsOfURL:copy encoding:NSUTF8StringEncoding error:nil];
+    NSRange key = [text rangeOfString:@"\"mediaFolderBookmark\": \""];
+    XCTAssertNotEqual(key.location, (NSUInteger)NSNotFound);
+    NSUInteger valueStart = NSMaxRange(key);
+    NSRange valueEnd = [text rangeOfString:@"\"" options:0 range:NSMakeRange(valueStart, text.length - valueStart)];
+    NSString *broken = [text stringByReplacingCharactersInRange:NSMakeRange(valueStart, valueEnd.location - valueStart)
+                                                     withString:@"***not base64***"];
+    NSURL *malformed = [_scratch URLByAppendingPathComponent:@"malformed.framewright"];
+    XCTAssertTrue([broken writeToURL:malformed atomically:YES encoding:NSUTF8StringEncoding error:&error], @"%@", error);
+    XCTAssertTrue([reopened openProjectAtURL:malformed error:&error], @"%@", error);
+    XCTAssertNil(reopened.mediaFolderBookmark);
+    XCTAssertEqual(reopened.loadWarnings.count, 1u);
+    XCTAssertTrue([reopened.loadWarnings.firstObject containsString:@"asked for again"], @"%@", reopened.loadWarnings);
 }
 
 @end
