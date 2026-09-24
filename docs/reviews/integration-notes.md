@@ -410,6 +410,23 @@ in the history table of `README.md`.
   gained `cachedImage` and `isFetching` (no fetch). The overlay observes the model, the playhead model and
   the loader (`.onChange(of: playhead.time)` feeds the model).
 
+- Neighbours: `adjacentClip(of:at:)` (`VEClipEdge` `.start`/`.end`: the clip on the same track ending
+  exactly where it starts / starting where it ends; 0 for a gap; plain C++ `adjacentClip` in EditOps) and
+  `matchMotion(clip:toAdjacentAt:)`: the neighbour's five Motion values on its boundary frame
+  (`Scheduler::motionAt`, what the monitors draw) onto this clip's first/last frame, planned by
+  `planMotionAtFrame` and applied as one `SetMotionTracks` ("Match Previous Clip" / "Match Next Clip").
+  An animated parameter gets a keyframe on the frame's start (keyframes that frame showed, such as one on
+  the out point, give way and lend it their interpolation, so the frame shows the value exactly); a static
+  one gets the static value. The note names which. Nothing to change: success, no undo step, "This clip
+  already matches ...". Refused: NotAdjacent, TrackKindMismatch, TrackLocked (also for the no-op).
+- App: `store.adjacentClip(to:at:)`; `InspectorModel.canMatch(_:)` / `matchAdjacent(_:)` (single video
+  clip, `isGestureActive` guard with "Finish the current drag first.", commits a nudge burst first) behind
+  the Video section's "Match" menu. `KenBurnsModel.previous` / `next` (`Neighbour`: framing at the cut,
+  animated in position/scale), `continuesFromPrevious` / `leadsIntoNext` (on by default when that
+  neighbour animates position or scale or its framing there is not the identity; toggling resets that
+  rectangle), `neighbourNote` when the framing had to be kept inside this picture. Rotation is not taken
+  from the neighbour by the helper (the rectangle is drawn with this clip's rotation); Match copies it.
+
 ## Photos drops (feature request 9)
 - Drop types: `MediaDrop.types` = public.file-url plus `UTType.filePromiseTypes` (every
   `NSFilePromiseReceiver.readableDraggedTypes` entry and kPasteboardTypeFileURLPromise; the named ones
