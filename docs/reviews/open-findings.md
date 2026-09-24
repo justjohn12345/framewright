@@ -23,7 +23,12 @@ server's drag session, so these are covered at the model level only:
   (`KenBurnsModel`: geometry, limits, swap, apply, lifetime) and the timeline markers (positions, hit testing, a click
   through `TimelineGestureController`) are tested at the model level; dragging the rectangles' bodies and corners on the
   real program monitor (`KenBurnsOverlay`'s SwiftUI gestures), the look of the keyframe controls and the markers, and
-  watching an animated clip play are by hand.
+  watching an animated clip play are by hand. Ken Burns range and neighbour matching: the range, duration, picture
+  time, picture pacing (`KenBurnsPictureLoader`), neighbour toggles, Match and Control-K are tested at the model and
+  engine level; by hand: the helper's bar (Move menu, Duration field with Return also pressing Apply, the neighbour
+  checkboxes) at narrow monitor widths, the picture following a real scrub smoothly, the inspector's Match menu, and
+  that the keyframe diamonds and interpolation checkmarks redraw after each click (the SwiftUI diff itself; the
+  controls now draw only from `KeyframeControlState`, whose changes are tested).
 - Photos drops and Import from Photos (feature request 9): everything after a drop reaches the drop delegates
   (`MediaBinDropDelegate`, `TimelineDropDelegate`, with a fake promise-carrying `NSItemProvider`), the promise receiving,
   progress, cancellation, the Media folder (next to a saved project; asked once for an untitled one and kept with it),
