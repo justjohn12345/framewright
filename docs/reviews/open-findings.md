@@ -4,14 +4,71 @@ Only what is still open. Fixed findings are in the history table of `README.md` 
 the full reports are in git history at the commits the table names.
 
 ## Keyframed Motion, Ken Burns and Photos drops (2026-09-24 review, `2026-09-24-motion-photos-review.md`)
-Twenty-six findings, three HIGH: adding a keyframe reshapes the segment it lands in (hold becomes a ramp, eases
-re-timed); Live Photo pairing across unrelated items plus a permanent remembered choice deletes media silently; the
-Ken Burns preview goes through the shared thumbnail cache (no byte budget, redraws the timeline and bin per picture,
-freezes mid-scrub). Ten MEDIUM at the seams (a nudge writing into a keyframe the frame does not show, next-tick
-keyframes a frame late after a hold, late Photos placement overwriting later edits, quit/New/Open ignoring media still
-arriving, the media-folder bookmark surviving Save As, the untested pasteboard promise path, the folder panel and
-unfiltered promise types, typed range text overwritten, unreachable start rectangle, a vacuous parity movement check),
-and a tail of LOWs. Five groups of test gaps. All open; the next fix round works from the report.
+All twenty-six findings are fixed and test gaps 1-5 are covered, except the items listed under the UI-test section
+below (see `integration-notes.md`, "Motion/Photos review fix round"); the lead's read of the fix round is pending:
+1. Adding a keyframe keeps every frame (`insertKeyframeKeepingValues`): `KeyframeInsertTests.cpp` (AddKeyframe, the
+   Control-K toggle and SetMotionValue's add path inside a hold, a linear, each ease and a custom curve, every frame
+   against the value before and an independent Newton reference), `VEEngineKeyframeReviewTests.testAddingKeyframesInsideAHoldAndAnEaseKeepsEveryFrame`,
+   `KeyframedMotionTests.testTheDiamondInsideAHoldOrAnEaseKeepsTheSegmentAndTheInspectorSaysWhatItIs`.
+2. Live Photos pair within one promise only; Settings > Media > Live Photos: `PhotosDropTests.testUnrelatedItemsWithOneNameAreNeverPairedNorDeleted`,
+   `testTheLivePhotoSettingRoundTripsWithTheQuestionsRememberedChoice`.
+3. The Ken Burns loader's own bounded cache: `KeyframedMotionTests.testKenBurnsPictureLoaderShowsEveryLandedPictureWhileScrubbingOneFetchAtATime`,
+   `...MovesOnAfterAFailedFetchAndKeepsTheLastPicture`, `...MemoryIsBounded`,
+   `testTheKenBurnsHelperLoadsItsPictureFromTheEngineWithoutTheSharedCache`,
+   `TimelineRedrawTests.testKenBurnsPicturesLandingRedrawNeitherTheTimelineNorTheBin` (overlay, bin and timeline hosted: 0/0/0).
+4. A value on a frame whose keyframe is elsewhere in its span lands on the frame's start (`planMotionValueAtFrame`):
+   `KeyframeInsertTests` ("a split's out point", "a 1.5x clip"), `VEEngineKeyframeReviewTests.testAValueTypedOnASplitsLastFrameShowsExactlyAndANudgeBurstIsOneStep`,
+   `testAValueTypedOnAFrameOfASpedUpClipShowsExactly`, `MotionReviewTests.testANudgeOnASplitsLastFrameShowsExactlyWhatWasTyped`.
+5. Frames evaluate at the keyframe tick (`motionTimeAt`): `KeyframeInsertTests` ("Keyframe on the next precise tick ...
+   after a hold (NTSC, 999/1000)").
+6. Late placement checks the timeline: `PhotosReceivingTests.testMediaArrivingAfterAnEditStaysInTheBinWithAMessage`,
+   `testMediaArrivingDuringAGestureOrANudgeBurstStaysInTheBin`, `testARefusedPlacementSaysWhyAndAnOccupiedDropPointTakesAnInsert`,
+   `testADropOffTheTracksImportsIntoTheBin`.
+7. Quit, close, New and Open ask while media arrives: `PhotosReceivingTests.testQuitNewAndOpenAskWhileMediaIsArriving`.
+8. Only a chosen Media folder is stored; Save As and copies use their own: `PhotosReceivingTests.testSaveAsElsewhereAndACopiedProjectFolderUseTheirOwnMediaFolder`,
+   `testAnEarlierVersionsStoredMediaFolderIsDroppedOnSaveAsAndInACopy`, `PhotosMediaTests.testTheMediaFolderBookmarkIsSavedWithTheProject`.
+9. Pasteboard promises settle each reader call: `PhotosReceivingTests.testAPasteboardPromiseMovesEachFileOutOfStagingAndCompletesAtThePromisedCount`,
+   `testFewerReaderCallsThanPromisedKeepTheItemUntilCancelWhichDeletesWhatArrivedAtOnce`, `testMoreReaderCallsThanPromisedImportTheExtraFilesToo`,
+   `testAReaderErrorFailsOnlyItsFile`, `testAPromiseReleasedWhilePendingDeletesWhatArrivedAndWhatComesLater`.
+10. Media folder marker, staging, non-media, refused imports: `PhotosReceivingTests.testThePanelsFolderGetsAMediaFolderAndAnExistingMediaFolderNeedsTheMarker`,
+    `testWhenTheProjectsFolderIsNotWritableThePanelAsksWithTheReason`, `testTwoPromisedFilesWithOneNameBothArrive`,
+    `testTheDragPasteboardIsPartitionedOncePerItemAndNonMediaPromisesAreRefused`, `testANonMediaPromiseIsNotReceivedAndAFileTheImportRefusesIsDeleted`.
+11. Typed range text survives model changes: `MotionReviewTests.testTypedRangeTextSurvivesASaveAModelChangeAndThePlayhead`.
+12. The start rectangle is reachable: `MotionReviewTests.testTheStartRectangleIsReachableUnderTheEnd`, `testCoincidingRectanglesShareTheirHandles`.
+13. The parity movement check measures the animation: `ExportParityTests.testAnAnimatedClipExportsTheMonitorsPictures`.
+14. Thread-safe `adopt`: `PhotosReceivingTests.testAdoptingFromManyThreadsNeverLosesAFile`.
+15. Held Control-K: `MotionReviewTests.testHeldControlKTogglesOnce` (through `KeyboardController.handle`).
+16. Drag state and clicks: `MotionReviewTests.testAClickWithoutMovementDoesNotPinARectangle`.
+17. A duration off the clip is refused: `MotionReviewTests.testADurationTypedWithThePlayheadOffTheClipIsRefused`.
+18. A moved rectangle survives its neighbour going: `MotionReviewTests.testARectangleMovedNextToANeighbourStaysWhenTheNeighbourGoes`.
+19. Curve order and overshoot: `KeyframeTests.cpp` ("validation", "a curve part divided again ..."), `KeyframeInsertTests`
+    ("an overshooting custom curve ..."), `ProjectJSONTests` ("backwards").
+20. Animated still pieces: `KeyframeRefusalTests.cpp` ("isThroughEdit: pieces of an animated still ...").
+21. Keyframes on every edit path, refusal codes: `KeyframeRefusalTests.cpp`, `VEEngineKeyframeReviewTests.testAnUnknownMotionParameterIsRefusedNotTreatedAsPositionX`.
+22. JSON: `ProjectJSONTests.cpp` ("keyframe errors and warnings", "a model keyframe that is not custom ..."); the v4
+    golden test no longer writes its file.
+23. Trash, stale and failed bookmarks, scope past New, one partition: `PhotosReceivingTests.testAStoredFolderInTheTrashOrGoneIsNotUsedAndAMovedOneIsFollowed`,
+    `testTheFoldersSecurityScopeOutlivesNewWhileAPromiseMayStillDeliver`, `testTheDragPasteboardIsPartitionedOncePerItemAndNonMediaPromisesAreRefused`.
+24. PHPicker and bundles, question queue: `PhotosReceivingTests.testAPickedLivePhotoBundleIsUnpackedAndThePartNotChosenLeavesNoBundle`,
+    `testAPickerWhoseSheetWentAwayWithoutItsDelegateCanBeShownAgain`, `testLivePhotoQuestionsWaitForAGestureAndNeverStack`,
+    `testCancellingTheLivePhotoQuestionLeavesNothingBehind`, `testAdoptingFromManyThreadsNeverLosesAFile` (names).
+25. UI details: `MotionReviewTests` (`testTheClipMenuItemFollowsThePlayhead`, `testPaddedOrEquivalentTextChangesNothing`,
+    `testKenBurnsReopenedOnTheSameClipKeepsItAndAMultiSelectionClosesIt`, `testTheDurationFormatFollowsThePreferenceWhileOpen`,
+    `testATrimEdgeNearerThanAMarkerKeepsThePress`, `testAnAbandonedMarkerDragPutsTheKeyframesBack`).
+26. Build and test plumbing: `PhotosDropTests.testTheDropTargetsAcceptEveryPromiseTypeTheSystemDeclares`,
+    `PhotosMediaTests.testTheSlowMotionTableMatchesTheScript`, `testAnIncompleteOrOutdatedTestMediaDirectoryIsRecognised`.
+Test gaps: 1 and 2 by `KeyframeInsertTests.cpp` (also "Animated clips: a split at 1.5x, an overwrite inside, a move onto
+and a ripple keep the pictures"), `KeyframeTests.cpp`; 3 by `VEEngineKeyframeReviewTests.mm` and `PhotosMediaTests`; 4 by
+`KeyframedMotionTests`, `MotionReviewTests`, `TimelineRedrawTests` (the band test now asserts its host draws); 5 by
+`PhotosReceivingTests` and `PhotosDropTests` (the provider double completes once; a source completing after cancel is
+`testASourceCompletingAfterCancelIsIgnoredAndItsFilesDeleted`; an item-provider error and a cancel before the main hop are
+`testAnItemProviderErrorAndACancelBeforeTheMainHop`).
+Still open, with reasons:
+- `VEEditErrorNotRepresentable` from the keyframe calls needs a 128-bit overflow of a clip's source time: no facade
+  input reaches it, so its message is covered by reading only.
+- What the real Photos drag hands over (one listed type per file for a Live Photo? a rename or an overwrite when two
+  promised files share a name in the staging folder?) is not observable in the test host; the double of the
+  receiver's contract covers both counts, errors and collisions (by hand, below).
 
 ## Test gaps that need a UI-test target (XCUITest) or a person
 The xctest host is not sandboxed and its synthesised NSEvents never reach SwiftUI's gesture system or the window
@@ -38,7 +95,11 @@ server's drag session, so these are covered at the model level only:
   engine level; by hand: the helper's bar (Move menu, Duration field with Return also pressing Apply, the neighbour
   checkboxes) at narrow monitor widths, the picture following a real scrub smoothly, the inspector's Match menu, and
   that the keyframe diamonds and interpolation checkmarks redraw after each click (the SwiftUI diff itself; the
-  controls now draw only from `KeyframeControlState`, whose changes are tested). Ken Burns editing: the existing-move
+  controls now draw only from `KeyframeControlState`, whose changes are tested). Since the Motion/Photos fix round,
+  also by hand: a real press on the overlay reaching the rectangle `KenBurnsHit` picks and a cancelled drag resetting
+  its `@GestureState` (the hit rules and `applyDrag` are tested), the inspector's Video rows keeping a field's focus
+  when the clip gets its first keyframe (one `VideoParameterRows` view either way), and the Clip menu's Add/Remove
+  Motion Keyframe title in the real menu bar as the playhead moves (`motionKeyframeMenuState` is tested). Ken Burns editing: the existing-move
   detection, the Custom range (parsing, clamping, the mode switch, Apply), the timeline band (geometry, its redraw
   budget, pixels at its edges) and marker drags through `TimelineGestureController` (groups, limits, one undo step,
   Escape, the helper following) are tested; by hand: Return in the Start/End/Duration fields committing the field
@@ -48,12 +109,16 @@ server's drag session, so these are covered at the model level only:
 - Photos drops and Import from Photos (feature request 9): everything after a drop reaches the drop delegates
   (`MediaBinDropDelegate`, `TimelineDropDelegate`, with a fake promise-carrying `NSItemProvider`), the promise receiving,
   progress, cancellation, the Media folder (next to a saved project; asked once for an untitled one and kept with it),
-  Live Photo choice and timeline placement are tested (`PhotosDropTests`), and HEIC/HEVC/slow-motion media through the
+  Live Photo choice and timeline placement are tested (`PhotosDropTests`, `PhotosReceivingTests`), and
+  HEIC/HEVC/slow-motion media through the
   engine (`PhotosMediaTests`). By hand: a real drag from Photos.app (the window server's promise session and
-  `NSFilePromiseReceiver` reading the drag pasteboard, which a test cannot produce), an iCloud original downloading
-  during a drop, what Photos hands over for a Live Photo and a slow-motion clip on a given macOS version, the
-  PHPicker sheet itself (`PhotosImportPicker.present`; its configuration and result handling are tested), and the
-  folder panel in the real sandbox (writing next to a project the sandbox granted only as a file falls back to it).
+  `NSFilePromiseReceiver` reading the drag pasteboard, which a test cannot produce; `PasteboardFilePromise` is tested
+  over a double of its contract and `DragContents` over item descriptions), an iCloud original downloading during a
+  drop, what Photos hands over for a Live Photo and a slow-motion clip on a given macOS version (and whether it renames
+  or overwrites a same-named file in the staging folder), the PHPicker sheet itself (`PhotosImportPicker.present`; its
+  configuration, stale-sheet recovery and result handling are tested), the folder panel in the real sandbox (writing
+  next to a project the sandbox granted only as a file falls back to it; simulated with a read-only folder), and a
+  security-scoped Media folder bookmark going stale (a plain bookmark's rewrite is tested).
 
 ## Test gaps that need media or a performance scheme (phase 7)
 - Gap 8, size estimate against a real export in quality mode: the estimate is a bits-per-pixel heuristic (labelled "≈");

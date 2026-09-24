@@ -35,7 +35,8 @@ audited the code line by line.
   sync with the in-window monitor.
 - Keyframed Motion: position, scale, rotation and opacity animate with keyframes (a keyframe
   toggle per parameter at the playhead, previous/next, hold, linear and ease interpolation;
-  Control-K keys all five parameters at the playhead, or removes them),
+  Control-K keys all five parameters at the playhead, or removes them; a keyframe added inside a
+  hold or an eased move keeps its shape, so no frame changes),
   shown as markers on the clip in the timeline that can be dragged to another frame (all the
   parameters keyed on that frame move together); keyframes stay on their pictures through trims,
   speed changes and splits. A Ken Burns helper (as in Final Cut Pro) draws a start and an end
@@ -51,9 +52,12 @@ audited the code line by line.
   unless turned off) and shown relative to their cut; a note when a dissolve sits on a plain split
   (both sides show the same frames); fade and gain handles on audio clips; Speed/Duration sheet.
 - Photos: drag photos and videos from Photos.app onto the media bin or the timeline (file promises
-  received into a Media folder next to the project, with progress and cancel; iCloud originals can
-  take their time), or File > Import from Photos… (the system photo picker). HEIC photos import as
-  stills, HEVC and slow-motion clips as video, Live Photos as the part you choose.
+  received into a Media folder the app makes next to the project, or inside a folder you choose,
+  with progress and cancel; iCloud originals can take their time), or File > Import from Photos…
+  (the system photo picker). HEIC photos import as stills, HEVC and slow-motion clips as video,
+  Live Photos as the part you choose (Settings > Media > Live Photos: ask, or always the video or
+  the still). Media that arrives after you edited the timeline stays in the bin instead of being
+  placed over your edits; quitting or opening another project while media arrives asks first.
 - Project files in JSON with schema migration; security-scoped bookmarks for media.
 - Export (File > Export…): H.264, HEVC (8-bit and 10-bit Main10) and ProRes 422 on
   VideoToolbox (hardware where the Mac has it for the frame size) and software AV1 (SVT-AV1) to

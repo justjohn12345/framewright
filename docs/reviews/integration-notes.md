@@ -340,9 +340,10 @@ in the history table of `README.md`.
   still's keyframes so they keep their timeline positions (head trims, the right piece of a split,
   overwrites). A parameter without keyframes shows its static value; with keyframes the static value
   is unused and the ends hold the first/last keyframe's value (Premiere). Interpolation belongs to the
-  segment after the keyframe: `Hold`, `Linear` (the default for new keyframes), `EaseOut` (leaves
-  slowly), `EaseIn` (arrives slowly), `EaseInOut` (both; the Ken Burns default), with Core
-  Animation's curves; the names follow Premiere/FCP, not CSS. `Bezier` only comes from a split.
+  segment after the keyframe: `Hold`, `Linear` (the default for a new keyframe outside any segment),
+  `EaseOut` (leaves slowly), `EaseIn` (arrives slowly), `EaseInOut` (both; the Ken Burns default),
+  with Core Animation's curves; the names follow Premiere/FCP, not CSS. `Bezier` comes from dividing
+  an eased segment: a split, or (since the Motion/Photos review fix round) a keyframe added inside it.
   `VideoParams` gained constructors (`VideoParams()` and the five static values), `staticValue`,
   `setStaticValue`, `valueAt`, `valuesAt` (values only, no keyframes) and `staticValues()`.
 - Frames and keyframes (`Clip.h`): `frameShowingSourceTime`, `keyframeIndexForFrame` (the frame whose
@@ -350,7 +351,8 @@ in the history table of `README.md`.
   a split leaves one) and `keyframeTimeForFrame` (the exact source time, or the next kPreciseTimescale
   tick when it has no CMTime form). Use these for "the keyframe under the playhead".
 - Evaluation: `Scheduler::motionAt(clip, time)` evaluates at the frame's exact source time (not the
-  source frame grid) into `VideoLayer::transform` / `opacity`; the program monitor, the output view and
+  source frame grid; the next precise tick when it has no CMTime form, see "Motion/Photos review fix
+  round") into `VideoLayer::transform` / `opacity`; the program monitor, the output view and
   export all get it from `renderGraphAt`. `ExportParityTests.testAnAnimatedClipExportsTheMonitorsPictures`
   proves the export matches the monitor over moving pictures.
 - Edits (`EditOps.h`, all single `SequenceCommand`s, so Accumulate groups merge them): `AddKeyframe`,
@@ -407,10 +409,10 @@ in the history table of `README.md`.
 - Picture: follows the playhead, as in FCP (this replaced "the picture at the range start" from the
   brief): the clip's unanimated frame under the playhead, clamped to its first/last frame
   (`pictureFrame`, `pictureSeconds`, through the clip's speed; 0 for a still). `KenBurnsPictureLoader`
-  (`model.picture`, made by the store over `store.thumbnails`) keeps one fetch of its own in flight and
-  fetches the latest wanted time when it lands; the last picture stays up meanwhile. `ThumbnailCache`
-  gained `cachedImage` and `isFetching` (no fetch). The overlay observes the model, the playhead model and
-  the loader (`.onChange(of: playhead.time)` feeds the model).
+  (`model.picture`) keeps one fetch of its own in flight and fetches the latest wanted time when it
+  lands. Since the Motion/Photos review fix round it has its own small cache and no longer uses
+  `store.thumbnails` (`cachedImage`/`isFetching(asset:)` are gone): see that section. The overlay
+  observes the model, the playhead model and the loader (`.onChange(of: playhead.time)` feeds the model).
 
 - Neighbours: `adjacentClip(of:at:)` (`VEClipEdge` `.start`/`.end`: the clip on the same track ending
   exactly where it starts / starting where it ends; 0 for a gap; plain C++ `adjacentClip` in EditOps) and
@@ -437,7 +439,7 @@ in the history table of `README.md`.
   subview that reads model state must either observe an ObservableObject that publishes the change
   (`@ObservedObject var store`, the playhead model, ...) or take the derived values as stored properties;
   a bare class reference does not redraw it. `InspectorModel` publishes only `message`: views that show
-  model values observe the store. Checked: `ParameterRow`, `AnimatedParameterRows`, `ParameterSection`,
+  model values observe the store. Checked: `ParameterRow`, `AnimatedParameterRows` (now `VideoParameterRows`), `ParameterSection`,
   `ClipInfoSection`, `TransitionInspector` and `KenBurnsOverlay` observe what they draw.
 - Add Motion Keyframe: `toggleMotionKeyframes(clip:at:)` (`planMotionKeyframeToggle`, one `SetMotionTracks`,
   "Add Keyframes" / "Remove Keyframes"; note "Keyframes added on N parameters" / "Keyframes removed"): keys
@@ -493,10 +495,8 @@ in the history table of `README.md`.
   `KenBurnsBandView.rect(for:in:)` is its geometry (`x(forTime:)`, the clip's row). A range moving with the playhead
   or with typing redraws that overlay only (`TimelineDiagnostics.kenBurnsBandUpdates`; measured over 21 range changes:
   0 model builds, 0 canvas draws, 21 band updates, `TimelineRedrawTests.testAKenBurnsRangeChangeRedrawsOnlyItsBand`).
-  Observation, not changed: the helper's picture loads through the shared `ThumbnailCache`, and every landing bumps
-  `thumbnails.version`, which the clips' canvas reads as its redraw token, so scrubbing with the helper open redraws
-  the canvas once per picture that lands (at most one fetch in flight). A cache that versions timeline-sized
-  thumbnails separately would remove that; the band test hosts the timeline alone for this reason.
+  The picture loader no longer goes through the shared `ThumbnailCache` (Motion/Photos review fix round), so pictures
+  landing redraw neither the canvas nor the bin (`testKenBurnsPicturesLandingRedrawNeitherTheTimelineNorTheBin`).
 
 - Draggable keyframe markers (engine + app). Engine (`EditOps.h`): `motionKeyframeGroupAt(clip, frameDuration, frame,
   group)` (`MotionKeyframeGroup`: each parameter's keyframe that the frame shows, `keyframeIndexForFrame`, with its
@@ -525,7 +525,8 @@ in the history table of `README.md`.
 ## Photos drops (feature request 9)
 - Drop types: `MediaDrop.types` = public.file-url plus `UTType.filePromiseTypes` (every
   `NSFilePromiseReceiver.readableDraggedTypes` entry and kPasteboardTypeFileURLPromise; the named ones
-  and `com.apple.live-photo-bundle` are UTImportedTypeDeclarations in project.yml / Info.plist).
+  and `com.apple.live-photo-bundle` are declared by the system: the app's redundant imported
+  declarations were removed in the Motion/Photos review fix round).
   `TimelineDropDelegate.types` adds them to the in-app types; the media bin uses
   `MediaBinDropDelegate` (replacing `.dropDestination(for: URL.self)`). Both take any
   `TimelineDropInfo`; `handlePerform(_:pasteboardPromises:)` gets the drag pasteboard's
@@ -543,11 +544,12 @@ in the history table of `README.md`.
   the project file when the app can create it, else (and always for an untitled project) a folder
   panel asked once (`chooseFolder`, injectable). The choice is `VEEngine.mediaFolderBookmark` (new
   facade property, saved in the project file under "mediaFolderBookmark" beside "assetBookmarks";
-  setting a different value is an unsaved change, not an undo step; New/Open reset it).
-- Live Photos: `LivePhotos.pairs(in:)` (a still and a movie with one name, within an item, a PHPicker
-  bundle folder or across the items of a batch); the user picks video or still (`askLivePhoto`,
-  "Remember my choice" stored under `livePhotoImport` in the store's defaults); the other part, our own
-  copy, is deleted.
+  setting a different value is an unsaved change, not an undo step; New/Open reset it). The rules
+  changed in the Motion/Photos review fix round (only a chosen folder is stored; see there).
+- Live Photos: `LivePhotos.pairs(in:)` (a still and a movie with one name) within what one promise
+  delivered (since the Motion/Photos review fix round never across the items of a batch); the user
+  picks video or still (`askLivePhoto`, "Remember my choice" stored under `livePhotoImport`, shown in
+  Settings > Media > Live Photos); the other part, our own copy, is deleted.
 - File > Import from Photos… (Shift-Cmd-I): `PhotosImportPicker` (`store.photosPicker`), a
   `PHPickerViewController` sheet (no Photos library entitlement; selection unlimited, images, videos
   and Live Photos, `.current` representation so HEIC/HEVC arrive as they are); results go through
@@ -559,3 +561,84 @@ in the history table of `README.md`.
   come from `playback::pictureTimeFor`. Test media gained `slowmo_hevc_portrait.mov` (HEVC, rotated 90,
   30 fps around a 240 fps section; `slowmoFrameTime` / `slowmoFrameAt` in TestMedia.h), which
   regenerates the generated test media once.
+
+## Motion/Photos review fix round (report `2026-09-24-motion-photos-review.md`)
+- Keyframe inserts (engine). `insertKeyframeKeepingValues(track, staticValue, time)` (Keyframes.h) adds a
+  keyframe that changes no value: inside a segment it divides it exactly like a split (`splitTrack`, the
+  boundary once): a hold stays a hold, a linear segment linear, an eased or custom segment becomes its two
+  exact `Bezier` parts (the inspector shows "Custom"); before the first keyframe, after the last or on an empty
+  track it is `Linear`. `AddKeyframe` (its interpolation is now optional), `SetMotionValue`'s add path,
+  `planMotionKeyframeToggle` and `planMotionAtFrame` insert through it and apply an explicit value or
+  interpolation afterwards. A keyframe whose inherited value is outside the parameter's range (a custom curve
+  from a file that overshoots) is refused with InvalidArgument, as is a split through it. Use it for any new
+  way of adding keyframes.
+- Values on frames. `planMotionValueAtFrame(clip, fd, frame, parameter, value, change)` (one SetMotionTracks
+  change) puts a value on the frame's start, the frame's other keyframes giving way and lending the last one's
+  interpolation (`planMotionAtFrame` now lends the last one's too). The facade's `setMotionValue` uses it when
+  the keyframe the frame shows is not on the frame's start (a split's out point, a sped-up clip), so a nudge
+  shows exactly what was typed.
+- Evaluation time. `motionTimeAt(clip, t)` (Clip.h) is the exact source time, or the next kPreciseTimescale
+  tick when it has no CMTime form (where `keyframeTimeForFrame` puts a keyframe); `motionValuesAt(clip, t)` is
+  what `Scheduler::motionAt`, `VEClipInfo motion(at:)`, Remove Animation and the toggle evaluate. Evaluate
+  Motion only through these.
+- Validation. `TimingCurve::isValid` requires x1 <= x2 (a few ulps); non-custom keyframes must carry the
+  default curve. SetVideoParams, SetClipsParams and placements refuse keyframes on an audio clip
+  (TrackKindMismatch) and new ones outside the clip's used source range (InvalidTime), like AddKeyframe.
+  `isThroughEdit` is false for two pieces of an animated still. JSON warns on an unknown Motion parameter and
+  on a curve on a non-custom keyframe; an unreadable "mediaFolderBookmark" loads with a warning.
+- Facade. An out-of-range `VEMotionParameter` is refused (InvalidArgument); `VEClipInfo` returns NO/empty/nil
+  for it. The Motion refusals include NotRepresentable (its message says where). `moveKeyframeOfClip` is not
+  for drags (use `moveKeyframeGroupOfClip`).
+- Ken Burns picture loader (app). `KenBurnsPictureLoader(assetID:engine:capacity:)` (or `fetch:` for tests)
+  calls `engine.thumbnail` itself and keeps at most `capacity` (6) pictures, least recently shown out; only the
+  overlay observes it. Each landed picture is shown before the latest wanted time is fetched; a failed fetch
+  re-drives it; memory pressure keeps the picture on screen only. Large or transient images belong in a cache
+  of their own, never in `ThumbnailCache` (whose landings redraw the timeline and every bin tile).
+  `MediaBinDiagnostics.tileBodies` counts bin tile bodies for redraw tests.
+- Pasteboard promise contract (app). `PasteboardFilePromise` works over `FilePromiseReceiving`
+  (`NSFilePromiseReceiver` conforms; tests use a double). Every receiver of one drag delivers into one hidden
+  staging folder (`PromiseDropSession`, AppKit requires one destination); each reader call settles on its own
+  (`FilePromiseDelivery`: the file is moved into the Media folder at once, or deleted when the delivery was
+  stopped); completion comes at `fileTypes.count` calls, later calls are handed over (`onLateFiles`, imported
+  into the bin, deleted when the project changed); cancel, and releasing a promise that is still receiving,
+  delete what arrived at once. `PromisedFile` gained `onRename`, `onLateFiles` and `securityScope` (defaults in
+  an extension). A real drop is partitioned once from the drag pasteboard's items (`DragContents`: a file URL
+  wins, promises of non-media types are refused); providers are partitioned once each otherwise.
+  `ReceivedFiles.adopt` is thread safe (one lock, retry on a taken name) and sanitizes names; `adoptItem`
+  unpacks a Live Photo bundle into its parts.
+- Media folder rules (app). `ImportedMediaFolder` makes "Media" (with a `.framewright-media` marker) next to
+  the project or inside a folder the user chose; an existing Media folder is adopted only with the marker
+  ("Media 2" otherwise). Only a chosen folder is stored (`VEEngine.mediaFolderBookmark`); the one next to the
+  project is derived from `projectURL` every time. `ProjectStore.save(to:)` calls `projectWillMove(to:)`, which
+  drops a stored folder that is the Media folder next to the old location on a Save As elsewhere. A stored
+  folder in the Trash is forgotten, a stale bookmark rewritten. Its security scope is a `SecurityScopeLease`
+  that promises still receiving keep alive past New/Open.
+- Arriving media (app). `IncomingMedia.Placement.changeCount` is recorded at the drop (and again after the
+  folder question); `ProjectStore.place(imported:from:at:timelineChanged:emptyRangeOnly:)` leaves the media in
+  the bin with a message when the timeline changed, a gesture or nudge burst is open, the track is gone or the
+  engine refuses it; Photos items (`emptyRangeOnly`) insert when the drop point is no longer empty. Live Photo
+  questions queue (one at a time) and wait while `isGestureActive`. A received file the import refuses is
+  deleted. `IncomingMedia.isReceiving` also covers batches waiting for their question; `arrivingCount`.
+- Documents (app). `DocumentController.confirmStoppingIncomingMedia(because:)` ("Media from Photos is still
+  arriving": Stop / Keep Waiting) runs in `confirmDiscardingChanges(because:)` (New, Open, Open Recent, window
+  close) and `shouldTerminate`; Stop calls `incoming.discardAll()`.
+- Settings for Live Photos (app). Settings > Media > Live Photos (`LivePhotoImportSetting`: ask, video, still)
+  is bound to the `livePhotoImport` key "Remember my choice" writes; `LivePhotos.makeAlert` names it.
+- PHPicker (app). `PhotosImportPicker` is observable (`isPresenting`; File > Import from Photos… is disabled
+  while it shows); a picker whose sheet went away without its delegate no longer blocks it; picks are received
+  on the next main-queue turn (`finishPicking`), after the sheet has gone.
+- Ken Burns UI (app). The Start/End/Duration fields keep what is being typed through model changes
+  (`KenBurnsModel` remembers each field's committed text); `hasUncommittedText` compares trimmed text; equivalent
+  text keeps the range; a duration typed with the playhead off the clip is refused. Presses on the overlay go
+  to one drag layer (`KenBurnsHit.target(at:start:end:)`: corners, labels, edges, inside; coinciding rectangles
+  share their handles) with a `@GestureState`; `applyDrag` ignores a drag that has not moved. The helper stays
+  open when Ken Burns… is pressed again on its clip, closes on a multi-selection and follows the duration
+  display preference (`durationDisplay` is now settable).
+- Motion UI (app). Control-K ignores auto-repeat. The Clip menu's Add/Remove Motion Keyframe item is its own
+  view observing the playhead (`MotionKeyframeMenuItem`, `store.motionKeyframeMenuState(at:)`). The inspector's
+  Video rows are one view (`VideoParameterRows`) whatever the clip's animation. In the marker zone a trim edge
+  nearer than the marker keeps the press.
+- Test media. Generated media directories hold the script's hash (`.script-hash`); `FRAMEWRIGHT_TEST_MEDIA_DIR`
+  is regenerated when incomplete or outdated (`testMediaIsComplete`); older versions are pruned
+  (`pruneTestMediaVersions`); the slow-motion clip's frame times are in the manifest (`frameTicks960`).
+
