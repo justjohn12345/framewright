@@ -690,6 +690,126 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertFalse(model.leadsIntoNext)
     }
 
+    // MARK: Keyframe controls and Add Motion Keyframe
+
+    /// The user's sequence (Part 3 bug): the controls are drawn only from `keyframeControlState`, so
+    /// each step must change it, and the engine must agree.
+    func testKeyframeControlStateFollowsEveryEdit() async throws {
+        let id = try await placedClip()
+        store.playheadTime = frames(10)
+        let initial = try XCTUnwrap(inspector.keyframeControlState(.positionX))
+        XCTAssertEqual(initial, KeyframeControlState())
+
+        inspector.toggleKeyframe(.positionX)
+        let added = try XCTUnwrap(inspector.keyframeControlState(.positionX))
+        XCTAssertTrue(added.hasKeyframeAtPlayhead)
+        XCTAssertTrue(added.isAnimated)
+        XCTAssertEqual(added.interpolation, .linear)
+        XCTAssertNotEqual(added, initial, "the diamond's input changed")
+
+        // Toggled off again: the engine and the controls both lose it.
+        inspector.toggleKeyframe(.positionX)
+        XCTAssertEqual(store.undoActionName, "Delete Keyframe")
+        XCTAssertFalse(try clip(id).isAnimated(.positionX))
+        XCTAssertNil(inspector.keyframeAtPlayhead(.positionX))
+        XCTAssertEqual(inspector.keyframeControlState(.positionX), KeyframeControlState())
+
+        // Another parameter's diamond.
+        inspector.toggleKeyframe(.scale)
+        XCTAssertTrue(try clip(id).isAnimated(.scale))
+        XCTAssertEqual(inspector.keyframeControlState(.scale)?.hasKeyframeAtPlayhead, true)
+        XCTAssertEqual(inspector.keyframeControlState(.positionX)?.hasKeyframeAtPlayhead, false)
+
+        // The interpolation sticks and reads back.
+        inspector.setInterpolation(.easeInOut, for: .scale)
+        XCTAssertEqual(store.undoActionName, "Change Keyframe Interpolation")
+        XCTAssertEqual(inspector.interpolation(.scale), .easeInOut)
+        XCTAssertEqual(inspector.keyframeControlState(.scale)?.interpolation, .easeInOut)
+        XCTAssertEqual(try clip(id).keyframes(for: .scale).first?.interpolation, .easeInOut)
+
+        // Previous/next availability follows the playhead.
+        store.playheadTime = frames(30)
+        XCTAssertEqual(inspector.keyframeControlState(.scale),
+                       KeyframeControlState(hasKeyframeAtPlayhead: false, interpolation: nil, isAnimated: true,
+                                            hasPrevious: true, hasNext: false))
+        store.selection = []
+        XCTAssertNil(inspector.keyframeControlState(.scale), "no controls without a single video clip")
+    }
+
+    func testControlKIsAddMotionKeyframe() {
+        XCTAssertEqual(KeyboardController.action(keyCode: 40, characters: "k", modifiers: .control), .toggleMotionKeyframes)
+        XCTAssertEqual(KeyboardController.action(keyCode: 40, characters: "k", modifiers: []), .shuttleStop)
+        XCTAssertNil(KeyboardController.action(keyCode: 40, characters: "k", modifiers: .command), "Split: the menu's")
+        XCTAssertNil(KeyboardController.action(keyCode: 40, characters: "k", modifiers: [.control, .shift]))
+        XCTAssertFalse(KeyboardController.Action.toggleMotionKeyframes.isTransportOrCancel, "editor window only")
+    }
+
+    func testAddMotionKeyframeAddsTheMissingOnesOrRemovesAllInOneUndoStep() async throws {
+        let id = try await placedClip()
+        store.playheadTime = frames(10)
+        inspector.setValue(.opacity, 60)
+        let keys = KeyboardController(store: store)
+        keys.perform(.toggleMotionKeyframes, on: store)
+        XCTAssertEqual(store.statusMessage, "Keyframes added on 5 parameters")
+        XCTAssertEqual(store.undoActionName, "Add Keyframes")
+        let parameters: [VEMotionParameter] = [.positionX, .positionY, .scale, .rotation, .opacity]
+        for parameter in parameters {
+            XCTAssertNotNil(try clip(id).keyframe(for: parameter, at: frames(10)), "\(parameter.rawValue)")
+        }
+        XCTAssertEqual(try clip(id).keyframe(for: .opacity, at: frames(10))?.value ?? 0, 0.6, accuracy: 1e-12)
+        XCTAssertTrue(store.hasAllMotionKeyframesAtPlayhead(try clip(id)))
+
+        keys.perform(.toggleMotionKeyframes, on: store)
+        XCTAssertEqual(store.statusMessage, "Keyframes removed")
+        XCTAssertFalse(try clip(id).hasKeyframes)
+        XCTAssertEqual(try clip(id).videoParams.opacity, 0.6, accuracy: 1e-12, "the picture stays")
+        store.undo()
+        XCTAssertEqual(try clip(id).allKeyframes.count, 5, "one undo step")
+        store.undo()
+        XCTAssertFalse(try clip(id).hasKeyframes, "one undo step")
+
+        // Some there already: only the missing ones.
+        inspector.toggleKeyframe(.scale)
+        store.toggleMotionKeyframes()
+        XCTAssertEqual(store.statusMessage, "Keyframes added on 4 parameters")
+
+        // Refusals say why.
+        store.playheadTime = frames(90)
+        store.toggleMotionKeyframes()
+        XCTAssertEqual(store.statusMessage, "Move the playhead over the clip to work with its keyframes.")
+        store.playheadTime = frames(20)
+        inspector.beginSliderDrag(.rotation)
+        store.toggleMotionKeyframes()
+        XCTAssertEqual(store.statusMessage, "Finish the current drag first.")
+        inspector.endSliderDrag()
+        store.selection = []
+        store.toggleMotionKeyframes()
+        XCTAssertEqual(store.statusMessage, "Select a single video clip to add Motion keyframes.")
+    }
+
+    func testTheTimelinesContextMenuOffersAddMotionKeyframeOnAVideoClip() async throws {
+        let id = try await placedClip()
+        store.selection = []
+        store.playheadTime = frames(15)
+        let gestures = TimelineGestureController(store: store)
+        let model = store.timelineModel
+        let row = try XCTUnwrap(model.layout(forTrack: try clip(id).trackID))
+        let point = CGPoint(x: model.x(forTime: 1), y: row.y + 20)
+        var items = gestures.contextMenuItems(at: point)
+        let add = try XCTUnwrap(items.first { $0.title == "Add Motion Keyframe  ⌃K" })
+        XCTAssertTrue(add.isEnabled)
+        add.action()
+        XCTAssertEqual(try clip(id).allKeyframes.count, 5)
+        items = gestures.contextMenuItems(at: point)
+        let remove = try XCTUnwrap(items.first { $0.title == "Remove Motion Keyframes  ⌃K" })
+        remove.action()
+        XCTAssertFalse(try clip(id).hasKeyframes)
+        // With the playhead off the clip the item is there but disabled.
+        store.playheadTime = frames(100)
+        items = gestures.contextMenuItems(at: point)
+        XCTAssertEqual(items.first { $0.title == "Add Motion Keyframe  ⌃K" }?.isEnabled, false)
+    }
+
     // MARK: Timeline markers
 
     func testTimelineMarkersFollowSpeedAndAClickMovesThePlayhead() async throws {

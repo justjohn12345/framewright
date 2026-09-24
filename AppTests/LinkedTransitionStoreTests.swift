@@ -186,7 +186,8 @@ final class LinkedTransitionStoreTests: XCTestCase {
         // On a clip: the clip's actions; on empty space: no menu.
         let clipRow = try XCTUnwrap(model.layout(forTrack: v1))
         let clipItems = gestures.contextMenuItems(at: CGPoint(x: model.x(forTime: 0.3), y: clipRow.y + 40))
-        XCTAssertEqual(clipItems.filter { !$0.isSeparator }.map(\.title), ["Delete", "Ripple Delete", "Unlink", "Speed/Duration…"])
+        XCTAssertEqual(clipItems.filter { !$0.isSeparator }.map(\.title),
+                       ["Delete", "Ripple Delete", "Unlink", "Speed/Duration…", "Add Motion Keyframe  ⌃K"])
         XCTAssertFalse(store.selection.isEmpty)
         XCTAssertTrue(gestures.contextMenuItems(at: CGPoint(x: model.x(forTime: 5), y: clipRow.y + 40)).isEmpty)
     }

@@ -142,6 +142,21 @@ extension VEKeyframeInterpolation {
     }
 }
 
+/// What a Video parameter's keyframe controls show, derived from the model. `KeyframeControls` draws
+/// only from this value (a stored, Equatable property), so SwiftUI redraws the controls whenever it
+/// changes: a view that kept only a reference to `InspectorModel` would compare equal after every
+/// edit and keep showing the old diamond and interpolation.
+struct KeyframeControlState: Equatable {
+    /// The frame under the playhead shows a keyframe of the parameter.
+    var hasKeyframeAtPlayhead = false
+    /// That keyframe's interpolation.
+    var interpolation: VEKeyframeInterpolation?
+    /// The parameter has keyframes.
+    var isAnimated = false
+    var hasPrevious = false
+    var hasNext = false
+}
+
 /// The inspector's editing logic, separate from SwiftUI so it can be tested.
 ///
 /// Targets: video parameters apply to every selected clip on a video track, audio parameters to
@@ -564,6 +579,17 @@ final class InspectorModel: ObservableObject {
             ? engine.removeKeyframe(clip: clip.clipID, parameter: motion, at: time)
             : engine.addKeyframe(clip: clip.clipID, parameter: motion, at: time)
         handle(result, mode: .single, clampNote: nil)
+    }
+
+    /// Everything the keyframe controls of `parameter` show (nil when it has none: not a Video
+    /// parameter, or not a single video clip).
+    func keyframeControlState(_ parameter: InspectorParameter) -> KeyframeControlState? {
+        guard hasKeyframeControls(parameter) else { return nil }
+        let keyframe = keyframeAtPlayhead(parameter)
+        return KeyframeControlState(hasKeyframeAtPlayhead: keyframe != nil, interpolation: keyframe?.interpolation,
+                                    isAnimated: isAnimated(parameter),
+                                    hasPrevious: previousKeyframeTime(parameter) != nil,
+                                    hasNext: nextKeyframeTime(parameter) != nil)
     }
 
     /// The interpolation of the keyframe under the playhead (nil when there is none).

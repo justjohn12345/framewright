@@ -785,6 +785,44 @@ final class ProjectStore: ObservableObject {
         requestInspectorFocus(.transitionDuration)
     }
 
+    // MARK: Motion keyframes
+
+    /// The clip Add Motion Keyframe works on: `id` when it is a video clip, else the single selected
+    /// video clip (a linked pair counts as its video clip); nil otherwise.
+    func motionKeyframeClip(_ id: VEClipID? = nil) -> VEClipInfo? {
+        if let id {
+            return clips[id].flatMap { $0.trackKind == .video ? $0 : nil }
+        }
+        let video = selectedClips.filter { $0.trackKind == .video }
+        return video.count == 1 ? video[0] : nil
+    }
+
+    /// Whether every Motion parameter of `clip` has a keyframe on the frame under the playhead (Add
+    /// Motion Keyframe then removes them).
+    func hasAllMotionKeyframesAtPlayhead(_ clip: VEClipInfo) -> Bool {
+        let time = playheadTime
+        return ([.positionX, .positionY, .scale, .rotation, .opacity] as [VEMotionParameter]).allSatisfy {
+            clip.keyframe(for: $0, at: time) != nil
+        }
+    }
+
+    /// Clip > Add Motion Keyframe (Control-K), also in the timeline's context menu: on the frame under
+    /// the playhead, adds keyframes to the Motion parameters of the clip that have none there (the
+    /// picture does not change), or, when all five have one, removes them. One undo step; the status
+    /// line says "Keyframes added on N parameters" or "Keyframes removed", or why nothing happened.
+    func toggleMotionKeyframes(clip id: VEClipID? = nil) {
+        guard !isGestureActive else {
+            statusMessage = "Finish the current drag first."
+            return
+        }
+        guard let clip = motionKeyframeClip(id) else {
+            statusMessage = "Select a single video clip to add Motion keyframes."
+            return
+        }
+        inspector.endNudgeBurst()
+        report(engine.toggleMotionKeyframes(clip: clip.clipID, at: playheadTime))
+    }
+
     // MARK: Neighbours
 
     /// The clip on the same track touching `id` at `edge`: the previous clip ending exactly where it

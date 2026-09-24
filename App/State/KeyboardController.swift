@@ -18,7 +18,8 @@ import Foundation
 /// Option+Delete (only the selected transition), Shift+Delete (ripple delete), I/O (source
 /// in/out), = or + / - (zoom the timeline, like Command-= / Command--), ] / [ (gain of the selected
 /// audio clips ±1 dB, with Shift ±10 dB; a burst is one undo step), Escape (cancel the drag in
-/// progress; passed on when there is none), Command-A (select all clips). Auto-repeat of Space and
+/// progress; passed on when there is none), Command-A (select all clips), Control-K (Add Motion
+/// Keyframe: keyframes on every Motion parameter at the playhead, or none when all are there). Auto-repeat of Space and
 /// J/K/L is ignored (holding L does not race to 8x, holding Space does not toggle). Transport
 /// keys drive the monitor that has focus (see `PlaybackActions`).
 @MainActor
@@ -36,6 +37,9 @@ final class KeyboardController {
         case selectAll
         /// `]` / `[`: gain of the selected audio clips ±1 dB (with Shift, `}` / `{`: ±10 dB).
         case gainUp(big: Bool), gainDown(big: Bool)
+        /// Control-K: Add Motion Keyframe (all five parameters on the frame under the playhead, or
+        /// remove them when all are there; Final Cut Pro's Add Keyframe key).
+        case toggleMotionKeyframes
 
         /// The keys the program output window takes: the transport (play, shuttle, step, start/end)
         /// and Escape. Everything else edits or navigates the timeline.
@@ -87,6 +91,9 @@ final class KeyboardController {
         let flags = modifiers.intersection([.command, .option, .control, .shift])
         if flags == .command, characters.lowercased() == "a" {
             return .selectAll
+        }
+        if flags == .control, characters.lowercased() == "k" {
+            return .toggleMotionKeyframes
         }
         switch keyCode {
         case 53: return flags.isEmpty ? .cancel : nil
@@ -192,6 +199,7 @@ final class KeyboardController {
         case .selectAll: store.selectAll()
         case let .gainUp(big): store.nudgeGain(big ? InspectorModel.bigStep : 1)
         case let .gainDown(big): store.nudgeGain(big ? -InspectorModel.bigStep : -1)
+        case .toggleMotionKeyframes: store.toggleMotionKeyframes()
         }
     }
 }

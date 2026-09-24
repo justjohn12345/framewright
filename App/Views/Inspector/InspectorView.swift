@@ -302,8 +302,8 @@ private struct ParameterRow: View {
                     }
                 }
                 .controlSize(.mini)
-                if inspector.hasKeyframeControls(parameter) {
-                    KeyframeControls(inspector: inspector, parameter: parameter)
+                if let state = inspector.keyframeControlState(parameter) {
+                    KeyframeControls(state: state, parameter: parameter, inspector: inspector)
                 }
             }
         }
@@ -320,29 +320,31 @@ private struct ParameterRow: View {
 /// A Video parameter's keyframe controls (Premiere's Effect Controls): previous keyframe, the
 /// keyframe toggle at the playhead (filled when the frame under the playhead has one; adds or
 /// removes it), next keyframe, and, on a keyframe, its interpolation and "Remove All Keyframes".
+/// Drawn only from `state` (see `KeyframeControlState`); `inspector` performs the actions.
 private struct KeyframeControls: View {
-    let inspector: InspectorModel
+    let state: KeyframeControlState
     let parameter: InspectorParameter
+    let inspector: InspectorModel
 
     var body: some View {
-        let keyframe = inspector.keyframeAtPlayhead(parameter)
-        let animated = inspector.isAnimated(parameter)
+        let hasKeyframe = state.hasKeyframeAtPlayhead
+        let animated = state.isAnimated
         HStack(spacing: 1) {
             Button {
                 inspector.goToKeyframe(parameter, forward: false)
             } label: {
                 Image(systemName: "chevron.left")
             }
-            .disabled(inspector.previousKeyframeTime(parameter) == nil)
+            .disabled(!state.hasPrevious)
             .help("Previous \(parameter.label) keyframe")
             .accessibilityIdentifier("PreviousKeyframe.\(parameter.rawValue)")
             Button {
                 inspector.toggleKeyframe(parameter)
             } label: {
-                Image(systemName: keyframe != nil ? "diamond.fill" : "diamond")
+                Image(systemName: hasKeyframe ? "diamond.fill" : "diamond")
                     .foregroundStyle(animated ? Color.accentColor : Color.secondary)
             }
-            .help(keyframe != nil ? "Remove the \(parameter.label) keyframe at the playhead"
+            .help(hasKeyframe ? "Remove the \(parameter.label) keyframe at the playhead"
                                   : "Add a \(parameter.label) keyframe at the playhead")
             .accessibilityIdentifier("ToggleKeyframe.\(parameter.rawValue)")
             Button {
@@ -350,7 +352,7 @@ private struct KeyframeControls: View {
             } label: {
                 Image(systemName: "chevron.right")
             }
-            .disabled(inspector.nextKeyframeTime(parameter) == nil)
+            .disabled(!state.hasNext)
             .help("Next \(parameter.label) keyframe")
             .accessibilityIdentifier("NextKeyframe.\(parameter.rawValue)")
             Menu {
@@ -358,16 +360,16 @@ private struct KeyframeControls: View {
                     Button {
                         inspector.setInterpolation(choice, for: parameter)
                     } label: {
-                        if keyframe?.interpolation == choice {
+                        if state.interpolation == choice {
                             Label(choice.title, systemImage: "checkmark")
                         } else {
                             Text(choice.title)
                         }
                     }
-                    .disabled(keyframe == nil)
+                    .disabled(!hasKeyframe)
                     .help(choice.explanation)
                 }
-                if keyframe?.interpolation == .custom {
+                if state.interpolation == .custom {
                     Text(VEKeyframeInterpolation.custom.title)
                 }
                 Divider()
@@ -380,7 +382,7 @@ private struct KeyframeControls: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .disabled(!animated)
-            .help(keyframe.map { "Interpolation: \($0.interpolation.title). \($0.interpolation.explanation)" }
+            .help(state.interpolation.map { "Interpolation: \($0.title). \($0.explanation)" }
                 ?? "Interpolation of the keyframe under the playhead")
             .accessibilityIdentifier("KeyframeInterpolation.\(parameter.rawValue)")
         }

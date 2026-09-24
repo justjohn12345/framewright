@@ -610,7 +610,7 @@ final class TimelineGestureController: ObservableObject {
             store.selectedTransitionID = nil
             let selected = store.selectedClips
             let canUnlink = !selected.isEmpty && selected.allSatisfy { $0.linkedClipID != 0 }
-            return [
+            var items = [
                 ContextMenuItem(title: "Delete") { store.deleteSelection(ripple: false) },
                 ContextMenuItem(title: "Ripple Delete") { store.deleteSelection(ripple: true) },
                 .separator,
@@ -621,6 +621,18 @@ final class TimelineGestureController: ObservableObject {
                     store.showSpeedSheet()
                 },
             ]
+            // A video clip under the pointer: Add Motion Keyframe on it at the playhead.
+            if let clip = store.motionKeyframeClip(id) {
+                let playhead = store.playheadTime
+                let over = clip.timelineStart <= playhead && playhead < clip.timelineEnd
+                let all = store.hasAllMotionKeyframesAtPlayhead(clip)
+                items.append(.separator)
+                items.append(ContextMenuItem(title: all ? "Remove Motion Keyframes  ⌃K" : "Add Motion Keyframe  ⌃K",
+                                             isEnabled: over) {
+                    store.toggleMotionKeyframes(clip: clip.clipID)
+                })
+            }
+            return items
         case .track, .none:
             return []
         }

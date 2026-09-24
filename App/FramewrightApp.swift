@@ -133,6 +133,11 @@ struct AppCommands: Commands {
             Button("Transition Duration…") { store.editTransitionDuration() }
                 .disabled(store.selectedTransitionID == nil)
             Divider()
+            // Control-K is handled by KeyboardController (like Delete), so a text field keeps it.
+            Button(store.motionKeyframeClip().map { store.hasAllMotionKeyframesAtPlayhead($0) } == true
+                ? "Remove Motion Keyframes  ⌃K" : "Add Motion Keyframe  ⌃K") { store.toggleMotionKeyframes() }
+                .disabled(store.motionKeyframeClip() == nil)
+            Divider()
             Button("Raise Gain 1 dB  ]") { store.nudgeGain(1) }
                 .disabled(store.selection.isEmpty)
             Button("Lower Gain 1 dB  [") { store.nudgeGain(-1) }
