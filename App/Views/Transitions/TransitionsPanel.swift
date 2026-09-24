@@ -1,8 +1,9 @@
 import SwiftUI
 import FramewrightEngine
 
-/// The transitions of the MVP (shown in the right panel's Effects tab, `EffectsPanel`), to drag
-/// onto a cut between two adjacent clips in the timeline:
+/// The transitions (shown in the right panel's Effects tab, `EffectsPanel`), to drag onto a cut
+/// between two adjacent clips in the timeline, or onto a clip's start or end where nothing touches
+/// it (a fade from or to black / silence); either way a span on the track's lane 0:
 /// Cross Dissolve (video tracks) and Constant Power (audio crossfade). The "+" button next to a
 /// transition (or its context menu) adds it at the cut nearest the playhead, like Shift+Cmd+D
 /// and Option+Shift+Cmd+D; so does a double-click on the row outside its label. New transitions
@@ -55,7 +56,8 @@ struct TransitionsPanel: View {
                     .padding(6)
                     .background(RoundedRectangle(cornerRadius: 5).fill(Color.purple.opacity(0.3)))
             }
-            .help("Drag onto a cut between two clips on a \(kind.trackKind == .video ? "video" : "audio") track")
+            .help("Drag onto a cut between two clips on a \(kind.trackKind == .video ? "video" : "audio") track, "
+                + "or onto a clip's free start or end to fade")
             Spacer(minLength: 4)
             Button {
                 store.addTransitionAtPlayhead(kind)

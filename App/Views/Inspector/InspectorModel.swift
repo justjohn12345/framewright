@@ -482,8 +482,8 @@ final class InspectorModel: ObservableObject {
         }
     }
 
-    /// Resets a whole section on every target (one undo step); a Video reset also removes the
-    /// clips' Motion keyframes.
+    /// Resets a whole section on every target (one undo step); a Video reset sets the static values
+    /// back and keeps the clips' effect spans (they compose onto the reset values).
     func reset(_ section: InspectorSection) {
         guard canEdit() else { return }
         endNudgeBurst()

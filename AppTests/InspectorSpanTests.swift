@@ -296,4 +296,27 @@ final class InspectorSpanTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(store.clips[clip]).motion(at: frames(200)).scale, 1.5, accuracy: 1e-9,
                        "the span's held 3x composes onto it")
     }
+
+    /// Audio crossfades are lane-0 spans too: their shares of the cut are edited like a dissolve's.
+    func testAnAudioCrossfadesSharesAreEditable() async throws {
+        let (_, tone) = try await fixture.importMedia()
+        func place(_ at: Double, _ from: Double, _ to: Double) throws -> VEClipID {
+            XCTAssertTrue(store.place(asset: tone.assetID, at: store.frameTime(at), videoTrack: 0, audioTrack: a1,
+                                      sourceIn: store.frameTime(from), sourceOut: store.frameTime(to), overwrite: true))
+            return try XCTUnwrap(store.selection.first)
+        }
+        let a = try place(0, 0, 1)
+        let b = try place(1, 1, 2)
+        let added = store.engine.addTransition(fromClip: a, toClip: b, duration: frames(12))
+        let id = try XCTUnwrap(added.createdIDs.first?.int64Value, added.message)
+        store.selectedTransitionID = id
+        XCTAssertEqual(inspector.transitionKind, .audioCrossfade)
+        XCTAssertEqual(inspector.transitionShares?.before, 6)
+        inspector.commitShare(before: false, "25 %")
+        XCTAssertEqual(inspector.transitionShares?.after, 3)
+        XCTAssertEqual(inspector.transitionShares?.before, 9)
+        let span = try XCTUnwrap(store.engine.spanInfo(id))
+        XCTAssertEqual(span.start, frames(21), "the crossfade reaches 9 frames before the cut")
+        XCTAssertEqual(span.end, frames(33))
+    }
 }

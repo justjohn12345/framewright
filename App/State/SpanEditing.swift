@@ -142,7 +142,7 @@ struct SpanEdge {
 extension ProjectStore {
     /// How long a Motion span added at the playhead is (or to its clip's end, if shorter).
     static let motionSpanSeconds = 5.0
-    /// The fraction of the start framing a new Motion span pushes in to (the Ken Burns default).
+    /// The fraction of its start framing a new Motion span's end framing shows (the Ken Burns push in).
     static let defaultPushInFraction = 0.8
 
     // MARK: Selection
@@ -208,12 +208,11 @@ extension ProjectStore {
     /// Adds a span of `kind` (Motion or Opacity on a video clip, Gain on an audio clip) over `range`
     /// (timeline, whole frames) on `lane`, or on the first effect lane with room when `lane` is nil,
     /// with its default values, as one undo step ("Add ... Span"), and selects it. Defaults: a Motion
-    /// span on a clip that shows its whole picture at the span's start (the identity framing) gets
-    /// the Ken Burns push in (start: the largest frame-shaped part of the picture, end: `default
-    /// PushInFraction` of it, eased in and out); on a placed clip it starts neutral (the picture keeps
-    /// its framing). An Opacity span fades: 1 -> 0 when it touches the clip's end, 0 -> 1 at its
-    /// start, else 1 -> 1. A Gain span is 0 -> 0 dB. A refusal is reported (with the free range for
-    /// an overlap) and changes nothing.
+    /// span is the Ken Burns push in: it starts on the framing the clip has there (no jump) and ends
+    /// on `defaultPushInFraction` of it around the same point (scale x 1.25), eased in and out. An
+    /// Opacity span fades: 1 -> 0 when it touches the clip's end, 0 -> 1 at its start, else 1 -> 1.
+    /// A Gain span is 0 -> 0 dB. A refusal is reported (with the free range for an overlap) and
+    /// changes nothing.
     @discardableResult
     func addSpan(kind: VESpanKind, lane: Int?, clip id: VEClipID, range: CMTimeRange) -> VEEditResult {
         guard !isGestureActive else {
@@ -265,37 +264,20 @@ extension ProjectStore {
             guard start.opacity != 1 || end.opacity != 1 else { return .success() }
             return engine.performInCoalescingGroup(key) { self.engine.setSpanValues(span.spanID, start: start, end: end) }
         case .motion:
-            guard let push = pushInValues(for: span, of: clip) else { return .success() }
+            // The Ken Burns default: from the framing the clip has there to a gentle push in on it (the
+            // end 1 / defaultPushInFraction larger, around the same point), easing in and out.
+            var end = VESpanValuesUnchanged()
+            end.scale = 1 / Self.defaultPushInFraction
+            let values = engine.performInCoalescingGroup(key) {
+                self.engine.setSpanValues(span.spanID, start: VESpanValuesUnchanged(), end: end)
+            }
+            guard values.ok else { return values }
             return engine.performInCoalescingGroup(key) {
-                self.engine.setSpanValues(span.spanID, start: push.start, end: push.end)
-            }.ok ? engine.performInCoalescingGroup(key) {
                 self.engine.setSpanInterpolation(span.spanID, interpolation: .easeInOut)
-            } : VEEditResult.failure(withMessage: "The Motion span's start and end could not be set.")
+            }
         default:
             return .success()
         }
-    }
-
-    /// The Ken Burns push in for a new neutral Motion span of `clip` (relative values), or nil when
-    /// the clip is placed (its framing at the span's start is not the identity) or has no picture.
-    private func pushInValues(for span: VEEffectSpan, of clip: VEClipInfo) -> (start: VESpanValues, end: VESpanValues)? {
-        guard let asset = asset(clip.assetID), asset.hasVideo, asset.width > 0, asset.height > 0,
-              sequence.width > 0, sequence.height > 0 else { return nil }
-        let fd = frameDuration
-        var startBase = VESpanValues()
-        var endBase = VESpanValues()
-        guard clip.getBaseValues(&startBase, underSpan: span.spanID, atEnd: false, frameDuration: fd),
-              clip.getBaseValues(&endBase, underSpan: span.spanID, atEnd: true, frameDuration: fd),
-              startBase.x == 0, startBase.y == 0, startBase.scale == 1 else { return nil }
-        let frame = CGSize(width: sequence.width, height: sequence.height)
-        let picture = KenBurnsModel.fittedPicture(width: Double(asset.width), height: Double(asset.height), in: frame)
-        let largest = KenBurnsModel.largestRect(in: picture, aspect: frame.width / frame.height)
-        let from = KenBurnsModel.framing(for: largest, sequence: frame, rotationDegrees: startBase.rotationDegrees)
-        let to = KenBurnsModel.framing(for: KenBurnsModel.scaled(largest, by: Self.defaultPushInFraction),
-                                       sequence: frame, rotationDegrees: endBase.rotationDegrees)
-        guard let start = Self.relativeFraming(from, base: startBase),
-              let end = Self.relativeFraming(to, base: endBase) else { return nil }
-        return (start, end)
     }
 
     /// The relative Motion values that show `framing` (position and scale) over `base`; nil when
