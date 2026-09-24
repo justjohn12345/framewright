@@ -500,12 +500,8 @@ TEST_CASE("ProjectJSON: the checked-in version 4 project (keyframes) matches the
     const Fixture expected = keyframedGoldenFixture();
     const std::string path = goldenPath("project-v4.json");
     const std::string written = serializeProject(expected.project) + "\n";
-    if (!std::ifstream(path).good()) {
-        // First run after adding the fixture: write the golden file for review and fail.
-        std::ofstream(path, std::ios::binary) << written;
-        FAIL_CHECK("golden file " << path.c_str() << " was missing and has been written; review and re-run");
-        return;
-    }
+    // The golden file is checked in and never written by the test: a missing one is a failure
+    // (readFile requires it), so a test run cannot bless its own output.
     const std::string text = readFile(path);
     CHECK(text == written);
     const ProjectLoadResult loaded = parseProject(text);
@@ -561,6 +557,34 @@ TEST_CASE("ProjectJSON: keyframe errors and warnings") {
         x[0].erase("time");
         CHECK(contains(loadError(j), "keyframes.x[0].time: missing required field"));
     }
+    SUBCASE("an unknown Motion parameter (a newer version) is dropped with a warning") {
+        json &keyframes = j["sequences"][0]["videoTracks"][0]["clips"][0]["video"]["keyframes"];
+        keyframes["skew"] = json::array({{{"time", {{"value", 30}, {"timescale", 30}}}, {"value", 1.0}}});
+        const ProjectLoadResult r = projectFromJson(j);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(anyContains(r.warnings, "keyframes: unknown Motion parameter \"skew\"; its keyframes were dropped"));
+        CHECK(r.project->sequences[0].videoTracks[0].clips[0].video.keyframes ==
+              fx.project.sequences[0].videoTracks[0].clips[0].video.keyframes);
+    }
+    SUBCASE("a curve on a keyframe that is not custom is ignored with a warning (it round trips equal)") {
+        json &rotation = j["sequences"][0]["videoTracks"][0]["clips"][0]["video"]["keyframes"]["rotation"];
+        rotation[0]["curve"] = json::array({0.1, 0.2, 0.3, 0.4});
+        const ProjectLoadResult r = projectFromJson(j);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(anyContains(r.warnings, "keyframes.rotation[0]: a timing curve on a linear keyframe was ignored"));
+        CHECK(*r.project == fx.project);
+    }
+    SUBCASE("a custom curve whose control points run backwards in time fails validation") {
+        x[1]["curve"] = json::array({0.9, 0.0, 0.1, 1.0});
+        CHECK(contains(loadError(j), "invalid timing curve"));
+    }
+}
+
+TEST_CASE("ProjectJSON: a model keyframe that is not custom cannot carry a curve (it would not round trip)") {
+    Fixture fx = keyframedGoldenFixture();
+    Keyframe &k = fx.sequence().videoTracks[0].clips[0].video.keyframes.rotation[0];
+    k.curve = TimingCurve{0.1, 0.2, 0.3, 0.4};
+    CHECK(contains(problemOf(fx.project), "has a timing curve but is not custom"));
 }
 
 TEST_CASE("ProjectJSON: version 1 migration") {

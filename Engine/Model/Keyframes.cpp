@@ -416,6 +416,11 @@ std::optional<std::string> keyframeTrackProblem(const KeyframeTrack &track, Moti
         if (keyframe.interpolation == KeyframeInterpolation::Bezier && !keyframe.curve.isValid()) {
             return what + " at " + describe(keyframe.time) + " has an invalid timing curve";
         }
+        if (keyframe.interpolation != KeyframeInterpolation::Bezier && !(keyframe.curve == TimingCurve{})) {
+            // Only a custom segment keeps a curve (the project file stores it only there).
+            return what + " at " + describe(keyframe.time) + " has a timing curve but is not custom (" +
+                   nameOf(keyframe.interpolation) + ")";
+        }
     }
     return std::nullopt;
 }

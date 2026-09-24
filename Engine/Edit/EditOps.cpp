@@ -44,6 +44,12 @@ EditResult requireExact(CMTime t, const char *what) {
     return EditResult::success();
 }
 
+// Refusal of `keyframes` as the new keyframes of `clip` (whose timing and current keyframes are
+// used) on a track of `kind`: Motion only on video tracks (TrackKindMismatch), and every keyframe
+// within the clip's used source range unless the clip already has that very keyframe (one a trim
+// hid), the rule AddKeyframe and SetMotionTracks apply (InvalidTime). Defined with the Motion ops.
+EditResult checkClipKeyframes(const Clip &clip, TrackKind kind, const MotionKeyframes &keyframes);
+
 EditResult checkVideoParams(const VideoParams &v) {
     if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.scale) || !std::isfinite(v.rotationDegrees) ||
         !std::isfinite(v.opacity)) {
@@ -176,6 +182,13 @@ EditResult buildClip(const Project &project, const Sequence &sequence, const Tra
     }
     if (EditResult r = checkAudioParams(clip.audio, clip.duration()); !r) {
         return r;
+    }
+    if (!placement.video.keyframes.empty()) {
+        Clip placed = clip;
+        placed.video.keyframes = MotionKeyframes{}; // a new clip has no keyframes a trim hid
+        if (EditResult r = checkClipKeyframes(placed, track.kind, placement.video.keyframes); !r) {
+            return r;
+        }
     }
     out = std::move(clip);
     return EditResult::success();
@@ -789,6 +802,9 @@ EditResult SetVideoParams::perform(const Project &, Sequence &sequence, IdGenera
     if (EditResult r = checkVideoParams(params_); !r) {
         return r;
     }
+    if (EditResult r = checkClipKeyframes(*clip, track->kind, params_.keyframes); !r) {
+        return r;
+    }
     clip->video = params_;
     return EditResult::success();
 }
@@ -853,6 +869,9 @@ EditResult SetClipsParams::perform(const Project &, Sequence &sequence, IdGenera
                                            "clip " + idString(change.clipId.value()) + " is not on a video track");
             }
             if (EditResult r = checkVideoParams(*change.video); !r) {
+                return r;
+            }
+            if (EditResult r = checkClipKeyframes(*clip, track->kind, change.video->keyframes); !r) {
                 return r;
             }
             clip->video = *change.video;
@@ -1033,6 +1052,27 @@ EditResult requireInsideClip(const Clip &clip, CMTime time) {
                                                                " is outside the clip's source range (" +
                                                                describe(in->toTimeRounded()) + " - " +
                                                                describe(out->toTimeRounded()) + ")");
+    }
+    return EditResult::success();
+}
+
+EditResult checkClipKeyframes(const Clip &clip, TrackKind kind, const MotionKeyframes &keyframes) {
+    if (keyframes.empty()) {
+        return EditResult::success();
+    }
+    if (kind != TrackKind::Video) {
+        return EditResult::failure(EditError::TrackKindMismatch, "clip " + idString(clip.id.value()) +
+                                                                     " is on an audio track, which has no Motion");
+    }
+    for (const MotionParameter parameter : kMotionParameters) {
+        const KeyframeTrack &current = clip.video.keyframes.track(parameter);
+        for (const Keyframe &keyframe : keyframes.track(parameter)) {
+            if (EditResult r = requireInsideClip(clip, keyframe.time); !r) {
+                if (std::find(current.begin(), current.end(), keyframe) == current.end()) {
+                    return r;
+                }
+            }
+        }
     }
     return EditResult::success();
 }
@@ -1881,7 +1921,9 @@ bool isThroughEdit(const Sequence &sequence, ClipId fromClipId, ClipId toClipId)
         return false;
     }
     if (from->isStill) {
-        return true; // a still shows the same picture on both sides
+        // A still shows the same picture on both sides, unless it is animated: a still's keyframes
+        // are measured from its own start, so identical keyframes restart the move at the cut.
+        return !from->video.isAnimated();
     }
     const auto out = from->exactSourceOut();
     const auto in = ExactTime::from(to->sourceIn);

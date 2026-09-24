@@ -136,6 +136,43 @@ TEST_CASE("Keyframes: a timing curve divided at any point reproduces it exactly"
     }
 }
 
+TEST_CASE("Keyframes: a curve part divided again, and cuts near either end, match the reference") {
+    // Every part is compared with the independent reference of the undivided curve.
+    for (const TimingCurve curve : {timingCurveFor(KeyframeInterpolation::EaseInOut),
+                                    timingCurveFor(KeyframeInterpolation::EaseOut), TimingCurve{0.3, 0.1, 0.6, 0.95}}) {
+        for (const double first : {1e-3, 0.37, 0.999}) {
+            const CurveSplit outer = splitCurve(curve, first);
+            REQUIRE(outer.before.has_value());
+            REQUIRE(outer.after.has_value());
+            CHECK(outer.before->isValid());
+            CHECK(outer.after->isValid());
+            // The part after the cut, cut again at 0.6 of its own time.
+            const CurveSplit inner = splitCurve(*outer.after, 0.6);
+            REQUIRE(inner.before.has_value());
+            REQUIRE(inner.after.has_value());
+            CHECK(inner.before->isValid());
+            CHECK(inner.after->isValid());
+            const double innerCut = first + (1 - first) * 0.6;
+            const double atInner = outer.valueAtSplit + (1 - outer.valueAtSplit) * inner.valueAtSplit;
+            for (int i = 0; i <= 50; ++i) {
+                const double u = i / 50.0;
+                double actual = 0;
+                if (u < first) {
+                    actual = outer.before->valueAt(u / first) * outer.valueAtSplit;
+                } else if (u < innerCut) {
+                    actual = outer.valueAtSplit +
+                             inner.before->valueAt((u - first) / (innerCut - first)) * (atInner - outer.valueAtSplit);
+                } else {
+                    actual = atInner + inner.after->valueAt((u - innerCut) / (1 - innerCut)) * (1 - atInner);
+                }
+                CAPTURE(first);
+                CAPTURE(u);
+                CHECK(actual == doctest::Approx(referenceCurve(curve, u)).epsilon(1e-9));
+            }
+        }
+    }
+}
+
 TEST_CASE("Keyframes: splitting a track keeps every value on both sides") {
     const std::vector<KeyframeInterpolation> kinds{KeyframeInterpolation::Hold, KeyframeInterpolation::Linear,
                                                    KeyframeInterpolation::EaseOut, KeyframeInterpolation::EaseIn,
@@ -200,6 +237,16 @@ TEST_CASE("Keyframes: validation") {
     Keyframe bent = key(f30(0), 1, KeyframeInterpolation::Bezier);
     bent.curve = TimingCurve{1.5, 0, 0.5, 1};
     CHECK(keyframeTrackProblem({bent}, MotionParameter::X).has_value());
+    // Control points that run backwards in time (x1 > x2): splitCurve could not keep their parts.
+    CHECK_FALSE(TimingCurve({0.9, 0, 0.1, 1}).isValid());
+    bent.curve = TimingCurve{0.9, 0, 0.1, 1};
+    CHECK(keyframeTrackProblem({bent}, MotionParameter::X).has_value());
+    CHECK(TimingCurve({0.5, 0, 0.5, 1}).isValid());
+    CHECK(TimingCurve({0.5 + 1e-16, 0, 0.5, 1}).isValid()); // rounding of a split part
+    // Only a custom keyframe keeps a curve.
+    Keyframe straight = key(f30(0), 1);
+    straight.curve = TimingCurve{0.42, 0, 0.58, 1};
+    CHECK(keyframeTrackProblem({straight}, MotionParameter::X).has_value());
 
     // A clip's keyframes are part of the model's invariants; audio clips have none.
     Fixture fx;

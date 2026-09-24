@@ -46,6 +46,8 @@ struct ClipPlacement {
     CMTime sourceIn = kCMTimeZero;
     CMTime sourceOut = kCMTimeInvalid; // invalid: to the end of the media
     Ratio speed{1, 1};                 // see speedFromDouble(); ignored for stills
+    // Keyframes only on a video track (TrackKindMismatch) and within the placed source range
+    // (InvalidTime), as AddKeyframe requires.
     VideoParams video;
     AudioParams audio;
 };
@@ -247,7 +249,9 @@ class RippleDelete final : public SequenceCommand {
 };
 
 // Sets a clip's video parameters, keyframes included (the facade keeps a clip's keyframes when
-// the inspector sets static values).
+// the inspector sets static values). Keyframes follow AddKeyframe's rules: only on a clip of a
+// video track (TrackKindMismatch), and within the clip's used source range unless the clip already
+// has that very keyframe (one a trim hid; InvalidTime). Static values are accepted on any clip.
 class SetVideoParams final : public SequenceCommand {
   public:
     SetVideoParams(SequenceId sequenceId, ClipId clipId, VideoParams params);
@@ -279,7 +283,8 @@ class SetAudioParams final : public SequenceCommand {
     AudioParams params_;
 };
 
-// One clip's new parameters in a SetClipsParams batch; parts left empty are unchanged.
+// One clip's new parameters in a SetClipsParams batch; parts left empty are unchanged. Keyframes
+// in `video` follow SetVideoParams's rules.
 struct ClipParamsChange {
     ClipId clipId{};
     std::optional<VideoParams> video;
@@ -739,7 +744,9 @@ std::optional<TransitionId> linkedTransition(const Sequence &sequence, Transitio
 // Whether the cut from `fromClipId` to `toClipId` is a through edit: both clips play the same
 // asset at the same speed with the same parameters, and the second continues exactly where the
 // first stops in the source (a plain split). Both sides of a transition there show (or play)
-// the same media, so it has no visible (audible) effect.
+// the same media, so it has no visible (audible) effect. Two pieces of one still are a through
+// edit only when unanimated: a still's keyframes are measured from its own start, so identical
+// keyframes on both pieces restart the move at the cut.
 bool isThroughEdit(const Sequence &sequence, ClipId fromClipId, ClipId toClipId);
 
 // The longest transition a cut can take, and what stops a longer one.

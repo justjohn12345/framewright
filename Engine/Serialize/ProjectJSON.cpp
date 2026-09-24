@@ -2,6 +2,7 @@
 
 #include "../Model/Validation.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <utility>
@@ -375,6 +376,11 @@ Keyframe parseKeyframe(const Node &node, Warnings &warnings) {
     keyframe.value = node.field("value").asDouble();
     keyframe.interpolation =
         node.has("interpolation") ? parseInterpolation(node.field("interpolation"), warnings) : KeyframeInterpolation::Linear;
+    if (keyframe.interpolation != KeyframeInterpolation::Bezier && node.has("curve")) {
+        // Only a custom (Bezier) segment has a curve; the others use their own (validation).
+        warnings.push_back(node.path() + ": a timing curve on a " + nameOf(keyframe.interpolation) +
+                           " keyframe was ignored");
+    }
     if (keyframe.interpolation == KeyframeInterpolation::Bezier) {
         const Node curve = node.field("curve");
         if (curve.arraySize() != 4) {
@@ -397,6 +403,15 @@ VideoParams parseVideoParams(const Node &node, Warnings &warnings) {
     if (node.has("keyframes")) {
         const Node keyframes = node.field("keyframes");
         keyframes.requireObject();
+        // A parameter this version does not know (from a newer one) cannot be kept: say so.
+        for (const auto &entry : keyframes.value().items()) {
+            const bool known = std::any_of(kMotionParameters.begin(), kMotionParameters.end(),
+                                           [&](MotionParameter p) { return entry.key() == nameOf(p); });
+            if (!known) {
+                warnings.push_back(keyframes.path() + ": unknown Motion parameter \"" + entry.key() +
+                                   "\"; its keyframes were dropped");
+            }
+        }
         for (const MotionParameter parameter : kMotionParameters) {
             if (!keyframes.has(nameOf(parameter))) {
                 continue;
