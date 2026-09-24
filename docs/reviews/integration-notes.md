@@ -427,6 +427,25 @@ in the history table of `README.md`.
   rectangle), `neighbourNote` when the framing had to be kept inside this picture. Rotation is not taken
   from the neighbour by the helper (the rectangle is drawn with this clip's rotation); Match copies it.
 
+### Keyframe controls fix and Add Motion Keyframe
+- Stale inspector controls (hands-on bug: a diamond that would not toggle off, an interpolation that did not
+  stick): `KeyframeControls` held only `let inspector` and `let parameter`, which compare equal after every
+  edit, so SwiftUI never re-ran its body. It now draws only from `KeyframeControlState` (Equatable, from
+  `InspectorModel.keyframeControlState(_:)`); the model reference is kept for actions. Rule for new views: a
+  subview that reads model state must either observe an ObservableObject that publishes the change
+  (`@ObservedObject var store`, the playhead model, ...) or take the derived values as stored properties;
+  a bare class reference does not redraw it. `InspectorModel` publishes only `message`: views that show
+  model values observe the store. Checked: `ParameterRow`, `AnimatedParameterRows`, `ParameterSection`,
+  `ClipInfoSection`, `TransitionInspector` and `KenBurnsOverlay` observe what they draw.
+- Add Motion Keyframe: `toggleMotionKeyframes(clip:at:)` (`planMotionKeyframeToggle`, one `SetMotionTracks`,
+  "Add Keyframes" / "Remove Keyframes"; note "Keyframes added on N parameters" / "Keyframes removed"): keys
+  every Motion parameter without a keyframe on the frame (values unchanged), or removes all five when all are
+  there (a track left empty keeps the frame's value). App: `store.toggleMotionKeyframes(clip:)`
+  (`isGestureActive` guard, single video clip or the clip under the pointer), `KeyboardController.Action
+  .toggleMotionKeyframes` on Control-K (handled by the key monitor, so a text field keeps the key; the Clip
+  menu item shows "⌃K" in its title like Delete does), and the timeline's clip context menu (disabled
+  when the playhead is not over the clip; the title says Add or Remove).
+
 ## Photos drops (feature request 9)
 - Drop types: `MediaDrop.types` = public.file-url plus `UTType.filePromiseTypes` (every
   `NSFilePromiseReceiver.readableDraggedTypes` entry and kPasteboardTypeFileURLPromise; the named ones

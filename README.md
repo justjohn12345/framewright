@@ -34,7 +34,8 @@ audited the code line by line.
   Monitor on Second Display shows the program full screen on another display, mirrored and in
   sync with the in-window monitor.
 - Keyframed Motion: position, scale, rotation and opacity animate with keyframes (a keyframe
-  toggle per parameter at the playhead, previous/next, hold, linear and ease interpolation),
+  toggle per parameter at the playhead, previous/next, hold, linear and ease interpolation;
+  Control-K keys all five parameters at the playhead, or removes them),
   shown as markers on the clip in the timeline; keyframes stay on their pictures through trims,
   speed changes and splits. A Ken Burns helper (as in Final Cut Pro) draws a start and an end
   rectangle over the picture at the playhead and turns them into an eased pan and zoom over the
