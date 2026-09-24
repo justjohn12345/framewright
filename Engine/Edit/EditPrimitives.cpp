@@ -57,6 +57,10 @@ EditResult retimeRefusal(RetimeResult result, ClipId clipId, CMTime at) {
         return EditResult::success();
     case RetimeResult::NotRepresentable:
         return notRepresentable(clipId, at);
+    case RetimeResult::HeldValuesOverflow:
+        return EditResult::failure(EditError::InvalidArgument,
+                                   "clip " + std::to_string(clipId.value()) + " cannot start at " + describe(at) +
+                                       ": the values its spans hold before that point are too large to keep");
     case RetimeResult::SpanCurveOvershoot:
         break;
     }

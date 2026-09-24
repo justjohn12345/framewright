@@ -1,7 +1,8 @@
 // The effect span facade (VEEngine "Effect spans" and "Transitions"): every call returns the span
 // as it is after the edit, is one undo step (one change), refuses with a code and a reason (an
 // overlap with the nearest free range), coalesces in gesture groups, survives a save and an open;
-// the Ken Burns move and matching a neighbour's edge on spans; transitions as lane-0 spans with
+// the Ken Burns move and matching a neighbour's edge on spans (a move holds its end framing after
+// its end; a second move on its lane starts from that framing); transitions as lane-0 spans with
 // their shares of the cut, fades, and linked pairs keeping the same range relative to the cut.
 // Uses h264_1080p30.mp4 (10 s, 30 fps, with audio).
 
@@ -126,7 +127,9 @@ VESpanValues values(double x, double scale) {
     VEClipInfo *info = [engine clipInfo:video];
     XCTAssertEqualWithAccuracy([info videoParamsAtTime:frames30(25)].x, -60 + 150 * 0.5, 1e-9, @"halfway, linear");
     XCTAssertEqualWithAccuracy([info videoParamsAtTime:frames30(25)].scale, 1.5, 1e-12);
-    XCTAssertEqual([info videoParamsAtTime:frames30(40)].x, 0, @"the span's end is exclusive");
+    XCTAssertEqual([info videoParamsAtTime:frames30(9)].x, 0, @"nothing before the span");
+    XCTAssertEqual([info videoParamsAtTime:frames30(40)].x, 90, @"from its end the end value holds");
+    XCTAssertEqual([info videoParamsAtTime:frames30(89)].scale, 2, @"to the clip's end");
 
     VEEditResult *eased = [engine setInterpolationOfSpan:span.spanID interpolation:VEKeyframeInterpolationEaseIn];
     XCTAssertTrue(eased.ok);
@@ -347,6 +350,69 @@ VESpanValues values(double x, double scale) {
     XCTAssertEqual([engine applyKenBurnsToSpan:999 start:start end:end interpolation:VEKeyframeInterpolationLinear]
                        .errorCode,
                    VEEditErrorSpanNotFound);
+}
+
+- (void)testAKenBurnsMoveHoldsItsEndFramingAndTheNextMoveStartsThere {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    // The 10 s movie over 300 frames; a move over [60, 150) and a later one on the same lane over
+    // [210, 270).
+    const auto [video, audio] = [self place:engine asset:asset at:0 from:0 to:300];
+    (void)audio;
+    const VESpanID first =
+        [engine addSpanOfKind:VESpanKindMotion lane:1 clip:video range:framesRange(60, 150)].span.spanID;
+    const VEMotionFraming own{0, 0, 1};
+    const VEMotionFraming pushed{-150, 80, 1.8};
+    XCTAssertTrue(
+        [engine applyKenBurnsToSpan:first start:own end:pushed interpolation:VEKeyframeInterpolationEaseInOut].ok);
+    VEClipInfo *info = [engine clipInfo:video];
+    VEVideoParams end = VEVideoParamsIdentity();
+    XCTAssertTrue([info getMotion:&end atEdgeOfSpan:first atEnd:YES frameDuration:frames30(1)]);
+    XCTAssertEqualWithAccuracy(end.scale, 1.8, 1e-12);
+    // motion(at:): the clip's framing before the move, the end framing from its end to the clip's end.
+    for (const int64_t f : {0, 30, 59}) {
+        const VEVideoParams shown = [info videoParamsAtTime:frames30(f)];
+        XCTAssertEqual(shown.x, 0, @"frame %lld", f);
+        XCTAssertEqual(shown.scale, 1, @"frame %lld", f);
+    }
+    XCTAssertLessThan([info videoParamsAtTime:frames30(149)].scale, 1.8, @"the last frame is a frame short");
+    for (const int64_t f : {150, 200, 299, 305}) {
+        const VEVideoParams shown = [info videoParamsAtTime:frames30(f)];
+        XCTAssertEqual(shown.x, end.x, @"frame %lld", f);
+        XCTAssertEqual(shown.y, end.y, @"frame %lld", f);
+        XCTAssertEqual(shown.scale, end.scale, @"frame %lld", f);
+    }
+
+    // A second move on the same lane: its start edge reads the held framing, so a move from there
+    // keeps its start values neutral and continues without a jump.
+    VEEditResult *added = [engine addSpanOfKind:VESpanKindMotion lane:1 clip:video range:framesRange(210, 270)];
+    XCTAssertTrue(added.ok, @"%@", added.message);
+    const VESpanID second = added.span.spanID;
+    info = [engine clipInfo:video];
+    VEVideoParams start = VEVideoParamsIdentity();
+    XCTAssertTrue([info getMotion:&start atEdgeOfSpan:second atEnd:NO frameDuration:frames30(1)]);
+    XCTAssertEqual(start.x, end.x);
+    XCTAssertEqual(start.scale, end.scale);
+    const VEMotionFraming from{start.x, start.y, start.scale};
+    const VEMotionFraming panned{150, 80, 1.8};
+    VEEditResult *kb = [engine applyKenBurnsToSpan:second
+                                             start:from
+                                               end:panned
+                                     interpolation:VEKeyframeInterpolationLinear];
+    XCTAssertTrue(kb.ok, @"%@", kb.message);
+    XCTAssertEqualWithAccuracy(kb.span.startValues.x, 0, 1e-9);
+    XCTAssertEqualWithAccuracy(kb.span.startValues.scale, 1, 1e-12);
+    info = [engine clipInfo:video];
+    XCTAssertEqualWithAccuracy([info videoParamsAtTime:frames30(210)].x, [info videoParamsAtTime:frames30(209)].x,
+                               1e-9);
+    XCTAssertEqualWithAccuracy([info videoParamsAtTime:frames30(240)].x, -150 + 300 * 0.5, 1e-9, @"halfway, linear");
+    XCTAssertEqualWithAccuracy([info videoParamsAtTime:frames30(299)].x, 150, 1e-9, @"the second end framing holds");
+    XCTAssertEqualWithAccuracy([info videoParamsAtTime:frames30(299)].scale, 1.8, 1e-12);
+    // The first move's framings still read back as applied.
+    VEVideoParams again = VEVideoParamsIdentity();
+    XCTAssertTrue([info getMotion:&again atEdgeOfSpan:first atEnd:YES frameDuration:frames30(1)]);
+    XCTAssertEqualWithAccuracy(again.x, pushed.x, 1e-9);
+    XCTAssertEqualWithAccuracy(again.scale, pushed.scale, 1e-12);
 }
 
 - (void)testMatchingASpanEdgeContinuesTheNeighbour {

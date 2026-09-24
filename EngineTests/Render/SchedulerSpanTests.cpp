@@ -1,8 +1,10 @@
 // The Scheduler evaluates effect spans and lane-0 transitions: layers carry the composed Motion at
-// speeds other than 1, at 29.97 fps and on stills; asymmetric dissolves and fades to and from black
-// mix at frame centres; the audio graph's level follows Gain spans exactly in dB (linear spans as
-// one ramp, eased ones in steps of at most kEasedGainStep), lane-0 fades and a 70/30 constant-power
-// crossfade. Checked against the independent references of SpanReference.h.
+// speeds other than 1, at 29.97 fps and on stills, each span holding its end value after its end
+// (also in a dissolve's tail handle, and under a later span on its lane); asymmetric dissolves and
+// fades to and from black mix at frame centres; the audio graph's level follows Gain spans exactly
+// in dB (linear spans as one ramp, eased ones in steps of at most kEasedGainStep, a held level as
+// flat segments), lane-0 fades and a 70/30 constant-power crossfade. Checked against the
+// independent references of SpanReference.h.
 
 #include "../../Engine/Render/Scheduler.h"
 #include "../Edit/EditTestSupport.h"
@@ -70,9 +72,10 @@ TEST_CASE("Scheduler spans: layers carry the composed Motion at speed 3/2, again
         const RenderGraph graph = Scheduler::renderGraphAt(fx.sequence(), fx.project, f30(f));
         const VideoLayer *layer = layerOf(graph, id);
         REQUIRE(layer != nullptr);
-        CHECK(close(layer->transform.x, referenceSpanValue(1.5, 3.5, 0, 300, KI::EaseOut, s).value_or(0)));
-        CHECK(close(layer->transform.rotationDegrees, referenceSpanValue(1.5, 3.5, 0, 45, KI::EaseOut, s).value_or(0)));
-        CHECK(close(layer->opacity, 0.5 * referenceSpanValue(2, 3, 1, 0, KI::Linear, s).value_or(1)));
+        CHECK(close(layer->transform.x, referenceHeldSpanValue(1.5, 3.5, 0, 300, KI::EaseOut, s).value_or(0)));
+        CHECK(close(layer->transform.rotationDegrees,
+                    referenceHeldSpanValue(1.5, 3.5, 0, 45, KI::EaseOut, s).value_or(0)));
+        CHECK(close(layer->opacity, 0.5 * referenceHeldSpanValue(2, 3, 1, 0, KI::Linear, s).value_or(1)));
         const VideoParams direct = Scheduler::motionAt(fx.clip(id), f30(f));
         CHECK(direct.x == layer->transform.x);
         CHECK(direct.opacity == layer->opacity);
@@ -107,16 +110,23 @@ TEST_CASE("Scheduler spans: at 29.97 fps with an exact source time off every CMT
         const RenderGraph graph = Scheduler::renderGraphAt(fx.sequence(), fx.project, t);
         const VideoLayer *layer = layerOf(graph, clip.id);
         REQUIRE(layer != nullptr);
-        const double want = f < 10 || f >= 80 ? 1.0
-                                              : *referenceSpanValue(start, end, 1, 3, KI::EaseInOut, source->toDouble());
+        const double want = f < 10    ? 1.0
+                            : f >= 80 ? 3.0 // held from the span's end
+                                      : *referenceSpanValue(start, end, 1, 3, KI::EaseInOut, source->toDouble());
         // The span's edges sit on the tick at or after the frames' exact source times, so the
         // reference in doubles agrees to within a tick's worth of the ramp.
         CHECK(close(layer->transform.scale, want, 1e-7));
     }
-    // The first frame of the span shows its start value exactly, the frame before it nothing.
+    // The first frame of the span shows its start value exactly, the frame before it nothing, and
+    // every frame from its end on its end value exactly.
     const RenderGraph first = Scheduler::renderGraphAt(fx.sequence(), fx.project, CMTimeMake(1001 * 10, 30000));
     REQUIRE(layerOf(first, clip.id) != nullptr);
     CHECK(layerOf(first, clip.id)->transform.scale == 1.0);
+    for (int f = 80; f < 90; ++f) {
+        const RenderGraph held = Scheduler::renderGraphAt(fx.sequence(), fx.project, CMTimeMake(1001 * f, 30000));
+        REQUIRE(layerOf(held, clip.id) != nullptr);
+        CHECK(layerOf(held, clip.id)->transform.scale == 3.0);
+    }
 }
 
 TEST_CASE("Scheduler spans: a still's spans are measured from its start") {
@@ -131,7 +141,8 @@ TEST_CASE("Scheduler spans: a still's spans are measured from its start") {
         const VideoLayer *layer = layerOf(graph, still);
         REQUIRE(layer != nullptr);
         CHECK(layer->sourceTime == kCMTimeZero);
-        CHECK(close(layer->transform.scale, referenceSpanValue(15, 45, 0.5, 1.5, KI::EaseIn, f - 40.0).value_or(1)));
+        const double want = referenceHeldSpanValue(15, 45, 0.5, 1.5, KI::EaseIn, f - 40.0).value_or(1);
+        CHECK(close(layer->transform.scale, want));
     }
 }
 
@@ -245,7 +256,7 @@ TEST_CASE("Scheduler spans: audio fades in and out are linear gains; the 70/30 c
     CHECK(close(*gainAt(graph, b, f30(60)), std::pow(10, -4 / 20.0) * std::sin(0.7 * M_PI / 2)));
 }
 
-TEST_CASE("Scheduler spans: Gain spans add decibels exactly; eased ones in steps of at most 5 ms") {
+TEST_CASE("Scheduler spans: Gain spans add decibels exactly; eased ones in steps of at most 5 ms; ends hold") {
     Fixture fx;
     const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 0, 90, 0);
     fx.sequence().findClip(c)->audio.gainDb = -2;
@@ -263,23 +274,207 @@ TEST_CASE("Scheduler spans: Gain spans add decibels exactly; eased ones in steps
         const double to = seconds(segment.timelineRange.end);
         if (from >= 1.5 && to <= 2.5) {
             CHECK(to - from <= Scheduler::kEasedGainStep + 1e-12);
-            // Exact at the step's edges.
+            // Exact at the step's edges (on top of the linear span's held -18 dB).
             CHECK(close(segment.level.start,
-                        -2 + *referenceSpanValue(1.5, 2.5, 0, 9, KI::EaseInOut, from)));
+                        -2 - 18 + *referenceSpanValue(1.5, 2.5, 0, 9, KI::EaseInOut, from)));
         }
     }
     for (int k = 0; k < 720; ++k) {
         const double s = k / 240.0;
         const auto gain = gainAt(graph, c, CMTimeMake(k, 240));
         REQUIRE(gain.has_value());
-        const double db = -2 + referenceSpanValue(0.5, 1.5, 0, -18, KI::Linear, s).value_or(0) +
-                          referenceSpanValue(1.5, 2.5, 0, 9, KI::EaseInOut, s).value_or(0);
+        const double db = -2 + referenceHeldSpanValue(0.5, 1.5, 0, -18, KI::Linear, s).value_or(0) +
+                          referenceHeldSpanValue(1.5, 2.5, 0, 9, KI::EaseInOut, s).value_or(0);
         CAPTURE(s);
         // Linear in dB is exact; the eased span between its 5 ms steps is within 0.01 dB.
         CHECK(std::fabs(20 * std::log10(*gain) - db) < (s >= 1.5 && s < 2.5 ? 0.01 : 1e-9));
     }
-    // A span's end is exclusive: at 1.5 s the linear span no longer acts (its -18 dB is gone).
-    CHECK(close(20 * std::log10(*gainAt(graph, c, CMTimeMake(3, 2))), -2.0));
+    // From 1.5 s the linear span holds its -18 dB (the eased one starts there, at 0 dB of its own);
+    // from 2.5 s both end levels hold: one flat segment to the clip's end.
+    CHECK(close(20 * std::log10(*gainAt(graph, c, CMTimeMake(3, 2))), -20.0));
     CHECK(close(20 * std::log10(*gainAt(graph, c, CMTimeMake(3, 2) - CMTimeMake(1, 48000))),
                 -2 - 18 * (1 - 1.0 / 48000), 1e-6));
+    std::size_t heldSegments = 0;
+    for (const AudioSegment &segment : graph.segments) {
+        if (segment.timelineRange.start >= CMTimeMake(5, 2)) {
+            ++heldSegments;
+            CHECK(segment.level.start == -2 - 18 + 9);
+            CHECK(segment.level.end == -2 - 18 + 9);
+        }
+    }
+    CHECK(heldSegments == 1);
+}
+
+TEST_CASE("Scheduler spans: held values per frame at 29.97 and 999/1000, on a chained lane, a still, a tail handle") {
+    Fixture fx;
+    fx.sequence().frameDuration = CMTimeMake(1001, 30000);
+    // V1: 120 NTSC frames of av24 at 999/1000 from an in point with no 30000 form, a Motion move
+    // over frames [10, 40) held, then a second move on the same lane over [70, 100) starting
+    // neutral; an Opacity span on lane 2 over [20, 50) held. It ends in a cross dissolve into the
+    // next clip (6 frames before the cut, 4 after), whose tail handle frames keep the held values.
+    // V2: a still whose span over its frames [5, 25) holds.
+    auto ntsc = [](std::int64_t frames) { return CMTimeMake(1001 * frames, 30000); };
+    Clip clip;
+    clip.id = fx.project.ids.make<ClipId>();
+    clip.assetId = fx.av24;
+    clip.trackId = fx.v1;
+    clip.timelineDuration = ntsc(120);
+    clip.sourceIn = CMTimeMake(44101, 44100);
+    clip.speed = Ratio{999, 1000};
+    EffectSpan dissolve;
+    dissolve.id = fx.project.ids.make<SpanId>();
+    dissolve.lane = kTransitionLane;
+    dissolve.kind = SpanKind::Transition;
+    dissolve.edge = ClipEdge::Tail;
+    dissolve.start = -ntsc(6);
+    dissolve.end = ntsc(4);
+    clip.spans.push_back(dissolve);
+    fx.track(fx.v1).clips.push_back(clip);
+    Clip next;
+    next.id = fx.project.ids.make<ClipId>();
+    next.assetId = fx.av24;
+    next.trackId = fx.v1;
+    next.timelineStart = ntsc(120);
+    next.timelineDuration = ntsc(30);
+    next.sourceIn = CMTimeMake(10, 1);
+    fx.track(fx.v1).clips.push_back(next);
+    const ClipId still = fx.addClip(fx.v2, fx.still, 0, 60);
+    fx.sequence().findClip(still)->timelineDuration = ntsc(60);
+    SpanTracks grow;
+    grow.scale = rampTrack(1, 1.4, f30(20), KI::EaseOut);
+    fx.addSpan(still, SpanKind::Motion, 1, f30(5), f30(25), grow);
+    fx.requireValid();
+    auto add = [&](SpanKind kind, int lane, std::int64_t from, std::int64_t to) {
+        AddSpan command(fx.seq, clip.id, kind, lane, ntsc(from), ntsc(to));
+        applyReversible(fx.project, command);
+        return command.createdSpanId();
+    };
+    const SpanId first = add(SpanKind::Motion, 1, 10, 40);
+    SetSpanValues firstValues(fx.seq, first,
+                              {SpanValueChange{SpanParameter::Scale, 1.0, 2.0},
+                               SpanValueChange{SpanParameter::X, 0.0, -300.0}},
+                              "Values", KI::EaseInOut);
+    applyReversible(fx.project, firstValues);
+    const SpanId second = add(SpanKind::Motion, 1, 70, 100);
+    SetSpanValues secondValues(fx.seq, second,
+                               {SpanValueChange{SpanParameter::Scale, 1.0, 0.75},
+                                SpanValueChange{SpanParameter::X, 0.0, 120.0}});
+    applyReversible(fx.project, secondValues);
+    const SpanId dim = add(SpanKind::Opacity, 2, 20, 50);
+    SetSpanValues dimValues(fx.seq, dim, {SpanValueChange{SpanParameter::Opacity, 1.0, 0.6}});
+    applyReversible(fx.project, dimValues);
+    const Clip &c = fx.clip(clip.id);
+    auto edge = [&](SpanId id, bool atEnd) { return seconds(atEnd ? fx.span(id)->end : fx.span(id)->start); };
+    for (int f = 0; f < 124; ++f) {
+        CAPTURE(f);
+        const CMTime t = ntsc(f);
+        const RenderGraph graph = Scheduler::renderGraphAt(fx.sequence(), fx.project, t);
+        const VideoLayer *layer = layerOf(graph, clip.id);
+        REQUIRE(layer != nullptr);
+        CHECK(layer->transform == motionValuesAt(c, t));
+        const auto source = c.exactSourceTimeAt(minTime(t, c.timelineEnd()));
+        REQUIRE(source.has_value());
+        const double s = source->toDouble();
+        const double scale =
+            referenceHeldSpanValue(edge(first, false), edge(first, true), 1, 2, KI::EaseInOut, s).value_or(1) *
+            referenceHeldSpanValue(edge(second, false), edge(second, true), 1, 0.75, KI::Linear, s).value_or(1);
+        const double opacity =
+            referenceHeldSpanValue(edge(dim, false), edge(dim, true), 1, 0.6, KI::Linear, s).value_or(1);
+        // The span edges sit on the tick at or after the frames' exact source times.
+        CHECK(close(layer->transform.scale, scale, 1e-7));
+        CHECK(close(layer->opacity, opacity, 1e-7));
+        if (f >= 40 && f <= 70) {
+            // Between the moves the first one's end holds exactly, the second's first frame too.
+            CHECK(layer->transform.scale == 2.0);
+            CHECK(layer->transform.x == -300.0);
+        }
+        if (f >= 100) {
+            // Both ends held, one on top of the other, through the dissolve's tail handle (frames
+            // 120-123 lie past the clip's end).
+            CHECK(layer->transform.scale == 2.0 * 0.75);
+            CHECK(layer->transform.x == -300.0 + 120.0);
+            CHECK(layer->opacity == 0.6);
+        }
+        if (f >= 114) {
+            REQUIRE(layer->transition.has_value());
+            CHECK_FALSE(layer->transition->isIncoming);
+        }
+    }
+    for (int f = 0; f < 60; ++f) {
+        const RenderGraph graph = Scheduler::renderGraphAt(fx.sequence(), fx.project, ntsc(f));
+        const VideoLayer *layer = layerOf(graph, still);
+        REQUIRE(layer != nullptr);
+        CAPTURE(f);
+        // The still's time is its timeline offset: frame f is 1001 f / 30000 s into it.
+        const double into = f * 1001.0 / 30000.0 * 30.0; // in 30 fps frames
+        const double want = referenceHeldSpanValue(5, 25, 1, 1.4, KI::EaseOut, into).value_or(1);
+        CHECK(close(layer->transform.scale, want, 1e-7));
+    }
+}
+
+TEST_CASE("Scheduler spans: a held gain is flat; a chained eased span ramps from it; a tail crossfade keeps it") {
+    Fixture fx;
+    // A1: a 120-frame clip at -1 dB; lane 1 ducks -12 dB over [0.5 s, 1 s) (linear), then swells
+    // +8 dB over [2 s, 2.5 s) easing in and out, starting neutral (from the held -13 dB). It ends in
+    // a crossfade into the next clip (10 frames before the cut, 5 after) whose outgoing handle keeps
+    // the held -5 dB.
+    const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 0, 120, 0);
+    const ClipId n = fx.addClip(fx.a1, fx.audioOnly, 120, 60, 300);
+    fx.sequence().findClip(c)->audio.gainDb = -1;
+    SpanTracks duck;
+    duck.gain = rampTrack(0, -12, CMTimeMake(1, 2));
+    fx.addSpan(c, SpanKind::Gain, 1, CMTimeMake(1, 2), CMTimeMake(1, 1), duck);
+    SpanTracks swell;
+    swell.gain = rampTrack(0, 8, CMTimeMake(1, 2), KI::EaseInOut);
+    fx.addSpan(c, SpanKind::Gain, 1, CMTimeMake(2, 1), CMTimeMake(5, 2), swell);
+    fx.addTailTransition(c, 10, 5); // [110, 125)
+    fx.requireValid();
+    const AudioGraph graph = wholeAudio(fx);
+    const double held = -1 - 12;
+    int eased = 0;
+    for (const AudioSegment &segment : graph.segments) {
+        if (segment.clipId != c) {
+            continue;
+        }
+        const double from = seconds(segment.timelineRange.start);
+        const double to = seconds(segment.timelineRange.end);
+        CAPTURE(from);
+        if (from >= 1 && to <= 2) {
+            // The hold between the spans: one flat segment at the held level.
+            CHECK(segment.level.start == held);
+            CHECK(segment.level.end == held);
+            CHECK(from == 1.0);
+            CHECK(to == 2.0);
+        } else if (from >= 2 && to <= 2.5) {
+            // The eased swell: steps of at most 5 ms on top of the held level, starting there.
+            ++eased;
+            CHECK(to - from <= Scheduler::kEasedGainStep + 1e-12);
+            CHECK(close(segment.level.start, held + *referenceSpanValue(2, 2.5, 0, 8, KI::EaseInOut, from)));
+            if (from == 2.0) {
+                CHECK(segment.level.start == held);
+            }
+        } else if (from >= 2.5) {
+            // Both ends held to the clip's end and through the crossfade's handle.
+            CHECK(segment.level.start == held + 8);
+            CHECK(segment.level.end == held + 8);
+        }
+    }
+    CHECK(eased >= 100);
+    for (int k = 0; k < 125 * 8; ++k) {
+        const CMTime t = CMTimeMake(k, 240);
+        const double s = k / 240.0;
+        CAPTURE(s);
+        const auto gain = gainAt(graph, c, t);
+        REQUIRE(gain.has_value());
+        const double db = -1 + referenceHeldSpanValue(0.5, 1, 0, -12, KI::Linear, s).value_or(0) +
+                          referenceHeldSpanValue(2, 2.5, 0, 8, KI::EaseInOut, s).value_or(0);
+        const double progress = std::clamp((k / 8.0 - 110) / 15.0, 0.0, 1.0);
+        const double shape = k / 8.0 >= 110 ? std::cos(progress * M_PI / 2) : 1.0;
+        const double level = 20 * std::log10(*gain / shape);
+        const double tolerance = s >= 2 && s < 2.5 ? 0.01 : 1e-9; // the eased swell is followed in steps
+        CHECK(std::fabs(level - db) < tolerance);
+        // The mixer's level is what the model's composition says (in the clip and in its handle).
+        CHECK(std::fabs(level - gainDbAt(fx.clip(c), t)) < tolerance);
+    }
+    (void)n;
 }

@@ -1,8 +1,10 @@
 // Spans stay on their pictures through clip edits: a split divides them exactly, moves and ripples
 // carry them along, overwrite and trims cut them, a speed change moves them with the source frames
-// and a still keeps its spans at its timeline offsets. Every frame is compared with an independent
-// reference of the move (SpanReference.h) evaluated at the source time the frame shows, so an edit
-// that shifted, stretched or re-evaluated a span by a frame would show.
+// and a still keeps its spans at its timeline offsets. A span an edit leaves wholly before a clip's
+// start hands the end value it held to the clip's static values, so the pictures after it keep the
+// hold. Every frame is compared with an independent reference of the move (SpanReference.h, with
+// the hold after each span) evaluated at the source time the frame shows, so an edit that shifted,
+// stretched or re-evaluated a span by a frame, or lost a hold, would show.
 
 #include "../Model/SpanReference.h"
 #include "EditTestSupport.h"
@@ -15,13 +17,13 @@ using KI = KeyframeInterpolation;
 
 // The fixture's move, by source second (the clip's static values composed in):
 //   lane 1 Motion [1.5 s, 3.5 s): x -100 -> 200 and scale 1 -> 1.8, easing in and out;
-//   lane 2 Opacity [1 s, 2.5 s): 1 -> 0.3, linear.
-// Statics: x 12, scale 1.25, opacity 0.9.
+//   lane 2 Opacity [1 s, 2.5 s): 1 -> 0.3, linear;
+// each holding its end value after its end. Statics: x 12, scale 1.25, opacity 0.9.
 VideoParams referenceMove(double s) {
     VideoParams v{12, 0, 1.25, 0, 0.9};
-    v.x += referenceSpanValue(1.5, 3.5, -100, 200, KI::EaseInOut, s).value_or(0);
-    v.scale *= referenceSpanValue(1.5, 3.5, 1, 1.8, KI::EaseInOut, s).value_or(1);
-    v.opacity *= referenceSpanValue(1, 2.5, 1, 0.3, KI::Linear, s).value_or(1);
+    v.x += referenceHeldSpanValue(1.5, 3.5, -100, 200, KI::EaseInOut, s).value_or(0);
+    v.scale *= referenceHeldSpanValue(1.5, 3.5, 1, 1.8, KI::EaseInOut, s).value_or(1);
+    v.opacity *= referenceHeldSpanValue(1, 2.5, 1, 0.3, KI::Linear, s).value_or(1);
     return v;
 }
 
@@ -48,13 +50,13 @@ struct Moving : Fixture {
         requireValid();
     }
 
-    // Checks every frame of the moving clip's pieces on V1 (the clips with its static values)
-    // against the reference at the source time the frame shows; returns the number of frames
-    // checked.
+    // Checks every frame of the moving clip's pieces on V1 (the clips of av30 from source 1 s to
+    // 4 s; the edits place other source ranges) against the reference at the source time the frame
+    // shows; returns the number of frames checked.
     int checkPictures() const {
         int checked = 0;
         for (const Clip &clip : sequence().videoTracks[0].clips) {
-            if (!(clip.video == VideoParams{12, 0, 1.25, 0, 0.9})) {
+            if (clip.assetId != av30 || clip.sourceIn < CMTimeMake(1, 1) || !(clip.sourceIn < CMTimeMake(4, 1))) {
                 continue; // a clip an edit placed
             }
             const auto [first, last] = framesOf(clip);
@@ -100,6 +102,13 @@ TEST_CASE("Span pictures: a split divides the spans exactly") {
         CHECK((fx.clip(right).findSpan(fx.motion) != nullptr) == (at <= 15));
         CHECK(fx.clip(fx.v).findSpan(fx.opacity) != nullptr);
         CHECK(fx.clip(right).spans.size() == (at < 45 ? 2u : at < 75 ? 1u : 0u));
+        // The right piece's static values carry what the spans wholly before the cut hold there:
+        // the fade's 0.3 from frame 45 (its end, exactly on the cut at 45), the move's end from 75.
+        const VideoParams &own = fx.clip(right).video;
+        CHECK(own.opacity == (at < 45 ? 0.9 : 0.9 * 0.3));
+        CHECK(own.x == (at < 75 ? 12 : 12 + 200));
+        CHECK(own.scale == (at < 75 ? 1.25 : 1.25 * 1.8));
+        CHECK(fx.clip(fx.v).video == VideoParams{12, 0, 1.25, 0, 0.9});
     }
 }
 
@@ -149,13 +158,29 @@ TEST_CASE("Span pictures: overwrite and trims cut the spans at the new edges, ex
         TrimClipTail tail(fx.seq, fx.v, f30(70));
         applyReversible(fx.project, tail);
         CHECK(fx.checkPictures() == 50);
-        // Extending again does not bring back what was cut: the span ends where the trim left it.
+        // Extending again does not bring back what was cut: the span ends where the trim left it
+        // and its value there holds over the frames the extension adds.
         TrimClipTail back(fx.seq, fx.v, f30(90));
         applyReversible(fx.project, back);
         const EffectSpan *motion = fx.clip(fx.v).findSpan(fx.motion);
         REQUIRE(motion != nullptr);
         CHECK(motion->end == f30(100)); // source frame 30 + 70
-        CHECK(motionValuesAt(fx.clip(fx.v), f30(80)).x == 12);
+        const double atCut = *referenceSpanValue(1.5, 3.5, -100, 200, KI::EaseInOut, 100 / 30.0);
+        CHECK(close(motionValuesAt(fx.clip(fx.v), f30(80)).x, 12 + atCut));
+        CHECK(motionValuesAt(fx.clip(fx.v), f30(80)) == motionValuesAt(fx.clip(fx.v), f30(89)));
+    }
+    SUBCASE("a head trim past a span keeps the value it held") {
+        // The Opacity span covers timeline frames [0, 45): a trim to 50 leaves it wholly before the
+        // clip's new start; it goes (reported) and its 0.3 stays as the clip's own opacity.
+        TrimClipHead head(fx.seq, fx.v, f30(50));
+        const EditResult r = applyReversible(fx.project, head);
+        CHECK(r.droppedSpanIds == std::vector<SpanId>{fx.opacity});
+        CHECK(fx.clip(fx.v).video == VideoParams{12, 0, 1.25, 0, 0.9 * 0.3});
+        CHECK(fx.checkPictures() == 40);
+        // Extending the head again shows the held opacity on the frames it adds.
+        TrimClipHead back(fx.seq, fx.v, f30(0));
+        applyReversible(fx.project, back);
+        CHECK(motionValuesAt(fx.clip(fx.v), f30(0)).opacity == 0.9 * 0.3);
     }
 }
 
@@ -190,14 +215,19 @@ TEST_CASE("Span pictures: at 29.97 fps with an in point off the grid, span edges
     SetSpanValues values(fx.seq, id, {SpanValueChange{SpanParameter::X, 0.0, 530.0}});
     applyReversible(fx.project, values);
     const Clip &c = fx.clip(clip.id);
-    // Frames 7..59 are in the span, 6 and 60 are not; frame 7 shows the start value exactly.
+    // Frames 7..59 are in the span, 6 is before it and from 60 on its end value holds; frame 7
+    // shows the start value exactly.
     CHECK(motionValuesAt(c, CMTimeMake(1001 * 6, 30000)).x == 0);
     CHECK(motionValuesAt(c, CMTimeMake(1001 * 7, 30000)).x == 0);
     CHECK(motionValuesAt(c, CMTimeMake(1001 * 8, 30000)).x > 0);
     CHECK(motionValuesAt(c, CMTimeMake(1001 * 59, 30000)).x > 500);
-    CHECK(motionValuesAt(c, CMTimeMake(1001 * 60, 30000)).x == 0);
+    CHECK(motionValuesAt(c, CMTimeMake(1001 * 59, 30000)).x < 530);
+    for (int f = 60; f < 100; ++f) {
+        CHECK(motionValuesAt(c, CMTimeMake(1001 * f, 30000)).x == 530);
+    }
     // A split between keeps every frame (at frame 40, whose exact source time has a CMTime form, as
-    // a split needs for the right piece's in point).
+    // a split needs for the right piece's in point), and so does one after the span (frame 80: the
+    // right piece keeps the held 530 as its own x).
     std::vector<double> before;
     for (int f = 0; f < 100; ++f) {
         before.push_back(motionValuesAt(c, CMTimeMake(1001 * f, 30000)).x);
@@ -210,19 +240,28 @@ TEST_CASE("Span pictures: at 29.97 fps with an in point off the grid, span edges
         const Clip &piece = f < 40 ? left : right;
         CHECK(close(motionValuesAt(piece, CMTimeMake(1001 * f, 30000)).x, before[static_cast<std::size_t>(f)]));
     }
+    const ClipId rightId = split.createdClipIds()[0];
+    SplitClip after(fx.seq, rightId, CMTimeMake(1001 * 80, 30000));
+    applyReversible(fx.project, after);
+    const Clip &last = fx.clip(after.createdClipIds()[0]);
+    CHECK(last.spans.empty());
+    CHECK(last.video.x == 530);
+    for (int f = 80; f < 100; ++f) {
+        CHECK(motionValuesAt(last, CMTimeMake(1001 * f, 30000)).x == before[static_cast<std::size_t>(f)]);
+    }
 }
 
 TEST_CASE("Span pictures: a still's spans keep their timeline places through a head trim and a move") {
     Fixture fx;
     const ClipId still = fx.addClip(fx.v1, fx.still, 30, 90);
     SpanTracks grow;
-    grow.scale = rampTrack(0.5, 1, f30(40));
+    grow.scale = rampTrack(0.5, 1.25, f30(40));
     const SpanId id = fx.addSpan(still, SpanKind::Motion, 1, f30(20), f30(60), grow);
     fx.requireValid();
     auto reference = [](std::int64_t timelineFrame, std::int64_t clipStart) {
-        // The span covers timeline frames [clipStart + 20, clipStart + 60).
+        // The span covers timeline frames [clipStart + 20, clipStart + 60), then holds 1.25.
         const double into = static_cast<double>(timelineFrame - clipStart);
-        return referenceSpanValue(20, 60, 0.5, 1, KI::Linear, into).value_or(1);
+        return referenceHeldSpanValue(20, 60, 0.5, 1.25, KI::Linear, into).value_or(1);
     };
     for (std::int64_t f = 30; f < 120; ++f) {
         CHECK(close(motionValuesAt(fx.clip(still), f30(f)).scale, reference(f, 30)));

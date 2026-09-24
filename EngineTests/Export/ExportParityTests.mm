@@ -10,13 +10,20 @@
 // - Sound: the playback mixer's output (captured from a real-time NullAudioOutput) and the offline
 //   renderer's mix are compared sample by sample over a sequence with speed 3/2, a fade in, a 70/30
 //   constant-power crossfade (7 frames before the cut, 3 after), a fade out, two tracks summed, a
-//   Gain span ramping one clip down and a +12 dB clip that drives the sum into clipping.
+//   Gain span ramping one clip down and holding the lower level after its end, and a +12 dB clip
+//   that drives the sum into clipping.
+// - Held Gain (effect lanes round 1b): the offline renderer's mix of a clip whose Gain spans duck,
+//   hold, swell from the held level and hold again is, sample for sample, the unspanned mix at the
+//   level the model composes (gainDbAt), so the hold reaches the export's sound.
 // - Effect spans on two lanes (effect lanes, open finding 8 before them): a clip whose position,
 //   scale, rotation and opacity are animated by Motion spans on two lanes and an Opacity span on a
 //   third (ease in and out, linear, hold; composed onto a static offset), under a still whose scale
 //   a Motion span steps (hold), exports the pictures the program monitor shows frame by frame; the
 //   monitor's layers carry the composed values at each frame (so the comparison is over moving
-//   pictures).
+//   pictures), each span holding its end values after its end.
+// - The hold-after reference case: a 30 s clip with a 5 s Ken Burns move from 5 s to 10 s shows its
+//   own framing for 0-5 s, the move over 5-10 s and the end framing, exactly, for 10-30 s, on the
+//   monitor and in the export alike.
 // - Fades from and to black: a clip with a lane-0 fade at each end exports the monitor's pictures,
 //   and the pictures go from black and back to it.
 // - Variable frame rate (UX round review, test gap 1): a VFR clip through each backend exports the
@@ -28,6 +35,7 @@
 #include "../../Engine/Export/ExportJob.h"
 #include "../../Engine/Media/AssetImport.h"
 #include "../../Engine/Render/Compositor.h"
+#include "../../Engine/Render/Scheduler.h"
 #include "../Media/BurnIn.h"
 #include "../Media/FFmpegTestMedia.h"
 #include "../Media/TestMedia.h"
@@ -444,7 +452,8 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
     // A1: X at speed 3/2 (4.5 s of source from 0.5 s) with a fade in, then Y from 5 s with a fade out,
     // joined by a 70/30 constant-power crossfade (7 frames before the cut, 3 after). A2: the movie
     // from 1 s at +12 dB: its beep (at 2 s, so at 1 s on the timeline) and the tone on top of the A1
-    // clips, ramped down 18 dB by a Gain span over its last two seconds (an ease in).
+    // clips, ramped down 18 dB by a Gain span over [1.5 s, 3 s) of the timeline (an ease in) and
+    // held there for its last second.
     const ClipId x = h.addClip(h.a1, movie, 0, 90, CMTimeMake(1, 2));
     Clip &xc = *h.sequence().findClip(x);
     xc.speed = Ratio{3, 2};
@@ -460,10 +469,10 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
     level.value = 0;
     level.interpolation = KeyframeInterpolation::EaseIn;
     Keyframe ducked;
-    ducked.time = CMTimeMake(2, 1);
+    ducked.time = CMTimeMake(3, 2);
     ducked.value = -18;
     duck.gain = {level, ducked};
-    h.addSpan(loud, SpanKind::Gain, 1, CMTimeMake(3, 1), CMTimeMake(5, 1), duck);
+    h.addSpan(loud, SpanKind::Gain, 1, CMTimeMake(5, 2), CMTimeMake(4, 1), duck);
     XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
     h.load();
 
@@ -646,15 +655,19 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
         if (at) {
             const VideoParams withoutGrow = composeMotion(animated, *at, growId);
             const EffectSpan &growSpan = *animated.findSpan(growId);
-            const bool growing = spanActiveAt(animated, growSpan, *at);
-            XCTAssertEqual(growing, f >= 15 && f < 30, @"frame %lld", f);
-            const double factor = growing ? spanValueAt(growSpan, SpanParameter::Scale, *at) : 1.0;
-            const double turn = growing ? spanValueAt(growSpan, SpanParameter::Rotation, *at) : 0.0;
+            const bool acting = spanActsAt(growSpan, *at);
+            XCTAssertEqual(acting, f >= 15, @"frame %lld: from its start on, holding after its end", f);
+            const double factor = spanContributionAt(growSpan, SpanParameter::Scale, *at);
+            const double turn = spanContributionAt(growSpan, SpanParameter::Rotation, *at);
             XCTAssertEqualWithAccuracy(shown.scale, withoutGrow.scale * factor, 1e-12, @"frame %lld", f);
             XCTAssertEqualWithAccuracy(shown.rotationDegrees, withoutGrow.rotationDegrees + turn, 1e-12, @"frame %lld", f);
-            if (growing) {
-                // Frame f shows source frame 30 + f, lane 2's frame f - 15 of its 15.
-                XCTAssertEqualWithAccuracy(factor, 1.0 + 0.2 * double(f - 15) / 15.0, 1e-12, @"frame %lld", f);
+            // Frame f shows source frame 30 + f: lane 2's frame f - 15 of its 15, then its end
+            // values held (a 20% growth and 10 degrees).
+            const double wantFactor = f < 15 ? 1.0 : f < 30 ? 1.0 + 0.2 * double(f - 15) / 15.0 : 1.2;
+            XCTAssertEqualWithAccuracy(factor, wantFactor, 1e-12, @"frame %lld", f);
+            if (f >= 30) {
+                XCTAssertEqual(factor, 1.2, @"frame %lld: the end value, held exactly", f);
+                XCTAssertEqual(turn, 10.0, @"frame %lld", f);
             }
             XCTAssertEqualWithAccuracy(shown.x, withoutGrow.x, 1e-12, @"frame %lld: lane 2 moves nothing", f);
             XCTAssertGreaterThanOrEqual(shown.x, -120.0 - 1e-9, @"frame %lld: the static offset still applies", f);
@@ -836,6 +849,249 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
     XCTAssertGreaterThan(brightness[25], brightness[29]);
     XCTAssertLessThan(brightness[0], brightness[15] / 2);
     XCTAssertLessThan(brightness[29], brightness[15] / 2);
+}
+
+/// The reference case of the hold-after rule: V1 is a 30 s clip (the 10 s movie at 1/4 speed, so
+/// source [0, 7.5 s)) with a 5 s Ken Burns move from 5 s to 10 s on the timeline (source
+/// [1.25 s, 2.5 s)), from the clip's own framing to a push in at 160 %, 120 left and 50 down, easing
+/// in and out. Every frame's layer shows the clip's framing exactly before the move, the move
+/// (growing every frame) over it, and exactly the end framing the move set (spanEdgeMotion) from
+/// 10 s to the end; the export shows the monitor's pictures before, during and well after the move.
+- (void)testAHeldKenBurnsMoveExportsTheMonitorsPictures {
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    h.sequence().width = 320;
+    h.sequence().height = 180;
+    const AssetId movie = h.importAsset("h264_1080p30.mp4");
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    auto key = [](CMTime time, double value) {
+        Keyframe k;
+        k.time = time;
+        k.value = value;
+        k.interpolation = KeyframeInterpolation::EaseInOut;
+        return k;
+    };
+    const ClipId clip = h.addClip(h.v1, movie, 0, 900, kCMTimeZero);
+    h.sequence().findClip(clip)->speed = Ratio{1, 4};
+    const CMTime length = CMTimeMake(5, 4); // the move's 5 s of timeline in source time
+    SpanTracks move;
+    move.x = {key(kCMTimeZero, 0), key(length, -120)};
+    move.y = {key(kCMTimeZero, 0), key(length, 50)};
+    move.scale = {key(kCMTimeZero, 1), key(length, 1.6)};
+    const SpanId span = h.addSpan(clip, SpanKind::Motion, 1, CMTimeMake(5, 4), CMTimeMake(5, 2), move);
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+    const Clip &placed = *h.sequence().findClip(clip);
+    const auto endFraming = spanEdgeMotion(placed, *placed.findSpan(span), frames30(1), true);
+    const auto startFraming = spanEdgeMotion(placed, *placed.findSpan(span), frames30(1), false);
+    XCTAssertTrue(endFraming.has_value() && startFraming.has_value());
+    if (!endFraming || !startFraming) {
+        return;
+    }
+    XCTAssertTrue(*endFraming == (VideoParams{-120, 50, 1.6, 0, 1}));
+    XCTAssertTrue(*startFraming == VideoParams{});
+
+    // Every frame of the sequence, as the Scheduler gives it to the monitor and the export.
+    double previousScale = 0;
+    for (int64_t f = 0; f < 900; ++f) {
+        const RenderGraph graph = Scheduler::renderGraphAt(h.sequence(), h.project, frames30(f));
+        XCTAssertEqual(graph.layers.size(), 1u, @"frame %lld", f);
+        if (graph.layers.size() != 1) {
+            continue;
+        }
+        const VideoParams &shown = graph.layers[0].transform;
+        if (f < 150) {
+            XCTAssertTrue(shown == VideoParams{}, @"frame %lld: the clip's own framing before the move", f);
+        } else if (f < 300) {
+            XCTAssertGreaterThan(shown.scale, f == 150 ? 0.0 : previousScale, @"frame %lld: the move pushes in", f);
+            XCTAssertLessThan(shown.scale, 1.6, @"frame %lld: short of the end framing inside the move", f);
+        } else {
+            XCTAssertTrue(shown == *endFraming, @"frame %lld: the end framing, held exactly", f);
+            XCTAssertEqual(graph.layers[0].opacity, 1.0, @"frame %lld", f);
+        }
+        previousScale = shown.scale;
+    }
+
+    ex::ExportRequest request;
+    request.project = std::make_shared<const Project>(h.project);
+    request.sequenceId = h.sequenceId;
+    request.encode.container = media::ContainerFormat::MOV;
+    media::VideoEncodeSettings v;
+    v.codec = media::VideoCodec::ProRes422;
+    v.width = 320;
+    v.height = 180;
+    request.encode.video = v;
+    request.outputPath = _dir + "/held-parity.mov";
+    ex::ExportServices services;
+    services.router = h.router;
+    services.cache = std::make_shared<media::FrameCache>();
+    services.routing = routingOf(h.project, *h.router);
+    std::string error;
+    auto result = runExport(request, services, error);
+    XCTAssertTrue(result.has_value(), @"%s", error.c_str());
+    if (!result || !result->ok()) {
+        XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
+        return;
+    }
+    XCTAssertEqual(result->value().frames, 900);
+    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
+    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, 320, 180);
+    auto routed = h.router->probe(request.outputPath);
+    XCTAssertTrue(created.ok() && pool.ok() && routed.ok());
+    if (!created.ok() || !pool.ok() || !routed.ok()) {
+        return;
+    }
+    media::DecodeOptions bgra;
+    bgra.pixelFormat = kCVPixelFormatType_32BGRA;
+    auto decoder = h.router->makeVideoDecoder(*routed, -1, bgra);
+    XCTAssertTrue(decoder.ok());
+    if (!decoder.ok()) {
+        return;
+    }
+    int64_t heldFramesChecked = 0;
+    for (int64_t f : {0, 90, 149, 150, 200, 250, 299, 300, 450, 600, 750, 899}) {
+        h.controller->seek(frames30(f));
+        const PlaybackHarness::Sample sample = h.presentExact();
+        XCTAssertEqual(sample.presented.frameIndex, f);
+        const render::PreviewFrame &frame = h.frame();
+        XCTAssertEqual(frame.graph.layers.size(), 1u, @"frame %lld", f);
+        if (frame.graph.layers.size() != 1) {
+            continue;
+        }
+        const VideoParams &shown = frame.graph.layers[0].transform;
+        XCTAssertTrue(shown == motionValuesAt(placed, frames30(f)), @"frame %lld: the monitor's layer", f);
+        auto render = [&](const RenderGraph &graph) -> std::vector<double> {
+            auto buffer = pool->makeBuffer();
+            XCTAssertTrue(buffer.ok());
+            if (!buffer.ok()) {
+                return {};
+            }
+            auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &out) {
+                if (index >= frame.textures.size() || !frame.textures[index]) {
+                    return false;
+                }
+                out = frame.textures[index];
+                return true;
+            };
+            auto rendered = created.value()->renderAndWait(graph, lookup, render::PixelBufferTarget{buffer.value()});
+            XCTAssertTrue(rendered.ok() && rendered->status.ok() && rendered->skippedLayers.empty(), @"frame %lld", f);
+            return blockMeans(buffer.value().get());
+        };
+        const std::vector<double> monitor = render(frame.graph);
+        // What the same picture would look like in the clip's own framing: the move's effect.
+        RenderGraph own = frame.graph;
+        own.layers[0].transform = VideoParams{};
+        const double framingEffect = compare(render(own), monitor).maxBlock;
+        if (f < 150) {
+            XCTAssertLessThan(framingEffect, 1.0, @"frame %lld: before the move, the clip's own framing", f);
+        } else if (f >= 300) {
+            XCTAssertTrue(shown == *endFraming, @"frame %lld: the end framing, held exactly", f);
+            XCTAssertGreaterThan(framingEffect, 40.0, @"frame %lld: the held push in is visible", f);
+            ++heldFramesChecked;
+        }
+        XCTAssertTrue(decoder->decoder->seek(frames30(f)).ok());
+        auto decoded = decoder->decoder->next();
+        XCTAssertTrue(decoded.ok() && decoded.value(), @"exported frame %lld", f);
+        if (!decoded.ok() || !decoded.value()) {
+            continue;
+        }
+        const Difference d = compare(monitor, blockMeans(decoded.value()->image.get()));
+        NSLog(@"PARITY held frame %lld: scale %.4f; blocks differ by at most %.2f, on average %.3f; the framing "
+              @"changes blocks by up to %.2f",
+              f, shown.scale, d.maxBlock, d.meanBlock, framingEffect);
+        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
+        XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
+    }
+    XCTAssertEqual(heldFramesChecked, 5);
+}
+
+/// A1: the movie's 440 Hz tone for 5 s at 0 dB with two Gain spans on lane 1: a linear duck to
+/// -12 dB over [1 s, 2 s), held, then from the held level a swell of +6 dB over [3 s, 3.5 s)
+/// easing in and out, held to the end. The offline renderer's mix divided by the same clip's
+/// unspanned mix is the level the model composes (gainDbAt) at every sample where the tone is
+/// away from its zero crossings: exact (float precision) over the ramps and holds that are linear
+/// in dB, within 0.01 dB over the eased swell (followed in 5 ms steps).
+- (void)testAHeldGainRendersOfflineAtTheComposedLevel {
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    const AssetId movie = h.importAsset("h264_1080p30.mp4");
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    const ClipId tone = h.addClip(h.a1, movie, 0, 150, CMTimeMake(3, 1));
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    Project plain = h.project; // the same clip without spans
+    auto ramp = [](double to, CMTime length, KeyframeInterpolation interpolation) {
+        Keyframe a;
+        a.time = kCMTimeZero;
+        a.value = 0;
+        a.interpolation = interpolation;
+        Keyframe b;
+        b.time = length;
+        b.value = to;
+        b.interpolation = interpolation;
+        return KeyframeTrack{a, b};
+    };
+    SpanTracks duck;
+    duck.gain = ramp(-12, CMTimeMake(1, 1), KeyframeInterpolation::Linear);
+    h.addSpan(tone, SpanKind::Gain, 1, CMTimeMake(4, 1), CMTimeMake(5, 1), duck); // source = timeline + 3 s
+    SpanTracks swell;
+    swell.gain = ramp(6, CMTimeMake(1, 2), KeyframeInterpolation::EaseInOut);
+    h.addSpan(tone, SpanKind::Gain, 1, CMTimeMake(6, 1), CMTimeMake(13, 2), swell);
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+
+    auto renderAll = [&](const Project &project) {
+        audio::OfflineAudioRenderer offline(h.router, std::make_shared<const Project>(project), h.sequenceId,
+                                            routingOf(project, *h.router), audio::OfflineAudioRenderer::Config{});
+        std::vector<float> mixed;
+        std::vector<float> block(1024 * 2);
+        for (;;) {
+            auto n = offline.render(block.data(), 1024, [] { return false; });
+            XCTAssertTrue(n.ok(), @"%s", n.ok() ? "" : n.error().description().c_str());
+            if (!n.ok() || n.value() == 0) {
+                break;
+            }
+            mixed.insert(mixed.end(), block.begin(), block.begin() + n.value() * 2);
+        }
+        return mixed;
+    };
+    const std::vector<float> spanned = renderAll(h.project);
+    const std::vector<float> unspanned = renderAll(plain);
+    XCTAssertEqual(spanned.size(), size_t(5 * 48000 * 2));
+    XCTAssertEqual(unspanned.size(), spanned.size());
+    const Clip &clip = *h.sequence().findClip(tone);
+    double worstLinear = 0;
+    double worstEased = 0;
+    int64_t compared = 0;
+    int64_t held = 0;
+    for (size_t i = 0; i < std::min(spanned.size(), unspanned.size()); i += 2) {
+        const double reference = unspanned[i];
+        if (std::fabs(reference) < 0.05 || std::fabs(reference) > 0.99) {
+            continue;
+        }
+        const int64_t sample = int64_t(i / 2);
+        const double seconds = double(sample) / 48000.0;
+        const double want = gainDbAt(clip, CMTimeMake(sample, 48000));
+        const double got = 20 * std::log10(double(spanned[i]) / reference);
+        const double error = std::fabs(got - want);
+        const bool easedPart = seconds >= 3.0 && seconds < 3.5;
+        double &worst = easedPart ? worstEased : worstLinear;
+        worst = std::max(worst, error);
+        ++compared;
+        if ((seconds >= 2.0 && seconds < 3.0) || seconds >= 3.5) {
+            ++held;
+            XCTAssertEqualWithAccuracy(want, seconds < 3.0 ? -12.0 : -6.0, 1e-12, @"sample %lld", sample);
+        }
+    }
+    NSLog(@"PARITY held gain: %lld samples compared (%lld held); worst %.2g dB on the linear parts and holds, "
+          @"%.2g dB on the eased swell",
+          compared, held, worstLinear, worstEased);
+    XCTAssertGreaterThan(compared, 5 * 48000 / 2);
+    XCTAssertGreaterThan(held, 48000);
+    XCTAssertLessThan(worstLinear, 1e-4);
+    XCTAssertLessThan(worstEased, 0.01);
 }
 
 @end

@@ -1,8 +1,44 @@
 #include "Clip.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace ve {
+
+namespace {
+
+// Applies what the Motion or Opacity span `span` contributes at `time` on top of `values`
+// (composeMotion): offsets add, factors multiply.
+void composeSpanOnto(VideoParams &values, const EffectSpan &span, const ExactTime &time) {
+    if (span.kind == SpanKind::Motion) {
+        values.x += spanContributionAt(span, SpanParameter::X, time);
+        values.y += spanContributionAt(span, SpanParameter::Y, time);
+        values.scale *= spanContributionAt(span, SpanParameter::Scale, time);
+        values.rotationDegrees += spanContributionAt(span, SpanParameter::Rotation, time);
+    } else if (span.kind == SpanKind::Opacity) {
+        values.opacity *= spanContributionAt(span, SpanParameter::Opacity, time);
+    }
+}
+
+// Calls `apply` for every effect span of `spans` that `include` accepts, lane 1, 2, 3 and within a
+// lane in the vector's (start) order: the order the composition applies them in.
+template <typename Include, typename Apply>
+void forEachInCompositionOrder(const std::vector<EffectSpan> &spans, Include include, Apply apply) {
+    for (int lane = kFirstEffectLane; lane <= kLastLane; ++lane) {
+        for (const EffectSpan &span : spans) {
+            if (span.lane == lane && !span.isTransition() && include(span)) {
+                apply(span);
+            }
+        }
+    }
+}
+
+bool isFinite(const VideoParams &values) {
+    return std::isfinite(values.x) && std::isfinite(values.y) && std::isfinite(values.scale) &&
+           std::isfinite(values.rotationDegrees) && std::isfinite(values.opacity);
+}
+
+} // namespace
 
 bool isValidSpeed(Ratio speed) {
     return speed.isReduced() && speed.num > 0 && speed.den <= kMaxSpeedDenominator && !(speed < Ratio{1, 100}) &&
@@ -230,6 +266,28 @@ RetimeResult Clip::fitSpans(ClipEdge editedEdge) {
     if (!bounds) {
         return RetimeResult::NotRepresentable;
     }
+    // Effect spans wholly before the in bound hold their end values over every frame left: those
+    // values move into the static values, composed in the composition's order.
+    VideoParams heldVideo = video;
+    double heldGainDb = audio.gainDb;
+    const auto in = ExactTime::from(bounds->first);
+    if (!in) {
+        return RetimeResult::NotRepresentable;
+    }
+    bool held = false;
+    forEachInCompositionOrder(
+        spans, [&](const EffectSpan &span) { return !(bounds->first < span.end); },
+        [&](const EffectSpan &span) {
+            held = true;
+            composeSpanOnto(heldVideo, span, *in);
+            if (span.kind == SpanKind::Gain) {
+                heldGainDb += spanContributionAt(span, SpanParameter::Gain, *in);
+            }
+        });
+    if (held && (!isFinite(heldVideo) || !std::isfinite(heldGainDb))) {
+        return RetimeResult::HeldValuesOverflow;
+    }
+
     std::vector<EffectSpan> fitted;
     fitted.reserve(spans.size());
     for (const EffectSpan &span : spans) {
@@ -305,6 +363,8 @@ RetimeResult Clip::fitSpans(ClipEdge editedEdge) {
         return span.isTransition() && !(span.start < span.end); // a fade shortened to nothing
     });
     spans = std::move(fitted);
+    video = heldVideo;
+    audio.gainDb = heldGainDb;
     return RetimeResult::Ok;
 }
 
@@ -428,48 +488,26 @@ std::optional<ExactTime> spanEvaluationTime(const Clip &clip, CMTime t) {
     return time;
 }
 
-bool spanActiveAt(const Clip &clip, const EffectSpan &span, const ExactTime &time) {
-    if (span.isTransition() || time.compare(span.start) < 0) {
-        return false;
-    }
-    if (time.compare(span.end) < 0) {
-        return true;
-    }
-    // A span reaching the clip's out bound also acts on the bound itself (a tail handle's time).
-    const auto bounds = clip.spanBounds();
-    return bounds && span.end == bounds->second && time.compare(bounds->second) == 0;
-}
-
 VideoParams composeMotion(const Clip &clip, const ExactTime &time, std::optional<SpanId> except) {
     VideoParams values = clip.video;
-    for (int lane = kFirstEffectLane; lane <= kLastLane; ++lane) {
-        for (const EffectSpan &span : clip.spans) {
-            if (span.lane != lane || (except && span.id == *except) || !spanActiveAt(clip, span, time)) {
-                continue;
-            }
-            if (span.kind == SpanKind::Motion) {
-                values.x += spanValueAt(span, SpanParameter::X, time);
-                values.y += spanValueAt(span, SpanParameter::Y, time);
-                values.scale *= spanValueAt(span, SpanParameter::Scale, time);
-                values.rotationDegrees += spanValueAt(span, SpanParameter::Rotation, time);
-            } else if (span.kind == SpanKind::Opacity) {
-                values.opacity *= spanValueAt(span, SpanParameter::Opacity, time);
-            }
-        }
-    }
+    forEachInCompositionOrder(
+        clip.spans,
+        [&](const EffectSpan &span) {
+            const bool picture = span.kind == SpanKind::Motion || span.kind == SpanKind::Opacity;
+            return picture && !(except && span.id == *except) && spanActsAt(span, time);
+        },
+        [&](const EffectSpan &span) { composeSpanOnto(values, span, time); });
     return values;
 }
 
 double composeGainDb(const Clip &clip, const ExactTime &time, std::optional<SpanId> except) {
     double gainDb = clip.audio.gainDb;
-    for (int lane = kFirstEffectLane; lane <= kLastLane; ++lane) {
-        for (const EffectSpan &span : clip.spans) {
-            if (span.lane == lane && span.kind == SpanKind::Gain && !(except && span.id == *except) &&
-                spanActiveAt(clip, span, time)) {
-                gainDb += spanValueAt(span, SpanParameter::Gain, time);
-            }
-        }
-    }
+    forEachInCompositionOrder(
+        clip.spans,
+        [&](const EffectSpan &span) {
+            return span.kind == SpanKind::Gain && !(except && span.id == *except) && spanActsAt(span, time);
+        },
+        [&](const EffectSpan &span) { gainDb += spanContributionAt(span, SpanParameter::Gain, time); });
     return gainDb;
 }
 

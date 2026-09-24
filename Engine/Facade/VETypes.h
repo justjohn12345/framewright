@@ -203,6 +203,8 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 /// start and end values for what it changes. Lane 0 holds transitions (cross dissolves / crossfades
 /// and fades), lanes 1-3 Motion and Opacity spans (video) or Gain spans (audio), which compose onto
 /// the clip's static values: position and rotation add, scale and opacity multiply, gain adds (dB).
+/// An effect span does nothing before its start, moves over its range and holds its end values from
+/// its end to the clip's end; a later span on the same lane applies on top of what it holds.
 @interface VEEffectSpan : NSObject
 @property (nonatomic, readonly) VESpanID spanID;
 @property (nonatomic, readonly) VEClipID clipID;
@@ -259,8 +261,8 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 @property (nonatomic, readonly) BOOL isStill;
 /// Linked partner, or 0.
 @property (nonatomic, readonly) VEClipID linkedClipID;
-/// The static Motion values: what the clip shows where no span acts (its Motion and Opacity spans
-/// compose onto them; see videoParamsAtTime:).
+/// The static Motion values: what the clip shows before its first span starts (its Motion and
+/// Opacity spans compose onto them; see videoParamsAtTime:).
 @property (nonatomic, readonly) VEVideoParams videoParams;
 /// The static gain and the lengths of the clip's lane-0 fades (see VEAudioParams).
 @property (nonatomic, readonly) VEAudioParams audioParams;
@@ -268,19 +270,21 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 @property (nonatomic, readonly, copy) NSArray<VEEffectSpan *> *spans;
 /// Whether the clip has spans on lanes 1-3.
 @property (nonatomic, readonly) BOOL hasEffectSpans;
-/// The Motion the picture has at timeline time `time` (the static values with the spans acting
-/// there composed onto them, evaluated at the frame's exact source time), as the monitors and
-/// export draw it.
+/// The Motion the picture has at timeline time `time` (the static values with every span that has
+/// started composed onto them: the moving value inside its range, its end value after it; evaluated
+/// at the frame's exact source time), as the monitors and export draw it.
 - (VEVideoParams)videoParamsAtTime:(CMTime)time NS_SWIFT_NAME(motion(at:));
-/// The clip's audio level in dB at timeline time `time` (the static gain plus its Gain spans).
+/// The clip's audio level in dB at timeline time `time` (the static gain plus its Gain spans, each
+/// holding its end level after its end).
 - (double)gainDbAtTime:(CMTime)time NS_SWIFT_NAME(gainDb(at:));
 /// The Motion an edge of the clip's Motion span `spanID` shows, as applyKenBurns(span:) sets it:
-/// at its start (`atEnd` NO) everything composed at the span's first instant; at its end the
-/// clip's other spans composed at the span's last frame (the sequence frame, `frameDuration` long,
-/// before its end) with the span at its end values. So the framings a Ken Burns move applied read
-/// back exactly (motion(at:) of the last frame shows the move one frame short of its end). Returns
-/// NO, leaving `motion` unchanged, for an unknown span, one of another kind or a time with no exact
-/// form.
+/// at its start (`atEnd` NO) everything composed at the span's first instant (including the end
+/// framing an earlier move on its lane holds there); at its end the clip's other spans composed at
+/// the span's last frame (the sequence frame, `frameDuration` long, before its end) with the span at
+/// its end values. So the framings a Ken Burns move applied read back exactly (motion(at:) of the
+/// last frame shows the move one frame short of its end; from its end on the end framing holds).
+/// Returns NO, leaving `motion` unchanged, for an unknown span, one of another kind or a time with
+/// no exact form.
 - (BOOL)getMotion:(VEVideoParams *)motion
      atEdgeOfSpan:(VESpanID)spanID
             atEnd:(BOOL)atEnd

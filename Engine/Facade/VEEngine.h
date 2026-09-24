@@ -459,18 +459,22 @@ NS_SWIFT_UI_ACTOR
 //
 // A clip's lanes 1-3 hold effect spans (VEEffectSpan): Motion and Opacity on video clips, Gain on
 // audio clips. A span is a range of the clip with start and end values; the values compose onto the
-// clip's static values (position and rotation add, scale and opacity multiply, gain adds in dB) and
-// act only within the span's range (in a transition's handles the value at the clip's edge holds).
-// Spans of one lane never overlap. Ranges passed here are timeline times, rounded to whole frames;
-// a span stays on its pictures when the clip is trimmed or its speed changes, a trim through it
-// clips it, a split divides it. Every call is one undo step (joins coalescing groups: drags pass the
-// whole change on every step) and returns the span as it is after the edit (VEEditResult.span).
-// Refusals: VEEditErrorSpanNotFound, VEEditErrorClipNotFound, VEEditErrorTrackKindMismatch (a
-// Motion or Opacity span on an audio clip, a Gain span on a video clip), VEEditErrorInvalidArgument
-// (a lane outside 1-3, values outside their range: scale below 0, opacity outside 0...1, a
-// parameter of another kind), VEEditErrorInvalidTime (a range outside the clip or shorter than a
-// frame), VEEditErrorOverlap (another span of the lane is there; VEEditResult.freeRange is the
-// nearest free range), VEEditErrorTrackLocked, VEEditErrorNotRepresentable.
+// clip's static values (position and rotation add, scale and opacity multiply, gain adds in dB). A
+// span does nothing before its start, moves over its range and holds its end values from its end to
+// the clip's end (also through a tail transition's handle); a later span on the same lane applies
+// on top of what it holds (so one starting neutral continues it without a jump). Spans of one lane
+// never overlap. Ranges passed here are timeline times, rounded to whole frames; a span stays on
+// its pictures when the clip is trimmed or its speed changes, a trim through it clips it, a split
+// divides it, and one a trim or split leaves wholly before a clip's start passes the values it held
+// on to that clip's static values (the pictures do not change). Every call is one undo step (joins
+// coalescing groups: drags pass the whole change on every step) and returns the span as it is after
+// the edit (VEEditResult.span). Refusals: VEEditErrorSpanNotFound, VEEditErrorClipNotFound,
+// VEEditErrorTrackKindMismatch (a Motion or Opacity span on an audio clip, a Gain span on a video
+// clip), VEEditErrorInvalidArgument (a lane outside 1-3, values outside their range: scale below 0,
+// opacity outside 0...1, a parameter of another kind), VEEditErrorInvalidTime (a range outside the
+// clip or shorter than a frame), VEEditErrorOverlap (another span of the lane is there;
+// VEEditResult.freeRange is the nearest free range), VEEditErrorTrackLocked,
+// VEEditErrorNotRepresentable.
 
 /// The clip's spans (lane 0 first, then lanes 1-3, each in time order); empty for an unknown clip.
 - (NSArray<VEEffectSpan *> *)spansForClip:(VEClipID)clipID NS_SWIFT_NAME(spans(forClip:));
@@ -507,8 +511,10 @@ NS_SWIFT_UI_ACTOR
 /// the clip's first frame shows what the previous clip's last frame shows (motion(at:) / gainDb(at:),
 /// everything else composing there taken into account); VEClipEdgeEnd sets its end values from the
 /// next clip's first frame. When nothing would change it succeeds without an undo step and the note
-/// says so. Refused: VEEditErrorNotAdjacent (no clip touches that edge), VEEditErrorInvalidArgument
-/// (a transition, or a span that does not reach that frame of its clip), and the span refusals.
+/// says so. A span that ended before the clip's last frame holds its end values there, so
+/// VEClipEdgeEnd sets them to make that frame show the next clip's first frame exactly. Refused:
+/// VEEditErrorNotAdjacent (no clip touches that edge), VEEditErrorInvalidArgument (a transition, or
+/// a span that starts after that frame of its clip), and the span refusals.
 - (VEEditResult *)matchSpanEdge:(VESpanID)spanID
           toAdjacentClipAtEdge:(VEClipEdge)edge NS_SWIFT_NAME(matchSpanEdge(_:toAdjacentClipAt:));
 /// The Ken Burns move on a Motion span: its Position X/Y and Scale start and end values set in one

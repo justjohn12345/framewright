@@ -1,6 +1,7 @@
 // The effect span edits (EditOps.h): AddSpan, SetSpanRange, SetSpanValues, SetSpanInterpolation,
 // MoveSpanLane and RemoveSpans, their refusals (an overlap names the nearest free range), undo and
-// coalescing; the Ken Burns plan (spanEdgeMotion reads its framings back) and matching a
+// coalescing; the Ken Burns plan (spanEdgeMotion reads its framings back, also for a move that
+// follows another on its lane and starts from the framing that one holds) and matching a
 // neighbour's edge. Values are checked against the independent references of SpanReference.h.
 
 #include "../Model/SpanReference.h"
@@ -9,6 +10,7 @@
 #include "../../Engine/Edit/UndoStack.h"
 
 #include <memory>
+#include <tuple>
 
 using namespace vetest;
 
@@ -193,7 +195,9 @@ TEST_CASE("SetSpanValues sets start and end values; the frames between follow th
         CHECK(close(shown.x, *referenceSpanValue(4.0 / 3, 7.0 / 3, 0, 90, KeyframeInterpolation::Linear, s)));
         CHECK(close(shown.scale, *referenceSpanValue(4.0 / 3, 7.0 / 3, 1, 2, KeyframeInterpolation::Linear, s)));
     }
-    CHECK(motionValuesAt(fx.clip(fx.v), f30(40)).x == 0); // the span ends there
+    CHECK(motionValuesAt(fx.clip(fx.v), f30(9)).x == 0);    // before the span: nothing
+    CHECK(motionValuesAt(fx.clip(fx.v), f30(40)).x == 90);  // from its end: its end value holds
+    CHECK(motionValuesAt(fx.clip(fx.v), f30(89)).scale == 2);
     SUBCASE("with an interpolation every segment moves that way (the Ken Burns step)") {
         SetSpanValues eased(fx.seq, id, {change(SpanParameter::Y, 0, -40)}, "Ken Burns",
                             KeyframeInterpolation::EaseInOut);
@@ -361,7 +365,7 @@ TEST_CASE("planKenBurns sets the framings given the other lanes; spanEdgeMotion 
     SpanFixture fx;
     Clip &clip = *fx.sequence().findClip(fx.v);
     clip.video = VideoParams{40, -20, 1.5, 0, 1};
-    // Lane 2 zooms out 1 -> 0.8 over frames [0, 60).
+    // Lane 2 zooms out 1 -> 0.8 over frames [0, 60), then holds 0.8.
     const SpanId zoom = fx.add(fx.v, SpanKind::Motion, 2, 0, 60);
     fx.setValues(zoom, {change(SpanParameter::Scale, 1, 0.8)});
     const SpanId move = fx.add(fx.v, SpanKind::Motion, 1, 30, 90);
@@ -385,11 +389,14 @@ TEST_CASE("planKenBurns sets the framings given the other lanes; spanEdgeMotion 
     const VideoParams first = motionValuesAt(c, f30(30));
     CHECK(close(first.x, start.x));
     CHECK(close(first.scale, start.scale));
-    // Against the reference: the other lanes at the span's last frame (59 of the zoom's 60 frames:
-    // past its end, so neutral) and first frame (source 2 s: 0.8 + 0.2 * (1 - 0.5)).
+    // Against the reference: the other lanes at the span's first frame (source 2 s: 0.8 + 0.2 * (1 -
+    // 0.5)) and last frame (source frame 119: past the zoom's end, so the 0.8 it holds).
     const double zoomAtStart = *referenceSpanValue(1, 3, 1, 0.8, KeyframeInterpolation::Linear, 2.0);
     CHECK(close(span.tracks.scale.front().value, 2 / (1.5 * zoomAtStart)));
-    CHECK(close(span.tracks.scale.back().value, 1.25 / 1.5));
+    CHECK(close(span.tracks.scale.back().value, 1.25 / (1.5 * 0.8)));
+    // From the span's end on (the clip's tail handle here) the end framing holds.
+    CHECK(close(motionValuesAt(c, f30(95)).scale, end.scale));
+    CHECK(close(motionValuesAt(c, f30(95)).x, end.x));
     CHECK(close(span.tracks.x.front().value, -100 - 40));
     CHECK(close(span.tracks.x.back().value, 200 - 40));
     SUBCASE("refused for another kind and where nothing else leaves a scale") {
@@ -398,6 +405,60 @@ TEST_CASE("planKenBurns sets the framings given the other lanes; spanEdgeMotion 
         fx.sequence().findClip(fx.v)->video.scale = 0;
         CHECK(planKenBurns(fx.clip(fx.v), fx.get(move), fx.sequence().frameDuration, start, end, changes).error ==
               EditError::InvalidArgument);
+    }
+}
+
+TEST_CASE("planKenBurns on a lane after another move: the held framing is the next move's start") {
+    SpanFixture fx;
+    Clip &clip = *fx.sequence().findClip(fx.v);
+    clip.video = VideoParams{40, -20, 1.5, 0, 1};
+    const CMTime fd = fx.sequence().frameDuration;
+    // Move A over frames [0, 30) from the clip's own framing to a push in; then move B, on the same
+    // lane, over [45, 75), from where A left the picture to a pan.
+    const SpanId first = fx.add(fx.v, SpanKind::Motion, 1, 0, 30);
+    const MotionFraming own{40, -20, 1.5};
+    const MotionFraming pushed{-60, 25, 2.4};
+    std::vector<SpanValueChange> changes;
+    REQUIRE(planKenBurns(fx.clip(fx.v), fx.get(first), fd, own, pushed, changes).ok());
+    fx.setValues(first, changes);
+    const SpanId second = fx.add(fx.v, SpanKind::Motion, 1, 45, 75);
+    // Before B has values, the picture holds A's end framing from frame 30 on, B's frames included.
+    const auto held = spanEdgeMotion(fx.clip(fx.v), fx.get(first), fd, true);
+    REQUIRE(held.has_value());
+    for (int f = 30; f < 90; ++f) {
+        CAPTURE(f);
+        CHECK(motionValuesAt(fx.clip(fx.v), f30(f)) == *held);
+    }
+    // B's start edge reads that held framing; the move from it gets neutral start values.
+    const auto bStart = spanEdgeMotion(fx.clip(fx.v), fx.get(second), fd, false);
+    REQUIRE(bStart.has_value());
+    CHECK(*bStart == *held);
+    const MotionFraming from{held->x, held->y, held->scale};
+    const MotionFraming panned{150, 25, 2.4};
+    REQUIRE(planKenBurns(fx.clip(fx.v), fx.get(second), fd, from, panned, changes).ok());
+    fx.setValues(second, changes);
+    const EffectSpan &b = fx.get(second);
+    CHECK(close(b.tracks.x.front().value, 0));
+    CHECK(close(b.tracks.y.front().value, 0));
+    CHECK(close(b.tracks.scale.front().value, 1));
+    const Clip &c = fx.clip(fx.v);
+    // Both moves read back exactly.
+    for (const auto &[span, atEnd, want] :
+         {std::tuple{first, false, own}, std::tuple{first, true, pushed}, std::tuple{second, false, from},
+          std::tuple{second, true, panned}}) {
+        const auto framing = spanEdgeMotion(c, *c.findSpan(span), fd, atEnd);
+        REQUIRE(framing.has_value());
+        CHECK(close(framing->x, want.x));
+        CHECK(close(framing->y, want.y));
+        CHECK(close(framing->scale, want.scale));
+    }
+    // No jump where B starts: its first frame shows the framing held before it.
+    CHECK(close(motionValuesAt(c, f30(45)).x, motionValuesAt(c, f30(44)).x));
+    CHECK(close(motionValuesAt(c, f30(45)).scale, motionValuesAt(c, f30(44)).scale));
+    // B's end framing holds to the clip's end.
+    for (int f = 75; f < 90; ++f) {
+        CHECK(close(motionValuesAt(c, f30(f)).x, 150));
+        CHECK(close(motionValuesAt(c, f30(f)).scale, 2.4));
     }
 }
 
@@ -439,11 +500,29 @@ TEST_CASE("planMatchSpanEdge continues the neighbour at the cut through the span
     applyReversible(fx.project, matchGain);
     CHECK(close(gainDbAt(fx.clip(n), f30(60)), gainDbAt(fx.clip(m), f30(59))));
 
-    // Refusals: no neighbour there; the span does not reach that frame; a transition.
+    // Refusals: no neighbour there.
     CHECK(planMatchSpanEdge(fx.sequence(), span, ClipEdge::Tail, changes).error == EditError::NotAdjacent);
+
+    // At the tail, a span that ended before the clip's last frame still holds its end value there:
+    // matching the next clip sets that value, so A's last frame shows B's first frame exactly (A's
+    // 0.5 opacity taken down to B's 0.35 by a span over A's frames [10, 20), held from frame 20).
+    fx.sequence().findClip(b)->video.opacity = 0.35;
     const SpanId inner = fx.addSpan(a, SpanKind::Opacity, 1, f30(10), f30(20), SpanTracks{});
-    fx.addClip(fx.v1, fx.av30, 120, 30, 600);
-    CHECK(planMatchSpanEdge(fx.sequence(), inner, ClipEdge::Tail, changes).error == EditError::InvalidArgument);
+    fx.requireValid();
+    REQUIRE(planMatchSpanEdge(fx.sequence(), inner, ClipEdge::Tail, changes).ok());
+    SetSpanValues matchInner(fx.seq, inner, changes);
+    applyReversible(fx.project, matchInner);
+    CHECK(close(fx.clip(a).findSpan(inner)->tracks.opacity.back().value, 0.7));
+    CHECK(close(motionValuesAt(fx.clip(a), f30(59)).opacity, motionValuesAt(fx.clip(b), f30(60)).opacity));
+    CHECK(close(motionValuesAt(fx.clip(a), f30(20)).opacity, 0.35)); // held from the span's end
+
+    // A span that starts after the clip's first frame contributes nothing there.
+    const SpanId later = fx.addSpan(b, SpanKind::Opacity, 2, f30(310), f30(320), SpanTracks{});
+    fx.requireValid();
+    const EditResult startsLater = planMatchSpanEdge(fx.sequence(), later, ClipEdge::Head, changes);
+    CHECK(startsLater.error == EditError::InvalidArgument);
+    CHECK(startsLater.message.find("starts after the first frame") != std::string::npos);
+    // A transition; an unknown span.
     const SpanId fade = fx.addFade(m, ClipEdge::Head, f30(5));
     CHECK(planMatchSpanEdge(fx.sequence(), fade, ClipEdge::Head, changes).error == EditError::InvalidArgument);
     CHECK(planMatchSpanEdge(fx.sequence(), SpanId{999}, ClipEdge::Head, changes).error == EditError::SpanNotFound);

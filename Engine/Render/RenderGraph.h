@@ -116,7 +116,8 @@ inline double decibelsToGain(double db) {
 //   decibelsToGain(level(t)) * fade(t) * constantPowerGain(crossfade(t)) inside one
 // where level, fade and crossfade interpolate their ramps linearly across the segment. `level` is
 // the clip's gain plus its Gain spans in dB (a Linear gain ramp is linear in dB; an eased one is
-// followed in steps of at most Scheduler::kEasedGainStep). `fade` is the clip's lane-0 fade in / fade
+// followed in steps of at most Scheduler::kEasedGainStep; after a span's end its end level holds,
+// constant, and a later span on its lane ramps on top of it). `fade` is the clip's lane-0 fade in / fade
 // out (linear, a gain). `crossfade` is the linear progress of a cross dissolve for this clip
 // (outgoing 1 -> 0, incoming 0 -> 1), not a gain; this is what AudioMixer implements.
 struct AudioSegment {

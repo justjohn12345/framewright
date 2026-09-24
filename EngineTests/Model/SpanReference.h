@@ -1,7 +1,8 @@
 // Independent references for effect span values: the timing curves solved with Newton's method (the
 // engine bisects), and spans evaluated from their two edge values and a frame's source time in
-// doubles. Used to check the model, the edit ops, the scheduler and the facade against arithmetic
-// that shares no code with them.
+// doubles (referenceSpanValue over the span's range, referenceHeldSpanValue with the hold after
+// it). Used to check the model, the edit ops, the scheduler and the facade against arithmetic that
+// shares no code with them.
 
 #pragma once
 
@@ -60,6 +61,19 @@ inline std::optional<double> referenceSpanValue(double start, double end, double
         return std::nullopt;
     }
     return from + (to - from) * referenceEase(interpolation, (s - start) / (end - start));
+}
+
+// What such a span contributes at source second `s` under the hold-after rule: nothing (nullopt)
+// before its start, its moving value over [start, end), and `to`, its end value, from its end on.
+inline std::optional<double> referenceHeldSpanValue(double start, double end, double from, double to,
+                                                    KeyframeInterpolation interpolation, double s) {
+    if (s < start) {
+        return std::nullopt;
+    }
+    if (s >= end) {
+        return to;
+    }
+    return referenceSpanValue(start, end, from, to, interpolation, s);
 }
 
 // A two-keyframe track from `from` (at 0) to `to` (at `length`) with `interpolation`.

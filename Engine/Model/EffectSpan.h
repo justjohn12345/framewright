@@ -21,10 +21,15 @@
 // with them, gain decibels added to the clip's gain (Clip.h). The neutral values (0, 1, 0 dB)
 // change nothing, which is what a new span starts with.
 //
-// Activity. A span acts on the frames whose source time lies in [start, end); outside it the span
-// does nothing (the clip shows its static values and its other lanes). In transition handles
-// (frames of a transition outside the clip) the source time is held at the clip's nearest edge, so
-// a span that reaches that edge keeps its edge value through the transition.
+// Activity (hold after). An effect span contributes nothing to the frames before its start,
+// animates over [start, end), and from its end on holds its end value until the clip ends: at
+// source time t >= start it contributes its value at min(t, end) (spanContributionAt). A later span
+// on the same lane does not end the hold but applies on top of it: spans on one lane are
+// cumulative, so a span that starts at neutral values continues the held picture without a jump,
+// and one that starts elsewhere jumps from it. (Clip.h, composeMotion, defines "on top of".) In
+// transition handles (frames of a transition outside the clip) the source time is held at the
+// clip's nearest edge: a tail handle keeps the values held at the clip's end, a head handle shows
+// the spans that start on the clip's in point at their start values.
 //
 // Plain C++ (CoreMedia's CMTime only): unit-testable without media.
 
@@ -147,6 +152,20 @@ double spanValueFromLeft(const EffectSpan &span, SpanParameter parameter, const 
 
 // The value of `parameter` at the span's start (`atEnd` false) or end (true).
 double spanEdgeValue(const EffectSpan &span, SpanParameter parameter, bool atEnd);
+
+// Whether the effect span contributes at `time` (the clip's source-time base): from its start on,
+// through its range and after its end (where it holds its end value). Never for a transition span.
+bool spanActsAt(const EffectSpan &span, const ExactTime &time);
+
+// The value of `parameter` the effect span contributes at `time`: nothing (the neutral value)
+// before its start, spanValueAt over [start, end), and its end value (spanValueAt at `end`) from
+// its end on.
+double spanContributionAt(const EffectSpan &span, SpanParameter parameter, const ExactTime &time);
+
+// The value spanContributionAt approaches as `time` rises to it: the neutral value up to and at the
+// span's start, spanValueFromLeft after it up to its end (the end of a ramp over a piece ending at
+// `time`), the end value after it (the hold).
+double spanContributionFromLeft(const EffectSpan &span, SpanParameter parameter, const ExactTime &time);
 
 // How the span moves between its keyframes: the interpolation every segment of every track shares
 // (Linear when no track has a segment), Bezier (a custom curve, shown as Custom) when the segments

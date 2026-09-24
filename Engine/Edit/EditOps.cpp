@@ -1522,9 +1522,9 @@ EditResult planMatchSpanEdge(const Sequence &sequence, SpanId spanId, ClipEdge e
     if (!time) {
         return notRepresentable(clip->id, ownFrame);
     }
-    if (!spanActiveAt(*clip, *span, *time)) {
+    if (!spanActsAt(*span, *time)) {
         return EditResult::failure(EditError::InvalidArgument,
-                                   spanName(spanId) + " does not reach the " +
+                                   spanName(spanId) + " starts after the " +
                                        (edge == ClipEdge::Head ? "first" : "last") + " frame of clip " +
                                        idString(clip->id.value()) + ", so its value cannot match the neighbour there");
     }

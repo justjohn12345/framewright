@@ -48,18 +48,20 @@ EditResult notRepresentable(ClipId clipId, CMTime at);
 
 // The failure for a clip timing change (Clip::setTimelineEnd and friends) that did not succeed:
 // NotRepresentable, or InvalidArgument when a span's custom timing curve overshoots at the new
-// edge. Success for RetimeResult::Ok.
+// edge or the values spans left before a new start hold are not finite once kept as static values.
+// Success for RetimeResult::Ok.
 EditResult retimeRefusal(RetimeResult result, ClipId clipId, CMTime at);
 
-// Splits the clip at `index` at timeline time `at` (strictly inside it). The left piece keeps
-// the id, the link and the lane-0 span at its head; the right piece gets a new id, no link and the
+// Splits the clip at `index` at timeline time `at` (strictly inside it). The left piece keeps the
+// id, the link and the lane-0 span at its head; the right piece gets a new id, no link and the
 // lane-0 span at its tail (a fade shortened to fit its piece; a transition at the clip's end thus
 // moves to the right piece). Effect spans are divided exactly at the cut (clipSpan / splitSpan):
-// the left piece keeps a divided span's id, the right piece's part gets a new one; both pieces show
-// exactly what the clip showed. Stores the right piece's id in `rightId`. Fails (changing nothing)
-// with NotRepresentable when the right piece's source in point has no exact CMTime form, and with
-// InvalidArgument when a custom timing curve (from a project file) overshoots a parameter's range
-// at the cut.
+// the left piece keeps a divided span's id, the right piece's part gets a new one; a span wholly
+// before the cut stays on the left piece and the value it holds becomes part of the right piece's
+// static values (Clip::fitSpans); both pieces show exactly what the clip showed. Stores the right
+// piece's id in `rightId`. Fails (changing nothing) with NotRepresentable when the right piece's
+// source in point has no exact CMTime form, and with InvalidArgument when a custom timing curve
+// (from a project file) overshoots a parameter's range at the cut.
 EditResult splitClipAt(Sequence &sequence, Track &track, std::size_t index, CMTime at, IdGenerator &ids,
                        ClipId &rightId);
 

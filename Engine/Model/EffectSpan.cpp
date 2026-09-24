@@ -219,6 +219,30 @@ double spanEdgeValue(const EffectSpan &span, SpanParameter parameter, bool atEnd
     return at ? spanValueAt(span, parameter, *at) : neutralValue(parameter);
 }
 
+bool spanActsAt(const EffectSpan &span, const ExactTime &time) {
+    return !span.isTransition() && time.compare(span.start) >= 0;
+}
+
+double spanContributionAt(const EffectSpan &span, SpanParameter parameter, const ExactTime &time) {
+    if (!spanActsAt(span, time)) {
+        return neutralValue(parameter);
+    }
+    if (time.compare(span.end) >= 0) {
+        return spanEdgeValue(span, parameter, true);
+    }
+    return spanValueAt(span, parameter, time);
+}
+
+double spanContributionFromLeft(const EffectSpan &span, SpanParameter parameter, const ExactTime &time) {
+    if (span.isTransition() || time.compare(span.start) <= 0) {
+        return neutralValue(parameter);
+    }
+    if (time.compare(span.end) > 0) {
+        return spanEdgeValue(span, parameter, true);
+    }
+    return spanValueFromLeft(span, parameter, time);
+}
+
 KeyframeInterpolation spanInterpolation(const EffectSpan &span) {
     std::optional<KeyframeInterpolation> shared;
     for (const SpanParameter parameter : kSpanParameters) {

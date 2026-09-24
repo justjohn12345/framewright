@@ -565,7 +565,7 @@ TEST_CASE("Scheduler: layers carry the clip's Motion and Opacity spans at each f
     CHECK(withStill.layers[1].transform.rotationDegrees == doctest::Approx(100).epsilon(1e-12));
 }
 
-TEST_CASE("Scheduler: a Motion span over the first 5 s of a 30 s clip acts on those frames only") {
+TEST_CASE("Scheduler: a Motion span over the first 5 s of a 30 s clip holds its end framing for the other 25 s") {
     Fixture fx;
     // V1: a 30 s clip (900 frames) of av30, and after it a second clip that must stay unanimated.
     const ClipId clip = fx.addClip(fx.v1, fx.av30, 0, 900);
@@ -591,10 +591,11 @@ TEST_CASE("Scheduler: a Motion span over the first 5 s of a 30 s clip acts on th
         }
         CHECK(shown.rotationDegrees == 12);
         if (frame >= 150) {
-            // After the span: the clip's own framing (a span acts only within its range).
-            CHECK(shown.x == 0);
-            CHECK(shown.y == 0);
-            CHECK(shown.scale == 1);
+            // After the span: its end framing, held exactly until the clip ends (the next clip
+            // above stays unanimated).
+            CHECK(shown.x == -240);
+            CHECK(shown.y == 90);
+            CHECK(shown.scale == 1.6);
         } else {
             const double u = ease.valueAt(double(frame) / 150.0);
             CHECK(shown.x == doctest::Approx(-240.0 * u).epsilon(1e-9));

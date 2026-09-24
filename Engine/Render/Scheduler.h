@@ -42,9 +42,9 @@ class Scheduler {
     static std::vector<ClipId> clipsAt(const Sequence &sequence, CMTime time);
 
     // The clip's Motion at sequence time `time`: its static values with its Motion and Opacity
-    // spans composed onto them (motionValuesAt), evaluated at the exact source time the frame maps
-    // to (held at the clip's edge in transition handles). Playback, the output view and export all
-    // get it from here.
+    // spans composed onto them (motionValuesAt: each from its start on, holding its end value after
+    // its end), evaluated at the exact source time the frame maps to (held at the clip's edge in
+    // transition handles). Playback, the output view and export all get it from here.
     static VideoParams motionAt(const Clip &clip, CMTime time);
 
     // Source frame time for `clip` at sequence time `time`: exact speed mapping, then the start

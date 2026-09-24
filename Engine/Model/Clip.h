@@ -13,7 +13,8 @@
 // - Still-image clips (isStill) have no source timing: sourceIn is zero, speed is 1 and the
 //   "source" is the offset into the still's timeline range.
 // - Effect spans (EffectSpan.h) live in `spans`: lane-0 transitions (Transition.h) and lanes 1-3
-//   effects, which compose onto the static values (motionValuesAt, gainDbAt).
+//   effects, which compose onto the static values (motionValuesAt, gainDbAt), each holding its end
+//   value from its end to the clip's end.
 // - Invariants (checked by validateSequence): speed reduced, with a denominator of at most
 //   kMaxSpeedDenominator and a value within [kMinSpeed, kMaxSpeed]; sourceIn >= 0 and the
 //   derived out point within the asset; start and duration on the sequence frame grid; every
@@ -112,6 +113,9 @@ enum class RetimeResult {
     // new edge cuts it, so the span cannot be clipped there without changing the picture; nothing
     // changed.
     SpanCurveOvershoot,
+    // The values spans left before the new start hold would not be finite once folded into the
+    // static values (fitSpans), so they cannot be kept; nothing changed.
+    HeldValuesOverflow,
 };
 
 struct Clip {
@@ -185,7 +189,11 @@ struct Clip {
     // inside is removed), and lane-0 fades are shortened to fit the clip (when a head fade and the
     // tail span together no longer fit, the fade at `editedEdge` gives way first; a cross dissolve
     // at the tail is never shortened here: SequenceCommand drops one that no longer fits). A fade
-    // shortened to nothing is removed. On a failure nothing changes.
+    // shortened to nothing is removed. An effect span left wholly before the new start (its end at
+    // or before the in bound) still held its end value over every remaining frame, so that value is
+    // folded into the static values before it goes (composed onto them as composeMotion and
+    // composeGainDb do, in lane and start order): no remaining frame changes. On a failure nothing
+    // changes.
     [[nodiscard]] RetimeResult fitSpans(ClipEdge editedEdge);
 
     // Orders the spans: lane 0 (head, then tail), then lanes 1-3, each by start.
@@ -227,18 +235,23 @@ std::optional<CMTime> spanTimeAt(const Clip &clip, CMTime t);
 
 // The source time the clip's spans are evaluated at for timeline time `t`: motionTimeAt held
 // within spanBounds(), so a frame of a transition handle (outside the clip) is evaluated at the
-// clip's nearest edge. Nullopt only for a non-numeric time or on overflow.
+// clip's nearest edge (a tail handle at the out bound, where every span holds its end value).
+// Nullopt only for a non-numeric time or on overflow.
 std::optional<ExactTime> spanEvaluationTime(const Clip &clip, CMTime t);
 
-// Whether the effect span acts at `time` (a spanEvaluationTime of `clip`): start <= time < end,
-// or the span ends on the clip's out bound and `time` is that bound (a tail handle).
-bool spanActiveAt(const Clip &clip, const EffectSpan &span, const ExactTime &time);
-
 // ----- Composition -----
-// A frame's Motion is the clip's static VideoParams with its active Motion and Opacity spans
-// applied in lane order (1, 2, 3): position and rotation add, scale and opacity multiply. Its audio
-// level is the static gain plus its active Gain spans' decibels. `except` leaves one span out (the
-// facade uses it to find what the other lanes contribute).
+// At source time `time` (a spanEvaluationTime) every effect span that has started (spanActsAt:
+// start <= time) contributes its value at min(time, end) (spanContributionAt): the moving value
+// inside its range, its end value held after it. Spans that have not started contribute nothing.
+// The contributions are applied to the clip's static values one after another, lane 1, 2, 3 and,
+// within a lane, in start order ("on top of" one another):
+//   - Position X, Position Y and Rotation: offsets, added;
+//   - Scale and Opacity: factors, multiplied;
+//   - Gain (audio): decibels, added to the static gain.
+// So on one lane a span that follows another applies its relative values on top of the value the
+// earlier one holds (a span starting neutral continues it without a jump), and spans on different
+// lanes combine the same way (a zoom on one lane with a pan on another). `except` leaves one span
+// out (what the rest of the composition contributes: the Ken Burns plan and matching use it).
 
 VideoParams composeMotion(const Clip &clip, const ExactTime &time, std::optional<SpanId> except = std::nullopt);
 double composeGainDb(const Clip &clip, const ExactTime &time, std::optional<SpanId> except = std::nullopt);
@@ -253,14 +266,19 @@ double gainDbAt(const Clip &clip, CMTime t);
 // ----- A span's edges as the Ken Burns move reads and writes them -----
 // The time the rest of the clip is composed at for an edge of `span`: its start (`atEnd` false),
 // or the spanEvaluationTime of its last frame (the sequence frame, `frameDuration` long, starting
-// before the timeline time of its end; not before the clip's first frame). Nullopt when a time has
-// no exact form.
+// before the timeline time of its end; not before the clip's first frame). The rest includes what
+// earlier spans hold there, on its own lane as on the others (so the start edge of a span that
+// follows another on its lane reads that span's held end value). Nullopt when a time has no exact
+// form.
 std::optional<ExactTime> spanEdgeFrameTime(const Clip &clip, const EffectSpan &span, CMTime frameDuration, bool atEnd);
 
 // The Motion an edge of the Motion span `span` shows: the clip's other spans composed at
-// spanEdgeFrameTime with `span` at its start or end values (spanEdgeValue). The Ken Burns move
-// (planKenBurns) sets the span's values so these are its start and end framings, so reading them
-// back gives the framings exactly. Nullopt for a span of another kind or a time with no exact form.
+// spanEdgeFrameTime (with what they hold there) and `span` at its start or end values
+// (spanEdgeValue) applied on top. The Ken Burns move (planKenBurns) sets the span's values from the
+// same composition, so reading them back gives the framings exactly. The start framing is what the
+// span's first frame shows; the end framing is reached at its end and, from there on, held on the
+// frames where nothing else changes (on those frames motionValuesAt equals it). Nullopt for a span
+// of another kind or a time with no exact form.
 std::optional<VideoParams> spanEdgeMotion(const Clip &clip, const EffectSpan &span, CMTime frameDuration, bool atEnd);
 
 } // namespace ve

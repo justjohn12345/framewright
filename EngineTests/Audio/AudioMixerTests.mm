@@ -219,7 +219,8 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
     const AssetId tone = fx.addTone("tone://sine330", sineSignal(330, amplitude));
     // The clip plays source [1 s, 2.5 s) at timeline [0.25 s, 1.75 s) at -3 dB. Lane 1: a linear
     // ramp to -18 dB over source [1.25 s, 1.75 s); lane 2: an eased swell of +6 dB over source
-    // [1.5 s, 2.25 s) (followed in 5 ms steps, linear in dB within each).
+    // [1.5 s, 2.25 s) (followed in 5 ms steps, linear in dB within each). Each holds its end level
+    // after its end (hold after), so the last 0.25 s plays at -3 - 18 + 6 dB.
     Clip &clip = fx.addClip(fx.a1, tone, CMTimeMake(1, 4), CMTimeMake(45, 30), CMTimeMake(1, 1));
     clip.audio.gainDb = -3;
     fx.addGainSpan(clip, 1, CMTimeMake(5, 4), CMTimeMake(7, 4), 0, -18, KeyframeInterpolation::Linear);
@@ -246,11 +247,11 @@ double maxAbsDiff(const std::vector<float> &a, const std::vector<double> &b) {
     for (int64_t n = 12000; n < 84000; ++n) {
         const double source = 1.0 + static_cast<double>(n - 12000) / kSr;
         double db = -3;
-        if (source >= 1.25 && source < 1.75) {
-            db += -18 * (source - 1.25) / 0.5;
+        if (source >= 1.25) {
+            db += -18 * std::min(1.0, (source - 1.25) / 0.5);
         }
-        if (source >= 1.5 && source < 2.25) {
-            db += 6 * easeInOut((source - 1.5) / 0.75);
+        if (source >= 1.5) {
+            db += source < 2.25 ? 6 * easeInOut((source - 1.5) / 0.75) : 6;
         }
         const int64_t s = n - 12000 + 48000;
         const double v = std::pow(10.0, db / 20.0) * amplitude * std::sin(2.0 * M_PI * 330.0 * static_cast<double>(s) / kSr);

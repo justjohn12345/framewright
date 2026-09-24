@@ -15,7 +15,9 @@
 //   linked pair out of sync: a partner that cannot move with its clip refuses the edit.
 // - Spans (EffectSpan.h) belong to their clip and move, trim and split with it: a trim through an
 //   effect span clips it (the value at the new edge evaluated exactly), a split divides it, one
-//   left with nothing inside the clip goes (EditResult::droppedSpanIds); lane-0 fades are
+//   left with nothing inside the clip goes (EditResult::droppedSpanIds; one left before the new
+//   start hands the end value it held on to the clip's static values, so no remaining frame
+//   changes: Clip::fitSpans); lane-0 fades are
 //   shortened to fit a shortened clip. Transitions whose cut no longer exists, or that lose the
 //   media or length they need, are removed by the edit (and restored by undo) and listed in
 //   EditResult::droppedTransitionIds, as is a fade in whose clip's start another clip now touches.
@@ -505,11 +507,14 @@ struct MotionFraming {
 // The Position X, Position Y and Scale start and end values of the Motion span `span` of `clip`
 // that make the picture show the framing `start` at the span's start (its first frame) and reach
 // `end` at its end, given everything else that composes onto the picture there (the clip's static
-// values and its other lanes, taken at the span's first and last frames: spanEdgeFrameTime).
+// values, the other spans of its lane and the other lanes, with what earlier spans hold, taken at
+// the span's first and last frames: spanEdgeFrameTime; so on a lane after another move, `start`
+// equal to that move's end framing gives neutral start values: the move continues without a jump).
 // spanEdgeMotion reads the framings back exactly. (The last frame shows the move a frame short of
 // its end, so a move ending on a cut continues into a span starting there without a repeated
-// framing.) Refused with InvalidArgument when a value would be invalid or the rest of the
-// composition has scale 0 there (no span value can make it show a framing).
+// framing; from its end on the end framing holds.) Refused with InvalidArgument when a value would
+// be invalid or the rest of the composition has scale 0 there (no span value can make it show a
+// framing).
 EditResult planKenBurns(const Clip &clip, const EffectSpan &span, CMTime frameDuration, MotionFraming start,
                         MotionFraming end, std::vector<SpanValueChange> &changes);
 
@@ -518,10 +523,13 @@ EditResult planKenBurns(const Clip &clip, const EffectSpan &span, CMTime frameDu
 // Tail: the next clip, whose first frame is matched on this clip's last frame): the span's start
 // (Head) or end (Tail) values are set so that the frame shows what the neighbour's frame shows
 // (motionValuesAt for Motion and Opacity spans, gainDbAt for Gain spans), given everything else that
-// composes there. Refused: SpanNotFound; NotAdjacent (no clip touches that edge); InvalidArgument
-// for a transition span, for a span that does not reach that edge of its clip (its value does not
-// act there), or when no value can match (scale 0 elsewhere in the composition). `changes` is empty
-// when the span already matches.
+// composes there. At the tail, a span that ended before the clip's last frame holds its end value
+// there, so its end value is set to make the last frame show the neighbour's exactly (a span still
+// moving on the last frame reaches the value at its end, a frame later, as the Ken Burns move does).
+// Refused: SpanNotFound; NotAdjacent (no clip touches that edge); InvalidArgument for a transition
+// span, for a span that starts after that frame of its clip (it contributes nothing there: at the
+// head, any span not starting on the clip's first frame), or when no value can match (scale 0
+// elsewhere in the composition). `changes` is empty when the span already matches.
 EditResult planMatchSpanEdge(const Sequence &sequence, SpanId spanId, ClipEdge edge,
                              std::vector<SpanValueChange> &changes);
 

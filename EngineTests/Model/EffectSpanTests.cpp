@@ -1,7 +1,9 @@
 // Effect spans in the model (EffectSpan.h, Clip.h): kinds, parameters and their ranges, values at
 // exact times, exact splits and cuts, track validation, lane rules, and the composition of lanes
-// (position and rotation add, scale and opacity multiply, gain adds in dB), each checked against
-// the independent references of SpanReference.h.
+// (position and rotation add, scale and opacity multiply, gain adds in dB) under the hold-after
+// rule (nothing before a span's start, its end value held after its end, later spans on a lane on
+// top of what earlier ones hold), each checked against the independent references of
+// SpanReference.h.
 
 #include "SpanReference.h"
 
@@ -330,12 +332,13 @@ TEST_CASE("EffectSpan: lane rules and placement are validated per clip") {
     }
 }
 
-TEST_CASE("Composition: lanes compose in order onto the static values, against the reference") {
+TEST_CASE("Composition: lanes compose in order onto the static values and hold, against the reference") {
     Fixture fx;
     // A 90-frame clip from source 1 s with static Motion, and spans on three lanes:
     //   lane 1 Motion [1 s, 3 s): x 0 -> 100 linear, scale 1 -> 2 and rotation 0 -> 90 ease in and out;
     //   lane 2 Motion [2 s, 4 s): x 0 -> -50, scale 1 -> 0.5, linear;
     //   lane 3 Opacity [1.5 s, 3.5 s): 1 -> 0.25 easing out.
+    // Each holds its end value after its end (the clip's source runs to 4 s).
     const ClipId id = fx.addClip(fx.v1, fx.av30, 0, 90, 30);
     Clip &clip = *fx.sequence().findClip(id);
     clip.video = VideoParams{10, -5, 1.5, 5, 0.8};
@@ -357,12 +360,12 @@ TEST_CASE("Composition: lanes compose in order onto the static values, against t
     for (int f = 0; f < 90; ++f) {
         CAPTURE(f);
         const double s = 1.0 + f / 30.0;
-        const double x1 = referenceSpanValue(1, 3, 0, 100, KI::Linear, s).value_or(0);
-        const double s1 = referenceSpanValue(1, 3, 1, 2, KI::EaseInOut, s).value_or(1);
-        const double r1 = referenceSpanValue(1, 3, 0, 90, KI::EaseInOut, s).value_or(0);
-        const double x2 = referenceSpanValue(2, 4, 0, -50, KI::Linear, s).value_or(0);
-        const double s2 = referenceSpanValue(2, 4, 1, 0.5, KI::Linear, s).value_or(1);
-        const double o3 = referenceSpanValue(1.5, 3.5, 1, 0.25, KI::EaseOut, s).value_or(1);
+        const double x1 = referenceHeldSpanValue(1, 3, 0, 100, KI::Linear, s).value_or(0);
+        const double s1 = referenceHeldSpanValue(1, 3, 1, 2, KI::EaseInOut, s).value_or(1);
+        const double r1 = referenceHeldSpanValue(1, 3, 0, 90, KI::EaseInOut, s).value_or(0);
+        const double x2 = referenceHeldSpanValue(2, 4, 0, -50, KI::Linear, s).value_or(0);
+        const double s2 = referenceHeldSpanValue(2, 4, 1, 0.5, KI::Linear, s).value_or(1);
+        const double o3 = referenceHeldSpanValue(1.5, 3.5, 1, 0.25, KI::EaseOut, s).value_or(1);
         const VideoParams shown = motionValuesAt(c, f30(f));
         CHECK(close(shown.x, 10 + x1 + x2));
         CHECK(close(shown.y, -5));
@@ -373,9 +376,14 @@ TEST_CASE("Composition: lanes compose in order onto the static values, against t
     // Without a span (`except`): the other lanes alone.
     const VideoParams without = composeMotion(c, exact(CMTimeMake(5, 2)), c.spans[1].id);
     CHECK(close(without.scale, 1.5 * *referenceSpanValue(1, 3, 1, 2, KI::EaseInOut, 2.5)));
+    // After lane 1's end its end values hold exactly (the frames from source 3 s on).
+    const VideoParams held = composeMotion(c, exact(CMTimeMake(7, 2)), c.spans[1].id);
+    CHECK(held.x == 10 + 100);
+    CHECK(held.scale == 1.5 * 2);
+    CHECK(held.rotationDegrees == 5 + 90);
 }
 
-TEST_CASE("Composition: gain spans add decibels to the clip's gain") {
+TEST_CASE("Composition: gain spans add decibels to the clip's gain and hold their end level") {
     Fixture fx;
     const ClipId id = fx.addClip(fx.a1, fx.audioOnly, 0, 90);
     fx.sequence().findClip(id)->audio.gainDb = -6;
@@ -389,39 +397,344 @@ TEST_CASE("Composition: gain spans add decibels to the clip's gain") {
     for (int k = 0; k < 720; ++k) {
         CAPTURE(k);
         const double s = k / 240.0;
-        const double expected = -6 + referenceSpanValue(0.5, 1.5, 0, -12, KeyframeInterpolation::Linear, s).value_or(0) +
-                                referenceSpanValue(1, 2, 0, 6, KeyframeInterpolation::EaseInOut, s).value_or(0);
+        const double expected =
+            -6 + referenceHeldSpanValue(0.5, 1.5, 0, -12, KeyframeInterpolation::Linear, s).value_or(0) +
+            referenceHeldSpanValue(1, 2, 0, 6, KeyframeInterpolation::EaseInOut, s).value_or(0);
         CHECK(close(gainDbAt(fx.clip(id), CMTimeMake(k, 240)), expected));
     }
+    // Past both ends: both end levels, exactly.
+    CHECK(gainDbAt(fx.clip(id), CMTimeMake(5, 2)) == -6 - 12 + 6);
 }
 
-TEST_CASE("Composition: a span reaching the clip's out point keeps acting through a tail handle") {
+TEST_CASE("Composition: every span holds through a tail handle; a head handle shows the spans starting there") {
     Fixture fx;
     const ClipId id = fx.addClip(fx.v1, fx.av30, 0, 60, 30); // source [1 s, 3 s)
     const SpanId whole = fx.addSpan(id, SpanKind::Motion, 1, f30(30), f30(90));
     const SpanId early = fx.addSpan(id, SpanKind::Motion, 2, f30(30), f30(60));
+    const SpanId late = fx.addSpan(id, SpanKind::Opacity, 3, f30(45), f30(75));
     Clip &clip = *fx.sequence().findClip(id);
     clip.findSpan(whole)->tracks.x = rampTrack(0, 60, f30(60));
     clip.findSpan(early)->tracks.scale = rampTrack(1, 2, f30(30));
+    clip.findSpan(late)->tracks.opacity = rampTrack(0.9, 0.4, f30(30));
     fx.requireValid();
     const Clip &c = fx.clip(id);
     // Frames past the clip's end (a transition handle) are evaluated at its out point: the span
-    // ending there shows its end value, the earlier one nothing.
+    // ending there shows its end value, and the spans that ended earlier keep holding theirs.
     for (int f = 60; f < 70; ++f) {
         const auto time = spanEvaluationTime(c, f30(f));
         REQUIRE(time.has_value());
         CHECK(time->compare(f30(90)) == 0);
-        CHECK(spanActiveAt(c, *c.findSpan(whole), *time));
-        CHECK_FALSE(spanActiveAt(c, *c.findSpan(early), *time));
-        CHECK(motionValuesAt(c, f30(f)).x == 60);
-        CHECK(motionValuesAt(c, f30(f)).scale == 1);
+        CHECK(spanActsAt(*c.findSpan(whole), *time));
+        CHECK(spanActsAt(*c.findSpan(early), *time));
+        const VideoParams shown = motionValuesAt(c, f30(f));
+        CHECK(shown.x == 60);
+        CHECK(shown.scale == 2);
+        CHECK(shown.opacity == 0.4);
+        CHECK(motionValuesAt(c, f30(59)).x < 60);               // the last frame is a frame short of it
+        CHECK(shown.scale == motionValuesAt(c, f30(59)).scale); // lane 2 held there already
     }
-    // Before the clip, its in point: both act, at their start values.
-    CHECK(motionValuesAt(c, f30(-3)).x == 0);
-    CHECK(spanActiveAt(c, *c.findSpan(early), *spanEvaluationTime(c, f30(-3))));
-    // The early span's end is exclusive.
-    CHECK_FALSE(spanActiveAt(c, *c.findSpan(early), exact(f30(60))));
-    CHECK(spanActiveAt(c, *c.findSpan(early), exact(f30(59))));
+    // Before the clip, its in point: the spans starting there act at their start values; the one
+    // starting later contributes nothing yet.
+    const auto head = spanEvaluationTime(c, f30(-3));
+    REQUIRE(head.has_value());
+    CHECK(spanActsAt(*c.findSpan(early), *head));
+    CHECK_FALSE(spanActsAt(*c.findSpan(late), *head));
+    CHECK(motionValuesAt(c, f30(-3)) == VideoParams{});
+    // A span acts from its start on, and after its end holds its end value.
+    CHECK_FALSE(spanActsAt(*c.findSpan(late), exact(f30(44))));
+    CHECK(spanActsAt(*c.findSpan(late), exact(f30(45))));
+    CHECK(spanContributionAt(*c.findSpan(late), SpanParameter::Opacity, exact(f30(44))) == 1);
+    CHECK(spanContributionAt(*c.findSpan(late), SpanParameter::Opacity, exact(f30(45))) == 0.9);
+    CHECK(spanContributionAt(*c.findSpan(early), SpanParameter::Scale, exact(f30(59))) < 2);
+    CHECK(spanContributionAt(*c.findSpan(early), SpanParameter::Scale, exact(f30(60))) == 2);
+    CHECK(spanContributionAt(*c.findSpan(early), SpanParameter::Scale, exact(f30(89))) == 2);
+    // From the left: neutral up to the start, the ramp up to the end, then the hold.
+    CHECK(spanContributionFromLeft(*c.findSpan(early), SpanParameter::Scale, exact(f30(30))) == 1);
+    CHECK(close(spanContributionFromLeft(*c.findSpan(early), SpanParameter::Scale, exact(f30(45))), 1.5));
+    CHECK(spanContributionFromLeft(*c.findSpan(early), SpanParameter::Scale, exact(f30(60))) == 2);
+    CHECK(spanContributionFromLeft(*c.findSpan(early), SpanParameter::Scale, exact(f30(61))) == 2);
+    // A transition span never contributes.
+    const SpanId fade = fx.addFade(id, ClipEdge::Tail, f30(10));
+    CHECK_FALSE(spanActsAt(*fx.clip(id).findSpan(fade), exact(f30(80))));
+}
+
+TEST_CASE("Hold after: a 5 s move from 5 s on a 30 s clip shows the framing before, moves, then holds its end") {
+    // The reference case: a 30 s clip (source [0, 30 s)) with a Ken Burns move over [5 s, 10 s).
+    Fixture fx;
+    const ClipId id = fx.addClip(fx.v1, fx.av30, 0, 900, 0);
+    SpanTracks move;
+    move.x = rampTrack(0, -200, CMTimeMake(5, 1), KeyframeInterpolation::EaseInOut);
+    move.y = rampTrack(0, 90, CMTimeMake(5, 1), KeyframeInterpolation::EaseInOut);
+    move.scale = rampTrack(1, 1.6, CMTimeMake(5, 1), KeyframeInterpolation::EaseInOut);
+    const SpanId span = fx.addSpan(id, SpanKind::Motion, 1, CMTimeMake(5, 1), CMTimeMake(10, 1), move);
+    fx.requireValid();
+    const Clip &c = fx.clip(id);
+    const auto end = spanEdgeMotion(c, *c.findSpan(span), f30(1), true);
+    REQUIRE(end.has_value());
+    CHECK(*end == VideoParams{-200, 90, 1.6, 0, 1});
+    for (int f = 0; f < 900; ++f) {
+        CAPTURE(f);
+        const VideoParams shown = motionValuesAt(c, f30(f));
+        if (f < 150) {
+            CHECK(shown == VideoParams{}); // the clip's own framing, exactly
+        } else if (f < 300) {
+            const double s = f / 30.0;
+            CHECK(close(shown.x, *referenceSpanValue(5, 10, 0, -200, KeyframeInterpolation::EaseInOut, s)));
+            CHECK(close(shown.y, *referenceSpanValue(5, 10, 0, 90, KeyframeInterpolation::EaseInOut, s)));
+            CHECK(close(shown.scale, *referenceSpanValue(5, 10, 1, 1.6, KeyframeInterpolation::EaseInOut, s)));
+        } else {
+            CHECK(shown == *end); // the end framing, held exactly to the clip's end
+        }
+    }
+    CHECK(motionValuesAt(c, f30(299)).scale < 1.6); // the move's last frame is a frame short of its end
+    CHECK(motionValuesAt(c, f30(920)) == *end);     // and it holds in a tail handle
+}
+
+TEST_CASE("Hold after: chained spans on one lane compose cumulatively") {
+    Fixture fx;
+    // A 120-frame clip from source 0 with static Motion; lane 1: A [0.5 s, 1.5 s) x 0 -> 100 and
+    // scale 1 -> 2 (linear), then B [2 s, 3 s) x 0 -> 50 and scale 1 -> 1.5 (ease in and out).
+    const ClipId id = fx.addClip(fx.v1, fx.av30, 0, 120, 0);
+    fx.sequence().findClip(id)->video = VideoParams{12, -4, 1.25, 3, 0.9};
+    SpanTracks a;
+    a.x = rampTrack(0, 100, CMTimeMake(1, 1));
+    a.scale = rampTrack(1, 2, CMTimeMake(1, 1));
+    fx.addSpan(id, SpanKind::Motion, 1, CMTimeMake(1, 2), CMTimeMake(3, 2), a);
+    SpanTracks b;
+    b.x = rampTrack(0, 50, CMTimeMake(1, 1), KeyframeInterpolation::EaseInOut);
+    b.scale = rampTrack(1, 1.5, CMTimeMake(1, 1), KeyframeInterpolation::EaseInOut);
+    const SpanId second = fx.addSpan(id, SpanKind::Motion, 1, CMTimeMake(2, 1), CMTimeMake(3, 1), b);
+    fx.requireValid();
+    using KI = KeyframeInterpolation;
+    SUBCASE("the second starts neutral: it continues the held picture without a jump") {
+        const Clip &c = fx.clip(id);
+        for (int f = 0; f < 120; ++f) {
+            CAPTURE(f);
+            const double s = f / 30.0;
+            const double xa = referenceHeldSpanValue(0.5, 1.5, 0, 100, KI::Linear, s).value_or(0);
+            const double sa = referenceHeldSpanValue(0.5, 1.5, 1, 2, KI::Linear, s).value_or(1);
+            const double xb = referenceHeldSpanValue(2, 3, 0, 50, KI::EaseInOut, s).value_or(0);
+            const double sb = referenceHeldSpanValue(2, 3, 1, 1.5, KI::EaseInOut, s).value_or(1);
+            const VideoParams shown = motionValuesAt(c, f30(f));
+            CHECK(close(shown.x, 12 + xa + xb));
+            CHECK(close(shown.scale, 1.25 * sa * sb));
+            CHECK(shown.y == -4);
+            CHECK(shown.rotationDegrees == 3);
+            CHECK(shown.opacity == 0.9);
+        }
+        // Between the spans A's end values hold exactly; B's first frame shows the same picture.
+        for (int f = 45; f <= 60; ++f) {
+            CHECK(motionValuesAt(c, f30(f)) == VideoParams{12 + 100, -4, 1.25 * 2, 3, 0.9});
+        }
+        // Past B the two end values hold, one on top of the other.
+        CHECK(motionValuesAt(c, f30(119)) == VideoParams{12 + 100 + 50, -4, 1.25 * 2 * 1.5, 3, 0.9});
+        // B's start framing, read as a Ken Burns move reads it, is A's held end framing.
+        const auto start = spanEdgeMotion(c, *c.findSpan(second), f30(1), false);
+        REQUIRE(start.has_value());
+        CHECK(*start == motionValuesAt(c, f30(59)));
+    }
+    SUBCASE("the second starts elsewhere: it jumps from the held picture by its start values") {
+        Clip &clip = *fx.sequence().findClip(id);
+        clip.findSpan(second)->tracks.x = rampTrack(30, 50, CMTimeMake(1, 1), KI::EaseInOut);
+        clip.findSpan(second)->tracks.scale = rampTrack(0.5, 1.5, CMTimeMake(1, 1), KI::EaseInOut);
+        fx.requireValid();
+        const Clip &c = fx.clip(id);
+        CHECK(motionValuesAt(c, f30(59)) == VideoParams{112, -4, 2.5, 3, 0.9});
+        CHECK(motionValuesAt(c, f30(60)) == VideoParams{112 + 30, -4, 2.5 * 0.5, 3, 0.9});
+        CHECK(motionValuesAt(c, f30(95)) == VideoParams{112 + 50, -4, 2.5 * 1.5, 3, 0.9});
+    }
+}
+
+TEST_CASE("Hold after: Opacity and Gain spans hold their end values; chained Gain spans add up") {
+    Fixture fx;
+    const ClipId v = fx.addClip(fx.v1, fx.av30, 0, 90, 30); // source [1 s, 4 s)
+    SpanTracks dim;
+    dim.opacity = rampTrack(1, 0.4, f30(15));
+    fx.addSpan(v, SpanKind::Opacity, 2, f30(40), f30(55), dim);
+    fx.requireValid();
+    for (int f = 0; f < 90; ++f) {
+        CAPTURE(f);
+        const double want = referenceHeldSpanValue(40, 55, 1, 0.4, KeyframeInterpolation::Linear, 30 + f).value_or(1);
+        CHECK(close(motionValuesAt(fx.clip(v), f30(f)).opacity, want));
+    }
+    CHECK(motionValuesAt(fx.clip(v), f30(89)).opacity == 0.4);
+
+    const ClipId a = fx.addClip(fx.a1, fx.audioOnly, 0, 120, 0);
+    fx.sequence().findClip(a)->audio.gainDb = -3;
+    SpanTracks duck;
+    duck.gain = rampTrack(0, -12, CMTimeMake(1, 2));
+    fx.addSpan(a, SpanKind::Gain, 1, CMTimeMake(1, 2), CMTimeMake(1, 1), duck);
+    SpanTracks swell; // starts neutral: the level goes on from -15 dB
+    swell.gain = rampTrack(0, 9, CMTimeMake(1, 2), KeyframeInterpolation::EaseOut);
+    fx.addSpan(a, SpanKind::Gain, 1, CMTimeMake(2, 1), CMTimeMake(5, 2), swell);
+    fx.requireValid();
+    for (int k = 0; k < 960; ++k) {
+        CAPTURE(k);
+        const double s = k / 240.0;
+        const double want = -3 +
+                            referenceHeldSpanValue(0.5, 1, 0, -12, KeyframeInterpolation::Linear, s).value_or(0) +
+                            referenceHeldSpanValue(2, 2.5, 0, 9, KeyframeInterpolation::EaseOut, s).value_or(0);
+        CHECK(close(gainDbAt(fx.clip(a), CMTimeMake(k, 240)), want));
+    }
+    CHECK(gainDbAt(fx.clip(a), CMTimeMake(3, 2)) == -15);
+    CHECK(gainDbAt(fx.clip(a), CMTimeMake(2, 1)) == -15); // the second span's first instant: no jump
+    CHECK(gainDbAt(fx.clip(a), CMTimeMake(3, 1)) == -6);
+}
+
+TEST_CASE("Hold after: on a still and at speeds other than 1 the end value holds from the span's end") {
+    Fixture fx;
+    // A still over timeline frames [30, 120): a span over its frames [10, 40) holds 1.5 after.
+    const ClipId still = fx.addClip(fx.v1, fx.still, 30, 90);
+    SpanTracks grow;
+    grow.scale = rampTrack(0.5, 1.5, f30(30), KeyframeInterpolation::EaseIn);
+    fx.addSpan(still, SpanKind::Motion, 1, f30(10), f30(40), grow);
+    // At 3/2 over timeline [0, 60) from source 1 s: a span over source [1.5 s, 2.5 s) (timeline
+    // frames [10, 30)) holds x = 80 after; at 1/3 over [0, 90) from source 0: a span over source
+    // [0.2 s, 0.6 s) (frames [18, 54)) holds rotation 30.
+    const ClipId fast = fx.addClip(fx.v2, fx.av30, 0, 60, 30, 1.5);
+    SpanTracks pan;
+    pan.x = rampTrack(0, 80, CMTimeMake(1, 1));
+    fx.addSpan(fast, SpanKind::Motion, 2, CMTimeMake(3, 2), CMTimeMake(5, 2), pan);
+    const ClipId slow = fx.addClip(fx.v2, fx.av30, 60, 90, 0, 1.0 / 3);
+    SpanTracks turn;
+    turn.rotation = rampTrack(0, 30, CMTimeMake(2, 5));
+    fx.addSpan(slow, SpanKind::Motion, 3, CMTimeMake(1, 5), CMTimeMake(3, 5), turn);
+    fx.requireValid();
+    for (int f = 30; f < 120; ++f) {
+        CAPTURE(f);
+        const double want =
+            referenceHeldSpanValue(10, 40, 0.5, 1.5, KeyframeInterpolation::EaseIn, f - 30.0).value_or(1);
+        CHECK(close(motionValuesAt(fx.clip(still), f30(f)).scale, want));
+    }
+    CHECK(motionValuesAt(fx.clip(still), f30(119)).scale == 1.5);
+    for (int f = 0; f < 60; ++f) {
+        CAPTURE(f);
+        const double want =
+            referenceHeldSpanValue(1.5, 2.5, 0, 80, KeyframeInterpolation::Linear, 1 + f / 20.0).value_or(0);
+        CHECK(close(motionValuesAt(fx.clip(fast), f30(f)).x, want));
+    }
+    CHECK(motionValuesAt(fx.clip(fast), f30(30)).x == 80);
+    for (int f = 60; f < 150; ++f) {
+        CAPTURE(f);
+        const double s = (f - 60) / 90.0;
+        const double want = referenceHeldSpanValue(0.2, 0.6, 0, 30, KeyframeInterpolation::Linear, s).value_or(0);
+        CHECK(close(motionValuesAt(fx.clip(slow), f30(f)).rotationDegrees, want));
+    }
+    CHECK(motionValuesAt(fx.clip(slow), f30(60 + 54)).rotationDegrees == 30);
+}
+
+TEST_CASE("Hold after: a span ending exactly at a cut holds from there, into a split's right piece too") {
+    Fixture fx;
+    // A 60-frame clip from source 1 s (source [1 s, 3 s)): lane 1 moves x 0 -> 90 over its last
+    // 30 frames, ending on its out point; lane 2 scales 1 -> 2 over [1 s, 2 s), ending at the middle.
+    const ClipId id = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
+    fx.sequence().findClip(id)->video = VideoParams{5, 0, 1.2, 0, 1};
+    SpanTracks tail;
+    tail.x = rampTrack(0, 90, f30(30));
+    fx.addSpan(id, SpanKind::Motion, 1, f30(60), f30(90), tail);
+    SpanTracks middle;
+    middle.scale = rampTrack(1, 2, f30(30), KeyframeInterpolation::EaseOut);
+    const SpanId half = fx.addSpan(id, SpanKind::Motion, 2, f30(30), f30(60), middle);
+    fx.requireValid();
+    const Clip &c = fx.clip(id);
+    CHECK(close(motionValuesAt(c, f30(59)).x, 5 + 87)); // a frame short of the end value
+    CHECK(motionValuesAt(c, f30(60)).x == 95);          // the out point (a tail handle): the end value
+    // A cut exactly at the lane-2 span's end: the right piece starts where the span ends, so the
+    // span stays on the left and its held scale becomes the right piece's own.
+    Clip right = c;
+    REQUIRE(right.setTimelineStartKeepingEnd(f30(30)) == RetimeResult::Ok);
+    CHECK(right.findSpan(half) == nullptr);
+    CHECK(right.video == VideoParams{5, 0, 1.2 * 2, 0, 1});
+    Clip left = c;
+    REQUIRE(left.setTimelineEnd(f30(30)) == RetimeResult::Ok);
+    REQUIRE(left.findSpan(half) != nullptr);
+    CHECK(left.video == c.video);
+    for (int f = 0; f < 60; ++f) {
+        CAPTURE(f);
+        const Clip &piece = f < 30 ? left : right;
+        CHECK(motionValuesAt(piece, f30(f)) == motionValuesAt(c, f30(f)));
+    }
+    // The left piece's tail handle holds the lane-2 end value (the cut is its out point).
+    CHECK(motionValuesAt(left, f30(33)).scale == 1.2 * 2);
+}
+
+TEST_CASE("Hold after: a trim or split past a span keeps its held value as the clip's own") {
+    Fixture fx;
+    // A 120-frame clip from source 0 with static Motion: lane 1 A [0.5 s, 1.5 s) and B [2 s, 3 s);
+    // lane 2 an Opacity span [0.2 s, 0.8 s); the linked audio clip ducks -9 dB over [0.3 s, 0.6 s).
+    const auto [v, a] = fx.addLinkedPair(0, 120, 0);
+    fx.sequence().findClip(v)->video = VideoParams{12, -4, 1.25, 3, 0.9};
+    fx.sequence().findClip(a)->audio.gainDb = -2;
+    SpanTracks first;
+    first.x = rampTrack(0, 100, CMTimeMake(1, 1));
+    first.scale = rampTrack(1, 2, CMTimeMake(1, 1), KeyframeInterpolation::EaseInOut);
+    const SpanId spanA = fx.addSpan(v, SpanKind::Motion, 1, CMTimeMake(1, 2), CMTimeMake(3, 2), first);
+    SpanTracks second;
+    second.x = rampTrack(0, 50, CMTimeMake(1, 1));
+    const SpanId spanB = fx.addSpan(v, SpanKind::Motion, 1, CMTimeMake(2, 1), CMTimeMake(3, 1), second);
+    SpanTracks fade;
+    fade.opacity = rampTrack(1, 0.5, f30(18));
+    const SpanId spanO = fx.addSpan(v, SpanKind::Opacity, 2, f30(6), f30(24), fade);
+    SpanTracks duck;
+    duck.gain = rampTrack(0, -9, f30(9));
+    const SpanId spanG = fx.addSpan(a, SpanKind::Gain, 1, f30(9), f30(18), duck);
+    fx.requireValid();
+    const Clip video = fx.clip(v);
+    const Clip audio = fx.clip(a);
+
+    // A head trim to frame 50 (source 5/3 s): A and the Opacity span lie wholly before it.
+    Clip trimmed = video;
+    REQUIRE(trimmed.setTimelineStartKeepingEnd(f30(50)) == RetimeResult::Ok);
+    CHECK(trimmed.findSpan(spanA) == nullptr);
+    CHECK(trimmed.findSpan(spanO) == nullptr);
+    REQUIRE(trimmed.findSpan(spanB) != nullptr);
+    CHECK(trimmed.video == VideoParams{12 + 100, -4, 1.25 * 2, 3, 0.9 * 0.5});
+    // The held values were composed in the composition's order (lane 1 before lane 2, A before B),
+    // so the remaining frames are the same to the bit.
+    for (int f = 50; f < 125; ++f) {
+        CAPTURE(f);
+        CHECK(motionValuesAt(trimmed, f30(f)) == motionValuesAt(video, f30(f)));
+    }
+    Clip ducked = audio;
+    REQUIRE(ducked.setTimelineStartKeepingEnd(f30(50)) == RetimeResult::Ok);
+    CHECK(ducked.findSpan(spanG) == nullptr);
+    CHECK(ducked.audio.gainDb == -11);
+    for (int k = 200; k < 480; ++k) {
+        CHECK(gainDbAt(ducked, CMTimeMake(k, 120)) == gainDbAt(audio, CMTimeMake(k, 120)));
+    }
+
+    // A trim that only cuts into a span clips it; nothing is held before it.
+    Clip into = video;
+    REQUIRE(into.setTimelineStartKeepingEnd(f30(20)) == RetimeResult::Ok);
+    CHECK(into.findSpan(spanA) != nullptr);
+    CHECK(into.findSpan(spanO) != nullptr);
+    CHECK(into.video == video.video);
+    for (int f = 20; f < 120; ++f) {
+        CHECK(close(motionValuesAt(into, f30(f)).x, motionValuesAt(video, f30(f)).x, 1e-12));
+        CHECK(close(motionValuesAt(into, f30(f)).scale, motionValuesAt(video, f30(f)).scale, 1e-12));
+    }
+
+    // A still: its spans move back with a head trim and those left before its start fold in.
+    const ClipId still = fx.addClip(fx.v2, fx.still, 0, 90);
+    SpanTracks grow;
+    grow.scale = rampTrack(1, 1.5, f30(20));
+    fx.addSpan(still, SpanKind::Motion, 1, f30(10), f30(30), grow);
+    fx.requireValid();
+    Clip stillTrimmed = fx.clip(still);
+    REQUIRE(stillTrimmed.setTimelineStartKeepingEnd(f30(40)) == RetimeResult::Ok);
+    CHECK(stillTrimmed.spans.empty());
+    CHECK(stillTrimmed.video.scale == 1.5);
+    for (int f = 40; f < 90; ++f) {
+        CHECK(motionValuesAt(stillTrimmed, f30(f)) == motionValuesAt(fx.clip(still), f30(f)));
+    }
+
+    // Values too large to keep refuse the change and leave the clip as it was.
+    Clip huge = video;
+    huge.video.x = 1.5e308;
+    huge.findSpan(spanA)->tracks.x = rampTrack(0, 1.5e308, CMTimeMake(1, 1));
+    const Clip hugeBefore = huge;
+    CHECK(huge.setTimelineStartKeepingEnd(f30(50)) == RetimeResult::HeldValuesOverflow);
+    CHECK(huge == hugeBefore);
 }
 
 TEST_CASE("Clip spans follow trims: effect spans are clipped exactly, fades shrink, the edited edge gives way") {
@@ -448,10 +761,13 @@ TEST_CASE("Clip spans follow trims: effect spans are clipped exactly, fades shri
     REQUIRE(clip.findSpan(across) != nullptr);  // it crossed it: clipped
     CHECK(clip.findSpan(across)->start == f30(45));
     CHECK(clip.findSpan(across)->end == f30(50));
-    // Every remaining frame shows what it showed before.
+    // Every remaining frame shows what it showed before (the removed Opacity span was neutral, so
+    // nothing of it is held).
     const Clip &before = fx.clip(id);
+    CHECK(clip.video == before.video);
     for (int f = 15; f < 75; ++f) {
         CHECK(close(motionValuesAt(clip, f30(f)).x, motionValuesAt(before, f30(f)).x, 1e-12));
+        CHECK(motionValuesAt(clip, f30(f)).opacity == motionValuesAt(before, f30(f)).opacity);
     }
 
     // Fades: an audio clip with a 30-frame fade in and a 40-frame fade out, cut to 50 frames from

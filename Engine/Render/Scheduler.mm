@@ -85,7 +85,7 @@ VideoParams Scheduler::motionAt(const Clip &clip, CMTime time) {
     // The exact source time the frame shows (not snapped to the asset's frame grid), or the tick
     // after it where it has no CMTime form (motionTimeAt), held within the clip's source range
     // (spanEvaluationTime): animation moves at the sequence's frame rate, also over a slower source
-    // or a still, and a span keeps its edge value through a transition handle.
+    // or a still; a span holds its end value after its end, also through a tail transition handle.
     return motionValuesAt(clip, time);
 }
 
@@ -297,7 +297,9 @@ AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &pro
                     addCut(transition->range.end);
                 }
             }
-            // Gain spans: their edges and keyframes, and fine steps through eased segments.
+            // Gain spans: their edges and keyframes, and fine steps through eased segments (only
+            // there: before a span's start it adds nothing and after its end it holds its end value,
+            // both flat).
             for (const EffectSpan &gain : clip.spans) {
                 if (gain.kind != SpanKind::Gain) {
                     continue;
@@ -335,8 +337,11 @@ AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &pro
 
             const bool hasGainSpans =
                 std::any_of(clip.spans.begin(), clip.spans.end(), [](const EffectSpan &s) { return s.kind == SpanKind::Gain; });
-            // The level over [a, b): the static gain plus the Gain spans acting on the piece, at a and
-            // as b is approached (the spans acting on a piece do not change inside it).
+            // The level over [a, b): the static gain plus what the Gain spans that have started by a
+            // contribute (composeGainDb's order and rule: the moving value inside a span, its end
+            // value held after it, a later span on the lane on top), at a and as b is approached. The
+            // pieces are cut at every span edge and keyframe, so over a piece each span is either
+            // one segment of its ramp or its held level, flat.
             auto levelOver = [&](CMTime a, CMTime b) {
                 DecibelRamp level{clip.audio.gainDb, clip.audio.gainDb};
                 if (!hasGainSpans) {
@@ -347,14 +352,15 @@ AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &pro
                 if (!from || !to) {
                     return level;
                 }
+                const bool instant = from->compare(*to) == 0;
                 for (int lane = kFirstEffectLane; lane <= kLastLane; ++lane) {
                     for (const EffectSpan &gain : clip.spans) {
-                        if (gain.lane != lane || gain.kind != SpanKind::Gain || !spanActiveAt(clip, gain, *from)) {
+                        if (gain.lane != lane || gain.kind != SpanKind::Gain || !spanActsAt(gain, *from)) {
                             continue;
                         }
-                        level.start += spanValueAt(gain, SpanParameter::Gain, *from);
-                        level.end += from->compare(*to) == 0 ? spanValueAt(gain, SpanParameter::Gain, *to)
-                                                             : spanValueFromLeft(gain, SpanParameter::Gain, *to);
+                        level.start += spanContributionAt(gain, SpanParameter::Gain, *from);
+                        level.end += instant ? spanContributionAt(gain, SpanParameter::Gain, *to)
+                                             : spanContributionFromLeft(gain, SpanParameter::Gain, *to);
                     }
                 }
                 return level;
