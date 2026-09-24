@@ -213,6 +213,7 @@ final class ProjectStore: ObservableObject {
             let critical = (note.userInfo?[VEEngineCriticalKey] as? NSNumber)?.boolValue ?? false
             store.thumbnails.handleMemoryPressure(critical: critical)
             store.waveforms.handleMemoryPressure(critical: critical)
+            store.kenBurns?.picture?.handleMemoryPressure()
         }
         preferencesForwarding = preferences.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
@@ -861,7 +862,7 @@ final class ProjectStore: ObservableObject {
         }
         guard let clip = clips[id], let info = asset(clip.assetID) else { return }
         var reason = ""
-        let picture = KenBurnsPictureLoader(assetID: info.assetID, cache: thumbnails)
+        let picture = KenBurnsPictureLoader(assetID: info.assetID, engine: engine)
         guard let model = KenBurnsModel(clip: clip, asset: info, sequence: sequence, playhead: playheadTime,
                                         durationDisplay: editingPreferences.durationDisplay, picture: picture,
                                         previous: adjacentClip(to: id, at: .start),

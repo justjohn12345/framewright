@@ -883,62 +883,135 @@ final class KenBurnsTimelineBand: ObservableObject {
     }
 }
 
-/// Loads the Ken Burns helper's picture through the thumbnail cache, paced for scrubbing: at most one
-/// fetch of its own is in flight, and when it lands the latest wanted time is fetched next (the
-/// times in between are skipped, like the program monitor's scrub coalescing). Until the wanted
-/// picture arrives the last one shown stays up, so the picture never goes blank while scrubbing.
-/// Pictures come from the cache (the whole, unanimated source frame), never from the program view.
+/// Loads the Ken Burns helper's picture, paced for scrubbing, with a small cache of its own: the
+/// pictures are large (up to `maxDimension`, several MB each) and belong to the helper alone, so they
+/// never go through the shared `ThumbnailCache` (whose every landing redraws the timeline and the
+/// media bin, and whose entries have no byte budget). At most one fetch is in flight; when it lands
+/// its picture is shown at once (the playhead may have moved on: a picture a little behind the
+/// playhead beats a frozen one while scrubbing) and the latest wanted time is fetched next, the times
+/// in between skipped (like the program monitor's scrub coalescing). A failed fetch also moves on to
+/// the latest wanted time; a time that failed is not fetched again until another time was wanted.
+/// Until the first picture arrives nothing is shown. At most `capacity` pictures are kept (the least
+/// recently shown go first), so the loader's memory is bounded however long the scrub. Only the
+/// overlay observes it. Pictures are the whole, unanimated source frame, never the program view.
 @MainActor
 final class KenBurnsPictureLoader: ObservableObject {
     /// The largest side of the fetched picture (enough for a monitor-sized overlay).
     static let maxDimension = 1280
+    /// Pictures kept by default: the current one plus a few to step back to.
+    nonisolated static let defaultCapacity = 6
+
+    /// Fetches the unanimated picture of an asset at a source time, calling `completion` on the main
+    /// thread with it or the error (the engine's `thumbnail(forAsset:at:maxDimension:completion:)`).
+    typealias Fetch = (_ asset: VEAssetID, _ time: CMTime, _ maxDimension: Int,
+                       _ completion: @escaping (CGImage?, Error?) -> Void) -> Void
 
     let assetID: VEAssetID
-    private let cache: ThumbnailCache
-    /// The picture to draw: the wanted one once it is cached, else the last one shown.
+    /// Pictures kept at most.
+    let capacity: Int
+    /// The picture to draw: the wanted one once it has arrived, else the last one that arrived.
     @Published private(set) var image: CGImage?
     /// The source seconds last asked for.
     private(set) var wantedSeconds: Double?
-    /// The source seconds of this loader's fetch in flight (nil when none).
+    /// The source seconds of the fetch in flight (nil when none).
     private(set) var pendingSeconds: Double?
-    /// Fetches this loader started (diagnostics and tests).
+    /// Fetches started, and those that failed (diagnostics and tests).
     private(set) var fetchesStarted = 0
+    private(set) var fetchesFailed = 0
 
-    init(assetID: VEAssetID, cache: ThumbnailCache) {
-        self.assetID = assetID
-        self.cache = cache
+    private let fetch: Fetch
+    /// Kept pictures by time (milliseconds), and their use order (oldest first).
+    private var pictures: [Int64: CGImage] = [:]
+    private var useOrder: [Int64] = []
+    /// Times whose fetch failed, not fetched again until another time was wanted.
+    private var failedMillis: Int64?
+
+    /// Pictures from `engine` (held weakly: the helper never keeps a closed project's engine).
+    convenience init(assetID: VEAssetID, engine: VEEngine, capacity: Int = KenBurnsPictureLoader.defaultCapacity) {
+        self.init(assetID: assetID, capacity: capacity) { [weak engine] asset, time, size, completion in
+            guard let engine else {
+                completion(nil, nil)
+                return
+            }
+            engine.thumbnail(forAsset: asset, at: time, maxDimension: size) { image, error in
+                completion(image, error)
+            }
+        }
     }
+
+    init(assetID: VEAssetID, capacity: Int = KenBurnsPictureLoader.defaultCapacity, fetch: @escaping Fetch) {
+        self.assetID = assetID
+        self.capacity = max(1, capacity)
+        self.fetch = fetch
+    }
+
+    /// Pictures kept now (at most `capacity`).
+    var cachedCount: Int { pictures.count }
 
     /// The picture at `seconds` (source time) is wanted now.
     func want(seconds: Double) {
+        let millis = Self.millis(seconds)
+        if millis != wantedSeconds.map(Self.millis) {
+            failedMillis = nil // a new time: one that failed may be tried again later
+        }
         wantedSeconds = seconds
-        update()
+        drive()
     }
 
-    /// The cache changed (a fetch landed): show what is there and fetch the latest wanted time.
-    func update() {
+    /// Memory pressure: keeps only the picture on screen.
+    func handleMemoryPressure() {
+        for millis in useOrder where pictures[millis] !== image {
+            pictures[millis] = nil
+        }
+        useOrder.removeAll { pictures[$0] == nil }
+    }
+
+    static func millis(_ seconds: Double) -> Int64 {
+        Int64((max(0, seconds.isFinite ? seconds : 0) * 1000).rounded())
+    }
+
+    /// Shows the wanted picture when it is kept, else fetches it (one fetch at a time).
+    private func drive() {
         guard let wanted = wantedSeconds else { return }
-        let size = Self.maxDimension
-        if let cached = cache.cachedImage(asset: assetID, seconds: wanted, maxDimension: size) {
-            if image !== cached { image = cached }
-            pendingSeconds = nil
+        let millis = Self.millis(wanted)
+        if let kept = pictures[millis] {
+            touch(millis)
+            if image !== kept { image = kept }
             return
         }
-        if image == nil, let any = cache.anyImage(asset: assetID, maxDimension: size) {
-            image = any // something of this clip while the first picture loads
-        }
-        if let pending = pendingSeconds, cache.isFetching(asset: assetID, seconds: pending, maxDimension: size) {
-            return // one at a time: the latest wanted time follows when this one lands
-        }
+        guard pendingSeconds == nil, millis != failedMillis else { return }
         pendingSeconds = wanted
-        _ = cache.image(asset: assetID, seconds: wanted, maxDimension: size) // starts the fetch
-        if cache.isFetching(asset: assetID, seconds: wanted, maxDimension: size) {
-            fetchesStarted += 1
-        } else if let arrived = cache.cachedImage(asset: assetID, seconds: wanted, maxDimension: size) {
-            image = arrived
-            pendingSeconds = nil
-        } else {
-            pendingSeconds = nil // failed recently: the cache retries later; keep the last picture
+        fetchesStarted += 1
+        fetch(assetID, CMTime(value: millis, timescale: 1000), Self.maxDimension) { [weak self] picture, error in
+            MainActor.assumeIsolated {
+                self?.landed(millis: millis, picture: picture, error: error)
+            }
         }
+    }
+
+    private func landed(millis: Int64, picture: CGImage?, error: Error?) {
+        pendingSeconds = nil
+        if let picture {
+            keep(picture, millis: millis)
+            image = picture // shown before the next fetch starts
+        } else if !isProjectClosed(error) {
+            fetchesFailed += 1
+            failedMillis = millis
+        }
+        drive() // the latest wanted time next (also after a failure)
+    }
+
+    private func keep(_ picture: CGImage, millis: Int64) {
+        pictures[millis] = picture
+        touch(millis)
+        while useOrder.count > capacity, let oldest = useOrder.first {
+            useOrder.removeFirst()
+            pictures[oldest] = nil
+        }
+    }
+
+    private func touch(_ millis: Int64) {
+        useOrder.removeAll { $0 == millis }
+        useOrder.append(millis)
     }
 }

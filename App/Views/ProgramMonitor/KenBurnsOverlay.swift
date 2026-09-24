@@ -9,8 +9,9 @@ import FramewrightEngine
 /// the smoothing, Swap, Cancel and Apply. Drag a rectangle to pan, drag a corner to
 /// zoom (the aspect ratio stays the frame's). The picture is the clip's unanimated frame at the
 /// playhead (its first or last frame while the playhead is outside it) and follows every playhead
-/// change, loaded through the thumbnail cache by `KenBurnsPictureLoader` (one fetch at a time, the
-/// latest time next), never from the program view.
+/// change, loaded by `KenBurnsPictureLoader` (its own small cache, one fetch at a time, each landed
+/// picture shown before the latest time is fetched), never from the program view or the shared
+/// thumbnail cache, so pictures landing redraw this overlay alone.
 ///
 /// Everything drawn comes from observed objects (the model, the playhead, the picture loader), so a
 /// change of any of them redraws the overlay.
@@ -19,7 +20,6 @@ struct KenBurnsOverlay: View {
     @ObservedObject var model: KenBurnsModel
     @ObservedObject var playhead: PlayheadModel
     @ObservedObject var picture: KenBurnsPictureLoader
-    let thumbnails: ThumbnailCache
     /// The rectangle as it was when the current drag started.
     @State private var dragOrigin: CGRect?
     @FocusState private var focusedField: RangeField?
@@ -54,7 +54,6 @@ struct KenBurnsOverlay: View {
         // The picture and a "From playhead" range follow the playhead while the helper is open.
         .onChange(of: playhead.time, initial: true) { _, time in model.setPlayhead(time) }
         .onChange(of: model.pictureSeconds, initial: true) { _, seconds in picture.want(seconds: seconds) }
-        .onReceive(thumbnails.$version) { _ in picture.update() }
     }
 
     /// Sequence pixels to view points: the frame letterboxed into the view.
@@ -341,8 +340,7 @@ struct KenBurnsOverlayHost: View {
 
     var body: some View {
         if let model = store.kenBurns, let picture = model.picture {
-            KenBurnsOverlay(store: store, model: model, playhead: store.playhead, picture: picture,
-                            thumbnails: store.thumbnails)
+            KenBurnsOverlay(store: store, model: model, playhead: store.playhead, picture: picture)
         }
     }
 }

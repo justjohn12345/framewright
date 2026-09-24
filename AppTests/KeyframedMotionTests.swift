@@ -444,38 +444,144 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(stillModel.pictureSeconds, 0)
     }
 
-    func testKenBurnsPictureLoaderFetchesOneAtATimeAndEndsOnTheLatestTime() async throws {
+    /// A picture source the test answers by hand: each fetch waits until `land` or `fail`.
+    private final class ScriptedPictures {
+        struct Request {
+            let millis: Int64
+            let completion: (CGImage?, Error?) -> Void
+        }
+
+        private(set) var requests: [Request] = []
+        private var answered = 0
+
+        func fetch(_ asset: VEAssetID, _ time: CMTime, _ size: Int, _ completion: @escaping (CGImage?, Error?) -> Void) {
+            requests.append(Request(millis: time.value * 1000 / Int64(time.timescale), completion: completion))
+        }
+
+        var pending: Request? { answered < requests.count ? requests[answered] : nil }
+
+        /// Answers the oldest open request with a picture (1x1, tagged by its time in the colour).
+        @discardableResult
+        func land() -> CGImage? {
+            guard let request = pending else { return nil }
+            answered += 1
+            let image = Self.picture()
+            request.completion(image, nil)
+            return image
+        }
+
+        func fail() {
+            guard let request = pending else { return }
+            answered += 1
+            request.completion(nil, NSError(domain: "Test", code: 1))
+        }
+
+        static func picture() -> CGImage? {
+            CGContext(data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 0,
+                      space: CGColorSpaceCreateDeviceRGB(),
+                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
+        }
+    }
+
+    func testKenBurnsPictureLoaderShowsEveryLandedPictureWhileScrubbingOneFetchAtATime() throws {
+        let source = ScriptedPictures()
+        let loader = KenBurnsPictureLoader(assetID: 1, capacity: 4, fetch: source.fetch)
+        // A scrub: many times while nothing has landed start one fetch.
+        for frame in stride(from: 0, through: 12, by: 3) {
+            loader.want(seconds: Double(frame) / 30)
+        }
+        XCTAssertEqual(loader.fetchesStarted, 1)
+        XCTAssertEqual(source.pending?.millis, 0)
+        XCTAssertNil(loader.image, "nothing to show before the first picture")
+
+        // Three landings while the playhead keeps moving: each landed picture shows at once (the
+        // preview never freezes on the first one), and the latest wanted time is fetched next.
+        var shown: [CGImage] = []
+        for step in 1 ... 3 {
+            let landed = try XCTUnwrap(source.land())
+            XCTAssertTrue(loader.image === landed, "landing \(step) shows its picture")
+            shown.append(landed)
+            XCTAssertEqual(loader.fetchesStarted, step + 1, "the latest time follows")
+            XCTAssertEqual(source.pending?.millis, Int64((Double(12 + 3 * (step - 1)) / 30 * 1000).rounded()))
+            loader.want(seconds: Double(12 + 3 * step) / 30) // the scrub goes on
+        }
+        XCTAssertEqual(Set(shown.map(ObjectIdentifier.init)).count, 3)
+
+        // The scrub stops at 0.7 s: 0.6 s lands, then the wanted 0.7 s, which stays.
+        source.land()
+        let final = try XCTUnwrap(source.land())
+        XCTAssertTrue(loader.image === final)
+        XCTAssertNil(loader.pendingSeconds)
+        XCTAssertNil(source.pending)
+        // A kept time (0.5 s, the third landing) shows at once without a fetch; one the capacity of
+        // four pushed out (0 s, the first) is fetched again.
+        let fetches = loader.fetchesStarted
+        loader.want(seconds: 0.5)
+        XCTAssertTrue(loader.image === shown[2])
+        XCTAssertEqual(loader.fetchesStarted, fetches)
+        loader.want(seconds: 0)
+        XCTAssertEqual(loader.fetchesStarted, fetches + 1)
+        XCTAssertEqual(source.pending?.millis, 0)
+        XCTAssertTrue(loader.image === shown[2], "the last picture stays up meanwhile")
+    }
+
+    func testKenBurnsPictureLoaderMovesOnAfterAFailedFetchAndKeepsTheLastPicture() throws {
+        let source = ScriptedPictures()
+        let loader = KenBurnsPictureLoader(assetID: 1, capacity: 4, fetch: source.fetch)
+        loader.want(seconds: 1)
+        let first = try XCTUnwrap(source.land())
+        loader.want(seconds: 2)
+        loader.want(seconds: 3) // wanted while 2 is in flight
+        source.fail()
+        XCTAssertEqual(loader.fetchesFailed, 1)
+        XCTAssertTrue(loader.image === first, "the last picture stays up")
+        XCTAssertEqual(source.pending?.millis, 3000, "the failure re-drives the loader to the latest time")
+        source.fail()
+        XCTAssertNil(source.pending, "a time that just failed is not fetched again in a loop")
+        XCTAssertEqual(loader.fetchesStarted, 3)
+        // Wanting another time and coming back tries it again.
+        loader.want(seconds: 4)
+        let fourth = try XCTUnwrap(source.land())
+        XCTAssertTrue(loader.image === fourth)
+        loader.want(seconds: 3)
+        XCTAssertEqual(source.pending?.millis, 3000)
+    }
+
+    func testKenBurnsPictureLoaderMemoryIsBounded() throws {
+        let source = ScriptedPictures()
+        let loader = KenBurnsPictureLoader(assetID: 1, capacity: 5, fetch: source.fetch)
+        // A long scrub back and forth over 300 distinct frames.
+        for pass in 0 ..< 2 {
+            for frame in 0 ..< 150 {
+                loader.want(seconds: Double(pass == 0 ? frame : 149 - frame) / 30)
+                source.land()
+                XCTAssertLessThanOrEqual(loader.cachedCount, 5)
+            }
+        }
+        XCTAssertEqual(loader.cachedCount, 5)
+        // Memory pressure keeps only the picture on screen.
+        let onScreen = loader.image
+        loader.handleMemoryPressure()
+        XCTAssertEqual(loader.cachedCount, 1)
+        XCTAssertTrue(loader.image === onScreen)
+    }
+
+    func testTheKenBurnsHelperLoadsItsPictureFromTheEngineWithoutTheSharedCache() async throws {
         let id = try await placedClip()
         store.beginKenBurns(clip: id)
         let loader = try XCTUnwrap(store.kenBurns?.picture)
         let thumbnails = store.thumbnails
-        // A scrub: many times in a row while nothing has landed yet starts one fetch.
-        for frame in stride(from: 0, through: 45, by: 3) {
-            loader.want(seconds: Double(frame) / 30)
-        }
-        XCTAssertEqual(loader.fetchesStarted, 1)
-        XCTAssertEqual(loader.pendingSeconds, 0)
-        XCTAssertNil(loader.image)
-        // The first lands; the update fetches the latest wanted time (the ones between are skipped).
-        let landed = await StoreFixture.wait(until: { !thumbnails.isFetching }, timeout: 20)
-        XCTAssertTrue(landed)
-        loader.update()
-        XCTAssertNotNil(loader.image, "the first picture shows while the latest loads")
-        XCTAssertEqual(loader.fetchesStarted, 2)
-        XCTAssertEqual(loader.pendingSeconds, 1.5)
-        let second = await StoreFixture.wait(until: { !thumbnails.isFetching }, timeout: 20)
-        XCTAssertTrue(second)
-        loader.update()
-        let latest = try XCTUnwrap(thumbnails.cachedImage(asset: loader.assetID, seconds: 1.5,
-                                                          maxDimension: KenBurnsPictureLoader.maxDimension))
-        XCTAssertTrue(loader.image === latest)
-        XCTAssertNil(loader.pendingSeconds)
-        XCTAssertEqual(loader.fetchesStarted, 2)
-        // A time already cached shows at once, without a fetch.
-        loader.want(seconds: 0)
-        XCTAssertTrue(loader.image === thumbnails.cachedImage(asset: loader.assetID, seconds: 0,
-                                                             maxDimension: KenBurnsPictureLoader.maxDimension))
-        XCTAssertEqual(loader.fetchesStarted, 2)
+        let requestsBefore = thumbnails.requestsStarted
+        let versionBefore = thumbnails.version
+        loader.want(seconds: 0.5)
+        let landed = await StoreFixture.wait(until: { loader.image != nil }, timeout: 20)
+        XCTAssertTrue(landed, "a real picture arrives from the engine")
+        let width = try XCTUnwrap(store.asset(try XCTUnwrap(store.clips[id]).assetID)).width
+        XCTAssertEqual(loader.image?.width, min(KenBurnsPictureLoader.maxDimension, Int(width)),
+                       "the whole picture, at most the helper's size")
+        await StoreFixture.wait(until: { false }, timeout: 0.2)
+        XCTAssertEqual(thumbnails.requestsStarted, requestsBefore, "the shared thumbnail cache is not used")
+        XCTAssertEqual(thumbnails.version, versionBefore, "nothing bumps the timeline's and bin's redraw token")
     }
 
     func testKenBurnsDurationFieldParsesAndClamps() async throws {

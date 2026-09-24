@@ -226,6 +226,96 @@ final class TimelineRedrawTests: XCTestCase {
     /// Lets SwiftUI process the pending updates (one main-queue turn), then makes the window
     /// lay out and display now, and renders the hosting view into a bitmap (which draws the
     /// SwiftUI content even while the window server does not composite the window).
+    /// The Ken Burns helper open over the program monitor while its pictures land during a scrub,
+    /// hosted with the timeline and the media bin in one window: the pictures have their own cache
+    /// (`KenBurnsPictureLoader`), so a landing redraws the helper's overlay only, never the timeline
+    /// model, the clips' canvas or a bin tile (it used to bump the shared thumbnail cache's redraw
+    /// token once per picture). Positive controls first prove the canvas and the tiles do redraw in
+    /// this host when what they show changes.
+    func testKenBurnsPicturesLandingRedrawNeitherTheTimelineNorTheBin() async throws {
+        try await makeTwentyClipSequence()
+        let store = fixture.store
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900),
+                              styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let root = VStack(spacing: 0) {
+            KenBurnsOverlayHost(store: store)
+                .frame(height: 420)
+            HStack(spacing: 0) {
+                MediaBinView(store: store)
+                    .frame(width: 420)
+                TimelineView(store: store)
+            }
+        }
+        let host = NSHostingView(rootView: root)
+        window.contentView = host
+        window.orderFront(nil)
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        let clip = try XCTUnwrap(store.clips.values.filter { $0.trackKind == .video }
+            .min { $0.timelineStart < $1.timelineStart })
+        store.playheadTime = .zero
+        store.beginKenBurns(clip: clip.clipID)
+        let loader = try XCTUnwrap(store.kenBurns?.picture)
+        // Thumbnails, waveforms, the tiles and the first picture settle.
+        let firstPicture = await StoreFixture.wait(until: { loader.image != nil }, timeout: 20)
+        XCTAssertTrue(firstPicture, "the helper's first picture arrives")
+        var last = (-1, -1)
+        for _ in 0 ..< 60 where last != (TimelineDiagnostics.canvasDraws, MediaBinDiagnostics.tileBodies) {
+            last = (TimelineDiagnostics.canvasDraws, MediaBinDiagnostics.tileBodies)
+            await Self.display(host)
+            await StoreFixture.wait(until: { false }, timeout: 0.1)
+        }
+
+        // Positive controls: the canvas redraws for a change it shows, a tile for its selection.
+        let controlDraws = TimelineDiagnostics.canvasDraws
+        store.snapIndicator = 0.5
+        await Self.display(host)
+        store.snapIndicator = nil
+        await Self.display(host)
+        XCTAssertGreaterThan(TimelineDiagnostics.canvasDraws, controlDraws, "the canvas draws in this host")
+        let controlTiles = MediaBinDiagnostics.tileBodies
+        let selectedAsset = store.selectedAssetID
+        store.selectedAssetID = selectedAsset == store.assets.first?.assetID ? store.assets.last?.assetID
+            : store.assets.first?.assetID
+        await Self.display(host)
+        XCTAssertGreaterThan(MediaBinDiagnostics.tileBodies, controlTiles, "the bin's tiles draw in this host")
+        await Self.display(host)
+
+        let builds = store.timelineBuildCount
+        let canvasDraws = TimelineDiagnostics.canvasDraws
+        let tileBodies = MediaBinDiagnostics.tileBodies
+        let versionBefore = store.thumbnails.version
+        // A scrub through the clip's frames: wait for each picture to land and show.
+        var landed: [ObjectIdentifier] = []
+        for frame in stride(from: 3, through: 27, by: 3) {
+            let time = CMTime(value: CMTimeValue(frame), timescale: 30)
+            let before = loader.image.map(ObjectIdentifier.init)
+            store.playhead.setTime(time) // the overlay feeds the helper from the playhead
+            await Self.display(host)
+            let arrived = await StoreFixture.wait(until: {
+                loader.pendingSeconds == nil && loader.image.map(ObjectIdentifier.init) != before
+            }, timeout: 20)
+            XCTAssertTrue(arrived, "the picture for frame \(frame) lands")
+            if let image = loader.image { landed.append(ObjectIdentifier(image)) }
+            await Self.display(host)
+            XCTAssertLessThanOrEqual(loader.cachedCount, loader.capacity, "the helper's memory stays bounded")
+        }
+        let rebuilt = store.timelineBuildCount - builds
+        let redrawn = TimelineDiagnostics.canvasDraws - canvasDraws
+        let tiles = MediaBinDiagnostics.tileBodies - tileBodies
+        print("\(landed.count) Ken Burns pictures landed: timeline model builds \(rebuilt), canvas draws \(redrawn), "
+            + "bin tile bodies \(tiles)")
+        XCTAssertEqual(Set(landed).count, 9, "nine distinct pictures landed and were shown")
+        XCTAssertEqual(rebuilt, 0, "the timeline model is not rebuilt")
+        XCTAssertEqual(redrawn, 0, "the clips' canvas is not redrawn")
+        XCTAssertEqual(tiles, 0, "no bin tile is redrawn")
+        XCTAssertEqual(store.thumbnails.version, versionBefore, "the shared thumbnail cache is untouched")
+        store.cancelKenBurns()
+    }
+
     private static func display(_ host: NSView) async {
         await Task.yield()
         try? await Task.sleep(nanoseconds: 2_000_000)

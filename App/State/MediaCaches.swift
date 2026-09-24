@@ -67,25 +67,6 @@ final class ThumbnailCache: ObservableObject {
         return nil
     }
 
-    /// The thumbnail if cached, else nil; never starts a fetch (for callers that pace their own).
-    func cachedImage(asset: VEAssetID, seconds: Double, maxDimension: Int) -> CGImage? {
-        images[Self.key(asset: asset, seconds: seconds, maxDimension: maxDimension)]
-    }
-
-    /// Whether the thumbnail is being fetched.
-    func isFetching(asset: VEAssetID, seconds: Double, maxDimension: Int) -> Bool {
-        inFlight.contains(Self.key(asset: asset, seconds: seconds, maxDimension: maxDimension))
-    }
-
-    /// The closest cached image of `asset` at `maxDimension` (any time), for showing something
-    /// while the exact frame loads.
-    func anyImage(asset: VEAssetID, maxDimension: Int) -> CGImage? {
-        for key in order.reversed() where key.assetID == asset && key.maxDimension == maxDimension {
-            if let image = images[key] { return image }
-        }
-        return nil
-    }
-
     /// Forgets everything (project closed); fetches still running are ignored when they finish.
     func removeAll() {
         generation &+= 1

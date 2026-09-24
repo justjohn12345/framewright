@@ -211,6 +211,12 @@ func presentImportPanel(store: ProjectStore) {
 }
 
 /// One asset in the bin.
+/// Redraw counters of the media bin (tests measure redraw budgets with them).
+enum MediaBinDiagnostics {
+    /// `AssetTileView` body evaluations.
+    static var tileBodies = 0
+}
+
 struct AssetTileView: View {
     let asset: VEAssetInfo
     @ObservedObject var thumbnails: ThumbnailCache
@@ -219,6 +225,7 @@ struct AssetTileView: View {
     static let thumbnailSize = 320
 
     var body: some View {
+        let _ = MediaBinDiagnostics.tileBodies += 1
         VStack(alignment: .leading, spacing: 4) {
             ZStack {
                 Rectangle()
