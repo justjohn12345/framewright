@@ -36,7 +36,8 @@ audited the code line by line.
 - Keyframed Motion: position, scale, rotation and opacity animate with keyframes (a keyframe
   toggle per parameter at the playhead, previous/next, hold, linear and ease interpolation;
   Control-K keys all five parameters at the playhead, or removes them),
-  shown as markers on the clip in the timeline; keyframes stay on their pictures through trims,
+  shown as markers on the clip in the timeline that can be dragged to another frame (all the
+  parameters keyed on that frame move together); keyframes stay on their pictures through trims,
   speed changes and splits. A Ken Burns helper (as in Final Cut Pro) draws a start and an end
   rectangle over the picture at the playhead and turns them into an eased pan and zoom over the
   whole clip, a set duration from the playhead or the clip's start (the end framing then holds) or

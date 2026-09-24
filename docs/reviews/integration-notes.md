@@ -496,6 +496,30 @@ in the history table of `README.md`.
   the canvas once per picture that lands (at most one fetch in flight). A cache that versions timeline-sized
   thumbnails separately would remove that; the band test hosts the timeline alone for this reason.
 
+- Draggable keyframe markers (engine + app). Engine (`EditOps.h`): `motionKeyframeGroupAt(clip, frameDuration, frame,
+  group)` (`MotionKeyframeGroup`: each parameter's keyframe that the frame shows, `keyframeIndexForFrame`, with its
+  index; `earliestFrame` / `latestFrame`: a frame after the frame showing the previous keyframe and a frame before
+  the one showing the next keyframe of each of those parameters, within the clip's frames; a neighbour a trim hid does
+  not limit beyond the clip); refused with InvalidArgument and `crowdedParameter` when a parameter has several
+  keyframes on the frame (a sped-up clip), KeyframeNotFound, InvalidTime. `planMotionKeyframeGroupMove` moves each to
+  the destination frame's start (`keyframeTimeForFrame`) keeping value, interpolation and curve. `MoveKeyframeGroup`
+  (one SequenceCommand, "Move Keyframe"/"Move Keyframes") plans inside `perform`, so in a ReplacePrevious group every
+  step is planned against the model before the drag (a plan made in the facade from the live model would find the
+  keyframes already moved by the previous step). Facade: `keyframeGroup(clip:at:)` (`VEKeyframeGroup`: frameTime,
+  parameters, earliestFrame, latestFrame, `canMove`/`reason`: a locked track, or several keyframes of one parameter
+  on the frame; read it before the drag) and `moveKeyframeGroup(clip:from:to:)` (pass the drag's original frame as
+  `from` on every step). `MoveKeyframe` (one parameter, source times) is unchanged.
+- App: `TimelineGestureController.DragState.movingKeyframes` (group key `timeline.keyframes`, `isGestureActive` via
+  `cancelActiveGesture`, Escape/abandon cancel the group): a drag that starts on a marker moves its keyframes (the
+  shared frame of a Ken Burns move moves x, y and scale together; a marker with only some parameters moves those),
+  horizontally, in whole sequence frames, clamped to the group's frames (only the frames change: no step is pushed
+  while the target frame stays the same), with the status line "Keyframe(s) at HH:MM:SS:FF" (+ "as far as it goes"
+  when clamped). A click without movement still seeks to the marker and selects the clip. Decision: dragging a
+  marker no longer moves the clip; the clip is moved by its body above the markers (the marker zone is the bottom
+  11 pt of the row), and Option keeps its meaning (the playhead), so there is no Option-drag clip move from a marker.
+  Hovering a marker shows the left-right cursor. The Ken Burns helper's Existing move range follows the dragged
+  keyframes (`update(clip:)` re-runs the detection on every step), and so does the band.
+
 ## Photos drops (feature request 9)
 - Drop types: `MediaDrop.types` = public.file-url plus `UTType.filePromiseTypes` (every
   `NSFilePromiseReceiver.readableDraggedTypes` entry and kPasteboardTypeFileURLPromise; the named ones

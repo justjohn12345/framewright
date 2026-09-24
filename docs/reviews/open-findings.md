@@ -28,7 +28,13 @@ server's drag session, so these are covered at the model level only:
   engine level; by hand: the helper's bar (Move menu, Duration field with Return also pressing Apply, the neighbour
   checkboxes) at narrow monitor widths, the picture following a real scrub smoothly, the inspector's Match menu, and
   that the keyframe diamonds and interpolation checkmarks redraw after each click (the SwiftUI diff itself; the
-  controls now draw only from `KeyframeControlState`, whose changes are tested).
+  controls now draw only from `KeyframeControlState`, whose changes are tested). Ken Burns editing: the existing-move
+  detection, the Custom range (parsing, clamping, the mode switch, Apply), the timeline band (geometry, its redraw
+  budget, pixels at its edges) and marker drags through `TimelineGestureController` (groups, limits, one undo step,
+  Escape, the helper following) are tested; by hand: Return in the Start/End/Duration fields committing the field
+  without pressing Apply and then pressing it (the default-button shortcut is dropped while `hasUncommittedText`;
+  AppKit's key-equivalent routing itself is not observable in the test host), the bar's layout with the three fields
+  at narrow monitor widths, and a real mouse drag of a marker through SwiftUI.
 - Photos drops and Import from Photos (feature request 9): everything after a drop reaches the drop delegates
   (`MediaBinDropDelegate`, `TimelineDropDelegate`, with a fake promise-carrying `NSItemProvider`), the promise receiving,
   progress, cancellation, the Media folder (next to a saved project; asked once for an untitled one and kept with it),
