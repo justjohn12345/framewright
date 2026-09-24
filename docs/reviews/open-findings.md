@@ -3,6 +3,16 @@
 Only what is still open. Fixed findings are in the history table of `README.md` (fix commits and regression tests);
 the full reports are in git history at the commits the table names.
 
+## Keyframed Motion, Ken Burns and Photos drops (2026-09-24 review, `2026-09-24-motion-photos-review.md`)
+Twenty-six findings, three HIGH: adding a keyframe reshapes the segment it lands in (hold becomes a ramp, eases
+re-timed); Live Photo pairing across unrelated items plus a permanent remembered choice deletes media silently; the
+Ken Burns preview goes through the shared thumbnail cache (no byte budget, redraws the timeline and bin per picture,
+freezes mid-scrub). Ten MEDIUM at the seams (a nudge writing into a keyframe the frame does not show, next-tick
+keyframes a frame late after a hold, late Photos placement overwriting later edits, quit/New/Open ignoring media still
+arriving, the media-folder bookmark surviving Save As, the untested pasteboard promise path, the folder panel and
+unfiltered promise types, typed range text overwritten, unreachable start rectangle, a vacuous parity movement check),
+and a tail of LOWs. Five groups of test gaps. All open; the next fix round works from the report.
+
 ## Test gaps that need a UI-test target (XCUITest) or a person
 The xctest host is not sandboxed and its synthesised NSEvents never reach SwiftUI's gesture system or the window
 server's drag session, so these are covered at the model level only:
