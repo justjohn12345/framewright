@@ -51,49 +51,41 @@ EditResult notRepresentable(ClipId clipId, CMTime at) {
                                    describe(at) + " has no CMTime form (its timescale would exceed 2^31 - 1)");
 }
 
-EditResult splitClipAt(Sequence &sequence, Track &track, std::size_t index, CMTime at, IdGenerator &ids,
-                       ClipId &rightId) {
+EditResult retimeRefusal(RetimeResult result, ClipId clipId, CMTime at) {
+    switch (result) {
+    case RetimeResult::Ok:
+        return EditResult::success();
+    case RetimeResult::NotRepresentable:
+        return notRepresentable(clipId, at);
+    case RetimeResult::SpanCurveOvershoot:
+        break;
+    }
+    return EditResult::failure(EditError::InvalidArgument,
+                               "clip " + std::to_string(clipId.value()) + " cannot be cut at " + describe(at) +
+                                   ": a span's custom timing curve goes outside its parameter's range there, so the "
+                                   "cut would change the picture");
+}
+
+EditResult splitClipAt(Sequence &, Track &track, std::size_t index, CMTime at, IdGenerator &ids, ClipId &rightId) {
     Clip left = track.clips[index];
     Clip right = track.clips[index];
-    if (left.video.isAnimated()) {
-        // Each piece keeps the keyframes on its side of the cut (source time `cut`), the cut itself
-        // interpolated, so neither piece's pictures change (Keyframes.h, splitTrack).
-        const auto source = left.exactSourceTimeAt(at);
-        const auto cut = source ? source->toTime() : std::nullopt;
-        if (!cut) {
-            return notRepresentable(left.id, at);
-        }
-        for (const MotionParameter parameter : kMotionParameters) {
-            TrackSplit pieces = splitTrack(left.video.keyframes.track(parameter), left.video.staticValue(parameter), *cut);
-            if (!pieces.right.empty() && !isValidMotionValue(parameter, pieces.right.front().value)) {
-                // A custom curve from a project file overshoots the parameter's range at the cut: the
-                // pieces' keyframe there cannot take that value, and the limited one would change
-                // the frames around the cut.
-                return EditResult::failure(EditError::InvalidArgument,
-                                           "clip " + std::to_string(left.id.value()) + " cannot be split at " +
-                                               describe(at) + ": " + displayNameOf(parameter) +
-                                               "'s custom timing curve goes outside its range there, so a split "
-                                               "would change the picture");
-            }
-            left.video.keyframes.track(parameter) = std::move(pieces.left);
-            left.video.setStaticValue(parameter, pieces.leftStatic);
-            right.video.keyframes.track(parameter) = std::move(pieces.right);
-            right.video.setStaticValue(parameter, pieces.rightStatic);
-        }
-    }
+    // Lane 0: the head span stays with the left piece, the tail span goes with the right one.
+    std::erase_if(left.spans, [](const EffectSpan &span) { return span.isTransition() && span.edge == ClipEdge::Tail; });
+    std::erase_if(right.spans, [](const EffectSpan &span) { return span.isTransition() && span.edge == ClipEdge::Head; });
     right.linkedClipId.reset();
-    right.audio.fadeInDuration = kCMTimeZero;
-    if (!right.setTimelineStartKeepingEnd(at)) {
-        return notRepresentable(left.id, at);
+    // Each piece clips the effect spans to its own source range (fitSpans): a span across the cut
+    // is divided exactly, the value at the cut evaluated.
+    if (EditResult r = retimeRefusal(right.setTimelineStartKeepingEnd(at), left.id, at); !r) {
+        return r;
     }
-    left.audio.fadeOutDuration = kCMTimeZero;
-    if (!left.setTimelineEnd(at)) {
-        return notRepresentable(left.id, at);
+    if (EditResult r = retimeRefusal(left.setTimelineEnd(at), left.id, at); !r) {
+        return r;
     }
     right.id = ids.make<ClipId>();
-    for (Transition &transition : sequence.transitions) {
-        if (transition.fromClipId == left.id) {
-            transition.fromClipId = right.id;
+    // A span divided by the cut is on both pieces: the right piece's part gets a new id.
+    for (EffectSpan &span : right.spans) {
+        if (!span.isTransition() && left.findSpan(span.id) != nullptr) {
+            span.id = ids.make<SpanId>();
         }
     }
     rightId = right.id;
@@ -146,18 +138,18 @@ EditResult clearRange(Sequence &sequence, Track &track, const TimeRange &range, 
                 return r;
             }
             splits.emplace_back(original, right);
-            if (!track.clips[i].setTimelineEnd(range.start)) {
-                return notRepresentable(original, range.start);
+            if (EditResult r = retimeRefusal(track.clips[i].setTimelineEnd(range.start), original, range.start); !r) {
+                return r;
             }
             i += 2;
             continue;
         }
         if (clipRange.start < range.start) {
-            if (!clip.setTimelineEnd(range.start)) {
-                return notRepresentable(clip.id, range.start);
+            if (EditResult r = retimeRefusal(clip.setTimelineEnd(range.start), clip.id, range.start); !r) {
+                return r;
             }
-        } else if (!clip.setTimelineStartKeepingEnd(range.end)) {
-            return notRepresentable(clip.id, range.end);
+        } else if (EditResult r = retimeRefusal(clip.setTimelineStartKeepingEnd(range.end), clip.id, range.end); !r) {
+            return r;
         }
         ++i;
     }
@@ -346,31 +338,27 @@ void normalizeSequence(Sequence &sequence, const Project &project) {
         }
     }
 
-    // Transitions: drop invalid ones, then ones conflicting with an earlier kept transition.
-    std::vector<Transition> kept;
-    std::unordered_map<ClipId, TimeRange> outgoing; // clip -> range of the transition at its end
-    std::unordered_map<ClipId, TimeRange> incoming; // clip -> range of the transition at its start
-    for (const Transition &transition : sequence.transitions) {
-        if (checkTransition(sequence, project, transition)) {
-            continue;
+    // Spans in order; transition spans that are no longer valid go. Two transitions that meet (a
+    // cross dissolve into a clip whose own tail span it now reaches) are resolved from the right:
+    // the later clip's span is checked first and kept.
+    for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (Track &track : *list) {
+            for (Clip &clip : track.clips) {
+                clip.sortSpans();
+            }
+            for (std::size_t i = track.clips.size(); i-- > 0;) {
+                Clip &clip = track.clips[i];
+                for (const ClipEdge edge : {ClipEdge::Tail, ClipEdge::Head}) {
+                    const EffectSpan *span = clip.transitionAt(edge);
+                    if (span != nullptr &&
+                        checkTransitionSpan(project, track, clip, *span, sequence.frameDuration).has_value()) {
+                        const SpanId id = span->id;
+                        std::erase_if(clip.spans, [id](const EffectSpan &s) { return s.id == id; });
+                    }
+                }
+            }
         }
-        const TimeRange range = *sequence.transitionRange(transition);
-        if (outgoing.count(transition.fromClipId) || incoming.count(transition.toClipId)) {
-            continue;
-        }
-        const auto fromHead = incoming.find(transition.fromClipId);
-        if (fromHead != incoming.end() && fromHead->second.end > range.start) {
-            continue;
-        }
-        const auto toTail = outgoing.find(transition.toClipId);
-        if (toTail != outgoing.end() && range.end > toTail->second.start) {
-            continue;
-        }
-        outgoing.emplace(transition.fromClipId, range);
-        incoming.emplace(transition.toClipId, range);
-        kept.push_back(transition);
     }
-    sequence.transitions = std::move(kept);
 }
 
 } // namespace ve

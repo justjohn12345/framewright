@@ -46,15 +46,20 @@ Clip removeClip(Track &track, ClipId clipId);
 // The failure returned when an exact source time has no CMTime form.
 EditResult notRepresentable(ClipId clipId, CMTime at);
 
+// The failure for a clip timing change (Clip::setTimelineEnd and friends) that did not succeed:
+// NotRepresentable, or InvalidArgument when a span's custom timing curve overshoots at the new
+// edge. Success for RetimeResult::Ok.
+EditResult retimeRefusal(RetimeResult result, ClipId clipId, CMTime at);
+
 // Splits the clip at `index` at timeline time `at` (strictly inside it). The left piece keeps
-// the id, link and fade-in; the right piece gets a new id, no link and the fade-out (each fade
-// shortened to fit its piece); a transition at the clip's end moves to the right piece. Motion
-// keyframes are divided at the cut (splitTrack), so both pieces show exactly what the clip showed.
-// Stores the right piece's id in `rightId`. Fails (changing nothing) with NotRepresentable when
-// the right piece's source in point has no exact CMTime form (for any clip, animated or not: a
-// clip's in point must be exact, so keyframeTimeForFrame's tick fallback has no counterpart here),
-// and with InvalidArgument when a custom timing curve (from a project file) overshoots a Motion
-// parameter's range at the cut.
+// the id, the link and the lane-0 span at its head; the right piece gets a new id, no link and the
+// lane-0 span at its tail (a fade shortened to fit its piece; a transition at the clip's end thus
+// moves to the right piece). Effect spans are divided exactly at the cut (clipSpan / splitSpan):
+// the left piece keeps a divided span's id, the right piece's part gets a new one; both pieces show
+// exactly what the clip showed. Stores the right piece's id in `rightId`. Fails (changing nothing)
+// with NotRepresentable when the right piece's source in point has no exact CMTime form, and with
+// InvalidArgument when a custom timing curve (from a project file) overshoots a parameter's range
+// at the cut.
 EditResult splitClipAt(Sequence &sequence, Track &track, std::size_t index, CMTime at, IdGenerator &ids,
                        ClipId &rightId);
 
@@ -88,9 +93,11 @@ EditResult openTime(Sequence &sequence, const std::unordered_set<TrackId> &track
 EditResult closeTime(Sequence &sequence, const std::unordered_set<TrackId> &tracks,
                      const std::vector<TimeRange> &ranges);
 
-// Tidies an edited sequence before validation: sorts clips, clears links whose partner is gone
-// or no longer reciprocates, and removes transitions that are no longer valid (their clips were
-// moved, trimmed or deleted) or that conflict with an earlier transition.
+// Tidies an edited sequence before validation: sorts clips and their spans, clears links whose
+// partner is gone or no longer reciprocates, and removes transition spans that are no longer valid
+// (checkTransitionSpan: their cut is gone, they lost the length or media they need, a fade in
+// whose clip's start another clip now touches). Tracks are processed in order and clips from left
+// to right, so of two transitions that meet, the later clip's is kept.
 void normalizeSequence(Sequence &sequence, const Project &project);
 
 } // namespace ve

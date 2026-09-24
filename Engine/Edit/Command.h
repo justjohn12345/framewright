@@ -4,8 +4,9 @@
 // revert(); revert() restores the exact previous state (bit for bit, including ids and the id
 // generator). Sequence edits derive from SequenceCommand, which runs the edit on a copy of the
 // sequence, validates the result, and records a SequencePatch (before/after snapshots of only
-// the tracks and transitions that changed). Undo and redo replay those snapshots rather than
-// re-running the edit, so arbitrarily long undo/redo chains are stable.
+// the tracks that changed; a clip's spans are part of its track, so undo restores whole clips with
+// their spans). Undo and redo replay those snapshots rather than re-running the edit, so
+// arbitrarily long undo/redo chains are stable.
 
 #pragma once
 
@@ -85,12 +86,10 @@ struct SequencePatch {
     bool trackOrderChanged = false;    // tracks added, removed or reordered
     std::vector<TrackId> videoOrderBefore, videoOrderAfter;
     std::vector<TrackId> audioOrderBefore, audioOrderAfter;
-    bool transitionsChanged = false;
-    std::vector<Transition> transitionsBefore, transitionsAfter;
     IdGenerator idsBefore, idsAfter;
 
     bool isEmpty() const {
-        return tracks.empty() && !trackOrderChanged && !transitionsChanged && idsBefore == idsAfter;
+        return tracks.empty() && !trackOrderChanged && idsBefore == idsAfter;
     }
 };
 
@@ -105,8 +104,8 @@ enum class PatchDirection {
 
 // Whether `sequence` and `ids` are exactly in the patch's source state for `direction` (the
 // "before" state going forward, the "after" state going backward): every recorded track equal
-// to its snapshot (or absent where it did not exist), the track order, the transitions and the
-// id generator as recorded.
+// to its snapshot (or absent where it did not exist), the track order and the id generator as
+// recorded.
 bool patchApplies(const Sequence &sequence, const IdGenerator &ids, const SequencePatch &patch,
                   PatchDirection direction);
 
@@ -121,9 +120,11 @@ SequencePatch composePatches(const SequencePatch &first, const SequencePatch &se
 
 // Runs an edit on a copy of one sequence and commits it only if the result is valid:
 // perform() edits the copy, normalizeSequence() tidies it, validateSequence() must pass, and the
-// edit may not change a locked track (its clips, its transitions, or remove it), except for
-// commands that exist to change track flags (mayEditLockedTracks()). Transitions dropped as a
-// side effect are reported in EditResult::droppedTransitionIds.
+// edit may not change a locked track (its clips and their spans, or remove it), except for
+// commands that exist to change track flags (mayEditLockedTracks()). Spans removed as a side
+// effect are reported in EditResult::droppedTransitionIds / droppedSpanIds: every span the edit
+// removed except those perform() marked as removed on purpose (markRemovedOnPurpose) and the
+// effect spans of clips the edit removed.
 class SequenceCommand : public Command {
   public:
     EditResult apply(Project &project) final;
@@ -154,10 +155,17 @@ class SequenceCommand : public Command {
         return false;
     }
 
+    // Called by perform() for a span it removes on purpose (not reported as dropped).
+    void markRemovedOnPurpose(SpanId spanId) {
+        removedOnPurpose_.push_back(spanId);
+    }
+
   private:
     SequenceId sequenceId_;
     std::optional<SequencePatch> patch_;
-    std::vector<TransitionId> dropped_;
+    std::vector<SpanId> droppedTransitions_;
+    std::vector<SpanId> droppedSpans_;
+    std::vector<SpanId> removedOnPurpose_;
 };
 
 } // namespace ve

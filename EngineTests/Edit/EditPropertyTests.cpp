@@ -18,7 +18,7 @@ class RandomEditor {
 
     std::unique_ptr<Command> next() {
         const Sequence &s = fx_.sequence();
-        switch (pick(20)) {
+        switch (pick(24)) {
         case 0:
         case 1:
             return insertOrOverwrite(true);
@@ -63,9 +63,19 @@ class RandomEditor {
                                                     VideoParams{double(frame(200)) - 100, double(frame(200)) - 100,
                                                                 0.25 * double(1 + pick(8)), double(frame(360)),
                                                                 0.1 * pick(11)});
-        case 13:
-            return std::make_unique<SetAudioParams>(fx_.seq, anyClip(),
-                                                    AudioParams{-double(pick(24)), f30(frame(20)), f30(frame(20))});
+        case 13: {
+            // Gain and lane-0 fades (refused on video clips, on touched starts and crossfaded ends).
+            ClipParamsChange change;
+            change.clipId = anyClip();
+            change.audio = AudioParams{-double(pick(24))};
+            if (pick(2) == 0) {
+                change.fadeIn = f30(frame(20));
+            }
+            if (pick(2) == 0) {
+                change.fadeOut = f30(frame(20));
+            }
+            return std::make_unique<SetClipsParams>(fx_.seq, std::vector<ClipParamsChange>{change});
+        }
         case 14: {
             static const double speeds[] = {0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 1.0 / 3.0};
             return std::make_unique<SetClipSpeed>(fx_.seq, anyClip(), speeds[pick(7)],
@@ -83,21 +93,34 @@ class RandomEditor {
                     }
                 }
             }
-            if (cuts.empty()) {
-                return nullptr;
+            TransitionSpanRequest request;
+            if (!cuts.empty() && pick(3) != 0) {
+                // A dissolve with an uneven split, or a fade out ending on the cut.
+                request.clipId = cuts[pick(cuts.size())].first;
+                request.start = -f30(frame(20));
+                request.end = f30(pick(4) == 0 ? 0 : frame(20));
+            } else {
+                request.clipId = anyClip();
+                request.edge = pick(2) == 0 ? ClipEdge::Head : ClipEdge::Tail;
+                const CMTime length = f30(1 + frame(20));
+                request.start = request.edge == ClipEdge::Head ? kCMTimeZero : -length;
+                request.end = request.edge == ClipEdge::Head ? length : kCMTimeZero;
             }
-            const auto &cut = cuts[pick(cuts.size())];
-            return std::make_unique<AddTransition>(fx_.seq, cut.first, cut.second, f30(2 + frame(30)));
+            return std::make_unique<AddTransitionSpans>(fx_.seq, std::vector<TransitionSpanRequest>{request});
         }
         case 16: {
-            if (s.transitions.empty()) {
+            const SpanId t = anySpan(true);
+            if (!t) {
                 return nullptr;
             }
-            const TransitionId t = s.transitions[pick(s.transitions.size())].id;
             if (pick(2) == 0) {
-                return std::make_unique<RemoveTransition>(fx_.seq, t);
+                return std::make_unique<RemoveSpans>(fx_.seq, std::vector<SpanId>{t});
             }
-            return std::make_unique<SetTransitionDuration>(fx_.seq, t, f30(1 + frame(40)));
+            const bool head = s.findSpan(t)->edge == ClipEdge::Head;
+            const CMTime length = f30(1 + frame(30));
+            return std::make_unique<SetTransitionRanges>(
+                fx_.seq, std::vector<TransitionRangeChange>{
+                             {t, head ? kCMTimeZero : -f30(frame(20)), head ? length : f30(frame(20))}});
         }
         case 17: {
             const ClipId a = anyClip();
@@ -115,6 +138,60 @@ class RandomEditor {
                 return std::make_unique<RemoveTrack>(fx_.seq, anyTrack(kind));
             }
             return nullptr;
+        }
+        case 19: {
+            // An effect span over part of a clip (of the clip's kind, or refused).
+            const ClipId c = anyClip();
+            const Clip *clip = s.findClip(c);
+            if (!clip) {
+                return nullptr;
+            }
+            static const SpanKind kinds[] = {SpanKind::Motion, SpanKind::Opacity, SpanKind::Gain};
+            const std::int64_t start = frameIndexAt(clip->timelineStart, f30(1), SnapMode::Round);
+            const std::int64_t length = frameIndexAt(clip->duration(), f30(1), SnapMode::Round);
+            const std::int64_t from = start + frame(length);
+            return std::make_unique<AddSpan>(fx_.seq, c, kinds[pick(3)], 1 + static_cast<int>(pick(3)), f30(from),
+                                             f30(from + 1 + frame(length)));
+        }
+        case 20: {
+            const SpanId id = anySpan(false);
+            const Clip *clip = nullptr;
+            if (!id || !s.findSpan(id, &clip)) {
+                return nullptr;
+            }
+            const std::int64_t start = frameIndexAt(clip->timelineStart, f30(1), SnapMode::Round);
+            const std::int64_t length = frameIndexAt(clip->duration(), f30(1), SnapMode::Round);
+            const std::int64_t from = start + frame(length);
+            return std::make_unique<SetSpanRange>(fx_.seq, id, f30(from), f30(from + 1 + frame(length)));
+        }
+        case 21: {
+            const SpanId id = anySpan(false);
+            if (!id) {
+                return nullptr;
+            }
+            const EffectSpan &span = *s.findSpan(id);
+            std::vector<SpanValueChange> changes;
+            for (const SpanParameter parameter : parametersOf(span.kind)) {
+                const double scale = parameter == SpanParameter::Opacity ? 0.1 : parameter == SpanParameter::Scale ? 0.25 : 10.0;
+                changes.push_back(SpanValueChange{parameter, scale * double(pick(9)), scale * double(pick(9))});
+            }
+            static const KeyframeInterpolation easings[] = {KeyframeInterpolation::Linear, KeyframeInterpolation::Hold,
+                                                            KeyframeInterpolation::EaseIn, KeyframeInterpolation::EaseOut,
+                                                            KeyframeInterpolation::EaseInOut};
+            if (pick(3) == 0) {
+                return std::make_unique<SetSpanInterpolation>(fx_.seq, id, easings[pick(5)]);
+            }
+            return std::make_unique<SetSpanValues>(fx_.seq, id, changes);
+        }
+        case 22: {
+            const SpanId id = anySpan(false);
+            if (!id) {
+                return nullptr;
+            }
+            if (pick(2) == 0) {
+                return std::make_unique<RemoveSpans>(fx_.seq, std::vector<SpanId>{id});
+            }
+            return std::make_unique<MoveSpanLane>(fx_.seq, id, 1 + static_cast<int>(pick(3)));
         }
         default: {
             const TrackKind kind = pick(2) == 0 ? TrackKind::Video : TrackKind::Audio;
@@ -145,6 +222,23 @@ class RandomEditor {
             }
         }
         return ids.empty() ? ClipId{} : ids[pick(ids.size())];
+    }
+
+    // A random transition span (`transitions`) or effect span, or an invalid id when there is none.
+    SpanId anySpan(bool transitions) {
+        std::vector<SpanId> ids;
+        for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
+            for (const Track &track : fx_.sequence().tracks(kind)) {
+                for (const Clip &clip : track.clips) {
+                    for (const EffectSpan &span : clip.spans) {
+                        if (span.isTransition() == transitions) {
+                            ids.push_back(span.id);
+                        }
+                    }
+                }
+            }
+        }
+        return ids.empty() ? SpanId{} : ids[pick(ids.size())];
     }
 
     RippleScope anyScope() {
@@ -217,9 +311,17 @@ void runRandomEdits(std::uint64_t seed, int steps) {
         const auto problem = validateProject(fx.project);
         REQUIRE_MESSAGE(!problem, doctest::String((name + ": " + problem.value_or("")).c_str()));
         CHECK_FALSE(hasInexactTime(fx.project));
-        for (const TransitionId dropped : result.droppedTransitionIds) {
-            CHECK(states.back().findSequence(fx.seq)->findTransition(dropped) != nullptr);
-            CHECK(fx.sequence().findTransition(dropped) == nullptr);
+        for (const SpanId dropped : result.droppedTransitionIds) {
+            const EffectSpan *before = states.back().findSequence(fx.seq)->findSpan(dropped);
+            REQUIRE(before != nullptr);
+            CHECK(before->isTransition());
+            CHECK(fx.sequence().findSpan(dropped) == nullptr);
+        }
+        for (const SpanId dropped : result.droppedSpanIds) {
+            const EffectSpan *before = states.back().findSequence(fx.seq)->findSpan(dropped);
+            REQUIRE(before != nullptr);
+            CHECK_FALSE(before->isTransition());
+            CHECK(fx.sequence().findSpan(dropped) == nullptr);
         }
         states.push_back(fx.project);
         jsonStates.push_back(toJsonString(fx.project));

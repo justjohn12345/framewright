@@ -3,6 +3,7 @@
 #include "../Model/Validation.h"
 #include "EditPrimitives.h"
 
+#include <algorithm>
 #include <unordered_map>
 #include <utility>
 
@@ -63,11 +64,6 @@ SequencePatch diffSequences(const Sequence &before, const Sequence &after, const
         patch.audioOrderAfter.clear();
     }
 
-    if (!(before.transitions == after.transitions)) {
-        patch.transitionsChanged = true;
-        patch.transitionsBefore = before.transitions;
-        patch.transitionsAfter = after.transitions;
-    }
     return patch;
 }
 
@@ -89,10 +85,6 @@ bool patchApplies(const Sequence &sequence, const IdGenerator &ids, const Sequen
             trackOrder(sequence.audioTracks) != (forward ? patch.audioOrderBefore : patch.audioOrderAfter)) {
             return false;
         }
-    }
-    if (patch.transitionsChanged &&
-        !(sequence.transitions == (forward ? patch.transitionsBefore : patch.transitionsAfter))) {
-        return false;
     }
     return true;
 }
@@ -140,9 +132,6 @@ bool applyPatch(Sequence &sequence, IdGenerator &ids, const SequencePatch &patch
         }
     }
 
-    if (patch.transitionsChanged) {
-        sequence.transitions = forward ? patch.transitionsAfter : patch.transitionsBefore;
-    }
     ids = forward ? patch.idsAfter : patch.idsBefore;
     return true;
 }
@@ -194,47 +183,41 @@ SequencePatch composePatches(const SequencePatch &first, const SequencePatch &se
             result.audioOrderAfter.clear();
         }
     }
-    if (first.transitionsChanged || second.transitionsChanged) {
-        result.transitionsChanged = true;
-        result.transitionsBefore = first.transitionsChanged ? first.transitionsBefore : second.transitionsBefore;
-        result.transitionsAfter = second.transitionsChanged ? second.transitionsAfter : first.transitionsAfter;
-        if (result.transitionsBefore == result.transitionsAfter) {
-            result.transitionsChanged = false;
-            result.transitionsBefore.clear();
-            result.transitionsAfter.clear();
-        }
-    }
     return result;
 }
 
 namespace {
 
-// Refusal if the change from `before` to `after` touches a locked track: its clips or
-// properties, its existence, or a transition on it.
-std::optional<EditResult> lockedTrackChange(const Sequence &before, const SequencePatch &patch) {
+// Refusal if the change touches a locked track: its clips (and their spans) or properties, or
+// its existence.
+std::optional<EditResult> lockedTrackChange(const SequencePatch &patch) {
     for (const TrackSnapshot &snapshot : patch.tracks) {
         if (snapshot.before && snapshot.before->locked) {
             return EditResult::failure(EditError::TrackLocked, "track \"" + snapshot.before->name + "\" is locked" +
                                                                    (snapshot.after ? "" : " and cannot be removed"));
         }
     }
-    if (patch.transitionsChanged) {
-        auto onLocked = [&](const std::vector<Transition> &list) {
-            std::vector<Transition> result;
-            for (const Transition &transition : list) {
-                const Track *track = before.findTrack(transition.trackId);
-                if (track && track->locked) {
-                    result.push_back(transition);
+    return std::nullopt;
+}
+
+struct SpanRecord {
+    SpanId id;
+    ClipId clip;
+    bool transition = false;
+};
+
+std::vector<SpanRecord> spanRecords(const Sequence &sequence) {
+    std::vector<SpanRecord> records;
+    for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (const Track &track : *list) {
+            for (const Clip &clip : track.clips) {
+                for (const EffectSpan &span : clip.spans) {
+                    records.push_back(SpanRecord{span.id, clip.id, span.isTransition()});
                 }
             }
-            return result;
-        };
-        const std::vector<Transition> lockedBefore = onLocked(patch.transitionsBefore);
-        if (!(lockedBefore == onLocked(patch.transitionsAfter))) {
-            return EditResult::failure(EditError::TrackLocked, "the edit would change a transition on a locked track");
         }
     }
-    return std::nullopt;
+    return records;
 }
 
 } // namespace
@@ -251,19 +234,17 @@ EditResult SequenceCommand::apply(Project &project) {
                                        name() + " cannot be redone: the sequence no longer matches its starting state");
         }
         EditResult redone = EditResult::success();
-        redone.droppedTransitionIds = dropped_;
+        redone.droppedTransitionIds = droppedTransitions_;
+        redone.droppedSpanIds = droppedSpans_;
         return redone;
     }
 
     Sequence working = *sequence;
     IdGenerator ids = project.ids;
+    removedOnPurpose_.clear();
     EditResult result = perform(project, working, ids);
     if (!result) {
         return result;
-    }
-    std::vector<TransitionId> beforeNormalize;
-    for (const Transition &transition : working.transitions) {
-        beforeNormalize.push_back(transition.id);
     }
     normalizeSequence(working, project);
     if (auto problem = validateSequence(working, project)) {
@@ -272,20 +253,30 @@ EditResult SequenceCommand::apply(Project &project) {
     }
     SequencePatch patch = diffSequences(*sequence, working, project.ids, ids);
     if (!mayEditLockedTracks()) {
-        if (auto refusal = lockedTrackChange(*sequence, patch)) {
+        if (auto refusal = lockedTrackChange(patch)) {
             return *refusal;
         }
     }
-    dropped_.clear();
-    for (const TransitionId transitionId : beforeNormalize) {
-        if (!working.findTransition(transitionId)) {
-            dropped_.push_back(transitionId);
+    // Spans that went as a side effect: not removed on purpose, and not effect spans that left
+    // with their clip.
+    droppedTransitions_.clear();
+    droppedSpans_.clear();
+    for (const SpanRecord &record : spanRecords(*sequence)) {
+        if (working.findSpan(record.id) != nullptr ||
+            std::find(removedOnPurpose_.begin(), removedOnPurpose_.end(), record.id) != removedOnPurpose_.end()) {
+            continue;
+        }
+        if (record.transition) {
+            droppedTransitions_.push_back(record.id);
+        } else if (working.findClip(record.clip) != nullptr) {
+            droppedSpans_.push_back(record.id);
         }
     }
     patch_ = std::move(patch);
     *sequence = std::move(working);
     project.ids = ids;
-    result.droppedTransitionIds = dropped_;
+    result.droppedTransitionIds = droppedTransitions_;
+    result.droppedSpanIds = droppedSpans_;
     return result;
 }
 
@@ -312,7 +303,9 @@ bool SequenceCommand::mergeWith(const Command &next) {
         return false;
     }
     patch_ = composePatches(*patch_, *other->patch_);
-    dropped_.insert(dropped_.end(), other->dropped_.begin(), other->dropped_.end());
+    droppedTransitions_.insert(droppedTransitions_.end(), other->droppedTransitions_.begin(),
+                               other->droppedTransitions_.end());
+    droppedSpans_.insert(droppedSpans_.end(), other->droppedSpans_.begin(), other->droppedSpans_.end());
     return true;
 }
 

@@ -16,169 +16,283 @@ struct CutFixture : Fixture {
 
 } // namespace
 
-TEST_CASE("AddTransition centres a transition on the cut") {
+TEST_CASE("AddTransitionSpans puts a centred dissolve on the outgoing clip's tail") {
     CutFixture fx;
-    AddTransition add(fx.seq, fx.a, fx.b, f30(10));
+    AddTransitionSpans add(fx.seq, {centredDissolve(fx.a, 10)});
     applyReversible(fx.project, add);
-    const Transition *t = fx.sequence().findTransition(add.createdTransitionId());
-    REQUIRE(t != nullptr);
-    CHECK(t->trackId == fx.v1);
-    CHECK(t->fromClipId == fx.a);
-    CHECK(t->toClipId == fx.b);
-    CHECK(t->duration == f30(10));
-    const auto range = fx.sequence().transitionRange(*t);
-    CHECK(range->start == f30(55));
-    CHECK(range->end == f30(65));
+    REQUIRE(add.createdSpanIds().size() == 1);
+    const SpanId id = add.createdSpanIds()[0];
+    const auto placed = findTransition(fx.sequence(), id);
+    REQUIRE(placed.has_value());
+    CHECK(placed->owner->id == fx.a);
+    CHECK(placed->partner->id == fx.b);
+    CHECK(placed->track->id == fx.v1);
+    CHECK(placed->role == TransitionRole::CrossDissolve);
+    CHECK(placed->range.start == f30(55));
+    CHECK(placed->range.end == f30(65));
+    const EffectSpan &span = *fx.span(id);
+    CHECK(span.lane == kTransitionLane);
+    CHECK(span.edge == ClipEdge::Tail);
+    CHECK(fx.clip(fx.b).spans.empty()); // the incoming clip owns nothing across the cut
 }
 
-TEST_CASE("AddTransition refusals") {
+TEST_CASE("AddTransitionSpans: asymmetric shares, fades and their rules") {
+    CutFixture fx;
+    SUBCASE("70/30: seven frames before the cut, three after") {
+        AddTransitionSpans add(fx.seq, {tailTransition(fx.a, 7, 3)});
+        applyReversible(fx.project, add);
+        CHECK(transitionFrames(fx, add.createdSpanIds()[0]) == span(53, 63));
+    }
+    SUBCASE("all after the cut (starting at it) is a dissolve on the outgoing clip's handles") {
+        AddTransitionSpans add(fx.seq, {tailTransition(fx.a, 0, 10)});
+        applyReversible(fx.project, add);
+        CHECK(findTransition(fx.sequence(), add.createdSpanIds()[0])->role == TransitionRole::CrossDissolve);
+    }
+    SUBCASE("ending on the cut is a fade out, touching neighbour or not") {
+        AddTransitionSpans add(fx.seq, {tailTransition(fx.a, 12, 0)});
+        applyReversible(fx.project, add);
+        CHECK(findTransition(fx.sequence(), add.createdSpanIds()[0])->role == TransitionRole::FadeOut);
+        CHECK(transitionFrames(fx, add.createdSpanIds()[0]) == span(48, 60));
+    }
+    SUBCASE("a fade out after the last clip, and a fade in where nothing touches the start") {
+        AddTransitionSpans add(fx.seq, {tailTransition(fx.b, 15, 0), headFade(fx.a, 20)});
+        applyReversible(fx.project, add);
+        CHECK(findTransition(fx.sequence(), add.createdSpanIds()[0])->role == TransitionRole::FadeOut);
+        CHECK(findTransition(fx.sequence(), add.createdSpanIds()[1])->role == TransitionRole::FadeIn);
+        CHECK(transitionFrames(fx, add.createdSpanIds()[1]) == span(0, 20));
+    }
+    SUBCASE("a fade in on a clip whose start another clip touches is refused: the cut is that clip's") {
+        AddTransitionSpans add(fx.seq, {headFade(fx.b, 10)});
+        const EditResult r = applyRefused(fx.project, add, EditError::InvalidArgument);
+        CHECK(r.message.find("touches the start") != std::string::npos);
+    }
+    SUBCASE("running past the end with nothing touching it is refused") {
+        AddTransitionSpans add(fx.seq, {tailTransition(fx.b, 5, 5)});
+        applyRefused(fx.project, add, EditError::NotAdjacent);
+    }
+    SUBCASE("a dissolve covers whole frames on each side of the cut") {
+        TransitionSpanRequest half = tailTransition(fx.a, 5, 5);
+        half.end = CMTimeMake(1, 60) + f30(4);
+        AddTransitionSpans add(fx.seq, {half});
+        applyRefused(fx.project, add, EditError::InvalidArgument);
+    }
+    SUBCASE("a fade may be any exact length (a migrated audio fade)") {
+        const ClipId m = fx.addClip(fx.a1, fx.audioOnly, 0, 60);
+        TransitionSpanRequest fade = tailTransition(m, 0, 0);
+        fade.start = CMTimeMake(-7, 48000);
+        AddTransitionSpans add(fx.seq, {fade});
+        applyReversible(fx.project, add);
+    }
+    SUBCASE("a head fade and the tail span may not meet") {
+        AddTransitionSpans tail(fx.seq, {tailTransition(fx.a, 40, 5)});
+        applyReversible(fx.project, tail);
+        AddTransitionSpans head(fx.seq, {headFade(fx.a, 21)});
+        applyRefused(fx.project, head, EditError::Overlap);
+        AddTransitionSpans fits(fx.seq, {headFade(fx.a, 20)});
+        applyReversible(fx.project, fits);
+    }
+    SUBCASE("the offsets must be on the right side of the edge") {
+        AddTransitionSpans wrongSide(fx.seq, {tailTransition(fx.a, -3, 6)});
+        applyRefused(fx.project, wrongSide, EditError::InvalidArgument);
+        TransitionSpanRequest shifted = headFade(fx.a, 10);
+        shifted.start = f30(2);
+        AddTransitionSpans notAtStart(fx.seq, {shifted});
+        applyRefused(fx.project, notAtStart, EditError::InvalidArgument);
+    }
+}
+
+TEST_CASE("AddTransitionSpans refusals") {
     CutFixture fx;
     Project &p = fx.project;
-    SUBCASE("not adjacent") {
-        const ClipId c = fx.addClip(fx.v1, fx.av30, 121, 30, 600);
-        AddTransition add(fx.seq, fx.b, c, f30(10));
-        applyRefused(p, add, EditError::NotAdjacent);
-    }
-    SUBCASE("wrong order") {
-        AddTransition add(fx.seq, fx.b, fx.a, f30(10));
-        applyRefused(p, add, EditError::NotAdjacent);
-    }
-    SUBCASE("different tracks") {
-        const ClipId c = fx.addClip(fx.v2, fx.av30, 60, 30, 600);
-        AddTransition add(fx.seq, fx.a, c, f30(10));
-        applyRefused(p, add, EditError::InvalidArgument);
-    }
     SUBCASE("outgoing clip has no media after its out point") {
         const ClipId c = fx.addClip(fx.v2, fx.av30, 0, 60, 1740);
-        const ClipId d = fx.addClip(fx.v2, fx.av30, 60, 60, 300);
-        AddTransition add(fx.seq, c, d, f30(10));
+        fx.addClip(fx.v2, fx.av30, 60, 60, 300);
+        AddTransitionSpans add(fx.seq, {centredDissolve(c, 10)});
         const EditResult r = applyRefused(p, add, EditError::InsufficientHandles);
         CHECK(r.message.find("after its out point") != std::string::npos);
     }
     SUBCASE("incoming clip has no media before its in point") {
         const ClipId c = fx.addClip(fx.v2, fx.av30, 0, 60, 300);
-        const ClipId d = fx.addClip(fx.v2, fx.av30, 60, 60, 0);
-        AddTransition add(fx.seq, c, d, f30(10));
+        fx.addClip(fx.v2, fx.av30, 60, 60, 0);
+        AddTransitionSpans add(fx.seq, {centredDissolve(c, 10)});
         const EditResult r = applyRefused(p, add, EditError::InsufficientHandles);
         CHECK(r.message.find("before its in point") != std::string::npos);
     }
     SUBCASE("handles too short for the requested length") {
         const ClipId c = fx.addClip(fx.v2, fx.av30, 0, 60, 300);
-        const ClipId d = fx.addClip(fx.v2, fx.av30, 60, 60, 4); // 4 frames of handle
-        AddTransition tooLong(fx.seq, c, d, f30(10));           // needs 5 before the cut
+        fx.addClip(fx.v2, fx.av30, 60, 60, 4);                   // 4 frames of handle
+        AddTransitionSpans tooLong(fx.seq, {centredDissolve(c, 10)}); // needs 5 before the cut
         applyRefused(p, tooLong, EditError::InsufficientHandles);
-        AddTransition fits(fx.seq, c, d, f30(9)); // needs 4
+        AddTransitionSpans fits(fx.seq, {centredDissolve(c, 9)}); // needs 4
         applyReversible(p, fits);
     }
     SUBCASE("longer than the clips") {
-        AddTransition add(fx.seq, fx.a, fx.b, f30(200));
+        AddTransitionSpans add(fx.seq, {centredDissolve(fx.a, 200)});
         applyRefused(p, add, EditError::InvalidArgument);
     }
-    SUBCASE("zero or non-numeric duration") {
-        AddTransition zero(fx.seq, fx.a, fx.b, kCMTimeZero);
-        applyRefused(p, zero, EditError::InvalidArgument);
-        AddTransition invalid(fx.seq, fx.a, fx.b, kCMTimeInvalid);
-        applyRefused(p, invalid, EditError::InvalidTime);
+    SUBCASE("empty or inexact offsets") {
+        AddTransitionSpans empty(fx.seq, {tailTransition(fx.a, 0, 0)});
+        applyRefused(p, empty, EditError::InvalidArgument);
+        TransitionSpanRequest invalid = tailTransition(fx.a, 5, 5);
+        invalid.end = kCMTimeInvalid;
+        AddTransitionSpans bad(fx.seq, {invalid});
+        applyRefused(p, bad, EditError::InvalidTime);
     }
     SUBCASE("already exists") {
         fx.addTransition(fx.v1, fx.a, fx.b, 10);
-        AddTransition add(fx.seq, fx.a, fx.b, f30(20));
+        AddTransitionSpans add(fx.seq, {centredDissolve(fx.a, 20)});
         applyRefused(p, add, EditError::AlreadyExists);
     }
     SUBCASE("overlaps the neighbouring transition") {
         const ClipId c = fx.addClip(fx.v1, fx.av30, 120, 60, 600);
-        fx.addTransition(fx.v1, fx.a, fx.b, 40);     // [40, 80)
-        AddTransition add(fx.seq, fx.b, c, f30(90)); // [75, 165)
+        fx.addTransition(fx.v1, fx.a, fx.b, 40);                     // [40, 80)
+        AddTransitionSpans add(fx.seq, {centredDissolve(fx.b, 90)}); // [75, 165)
         applyRefused(p, add, EditError::Overlap);
-        AddTransition fits(fx.seq, fx.b, c, f30(80)); // [80, 160)
+        AddTransitionSpans fits(fx.seq, {centredDissolve(fx.b, 80)}); // [80, 160)
         applyReversible(p, fits);
+        (void)c;
     }
     SUBCASE("locked or missing") {
-        AddTransition missing(fx.seq, fx.a, ClipId{999}, f30(10));
+        AddTransitionSpans missing(fx.seq, {centredDissolve(ClipId{999}, 10)});
         applyRefused(p, missing, EditError::ClipNotFound);
         lockTrack(fx, fx.v1);
-        AddTransition locked(fx.seq, fx.a, fx.b, f30(10));
+        AddTransitionSpans locked(fx.seq, {centredDissolve(fx.a, 10)});
         applyRefused(p, locked, EditError::TrackLocked);
+    }
+    SUBCASE("a pair is refused as a whole") {
+        const ClipId c = fx.addClip(fx.v2, fx.av30, 0, 60, 1740);
+        fx.addClip(fx.v2, fx.av30, 60, 60, 300);
+        AddTransitionSpans both(fx.seq, {centredDissolve(fx.a, 10), centredDissolve(c, 10)});
+        applyRefused(p, both, EditError::InsufficientHandles);
+    }
+    SUBCASE("none") {
+        AddTransitionSpans none(fx.seq, {});
+        applyRefused(p, none, EditError::InvalidArgument);
     }
 }
 
 TEST_CASE("Transitions between stills need no handles; audio tracks crossfade") {
     Fixture fx;
     const ClipId s1 = fx.addClip(fx.v1, fx.still, 0, 60);
-    const ClipId s2 = fx.addClip(fx.v1, fx.still, 60, 60);
-    AddTransition dissolve(fx.seq, s1, s2, f30(30));
+    fx.addClip(fx.v1, fx.still, 60, 60);
+    AddTransitionSpans dissolve(fx.seq, {centredDissolve(s1, 30)});
     applyReversible(fx.project, dissolve);
 
     const ClipId m1 = fx.addClip(fx.a1, fx.audioOnly, 0, 60, 30);
-    const ClipId m2 = fx.addClip(fx.a1, fx.audioOnly, 60, 60, 300);
-    AddTransition crossfade(fx.seq, m1, m2, f30(20));
+    fx.addClip(fx.a1, fx.audioOnly, 60, 60, 300);
+    AddTransitionSpans crossfade(fx.seq, {centredDissolve(m1, 20)});
     applyReversible(fx.project, crossfade);
-    CHECK(fx.sequence().transitions.size() == 2);
+    CHECK(findTransition(fx.sequence(), crossfade.createdSpanIds()[0])->role == TransitionRole::CrossDissolve);
 }
 
-TEST_CASE("SetTransitionDuration and RemoveTransition") {
+TEST_CASE("SetTransitionRanges resizes, slides the split and changes the role; RemoveSpans removes") {
     CutFixture fx;
-    const TransitionId t = fx.addTransition(fx.v1, fx.a, fx.b, 10);
+    const SpanId t = fx.addTransition(fx.v1, fx.a, fx.b, 10);
     fx.requireValid();
-    SetTransitionDuration longer(fx.seq, t, f30(40));
+    SetTransitionRanges longer(fx.seq, {{t, -f30(20), f30(20)}});
     applyReversible(fx.project, longer);
-    CHECK(fx.sequence().findTransition(t)->duration == f30(40));
+    CHECK(transitionFrames(fx, t) == span(40, 80));
 
-    SetTransitionDuration tooLong(fx.seq, t, f30(122)); // 61 frames before the cut, but A is 60 long
-    applyRefused(fx.project, tooLong, EditError::InvalidArgument);
+    SUBCASE("a 70/30 split") {
+        SetTransitionRanges slide(fx.seq, {{t, -f30(14), f30(6)}});
+        applyReversible(fx.project, slide);
+        CHECK(transitionFrames(fx, t) == span(46, 66));
+    }
+    SUBCASE("ending on the cut: a fade out; past it again: a dissolve") {
+        SetTransitionRanges fade(fx.seq, {{t, -f30(12), kCMTimeZero}});
+        applyReversible(fx.project, fade);
+        CHECK(findTransition(fx.sequence(), t)->role == TransitionRole::FadeOut);
+        SetTransitionRanges back(fx.seq, {{t, -f30(12), f30(3)}});
+        applyReversible(fx.project, back);
+        CHECK(findTransition(fx.sequence(), t)->role == TransitionRole::CrossDissolve);
+    }
+    SUBCASE("refusals") {
+        SetTransitionRanges tooLong(fx.seq, {{t, -f30(61), f30(20)}}); // A is 60 long
+        applyRefused(fx.project, tooLong, EditError::InvalidArgument);
+        SetTransitionRanges missing(fx.seq, {{SpanId{999}, -f30(5), f30(5)}});
+        applyRefused(fx.project, missing, EditError::TransitionNotFound);
+        SetTransitionRanges none(fx.seq, {});
+        applyRefused(fx.project, none, EditError::InvalidArgument);
+        lockTrack(fx, fx.v1);
+        SetTransitionRanges locked(fx.seq, {{t, -f30(5), f30(5)}});
+        applyRefused(fx.project, locked, EditError::TrackLocked);
+        fx.track(fx.v1).locked = false; // for the removal below
+    }
+    SUBCASE("an effect span is not a transition") {
+        const SpanId motion = fx.addSpan(fx.a, SpanKind::Motion, 1, f30(30), f30(60));
+        SetTransitionRanges wrong(fx.seq, {{motion, -f30(5), f30(5)}});
+        applyRefused(fx.project, wrong, EditError::TransitionNotFound);
+    }
 
-    SetTransitionDuration missing(fx.seq, TransitionId{999}, f30(10));
-    applyRefused(fx.project, missing, EditError::TransitionNotFound);
-
-    RemoveTransition remove(fx.seq, t);
+    RemoveSpans remove(fx.seq, {t});
     applyReversible(fx.project, remove);
-    CHECK(fx.sequence().transitions.empty());
-    RemoveTransition again(fx.seq, t);
-    applyRefused(fx.project, again, EditError::TransitionNotFound);
+    CHECK(fx.span(t) == nullptr);
+    RemoveSpans again(fx.seq, {t});
+    applyRefused(fx.project, again, EditError::SpanNotFound);
 }
 
-TEST_CASE("SetTransitionDuration refuses a length the handles cannot cover") {
+TEST_CASE("SetTransitionRanges refuses a range the handles cannot cover") {
     Fixture fx;
     const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 1730); // 10 frames after its out point
     const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
-    const TransitionId t = fx.addTransition(fx.v1, a, b, 20); // needs 10 after the cut
+    const SpanId t = fx.addTransition(fx.v1, a, b, 20); // needs 10 after the cut
     fx.requireValid();
-    SetTransitionDuration longer(fx.seq, t, f30(22));
+    SetTransitionRanges longer(fx.seq, {{t, -f30(10), f30(11)}});
     applyRefused(fx.project, longer, EditError::InsufficientHandles);
-    lockTrack(fx, fx.v1);
-    SetTransitionDuration locked(fx.seq, t, f30(10));
-    applyRefused(fx.project, locked, EditError::TrackLocked);
+    SetTransitionRanges before(fx.seq, {{t, -f30(30), f30(10)}}); // more before the cut is fine
+    applyReversible(fx.project, before);
 }
 
 TEST_CASE("Edits that break a cut remove its transition; undo restores it") {
     CutFixture fx;
-    const TransitionId t = fx.addTransition(fx.v1, fx.a, fx.b, 10);
+    const SpanId t = fx.addTransition(fx.v1, fx.a, fx.b, 10);
     fx.requireValid();
     SUBCASE("trimming the outgoing clip away from the cut") {
         TrimClipTail trim(fx.seq, fx.a, f30(50));
-        applyReversible(fx.project, trim);
-        CHECK(fx.sequence().findTransition(t) == nullptr);
+        const EditResult r = applyReversible(fx.project, trim);
+        CHECK(fx.span(t) == nullptr);
+        CHECK(r.droppedTransitionIds == std::vector<SpanId>{t});
     }
     SUBCASE("removing a clip") {
         RemoveClips remove(fx.seq, {fx.b});
         applyReversible(fx.project, remove);
-        CHECK(fx.sequence().transitions.empty());
+        CHECK(fx.span(t) == nullptr);
     }
     SUBCASE("ripple delete keeps transitions whose clips stay adjacent") {
         const ClipId c = fx.addClip(fx.v1, fx.av30, 150, 30, 900);
         RippleDelete ripple(fx.seq, {c});
         applyReversible(fx.project, ripple);
-        CHECK(fx.sequence().findTransition(t) != nullptr);
+        CHECK(fx.span(t) != nullptr);
     }
     SUBCASE("trimming the incoming clip's head shortens its handle below the transition") {
         TrimClipHead trim(fx.seq, fx.b, f30(70));
         applyReversible(fx.project, trim);
-        CHECK(fx.sequence().transitions.empty());
+        CHECK(fx.span(t) == nullptr);
     }
     SUBCASE("unrelated edits keep it") {
         SetVideoParams params(fx.seq, fx.a, VideoParams{1, 2, 1, 0, 0.5});
         applyReversible(fx.project, params);
-        CHECK(fx.sequence().findTransition(t) != nullptr);
+        CHECK(fx.span(t) != nullptr);
+    }
+    SUBCASE("a fade out stays when the cut breaks: it needs no neighbour") {
+        SetTransitionRanges fade(fx.seq, {{t, -f30(10), kCMTimeZero}});
+        applyReversible(fx.project, fade);
+        RemoveClips remove(fx.seq, {fx.b});
+        const EditResult r = applyReversible(fx.project, remove);
+        CHECK(r.droppedTransitionIds.empty());
+        CHECK(findTransition(fx.sequence(), t)->role == TransitionRole::FadeOut);
+    }
+    SUBCASE("a fade in goes when a moved clip comes to touch its clip's start") {
+        const SpanId in = fx.addFade(fx.a, ClipEdge::Head, f30(10));
+        const ClipId c = fx.addClip(fx.v1, fx.av30, 200, 30, 900);
+        fx.requireValid();
+        TrimClipHead gap(fx.seq, fx.a, f30(30)); // A now starts at 30
+        applyReversible(fx.project, gap);
+        CHECK(fx.span(in) != nullptr);
+        MoveClip touch(fx.seq, c, fx.v1, kCMTimeZero); // [0, 30) touches A's start
+        const EditResult r = applyReversible(fx.project, touch);
+        CHECK(fx.span(in) == nullptr);
+        CHECK(r.droppedTransitionIds == std::vector<SpanId>{in});
     }
 }
 
@@ -250,10 +364,10 @@ TEST_CASE("RemoveTrack removes clips and transitions and unlinks partners") {
     fx.requireValid();
 
     RemoveTrack remove(fx.seq, fx.v1);
-    applyReversible(fx.project, remove);
+    const EditResult r = applyReversible(fx.project, remove);
     CHECK(fx.sequence().videoTracks.size() == 1);
     CHECK(fx.sequence().videoTracks[0].id == fx.v2);
-    CHECK(fx.sequence().transitions.empty());
+    CHECK(r.droppedTransitionIds.empty()); // removed on purpose with the track
     CHECK_FALSE(fx.clip(audio).linkedClipId.has_value());
 
     RemoveTrack missing(fx.seq, TrackId{999});
@@ -295,7 +409,7 @@ namespace {
 // sources); a 10-frame dissolve on V1 and a 16-frame crossfade on A1.
 struct LinkedPairFixture : Fixture {
     ClipId a, b, aa, ba;
-    TransitionId dissolve, crossfade;
+    SpanId dissolve, crossfade;
     LinkedPairFixture() {
         a = addClip(v1, av30, 0, 60, 30);
         b = addClip(v1, av30, 60, 60, 300);
@@ -315,9 +429,9 @@ TEST_CASE("linkedTransition finds the transition on the linked partners' cut, ei
     LinkedPairFixture fx;
     CHECK(linkedTransition(fx.sequence(), fx.dissolve) == fx.crossfade);
     CHECK(linkedTransition(fx.sequence(), fx.crossfade) == fx.dissolve);
-    CHECK_FALSE(linkedTransition(fx.sequence(), TransitionId{999}).has_value());
+    CHECK_FALSE(linkedTransition(fx.sequence(), SpanId{999}).has_value());
     SUBCASE("no transition on the partners' cut") {
-        std::erase_if(fx.sequence().transitions, [&](const Transition &t) { return t.id == fx.crossfade; });
+        std::erase_if(fx.sequence().findClip(fx.aa)->spans, [&](const EffectSpan &s) { return s.id == fx.crossfade; });
         CHECK_FALSE(linkedTransition(fx.sequence(), fx.dissolve).has_value());
     }
     SUBCASE("an unlinked clip") {
@@ -326,48 +440,119 @@ TEST_CASE("linkedTransition finds the transition on the linked partners' cut, ei
         CHECK_FALSE(linkedTransition(fx.sequence(), fx.dissolve).has_value());
         CHECK_FALSE(linkedTransition(fx.sequence(), fx.crossfade).has_value());
     }
+    SUBCASE("fades at the same edge of linked clips are linked; a fade and a dissolve are not") {
+        LinkedPairFixture other;
+        const SpanId videoFade = other.addFade(other.b, ClipEdge::Tail, f30(10));
+        const SpanId audioFade = other.addFade(other.ba, ClipEdge::Tail, f30(20));
+        other.requireValid();
+        CHECK(linkedTransition(other.sequence(), videoFade) == audioFade);
+        CHECK(linkedTransition(other.sequence(), audioFade) == videoFade);
+        std::erase_if(other.sequence().findClip(other.aa)->spans, [&](const EffectSpan &s) { return s.id == other.crossfade; });
+        other.addTailTransition(other.aa, 8, 0); // a fade out under a dissolve
+        other.requireValid();
+        CHECK_FALSE(linkedTransition(other.sequence(), other.dissolve).has_value());
+    }
 }
 
-TEST_CASE("RemoveTransitions removes a linked pair as one reversible step") {
+TEST_CASE("RemoveSpans removes a linked pair as one reversible step") {
     LinkedPairFixture fx;
-    RemoveTransitions both(fx.seq, {fx.dissolve, fx.crossfade});
-    CHECK(both.name() == "Remove Transitions");
+    RemoveSpans both(fx.seq, {fx.dissolve, fx.crossfade});
     applyReversible(fx.project, both);
-    CHECK(fx.sequence().transitions.empty());
+    CHECK(both.name() == "Remove Transitions");
+    CHECK(fx.span(fx.dissolve) == nullptr);
+    CHECK(fx.span(fx.crossfade) == nullptr);
     SUBCASE("refused as a whole") {
         LinkedPairFixture other;
-        RemoveTransitions missing(other.seq, {other.dissolve, TransitionId{999}});
-        applyRefused(other.project, missing, EditError::TransitionNotFound);
+        RemoveSpans missing(other.seq, {other.dissolve, SpanId{999}});
+        applyRefused(other.project, missing, EditError::SpanNotFound);
         lockTrack(other, other.a1);
-        RemoveTransitions locked(other.seq, {other.dissolve, other.crossfade});
+        RemoveSpans locked(other.seq, {other.dissolve, other.crossfade});
         applyRefused(other.project, locked, EditError::TrackLocked);
-        RemoveTransitions none(other.seq, {});
+        RemoveSpans none(other.seq, {});
         applyRefused(other.project, none, EditError::InvalidArgument);
     }
 }
 
-TEST_CASE("SetTransitionDurations resizes a linked pair as one step and refuses it as a whole") {
+TEST_CASE("SetTransitionRanges resizes a linked pair as one step and refuses it as a whole") {
     LinkedPairFixture fx;
-    SetTransitionDurations both(fx.seq, {{fx.dissolve, f30(20)}, {fx.crossfade, f30(24)}});
-    CHECK(both.name() == "Change Transition Durations");
+    SetTransitionRanges both(fx.seq, {{fx.dissolve, -f30(10), f30(10)}, {fx.crossfade, -f30(12), f30(12)}});
+    CHECK(both.name() == "Change Transitions");
     applyReversible(fx.project, both);
-    CHECK(fx.sequence().findTransition(fx.dissolve)->duration == f30(20));
-    CHECK(fx.sequence().findTransition(fx.crossfade)->duration == f30(24));
+    CHECK(transitionFrames(fx, fx.dissolve) == span(50, 70));
+    CHECK(transitionFrames(fx, fx.crossfade) == span(48, 72));
 
     // One of them too long for its clips: nothing changes.
-    SetTransitionDurations tooLong(fx.seq, {{fx.dissolve, f30(30)}, {fx.crossfade, f30(122)}});
+    SetTransitionRanges tooLong(fx.seq, {{fx.dissolve, -f30(15), f30(15)}, {fx.crossfade, -f30(61), f30(61)}});
     applyRefused(fx.project, tooLong, EditError::InvalidArgument);
-    CHECK(fx.sequence().findTransition(fx.dissolve)->duration == f30(20));
+    CHECK(transitionFrames(fx, fx.dissolve) == span(50, 70));
 
     SUBCASE("successive steps merge (an Accumulate group of nudges)") {
-        SetTransitionDurations first(fx.seq, {{fx.dissolve, f30(22)}, {fx.crossfade, f30(22)}});
-        SetTransitionDurations second(fx.seq, {{fx.dissolve, f30(24)}, {fx.crossfade, f30(24)}});
+        SetTransitionRanges first(fx.seq, {{fx.dissolve, -f30(11), f30(11)}, {fx.crossfade, -f30(11), f30(11)}});
+        SetTransitionRanges second(fx.seq, {{fx.dissolve, -f30(12), f30(12)}, {fx.crossfade, -f30(12), f30(12)}});
         REQUIRE(first.apply(fx.project));
         REQUIRE(second.apply(fx.project));
         CHECK(first.mergeWith(second));
+        CHECK(first.coalescingKey() == second.coalescingKey());
         first.revert(fx.project);
-        CHECK(fx.sequence().findTransition(fx.dissolve)->duration == f30(20));
-        CHECK(fx.sequence().findTransition(fx.crossfade)->duration == f30(24));
+        CHECK(transitionFrames(fx, fx.dissolve) == span(50, 70));
+        CHECK(transitionFrames(fx, fx.crossfade) == span(48, 72));
+    }
+}
+
+TEST_CASE("transitionLimit and transitionSideLimits: what each side of a cut allows, and why") {
+    Fixture fx;
+    // A has 10 frames of media after its out point; B has 6 before its in point.
+    const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 1730);
+    const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 40, 6);
+    fx.requireValid();
+    EditResult why = EditResult::success();
+    const auto sides = transitionSideLimits(fx.project, fx.seq, a, SpanId{}, why);
+    REQUIRE(sides.has_value());
+    CHECK(sides->maxBeforeFrames == 6);
+    CHECK(sides->beforeError == EditError::InsufficientHandles);
+    CHECK(sides->beforeLimitingClip == b);
+    CHECK(sides->beforeReason.find("before its in point") != std::string::npos);
+    CHECK(sides->maxAfterFrames == 10);
+    CHECK(sides->afterError == EditError::InsufficientHandles);
+    CHECK(sides->afterLimitingClip == a);
+    // Centred: floor(n/2) <= 6 and ceil(n/2) <= 10 -> 13 (6 before, 7 after).
+    const TransitionLimit limit = transitionLimit(fx.project, fx.seq, a, b);
+    CHECK(limit.maximumFrames == 13);
+    CHECK(limit.limitError == EditError::InsufficientHandles);
+    CHECK(limit.limitingClip == b);
+    // Each limit is exact: one frame more is refused, the limit itself fits.
+    AddTransitionSpans fits(fx.seq, {tailTransition(a, 6, 10)});
+    applyReversible(fx.project, fits);
+    fits.revert(fx.project);
+    AddTransitionSpans before(fx.seq, {tailTransition(a, 7, 10)});
+    applyRefused(fx.project, before, EditError::InsufficientHandles);
+    AddTransitionSpans after(fx.seq, {tailTransition(a, 6, 11)});
+    applyRefused(fx.project, after, EditError::InsufficientHandles);
+    SUBCASE("the clips' lengths and neighbouring transitions limit too") {
+        Fixture g;
+        const ClipId x = g.addClip(g.v1, g.av30, 0, 20, 30);
+        const ClipId y = g.addClip(g.v1, g.av30, 20, 12, 300);
+        g.addClip(g.v1, g.av30, 32, 30, 600);
+        g.addFade(x, ClipEdge::Head, f30(5));
+        g.addTailTransition(y, 4, 4); // y's own dissolve into the third clip
+        g.requireValid();
+        const auto s = transitionSideLimits(g.project, g.seq, x, SpanId{}, why);
+        REQUIRE(s.has_value());
+        CHECK(s->maxBeforeFrames == 15); // x is 20 long, less its 5-frame fade in
+        CHECK(s->beforeError == EditError::Overlap);
+        CHECK(s->maxAfterFrames == 8); // y is 12 long, less its own dissolve's 4 frames
+        CHECK(s->afterError == EditError::Overlap);
+    }
+    SUBCASE("structural refusals") {
+        CHECK_FALSE(transitionSideLimits(fx.project, fx.seq, b, SpanId{}, why).has_value());
+        CHECK(why.error == EditError::NotAdjacent);
+        fx.addTransition(fx.v1, a, b, 4);
+        CHECK_FALSE(transitionSideLimits(fx.project, fx.seq, a, SpanId{}, why).has_value());
+        CHECK(why.error == EditError::AlreadyExists);
+        CHECK(transitionLimit(fx.project, fx.seq, a, b).limitError == EditError::AlreadyExists);
+        lockTrack(fx, fx.v1);
+        CHECK(transitionLimit(fx.project, fx.seq, a, b, fx.clip(a).transitionAt(ClipEdge::Tail)->id).limitError ==
+              EditError::TrackLocked);
     }
 }
 
@@ -399,5 +584,11 @@ TEST_CASE("isThroughEdit: a plain split versus cuts between different media") {
         const ClipId s1 = fx.addClip(fx.v2, fx.still, 0, 60);
         const ClipId s2 = fx.addClip(fx.v2, fx.still, 60, 60);
         CHECK(isThroughEdit(fx.sequence(), s1, s2));
+        fx.addSpan(s2, SpanKind::Motion, 1, kCMTimeZero, f30(30));
+        CHECK_FALSE(isThroughEdit(fx.sequence(), s1, s2));
+    }
+    SUBCASE("an effect span on either side makes the pictures differ in the handles") {
+        fx.addSpan(a, SpanKind::Opacity, 1, f30(40), f30(90));
+        CHECK_FALSE(isThroughEdit(fx.sequence(), a, b));
     }
 }

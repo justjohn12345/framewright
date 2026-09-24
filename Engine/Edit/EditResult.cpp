@@ -40,8 +40,8 @@ const char *nameOf(EditError error) {
         return "not linked";
     case EditError::InsideTransition:
         return "inside a transition";
-    case EditError::KeyframeNotFound:
-        return "keyframe not found";
+    case EditError::SpanNotFound:
+        return "span not found";
     case EditError::NotRepresentable:
         return "not representable";
     case EditError::InvariantViolation:

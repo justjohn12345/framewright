@@ -123,10 +123,13 @@ TEST_CASE("videoDuration: a transition needs video handles, an audio crossfade a
     const ClipId a1 = fx.addClip(fx.a1, fx.av30, 0, 30, 1468);
     const ClipId a2 = fx.addClip(fx.a1, fx.av30, 30, 30, 100);
     fx.requireValid();
-    AddTransition video(fx.seq, v1, v2, f30(10));
+    AddTransitionSpans video(fx.seq, {centredDissolve(v1, 10)});
     applyRefused(p, video, EditError::InsufficientHandles);
-    AddTransition sound(fx.seq, a1, a2, f30(10));
+    AddTransitionSpans sound(fx.seq, {centredDissolve(a1, 10)});
     applyReversible(p, sound);
+    CHECK(transitionLimit(p, fx.seq, v1, v2).limitError == EditError::InsufficientHandles);
+    CHECK(transitionLimit(p, fx.seq, v1, v2).maximumFrames == 4); // 2 frames after: floor(4/2) before, 2 after
+    (void)a2;
 }
 
 TEST_CASE("videoDuration: the scheduler never shows a frame past the video's end") {

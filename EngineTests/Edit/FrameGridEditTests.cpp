@@ -198,7 +198,12 @@ TEST_CASE("Frame grids: 23.976 timeline edits stay on the grid") {
     checkOnGrid(fx, fx.clip(video));
     CHECK(fx.clip(video).speed == Ratio{37, 100});
 
-    AddTransition dissolve(fx.seq, video, split.createdClipIds()[0], fx.frames(5));
+    const auto [start, end] = centredTransitionOffsets(5, fx.frame);
+    TransitionSpanRequest request;
+    request.clipId = video;
+    request.start = start;
+    request.end = end;
+    AddTransitionSpans dissolve(fx.seq, {request});
     const EditResult added = dissolve.apply(fx.project);
     CHECK((added.ok() || added.error == EditError::NotAdjacent || added.error == EditError::InsufficientHandles));
 }

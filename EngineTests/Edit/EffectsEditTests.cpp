@@ -1,5 +1,5 @@
-// Phase 6 edit ops: SetClipsParams (multi-clip parameter batches) and transitionLimit (the
-// longest transition a cut can take, and why).
+// Phase 6 edit ops: SetClipsParams (multi-clip parameter batches, audio fades as lane-0 spans) and
+// transitionLimit (the longest centred transition a cut can take, and why).
 
 #include "EditTestSupport.h"
 
@@ -21,20 +21,27 @@ TEST_CASE("SetClipsParams changes several clips in one reversible edit") {
     moved.x = -12;
     AudioParams quiet;
     quiet.gainDb = -9;
-    quiet.fadeInDuration = f30(5);
+    ClipParamsChange quieter{a1b, std::nullopt, quiet};
+    quieter.fadeOut = f30(5); // (a fade in is refused: a1a touches a1b's start)
     SetClipsParams batch(fx.seq, {ClipParamsChange{v1a, dim, std::nullopt}, ClipParamsChange{v1b, moved, std::nullopt},
-                                  ClipParamsChange{a1b, std::nullopt, quiet}});
+                                  quieter});
     CHECK(batch.name() == "Change Clip Settings");
     applyReversible(fx.project, batch);
     CHECK(fx.clip(v1a).video.opacity == 0.5);
     CHECK(fx.clip(v1b).video.x == -12);
     CHECK(fx.clip(a1b).audio == quiet);
+    CHECK(clipFadeLength(fx.clip(a1b), ClipEdge::Tail) == f30(5));
     CHECK(fx.clip(a1a).audio == AudioParams{});
+    CHECK(fx.clip(a1a).spans.empty());
 
     SetClipsParams videoOnly(fx.seq, {ClipParamsChange{v1a, moved, std::nullopt}});
     CHECK(videoOnly.name() == "Change Video Settings");
     SetClipsParams audioOnly(fx.seq, {ClipParamsChange{a1a, std::nullopt, quiet}});
     CHECK(audioOnly.name() == "Change Audio Settings");
+    ClipParamsChange fadeOnly{a1a, std::nullopt, std::nullopt};
+    fadeOnly.fadeOut = f30(3);
+    SetClipsParams fades(fx.seq, {fadeOnly});
+    CHECK(fades.name() == "Change Audio Settings");
 }
 
 TEST_CASE("SetClipsParams is refused as a whole") {
@@ -52,12 +59,34 @@ TEST_CASE("SetClipsParams is refused as a whole") {
         applyRefused(fx.project, batch, EditError::TrackKindMismatch);
     }
     SUBCASE("fades longer than the clip") {
-        AudioParams fades;
-        fades.fadeInDuration = f30(20);
-        fades.fadeOutDuration = f30(11);
-        SetClipsParams batch(fx.seq, {ClipParamsChange{video, params, std::nullopt},
-                                      ClipParamsChange{audio, std::nullopt, fades}});
+        ClipParamsChange fades{audio, std::nullopt, std::nullopt};
+        fades.fadeIn = f30(20);
+        fades.fadeOut = f30(11);
+        SetClipsParams batch(fx.seq, {ClipParamsChange{video, params, std::nullopt}, fades});
         applyRefused(fx.project, batch, EditError::InvalidTime);
+    }
+    SUBCASE("fades on a video clip") {
+        ClipParamsChange fades{video, std::nullopt, std::nullopt};
+        fades.fadeIn = f30(2);
+        SetClipsParams batch(fx.seq, {fades});
+        applyRefused(fx.project, batch, EditError::TrackKindMismatch);
+    }
+    SUBCASE("a fade in on a clip whose start another clip touches, a fade out on a crossfaded end") {
+        const ClipId next = fx.addClip(fx.a1, fx.av30, 30, 30, 300);
+        ClipParamsChange in{next, std::nullopt, std::nullopt};
+        in.fadeIn = f30(2);
+        SetClipsParams touched(fx.seq, {in});
+        applyRefused(fx.project, touched, EditError::InvalidArgument);
+        fx.addTransition(fx.a1, audio, next, 6);
+        fx.requireValid();
+        ClipParamsChange out{audio, std::nullopt, std::nullopt};
+        out.fadeOut = f30(2);
+        SetClipsParams crossfaded(fx.seq, {out});
+        applyRefused(fx.project, crossfaded, EditError::InvalidArgument);
+        out.fadeOut = kCMTimeZero; // zero leaves the crossfade alone
+        SetClipsParams none(fx.seq, {out});
+        REQUIRE(none.apply(fx.project));
+        CHECK(none.isNoOp());
     }
     SUBCASE("a clip listed twice") {
         SetClipsParams batch(fx.seq, {ClipParamsChange{video, params, std::nullopt},
@@ -115,9 +144,9 @@ TEST_CASE("transitionLimit finds the longest transition a cut takes and why") {
         CHECK(identical(limit.maximum, f30(120)));
         CHECK(limit.limitError == EditError::InvalidArgument);
         CHECK(limit.reason.find("longer than the clips") != std::string::npos);
-        AddTransition fits(fx.seq, a, b, f30(120));
+        AddTransitionSpans fits(fx.seq, {centredDissolve(a, 120)});
         applyReversible(fx.project, fits);
-        AddTransition tooLong(fx.seq, a, b, f30(121));
+        AddTransitionSpans tooLong(fx.seq, {centredDissolve(a, 121)});
         fits.revert(fx.project);
         applyRefused(fx.project, tooLong, EditError::InvalidArgument);
     }
@@ -128,8 +157,11 @@ TEST_CASE("transitionLimit finds the longest transition a cut takes and why") {
         CHECK(limit.limitError == EditError::InsufficientHandles);
         CHECK(limit.limitingClip == c);
         CHECK(limit.reason == "“av30.mov” has no more media before its in point.");
-        AddTransition atLimit(fx.seq, b, c, f30(15));
+        AddTransitionSpans atLimit(fx.seq, {centredDissolve(b, 15)});
         applyReversible(fx.project, atLimit);
+        atLimit.revert(fx.project);
+        AddTransitionSpans past(fx.seq, {centredDissolve(b, 16)});
+        applyRefused(fx.project, past, EditError::InsufficientHandles);
     }
     SUBCASE("limited by the outgoing clip's media after its out point") {
         // A2 ends 6 frames before the end of av30's 1800 frames.
@@ -156,7 +188,7 @@ TEST_CASE("transitionLimit finds the longest transition a cut takes and why") {
     SUBCASE("structural refusals") {
         CHECK(transitionLimit(fx.project, fx.seq, b, a).limitError == EditError::NotAdjacent);
         CHECK(transitionLimit(fx.project, fx.seq, a, ClipId(999)).limitError == EditError::ClipNotFound);
-        const TransitionId t = fx.addTransition(fx.v1, a, b, 10);
+        const SpanId t = fx.addTransition(fx.v1, a, b, 10);
         CHECK(transitionLimit(fx.project, fx.seq, a, b).limitError == EditError::AlreadyExists);
         const TransitionLimit resize = transitionLimit(fx.project, fx.seq, a, b, t);
         CHECK(resize.maximumFrames == 120);

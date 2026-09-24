@@ -7,16 +7,19 @@
 //   example a split that would need a source in point with a timescale above 2^31 - 1) is
 //   refused with EditError::NotRepresentable; nothing is ever rounded.
 // - An edit is refused (EditError::TrackLocked) if it would change a locked track in any way:
-//   its clips (including clearing a link to a clip the edit removes), its transitions, or its
+//   its clips (including clearing a link to a clip the edit removes) and their spans, or its
 //   existence. SetTrackFlags is the only exception.
 // - "includeLinked" options (default true) apply the edit to the clip's linked partner as well.
 // - Ripple edits (Insert, RippleDelete, SetClipSpeed with ripple) move the time after the edit
 //   point on the tracks chosen by a RippleScope (default AllUnlockedTracks) and never leave a
 //   linked pair out of sync: a partner that cannot move with its clip refuses the edit.
-// - Transitions whose clips stop being adjacent, or lose the media or length they need, are
-//   removed by the edit (and restored by undo) and listed in EditResult::droppedTransitionIds.
+// - Spans (EffectSpan.h) belong to their clip and move, trim and split with it: a trim through an
+//   effect span clips it (the value at the new edge evaluated exactly), a split divides it, one
+//   left with nothing inside the clip goes (EditResult::droppedSpanIds); lane-0 fades are
+//   shortened to fit a shortened clip. Transitions whose cut no longer exists, or that lose the
+//   media or length they need, are removed by the edit (and restored by undo) and listed in
+//   EditResult::droppedTransitionIds, as is a fade in whose clip's start another clip now touches.
 //   Splitting inside a transition's range is refused unless SplitOptions allows it.
-// - Edits that shorten a clip shorten its fades to fit (fadeIn + fadeOut <= duration).
 // - Accessors like createdClipIds() are valid after the first successful apply() and stay
 //   valid through undo/redo (redo recreates the same ids).
 
@@ -46,9 +49,7 @@ struct ClipPlacement {
     CMTime sourceIn = kCMTimeZero;
     CMTime sourceOut = kCMTimeInvalid; // invalid: to the end of the media
     Ratio speed{1, 1};                 // see speedFromDouble(); ignored for stills
-    // Keyframes only on a video track (TrackKindMismatch) and within the placed source range
-    // (InvalidTime), as AddKeyframe requires.
-    VideoParams video;
+    VideoParams video;                 // static values (a new clip has no spans)
     AudioParams audio;
 };
 
@@ -174,15 +175,17 @@ class TrimClipTail final : public SequenceCommand {
 
 struct SplitOptions {
     bool includeLinked = true;
-    // Splitting strictly inside a transition's range would leave a piece too short for it. By
-    // default such a split is refused (EditError::InsideTransition); with this set the
-    // transition is removed instead and reported in EditResult::droppedTransitionIds.
+    // Splitting strictly inside a transition's range (a cross dissolve over the cut, or a fade) would
+    // leave a piece too short for it. By default such a split is refused (EditError::InsideTransition);
+    // with this set the transition is removed instead and reported in
+    // EditResult::droppedTransitionIds.
     bool allowBreakingTransitions = false;
 };
 
 // Splits a clip at `at` (strictly inside it). The linked partner is split too when it spans
-// `at`, and the two right-hand pieces are linked to each other. Each piece keeps the fade on
-// its outer edge, shortened to fit.
+// `at`, and the two right-hand pieces are linked to each other. The left piece keeps the lane-0
+// span at its head, the right piece the one at its tail; effect spans across the cut are divided
+// exactly (the right part gets a new id), so neither piece's pictures or sound change.
 class SplitClip final : public SequenceCommand {
   public:
     SplitClip(SequenceId sequenceId, ClipId clipId, CMTime at, bool includeLinked = true);
@@ -248,15 +251,13 @@ class RippleDelete final : public SequenceCommand {
     RippleOptions options_;
 };
 
-// Sets a clip's video parameters, keyframes included (the facade keeps a clip's keyframes when
-// the inspector sets static values). Keyframes follow AddKeyframe's rules: only on a clip of a
-// video track (TrackKindMismatch), and within the clip's used source range unless the clip already
-// has that very keyframe (one a trim hid; InvalidTime). Static values are accepted on any clip.
+// Sets a clip's static video parameters (its spans compose onto them). Accepted on any clip.
 class SetVideoParams final : public SequenceCommand {
   public:
-    SetVideoParams(SequenceId sequenceId, ClipId clipId, VideoParams params);
+    SetVideoParams(SequenceId sequenceId, ClipId clipId, VideoParams params,
+                   std::string name = "Change Video Settings");
     std::string name() const override {
-        return "Change Video Settings";
+        return name_;
     }
 
   protected:
@@ -265,9 +266,10 @@ class SetVideoParams final : public SequenceCommand {
   private:
     ClipId clipId_;
     VideoParams params_;
+    std::string name_;
 };
 
-// Fades must be exact times >= 0 that together fit the clip (fadeIn + fadeOut <= duration).
+// Sets a clip's static audio level (its Gain spans add to it).
 class SetAudioParams final : public SequenceCommand {
   public:
     SetAudioParams(SequenceId sequenceId, ClipId clipId, AudioParams params);
@@ -283,19 +285,22 @@ class SetAudioParams final : public SequenceCommand {
     AudioParams params_;
 };
 
-// One clip's new parameters in a SetClipsParams batch; parts left empty are unchanged. Keyframes
-// in `video` follow SetVideoParams's rules.
+// One clip's new parameters in a SetClipsParams batch; parts left empty are unchanged.
 struct ClipParamsChange {
     ClipId clipId{};
     std::optional<VideoParams> video;
     std::optional<AudioParams> audio;
+    // The length of the clip's lane-0 fade in / fade out (0 removes it): a head fade span, or a
+    // tail span ending on the cut (see setClipFade). Audio clips only, like `audio`.
+    std::optional<CMTime> fadeIn = std::nullopt;
+    std::optional<CMTime> fadeOut = std::nullopt;
 };
 
 // Sets the parameters of several clips as one edit (a multi-selection change in the inspector).
-// Video parameters apply only to clips on video tracks and audio parameters only to clips on
-// audio tracks (EditError::TrackKindMismatch otherwise). Refused as a whole when a clip is
-// missing, listed twice, on a locked track, or given invalid parameters (see SetVideoParams and
-// SetAudioParams). Under CoalesceMode::Accumulate successive batches merge into one undo step.
+// Video parameters apply only to clips on video tracks and audio parameters and fades only to
+// clips on audio tracks (EditError::TrackKindMismatch otherwise). Refused as a whole when a clip is
+// missing, listed twice, on a locked track, or given invalid parameters or fades (see
+// setClipFade). Under CoalesceMode::Accumulate successive batches merge into one undo step.
 class SetClipsParams final : public SequenceCommand {
   public:
     SetClipsParams(SequenceId sequenceId, std::vector<ClipParamsChange> changes);
@@ -307,310 +312,6 @@ class SetClipsParams final : public SequenceCommand {
   private:
     std::vector<ClipParamsChange> changes_;
 };
-
-// ----- Keyframed Motion (Keyframes.h) -----
-//
-// Keyframe times are source times of the clip (Clip::exactSourceTimeAt; for a still the time into
-// the clip) and must be exact model times. Keyframes are added and moved only within the clip's
-// used source range [sourceIn, source out] (a still's [0, duration]); keyframes a trim cut off
-// stay, hidden, and can still be changed or removed. Only clips on video tracks have Motion
-// (EditError::TrackKindMismatch otherwise). Every command is one SequenceCommand, so an
-// Accumulate coalescing group (keyboard nudges) merges successive steps into one undo step.
-
-// Adds a keyframe to `parameter` at `time` without reshaping the segment it lands in
-// (insertKeyframeKeepingValues: the value the parameter has there now, a hold stays a hold, an eased
-// segment is divided into its two exact Custom parts, a keyframe before the first or after the last
-// one is Linear), so no frame's picture changes; then applies `value` and `interpolation` when given.
-// Refused with AlreadyExists when the parameter has a keyframe at `time`, and with InvalidArgument
-// when a custom curve from a project file overshoots the parameter's range there (and no value is
-// given).
-class AddKeyframe final : public SequenceCommand {
-  public:
-    AddKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime time,
-                std::optional<double> value = std::nullopt,
-                std::optional<KeyframeInterpolation> interpolation = std::nullopt);
-    std::string name() const override {
-        return "Add Keyframe";
-    }
-
-  protected:
-    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
-
-  private:
-    ClipId clipId_;
-    MotionParameter parameter_;
-    CMTime time_;
-    std::optional<double> value_;
-    std::optional<KeyframeInterpolation> interpolation_;
-};
-
-// Sets a Motion value. With `keyframeTime` the keyframe at that time gets `value` (and
-// `interpolation`, when given), and when there is none one is added there like AddKeyframe (the
-// segment it lands in keeps its shape: a hold stays a hold, an eased segment is divided exactly)
-// and then given `value` and `interpolation`: what the inspector does for an animated parameter.
-// Without a time the static value is set (the value of a parameter that has no keyframes).
-class SetMotionValue final : public SequenceCommand {
-  public:
-    SetMotionValue(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, std::optional<CMTime> keyframeTime,
-                   double value, std::optional<KeyframeInterpolation> interpolation = std::nullopt);
-    std::string name() const override;
-
-  protected:
-    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
-
-  private:
-    ClipId clipId_;
-    MotionParameter parameter_;
-    std::optional<CMTime> keyframeTime_;
-    double value_;
-    std::optional<KeyframeInterpolation> interpolation_;
-    bool added_ = false;
-};
-
-// Removes the keyframe of `parameter` at `time` (KeyframeNotFound when there is none). Removing a
-// parameter's last keyframe makes its value static at that keyframe's value, so the picture does
-// not change.
-class RemoveKeyframe final : public SequenceCommand {
-  public:
-    RemoveKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime time);
-    std::string name() const override {
-        return "Delete Keyframe";
-    }
-
-  protected:
-    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
-
-  private:
-    ClipId clipId_;
-    MotionParameter parameter_;
-    CMTime time_;
-};
-
-// Moves the keyframe of `parameter` at `from` to `to` (within the clip's used source range),
-// keeping its value and interpolation. Refused with AlreadyExists when another keyframe is at `to`.
-class MoveKeyframe final : public SequenceCommand {
-  public:
-    MoveKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime from, CMTime to);
-    std::string name() const override {
-        return "Move Keyframe";
-    }
-
-  protected:
-    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
-
-  private:
-    ClipId clipId_;
-    MotionParameter parameter_;
-    CMTime from_;
-    CMTime to_;
-};
-
-// Moves the keyframes a timeline marker stands for: those on the sequence frame starting at
-// `fromFrame` (motionKeyframeGroupAt) to the frame starting at `toFrame`, together, in one edit
-// (a marker drag; planned by planMotionKeyframeGroupMove against the model the command applies to,
-// so the steps of a ReplacePrevious coalescing group each start from the state before the drag).
-// Named "Move Keyframe" for one parameter, "Move Keyframes" for several. `toFrame == fromFrame`
-// changes nothing.
-class MoveKeyframeGroup final : public SequenceCommand {
-  public:
-    MoveKeyframeGroup(SequenceId sequenceId, ClipId clipId, CMTime fromFrame, CMTime toFrame);
-    std::string name() const override {
-        return parameterCount_ == 1 ? "Move Keyframe" : "Move Keyframes";
-    }
-
-  protected:
-    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
-
-  private:
-    ClipId clipId_;
-    CMTime fromFrame_;
-    CMTime toFrame_;
-    std::size_t parameterCount_ = 0;
-};
-
-// Sets the interpolation of the segment that starts at the keyframe of `parameter` at `time`.
-// Bezier (a custom curve, which only a split creates) cannot be set this way.
-class SetKeyframeInterpolation final : public SequenceCommand {
-  public:
-    SetKeyframeInterpolation(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime time,
-                             KeyframeInterpolation interpolation);
-    std::string name() const override {
-        return "Change Keyframe Interpolation";
-    }
-
-  protected:
-    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
-
-  private:
-    ClipId clipId_;
-    MotionParameter parameter_;
-    CMTime time_;
-    KeyframeInterpolation interpolation_;
-};
-
-// One parameter's complete replacement in a SetMotionTracks edit.
-struct MotionTrackChange {
-    MotionParameter parameter = MotionParameter::X;
-    KeyframeTrack keyframes;   // may be empty (no animation)
-    double staticValue = 0.0;  // the value when `keyframes` is empty
-};
-
-// Replaces whole keyframe tracks (and static values) of one clip as one edit: the Ken Burns
-// helper (position and scale from a start and an end framing, planned by planMotionMove),
-// matching a neighbour's framing (planMotionAtFrame) and turning a parameter's animation off. Each
-// track is validated like the model (keyframeTrackProblem); a keyframe of a non-empty track must
-// lie within the clip's used source range unless the clip's track already has that very keyframe
-// (one a trim hid, which a partial Ken Burns move keeps).
-class SetMotionTracks final : public SequenceCommand {
-  public:
-    SetMotionTracks(SequenceId sequenceId, ClipId clipId, std::vector<MotionTrackChange> changes,
-                    std::string name = "Change Animation");
-    std::string name() const override {
-        return name_;
-    }
-
-  protected:
-    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
-
-  private:
-    ClipId clipId_;
-    std::vector<MotionTrackChange> changes_;
-    std::string name_;
-};
-
-// ----- Ken Burns moves and matching a neighbour's framing (plans for SetMotionTracks) -----
-
-// Position and scale of a framing (VEMotionFraming in the facade).
-struct MotionFraming {
-    double x = 0.0;
-    double y = 0.0;
-    double scale = 1.0;
-};
-
-// A Ken Burns move over part of a clip: position and scale go from `start` on the sequence frame
-// starting at `firstFrame` to `end` on the frame starting at `lastFrame` (two frames of the clip,
-// `firstFrame` before `lastFrame`; the move covers the frames between them, both included).
-struct MotionMoveRequest {
-    CMTime firstFrame = kCMTimeInvalid;
-    CMTime lastFrame = kCMTimeInvalid;
-    MotionFraming start;
-    MotionFraming end;
-    // The segment from the start keyframe to the end keyframe (not Bezier).
-    KeyframeInterpolation interpolation = KeyframeInterpolation::EaseInOut;
-};
-
-// Kept keyframes that lead into the move (before it) or on from it (after it) with a framing other
-// than the move's start (end) framing: the frames between them and the move then change instead of
-// holding that framing.
-struct MotionMoveDrift {
-    // The parameters concerned, in MotionParameter order (empty: the framing holds).
-    std::vector<MotionParameter> parameters;
-    // The source time of the concerned keyframe farthest from the move (the earliest before it, the
-    // latest after it): the drift spans from there to the move. Invalid when `parameters` is empty.
-    CMTime keyframeTime = kCMTimeInvalid;
-};
-
-struct MotionMovePlan {
-    // Position X, Position Y and Scale, for SetMotionTracks (named "Ken Burns" by the facade).
-    std::vector<MotionTrackChange> changes;
-    MotionMoveDrift before;
-    MotionMoveDrift after;
-};
-
-// Plans the Ken Burns move `request` on `clip` (on a sequence with `frameDuration` frames):
-// - The start keyframe goes on `firstFrame` and the end keyframe on `lastFrame`
-//   (keyframeTimeForFrame), with the request's interpolation on the start keyframe and Linear on
-//   the end keyframe (it matters only when a kept keyframe follows the move).
-// - Position and scale keyframes that the move's frames show (keyframeIndexForFrame's rule: a
-//   keyframe belongs to the frame whose source span contains it) are replaced. Keyframes the
-//   clip shows outside the move are kept, so a second move can be added elsewhere in the clip.
-//   Keyframes a trim hid (outside the clip's used source range) are kept too, except on a side
-//   the move reaches: a move from the clip's first frame replaces those before the clip, one to
-//   its last frame those after it (the move then owns that end of the clip, and its framing holds
-//   there if the clip is extended again). A move over the whole clip therefore replaces every
-//   position and scale keyframe, as the helper always did.
-// - Without kept keyframes the start framing holds before the move and the end framing after it
-//   (the evaluation's hold before the first and after the last keyframe). A kept keyframe with a
-//   different value leads into (out of) the move instead; `plan.before` / `plan.after` report it
-//   (compared with motionValuesMatch).
-// The static values of position and scale become the start framing (unused while animated).
-// Refused with InvalidTime (frames not on the grid, not frames of the clip, not in order),
-// InvalidArgument (Bezier interpolation, an invalid value) or NotRepresentable.
-EditResult planMotionMove(const Clip &clip, CMTime frameDuration, const MotionMoveRequest &request,
-                          MotionMovePlan &plan);
-
-// Plans setting all five Motion values of `clip` to `values` (its static values; its keyframes
-// are ignored) on the frame starting at `frame` (a frame of the clip): an animated parameter gets
-// a keyframe on the frame's start (keyframeTimeForFrame), so the frame shows exactly that value;
-// it is added like AddKeyframe (the segment it lands in keeps its shape) and then given the value;
-// the other keyframes the frame showed (keyframeIndexForFrame's rule, e.g. one on the out point)
-// give way to it, and it takes the interpolation of the last of them (the segment leaving the
-// frame). A static parameter gets the value as its static value, so the whole clip shows it. The
-// changes list every parameter in MotionParameter order. Refused like planMotionMove.
-EditResult planMotionAtFrame(const Clip &clip, CMTime frameDuration, CMTime frame, const VideoParams &values,
-                             std::vector<MotionTrackChange> &changes);
-
-// Plans setting `value` for the animated `parameter` on the frame starting at `frame`, like
-// planMotionAtFrame does for each animated parameter: a keyframe on the frame's start with `value`
-// (the one there, or one added without reshaping its segment), the frame's other keyframes giving
-// way. What the facade's setMotionValue does when the keyframe the frame shows is not on the
-// frame's start (a split's out point, or inside a frame of a sped-up clip), so the frame shows
-// exactly `value`. `change` is one SetMotionTracks change. Refused like planMotionAtFrame, and with
-// InvalidArgument when the parameter is not animated or the value is invalid.
-EditResult planMotionValueAtFrame(const Clip &clip, CMTime frameDuration, CMTime frame, MotionParameter parameter,
-                                  double value, MotionTrackChange &change);
-
-// The Add Motion Keyframe toggle on the frame starting at `frame` (a frame of the clip). When every
-// Motion parameter has a keyframe that frame shows (keyframeIndexForFrame), it plans removing them
-// all: a track left without keyframes keeps the value the frame showed as its static value, so that
-// frame's picture does not change. Otherwise it plans adding a keyframe on the frame's start
-// (keyframeTimeForFrame) to each parameter without one there, like AddKeyframe (the value it has
-// there, the segment keeping its shape: no frame's picture changes). `changes` lists only the parameters that change, in
-// MotionParameter order; `removing` says which way it went. Refused like planMotionAtFrame.
-struct MotionKeyframeToggle {
-    std::vector<MotionTrackChange> changes;
-    bool removing = false;
-};
-EditResult planMotionKeyframeToggle(const Clip &clip, CMTime frameDuration, CMTime frame, MotionKeyframeToggle &plan);
-
-// The keyframes a timeline marker stands for: on the sequence frame starting at `frame` (a frame of
-// the clip), each Motion parameter's keyframe that frame shows (keyframeIndexForFrame), and how far
-// they can move together. Moving keeps each parameter's keyframes in order and at least a frame
-// apart: the group stays after the frame showing the previous keyframe of each of its parameters and
-// before the frame showing the next one; a neighbour a trim hid does not limit it beyond the clip's
-// own frames, which bound it too.
-struct MotionKeyframeGroup {
-    // Index of each parameter's keyframe in its track, in MotionParameter order (the parameters
-    // without a keyframe on the frame are left out).
-    std::vector<std::pair<MotionParameter, std::size_t>> keyframes;
-    // The first and last frame starts (timeline times) the group can move to; `frame` is between.
-    CMTime earliestFrame = kCMTimeInvalid;
-    CMTime latestFrame = kCMTimeInvalid;
-    // Set with the InvalidArgument refusal: the parameter with several keyframes on the frame.
-    std::optional<MotionParameter> crowdedParameter;
-};
-// Refused with InvalidTime (not a frame of the clip), KeyframeNotFound (no keyframe on the frame) and
-// InvalidArgument when a parameter has several keyframes on the frame (a sped-up clip's frame spans
-// several source frames; moved to one frame they would meet).
-EditResult motionKeyframeGroupAt(const Clip &clip, CMTime frameDuration, CMTime frame, MotionKeyframeGroup &group);
-
-// Plans moving the group on `fromFrame` to `toFrame` (a frame start within the group's
-// [earliestFrame, latestFrame]): each keyframe goes to the destination frame's start
-// (keyframeTimeForFrame) with its value, interpolation and curve. `changes` lists the group's
-// parameters (whole tracks for SetMotionTracks-like application; empty when `toFrame == fromFrame`).
-// Refused like motionKeyframeGroupAt, with InvalidTime when `toFrame` is not a frame the group can
-// move to, or NotRepresentable.
-EditResult planMotionKeyframeGroupMove(const Clip &clip, CMTime frameDuration, CMTime fromFrame, CMTime toFrame,
-                                       std::vector<MotionTrackChange> &changes);
-
-// Whether two values of `parameter` are the same for the picture: equal within a millionth of the
-// larger magnitude (at least 1, so within a millionth of a pixel near the centre).
-bool motionValuesMatch(MotionParameter parameter, double a, double b);
-
-// The clip on the same track that touches `clipId` at `edge`: the one ending exactly where it
-// starts (Head) or starting exactly where it ends (Tail); nullptr when there is none (a gap, the
-// track's end, or no such clip).
-const Clip *adjacentClip(const Sequence &sequence, ClipId clipId, ClipEdge edge);
 
 struct SpeedOptions {
     bool includeLinked = true;
@@ -645,16 +346,26 @@ class SetClipSpeed final : public SequenceCommand {
     SpeedOptions options_;
 };
 
-// Adds a transition on the cut between two adjacent clips of one track (`fromClipId` ends where
-// `toClipId` starts). Refused without enough handle media.
-class AddTransition final : public SequenceCommand {
+// ----- Effect spans (EffectSpan.h) -----
+//
+// Span edits take timeline times, rounded to the sequence frame grid, and store the source times
+// those frames show (spanTimeAt). An effect span covers at least one frame of its clip and lies
+// within it; spans of one lane never overlap (refused with EditError::Overlap and
+// EditResult::freeRange, the nearest free range of the lane). Motion and Opacity spans live on
+// clips of video tracks and Gain spans on clips of audio tracks (TrackKindMismatch), on lanes
+// 1-3 (InvalidArgument). Every command is one SequenceCommand, so an Accumulate coalescing group
+// (keyboard nudges) merges successive steps, and a Replace group (a drag) replays each step
+// against the state before the drag. Refused with SpanNotFound for an unknown span.
+
+// Adds a span of `kind` (Motion, Opacity or Gain) on `lane` of `clipId` over the timeline frames
+// [timelineStart, timelineEnd). It starts with a keyframe at each end holding the neutral values
+// (position and rotation 0, scale and opacity 1, gain 0 dB), so it changes no frame until its
+// values are set: the picture keeps the clip's framing at the range's edges.
+class AddSpan final : public SequenceCommand {
   public:
-    AddTransition(SequenceId sequenceId, ClipId fromClipId, ClipId toClipId, CMTime duration,
-                  TransitionKind kind = TransitionKind::CrossDissolve);
-    std::string name() const override {
-        return "Add Transition";
-    }
-    TransitionId createdTransitionId() const {
+    AddSpan(SequenceId sequenceId, ClipId clipId, SpanKind kind, int lane, CMTime timelineStart, CMTime timelineEnd);
+    std::string name() const override;
+    SpanId createdSpanId() const {
         return created_;
     }
 
@@ -662,92 +373,283 @@ class AddTransition final : public SequenceCommand {
     EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
 
   private:
-    ClipId fromClipId_;
-    ClipId toClipId_;
-    CMTime duration_;
-    TransitionKind kind_;
-    TransitionId created_;
+    ClipId clipId_;
+    SpanKind kind_;
+    int lane_;
+    CMTime start_;
+    CMTime end_;
+    SpanId created_;
 };
 
-class RemoveTransition final : public SequenceCommand {
+// Moves an effect span's edges to the timeline frames [timelineStart, timelineEnd) (a trim of one
+// edge, or both for a move within the clip). Keyframes keep their places relative to the span:
+// a move shifts them with it, a trim stretches the span's keyframes over the new range (the start
+// and end values stay the span's start and end values).
+class SetSpanRange final : public SequenceCommand {
   public:
-    RemoveTransition(SequenceId sequenceId, TransitionId transitionId);
+    SetSpanRange(SequenceId sequenceId, SpanId spanId, CMTime timelineStart, CMTime timelineEnd);
     std::string name() const override {
-        return "Remove Transition";
+        return "Change Span Range";
     }
 
   protected:
     EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
 
   private:
-    TransitionId transitionId_;
+    SpanId spanId_;
+    CMTime start_;
+    CMTime end_;
 };
 
-class SetTransitionDuration final : public SequenceCommand {
+// A new start and/or end value of one parameter of a span.
+struct SpanValueChange {
+    SpanParameter parameter = SpanParameter::X;
+    std::optional<double> start;
+    std::optional<double> end;
+};
+
+// Sets start and end values of an effect span's parameters (of its kind only; InvalidArgument for
+// another kind's parameter or a value outside the parameter's range): the keyframe at the span's
+// start or end gets the value (added there without reshaping its segment when there is none, like a
+// keyframe insert); keyframes in between are kept. With `interpolation` every segment of the span
+// then moves that way too (the Ken Burns move sets its values and easing in one step; not Bezier).
+class SetSpanValues final : public SequenceCommand {
   public:
-    SetTransitionDuration(SequenceId sequenceId, TransitionId transitionId, CMTime duration);
+    SetSpanValues(SequenceId sequenceId, SpanId spanId, std::vector<SpanValueChange> changes,
+                  std::string name = "Change Span Values",
+                  std::optional<KeyframeInterpolation> interpolation = std::nullopt);
     std::string name() const override {
-        return "Change Transition Duration";
+        return name_;
     }
 
   protected:
     EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
 
   private:
-    TransitionId transitionId_;
-    CMTime duration_;
+    SpanId spanId_;
+    std::vector<SpanValueChange> changes_;
+    std::string name_;
+    std::optional<KeyframeInterpolation> interpolation_;
 };
 
-// Removes several transitions as one step (a dissolve and its linked audio crossfade).
-// Refused as a whole when one is missing or on a locked track.
-class RemoveTransitions final : public SequenceCommand {
+// Sets how an effect span moves between its keyframes: every segment of every track gets
+// `interpolation` (not Bezier, which only dividing a segment makes).
+class SetSpanInterpolation final : public SequenceCommand {
   public:
-    RemoveTransitions(SequenceId sequenceId, std::vector<TransitionId> transitionIds);
+    SetSpanInterpolation(SequenceId sequenceId, SpanId spanId, KeyframeInterpolation interpolation);
     std::string name() const override {
-        return transitionIds_.size() == 1 ? "Remove Transition" : "Remove Transitions";
+        return "Change Span Interpolation";
     }
 
   protected:
     EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
 
   private:
-    std::vector<TransitionId> transitionIds_;
+    SpanId spanId_;
+    KeyframeInterpolation interpolation_;
 };
 
-// Sets the durations of several transitions as one step (a dissolve and its linked crossfade
-// resized together); each is checked like SetTransitionDuration, and the whole edit is refused
-// when one does not fit. One SequenceCommand (not a composite), so an Accumulate group (keyboard
-// nudges) merges successive steps.
-class SetTransitionDurations final : public SequenceCommand {
+// Moves an effect span to another lane (1-3) of its clip; refused (Overlap) where it would meet a
+// span of that lane.
+class MoveSpanLane final : public SequenceCommand {
   public:
-    struct Change {
-        TransitionId transitionId;
-        CMTime duration = kCMTimeZero;
-    };
-    SetTransitionDurations(SequenceId sequenceId, std::vector<Change> changes);
+    MoveSpanLane(SequenceId sequenceId, SpanId spanId, int lane);
     std::string name() const override {
-        return changes_.size() == 1 ? "Change Transition Duration" : "Change Transition Durations";
+        return "Move Span to Lane";
     }
 
   protected:
     EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
 
   private:
-    std::vector<Change> changes_;
+    SpanId spanId_;
+    int lane_;
 };
 
-// The transition linked to `transitionId`: the one on the cut between the linked partners of
-// its two clips (the audio crossfade under a video dissolve, and the other way round). Nullopt
-// when either clip is unlinked, the partners do not meet at a cut, or no transition joins them.
-std::optional<TransitionId> linkedTransition(const Sequence &sequence, TransitionId transitionId);
+// Removes spans of any kind (transitions too) as one step; refused as a whole when one is missing
+// (SpanNotFound) or on a locked track.
+class RemoveSpans final : public SequenceCommand {
+  public:
+    RemoveSpans(SequenceId sequenceId, std::vector<SpanId> spanIds);
+    std::string name() const override;
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    std::vector<SpanId> spanIds_;
+    bool allTransitions_ = false;
+};
+
+// The timeline range an effect span covers (exact where representable, else rounded), or the
+// range a transition span covers; nullopt on overflow.
+std::optional<TimeRange> spanTimelineRange(const Clip &clip, const EffectSpan &span, const Track &track);
+
+// The free timeline ranges (whole frames, in order) of `lane` of `clip`: its frames that no span of
+// the lane covers, `except` left out (the span being moved).
+std::vector<TimeRange> freeLaneRanges(const Clip &clip, int lane, CMTime frameDuration, SpanId except = {});
+
+// The free range of `lane` nearest [start, end): the one overlapping it most, else the closest.
+std::optional<TimeRange> nearestFreeRange(const Clip &clip, int lane, CMTime frameDuration, TimeRange requested,
+                                          SpanId except = {});
+
+// ----- Ken Burns and matching a neighbour (plans for SetSpanValues) -----
+
+// Position and scale of a framing (VEMotionFraming in the facade): what the picture shows.
+struct MotionFraming {
+    double x = 0.0;
+    double y = 0.0;
+    double scale = 1.0;
+};
+
+// The Position X, Position Y and Scale start and end values of the Motion span `span` of `clip`
+// that make the picture show the framing `start` at the span's start (its first frame) and reach
+// `end` at its end, given everything else that composes onto the picture there (the clip's static
+// values and its other lanes, taken at the span's first and last frames: spanEdgeFrameTime).
+// spanEdgeMotion reads the framings back exactly. (The last frame shows the move a frame short of
+// its end, so a move ending on a cut continues into a span starting there without a repeated
+// framing.) Refused with InvalidArgument when a value would be invalid or the rest of the
+// composition has scale 0 there (no span value can make it show a framing).
+EditResult planKenBurns(const Clip &clip, const EffectSpan &span, CMTime frameDuration, MotionFraming start,
+                        MotionFraming end, std::vector<SpanValueChange> &changes);
+
+// The value changes that make the effect span `spanId` continue its touching neighbour at `edge`
+// of its clip (Head: the previous clip, whose last frame is matched on this clip's first frame;
+// Tail: the next clip, whose first frame is matched on this clip's last frame): the span's start
+// (Head) or end (Tail) values are set so that the frame shows what the neighbour's frame shows
+// (motionValuesAt for Motion and Opacity spans, gainDbAt for Gain spans), given everything else that
+// composes there. Refused: SpanNotFound; NotAdjacent (no clip touches that edge); InvalidArgument
+// for a transition span, for a span that does not reach that edge of its clip (its value does not
+// act there), or when no value can match (scale 0 elsewhere in the composition). `changes` is empty
+// when the span already matches.
+EditResult planMatchSpanEdge(const Sequence &sequence, SpanId spanId, ClipEdge edge,
+                             std::vector<SpanValueChange> &changes);
+
+// Whether two values of `parameter` are the same for the picture or the sound: equal within a
+// millionth of the larger magnitude (at least 1, so within a millionth of a pixel near the centre).
+bool spanValuesMatch(SpanParameter parameter, double a, double b);
+
+// The clip on the same track that touches `clipId` at `edge`: the one ending exactly where it
+// starts (Head) or starting exactly where it ends (Tail); nullptr when there is none (a gap, the
+// track's end, or no such clip).
+const Clip *adjacentClip(const Sequence &sequence, ClipId clipId, ClipEdge edge);
+
+// ----- Audio fades (lane-0 spans; the facade's VEAudioParams fades) -----
+
+// Sets the length of the lane-0 fade in (`edge` Head) or fade out (Tail) of `clip`, an audio clip
+// on `track`: a head fade span over the first `length` of the clip, or a tail span ending on the
+// cut; zero removes it. Refused: InvalidTime (not an exact time >= 0, or longer than the clip);
+// InvalidArgument for a fade in on a clip whose start another clip touches (the cut is that clip's)
+// or a fade out on a clip that ends in a cross dissolve (the tail's transition is the dissolve), and
+// when the two fades together would be longer than the clip. Unchanged fades change nothing. New
+// span ids come from `ids`.
+EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime length, IdGenerator &ids);
+
+// The clip's lane-0 fade in (Head: a head span) or fade out (Tail: a tail span ending on the cut)
+// length; zero when it has none (a cross dissolve at the tail is not a fade).
+CMTime clipFadeLength(const Clip &clip, ClipEdge edge);
+
+// ----- Transitions (lane-0 spans, Transition.h) -----
+
+// A transition span to add: on `clipId` at `edge`, covering [start, end] relative to that edge
+// (EffectSpan::start/end: a tail span [-before, after] around the cut at the clip's end, a head span
+// [0, length]).
+struct TransitionSpanRequest {
+    ClipId clipId{};
+    ClipEdge edge = ClipEdge::Tail;
+    CMTime start = kCMTimeZero;
+    CMTime end = kCMTimeZero;
+    TransitionKind kind = TransitionKind::CrossDissolve;
+};
+
+// Adds transition spans as one step (a dissolve and its linked audio crossfade): each must be a
+// valid transition (checkTransitionSpan: a cross dissolve into the touching next clip in whole
+// frames with enough media on both sides, a fade within the clip, a fade in only where nothing
+// touches the clip's start). Refused as a whole: AlreadyExists (the clip has a lane-0 span at that
+// edge, or the next clip's start is taken), NotAdjacent, InsufficientHandles, InvalidArgument
+// (longer than a clip, off the frame grid, a fade in on a touched clip), Overlap (meets another
+// transition), TrackLocked, ClipNotFound.
+class AddTransitionSpans final : public SequenceCommand {
+  public:
+    AddTransitionSpans(SequenceId sequenceId, std::vector<TransitionSpanRequest> requests);
+    std::string name() const override {
+        return requests_.size() == 1 ? "Add Transition" : "Add Transitions";
+    }
+    // The new span ids, in request order.
+    const std::vector<SpanId> &createdSpanIds() const {
+        return created_;
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    std::vector<TransitionSpanRequest> requests_;
+    std::vector<SpanId> created_;
+};
+
+// New offsets for a transition span (EffectSpan::start/end relative to its edge).
+struct TransitionRangeChange {
+    SpanId spanId{};
+    CMTime start = kCMTimeZero;
+    CMTime end = kCMTimeZero;
+};
+
+// Sets the ranges of several transition spans as one step (a dissolve and its linked crossfade
+// resized together); each is checked like AddTransitionSpans, and the whole edit is refused when
+// one does not fit. One SequenceCommand (not a composite), so an Accumulate group (keyboard nudges)
+// merges successive steps. A tail span whose end becomes 0 turns into a fade out (to black or
+// silence); one reaching past the cut again becomes a cross dissolve.
+class SetTransitionRanges final : public SequenceCommand {
+  public:
+    // `durationChange`: the edit changes the transitions' lengths only (the facade's setDuration),
+    // named "Change Transition Duration(s)"; otherwise "Change Transition(s)".
+    SetTransitionRanges(SequenceId sequenceId, std::vector<TransitionRangeChange> changes, bool durationChange = false);
+    std::string name() const override;
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    std::vector<TransitionRangeChange> changes_;
+    bool durationChange_ = false;
+};
+
+// The transition resolved with its role, owner and timeline range, or nullopt when `spanId` is not
+// a transition span of `sequence`.
+std::optional<TransitionPlacement> findTransition(const Sequence &sequence, SpanId spanId);
+
+// The transition linked to `spanId`: the linked partner of its owner has a lane-0 span at the same
+// edge, and for a cross dissolve the partners of its two clips meet at that cut (the audio
+// crossfade under a video dissolve, and the other way round). Nullopt when the owner is unlinked,
+// the partners do not meet at a cut, or no transition is there.
+std::optional<SpanId> linkedTransition(const Sequence &sequence, SpanId spanId);
 
 // Whether the cut from `fromClipId` to `toClipId` is a through edit: both clips play the same
-// asset at the same speed with the same parameters, and the second continues exactly where the
-// first stops in the source (a plain split). Both sides of a transition there show (or play)
-// the same media, so it has no visible (audible) effect. Two pieces of one still are a through
-// edit only when unanimated: a still's keyframes are measured from its own start, so identical
-// keyframes on both pieces restart the move at the cut.
+// asset at the same speed with the same static parameters and no effect spans, and the second
+// continues exactly where the first stops in the source (a plain split). Both sides of a
+// transition there show (or play) the same media, so it has no visible (audible) effect. Two
+// pieces of one still are a through edit when neither has effect spans.
 bool isThroughEdit(const Sequence &sequence, ClipId fromClipId, ClipId toClipId);
+
+// How far a cross dissolve out of `owner` can reach on each side of its cut, and why not farther:
+// before the cut it is limited by the owner's length (less a fade in at its head) and by the next
+// clip's media before its in point; after the cut by the next clip's length (less its own tail
+// span) and by the owner's media after its out point. Whole sequence frames.
+struct TransitionSideLimits {
+    std::int64_t maxBeforeFrames = 0;
+    std::int64_t maxAfterFrames = 0;
+    EditError beforeError = EditError::None; // InsufficientHandles, InvalidArgument (length), Overlap
+    EditError afterError = EditError::None;
+    std::string beforeReason; // sentences for the user
+    std::string afterReason;
+    ClipId beforeLimitingClip{}; // for InsufficientHandles: the clip lacking media
+    ClipId afterLimitingClip{};
+};
+// Refused (nullopt with `why`) when the clips do not meet at a cut on one track, `owner` has a
+// lane-0 tail span other than `existing`, the track is locked or a clip is missing.
+std::optional<TransitionSideLimits> transitionSideLimits(const Project &project, SequenceId sequenceId,
+                                                         ClipId owner, SpanId existing, EditResult &why);
 
 // The longest transition a cut can take, and what stops a longer one.
 struct TransitionLimit {
@@ -766,14 +668,16 @@ struct TransitionLimit {
     ClipId limitingClip{};
 };
 
-// The longest transition (centred on the cut, see Sequence::transitionRange) that fits the cut
-// between `fromClipId` and `toClipId` of `sequenceId`: within both clips, with enough media
-// beyond the cut in each (stills have unlimited media), and clear of the clips' other
-// transitions. `existing` is the transition being resized, if any (ignored as a neighbour; any
-// other transition on the cut makes the limit zero with AlreadyExists). Validity grows
-// monotonically shorter-to-longer, so the maximum is found by bisection over whole frames.
+// The longest centred transition (floor(n/2) frames before the cut, the rest after) that fits the
+// cut between `fromClipId` and `toClipId` of `sequenceId` (transitionSideLimits). `existing` is the
+// transition being resized, if any (any other lane-0 span at the owner's tail makes the limit zero
+// with AlreadyExists).
 TransitionLimit transitionLimit(const Project &project, SequenceId sequenceId, ClipId fromClipId, ClipId toClipId,
-                                TransitionId existing = {});
+                                SpanId existing = {});
+
+// The tail-span offsets (EffectSpan::start, end) of a transition of `frames` whole frames centred on
+// its cut: floor(frames / 2) frames before it, the rest after (how version 4 drew transitions).
+std::pair<CMTime, CMTime> centredTransitionOffsets(std::int64_t frames, CMTime frameDuration);
 
 // Links two unlinked clips on different tracks so they move, trim and split together.
 class LinkClips final : public SequenceCommand {

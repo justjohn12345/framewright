@@ -49,7 +49,7 @@ class UndoStack {
     explicit UndoStack(std::size_t maxDepth = kDefaultMaxDepth);
 
     // Applies `command` to `project` and records it. Returns the command's result (including
-    // droppedTransitionIds); on failure nothing is recorded and the project is unchanged (during
+    // droppedTransitionIds, droppedSpanIds); on failure nothing is recorded and the project is unchanged (during
     // ReplacePrevious coalescing the group's previous command stays applied).
     EditResult push(Project &project, std::unique_ptr<Command> command);
 

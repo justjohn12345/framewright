@@ -62,7 +62,7 @@ TEST_CASE("Locked tracks: transitions on a locked track cannot change as a side 
     const ClipId y = fx.addClip(fx.a1, fx.av30, 60, 60, 300);
     const ClipId vx = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
     fx.link(y, vx);
-    fx.addTransition(fx.a1, x, y, 10);
+    const SpanId t = fx.addTransition(fx.a1, x, y, 10);
     lockTrack(fx, fx.a1);
     fx.requireValid();
     // Deleting the video alone would unlink the locked audio clip.
@@ -71,7 +71,10 @@ TEST_CASE("Locked tracks: transitions on a locked track cannot change as a side 
     // Locking and unlocking are always possible.
     SetTrackFlags rename(fx.seq, fx.a1, TrackFlagsUpdate{true, true, true, std::string("Locked")});
     applyReversible(fx.project, rename);
-    CHECK(fx.sequence().transitions.size() == 1);
+    CHECK(fx.span(t) != nullptr);
+    // A span edit on the locked track is refused too.
+    SetTransitionRanges resize(fx.seq, {{t, -f30(6), f30(6)}});
+    applyRefused(fx.project, resize, EditError::TrackLocked);
 }
 
 TEST_CASE("Locked tracks: every command that edits clips checks the lock") {
@@ -90,7 +93,11 @@ TEST_CASE("Locked tracks: every command that edits clips checks the lock") {
         applyRefused(p, c, EditError::TrackLocked);
     }
     {
-        AddTransition c(fx.seq, v, next, f30(10));
+        AddTransitionSpans c(fx.seq, {centredDissolve(v, 10)});
+        applyRefused(p, c, EditError::TrackLocked);
+    }
+    {
+        AddSpan c(fx.seq, v, SpanKind::Motion, 1, kCMTimeZero, f30(10));
         applyRefused(p, c, EditError::TrackLocked);
     }
     {

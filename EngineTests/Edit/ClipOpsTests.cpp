@@ -278,8 +278,8 @@ TEST_CASE("InsertClip handles stills, speed, foreign frame rates and off-grid ti
 TEST_CASE("OverwriteClip splits a clip it lands inside") {
     Fixture fx;
     const ClipId a = fx.addClip(fx.a1, fx.av30, 0, 90);
-    fx.sequence().findClip(a)->audio.fadeInDuration = f30(5);
-    fx.sequence().findClip(a)->audio.fadeOutDuration = f30(6);
+    const SpanId in = fx.addFade(a, ClipEdge::Head, f30(5));
+    const SpanId out = fx.addFade(a, ClipEdge::Tail, f30(6));
     fx.requireValid();
 
     OverwriteClip overwrite(fx.seq, f30(30), {place(fx.a1, fx.av30, 300, 315)});
@@ -298,10 +298,12 @@ TEST_CASE("OverwriteClip splits a clip it lands inside") {
     CHECK(fx.clip(right).sourceIn == f30(45));
     CHECK(fx.clip(right).sourceOut() == f30(90));
     // The fade-in stays with the left piece, the fade-out goes with the right piece.
-    CHECK(fx.clip(a).audio.fadeInDuration == f30(5));
-    CHECK(fx.clip(a).audio.fadeOutDuration == kCMTimeZero);
-    CHECK(fx.clip(right).audio.fadeInDuration == kCMTimeZero);
-    CHECK(fx.clip(right).audio.fadeOutDuration == f30(6));
+    CHECK(clipFadeLength(fx.clip(a), ClipEdge::Head) == f30(5));
+    CHECK(clipFadeLength(fx.clip(a), ClipEdge::Tail) == kCMTimeZero);
+    CHECK(clipFadeLength(fx.clip(right), ClipEdge::Head) == kCMTimeZero);
+    CHECK(clipFadeLength(fx.clip(right), ClipEdge::Tail) == f30(6));
+    CHECK(fx.clip(a).findSpan(in) != nullptr);
+    CHECK(fx.clip(right).findSpan(out) != nullptr);
 }
 
 TEST_CASE("OverwriteClip trims clips it overlaps and removes clips it covers") {
@@ -483,13 +485,14 @@ TEST_CASE("MoveClip drops a transition whose cut it breaks; undo restores it") {
     Fixture fx;
     const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
     const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
-    fx.addTransition(fx.v1, a, b, 10);
+    const SpanId t = fx.addTransition(fx.v1, a, b, 10);
     fx.requireValid();
     MoveClip move(fx.seq, b, fx.v1, f30(200));
-    applyReversible(fx.project, move);
-    CHECK(fx.sequence().transitions.empty());
+    const EditResult r = applyReversible(fx.project, move);
+    CHECK(fx.span(t) == nullptr);
+    CHECK(r.droppedTransitionIds == std::vector<SpanId>{t});
     move.revert(fx.project);
-    CHECK(fx.sequence().transitions.size() == 1);
+    CHECK(fx.span(t) != nullptr);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -651,7 +654,9 @@ TEST_CASE("Trimming a speed-changed clip moves the source by speed x the timelin
 TEST_CASE("SplitClip splits at a frame inside the clip") {
     Fixture fx;
     const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 10, 60, 100);
-    fx.sequence().findClip(c)->audio = AudioParams{-3.0, f30(3), f30(4)};
+    fx.sequence().findClip(c)->audio = AudioParams{-3.0};
+    fx.addFade(c, ClipEdge::Head, f30(3));
+    fx.addFade(c, ClipEdge::Tail, f30(4));
     SplitClip split(fx.seq, c, f30(30));
     applyReversible(fx.project, split);
     REQUIRE(split.createdClipIds().size() == 1);
@@ -664,10 +669,10 @@ TEST_CASE("SplitClip splits at a frame inside the clip") {
     CHECK(fx.clip(right).sourceOut() == f30(160));
     CHECK(fx.clip(c).audio.gainDb == -3.0);
     CHECK(fx.clip(right).audio.gainDb == -3.0);
-    CHECK(fx.clip(c).audio.fadeInDuration == f30(3));
-    CHECK(fx.clip(c).audio.fadeOutDuration == kCMTimeZero);
-    CHECK(fx.clip(right).audio.fadeInDuration == kCMTimeZero);
-    CHECK(fx.clip(right).audio.fadeOutDuration == f30(4));
+    CHECK(clipFadeLength(fx.clip(c), ClipEdge::Head) == f30(3));
+    CHECK(clipFadeLength(fx.clip(c), ClipEdge::Tail) == kCMTimeZero);
+    CHECK(clipFadeLength(fx.clip(right), ClipEdge::Head) == kCMTimeZero);
+    CHECK(clipFadeLength(fx.clip(right), ClipEdge::Tail) == f30(4));
 }
 
 TEST_CASE("SplitClip splits the linked clip too and links the halves pairwise") {
@@ -726,15 +731,17 @@ TEST_CASE("SplitClip moves a transition at the clip's end to the right piece") {
     Fixture fx;
     const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
     const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
-    const TransitionId t = fx.addTransition(fx.v1, a, b, 10);
+    const SpanId t = fx.addTransition(fx.v1, a, b, 10);
     fx.requireValid();
 
     SplitClip split(fx.seq, a, f30(20));
     applyReversible(fx.project, split);
     const ClipId right = split.createdClipIds()[0];
-    REQUIRE(fx.sequence().findTransition(t) != nullptr);
-    CHECK(fx.sequence().findTransition(t)->fromClipId == right);
-    CHECK(fx.sequence().findTransition(t)->toClipId == b);
+    const auto placed = findTransition(fx.sequence(), t);
+    REQUIRE(placed.has_value());
+    CHECK(placed->owner->id == right);
+    CHECK(placed->partner->id == b);
+    CHECK(fx.clip(a).spans.empty());
 }
 
 TEST_CASE("SplitClip on a speed-changed clip splits the source proportionally") {
@@ -872,7 +879,7 @@ TEST_CASE("SetVideoParams and SetAudioParams validate and apply") {
     CHECK(fx.clip(v).video == video);
     CHECK(setVideo.coalescingKey() == "videoParams:" + std::to_string(v.value()));
 
-    AudioParams audio{-6.0, f30(10), f30(20)};
+    AudioParams audio{-6.0};
     SetAudioParams setAudio(fx.seq, a, audio);
     applyReversible(fx.project, setAudio);
     CHECK(fx.clip(a).audio == audio);
@@ -883,15 +890,19 @@ TEST_CASE("SetVideoParams and SetAudioParams validate and apply") {
         applyRefused(fx.project, c, EditError::InvalidArgument);
     }
     {
-        SetAudioParams c(fx.seq, a, AudioParams{NAN, kCMTimeZero, kCMTimeZero});
+        SetAudioParams c(fx.seq, a, AudioParams{NAN});
         applyRefused(fx.project, c, EditError::InvalidArgument);
     }
     {
-        SetAudioParams c(fx.seq, a, AudioParams{0, f30(31), kCMTimeZero});
+        ClipParamsChange tooLong{a, std::nullopt, std::nullopt};
+        tooLong.fadeIn = f30(31);
+        SetClipsParams c(fx.seq, {tooLong});
         applyRefused(fx.project, c, EditError::InvalidTime);
     }
     {
-        SetAudioParams c(fx.seq, a, AudioParams{0, kCMTimeZero, f30(-1)});
+        ClipParamsChange negative{a, std::nullopt, std::nullopt};
+        negative.fadeOut = f30(-1);
+        SetClipsParams c(fx.seq, {negative});
         applyRefused(fx.project, c, EditError::InvalidTime);
     }
     {

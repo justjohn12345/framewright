@@ -107,8 +107,12 @@ class NtscEditor {
             if (index + 1 >= track.clips.size() || track.clips[index + 1].timelineStart != c->timelineEnd()) {
                 return nullptr;
             }
-            return std::make_unique<AddTransition>(fx_.seq, clip, track.clips[index + 1].id,
-                                                   fx_.frames(2 + frame(12)));
+            const auto [start, end] = centredTransitionOffsets(2 + frame(12), fx_.frame);
+            TransitionSpanRequest request;
+            request.clipId = clip;
+            request.start = start;
+            request.end = end;
+            return std::make_unique<AddTransitionSpans>(fx_.seq, std::vector<TransitionSpanRequest>{request});
         }
         }
     }

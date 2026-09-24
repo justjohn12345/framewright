@@ -44,12 +44,6 @@ EditResult requireExact(CMTime t, const char *what) {
     return EditResult::success();
 }
 
-// Refusal of `keyframes` as the new keyframes of `clip` (whose timing and current keyframes are
-// used) on a track of `kind`: Motion only on video tracks (TrackKindMismatch), and every keyframe
-// within the clip's used source range unless the clip already has that very keyframe (one a trim
-// hid), the rule AddKeyframe and SetMotionTracks apply (InvalidTime). Defined with the Motion ops.
-EditResult checkClipKeyframes(const Clip &clip, TrackKind kind, const MotionKeyframes &keyframes);
-
 EditResult checkVideoParams(const VideoParams &v) {
     if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.scale) || !std::isfinite(v.rotationDegrees) ||
         !std::isfinite(v.opacity)) {
@@ -67,29 +61,9 @@ EditResult checkVideoParams(const VideoParams &v) {
     return EditResult::success();
 }
 
-EditResult checkAudioParams(const AudioParams &a, CMTime clipDuration) {
+EditResult checkAudioParams(const AudioParams &a) {
     if (!std::isfinite(a.gainDb)) {
         return EditResult::failure(EditError::InvalidArgument, "gain must be finite");
-    }
-    for (const CMTime fade : {a.fadeInDuration, a.fadeOutDuration}) {
-        if (EditResult r = requireExact(fade, "fade duration"); !r) {
-            return r;
-        }
-        if (fade < kCMTimeZero) {
-            return EditResult::failure(EditError::InvalidTime, "fade durations must be >= 0");
-        }
-        if (fade > clipDuration) {
-            return EditResult::failure(EditError::InvalidTime, "fade " + describe(fade) + " is longer than the clip (" +
-                                                                   describe(clipDuration) + ")");
-        }
-    }
-    const auto fadeIn = ExactTime::from(a.fadeInDuration);
-    const auto fadeOut = ExactTime::from(a.fadeOutDuration);
-    const auto total = fadeIn && fadeOut ? fadeIn->plus(*fadeOut) : std::nullopt;
-    if (!total || total->compare(clipDuration) > 0) {
-        return EditResult::failure(EditError::InvalidTime, "the fade-in and fade-out overlap: together they are longer "
-                                                           "than the clip (" +
-                                                               describe(clipDuration) + ")");
     }
     return EditResult::success();
 }
@@ -180,15 +154,8 @@ EditResult buildClip(const Project &project, const Sequence &sequence, const Tra
         clip.sourceIn = placement.sourceIn;
         clip.timelineDuration = *length;
     }
-    if (EditResult r = checkAudioParams(clip.audio, clip.duration()); !r) {
+    if (EditResult r = checkAudioParams(clip.audio); !r) {
         return r;
-    }
-    if (!placement.video.keyframes.empty()) {
-        Clip placed = clip;
-        placed.video.keyframes = MotionKeyframes{}; // a new clip has no keyframes a trim hid
-        if (EditResult r = checkClipKeyframes(placed, track.kind, placement.video.keyframes); !r) {
-            return r;
-        }
     }
     out = std::move(clip);
     return EditResult::success();
@@ -349,51 +316,37 @@ EditResult transitionIssueToResult(const TransitionIssue &issue) {
         return EditResult::failure(EditError::NotAdjacent, issue.message);
     case TransitionIssueKind::InsufficientHandles:
         return EditResult::failure(EditError::InsufficientHandles, issue.message);
+    case TransitionIssueKind::Overlap:
+        return EditResult::failure(EditError::Overlap, issue.message);
     case TransitionIssueKind::TooLong:
     case TransitionIssueKind::BadDuration:
     case TransitionIssueKind::Structure:
+    case TransitionIssueKind::Touching:
         break;
     }
     return EditResult::failure(EditError::InvalidArgument, issue.message);
 }
 
-// Full placement check for a new or resized transition (ignoring `ignore` when looking for
-// neighbouring transitions).
-EditResult checkTransitionPlacement(const Sequence &sequence, const Project &project, const Transition &transition,
-                                    TransitionId ignore) {
-    if (auto issue = checkTransition(sequence, project, transition)) {
-        return transitionIssueToResult(*issue);
-    }
-    const TimeRange range = *sequence.transitionRange(transition);
-    for (const Transition &other : sequence.transitions) {
-        if (other.id == ignore || other.id == transition.id) {
-            continue;
-        }
-        const auto otherRange = sequence.transitionRange(other);
-        if (!otherRange) {
-            continue;
-        }
-        if (other.toClipId == transition.fromClipId && otherRange->end > range.start) {
-            return EditResult::failure(EditError::Overlap, "overlaps the transition at the start of clip " +
-                                                               idString(transition.fromClipId.value()));
-        }
-        if (other.fromClipId == transition.toClipId && range.end > otherRange->start) {
-            return EditResult::failure(EditError::Overlap, "overlaps the transition at the end of clip " +
-                                                               idString(transition.toClipId.value()));
+// The lane-0 spans acting on `clip` of `track` (its own, and a cross dissolve into it from the clip
+// touching its start), with their timeline ranges.
+std::vector<TransitionPlacement> transitionsOn(const Track &track, const Clip &clip) {
+    std::vector<TransitionPlacement> result;
+    for (const ClipEdge edge : {ClipEdge::Head, ClipEdge::Tail}) {
+        if (const EffectSpan *span = clip.transitionAt(edge)) {
+            if (auto placement = placeTransition(track, clip, *span)) {
+                result.push_back(*placement);
+            }
         }
     }
-    return EditResult::success();
-}
-
-EditResult snapDuration(const Sequence &sequence, CMTime requested, CMTime &out) {
-    if (EditResult r = requireNumeric(requested, "duration"); !r) {
-        return r;
+    if (const Clip *previous = touchingClip(track, clip, ClipEdge::Head)) {
+        if (const EffectSpan *span = previous->transitionAt(ClipEdge::Tail)) {
+            auto placement = placeTransition(track, *previous, *span);
+            if (placement && placement->role == TransitionRole::CrossDissolve) {
+                result.push_back(*placement);
+            }
+        }
     }
-    out = snapToSequence(sequence, requested);
-    if (out < sequence.frameDuration) {
-        return EditResult::failure(EditError::InvalidArgument, "duration must be at least one frame");
-    }
-    return EditResult::success();
+    return result;
 }
 
 } // namespace
@@ -612,8 +565,8 @@ EditResult TrimClipHead::perform(const Project &, Sequence &sequence, IdGenerato
     for (const ClipId clipId : targets) {
         Clip &clip = *sequence.findClip(clipId);
         const CMTime newStart = clip.timelineStart + delta;
-        if (!clip.setTimelineStartKeepingEnd(newStart)) {
-            return notRepresentable(clip.id, newStart);
+        if (EditResult r = retimeRefusal(clip.setTimelineStartKeepingEnd(newStart), clip.id, newStart); !r) {
+            return r;
         }
     }
     return EditResult::success();
@@ -678,8 +631,8 @@ EditResult TrimClipTail::perform(const Project &project, Sequence &sequence, IdG
     for (const ClipId clipId : targets) {
         Clip &clip = *sequence.findClip(clipId);
         const CMTime newEnd = clip.timelineEnd() + delta;
-        if (!clip.setTimelineEnd(newEnd)) {
-            return notRepresentable(clip.id, newEnd);
+        if (EditResult r = retimeRefusal(clip.setTimelineEnd(newEnd), clip.id, newEnd); !r) {
+            return r;
         }
     }
     return EditResult::success();
@@ -715,19 +668,27 @@ EditResult SplitClip::perform(const Project &, Sequence &sequence, IdGenerator &
             splitting.push_back(clipId);
         }
     }
-    if (!options_.allowBreakingTransitions) {
-        for (const Transition &transition : sequence.transitions) {
-            const bool onSplitClip =
-                std::find(splitting.begin(), splitting.end(), transition.fromClipId) != splitting.end() ||
-                std::find(splitting.begin(), splitting.end(), transition.toClipId) != splitting.end();
-            const auto range = sequence.transitionRange(transition);
-            if (onSplitClip && range && range->start < at && at < range->end) {
+    // Transitions acting on a clip being split, around the split time: refused, or removed when
+    // allowed (reported as dropped).
+    std::vector<std::pair<ClipId, SpanId>> broken;
+    for (const ClipId clipId : splitting) {
+        const Track &track = *sequence.trackOfClip(clipId);
+        for (const TransitionPlacement &transition : transitionsOn(track, *track.find(clipId))) {
+            if (!(transition.range.start < at && at < transition.range.end)) {
+                continue;
+            }
+            if (!options_.allowBreakingTransitions) {
                 return EditResult::failure(EditError::InsideTransition,
                                            "split time " + describe(at) + " is inside transition " +
-                                               idString(transition.id.value()) + " (" + describe(range->start) +
-                                               " - " + describe(range->end) + "); remove or shorten it first");
+                                               idString(transition.span->id.value()) + " (" +
+                                               describe(transition.range.start) + " - " +
+                                               describe(transition.range.end) + "); remove or shorten it first");
             }
+            broken.emplace_back(transition.owner->id, transition.span->id);
         }
+    }
+    for (const auto &[owner, spanId] : broken) {
+        std::erase_if(sequence.findClip(owner)->spans, [spanId](const EffectSpan &span) { return span.id == spanId; });
     }
     created_.clear();
     SplitList splits;
@@ -788,8 +749,8 @@ EditResult RippleDelete::perform(const Project &, Sequence &sequence, IdGenerato
 
 // ----- Clip parameters -----
 
-SetVideoParams::SetVideoParams(SequenceId sequenceId, ClipId clipId, VideoParams params)
-    : SequenceCommand(sequenceId), clipId_(clipId), params_(params) {
+SetVideoParams::SetVideoParams(SequenceId sequenceId, ClipId clipId, VideoParams params, std::string name)
+    : SequenceCommand(sequenceId), clipId_(clipId), params_(params), name_(std::move(name)) {
     setCoalescingKey("videoParams:" + idString(clipId.value()));
 }
 
@@ -800,9 +761,6 @@ EditResult SetVideoParams::perform(const Project &, Sequence &sequence, IdGenera
         return r;
     }
     if (EditResult r = checkVideoParams(params_); !r) {
-        return r;
-    }
-    if (EditResult r = checkClipKeyframes(*clip, track->kind, params_.keyframes); !r) {
         return r;
     }
     clip->video = params_;
@@ -820,7 +778,7 @@ EditResult SetAudioParams::perform(const Project &, Sequence &sequence, IdGenera
     if (EditResult r = findEditableClip(sequence, clipId_, track, clip); !r) {
         return r;
     }
-    if (EditResult r = checkAudioParams(params_, clip->duration()); !r) {
+    if (EditResult r = checkAudioParams(params_); !r) {
         return r;
     }
     clip->audio = params_;
@@ -838,7 +796,9 @@ SetClipsParams::SetClipsParams(SequenceId sequenceId, std::vector<ClipParamsChan
 
 std::string SetClipsParams::name() const {
     const bool video = std::any_of(changes_.begin(), changes_.end(), [](const auto &c) { return c.video.has_value(); });
-    const bool audio = std::any_of(changes_.begin(), changes_.end(), [](const auto &c) { return c.audio.has_value(); });
+    const bool audio = std::any_of(changes_.begin(), changes_.end(), [](const auto &c) {
+        return c.audio.has_value() || c.fadeIn.has_value() || c.fadeOut.has_value();
+    });
     if (video && !audio) {
         return "Change Video Settings";
     }
@@ -848,7 +808,7 @@ std::string SetClipsParams::name() const {
     return "Change Clip Settings";
 }
 
-EditResult SetClipsParams::perform(const Project &, Sequence &sequence, IdGenerator &) {
+EditResult SetClipsParams::perform(const Project &, Sequence &sequence, IdGenerator &ids) {
     if (changes_.empty()) {
         return EditResult::failure(EditError::InvalidArgument, "no clips to change");
     }
@@ -871,20 +831,35 @@ EditResult SetClipsParams::perform(const Project &, Sequence &sequence, IdGenera
             if (EditResult r = checkVideoParams(*change.video); !r) {
                 return r;
             }
-            if (EditResult r = checkClipKeyframes(*clip, track->kind, change.video->keyframes); !r) {
-                return r;
-            }
             clip->video = *change.video;
         }
-        if (change.audio) {
+        if (change.audio || change.fadeIn || change.fadeOut) {
             if (track->kind != TrackKind::Audio) {
                 return EditResult::failure(EditError::TrackKindMismatch,
                                            "clip " + idString(change.clipId.value()) + " is not on an audio track");
             }
-            if (EditResult r = checkAudioParams(*change.audio, clip->duration()); !r) {
+        }
+        if (change.audio) {
+            if (EditResult r = checkAudioParams(*change.audio); !r) {
                 return r;
             }
             clip->audio = *change.audio;
+        }
+        // With both fades changing, the one that shrinks goes first, so the clip never holds two
+        // fades that meet on the way to two that fit (each is checked against the other).
+        std::vector<std::pair<ClipEdge, CMTime>> fades;
+        if (change.fadeIn) {
+            fades.emplace_back(ClipEdge::Head, *change.fadeIn);
+        }
+        if (change.fadeOut) {
+            const bool inGrows = change.fadeIn && isNumeric(*change.fadeIn) &&
+                                 clipFadeLength(*clip, ClipEdge::Head) < *change.fadeIn;
+            fades.insert(inGrows ? fades.begin() : fades.end(), std::make_pair(ClipEdge::Tail, *change.fadeOut));
+        }
+        for (const auto &[edge, length] : fades) {
+            if (EditResult r = setClipFade(*clip, *track, edge, length, ids); !r) {
+                return r;
+            }
         }
     }
     return EditResult::success();
@@ -996,7 +971,10 @@ EditResult SetClipSpeed::perform(const Project &project, Sequence &sequence, IdG
         Clip &clip = *sequence.findClip(change.clipId);
         clip.speed = speed_;
         clip.timelineDuration = change.newDuration;
-        clip.fitFades(ClipEdge::Tail);
+        // Spans stay on their pictures: those past the new out point are clipped there.
+        if (EditResult r = retimeRefusal(clip.fitSpans(ClipEdge::Tail), clip.id, clip.timelineEnd()); !r) {
+            return r;
+        }
     }
     if (rippling && delta < kCMTimeZero) {
         return closeTime(sequence, rippled, {TimeRange{changes.front().newEnd, oldEnd}});
@@ -1004,394 +982,207 @@ EditResult SetClipSpeed::perform(const Project &project, Sequence &sequence, IdG
     return EditResult::success();
 }
 
-// ----- Keyframed Motion -----
+// ----- Effect spans -----
 
 namespace {
 
-std::string motionKey(const char *op, ClipId clipId, MotionParameter parameter) {
-    return std::string(op) + ":" + idString(clipId.value()) + ":" + nameOf(parameter);
+std::string spanName(SpanId id) {
+    return "span " + idString(id.value());
 }
 
-// The clip, on an editable video track.
-EditResult findMotionClip(Sequence &sequence, ClipId clipId, Clip *&clip) {
-    Track *track = nullptr;
-    if (EditResult r = findEditableClip(sequence, clipId, track, clip); !r) {
-        return r;
+EditResult spanNotFound(SpanId id) {
+    return EditResult::failure(EditError::SpanNotFound, spanName(id) + " does not exist");
+}
+
+// The effect span `spanId` (lanes 1-3), its clip and track, on an editable track.
+EditResult findEffectSpan(Sequence &sequence, SpanId spanId, Track *&track, Clip *&clip, EffectSpan *&span) {
+    span = sequence.findSpan(spanId, &clip, &track);
+    if (span == nullptr) {
+        return spanNotFound(spanId);
     }
-    if (track->kind != TrackKind::Video) {
-        return EditResult::failure(EditError::TrackKindMismatch,
-                                   "clip " + idString(clipId.value()) + " is on an audio track, which has no Motion");
+    if (span->isTransition()) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   spanName(spanId) + " is a transition; change it with the transition edits");
+    }
+    return requireEditableTrack(track, track->id);
+}
+
+EditResult checkLane(int lane) {
+    if (lane < kFirstEffectLane || lane > kLastLane) {
+        return EditResult::failure(EditError::InvalidArgument, "effect spans live on lanes " +
+                                                                   std::to_string(kFirstEffectLane) + " to " +
+                                                                   std::to_string(kLastLane) + ", not lane " +
+                                                                   std::to_string(lane));
     }
     return EditResult::success();
 }
 
-EditResult checkMotionValue(MotionParameter parameter, double value) {
-    if (!isValidMotionValue(parameter, value)) {
+EditResult checkSpanKind(SpanKind kind, TrackKind trackKind) {
+    if (kind == SpanKind::Transition) {
+        return EditResult::failure(EditError::InvalidArgument, "a transition is added with the transition edits");
+    }
+    const bool video = kind == SpanKind::Motion || kind == SpanKind::Opacity;
+    if (video != (trackKind == TrackKind::Video)) {
+        return EditResult::failure(EditError::TrackKindMismatch, std::string("a ") + nameOf(kind) +
+                                                                     " span cannot go on a clip of " +
+                                                                     nameOf(trackKind) + " track");
+    }
+    return EditResult::success();
+}
+
+EditResult checkSpanValue(SpanParameter parameter, double value) {
+    if (!isValidSpanValue(parameter, value)) {
         return EditResult::failure(EditError::InvalidArgument,
                                    std::string(displayNameOf(parameter)) + " cannot be " + std::to_string(value) +
-                                       (parameter == MotionParameter::Opacity ? " (it is within 0...1)"
-                                        : parameter == MotionParameter::Scale ? " (it is at least 0)"
-                                                                              : " (it must be finite)"));
+                                       (parameter == SpanParameter::Opacity ? " (it is within 0...1)"
+                                        : parameter == SpanParameter::Scale ? " (it is at least 0)"
+                                                                            : " (it must be finite)"));
     }
     return EditResult::success();
-}
-
-// Refusal unless `time` lies within the clip's used source range [in, out] (inclusive: a split
-// leaves a keyframe on a piece's out point).
-EditResult requireInsideClip(const Clip &clip, CMTime time) {
-    if (EditResult r = requireExact(time, "keyframe time"); !r) {
-        return r;
-    }
-    const auto in = ExactTime::from(clip.isStill ? kCMTimeZero : clip.sourceIn);
-    const auto out = clip.exactSourceOut();
-    if (!in || !out) {
-        return notRepresentable(clip.id, clip.timelineStart);
-    }
-    if (in->compare(time) > 0 || out->compare(time) < 0) {
-        return EditResult::failure(EditError::InvalidTime, "keyframe time " + describe(time) +
-                                                               " is outside the clip's source range (" +
-                                                               describe(in->toTimeRounded()) + " - " +
-                                                               describe(out->toTimeRounded()) + ")");
-    }
-    return EditResult::success();
-}
-
-EditResult checkClipKeyframes(const Clip &clip, TrackKind kind, const MotionKeyframes &keyframes) {
-    if (keyframes.empty()) {
-        return EditResult::success();
-    }
-    if (kind != TrackKind::Video) {
-        return EditResult::failure(EditError::TrackKindMismatch, "clip " + idString(clip.id.value()) +
-                                                                     " is on an audio track, which has no Motion");
-    }
-    for (const MotionParameter parameter : kMotionParameters) {
-        const KeyframeTrack &current = clip.video.keyframes.track(parameter);
-        for (const Keyframe &keyframe : keyframes.track(parameter)) {
-            if (EditResult r = requireInsideClip(clip, keyframe.time); !r) {
-                if (std::find(current.begin(), current.end(), keyframe) == current.end()) {
-                    return r;
-                }
-            }
-        }
-    }
-    return EditResult::success();
-}
-
-EditResult keyframeNotFound(ClipId clipId, MotionParameter parameter, CMTime time) {
-    return EditResult::failure(EditError::KeyframeNotFound, std::string(displayNameOf(parameter)) +
-                                                                " of clip " + idString(clipId.value()) +
-                                                                " has no keyframe at " + describe(time));
 }
 
 EditResult checkInterpolation(KeyframeInterpolation interpolation) {
     if (interpolation == KeyframeInterpolation::Bezier) {
         return EditResult::failure(EditError::InvalidArgument,
-                                   "a custom curve comes only from dividing an eased segment (a split, or a keyframe "
-                                   "added inside it); choose hold, linear or an ease");
+                                   "a custom curve comes only from dividing an eased segment (a split); choose hold, "
+                                   "linear or an ease");
     }
     return EditResult::success();
 }
 
-// Refusal when the keyframe `insertKeyframeKeepingValues` added at `time` has a value outside the
-// parameter's range: a custom curve from a project file overshoots there, and a keyframe with the
-// limited value would change the frames around it.
-EditResult checkInsertedValue(MotionParameter parameter, const Keyframe &keyframe) {
-    if (isValidMotionValue(parameter, keyframe.value)) {
-        return EditResult::success();
+// The source range of an effect span over the timeline frames [timelineStart, timelineEnd) of
+// `clip` (rounded to the frame grid): at least one frame, within the clip. `frames` receives the
+// snapped timeline range.
+EditResult spanSourceRange(const Sequence &sequence, const Clip &clip, CMTime timelineStart, CMTime timelineEnd,
+                           CMTime &start, CMTime &end, TimeRange &frames) {
+    if (EditResult r = requireNumeric(timelineStart, "span start"); !r) {
+        return r;
     }
-    return EditResult::failure(EditError::InvalidArgument,
-                               std::string(displayNameOf(parameter)) + "'s custom timing curve goes outside its range at " +
-                                   describe(keyframe.time) +
-                                   ", so a keyframe there would change the picture; set a value there instead");
+    if (EditResult r = requireNumeric(timelineEnd, "span end"); !r) {
+        return r;
+    }
+    frames = TimeRange{snapToSequence(sequence, timelineStart), snapToSequence(sequence, timelineEnd)};
+    if (!(frames.start < frames.end)) {
+        return EditResult::failure(EditError::InvalidArgument, "a span covers at least one frame");
+    }
+    if (frames.start < clip.timelineStart || clip.timelineEnd() < frames.end) {
+        return EditResult::failure(EditError::InvalidTime, "the span " + describe(frames.start) + " - " +
+                                                               describe(frames.end) + " is not within clip " +
+                                                               idString(clip.id.value()) + " (" +
+                                                               describe(clip.timelineStart) + " - " +
+                                                               describe(clip.timelineEnd()) + ")");
+    }
+    const auto from = spanTimeAt(clip, frames.start);
+    const auto to = spanTimeAt(clip, frames.end);
+    if (!from || !to) {
+        return notRepresentable(clip.id, frames.start);
+    }
+    if (!(*from < *to)) {
+        return EditResult::failure(EditError::InvalidArgument, "the span covers no source time of clip " +
+                                                                   idString(clip.id.value()));
+    }
+    start = *from;
+    end = *to;
+    return EditResult::success();
 }
 
-// Sets `value` on the frame starting at `frame` of `parameter` (an animated parameter of `clip`):
-// the keyframe goes on the frame's start `time` (keyframeTimeForFrame), where the frame's picture is
-// evaluated, so the frame shows exactly `value`. It is added without reshaping the segment it lands
-// in (insertKeyframeKeepingValues: a hold stays a hold, an eased segment is divided exactly) and
-// then given the value. Other keyframes the frame shows (keyframeIndexForFrame's rule: one on the
-// out point, or inside a frame of a sped-up clip) give way to it, and it takes the interpolation and
-// curve of the last of them, whose segment is the one leaving the frame.
-KeyframeTrack trackWithValueOnFrame(const Clip &clip, CMTime frameDuration, CMTime frame, CMTime time,
-                                    MotionParameter parameter, double value) {
-    KeyframeTrack track = clip.video.keyframes.track(parameter);
-    insertKeyframeKeepingValues(track, clip.video.staticValue(parameter), time);
-    std::optional<Keyframe> lender;
-    KeyframeTrack kept;
-    kept.reserve(track.size());
-    for (const Keyframe &keyframe : track) {
-        if (!(keyframe.time == time)) {
-            const std::optional<CMTime> shownBy = frameShowingSourceTime(clip, keyframe.time, frameDuration);
-            if (shownBy && *shownBy == frame) {
-                lender = keyframe; // in time order: the last one wins
-                continue;
-            }
+// Refusal (Overlap, with the nearest free range) when [start, end) meets another span of `lane`.
+EditResult checkLaneFree(const Sequence &sequence, const Clip &clip, int lane, CMTime start, CMTime end,
+                         const TimeRange &frames, SpanId except) {
+    for (const EffectSpan &other : clip.spans) {
+        if (other.isTransition() || other.lane != lane || other.id == except) {
+            continue;
         }
-        kept.push_back(keyframe);
+        if (other.start < end && start < other.end) {
+            EditResult refusal = EditResult::failure(
+                EditError::Overlap, "lane " + std::to_string(lane) + " of clip " + idString(clip.id.value()) +
+                                        " already has " + spanName(other.id) + " there");
+            refusal.freeRange = nearestFreeRange(clip, lane, sequence.frameDuration, frames, except);
+            if (refusal.freeRange) {
+                refusal.message += "; the nearest free range is " + describe(refusal.freeRange->start) + " - " +
+                                   describe(refusal.freeRange->end);
+            } else {
+                refusal.message += "; the lane has no free frame";
+            }
+            return refusal;
+        }
     }
-    Keyframe &target = kept[*keyframeIndexAt(kept, time)];
-    target.value = value;
-    if (lender) {
-        target.interpolation = lender->interpolation;
-        target.curve = lender->curve;
-    }
-    return kept;
+    return EditResult::success();
+}
+
+Keyframe keyframeAt(CMTime time, double value, KeyframeInterpolation interpolation) {
+    Keyframe keyframe;
+    keyframe.time = time;
+    keyframe.value = value;
+    keyframe.interpolation = interpolation;
+    return keyframe;
 }
 
 } // namespace
 
-AddKeyframe::AddKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime time,
-                         std::optional<double> value, std::optional<KeyframeInterpolation> interpolation)
-    : SequenceCommand(sequenceId), clipId_(clipId), parameter_(parameter), time_(time), value_(value),
-      interpolation_(interpolation) {
-    setCoalescingKey(motionKey("addKeyframe", clipId, parameter));
+std::optional<TimeRange> spanTimelineRange(const Clip &clip, const EffectSpan &span, const Track &track) {
+    if (span.isTransition()) {
+        const auto placement = placeTransition(track, clip, span);
+        return placement ? std::optional<TimeRange>(placement->range) : std::nullopt;
+    }
+    const auto start = clip.exactTimelineTimeAt(span.start);
+    const auto end = clip.exactTimelineTimeAt(span.end);
+    if (!start || !end) {
+        return std::nullopt;
+    }
+    return TimeRange{start->toTimeRounded(), end->toTimeRounded()};
 }
 
-EditResult AddKeyframe::perform(const Project &, Sequence &sequence, IdGenerator &) {
-    Clip *clip = nullptr;
-    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
-        return r;
-    }
-    if (EditResult r = requireInsideClip(*clip, time_); !r) {
-        return r;
-    }
-    if (interpolation_) {
-        if (EditResult r = checkInterpolation(*interpolation_); !r) {
-            return r;
+std::vector<TimeRange> freeLaneRanges(const Clip &clip, int lane, CMTime frameDuration, SpanId except) {
+    std::vector<TimeRange> occupied;
+    for (const EffectSpan &span : clip.spans) {
+        if (span.isTransition() || span.lane != lane || span.id == except) {
+            continue;
+        }
+        const auto start = clip.exactTimelineTimeAt(span.start);
+        const auto end = clip.exactTimelineTimeAt(span.end);
+        const auto first = start ? start->frameIndex(frameDuration, SnapMode::Floor) : std::nullopt;
+        const auto past = end ? end->frameIndex(frameDuration, SnapMode::Ceil) : std::nullopt;
+        if (first && past) {
+            occupied.push_back(TimeRange{timeForFrame(*first, frameDuration), timeForFrame(*past, frameDuration)});
         }
     }
-    KeyframeTrack &track = clip->video.keyframes.track(parameter_);
-    if (keyframeIndexAt(track, time_)) {
-        return EditResult::failure(EditError::AlreadyExists, std::string(displayNameOf(parameter_)) +
-                                                                 " already has a keyframe at " + describe(time_));
+    std::sort(occupied.begin(), occupied.end(), [](const TimeRange &a, const TimeRange &b) { return a.start < b.start; });
+    std::vector<TimeRange> free;
+    CMTime cursor = clip.timelineStart;
+    for (const TimeRange &range : occupied) {
+        if (cursor < range.start) {
+            free.push_back(TimeRange{cursor, minTime(range.start, clip.timelineEnd())});
+        }
+        cursor = maxTime(cursor, range.end);
     }
-    if (value_) {
-        if (EditResult r = checkMotionValue(parameter_, *value_); !r) {
-            return r;
+    if (cursor < clip.timelineEnd()) {
+        free.push_back(TimeRange{cursor, clip.timelineEnd()});
+    }
+    return free;
+}
+
+std::optional<TimeRange> nearestFreeRange(const Clip &clip, int lane, CMTime frameDuration, TimeRange requested,
+                                          SpanId except) {
+    std::optional<TimeRange> best;
+    double bestOverlap = -1.0;
+    double bestDistance = 0.0;
+    for (const TimeRange &range : freeLaneRanges(clip, lane, frameDuration, except)) {
+        const auto overlap = intersection(range, requested);
+        const double seconds = overlap ? toSeconds(overlap->duration()) : 0.0;
+        const double distance = overlap ? 0.0
+                                        : std::min(std::fabs(toSeconds(range.start - requested.end)),
+                                                   std::fabs(toSeconds(requested.start - range.end)));
+        if (!best || seconds > bestOverlap || (seconds == bestOverlap && distance < bestDistance)) {
+            best = range;
+            bestOverlap = seconds;
+            bestDistance = distance;
         }
     }
-    // Added without reshaping the segment it lands in, then given what was asked for.
-    KeyframeTrack updated = track;
-    Keyframe &keyframe = updated[insertKeyframeKeepingValues(updated, clip->video.staticValue(parameter_), time_)];
-    if (value_) {
-        keyframe.value = *value_;
-    } else if (EditResult r = checkInsertedValue(parameter_, keyframe); !r) {
-        return r;
-    }
-    if (interpolation_) {
-        keyframe.interpolation = *interpolation_;
-        keyframe.curve = TimingCurve{};
-    }
-    track = std::move(updated);
-    return EditResult::success();
+    return best;
 }
 
-SetMotionValue::SetMotionValue(SequenceId sequenceId, ClipId clipId, MotionParameter parameter,
-                               std::optional<CMTime> keyframeTime, double value,
-                               std::optional<KeyframeInterpolation> interpolation)
-    : SequenceCommand(sequenceId), clipId_(clipId), parameter_(parameter), keyframeTime_(keyframeTime), value_(value),
-      interpolation_(interpolation) {
-    setCoalescingKey(motionKey("motionValue", clipId, parameter));
-}
-
-std::string SetMotionValue::name() const {
-    if (!keyframeTime_) {
-        return "Change Video Settings";
-    }
-    return added_ ? "Add Keyframe" : "Change Keyframe";
-}
-
-EditResult SetMotionValue::perform(const Project &, Sequence &sequence, IdGenerator &) {
-    Clip *clip = nullptr;
-    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
-        return r;
-    }
-    if (EditResult r = checkMotionValue(parameter_, value_); !r) {
-        return r;
-    }
-    if (!keyframeTime_) {
-        clip->video.setStaticValue(parameter_, value_);
-        return EditResult::success();
-    }
-    if (interpolation_) {
-        if (EditResult r = checkInterpolation(*interpolation_); !r) {
-            return r;
-        }
-    }
-    KeyframeTrack &track = clip->video.keyframes.track(parameter_);
-    if (const auto index = keyframeIndexAt(track, *keyframeTime_)) {
-        Keyframe &keyframe = track[*index];
-        keyframe.value = value_;
-        if (interpolation_) {
-            keyframe.interpolation = *interpolation_;
-            keyframe.curve = TimingCurve{};
-        }
-        added_ = false;
-        return EditResult::success();
-    }
-    if (EditResult r = requireInsideClip(*clip, *keyframeTime_); !r) {
-        return r;
-    }
-    // Added without reshaping the segment it lands in (a hold stays a hold, an eased segment is
-    // divided exactly), then given the value and, when asked for, the interpolation.
-    Keyframe &keyframe = track[insertKeyframeKeepingValues(track, clip->video.staticValue(parameter_), *keyframeTime_)];
-    keyframe.value = value_;
-    if (interpolation_) {
-        keyframe.interpolation = *interpolation_;
-        keyframe.curve = TimingCurve{};
-    }
-    added_ = true;
-    return EditResult::success();
-}
-
-RemoveKeyframe::RemoveKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime time)
-    : SequenceCommand(sequenceId), clipId_(clipId), parameter_(parameter), time_(time) {
-    setCoalescingKey(motionKey("removeKeyframe", clipId, parameter));
-}
-
-EditResult RemoveKeyframe::perform(const Project &, Sequence &sequence, IdGenerator &) {
-    Clip *clip = nullptr;
-    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
-        return r;
-    }
-    KeyframeTrack &track = clip->video.keyframes.track(parameter_);
-    const auto index = isNumeric(time_) ? keyframeIndexAt(track, time_) : std::nullopt;
-    if (!index) {
-        return keyframeNotFound(clipId_, parameter_, time_);
-    }
-    if (track.size() == 1) {
-        clip->video.setStaticValue(parameter_, track.front().value);
-    }
-    track.erase(track.begin() + static_cast<std::ptrdiff_t>(*index));
-    return EditResult::success();
-}
-
-MoveKeyframe::MoveKeyframe(SequenceId sequenceId, ClipId clipId, MotionParameter parameter, CMTime from, CMTime to)
-    : SequenceCommand(sequenceId), clipId_(clipId), parameter_(parameter), from_(from), to_(to) {
-    setCoalescingKey(motionKey("moveKeyframe", clipId, parameter));
-}
-
-EditResult MoveKeyframe::perform(const Project &, Sequence &sequence, IdGenerator &) {
-    Clip *clip = nullptr;
-    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
-        return r;
-    }
-    KeyframeTrack &track = clip->video.keyframes.track(parameter_);
-    const auto index = isNumeric(from_) ? keyframeIndexAt(track, from_) : std::nullopt;
-    if (!index) {
-        return keyframeNotFound(clipId_, parameter_, from_);
-    }
-    if (EditResult r = requireInsideClip(*clip, to_); !r) {
-        return r;
-    }
-    if (to_ == from_) {
-        return EditResult::success();
-    }
-    if (keyframeIndexAt(track, to_)) {
-        return EditResult::failure(EditError::AlreadyExists, std::string(displayNameOf(parameter_)) +
-                                                                 " already has a keyframe at " + describe(to_));
-    }
-    Keyframe moved = track[*index];
-    moved.time = to_;
-    track.erase(track.begin() + static_cast<std::ptrdiff_t>(*index));
-    upsertKeyframe(track, moved);
-    return EditResult::success();
-}
-
-MoveKeyframeGroup::MoveKeyframeGroup(SequenceId sequenceId, ClipId clipId, CMTime fromFrame, CMTime toFrame)
-    : SequenceCommand(sequenceId), clipId_(clipId), fromFrame_(fromFrame), toFrame_(toFrame) {
-    setCoalescingKey("moveKeyframeGroup:" + idString(clipId.value()));
-}
-
-EditResult MoveKeyframeGroup::perform(const Project &, Sequence &sequence, IdGenerator &) {
-    Clip *clip = nullptr;
-    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
-        return r;
-    }
-    MotionKeyframeGroup group;
-    if (EditResult r = motionKeyframeGroupAt(*clip, sequence.frameDuration, fromFrame_, group); !r) {
-        return r;
-    }
-    parameterCount_ = group.keyframes.size();
-    std::vector<MotionTrackChange> changes;
-    if (EditResult r = planMotionKeyframeGroupMove(*clip, sequence.frameDuration, fromFrame_, toFrame_, changes); !r) {
-        return r;
-    }
-    for (MotionTrackChange &change : changes) {
-        clip->video.keyframes.track(change.parameter) = std::move(change.keyframes);
-    }
-    return EditResult::success();
-}
-
-SetKeyframeInterpolation::SetKeyframeInterpolation(SequenceId sequenceId, ClipId clipId, MotionParameter parameter,
-                                                   CMTime time, KeyframeInterpolation interpolation)
-    : SequenceCommand(sequenceId), clipId_(clipId), parameter_(parameter), time_(time),
-      interpolation_(interpolation) {
-    setCoalescingKey(motionKey("keyframeInterpolation", clipId, parameter));
-}
-
-EditResult SetKeyframeInterpolation::perform(const Project &, Sequence &sequence, IdGenerator &) {
-    Clip *clip = nullptr;
-    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
-        return r;
-    }
-    if (EditResult r = checkInterpolation(interpolation_); !r) {
-        return r;
-    }
-    KeyframeTrack &track = clip->video.keyframes.track(parameter_);
-    const auto index = isNumeric(time_) ? keyframeIndexAt(track, time_) : std::nullopt;
-    if (!index) {
-        return keyframeNotFound(clipId_, parameter_, time_);
-    }
-    track[*index].interpolation = interpolation_;
-    track[*index].curve = TimingCurve{};
-    return EditResult::success();
-}
-
-SetMotionTracks::SetMotionTracks(SequenceId sequenceId, ClipId clipId, std::vector<MotionTrackChange> changes,
-                                 std::string name)
-    : SequenceCommand(sequenceId), clipId_(clipId), changes_(std::move(changes)), name_(std::move(name)) {
-    setCoalescingKey("motionTracks:" + idString(clipId.value()));
-}
-
-EditResult SetMotionTracks::perform(const Project &, Sequence &sequence, IdGenerator &) {
-    if (changes_.empty()) {
-        return EditResult::failure(EditError::InvalidArgument, "no parameters to change");
-    }
-    Clip *clip = nullptr;
-    if (EditResult r = findMotionClip(sequence, clipId_, clip); !r) {
-        return r;
-    }
-    std::unordered_set<int> seen;
-    for (const MotionTrackChange &change : changes_) {
-        if (!seen.insert(static_cast<int>(change.parameter)).second) {
-            return EditResult::failure(EditError::InvalidArgument,
-                                       std::string(displayNameOf(change.parameter)) + " is listed twice");
-        }
-        if (EditResult r = checkMotionValue(change.parameter, change.staticValue); !r) {
-            return r;
-        }
-        if (auto problem = keyframeTrackProblem(change.keyframes, change.parameter)) {
-            return EditResult::failure(EditError::InvalidArgument, *problem);
-        }
-        const KeyframeTrack &current = clip->video.keyframes.track(change.parameter);
-        for (const Keyframe &keyframe : change.keyframes) {
-            if (EditResult r = requireInsideClip(*clip, keyframe.time); !r) {
-                // A keyframe a trim hid may stay where it is (a partial Ken Burns move keeps it).
-                if (std::find(current.begin(), current.end(), keyframe) == current.end()) {
-                    return r;
-                }
-            }
-        }
-        clip->video.keyframes.track(change.parameter) = change.keyframes;
-        clip->video.setStaticValue(change.parameter, change.staticValue);
-    }
-    return EditResult::success();
-}
-
-// ----- Ken Burns moves and matching a neighbour's framing -----
-
-bool motionValuesMatch(MotionParameter, double a, double b) {
+bool spanValuesMatch(SpanParameter, double a, double b) {
     if (!std::isfinite(a) || !std::isfinite(b)) {
         return a == b;
     }
@@ -1399,517 +1190,624 @@ bool motionValuesMatch(MotionParameter, double a, double b) {
     return std::abs(a - b) <= 1e-6 * magnitude;
 }
 
-namespace {
-
-// Refusal unless `frame` is the start of one of the clip's sequence frames.
-EditResult requireClipFrame(const Clip &clip, CMTime frameDuration, CMTime frame, const char *what) {
-    if (!isPositive(frameDuration) || !isNumeric(frame) || !isOnFrameGrid(frame, frameDuration)) {
-        return EditResult::failure(EditError::InvalidTime, std::string(what) + " " + describe(frame) +
-                                                               " is not the start of a sequence frame");
-    }
-    if (frame < clip.timelineStart || frame >= clip.timelineEnd()) {
-        return EditResult::failure(EditError::InvalidTime, std::string(what) + " " + describe(frame) +
-                                                               " is not a frame of clip " +
-                                                               idString(clip.id.value()));
-    }
-    return EditResult::success();
-}
-
-// Whether `time` (a keyframe's source time) plays before the clip's start on the timeline.
-bool isBeforeClip(const Clip &clip, CMTime time) {
-    const auto at = clip.exactTimelineTimeAt(time);
-    const auto start = ExactTime::from(clip.timelineStart);
-    return at && start && at->compare(*start) < 0;
-}
-
-void noteDrift(MotionMoveDrift &drift, MotionParameter parameter, CMTime time, bool earliest) {
-    drift.parameters.push_back(parameter);
-    if (!isNumeric(drift.keyframeTime) || (earliest ? time < drift.keyframeTime : time > drift.keyframeTime)) {
-        drift.keyframeTime = time;
-    }
-}
-
-} // namespace
-
-EditResult planMotionMove(const Clip &clip, CMTime frameDuration, const MotionMoveRequest &request,
-                          MotionMovePlan &plan) {
-    plan = MotionMovePlan{};
-    if (EditResult r = requireClipFrame(clip, frameDuration, request.firstFrame, "the move's first frame"); !r) {
-        return r;
-    }
-    if (EditResult r = requireClipFrame(clip, frameDuration, request.lastFrame, "the move's last frame"); !r) {
-        return r;
-    }
-    if (!(request.firstFrame < request.lastFrame)) {
-        return EditResult::failure(EditError::InvalidTime, "a Ken Burns move needs at least two frames");
-    }
-    if (EditResult r = checkInterpolation(request.interpolation); !r) {
-        return r;
-    }
-    const std::optional<CMTime> startTime = keyframeTimeForFrame(clip, request.firstFrame);
-    const std::optional<CMTime> endTime = keyframeTimeForFrame(clip, request.lastFrame);
-    if (!startTime || !endTime) {
-        return notRepresentable(clip.id, clip.timelineStart);
-    }
-    const std::optional<CMTime> clipLastFrame = checkedSubtract(clip.timelineEnd(), frameDuration);
-    const bool fromClipStart = request.firstFrame == clip.timelineStart;
-    const bool toClipEnd = clipLastFrame && request.lastFrame == *clipLastFrame;
-
-    const std::pair<MotionParameter, std::pair<double, double>> values[] = {
-        {MotionParameter::X, {request.start.x, request.end.x}},
-        {MotionParameter::Y, {request.start.y, request.end.y}},
-        {MotionParameter::Scale, {request.start.scale, request.end.scale}},
-    };
-    for (const auto &[parameter, pair] : values) {
-        if (EditResult r = checkMotionValue(parameter, pair.first); !r) {
-            return r;
-        }
-        if (EditResult r = checkMotionValue(parameter, pair.second); !r) {
-            return r;
-        }
-        MotionTrackChange change;
-        change.parameter = parameter;
-        change.staticValue = pair.first;
-        std::optional<Keyframe> keptBefore; // the kept keyframe nearest before the move
-        std::optional<Keyframe> keptAfter;  // the kept keyframe nearest after it
-        for (const Keyframe &keyframe : clip.video.keyframes.track(parameter)) {
-            const std::optional<CMTime> frame = frameShowingSourceTime(clip, keyframe.time, frameDuration);
-            bool before = false;
-            if (frame) {
-                if (*frame >= request.firstFrame && *frame <= request.lastFrame) {
-                    continue; // shown by the move's frames: replaced
-                }
-                before = *frame < request.firstFrame;
-            } else {
-                // Hidden by a trim: replaced when the move reaches that end of the clip.
-                before = isBeforeClip(clip, keyframe.time);
-                if (before ? fromClipStart : toClipEnd) {
-                    continue;
-                }
-            }
-            change.keyframes.push_back(keyframe);
-            if (before) {
-                keptBefore = keyframe; // the track is in time order: the last one is the nearest
-            } else if (!keptAfter) {
-                keptAfter = keyframe;
-            }
-        }
-        Keyframe from;
-        from.time = *startTime;
-        from.value = pair.first;
-        from.interpolation = request.interpolation;
-        Keyframe to;
-        to.time = *endTime;
-        to.value = pair.second;
-        to.interpolation = KeyframeInterpolation::Linear;
-        upsertKeyframe(change.keyframes, from);
-        upsertKeyframe(change.keyframes, to);
-        if (auto problem = keyframeTrackProblem(change.keyframes, parameter)) {
-            return EditResult::failure(EditError::InvariantViolation, "the Ken Burns move's " +
-                                                                          std::string(displayNameOf(parameter)) +
-                                                                          " keyframes are invalid: " + *problem);
-        }
-        if (keptBefore && !motionValuesMatch(parameter, keptBefore->value, pair.first)) {
-            noteDrift(plan.before, parameter, keptBefore->time, true);
-        }
-        if (keptAfter && !motionValuesMatch(parameter, keptAfter->value, pair.second)) {
-            noteDrift(plan.after, parameter, keptAfter->time, false);
-        }
-        plan.changes.push_back(std::move(change));
-    }
-    return EditResult::success();
-}
-
-EditResult planMotionAtFrame(const Clip &clip, CMTime frameDuration, CMTime frame, const VideoParams &values,
-                             std::vector<MotionTrackChange> &changes) {
-    changes.clear();
-    if (EditResult r = requireClipFrame(clip, frameDuration, frame, "the frame"); !r) {
-        return r;
-    }
-    const std::optional<CMTime> time = keyframeTimeForFrame(clip, frame);
-    if (!time) {
-        return notRepresentable(clip.id, frame);
-    }
-    for (MotionParameter parameter : kMotionParameters) {
-        const double value = values.staticValue(parameter);
-        if (EditResult r = checkMotionValue(parameter, value); !r) {
-            return r;
-        }
-        MotionTrackChange change;
-        change.parameter = parameter;
-        if (!clip.video.isAnimated(parameter)) {
-            change.staticValue = value;
-            changes.push_back(std::move(change));
-            continue;
-        }
-        change.staticValue = clip.video.staticValue(parameter);
-        change.keyframes = trackWithValueOnFrame(clip, frameDuration, frame, *time, parameter, value);
-        changes.push_back(std::move(change));
-    }
-    return EditResult::success();
-}
-
-EditResult planMotionValueAtFrame(const Clip &clip, CMTime frameDuration, CMTime frame, MotionParameter parameter,
-                                  double value, MotionTrackChange &change) {
-    change = MotionTrackChange{};
-    change.parameter = parameter;
-    if (EditResult r = requireClipFrame(clip, frameDuration, frame, "the frame"); !r) {
-        return r;
-    }
-    if (EditResult r = checkMotionValue(parameter, value); !r) {
-        return r;
-    }
-    if (!clip.video.isAnimated(parameter)) {
-        return EditResult::failure(EditError::InvalidArgument,
-                                   std::string(displayNameOf(parameter)) + " of clip " + idString(clip.id.value()) +
-                                       " is not animated");
-    }
-    const std::optional<CMTime> time = keyframeTimeForFrame(clip, frame);
-    if (!time) {
-        return notRepresentable(clip.id, frame);
-    }
-    change.staticValue = clip.video.staticValue(parameter);
-    change.keyframes = trackWithValueOnFrame(clip, frameDuration, frame, *time, parameter, value);
-    return EditResult::success();
-}
-
-EditResult planMotionKeyframeToggle(const Clip &clip, CMTime frameDuration, CMTime frame, MotionKeyframeToggle &plan) {
-    plan = MotionKeyframeToggle{};
-    if (EditResult r = requireClipFrame(clip, frameDuration, frame, "the frame"); !r) {
-        return r;
-    }
-    const std::optional<CMTime> time = keyframeTimeForFrame(clip, frame);
-    const std::optional<ExactTime> shown = motionTimeAt(clip, frame);
-    if (!time || !shown) {
-        return notRepresentable(clip.id, frame);
-    }
-    bool all = true;
-    for (MotionParameter parameter : kMotionParameters) {
-        if (!keyframeIndexForFrame(clip, parameter, frame, frameDuration)) {
-            all = false;
-            break;
-        }
-    }
-    plan.removing = all;
-    for (MotionParameter parameter : kMotionParameters) {
-        const KeyframeTrack &track = clip.video.keyframes.track(parameter);
-        MotionTrackChange change;
-        change.parameter = parameter;
-        change.staticValue = clip.video.staticValue(parameter);
-        if (all) {
-            // Every keyframe this frame shows goes (a sped-up frame can show several).
-            for (const Keyframe &keyframe : track) {
-                const std::optional<CMTime> shownBy = frameShowingSourceTime(clip, keyframe.time, frameDuration);
-                if (!shownBy || *shownBy != frame) {
-                    change.keyframes.push_back(keyframe);
-                }
-            }
-            if (change.keyframes.empty()) {
-                change.staticValue = clampMotionValue(parameter, clip.video.valueAt(parameter, *shown));
-            }
-        } else {
-            if (keyframeIndexForFrame(clip, parameter, frame, frameDuration)) {
-                continue; // already has one on this frame
-            }
-            // Added without reshaping the segment it lands in (like AddKeyframe).
-            change.keyframes = track;
-            const std::size_t index = insertKeyframeKeepingValues(change.keyframes, change.staticValue, *time);
-            if (EditResult r = checkInsertedValue(parameter, change.keyframes[index]); !r) {
-                return r;
-            }
-        }
-        plan.changes.push_back(std::move(change));
-    }
-    return EditResult::success();
-}
-
-EditResult motionKeyframeGroupAt(const Clip &clip, CMTime frameDuration, CMTime frame, MotionKeyframeGroup &group) {
-    group = MotionKeyframeGroup{};
-    if (EditResult r = requireClipFrame(clip, frameDuration, frame, "the keyframe's frame"); !r) {
-        return r;
-    }
-    const std::optional<CMTime> lastFrame = checkedSubtract(clip.timelineEnd(), frameDuration);
-    if (!lastFrame) {
-        return notRepresentable(clip.id, frame);
-    }
-    CMTime earliest = clip.timelineStart;
-    CMTime latest = *lastFrame;
-    for (MotionParameter parameter : kMotionParameters) {
-        const auto index = keyframeIndexForFrame(clip, parameter, frame, frameDuration);
-        if (!index) {
-            continue;
-        }
-        const KeyframeTrack &track = clip.video.keyframes.track(parameter);
-        if (*index + 1 < track.size()) {
-            const std::optional<CMTime> next = frameShowingSourceTime(clip, track[*index + 1].time, frameDuration);
-            if (next && *next == frame) {
-                group.crowdedParameter = parameter;
-                return EditResult::failure(EditError::InvalidArgument,
-                                           std::string(displayNameOf(parameter)) +
-                                               " has several keyframes on the frame at " + describe(frame) +
-                                               " (the clip plays faster than the sequence): moved to one frame they "
-                                               "would meet");
-            }
-            if (next) {
-                const std::optional<CMTime> limit = checkedSubtract(*next, frameDuration);
-                if (!limit) {
-                    return notRepresentable(clip.id, *next);
-                }
-                latest = minTime(latest, *limit);
-            }
-        }
-        if (*index > 0) {
-            if (const std::optional<CMTime> previous =
-                    frameShowingSourceTime(clip, track[*index - 1].time, frameDuration)) {
-                const std::optional<CMTime> limit = checkedAdd(*previous, frameDuration);
-                if (!limit) {
-                    return notRepresentable(clip.id, *previous);
-                }
-                earliest = maxTime(earliest, *limit);
-            }
-        }
-        group.keyframes.emplace_back(parameter, *index);
-    }
-    if (group.keyframes.empty()) {
-        return EditResult::failure(EditError::KeyframeNotFound, "clip " + idString(clip.id.value()) +
-                                                                    " has no keyframe on the frame at " +
-                                                                    describe(frame));
-    }
-    group.earliestFrame = earliest;
-    group.latestFrame = latest;
-    return EditResult::success();
-}
-
-EditResult planMotionKeyframeGroupMove(const Clip &clip, CMTime frameDuration, CMTime fromFrame, CMTime toFrame,
-                                       std::vector<MotionTrackChange> &changes) {
-    changes.clear();
-    MotionKeyframeGroup group;
-    if (EditResult r = motionKeyframeGroupAt(clip, frameDuration, fromFrame, group); !r) {
-        return r;
-    }
-    if (!isNumeric(toFrame) || !isOnFrameGrid(toFrame, frameDuration) || toFrame < group.earliestFrame ||
-        toFrame > group.latestFrame) {
-        return EditResult::failure(EditError::InvalidTime, "the keyframes on the frame at " + describe(fromFrame) +
-                                                               " can move to the frames from " +
-                                                               describe(group.earliestFrame) + " to " +
-                                                               describe(group.latestFrame) + ", not " +
-                                                               describe(toFrame));
-    }
-    if (toFrame == fromFrame) {
-        return EditResult::success();
-    }
-    const std::optional<CMTime> destination = keyframeTimeForFrame(clip, toFrame);
-    if (!destination) {
-        return notRepresentable(clip.id, toFrame);
-    }
-    for (const auto &[parameter, index] : group.keyframes) {
-        MotionTrackChange change;
-        change.parameter = parameter;
-        change.staticValue = clip.video.staticValue(parameter);
-        change.keyframes = clip.video.keyframes.track(parameter);
-        Keyframe moved = change.keyframes[index];
-        moved.time = *destination;
-        change.keyframes.erase(change.keyframes.begin() + static_cast<std::ptrdiff_t>(index));
-        upsertKeyframe(change.keyframes, moved);
-        if (auto problem = keyframeTrackProblem(change.keyframes, parameter)) {
-            return EditResult::failure(EditError::InvariantViolation,
-                                       "moving the " + std::string(displayNameOf(parameter)) +
-                                           " keyframe would break its track: " + *problem);
-        }
-        changes.push_back(std::move(change));
-    }
-    return EditResult::success();
-}
-
 const Clip *adjacentClip(const Sequence &sequence, ClipId clipId, ClipEdge edge) {
     const Track *track = sequence.trackOfClip(clipId);
     const Clip *clip = track != nullptr ? track->find(clipId) : nullptr;
-    if (clip == nullptr) {
-        return nullptr;
+    return clip != nullptr ? touchingClip(*track, *clip, edge) : nullptr;
+}
+
+AddSpan::AddSpan(SequenceId sequenceId, ClipId clipId, SpanKind kind, int lane, CMTime timelineStart,
+                 CMTime timelineEnd)
+    : SequenceCommand(sequenceId), clipId_(clipId), kind_(kind), lane_(lane), start_(timelineStart),
+      end_(timelineEnd) {}
+
+std::string AddSpan::name() const {
+    return std::string("Add ") + displayNameOf(kind_) + " Span";
+}
+
+EditResult AddSpan::perform(const Project &, Sequence &sequence, IdGenerator &ids) {
+    Track *track = nullptr;
+    Clip *clip = nullptr;
+    if (EditResult r = findEditableClip(sequence, clipId_, track, clip); !r) {
+        return r;
     }
-    for (const Clip &other : track->clips) {
-        if (other.id == clipId) {
-            continue;
-        }
-        if (edge == ClipEdge::Head ? other.timelineEnd() == clip->timelineStart
-                                   : other.timelineStart == clip->timelineEnd()) {
-            return &other;
+    if (EditResult r = checkSpanKind(kind_, track->kind); !r) {
+        return r;
+    }
+    if (EditResult r = checkLane(lane_); !r) {
+        return r;
+    }
+    CMTime start = kCMTimeZero;
+    CMTime end = kCMTimeZero;
+    TimeRange frames;
+    if (EditResult r = spanSourceRange(sequence, *clip, start_, end_, start, end, frames); !r) {
+        return r;
+    }
+    if (EditResult r = checkLaneFree(sequence, *clip, lane_, start, end, frames, SpanId{}); !r) {
+        return r;
+    }
+    const auto length = checkedSubtract(end, start);
+    if (!length || !isExactModelTime(*length)) {
+        return notRepresentable(clip->id, frames.end);
+    }
+    EffectSpan span;
+    span.id = ids.make<SpanId>();
+    span.lane = lane_;
+    span.kind = kind_;
+    span.start = start;
+    span.end = end;
+    for (const SpanParameter parameter : parametersOf(kind_)) {
+        const double neutral = neutralValue(parameter);
+        span.tracks.track(parameter) = {keyframeAt(kCMTimeZero, neutral, KeyframeInterpolation::Linear),
+                                        keyframeAt(*length, neutral, KeyframeInterpolation::Linear)};
+    }
+    created_ = span.id;
+    clip->spans.push_back(std::move(span));
+    clip->sortSpans();
+    return EditResult::success();
+}
+
+SetSpanRange::SetSpanRange(SequenceId sequenceId, SpanId spanId, CMTime timelineStart, CMTime timelineEnd)
+    : SequenceCommand(sequenceId), spanId_(spanId), start_(timelineStart), end_(timelineEnd) {
+    setCoalescingKey("spanRange:" + idString(spanId.value()));
+}
+
+EditResult SetSpanRange::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Track *track = nullptr;
+    Clip *clip = nullptr;
+    EffectSpan *span = nullptr;
+    if (EditResult r = findEffectSpan(sequence, spanId_, track, clip, span); !r) {
+        return r;
+    }
+    CMTime start = kCMTimeZero;
+    CMTime end = kCMTimeZero;
+    TimeRange frames;
+    if (EditResult r = spanSourceRange(sequence, *clip, start_, end_, start, end, frames); !r) {
+        return r;
+    }
+    if (identical(start, span->start) && identical(end, span->end)) {
+        return EditResult::success();
+    }
+    if (EditResult r = checkLaneFree(sequence, *clip, span->lane, start, end, frames, span->id); !r) {
+        return r;
+    }
+    const auto oldLength = checkedSubtract(span->end, span->start);
+    const auto newLength = checkedSubtract(end, start);
+    if (!oldLength || !newLength || !isExactModelTime(*newLength)) {
+        return notRepresentable(clip->id, frames.start);
+    }
+    EffectSpan moved = *span;
+    moved.start = start;
+    moved.end = end;
+    if (!(*oldLength == *newLength)) {
+        // A trim: the keyframes stretch over the new length, keeping their places in the span.
+        for (const SpanParameter parameter : kSpanParameters) {
+            KeyframeTrack &keys = moved.tracks.track(parameter);
+            if (keys.empty()) {
+                continue;
+            }
+            auto rescaled = rescaleTrack(keys, *newLength, *oldLength);
+            if (!rescaled) {
+                return notRepresentable(clip->id, frames.start);
+            }
+            keys = std::move(*rescaled);
+            // The end keyframe lands exactly on the new length.
+            if (keys.back().time != *newLength && span->tracks.track(parameter).back().time == *oldLength) {
+                keys.back().time = *newLength;
+            }
         }
     }
-    return nullptr;
+    *span = std::move(moved);
+    clip->sortSpans();
+    return EditResult::success();
+}
+
+SetSpanValues::SetSpanValues(SequenceId sequenceId, SpanId spanId, std::vector<SpanValueChange> changes,
+                             std::string name, std::optional<KeyframeInterpolation> interpolation)
+    : SequenceCommand(sequenceId), spanId_(spanId), changes_(std::move(changes)), name_(std::move(name)),
+      interpolation_(interpolation) {
+    setCoalescingKey("spanValues:" + idString(spanId.value()));
+}
+
+EditResult SetSpanValues::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    if (changes_.empty()) {
+        return EditResult::failure(EditError::InvalidArgument, "no values to change");
+    }
+    Track *track = nullptr;
+    Clip *clip = nullptr;
+    EffectSpan *span = nullptr;
+    if (EditResult r = findEffectSpan(sequence, spanId_, track, clip, span); !r) {
+        return r;
+    }
+    const auto length = checkedSubtract(span->end, span->start);
+    if (!length) {
+        return notRepresentable(clip->id, clip->timelineStart);
+    }
+    if (interpolation_) {
+        if (EditResult r = checkInterpolation(*interpolation_); !r) {
+            return r;
+        }
+    }
+    const KeyframeInterpolation easing = spanInterpolation(*span);
+    EffectSpan updated = *span;
+    std::vector<SpanParameter> seen;
+    for (const SpanValueChange &change : changes_) {
+        if (!kindHasParameter(span->kind, change.parameter)) {
+            return EditResult::failure(EditError::InvalidArgument,
+                                       std::string("a ") + nameOf(span->kind) + " span has no " +
+                                           displayNameOf(change.parameter));
+        }
+        if (std::find(seen.begin(), seen.end(), change.parameter) != seen.end()) {
+            return EditResult::failure(EditError::InvalidArgument,
+                                       std::string(displayNameOf(change.parameter)) + " is listed twice");
+        }
+        seen.push_back(change.parameter);
+        KeyframeTrack &keys = updated.tracks.track(change.parameter);
+        const bool wasEmpty = keys.empty();
+        const double neutral = neutralValue(change.parameter);
+        for (const auto &[time, value] : {std::pair{kCMTimeZero, change.start}, std::pair{*length, change.end}}) {
+            if (!value) {
+                continue;
+            }
+            if (EditResult r = checkSpanValue(change.parameter, *value); !r) {
+                return r;
+            }
+            keys[insertKeyframeKeepingValues(keys, neutral, time)].value = *value;
+        }
+        if (wasEmpty && easing != KeyframeInterpolation::Bezier) {
+            // A new track moves like the span's other tracks.
+            for (Keyframe &keyframe : keys) {
+                keyframe.interpolation = easing;
+            }
+        }
+    }
+    if (interpolation_) {
+        for (const SpanParameter parameter : kSpanParameters) {
+            for (Keyframe &keyframe : updated.tracks.track(parameter)) {
+                keyframe.interpolation = *interpolation_;
+                keyframe.curve = TimingCurve{};
+            }
+        }
+    }
+    if (auto problem = spanTracksProblem(updated)) {
+        return EditResult::failure(EditError::InvalidArgument, *problem);
+    }
+    *span = std::move(updated);
+    return EditResult::success();
+}
+
+SetSpanInterpolation::SetSpanInterpolation(SequenceId sequenceId, SpanId spanId, KeyframeInterpolation interpolation)
+    : SequenceCommand(sequenceId), spanId_(spanId), interpolation_(interpolation) {
+    setCoalescingKey("spanInterpolation:" + idString(spanId.value()));
+}
+
+EditResult SetSpanInterpolation::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Track *track = nullptr;
+    Clip *clip = nullptr;
+    EffectSpan *span = nullptr;
+    if (EditResult r = findEffectSpan(sequence, spanId_, track, clip, span); !r) {
+        return r;
+    }
+    if (EditResult r = checkInterpolation(interpolation_); !r) {
+        return r;
+    }
+    for (const SpanParameter parameter : kSpanParameters) {
+        for (Keyframe &keyframe : span->tracks.track(parameter)) {
+            keyframe.interpolation = interpolation_;
+            keyframe.curve = TimingCurve{};
+        }
+    }
+    return EditResult::success();
+}
+
+MoveSpanLane::MoveSpanLane(SequenceId sequenceId, SpanId spanId, int lane)
+    : SequenceCommand(sequenceId), spanId_(spanId), lane_(lane) {
+    setCoalescingKey("spanLane:" + idString(spanId.value()));
+}
+
+EditResult MoveSpanLane::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    Track *track = nullptr;
+    Clip *clip = nullptr;
+    EffectSpan *span = nullptr;
+    if (EditResult r = findEffectSpan(sequence, spanId_, track, clip, span); !r) {
+        return r;
+    }
+    if (EditResult r = checkLane(lane_); !r) {
+        return r;
+    }
+    if (span->lane == lane_) {
+        return EditResult::success();
+    }
+    const TimeRange frames = spanTimelineRange(*clip, *span, *track).value_or(clip->timelineRange());
+    if (EditResult r = checkLaneFree(sequence, *clip, lane_, span->start, span->end, frames, span->id); !r) {
+        return r;
+    }
+    span->lane = lane_;
+    clip->sortSpans();
+    return EditResult::success();
+}
+
+RemoveSpans::RemoveSpans(SequenceId sequenceId, std::vector<SpanId> spanIds)
+    : SequenceCommand(sequenceId), spanIds_(std::move(spanIds)) {}
+
+std::string RemoveSpans::name() const {
+    if (allTransitions_) {
+        return spanIds_.size() == 1 ? "Remove Transition" : "Remove Transitions";
+    }
+    return spanIds_.size() == 1 ? "Remove Span" : "Remove Spans";
+}
+
+EditResult RemoveSpans::perform(const Project &, Sequence &sequence, IdGenerator &) {
+    if (spanIds_.empty()) {
+        return EditResult::failure(EditError::InvalidArgument, "no spans to remove");
+    }
+    allTransitions_ = true;
+    for (const SpanId id : spanIds_) {
+        Clip *clip = nullptr;
+        Track *track = nullptr;
+        const EffectSpan *span = sequence.findSpan(id, &clip, &track);
+        if (span == nullptr) {
+            return spanNotFound(id);
+        }
+        if (EditResult r = requireEditableTrack(track, track->id); !r) {
+            return r;
+        }
+        allTransitions_ = allTransitions_ && span->isTransition();
+        std::erase_if(clip->spans, [id](const EffectSpan &s) { return s.id == id; });
+        markRemovedOnPurpose(id);
+    }
+    return EditResult::success();
+}
+
+// ----- Ken Burns and matching a neighbour -----
+
+EditResult planKenBurns(const Clip &clip, const EffectSpan &span, CMTime frameDuration, MotionFraming start,
+                        MotionFraming end, std::vector<SpanValueChange> &changes) {
+    changes.clear();
+    if (span.kind != SpanKind::Motion) {
+        return EditResult::failure(EditError::InvalidArgument, "the Ken Burns move needs a Motion span");
+    }
+    // The framings are read back the same way (spanEdgeMotion).
+    const auto startTime = spanEdgeFrameTime(clip, span, frameDuration, false);
+    const auto endTime = spanEdgeFrameTime(clip, span, frameDuration, true);
+    if (!startTime || !endTime) {
+        return notRepresentable(clip.id, clip.timelineStart);
+    }
+    const VideoParams before = composeMotion(clip, *startTime, span.id);
+    const VideoParams after = composeMotion(clip, *endTime, span.id);
+    if (!(before.scale > 0.0) || !(after.scale > 0.0)) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   "the clip's scale is 0 there without this span, so no framing can be shown");
+    }
+    const std::pair<SpanParameter, std::pair<double, double>> values[] = {
+        {SpanParameter::X, {start.x - before.x, end.x - after.x}},
+        {SpanParameter::Y, {start.y - before.y, end.y - after.y}},
+        {SpanParameter::Scale, {start.scale / before.scale, end.scale / after.scale}},
+    };
+    for (const auto &[parameter, pair] : values) {
+        if (EditResult r = checkSpanValue(parameter, pair.first); !r) {
+            return r;
+        }
+        if (EditResult r = checkSpanValue(parameter, pair.second); !r) {
+            return r;
+        }
+        changes.push_back(SpanValueChange{parameter, pair.first, pair.second});
+    }
+    return EditResult::success();
+}
+
+EditResult planMatchSpanEdge(const Sequence &sequence, SpanId spanId, ClipEdge edge,
+                             std::vector<SpanValueChange> &changes) {
+    changes.clear();
+    const Clip *clip = nullptr;
+    const Track *track = nullptr;
+    const EffectSpan *span = sequence.findSpan(spanId, &clip, &track);
+    if (span == nullptr) {
+        return spanNotFound(spanId);
+    }
+    if (span->isTransition()) {
+        return EditResult::failure(EditError::InvalidArgument, "a transition has no values to match");
+    }
+    const Clip *neighbour = touchingClip(*track, *clip, edge);
+    if (neighbour == nullptr) {
+        return EditResult::failure(EditError::NotAdjacent, std::string("no clip touches the ") +
+                                                               (edge == ClipEdge::Head ? "start" : "end") + " of clip " +
+                                                               idString(clip->id.value()));
+    }
+    const CMTime fd = sequence.frameDuration;
+    // This clip's frame at that edge, and the neighbour's frame that meets it.
+    const CMTime ownFrame = edge == ClipEdge::Head ? clip->timelineStart : clip->timelineEnd() - fd;
+    const CMTime otherFrame = edge == ClipEdge::Head ? neighbour->timelineEnd() - fd : neighbour->timelineStart;
+    const auto time = spanEvaluationTime(*clip, ownFrame);
+    if (!time) {
+        return notRepresentable(clip->id, ownFrame);
+    }
+    if (!spanActiveAt(*clip, *span, *time)) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   spanName(spanId) + " does not reach the " +
+                                       (edge == ClipEdge::Head ? "first" : "last") + " frame of clip " +
+                                       idString(clip->id.value()) + ", so its value cannot match the neighbour there");
+    }
+    const bool atEnd = edge == ClipEdge::Tail;
+    auto propose = [&](SpanParameter parameter, double value) -> EditResult {
+        if (EditResult r = checkSpanValue(parameter, value); !r) {
+            return r;
+        }
+        if (!spanValuesMatch(parameter, spanEdgeValue(*span, parameter, atEnd), value)) {
+            SpanValueChange change;
+            change.parameter = parameter;
+            (atEnd ? change.end : change.start) = value;
+            changes.push_back(change);
+        }
+        return EditResult::success();
+    };
+    if (span->kind == SpanKind::Gain) {
+        const double target = gainDbAt(*neighbour, otherFrame);
+        return propose(SpanParameter::Gain, target - composeGainDb(*clip, *time, span->id));
+    }
+    const VideoParams target = motionValuesAt(*neighbour, otherFrame);
+    const VideoParams others = composeMotion(*clip, *time, span->id);
+    if (span->kind == SpanKind::Opacity) {
+        if (!(others.opacity > 0.0)) {
+            return EditResult::failure(EditError::InvalidArgument,
+                                       "the clip's opacity is 0 there without this span, so no value can match");
+        }
+        return propose(SpanParameter::Opacity, target.opacity / others.opacity);
+    }
+    if (!(others.scale > 0.0)) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   "the clip's scale is 0 there without this span, so no value can match");
+    }
+    for (const auto &[parameter, value] :
+         {std::pair{SpanParameter::X, target.x - others.x}, std::pair{SpanParameter::Y, target.y - others.y},
+          std::pair{SpanParameter::Scale, target.scale / others.scale},
+          std::pair{SpanParameter::Rotation, target.rotationDegrees - others.rotationDegrees}}) {
+        if (EditResult r = propose(parameter, value); !r) {
+            return r;
+        }
+    }
+    return EditResult::success();
+}
+
+// ----- Audio fades -----
+
+CMTime clipFadeLength(const Clip &clip, ClipEdge edge) {
+    const EffectSpan *span = clip.transitionAt(edge);
+    if (span == nullptr) {
+        return kCMTimeZero;
+    }
+    if (edge == ClipEdge::Head) {
+        return span->end;
+    }
+    return span->end == kCMTimeZero ? -span->start : kCMTimeZero;
+}
+
+EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime length, IdGenerator &ids) {
+    const char *which = edge == ClipEdge::Head ? "fade in" : "fade out";
+    if (EditResult r = requireExact(length, which); !r) {
+        return r;
+    }
+    if (length < kCMTimeZero || clip.timelineDuration < length) {
+        return EditResult::failure(EditError::InvalidTime, std::string("a ") + which + " of " + describe(length) +
+                                                               " does not fit clip " + idString(clip.id.value()) +
+                                                               " (" + describe(clip.timelineDuration) + ")");
+    }
+    EffectSpan *span = clip.transitionAt(edge);
+    if (edge == ClipEdge::Tail && span != nullptr && kCMTimeZero < span->end) {
+        if (length == kCMTimeZero) {
+            return EditResult::success(); // a cross dissolve is not a fade
+        }
+        return EditResult::failure(EditError::InvalidArgument, "clip " + idString(clip.id.value()) +
+                                                                   " ends in a crossfade, which replaces a fade out "
+                                                                   "there");
+    }
+    if (length == kCMTimeZero) {
+        if (span != nullptr) {
+            const SpanId id = span->id;
+            std::erase_if(clip.spans, [id](const EffectSpan &s) { return s.id == id; });
+        }
+        return EditResult::success();
+    }
+    if (edge == ClipEdge::Head && span == nullptr && touchingClip(track, clip, ClipEdge::Head) != nullptr) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   "another clip touches the start of clip " + idString(clip.id.value()) +
+                                       ", so the cut belongs to that clip: use a crossfade there instead of a fade in");
+    }
+    const CMTime other = edge == ClipEdge::Head ? [&] {
+        const EffectSpan *tail = clip.transitionAt(ClipEdge::Tail);
+        return tail != nullptr ? -tail->start : kCMTimeZero;
+    }()
+                                                : clipFadeLength(clip, ClipEdge::Head);
+    const auto total = ExactTime::from(length) && ExactTime::from(other)
+                           ? ExactTime::from(length)->plus(*ExactTime::from(other))
+                           : std::nullopt;
+    if (!total || total->compare(clip.timelineDuration) > 0) {
+        return EditResult::failure(EditError::InvalidTime, "the fade in and fade out overlap: together they are "
+                                                           "longer than the clip (" +
+                                                               describe(clip.timelineDuration) + ")");
+    }
+    const auto start = checkedNegate(length);
+    if (!start) {
+        return notRepresentable(clip.id, clip.timelineStart);
+    }
+    if (span == nullptr) {
+        EffectSpan fade;
+        fade.id = ids.make<SpanId>();
+        fade.lane = kTransitionLane;
+        fade.kind = SpanKind::Transition;
+        fade.edge = edge;
+        clip.spans.push_back(fade);
+        span = &clip.spans.back();
+    }
+    if (edge == ClipEdge::Head) {
+        span->start = kCMTimeZero;
+        span->end = length;
+    } else {
+        span->start = *start;
+        span->end = kCMTimeZero;
+    }
+    clip.sortSpans();
+    return EditResult::success();
 }
 
 // ----- Transitions -----
 
-AddTransition::AddTransition(SequenceId sequenceId, ClipId fromClipId, ClipId toClipId, CMTime duration,
-                             TransitionKind kind)
-    : SequenceCommand(sequenceId), fromClipId_(fromClipId), toClipId_(toClipId), duration_(duration), kind_(kind) {}
-
-EditResult AddTransition::perform(const Project &project, Sequence &sequence, IdGenerator &ids) {
-    Track *track = nullptr;
-    Clip *from = nullptr;
-    if (EditResult r = findEditableClip(sequence, fromClipId_, track, from); !r) {
-        return r;
+std::optional<TransitionPlacement> findTransition(const Sequence &sequence, SpanId spanId) {
+    const Clip *owner = nullptr;
+    const Track *track = nullptr;
+    const EffectSpan *span = sequence.findSpan(spanId, &owner, &track);
+    if (span == nullptr || !span->isTransition()) {
+        return std::nullopt;
     }
-    const Clip *to = track->find(toClipId_);
-    if (!to) {
-        if (!sequence.findClip(toClipId_)) {
-            return EditResult::failure(EditError::ClipNotFound,
-                                       "clip " + idString(toClipId_.value()) + " does not exist");
-        }
-        return EditResult::failure(EditError::InvalidArgument, "transition clips must be on the same track");
-    }
-    CMTime duration;
-    if (EditResult r = snapDuration(sequence, duration_, duration); !r) {
-        return r;
-    }
-    if (from->timelineEnd() != to->timelineStart) {
-        return EditResult::failure(EditError::NotAdjacent, "clip " + idString(fromClipId_.value()) +
-                                                               " does not end where clip " +
-                                                               idString(toClipId_.value()) + " starts");
-    }
-    if (sequence.transitionFrom(fromClipId_) || sequence.transitionTo(toClipId_)) {
-        return EditResult::failure(EditError::AlreadyExists, "there is already a transition on this cut");
-    }
-    Transition transition;
-    transition.id = ids.make<TransitionId>();
-    transition.trackId = track->id;
-    transition.kind = kind_;
-    transition.fromClipId = fromClipId_;
-    transition.toClipId = toClipId_;
-    transition.duration = duration;
-    if (EditResult r = checkTransitionPlacement(sequence, project, transition, TransitionId{}); !r) {
-        return r;
-    }
-    sequence.transitions.push_back(transition);
-    created_ = transition.id;
-    return EditResult::success();
+    return placeTransition(*track, *owner, *span);
 }
 
-RemoveTransition::RemoveTransition(SequenceId sequenceId, TransitionId transitionId)
-    : SequenceCommand(sequenceId), transitionId_(transitionId) {}
-
-EditResult RemoveTransition::perform(const Project &, Sequence &sequence, IdGenerator &) {
-    const Transition *transition = sequence.findTransition(transitionId_);
-    if (!transition) {
-        return EditResult::failure(EditError::TransitionNotFound,
-                                   "transition " + idString(transitionId_.value()) + " does not exist");
-    }
-    if (EditResult r = requireEditableTrack(sequence.findTrack(transition->trackId), transition->trackId); !r) {
-        return r;
-    }
-    std::erase_if(sequence.transitions, [this](const Transition &t) { return t.id == transitionId_; });
-    return EditResult::success();
+std::pair<CMTime, CMTime> centredTransitionOffsets(std::int64_t frames, CMTime frameDuration) {
+    const CMTime before = timeForFrame(frames / 2, frameDuration);
+    const CMTime after = timeForFrame(frames - frames / 2, frameDuration);
+    return {-before, after};
 }
 
-SetTransitionDuration::SetTransitionDuration(SequenceId sequenceId, TransitionId transitionId, CMTime duration)
-    : SequenceCommand(sequenceId), transitionId_(transitionId), duration_(duration) {
-    setCoalescingKey("transitionDuration:" + idString(transitionId.value()));
-}
+namespace {
 
-EditResult SetTransitionDuration::perform(const Project &project, Sequence &sequence, IdGenerator &) {
-    const Transition *existing = sequence.findTransition(transitionId_);
-    if (!existing) {
-        return EditResult::failure(EditError::TransitionNotFound,
-                                   "transition " + idString(transitionId_.value()) + " does not exist");
+// Validates the transition spans of `clip` after an edit put `span` there.
+EditResult checkPlacedTransition(const Project &project, const Sequence &sequence, const Track &track,
+                                 const Clip &clip, const EffectSpan &span) {
+    if (auto issue = checkTransitionSpan(project, track, clip, span, sequence.frameDuration)) {
+        return transitionIssueToResult(*issue);
     }
-    if (EditResult r = requireEditableTrack(sequence.findTrack(existing->trackId), existing->trackId); !r) {
-        return r;
-    }
-    Transition updated = *existing;
-    if (EditResult r = snapDuration(sequence, duration_, updated.duration); !r) {
-        return r;
-    }
-    if (EditResult r = checkTransitionPlacement(sequence, project, updated, transitionId_); !r) {
-        return r;
-    }
-    for (Transition &transition : sequence.transitions) {
-        if (transition.id == transitionId_) {
-            transition = updated;
+    // The clip's transition at its other edge must still fit beside it (a tail span checks the fade
+    // in at the clip's start; a fade in is checked from the tail span's side).
+    if (const EffectSpan *other = clip.transitionAt(span.edge == ClipEdge::Head ? ClipEdge::Tail : ClipEdge::Head)) {
+        if (auto issue = checkTransitionSpan(project, track, clip, *other, sequence.frameDuration)) {
+            return transitionIssueToResult(*issue);
         }
     }
-    return EditResult::success();
-}
-
-RemoveTransitions::RemoveTransitions(SequenceId sequenceId, std::vector<TransitionId> transitionIds)
-    : SequenceCommand(sequenceId), transitionIds_(std::move(transitionIds)) {}
-
-EditResult RemoveTransitions::perform(const Project &, Sequence &sequence, IdGenerator &) {
-    if (transitionIds_.empty()) {
-        return EditResult::failure(EditError::InvalidArgument, "no transitions to remove");
-    }
-    for (const TransitionId id : transitionIds_) {
-        const Transition *transition = sequence.findTransition(id);
-        if (!transition) {
-            return EditResult::failure(EditError::TransitionNotFound,
-                                       "transition " + idString(id.value()) + " does not exist");
-        }
-        if (EditResult r = requireEditableTrack(sequence.findTrack(transition->trackId), transition->trackId); !r) {
-            return r;
-        }
-    }
-    std::erase_if(sequence.transitions, [this](const Transition &t) {
-        return std::find(transitionIds_.begin(), transitionIds_.end(), t.id) != transitionIds_.end();
-    });
-    return EditResult::success();
-}
-
-SetTransitionDurations::SetTransitionDurations(SequenceId sequenceId, std::vector<Change> changes)
-    : SequenceCommand(sequenceId), changes_(std::move(changes)) {
-    std::string key = "transitionDurations:";
-    for (const Change &change : changes_) {
-        key += idString(change.transitionId.value()) + ",";
-    }
-    setCoalescingKey(key);
-}
-
-EditResult SetTransitionDurations::perform(const Project &project, Sequence &sequence, IdGenerator &) {
-    if (changes_.empty()) {
-        return EditResult::failure(EditError::InvalidArgument, "no transitions to change");
-    }
-    for (const Change &change : changes_) {
-        const Transition *existing = sequence.findTransition(change.transitionId);
-        if (!existing) {
-            return EditResult::failure(EditError::TransitionNotFound,
-                                       "transition " + idString(change.transitionId.value()) + " does not exist");
-        }
-        if (EditResult r = requireEditableTrack(sequence.findTrack(existing->trackId), existing->trackId); !r) {
-            return r;
-        }
-        Transition updated = *existing;
-        if (EditResult r = snapDuration(sequence, change.duration, updated.duration); !r) {
-            return r;
-        }
-        if (EditResult r = checkTransitionPlacement(sequence, project, updated, change.transitionId); !r) {
-            return r;
-        }
-        for (Transition &transition : sequence.transitions) {
-            if (transition.id == change.transitionId) {
-                transition = updated;
+    // The clip before it may reach into this clip (a cross dissolve), which this span must not meet.
+    if (const Clip *previous = touchingClip(track, clip, ClipEdge::Head)) {
+        if (const EffectSpan *incoming = previous->transitionAt(ClipEdge::Tail)) {
+            if (auto issue = checkTransitionSpan(project, track, *previous, *incoming, sequence.frameDuration)) {
+                return transitionIssueToResult(*issue);
             }
         }
     }
     return EditResult::success();
 }
 
-std::optional<TransitionId> linkedTransition(const Sequence &sequence, TransitionId transitionId) {
-    const Transition *transition = sequence.findTransition(transitionId);
-    if (!transition) {
-        return std::nullopt;
+} // namespace
+
+AddTransitionSpans::AddTransitionSpans(SequenceId sequenceId, std::vector<TransitionSpanRequest> requests)
+    : SequenceCommand(sequenceId), requests_(std::move(requests)) {}
+
+EditResult AddTransitionSpans::perform(const Project &project, Sequence &sequence, IdGenerator &ids) {
+    if (requests_.empty()) {
+        return EditResult::failure(EditError::InvalidArgument, "no transitions to add");
     }
-    const Clip *from = sequence.findClip(transition->fromClipId);
-    const Clip *to = sequence.findClip(transition->toClipId);
-    if (!from || !to || !from->linkedClipId || !to->linkedClipId) {
-        return std::nullopt;
+    created_.clear();
+    for (const TransitionSpanRequest &request : requests_) {
+        Track *track = nullptr;
+        Clip *clip = nullptr;
+        if (EditResult r = findEditableClip(sequence, request.clipId, track, clip); !r) {
+            return r;
+        }
+        for (const CMTime t : {request.start, request.end}) {
+            if (EditResult r = requireExact(t, "transition offset"); !r) {
+                return r;
+            }
+        }
+        if (clip->transitionAt(request.edge) != nullptr) {
+            return EditResult::failure(EditError::AlreadyExists,
+                                       std::string("clip ") + idString(clip->id.value()) + " already has a transition at its " +
+                                           (request.edge == ClipEdge::Head ? "start" : "end"));
+        }
+        EffectSpan span;
+        span.id = ids.make<SpanId>();
+        span.lane = kTransitionLane;
+        span.kind = SpanKind::Transition;
+        span.edge = request.edge;
+        span.transition = request.kind;
+        span.start = request.start;
+        span.end = request.end;
+        clip->spans.push_back(span);
+        clip->sortSpans();
+        if (EditResult r = checkPlacedTransition(project, sequence, *track, *clip, *clip->findSpan(span.id)); !r) {
+            return r;
+        }
+        created_.push_back(span.id);
     }
-    const ClipId partnerFrom = *from->linkedClipId;
-    const ClipId partnerTo = *to->linkedClipId;
-    for (const Transition &candidate : sequence.transitions) {
-        if (candidate.id != transitionId && candidate.fromClipId == partnerFrom && candidate.toClipId == partnerTo) {
-            return candidate.id;
+    return EditResult::success();
+}
+
+SetTransitionRanges::SetTransitionRanges(SequenceId sequenceId, std::vector<TransitionRangeChange> changes,
+                                         bool durationChange)
+    : SequenceCommand(sequenceId), changes_(std::move(changes)), durationChange_(durationChange) {
+    std::string key = "transitionRanges:";
+    for (const TransitionRangeChange &change : changes_) {
+        key += idString(change.spanId.value()) + ",";
+    }
+    setCoalescingKey(key);
+}
+
+std::string SetTransitionRanges::name() const {
+    const bool several = changes_.size() != 1;
+    if (durationChange_) {
+        return several ? "Change Transition Durations" : "Change Transition Duration";
+    }
+    return several ? "Change Transitions" : "Change Transition";
+}
+
+EditResult SetTransitionRanges::perform(const Project &project, Sequence &sequence, IdGenerator &) {
+    if (changes_.empty()) {
+        return EditResult::failure(EditError::InvalidArgument, "no transitions to change");
+    }
+    for (const TransitionRangeChange &change : changes_) {
+        Clip *clip = nullptr;
+        Track *track = nullptr;
+        EffectSpan *span = sequence.findSpan(change.spanId, &clip, &track);
+        if (span == nullptr || !span->isTransition()) {
+            return EditResult::failure(EditError::TransitionNotFound,
+                                       "transition " + idString(change.spanId.value()) + " does not exist");
+        }
+        if (EditResult r = requireEditableTrack(track, track->id); !r) {
+            return r;
+        }
+        for (const CMTime t : {change.start, change.end}) {
+            if (EditResult r = requireExact(t, "transition offset"); !r) {
+                return r;
+            }
+        }
+        span->start = change.start;
+        span->end = change.end;
+        if (EditResult r = checkPlacedTransition(project, sequence, *track, *clip, *span); !r) {
+            return r;
         }
     }
-    return std::nullopt;
+    return EditResult::success();
+}
+
+std::optional<SpanId> linkedTransition(const Sequence &sequence, SpanId spanId) {
+    const auto transition = findTransition(sequence, spanId);
+    if (!transition || !transition->owner->linkedClipId) {
+        return std::nullopt;
+    }
+    const Clip *partnerOwner = sequence.findClip(*transition->owner->linkedClipId);
+    const Track *partnerTrack = partnerOwner != nullptr ? sequence.trackOfClip(partnerOwner->id) : nullptr;
+    const EffectSpan *candidate = partnerOwner != nullptr ? partnerOwner->transitionAt(transition->span->edge) : nullptr;
+    if (candidate == nullptr) {
+        return std::nullopt;
+    }
+    const auto other = placeTransition(*partnerTrack, *partnerOwner, *candidate);
+    if (!other || other->role != transition->role) {
+        return std::nullopt;
+    }
+    if (transition->role == TransitionRole::CrossDissolve) {
+        // The partners of the two clips meet at this cut.
+        if (transition->partner == nullptr || other->partner == nullptr || !transition->partner->linkedClipId ||
+            *transition->partner->linkedClipId != other->partner->id) {
+            return std::nullopt;
+        }
+    }
+    return candidate->id;
 }
 
 bool isThroughEdit(const Sequence &sequence, ClipId fromClipId, ClipId toClipId) {
@@ -1917,13 +1815,12 @@ bool isThroughEdit(const Sequence &sequence, ClipId fromClipId, ClipId toClipId)
     const Clip *to = sequence.findClip(toClipId);
     if (!from || !to || from->assetId != to->assetId || from->trackId != to->trackId ||
         CMTimeCompare(from->timelineEnd(), to->timelineStart) != 0 || from->isStill != to->isStill ||
-        !(from->speedRatio() == to->speedRatio()) || !(from->video == to->video) || !(from->audio.gainDb == to->audio.gainDb)) {
+        !(from->speedRatio() == to->speedRatio()) || !(from->video == to->video) ||
+        !(from->audio.gainDb == to->audio.gainDb) || from->hasEffectSpans() || to->hasEffectSpans()) {
         return false;
     }
     if (from->isStill) {
-        // A still shows the same picture on both sides, unless it is animated: a still's keyframes
-        // are measured from its own start, so identical keyframes restart the move at the cut.
-        return !from->video.isAnimated();
+        return true;
     }
     const auto out = from->exactSourceOut();
     const auto in = ExactTime::from(to->sourceIn);
@@ -1937,7 +1834,7 @@ namespace {
 std::string quotedMediaName(const Project &project, const Clip &clip) {
     const MediaAsset *asset = project.findAsset(clip.assetId);
     const std::string name = asset && !asset->name.empty() ? asset->name : "clip " + idString(clip.id.value());
-    return "\u201C" + name + "\u201D";
+    return "“" + name + "”";
 }
 
 TransitionLimit noTransition(EditError error, std::string reason) {
@@ -1947,91 +1844,163 @@ TransitionLimit noTransition(EditError error, std::string reason) {
     return limit;
 }
 
+// Whole frames of `length` (a timeline time), rounded down; unlimited for nullopt.
+std::int64_t wholeFrames(const std::optional<ExactTime> &length, CMTime frameDuration) {
+    if (!length) {
+        return std::numeric_limits<std::int64_t>::max() / 4;
+    }
+    if (length->numerator() <= 0) {
+        return 0;
+    }
+    return length->frameIndex(frameDuration, SnapMode::Floor).value_or(0);
+}
+
 } // namespace
 
+std::optional<TransitionSideLimits> transitionSideLimits(const Project &project, SequenceId sequenceId, ClipId ownerId,
+                                                         SpanId existing, EditResult &why) {
+    const Sequence *sequence = project.findSequence(sequenceId);
+    if (!sequence || !isPositive(sequence->frameDuration)) {
+        why = EditResult::failure(EditError::SequenceNotFound, "The sequence no longer exists.");
+        return std::nullopt;
+    }
+    const Track *track = sequence->trackOfClip(ownerId);
+    const Clip *owner = track ? track->find(ownerId) : nullptr;
+    if (!owner) {
+        why = EditResult::failure(EditError::ClipNotFound, "The clips no longer exist.");
+        return std::nullopt;
+    }
+    const Clip *next = touchingClip(*track, *owner, ClipEdge::Tail);
+    if (!next) {
+        why = EditResult::failure(EditError::NotAdjacent, "The clips do not meet at a cut on one track.");
+        return std::nullopt;
+    }
+    if (track->locked) {
+        why = EditResult::failure(EditError::TrackLocked, "Track “" + track->name + "” is locked.");
+        return std::nullopt;
+    }
+    const EffectSpan *tail = owner->transitionAt(ClipEdge::Tail);
+    if (tail && tail->id != existing) {
+        why = EditResult::failure(EditError::AlreadyExists, "This cut already has a transition.");
+        return std::nullopt;
+    }
+    if (existing && !tail) {
+        why = EditResult::failure(EditError::TransitionNotFound, "The transition no longer exists.");
+        return std::nullopt;
+    }
+    const CMTime fd = sequence->frameDuration;
+    TransitionSideLimits limits;
+
+    // Before the cut: the owner's frames not taken by its fade in or by a dissolve into it, and the
+    // next clip's media before its in point.
+    CMTime taken = kCMTimeZero;
+    EditError roomError = EditError::InvalidArgument;
+    std::string roomReason = "A transition cannot be longer than the clips it joins.";
+    if (const EffectSpan *head = owner->transitionAt(ClipEdge::Head)) {
+        taken = head->end;
+        roomError = EditError::Overlap;
+        roomReason = "It would overlap the fade at the clip's start.";
+    } else if (const Clip *previous = touchingClip(*track, *owner, ClipEdge::Head)) {
+        if (const EffectSpan *incoming = previous->transitionAt(ClipEdge::Tail); incoming && kCMTimeZero < incoming->end) {
+            taken = incoming->end;
+            roomError = EditError::Overlap;
+            roomReason = "It would overlap the neighbouring transition.";
+        }
+    }
+    const auto ownerLength = ExactTime::from(owner->timelineDuration);
+    const auto takenExact = ExactTime::from(taken);
+    const std::int64_t roomBefore =
+        wholeFrames(ownerLength && takenExact ? ownerLength->minus(*takenExact) : std::nullopt, fd);
+    std::int64_t mediaBefore = wholeFrames(std::nullopt, fd);
+    if (!next->isStill) {
+        const auto in = ExactTime::from(next->sourceIn);
+        mediaBefore = wholeFrames(in ? in->dividedBy(next->speedRatio()) : std::nullopt, fd);
+    }
+    limits.maxBeforeFrames = std::min(roomBefore, mediaBefore);
+    if (roomBefore <= mediaBefore) {
+        limits.beforeError = roomError;
+        limits.beforeReason = roomReason;
+    } else {
+        limits.beforeError = EditError::InsufficientHandles;
+        limits.beforeReason = quotedMediaName(project, *next) + " has no more media before its in point.";
+        limits.beforeLimitingClip = next->id;
+    }
+
+    // After the cut: the next clip's frames not taken by its own tail transition, and the owner's
+    // media after its out point.
+    CMTime nextTaken = kCMTimeZero;
+    EditError nextError = EditError::InvalidArgument;
+    std::string nextReason = "A transition cannot be longer than the clips it joins.";
+    if (const EffectSpan *nextTail = next->transitionAt(ClipEdge::Tail)) {
+        nextTaken = -nextTail->start;
+        nextError = EditError::Overlap;
+        nextReason = "It would overlap the neighbouring transition.";
+    }
+    const auto nextLength = ExactTime::from(next->timelineDuration);
+    const auto nextTakenExact = ExactTime::from(nextTaken);
+    const std::int64_t roomAfter =
+        wholeFrames(nextLength && nextTakenExact ? nextLength->minus(*nextTakenExact) : std::nullopt, fd);
+    std::int64_t mediaAfter = wholeFrames(std::nullopt, fd);
+    if (!owner->isStill) {
+        const MediaAsset *asset = project.findAsset(owner->assetId);
+        const auto out = owner->exactSourceOut();
+        const auto end = asset ? ExactTime::from(mediaEndFor(*asset, track->kind)) : std::nullopt;
+        const auto rest = out && end ? end->minus(*out) : std::nullopt;
+        mediaAfter = wholeFrames(rest ? rest->dividedBy(owner->speedRatio()) : std::optional<ExactTime>(ExactTime{}), fd);
+    }
+    limits.maxAfterFrames = std::min(roomAfter, mediaAfter);
+    if (roomAfter <= mediaAfter) {
+        limits.afterError = nextError;
+        limits.afterReason = nextReason;
+    } else {
+        limits.afterError = EditError::InsufficientHandles;
+        limits.afterReason = quotedMediaName(project, *owner) + " has no more media after its out point.";
+        limits.afterLimitingClip = owner->id;
+    }
+    why = EditResult::success();
+    return limits;
+}
+
 TransitionLimit transitionLimit(const Project &project, SequenceId sequenceId, ClipId fromClipId, ClipId toClipId,
-                                TransitionId existing) {
+                                SpanId existing) {
     const Sequence *sequence = project.findSequence(sequenceId);
     if (!sequence || !isPositive(sequence->frameDuration)) {
         return noTransition(EditError::SequenceNotFound, "The sequence no longer exists.");
     }
     const Track *track = sequence->trackOfClip(fromClipId);
     const Clip *from = track ? track->find(fromClipId) : nullptr;
-    const Clip *to = track ? track->find(toClipId) : nullptr;
     if (!from || !sequence->findClip(toClipId)) {
         return noTransition(EditError::ClipNotFound, "The clips no longer exist.");
     }
-    if (!to || from->timelineEnd() != to->timelineStart || fromClipId == toClipId) {
+    const Clip *next = touchingClip(*track, *from, ClipEdge::Tail);
+    if (!next || next->id != toClipId || fromClipId == toClipId) {
         return noTransition(EditError::NotAdjacent, "The clips do not meet at a cut on one track.");
     }
-    if (track->locked) {
-        return noTransition(EditError::TrackLocked, "Track \u201C" + track->name + "\u201D is locked.");
+    EditResult why = EditResult::success();
+    const auto sides = transitionSideLimits(project, sequenceId, fromClipId, existing, why);
+    if (!sides) {
+        return noTransition(why.error, why.message);
     }
-    const Transition *onCut = sequence->transitionFrom(fromClipId);
-    if (!onCut) {
-        onCut = sequence->transitionTo(toClipId);
-    }
-    if (onCut && onCut->id != existing) {
-        return noTransition(EditError::AlreadyExists, "This cut already has a transition.");
-    }
-    if (existing && !onCut) {
-        return noTransition(EditError::TransitionNotFound, "The transition no longer exists.");
-    }
-
-    Transition probe;
-    probe.id = existing ? existing : TransitionId(std::numeric_limits<TransitionId::ValueType>::max());
-    probe.trackId = track->id;
-    probe.fromClipId = fromClipId;
-    probe.toClipId = toClipId;
-    auto check = [&](std::int64_t frames) {
-        probe.duration = timeForFrame(frames, sequence->frameDuration);
-        return checkTransitionPlacement(*sequence, project, probe, existing);
-    };
-    // A centred transition of n frames needs floor(n/2) frames of the outgoing clip and ceil(n/2)
-    // of the incoming one, so it can never exceed their combined length.
-    const std::int64_t upper = frameIndexAt(from->duration(), sequence->frameDuration, SnapMode::Floor) +
-                               frameIndexAt(to->duration(), sequence->frameDuration, SnapMode::Floor);
-    std::int64_t lo = 0;         // fits (0: none)
-    std::int64_t hi = upper + 1; // refused
-    while (hi - lo > 1) {
-        const std::int64_t mid = lo + (hi - lo) / 2;
-        if (check(mid)) {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
+    // A centred transition of n frames takes floor(n/2) before the cut and the rest after.
+    const std::int64_t before = sides->maxBeforeFrames;
+    const std::int64_t after = sides->maxAfterFrames;
+    std::int64_t frames = 2 * std::min(before, after);
+    if (after >= 1) {
+        frames = std::max(frames, 2 * std::min(before, after - 1) + 1);
     }
     TransitionLimit limit;
-    limit.maximumFrames = lo;
-    limit.maximum = lo > 0 ? timeForFrame(lo, sequence->frameDuration) : kCMTimeZero;
-    // Why one frame more is refused.
-    probe.duration = timeForFrame(lo + 1, sequence->frameDuration);
-    if (auto issue = checkTransition(*sequence, project, probe)) {
-        switch (issue->kind) {
-        case TransitionIssueKind::InsufficientHandles: {
-            limit.limitError = EditError::InsufficientHandles;
-            limit.limitingClip = issue->clip;
-            const bool outgoing = issue->clip == fromClipId;
-            limit.reason = quotedMediaName(project, outgoing ? *from : *to) +
-                           (outgoing ? " has no more media after its out point." : " has no more media before its in point.");
-            break;
-        }
-        case TransitionIssueKind::TooLong:
-            limit.limitError = EditError::InvalidArgument;
-            limit.reason = "A transition cannot be longer than the clips it joins.";
-            break;
-        case TransitionIssueKind::NotAdjacent:
-        case TransitionIssueKind::BadDuration:
-        case TransitionIssueKind::Structure:
-            limit.limitError = EditError::InvalidArgument;
-            limit.reason = "The cut cannot take a longer transition.";
-            break;
-        }
+    limit.maximumFrames = frames;
+    limit.maximum = frames > 0 ? timeForFrame(frames, sequence->frameDuration) : kCMTimeZero;
+    // Why one frame more is refused: the side it would overrun.
+    const std::int64_t longer = frames + 1;
+    if (longer / 2 > before) {
+        limit.limitError = sides->beforeError;
+        limit.reason = sides->beforeReason;
+        limit.limitingClip = sides->beforeLimitingClip;
     } else {
-        const EditResult refusal = check(lo + 1);
-        limit.limitError = refusal ? EditError::InvalidArgument : refusal.error;
-        limit.reason = refusal.error == EditError::Overlap ? "It would overlap the neighbouring transition."
-                                                           : "The cut cannot take a longer transition.";
+        limit.limitError = sides->afterError;
+        limit.reason = sides->afterReason;
+        limit.limitingClip = sides->afterLimitingClip;
     }
     return limit;
 }
@@ -2118,9 +2087,13 @@ EditResult RemoveTrack::perform(const Project &, Sequence &sequence, IdGenerator
     if (EditResult r = requireEditableTrack(track, trackId_); !r) {
         return r;
     }
+    for (const Clip &clip : track->clips) {
+        for (const EffectSpan &span : clip.spans) {
+            markRemovedOnPurpose(span.id);
+        }
+    }
     std::vector<Track> &list = sequence.tracks(track->kind);
     std::erase_if(list, [this](const Track &t) { return t.id == trackId_; });
-    std::erase_if(sequence.transitions, [this](const Transition &t) { return t.trackId == trackId_; });
     return EditResult::success();
 }
 
