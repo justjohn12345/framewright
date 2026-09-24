@@ -6,7 +6,7 @@ import XCTest
 
 /// Linked transitions through the store (open finding 2): Delete removes a dissolve with its
 /// linked crossfade as one undo step, Option-Delete and "Delete This Transition Only" remove one;
-/// duration changes (inspector, handle drag) change both unless "Also change the linked
+/// duration changes (inspector, a lane-0 edge drag) change both unless "Also change the linked
 /// transition" is off, which is remembered. Also the Transition inspector's cut and offsets
 /// (finding 1b), the through-edit note (1a) and the timeline's right-click menu.
 @MainActor
@@ -113,10 +113,10 @@ final class LinkedTransitionStoreTests: XCTestCase {
         store.resizesLinkedTransitions = true
         let gestures = TimelineGestureController(store: store)
         let model = store.timelineModel
-        let band = try XCTUnwrap(model.transition(id: dissolve))
+        let band = try XCTUnwrap(model.span(id: dissolve))
         let row = try XCTUnwrap(model.layout(forTrack: v1))
-        let tail = CGPoint(x: model.x(forTime: band.end) - 2, y: row.y + 5)
-        XCTAssertEqual(model.hitTest(tail), .transitionTail(dissolve))
+        let tail = CGPoint(x: model.x(forTime: band.end) - 2, y: try XCTUnwrap(row.laneY(0)) + 7)
+        XCTAssertEqual(model.hitTest(tail), .spanTail(dissolve))
         gestures.changed(location: tail, startLocation: tail, modifiers: [])
         let moved = CGPoint(x: tail.x + 3 * CGFloat(model.pixelsPerSecond) / 30, y: tail.y) // +3 frames each side
         gestures.changed(location: moved, startLocation: tail, modifiers: [])
@@ -169,9 +169,9 @@ final class LinkedTransitionStoreTests: XCTestCase {
         let (dissolve, crossfade) = try await linkedTransitions()
         let gestures = TimelineGestureController(store: store)
         let model = store.timelineModel
-        let band = try XCTUnwrap(model.transition(id: crossfade))
+        let band = try XCTUnwrap(model.span(id: crossfade))
         let row = try XCTUnwrap(model.layout(forTrack: a1))
-        let point = CGPoint(x: model.x(forTime: (band.start + band.end) / 2), y: row.y + 5)
+        let point = CGPoint(x: model.x(forTime: (band.start + band.end) / 2), y: try XCTUnwrap(row.laneY(0)) + 7)
         store.selectedTransitionID = nil
         store.selection = [try XCTUnwrap(store.clips.keys.first)]
         let items = gestures.contextMenuItems(at: point)
@@ -187,7 +187,7 @@ final class LinkedTransitionStoreTests: XCTestCase {
         let clipRow = try XCTUnwrap(model.layout(forTrack: v1))
         let clipItems = gestures.contextMenuItems(at: CGPoint(x: model.x(forTime: 0.3), y: clipRow.y + 40))
         XCTAssertEqual(clipItems.filter { !$0.isSeparator }.map(\.title),
-                       ["Delete", "Ripple Delete", "Unlink", "Speed/Duration…", "Add Motion Keyframe  ⌃K"])
+                       ["Delete", "Ripple Delete", "Unlink", "Speed/Duration…", "Add Motion Span at Playhead"])
         XCTAssertFalse(store.selection.isEmpty)
         XCTAssertTrue(gestures.contextMenuItems(at: CGPoint(x: model.x(forTime: 5), y: clipRow.y + 40)).isEmpty)
     }

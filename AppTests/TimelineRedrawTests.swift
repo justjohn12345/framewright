@@ -105,6 +105,71 @@ final class TimelineRedrawTests: XCTestCase {
         XCTAssertGreaterThan(TimelineDiagnostics.canvasDraws, afterDraws)
     }
 
+    /// With spans on lanes (a transition on lane 0, effect spans on two lanes, a Gain span on audio)
+    /// the playhead moving still builds no timeline model and redraws no clips, and a span edit
+    /// rebuilds the model once, however often the views read it.
+    func testWithLanesAPlayheadTickBuildsNoModelAndASpanEditOne() async throws {
+        try await makeTwentyClipSequence()
+        let store = fixture.store
+        let video = store.clips.values.filter { $0.trackKind == .video }.sorted { $0.timelineStart < $1.timelineStart }
+        let audio = try XCTUnwrap(store.clips.values.first { $0.trackKind == .audio })
+        let first = video[0]
+        XCTAssertTrue(store.engine.addTransition(at: .end, of: video[19].clipID, duration: CMTime(value: 10, timescale: 30),
+                                                 options: []).ok)
+        let motion = try XCTUnwrap(store.engine.addSpan(kind: .motion, lane: 1, clip: first.clipID,
+                                                        range: CMTimeRange(start: .zero, duration: CMTime(value: 20, timescale: 30))).span)
+        XCTAssertTrue(store.engine.addSpan(kind: .opacity, lane: 2, clip: first.clipID,
+                                           range: CMTimeRange(start: .zero, duration: CMTime(value: 10, timescale: 30))).ok)
+        XCTAssertTrue(store.engine.addSpan(kind: .gain, lane: 1, clip: audio.clipID,
+                                           range: CMTimeRange(start: .zero, duration: CMTime(value: 30, timescale: 30))).ok)
+        store.refreshModel()
+        XCTAssertEqual(store.timelineModel.layout(forTrack: first.trackID)?.lanes, [0, 1, 2, 3])
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 500),
+                              styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: TimelineView(store: store))
+        window.contentView = host
+        window.orderFront(nil)
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        var lastDraws = -1
+        for _ in 0 ..< 50 where lastDraws != TimelineDiagnostics.canvasDraws {
+            lastDraws = TimelineDiagnostics.canvasDraws
+            await Self.display(host)
+            await StoreFixture.wait(until: { false }, timeout: 0.1)
+        }
+        let controlDraws = TimelineDiagnostics.canvasDraws
+        store.snapIndicator = 0.5
+        await Self.display(host)
+        store.snapIndicator = nil
+        await Self.display(host)
+        XCTAssertGreaterThan(TimelineDiagnostics.canvasDraws, controlDraws, "the canvas draws in this host")
+
+        let builds = store.timelineBuildCount
+        let canvasDraws = TimelineDiagnostics.canvasDraws
+        for frame in 1 ... 60 {
+            store.playhead.setTime(CMTime(value: CMTimeValue(frame), timescale: 60))
+            await Self.display(host)
+        }
+        let rebuilt = store.timelineBuildCount - builds
+        let redrawn = TimelineDiagnostics.canvasDraws - canvasDraws
+        print("60 playhead moves with lanes: timeline model builds \(rebuilt), canvas draws \(redrawn)")
+        XCTAssertEqual(rebuilt, 0, "a playhead tick builds no model")
+        XCTAssertLessThanOrEqual(redrawn, 2, "and redraws no clips")
+
+        // A span edit: one build, whatever reads the model afterwards.
+        XCTAssertTrue(store.engine.setSpanRange(motion.spanID, range: CMTimeRange(start: CMTime(value: 2, timescale: 30),
+                                                                                    duration: CMTime(value: 20, timescale: 30))).ok)
+        await Self.display(host)
+        _ = store.timelineModel
+        _ = store.timelineContentHeight
+        await Self.display(host)
+        XCTAssertEqual(store.timelineBuildCount - builds, 1, "a span edit rebuilds the model once")
+        XCTAssertEqual(store.timelineModel.span(id: motion.spanID)?.start ?? -1, 2.0 / 30, accuracy: 1e-9)
+    }
+
     /// While the Ken Burns helper is open, its range moving with the playhead ("From playhead") and
     /// with typing (Custom) redraws the band overlay only: the timeline model is not rebuilt and the
     /// clips' canvas is not redrawn. The timeline is hosted alone (the helper's picture loads through

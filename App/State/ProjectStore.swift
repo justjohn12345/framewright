@@ -85,21 +85,48 @@ final class ProjectStore: ObservableObject {
     }
 
     // UI state.
+    /// The selected clips. Selecting a clip clears the span selection (`selectedSpanID`): the two
+    /// are exclusive.
     @Published var selection: Set<VEClipID> = [] {
         didSet {
+            if !selection.isEmpty, selectedSpanID != nil { selectedSpanID = nil }
             // The Ken Burns helper edits one selected clip: deselecting it, or adding another clip to
             // the selection (the inspector then hides the helper's controls), closes it.
             if let kenBurns, selection != [kenBurns.clipID] { self.kenBurns = nil }
         }
     }
+    /// The selected span (an effect span on lanes 1-3 or a transition on lane 0), exclusive with the
+    /// clip selection: selecting a span deselects the clips (the inspector then shows the span, and
+    /// Delete removes it); selecting a clip deselects the span.
+    @Published var selectedSpanID: VESpanID? {
+        didSet {
+            if selectedSpanID != nil, !selection.isEmpty { selection = [] }
+        }
+    }
     @Published var selectedAssetID: VEAssetID?
-    @Published var selectedTransitionID: VETransitionID?
+    /// The selected transition: the selected span when it is a transition (lane 0). Setting it
+    /// selects that span; setting nil deselects a selected transition (an effect span stays).
+    var selectedTransitionID: VETransitionID? {
+        get {
+            guard let id = selectedSpanID, engine.transitionInfo(id) != nil else { return nil }
+            return id
+        }
+        set {
+            if let newValue {
+                selectedSpanID = newValue
+            } else if selectedTransitionID != nil {
+                selectedSpanID = nil
+            }
+        }
+    }
     @Published private(set) var source = SourceMonitorState()
     @Published var targetVideoTrackID: VETrackID = 0
     @Published var targetAudioTrackID: VETrackID = 0
     @Published var focusArea: FocusArea = .timeline
     /// Empty tracks whose rows the user collapsed (a track with clips always shows full height).
     @Published private(set) var collapsedTrackIDs: Set<VETrackID> = []
+    /// The kind of track whose lane 0 is shown for a transition dragged over the timeline.
+    @Published private(set) var revealedTransitionLane: TimelineViewModel.TrackKind?
     /// Last refused edit, edit note or import problem, shown in the transport bar.
     @Published var statusMessage: String?
     /// The snap line shown while dragging (seconds), or nil.
@@ -165,12 +192,22 @@ final class ProjectStore: ObservableObject {
     /// Number of times the timeline's content model was rebuilt (once per model change;
     /// diagnostics and tests).
     private(set) var timelineBuildCount = 0
-    private var cachedTimeline: (changeCount: UInt64, collapsed: Set<VETrackID>, model: TimelineViewModel)?
+    private var cachedTimeline: (key: TimelineCacheKey, model: TimelineViewModel)?
+    /// What the timeline's content model depends on besides the engine's model (whose change count
+    /// covers the clips, the spans and so the lanes in use).
+    private struct TimelineCacheKey: Equatable {
+        let changeCount: UInt64
+        let collapsedTracks: Set<VETrackID>
+        let collapsedLanes: Set<String>
+        let revealedTransitionLane: TimelineViewModel.TrackKind?
+    }
     private var observers: [NSObjectProtocol] = []
     private var preferencesForwarding: AnyCancellable?
     /// Tells the engine whether the source monitor is on screen (it drops the source controller's
     /// stopped lookahead while hidden).
     private var sourceVisibilityForwarding: AnyCancellable?
+    /// Redraws the timeline (which observes the store) when a track's lanes collapse or expand.
+    private var laneCollapseForwarding: AnyCancellable?
 
     /// The app's store: a new engine with the default cache directory, the layout persisted in the
     /// standard defaults.
@@ -232,6 +269,9 @@ final class ProjectStore: ObservableObject {
         sourceVisibilityForwarding = layout.$showsSourceMonitor.removeDuplicates().sink { [weak engine] visible in
             MainActor.assumeIsolated { engine?.sourceMonitorVisible = visible }
         }
+        laneCollapseForwarding = layout.$collapsedLaneTracks.removeDuplicates().dropFirst().sink { [weak self] _ in
+            MainActor.assumeIsolated { self?.objectWillChange.send() }
+        }
         refreshAssets()
         refreshModel()
         playhead.apply(engine.playbackStatus)
@@ -256,8 +296,8 @@ final class ProjectStore: ObservableObject {
         clips = byID
         let kept = selection.filter { byID[$0] != nil }
         if kept != selection { selection = kept }
-        if let transition = selectedTransitionID, engine.transitionInfo(transition) == nil {
-            selectedTransitionID = nil
+        if let span = selectedSpanID, engine.spanInfo(span) == nil {
+            selectedSpanID = nil
         }
         if let kenBurns {
             if let clip = byID[kenBurns.clipID] {
@@ -327,18 +367,37 @@ final class ProjectStore: ObservableObject {
     }
 
     private var timelineContent: TimelineViewModel {
-        if let cached = cachedTimeline, cached.changeCount == changeCount, cached.collapsed == collapsedTrackIDs {
+        let key = TimelineCacheKey(changeCount: changeCount, collapsedTracks: collapsedTrackIDs,
+                                   collapsedLanes: layout.collapsedLaneTracks,
+                                   revealedTransitionLane: revealedTransitionLane)
+        if let cached = cachedTimeline, cached.key == key {
             return cached.model
         }
         timelineBuildCount += 1
         var model = TimelineViewModel()
         model.frameSeconds = frameDuration.secondsOrZero
         let occupied = Set(clips.values.map(\.trackID))
+        var spans: [TimelineViewModel.Span] = []
+        for clip in clips.values {
+            for span in clip.spans {
+                spans.append(Self.timelineSpan(span, of: clip))
+            }
+        }
+        let spansByTrack = Dictionary(grouping: spans, by: \.trackID)
         model.tracks = tracks.map {
-            TimelineViewModel.Track(id: $0.trackID, kind: $0.kind == .video ? .video : .audio, index: $0.index,
-                                    name: $0.name, muted: $0.muted, solo: $0.solo, locked: $0.locked,
-                                    isEmpty: !occupied.contains($0.trackID),
-                                    collapsed: collapsedTrackIDs.contains($0.trackID) && !occupied.contains($0.trackID))
+            let kind: TimelineViewModel.TrackKind = $0.kind == .video ? .video : .audio
+            let hasClips = occupied.contains($0.trackID)
+            let lanesCollapsed = layout.collapsedLaneTracks.contains(
+                WindowLayoutModel.laneKey(video: kind == .video, index: $0.index))
+            var track = TimelineViewModel.Track(id: $0.trackID, kind: kind, index: $0.index,
+                                                name: $0.name, muted: $0.muted, solo: $0.solo, locked: $0.locked,
+                                                isEmpty: !hasClips,
+                                                collapsed: collapsedTrackIDs.contains($0.trackID) && !hasClips)
+            track.lanesCollapsed = lanesCollapsed
+            track.lanes = TimelineViewModel.lanes(hasClips: hasClips, spans: spansByTrack[$0.trackID] ?? [],
+                                                  collapsed: lanesCollapsed,
+                                                  revealTransitionLane: revealedTransitionLane == kind)
+            return track
         }
         model.clips = clips.values.map {
             let audio = $0.audioParams
@@ -348,15 +407,33 @@ final class ProjectStore: ObservableObject {
                                           linkedClipID: $0.linkedClipID, isStill: $0.isStill,
                                           isAudio: $0.trackKind == .audio, gainDb: audio.gainDb,
                                           fadeIn: audio.fadeInDuration.secondsOrZero,
-                                          fadeOut: audio.fadeOutDuration.secondsOrZero,
-                                          keyframes: [])
+                                          fadeOut: audio.fadeOutDuration.secondsOrZero)
         }.sorted { $0.start < $1.start }
-        model.transitions = sequence.transitions.map {
-            TimelineViewModel.Transition(id: $0.transitionID, trackID: $0.trackID, start: $0.start.secondsOrZero,
-                                         end: $0.end.secondsOrZero, fromClipID: $0.fromClipID, toClipID: $0.toClipID)
-        }
-        cachedTimeline = (changeCount, collapsedTrackIDs, model)
+        model.spans = spans.sorted { ($0.trackID, $0.lane, $0.start) < ($1.trackID, $1.lane, $1.start) }
+        cachedTimeline = (key, model)
         return model
+    }
+
+    /// A span of `clip` as the timeline draws it (timeline seconds).
+    private static func timelineSpan(_ span: VEEffectSpan, of clip: VEClipInfo) -> TimelineViewModel.Span {
+        let kind: TimelineViewModel.SpanKind
+        switch span.kind {
+        case .transition: kind = .transition
+        case .motion: kind = .motion
+        case .opacity: kind = .opacity
+        case .gain: kind = .gain
+        @unknown default: kind = .motion
+        }
+        let style: TimelineViewModel.TransitionStyle
+        switch span.transitionStyle {
+        case .fadeIn: style = .fadeIn
+        case .fadeOut: style = .fadeOut
+        default: style = .crossDissolve
+        }
+        let cut = style == .fadeIn ? clip.timelineStart : clip.timelineEnd
+        return TimelineViewModel.Span(id: span.spanID, clipID: clip.clipID, trackID: clip.trackID, lane: span.lane,
+                                      kind: kind, start: span.start.secondsOrZero, end: span.end.secondsOrZero,
+                                      style: style, cut: cut.secondsOrZero, isAudio: clip.trackKind == .audio)
     }
 
     /// Converts seconds to a CMTime on the sequence frame grid.
@@ -543,6 +620,36 @@ final class ProjectStore: ObservableObject {
         collapsedTrackIDs.contains(id) && isTrackEmpty(id)
     }
 
+    /// Collapses or expands a track's lanes (remembered in the window layout by the track's kind and
+    /// number, `WindowLayoutModel.laneKey`).
+    func setLanes(ofTrack id: VETrackID, collapsed: Bool) {
+        guard let track = track(id) else { return }
+        layout.setLanesCollapsed(collapsed, key: WindowLayoutModel.laneKey(video: track.kind == .video,
+                                                                          index: track.index))
+    }
+
+    /// Whether the user collapsed the track's lanes.
+    func areLanesCollapsed(ofTrack id: VETrackID) -> Bool {
+        guard let track = track(id) else { return false }
+        return layout.collapsedLaneTracks.contains(WindowLayoutModel.laneKey(video: track.kind == .video,
+                                                                              index: track.index))
+    }
+
+    /// The track header's disclosure: an empty track collapses its row, a track with clips its lanes.
+    func toggleDisclosure(ofTrack id: VETrackID) {
+        if isTrackEmpty(id) {
+            setTrack(id, collapsed: !isTrackCollapsed(id))
+        } else {
+            setLanes(ofTrack: id, collapsed: !areLanesCollapsed(ofTrack: id))
+        }
+    }
+
+    /// Shows lane 0 on every track of `kind` while a transition is dragged over the timeline (nil
+    /// when none is), so it can be dropped there. Publishes only a change.
+    func revealTransitionLane(_ kind: TimelineViewModel.TrackKind?) {
+        if revealedTransitionLane != kind { revealedTransitionLane = kind }
+    }
+
     // MARK: Selection
 
     func select(clip id: VEClipID, extend: Bool) {
@@ -587,15 +694,15 @@ final class ProjectStore: ObservableObject {
     var canDelete: Bool {
         switch focusArea {
         case .mediaBin: return selectedAssetID != nil
-        case .timeline: return !selection.isEmpty || selectedTransitionID != nil
+        case .timeline: return !selection.isEmpty || selectedSpanID != nil
         case .sourceMonitor: return false
         }
     }
 
     /// Delete / Shift+Delete, for the focused panel: in the media bin they remove the selected
     /// asset (refused while clips use it), in the timeline they remove (or ripple delete) the
-    /// selected clips or transition; with the source monitor focused they do nothing. Ignored
-    /// during a gesture.
+    /// selected clips, or remove the selected span (a transition with its linked one; one undo
+    /// step); with the source monitor focused they do nothing. Ignored during a gesture.
     func deleteSelection(ripple: Bool) {
         guard !isGestureActive else { return }
         switch focusArea {
@@ -609,9 +716,13 @@ final class ProjectStore: ObservableObject {
         case .timeline:
             break
         }
-        if selection.isEmpty, let transition = selectedTransitionID {
-            // A dissolve goes with its linked crossfade (they were added as one step).
-            removeTransition(transition, includingLinked: true)
+        if selection.isEmpty, let span = selectedSpanID {
+            if engine.transitionInfo(span) != nil {
+                // A dissolve goes with its linked crossfade (they were added as one step).
+                removeTransition(span, includingLinked: true)
+            } else {
+                removeSpan(span)
+            }
             return
         }
         guard !selection.isEmpty else { return }
@@ -629,7 +740,7 @@ final class ProjectStore: ObservableObject {
     func removeTransition(_ id: VETransitionID, includingLinked: Bool) -> Bool {
         guard !isGestureActive else { return false }
         guard report(engine.removeTransition(id, includingLinked: includingLinked)) else { return false }
-        if let selected = selectedTransitionID, engine.transitionInfo(selected) == nil { selectedTransitionID = nil }
+        if let selected = selectedSpanID, engine.spanInfo(selected) == nil { selectedSpanID = nil }
         return true
     }
 
@@ -796,41 +907,6 @@ final class ProjectStore: ObservableObject {
         guard !isGestureActive, selectedTransitionID != nil else { return }
         selection = []
         requestInspectorFocus(.transitionDuration)
-    }
-
-    // MARK: Motion keyframes
-
-    /// The clip Add Motion Keyframe works on: `id` when it is a video clip, else the single selected
-    /// video clip (a linked pair counts as its video clip); nil otherwise.
-    func motionKeyframeClip(_ id: VEClipID? = nil) -> VEClipInfo? {
-        if let id {
-            return clips[id].flatMap { $0.trackKind == .video ? $0 : nil }
-        }
-        let video = selectedClips.filter { $0.trackKind == .video }
-        return video.count == 1 ? video[0] : nil
-    }
-
-    /// Whether every Motion parameter of `clip` has a keyframe on the frame under the playhead. Motion
-    /// keyframes became Motion spans (the effect lanes UI brings "Add Motion Span at Playhead" in their
-    /// place), so never.
-    func hasAllMotionKeyframesAtPlayhead(_ clip: VEClipInfo, at time: CMTime? = nil) -> Bool {
-        false
-    }
-
-    /// Clip > Add Motion Keyframe with the playhead at `time`: disabled (Motion keyframes became
-    /// Motion spans; see `hasAllMotionKeyframesAtPlayhead`).
-    func motionKeyframeMenuState(at time: CMTime) -> (title: String, enabled: Bool) {
-        ("Add Motion Keyframe  ⌃K", false)
-    }
-
-    /// Clip > Add Motion Keyframe (Control-K), also in the timeline's context menu: refused with a
-    /// message until the effect lanes UI replaces it (Motion keyframes became Motion spans).
-    func toggleMotionKeyframes(clip id: VEClipID? = nil) {
-        guard !isGestureActive else {
-            statusMessage = "Finish the current drag first."
-            return
-        }
-        statusMessage = InspectorModel.keyframesMovedMessage
     }
 
     // MARK: Neighbours
@@ -1254,7 +1330,9 @@ final class ProjectStore: ObservableObject {
         thumbnails.removeAll()
         waveforms.removeAll()
         selection = []
+        selectedSpanID = nil
         selectedAssetID = nil
+        revealedTransitionLane = nil
         collapsedTrackIDs = [] // track ids restart per project
         source = SourceMonitorState()
         sourcePlayhead.reset()

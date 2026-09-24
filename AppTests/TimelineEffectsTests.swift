@@ -4,11 +4,11 @@ import FramewrightEngine
 import XCTest
 @testable import Framewright
 
-/// Transitions, fades and gain in the timeline: hit testing of transition bands, fade handles
-/// and the gain line; the gesture controller's transition-edge, fade-handle and gain drags
-/// (synthetic points); transition drops with their feedback; the linked-crossfade preference;
-/// and the menu commands' refusals. Geometry at the default zoom (50 pt/s, no scroll): rows V2
-/// y 0...64, V1 66...130, A1 132...180, A2 182...230.
+/// Transitions and gain in the timeline: hit testing of the gain line, a transition on lane 0
+/// fitted to the media, selected by a double-click and deleted; the gain drag (synthetic points);
+/// transition drops with their feedback; the linked-crossfade preference; and the menu commands'
+/// refusals. Geometry at the default zoom (50 pt/s, no scroll): rows V2 y 0...64, V1 66...130 (its
+/// lanes below it when it has clips).
 @MainActor
 final class TimelineEffectsTests: XCTestCase {
     private var fixture: StoreFixture!
@@ -49,7 +49,7 @@ final class TimelineEffectsTests: XCTestCase {
 
     // MARK: Hit testing
 
-    func testHitTestingTransitionBandsFadeHandlesAndGainLine() throws {
+    func testHitTestingTheGainLine() throws {
         var model = TimelineViewModel()
         model.pixelsPerSecond = 100
         model.frameSeconds = 1.0 / 30.0
@@ -59,63 +59,24 @@ final class TimelineEffectsTests: XCTestCase {
         ]
         model.clips = [
             .init(id: 1, trackID: 10, start: 0, end: 4),
-            .init(id: 2, trackID: 10, start: 4, end: 8),
             .init(id: 3, trackID: 20, start: 0, end: 4, isAudio: true, gainDb: 0, fadeIn: 1, fadeOut: 0.5),
         ]
-        model.transitions = [.init(id: 50, trackID: 10, start: 3.5, end: 4.5, fromClipID: 1, toClipID: 2)]
         let v1Top: CGFloat = 0
-        // Transition band [350, 450] at the top of V1: edges resize, the middle selects.
-        XCTAssertEqual(model.hitTest(CGPoint(x: 352, y: v1Top + 5)), .transitionHead(50))
-        XCTAssertEqual(model.hitTest(CGPoint(x: 400, y: v1Top + 5)), .transition(50))
-        XCTAssertEqual(model.hitTest(CGPoint(x: 448, y: v1Top + 5)), .transitionTail(50))
-        XCTAssertEqual(model.transition(id: 50)?.cut(in: model), 4)
-        // Below the band the clips' own zones apply.
-        XCTAssertEqual(model.hitTest(CGPoint(x: 398, y: v1Top + 40)), .clipTail(1))
-
         let a1Top = TimelineViewModel.videoTrackHeight + TimelineViewModel.trackSpacing
         let clip = try XCTUnwrap(model.clip(id: 3))
-        // Fade handles at the top corners, at the fades' ends (x = 100 and x = 350).
-        let fadeIn = try XCTUnwrap(model.fadeHandleCenter(forClip: clip, fadeIn: true))
-        XCTAssertEqual(fadeIn.x, 100, accuracy: 1e-9)
-        XCTAssertEqual(model.hitTest(CGPoint(x: 103, y: a1Top + 5)), .fadeIn(3))
-        XCTAssertEqual(model.hitTest(CGPoint(x: 348, y: a1Top + 5)), .fadeOut(3))
-        XCTAssertEqual(model.hitTest(CGPoint(x: 200, y: a1Top + 5)), .clipBody(3), "between the handles")
-        // A fade of zero keeps its handle inside the corner, above the trim zone.
-        var noFade = clip
-        noFade.fadeIn = 0
-        model.clips[2] = noFade
-        XCTAssertEqual(model.hitTest(CGPoint(x: 3, y: a1Top + 5)), .fadeIn(3))
-        XCTAssertEqual(model.hitTest(CGPoint(x: 3, y: a1Top + 30)), .clipHead(3), "lower down the edge trims")
+        // Fades are lane-0 spans now: the clip's top corners select and trim it like any clip.
+        XCTAssertEqual(model.hitTest(CGPoint(x: 103, y: a1Top + 5)), .clipBody(3))
+        XCTAssertEqual(model.hitTest(CGPoint(x: 3, y: a1Top + 5)), .clipHead(3))
         // The gain line: 0 dB at 24/84 of the content height below the label.
-        let content = try XCTUnwrap(model.contentRect(forClip: noFade))
+        let content = try XCTUnwrap(model.contentRect(forClip: clip))
         let gainY = TimelineViewModel.gainY(0, in: content)
         XCTAssertEqual(gainY, content.minY + content.height * 24 / 84, accuracy: 1e-9)
         XCTAssertEqual(model.hitTest(CGPoint(x: 200, y: gainY + 2)), .gainLine(3))
         XCTAssertEqual(model.hitTest(CGPoint(x: 200, y: gainY + 8)), .clipBody(3))
         XCTAssertEqual(TimelineViewModel.gainY(-60, in: content), content.maxY, accuracy: 1e-9)
         XCTAssertEqual(TimelineViewModel.gainY(100, in: content), content.minY, accuracy: 1e-9, "clamped")
-        // Video clips have neither fade handles nor a gain line.
+        // Video clips have no gain line.
         XCTAssertEqual(model.hitTest(CGPoint(x: 200, y: v1Top + 20)), .clipBody(1))
-    }
-
-    /// Review finding 10: on a clip narrower than 40 pt the fade handle is hit only within its
-    /// drawn square, so the rest of the label selects the clip.
-    func testANarrowAudioClipKeepsMostOfItsLabelForSelecting() throws {
-        var model = TimelineViewModel()
-        model.pixelsPerSecond = 100
-        model.frameSeconds = 1.0 / 30.0
-        model.tracks = [.init(id: 20, kind: .audio, index: 0, name: "A1")]
-        model.clips = [
-            .init(id: 1, trackID: 20, start: 0, end: 0.3, isAudio: true), // 30 pt wide
-            .init(id: 2, trackID: 20, start: 1, end: 3, isAudio: true), // 200 pt wide
-        ]
-        let narrow = try XCTUnwrap(model.clip(id: 1))
-        let wide = try XCTUnwrap(model.clip(id: 2))
-        XCTAssertEqual(model.fadeHandleZoneHeight(forClip: narrow), TimelineViewModel.narrowFadeHandleZoneHeight)
-        XCTAssertEqual(model.fadeHandleZoneHeight(forClip: wide), TimelineViewModel.fadeHandleZoneHeight)
-        XCTAssertEqual(model.hitTest(CGPoint(x: 5, y: 4)), .fadeIn(1), "on the drawn handle")
-        XCTAssertEqual(model.hitTest(CGPoint(x: 15, y: 10)), .clipBody(1), "the label below the handle selects")
-        XCTAssertEqual(model.hitTest(CGPoint(x: 105, y: 10)), .fadeIn(2), "a wide clip keeps the taller zone")
     }
 
     // MARK: Hover
@@ -152,7 +113,11 @@ final class TimelineEffectsTests: XCTestCase {
 
     // MARK: Drags
 
-    func testTransitionEdgeDragIsSymmetricSnappedBoundedAndOneStep() async throws {
+    /// A transition is a bar on lane 0: a double-click selects it and asks the inspector to focus its
+    /// duration, Delete removes it, an edge dragged far beyond the media stops where the clips'
+    /// media ends (the engine fits it and says so). The edges and the fade conversion are covered
+    /// by `EffectLanesTimelineTests`.
+    func testATransitionOnLaneZeroIsFittedSelectedAndDeleted() async throws {
         let (movie, _) = try await fixture.importMedia()
         // A: source [0, 1) at 0; B: source [1, 2) at 1: 30 frames of media beyond the cut each way.
         let a = try place(movie, at: 0, from: 0, to: 1, video: v1)
@@ -160,41 +125,26 @@ final class TimelineEffectsTests: XCTestCase {
         let added = store.engine.addTransition(fromClip: a, toClip: b, duration: CMTime(value: 10, timescale: 30))
         XCTAssertTrue(added.ok, added.message)
         let transition = try XCTUnwrap(added.createdIDs.first?.int64Value)
-        func frames() -> Int64 { store.frames(store.engine.transitionInfo(transition)?.duration ?? .zero) }
+        store.refreshModel()
+        let model = store.timelineModel
+        let layout = try XCTUnwrap(model.layout(forTrack: v1))
+        let laneY = try XCTUnwrap(layout.laneY(0)) + 7
+        func after() -> Int64 { store.frames(store.engine.spanInfo(transition)?.shareAfterCut ?? .zero) }
         let gestures = TimelineGestureController(store: store)
-        // The band covers 1 s - 5 frames ... 1 s + 5 frames: x 41.7 ... 58.3 on V1's strip (y 66...82).
-        drag(gestures, from: CGPoint(x: 57, y: 70), through: [CGPoint(x: 62, y: 70), CGPoint(x: 67, y: 70)], end: false)
+        // The end edge (x 58.3) far to the right: B has 30 frames before its in point; fitted, said so.
+        drag(gestures, from: CGPoint(x: 57.5, y: laneY), through: [CGPoint(x: 400, y: laneY)], end: false)
         XCTAssertEqual(store.selectedTransitionID, transition)
-        XCTAssertEqual(frames(), 22, "10 pt = 6 frames to the right: 12 frames longer, centred on the cut")
-        XCTAssertNotNil(store.cancelActiveGesture)
         XCTAssertTrue(store.isGestureActive)
-        // Far beyond the media: stops at the bound (60 frames) and says why.
-        gestures.changed(location: CGPoint(x: 400, y: 70), startLocation: CGPoint(x: 57, y: 70), modifiers: [])
-        XCTAssertEqual(frames(), 60)
-        XCTAssertTrue(store.statusMessage?.hasPrefix("Limited to") == true, store.statusMessage ?? "")
-        // Far to the left: never shorter than one frame.
-        gestures.changed(location: CGPoint(x: 20, y: 70), startLocation: CGPoint(x: 57, y: 70), modifiers: [])
-        XCTAssertEqual(frames(), 1)
-        XCTAssertEqual(store.statusMessage, "A transition is at least one frame long.")
+        XCTAssertEqual(after(), 30, "all the media B has before its in point")
+        XCTAssertTrue(store.statusMessage?.contains("shortened") == true, store.statusMessage ?? "")
         gestures.ended()
         XCTAssertFalse(store.engine.isCoalescing)
-        XCTAssertEqual(store.undoActionName, "Change Transition Duration")
         store.undo()
-        XCTAssertEqual(frames(), 10, "the whole drag was one undo step")
-
-        // The head edge: dragging it left lengthens.
-        drag(gestures, from: CGPoint(x: 43, y: 70), through: [CGPoint(x: 38, y: 70), CGPoint(x: 33, y: 70)])
-        XCTAssertEqual(frames(), 22)
-
-        // Escape reverts a drag in progress.
-        drag(gestures, from: CGPoint(x: 43, y: 70), through: [CGPoint(x: 70, y: 70)], end: false)
-        store.cancelActiveGesture?()
-        XCTAssertEqual(frames(), 22)
-        gestures.ended()
+        XCTAssertEqual(after(), 5, "one undo step")
 
         // Double-click selects the transition and asks the inspector to focus its duration.
         store.selectedTransitionID = nil
-        gestures.changed(location: CGPoint(x: 50, y: 70), startLocation: CGPoint(x: 50, y: 70), modifiers: [],
+        gestures.changed(location: CGPoint(x: 50, y: laneY), startLocation: CGPoint(x: 50, y: laneY), modifiers: [],
                          clickCount: 2)
         gestures.ended()
         XCTAssertEqual(store.selectedTransitionID, transition)
@@ -204,33 +154,6 @@ final class TimelineEffectsTests: XCTestCase {
         store.focusArea = .timeline
         store.deleteSelection(ripple: false)
         XCTAssertNil(store.engine.transitionInfo(transition))
-    }
-
-    func testFadeHandleDragsAreSnappedBoundedAndOneStepEach() async throws {
-        let (_, tone) = try await fixture.importMedia()
-        let clip = try place(tone, at: 0, from: 0, to: 3, audio: a1) // 90 frames, x 0...150 on A1
-        func fade(_ fadeIn: Bool) -> Int64 {
-            let params = store.clips[clip]?.audioParams
-            return store.frames((fadeIn ? params?.fadeInDuration : params?.fadeOutDuration) ?? .zero)
-        }
-        let gestures = TimelineGestureController(store: store)
-        // The fade-in handle sits in the top-left corner (y 132...144).
-        drag(gestures, from: CGPoint(x: 4, y: 137), through: [CGPoint(x: 30, y: 137), CGPoint(x: 50.6, y: 137)])
-        XCTAssertEqual(fade(true), 30, "1 s, snapped to whole frames")
-        XCTAssertEqual(store.undoActionName, "Change Audio Settings")
-        // The fade-out handle, in the top-right corner: 1 s.
-        drag(gestures, from: CGPoint(x: 146, y: 137), through: [CGPoint(x: 100, y: 137)])
-        XCTAssertEqual(fade(false), 30)
-        // Dragged into the fade-in: stops where they meet and says why.
-        drag(gestures, from: CGPoint(x: 101, y: 137), through: [CGPoint(x: -40, y: 137)], end: false)
-        XCTAssertEqual(fade(false), 60, "fade in + fade out <= the clip's 90 frames")
-        XCTAssertTrue(store.statusMessage?.contains("cannot overlap") == true, store.statusMessage ?? "")
-        gestures.ended()
-        store.undo()
-        XCTAssertEqual(fade(false), 30, "one undo step per drag")
-        store.undo()
-        XCTAssertEqual(fade(false), 0)
-        XCTAssertEqual(fade(true), 30)
     }
 
     func testGainLineDragWithFineControlAndTooltip() async throws {

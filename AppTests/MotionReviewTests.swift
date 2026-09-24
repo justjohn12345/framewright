@@ -271,7 +271,7 @@ final class MotionReviewTests: XCTestCase {
 
     // MARK: Keys and menus (findings 15, 25)
 
-    func testHeldControlKTogglesOnce() async throws {
+    func testHeldControlKAddsOneMotionSpan() async throws {
         let id = try await placedClip()
         store.playheadTime = frames(10)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled],
@@ -285,48 +285,32 @@ final class MotionReviewTests: XCTestCase {
                                            windowNumber: 0, context: nil, characters: "\u{b}",
                                            charactersIgnoringModifiers: "k", isARepeat: repeating, keyCode: 40))
         }
-        let changes = store.changeCount
         XCTAssertTrue(keyboard.handle(try controlK(repeating: false), window: window))
-        XCTAssertEqual(store.statusMessage, InspectorModel.keyframesMovedMessage,
-                       "Motion keyframes became effect spans: refused with the reason")
+        XCTAssertEqual(try clip(id).spans.count, 1, "one Motion span from the playhead")
+        let changes = store.changeCount
         for _ in 0 ..< 5 {
             XCTAssertTrue(keyboard.handle(try controlK(repeating: true), window: window), "swallowed")
         }
-        XCTAssertEqual(store.changeCount, changes, "neither the press nor its auto-repeat edits anything")
-        XCTAssertFalse(store.hasAllMotionKeyframesAtPlayhead(try clip(id)))
-        XCTAssertTrue(try clip(id).spans.isEmpty)
+        XCTAssertEqual(store.changeCount, changes, "the auto-repeat adds nothing")
+        XCTAssertEqual(try clip(id).spans.count, 1)
         store.editorWindow = nil
     }
 
-    func testTheClipMenuItemIsDisabledNowThatKeyframesAreSpans() async throws {
-        let id = try await placedClip()
-        store.playheadTime = frames(10)
-        for time in [frames(10), frames(11), try clip(id).timelineEnd] {
-            XCTAssertEqual(store.motionKeyframeMenuState(at: time).title, "Add Motion Keyframe  ⌃K")
-            XCTAssertFalse(store.motionKeyframeMenuState(at: time).enabled)
-        }
-        let changes = store.changeCount
-        store.toggleMotionKeyframes()
-        XCTAssertEqual(store.statusMessage, InspectorModel.keyframesMovedMessage)
-        XCTAssertEqual(store.changeCount, changes)
-    }
+    // MARK: Trim edges at the bottom of a clip (test gap 4)
 
-    // MARK: Timeline markers (test gap 4)
-
-    func testAClipWithMotionSpansHasNoKeyframeMarkersAndItsTrimEdgesKeepThePress() async throws {
+    func testTheBottomOfAClipWithSpansKeepsItsTrimEdges() async throws {
         let id = try await placedClip()
         let added = store.engine.addSpan(kind: .motion, lane: 1, clip: id,
                                          range: CMTimeRange(start: .zero, duration: frames(60)))
         XCTAssertTrue(added.ok, added.message)
         store.refreshModel()
         let model = store.timelineModel
-        let timelineClip = try XCTUnwrap(model.clip(id: id))
-        XCTAssertEqual(timelineClip.keyframes, [], "Motion keyframes became effect spans: no markers")
-        let rect = try XCTUnwrap(model.rect(forClip: timelineClip))
-        let y = rect.maxY - 4 // where the marker zone was
+        let rect = try XCTUnwrap(model.rect(forClip: try XCTUnwrap(model.clip(id: id))))
+        let y = rect.maxY - 4 // where the keyframe markers used to be: the spans are on the lanes below
         XCTAssertEqual(model.hitTest(CGPoint(x: rect.minX + 0.5, y: y)), .clipHead(id))
         XCTAssertEqual(model.hitTest(CGPoint(x: rect.maxX - 0.5, y: y)), .clipTail(id))
         XCTAssertEqual(model.hitTest(CGPoint(x: rect.midX, y: y)), .clipBody(id))
+        XCTAssertEqual(model.hitTest(CGPoint(x: rect.midX, y: rect.maxY + 7)), .span(try XCTUnwrap(added.span).spanID))
     }
 
     func testANudgeOnASplitPieceMovesTheStaticValueUnderItsSpan() async throws {

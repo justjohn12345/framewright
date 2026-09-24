@@ -5,7 +5,16 @@ import SwiftUI
 struct ContextMenuItem {
     var title: String
     var isEnabled = true
+    /// Shown with a check mark (the current choice of a submenu).
+    var isChecked = false
+    /// A submenu's items (the item itself then runs nothing).
+    var submenu: [ContextMenuItem] = []
     var action: @MainActor () -> Void
+
+    /// An item opening a submenu of `items`.
+    static func submenu(_ title: String, isEnabled: Bool = true, _ items: [ContextMenuItem]) -> ContextMenuItem {
+        ContextMenuItem(title: title, isEnabled: isEnabled, submenu: items, action: {})
+    }
 
     /// A separator line.
     static var separator: ContextMenuItem {
@@ -117,11 +126,19 @@ struct ContextMenuCatcher: NSViewRepresentable {
                     menu.addItem(.separator())
                     continue
                 }
+                if !item.submenu.isEmpty {
+                    let menuItem = NSMenuItem(title: item.title, action: nil, keyEquivalent: "")
+                    menuItem.submenu = Self.menu(item.submenu)
+                    menuItem.isEnabled = item.isEnabled
+                    menu.addItem(menuItem)
+                    continue
+                }
                 let menuItem = NSMenuItem(title: item.title, action: #selector(MenuActionTarget.run(_:)),
                                           keyEquivalent: "")
                 menuItem.target = MenuActionTarget.shared
                 menuItem.representedObject = MenuAction(item.action)
                 menuItem.isEnabled = item.isEnabled
+                menuItem.state = item.isChecked ? .on : .off
                 menu.addItem(menuItem)
             }
             return menu

@@ -19,9 +19,10 @@ import Foundation
 /// in/out), = or + / - (zoom the timeline, like Command-= / Command--), ] / [ (gain of the selected
 /// audio clips ±1 dB, with Shift ±10 dB; a burst is one undo step), Escape (cancel the drag in
 /// progress; passed on when there is none), Command-A (select all clips), Control-K (Add Motion
-/// Keyframe: keyframes on every Motion parameter at the playhead, or none when all are there). Auto-repeat of Space and
-/// J/K/L is ignored (holding L does not race to 8x, holding Space does not toggle). Transport
-/// keys drive the monitor that has focus (see `PlaybackActions`).
+/// Span at Playhead: a Motion span from the playhead, 5 s or to the clip's end, which opens the Ken
+/// Burns editor). Auto-repeat of Space, J/K/L and Control-K is ignored (holding L does not race to
+/// 8x, holding Space does not toggle, holding Control-K adds one span). Transport keys drive the
+/// monitor that has focus (see `PlaybackActions`).
 @MainActor
 final class KeyboardController {
     enum Action: Equatable {
@@ -37,9 +38,8 @@ final class KeyboardController {
         case selectAll
         /// `]` / `[`: gain of the selected audio clips ±1 dB (with Shift, `}` / `{`: ±10 dB).
         case gainUp(big: Bool), gainDown(big: Bool)
-        /// Control-K: Add Motion Keyframe (all five parameters on the frame under the playhead, or
-        /// remove them when all are there; Final Cut Pro's Add Keyframe key).
-        case toggleMotionKeyframes
+        /// Control-K: Add Motion Span at Playhead (Final Cut Pro's Add Keyframe key).
+        case addMotionSpan
 
         /// The keys the program output window takes: the transport (play, shuttle, step, start/end)
         /// and Escape. Everything else edits or navigates the timeline.
@@ -53,11 +53,11 @@ final class KeyboardController {
             }
         }
 
-        /// Keys whose auto-repeat is ignored: discrete transport commands, and toggles (holding
-        /// Control-K would add and remove the keyframes over and over, each an undo step).
+        /// Keys whose auto-repeat is ignored: discrete transport commands, and Control-K (holding it
+        /// would try to add a span over and over, each an undo step or a refusal).
         var ignoresRepeat: Bool {
             switch self {
-            case .togglePlay, .shuttleReverse, .shuttleStop, .shuttleForward, .toggleMotionKeyframes: return true
+            case .togglePlay, .shuttleReverse, .shuttleStop, .shuttleForward, .addMotionSpan: return true
             default: return false
             }
         }
@@ -94,7 +94,7 @@ final class KeyboardController {
             return .selectAll
         }
         if flags == .control, characters.lowercased() == "k" {
-            return .toggleMotionKeyframes
+            return .addMotionSpan
         }
         switch keyCode {
         case 53: return flags.isEmpty ? .cancel : nil
@@ -200,7 +200,7 @@ final class KeyboardController {
         case .selectAll: store.selectAll()
         case let .gainUp(big): store.nudgeGain(big ? InspectorModel.bigStep : 1)
         case let .gainDown(big): store.nudgeGain(big ? -InspectorModel.bigStep : -1)
-        case .toggleMotionKeyframes: store.toggleMotionKeyframes()
+        case .addMotionSpan: store.addMotionSpanAtPlayhead()
         }
     }
 }

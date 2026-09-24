@@ -20,7 +20,6 @@ final class TimelineViewModelTests: XCTestCase {
             .init(id: 3, trackID: 11, start: 10, end: 12),
             .init(id: 4, trackID: 20, start: 0, end: 4, linkedClipID: 1),
         ]
-        model.transitions = [.init(id: 50, trackID: 10, start: 3.5, end: 4.5)]
         return model
     }
 
@@ -81,7 +80,7 @@ final class TimelineViewModelTests: XCTestCase {
         XCTAssertNil(free.snap)
     }
 
-    func testHitTestingEdgeZonesBodiesAndTransitions() {
+    func testHitTestingEdgeZonesAndBodies() {
         let model = makeModel(pixelsPerSecond: 100)
         let v1Mid = TimelineViewModel.videoTrackHeight + TimelineViewModel.trackSpacing + 40
         XCTAssertEqual(model.hitTest(CGPoint(x: 200, y: v1Mid)), .clipBody(1))
@@ -93,9 +92,9 @@ final class TimelineViewModelTests: XCTestCase {
         XCTAssertEqual(model.hitTest(CGPoint(x: 403, y: v1Mid)), .clipHead(2))
         XCTAssertEqual(model.hitTest(CGPoint(x: 595, y: v1Mid)), .clipTail(2))
         XCTAssertEqual(model.hitTest(CGPoint(x: 700, y: v1Mid)), .track(10))
-        // The transition strip at the top of the row.
+        // Without lanes the whole row, top to bottom, is the clips'.
         let v1Top = TimelineViewModel.videoTrackHeight + TimelineViewModel.trackSpacing
-        XCTAssertEqual(model.hitTest(CGPoint(x: 380, y: v1Top + 5)), .transition(50))
+        XCTAssertEqual(model.hitTest(CGPoint(x: 380, y: v1Top + 5)), .clipBody(1))
         XCTAssertEqual(model.hitTest(CGPoint(x: 1050, y: 30)), .clipBody(3))
         XCTAssertEqual(model.hitTest(CGPoint(x: 100, y: 5000)), .none)
         // Narrow clips shrink the edge zones to a third of their width.

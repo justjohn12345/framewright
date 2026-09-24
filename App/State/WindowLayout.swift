@@ -28,6 +28,10 @@ enum InspectorTab: String, CaseIterable, Identifiable {
 /// until the user drags the divider above it; from then on the dragged height is kept (a double-click
 /// on the divider returns to fitting). Widths and the dragged height are clamped whenever they are
 /// used, so a height saved on a larger screen still leaves the monitors room on a smaller one.
+///
+/// Also the tracks whose effect lanes the user collapsed (the disclosure in a track header), by the
+/// track's kind and number ("V1", "A2": track ids restart per project, the numbers are what the
+/// user sees), so a collapsed V1 stays collapsed across projects and relaunches.
 @MainActor
 final class WindowLayoutModel: ObservableObject {
     static let sourceMonitorKey = "layout.showsSourceMonitor"
@@ -36,6 +40,7 @@ final class WindowLayoutModel: ObservableObject {
     static let inspectorWidthKey = "layout.inspectorWidth"
     static let sourceFractionKey = "layout.sourceMonitorFraction"
     static let timelineHeightKey = "layout.timelineHeight"
+    static let collapsedLanesKey = "layout.collapsedLanes"
 
     static let defaultMediaBinWidth: CGFloat = 240
     static let mediaBinWidths: ClosedRange<CGFloat> = 180 ... 480
@@ -65,6 +70,8 @@ final class WindowLayoutModel: ObservableObject {
     @Published private(set) var sourceMonitorFraction: Double
     /// The height the user dragged the timeline to; nil while it fits its content.
     @Published private(set) var timelineHeight: CGFloat?
+    /// The tracks whose lanes are collapsed, by `laneKey(video:index:)`.
+    @Published private(set) var collapsedLaneTracks: Set<String>
 
     /// Where the layout is saved; nil keeps it in memory only (a store made for tests).
     let defaults: UserDefaults?
@@ -81,6 +88,24 @@ final class WindowLayoutModel: ObservableObject {
         sourceMonitorFraction = fraction.map { min(Self.sourceFractions.upperBound, max(Self.sourceFractions.lowerBound, $0)) }
             ?? Self.defaultSourceFraction
         timelineHeight = Self.stored(defaults, Self.timelineHeightKey).map { max(Self.minimumTimelineHeight, $0) }
+        collapsedLaneTracks = Set((defaults?.array(forKey: Self.collapsedLanesKey) as? [String]) ?? [])
+    }
+
+    // MARK: Lanes
+
+    /// The key a track's lane collapse is kept under: its kind and number as the headers show them
+    /// ("V1" for the first video track, "A2" for the second audio track).
+    static func laneKey(video: Bool, index: Int) -> String {
+        (video ? "V" : "A") + String(index + 1)
+    }
+
+    /// Collapses or expands the lanes of the track `key` (`laneKey(video:index:)`), remembered.
+    func setLanesCollapsed(_ collapsed: Bool, key: String) {
+        var keys = collapsedLaneTracks
+        if collapsed { keys.insert(key) } else { keys.remove(key) }
+        guard keys != collapsedLaneTracks else { return }
+        collapsedLaneTracks = keys
+        defaults?.set(keys.sorted(), forKey: Self.collapsedLanesKey)
     }
 
     // MARK: Setters (clamped, persisted)
@@ -134,7 +159,7 @@ final class WindowLayoutModel: ObservableObject {
         defaults?.removeObject(forKey: Self.timelineHeightKey)
     }
 
-    /// Restores every default (panels, tab and splits).
+    /// Restores every default (panels, tab, splits and lanes).
     func resetToDefaults() {
         showsSourceMonitor = false
         inspectorTab = .inspector
@@ -142,8 +167,9 @@ final class WindowLayoutModel: ObservableObject {
         inspectorWidth = Self.defaultInspectorWidth
         sourceMonitorFraction = Self.defaultSourceFraction
         timelineHeight = nil
+        collapsedLaneTracks = []
         for key in [Self.sourceMonitorKey, Self.inspectorTabKey, Self.mediaBinWidthKey, Self.inspectorWidthKey,
-                    Self.sourceFractionKey, Self.timelineHeightKey] {
+                    Self.sourceFractionKey, Self.timelineHeightKey, Self.collapsedLanesKey] {
             defaults?.removeObject(forKey: key)
         }
     }

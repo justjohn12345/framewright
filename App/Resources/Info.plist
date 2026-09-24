@@ -94,6 +94,26 @@
 			<key>UTTypeIdentifier</key>
 			<string>com.justjohn12345.framewright.transition.audio-crossfade</string>
 		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Fade Effect</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.effect.fade</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Gain Effect</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.effect.gain</string>
+		</dict>
 	</array>
 </dict>
 </plist>

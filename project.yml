@@ -225,6 +225,15 @@ targets:
             UTTypeDescription: Framewright Audio Crossfade
             UTTypeConformsTo:
               - public.data
+          # In-app drag payloads of the Effects tab's lane effects (a Fade on video, a Gain span on audio).
+          - UTTypeIdentifier: com.justjohn12345.framewright.effect.fade
+            UTTypeDescription: Framewright Fade Effect
+            UTTypeConformsTo:
+              - public.data
+          - UTTypeIdentifier: com.justjohn12345.framewright.effect.gain
+            UTTypeDescription: Framewright Gain Effect
+            UTTypeConformsTo:
+              - public.data
         # No imported declarations: the app makes the file promise types and the Live Photo bundle
         # type with UTType(importedAs:) (App/State/PromisedFiles.swift), which works whether or not
         # the system declares them (com.apple.NSFilePromiseItemMetaData is a pasteboard type, not a

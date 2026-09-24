@@ -8,6 +8,15 @@ import Foundation
 /// space below the ruler (y = 0 at the top of the first row, rows shifted up by scrollY).
 /// Rows run top to bottom: video tracks from the top-most (last) to V1, then audio A1, A2, ...
 /// Times are seconds (Double); callers convert to CMTime on the sequence frame grid.
+///
+/// Lanes: under a track's row of clips come its lanes (`Track.lanes`, `laneHeight` each): lane 0
+/// holds the transitions (cross dissolves / crossfades across a cut, fades from and to black or
+/// silence), lanes 1-3 the effect spans (Motion and Opacity on video, Gain on audio). Which lanes a
+/// track shows is `lanes(hasClips:spans:collapsed:revealTransitionLane:)`: none for an empty track or
+/// one whose lanes the user collapsed; lane 0 while the track has a transition (or a transition is
+/// dragged over the timeline); the effect lanes in use plus one empty lane to create spans on, never
+/// more than `maxEffectLanes`. A span is drawn on its lane over its range: an effect span within
+/// its clip, a transition straddling its cut.
 struct TimelineViewModel: Equatable {
     enum TrackKind: Equatable {
         case video
@@ -27,6 +36,11 @@ struct TimelineViewModel: Equatable {
         var isEmpty = false
         /// Shown as a short strip (`collapsedTrackHeight`): the user collapsed it and it is empty.
         var collapsed = false
+        /// The lanes drawn under the row, top to bottom (lane 0, the transitions, first); see
+        /// `lanes(hasClips:spans:collapsed:revealTransitionLane:)`.
+        var lanes: [Int] = []
+        /// The user collapsed the track's lanes (the disclosure in its header; a track with clips).
+        var lanesCollapsed = false
     }
 
     struct Clip: Equatable, Identifiable {
@@ -46,23 +60,71 @@ struct TimelineViewModel: Equatable {
         /// Fade durations in seconds.
         var fadeIn: Double = 0
         var fadeOut: Double = 0
-        /// On a video track: the starts (seconds) of the sequence frames that show a Motion
-        /// keyframe, sorted, one per frame (keyframes of every parameter; see
-        /// `VEKeyframe.frameTime`). Drawn as markers along the clip's bottom edge.
-        var keyframes: [Double] = []
     }
 
-    struct Transition: Equatable, Identifiable {
-        let id: Int64
-        let trackID: Int64
-        let start: Double
-        let end: Double
-        var fromClipID: Int64 = 0
-        var toClipID: Int64 = 0
+    /// What a span changes (VESpanKind).
+    enum SpanKind: Equatable {
+        /// Lane 0: a cross dissolve / crossfade or a fade from or to black / silence.
+        case transition
+        /// Video: position, scale and rotation (a Ken Burns move).
+        case motion
+        /// Video: opacity (a fade).
+        case opacity
+        /// Audio: gain in dB.
+        case gain
+    }
 
-        /// The cut the transition is centred on (the outgoing clip's end).
-        func cut(in model: TimelineViewModel) -> Double {
-            model.clip(id: fromClipID)?.end ?? (start + end) / 2
+    /// What a transition span does where it sits (VETransitionStyle).
+    enum TransitionStyle: Equatable {
+        case crossDissolve
+        case fadeOut
+        case fadeIn
+    }
+
+    /// A span of a clip on one of its track's lanes (VEEffectSpan), in timeline seconds.
+    struct Span: Equatable, Identifiable {
+        let id: Int64
+        let clipID: Int64
+        let trackID: Int64
+        var lane: Int
+        var kind: SpanKind
+        var start: Double
+        var end: Double
+        /// Transitions: what it does, and the cut it hangs on (its clip's end for a cross dissolve
+        /// or a fade out, its clip's start for a fade in).
+        var style: TransitionStyle = .crossDissolve
+        var cut: Double = 0
+        /// On an audio track (a crossfade rather than a dissolve).
+        var isAudio = false
+
+        /// The name drawn on the bar (and used in the inspector).
+        var title: String {
+            switch kind {
+            case .motion: return "Motion"
+            case .opacity: return "Fade"
+            case .gain: return "Gain"
+            case .transition:
+                switch style {
+                case .crossDissolve: return isAudio ? "Crossfade" : "Cross Dissolve"
+                case .fadeIn: return "Fade In"
+                case .fadeOut: return "Fade Out"
+                }
+            }
+        }
+
+        /// The SF Symbol drawn on the bar.
+        var systemImage: String {
+            switch kind {
+            case .motion: return "arrow.up.left.and.arrow.down.right"
+            case .opacity: return "circle.lefthalf.filled"
+            case .gain: return "speaker.wave.2"
+            case .transition:
+                switch style {
+                case .crossDissolve: return isAudio ? "waveform.path" : "square.on.square.dashed"
+                case .fadeIn: return "arrow.up.right"
+                case .fadeOut: return "arrow.down.right"
+                }
+            }
         }
     }
 
@@ -70,26 +132,44 @@ struct TimelineViewModel: Equatable {
         let track: Track
         /// Top of the row in content coordinates (before scrolling).
         let y: CGFloat
+        /// The row and its lanes.
         let height: CGFloat
+        /// The row of clips (the lanes follow below it).
+        let rowHeight: CGFloat
+
+        /// The lanes shown under the row, top to bottom.
+        var lanes: [Int] { track.lanes }
+
+        /// Top of `lane` in content coordinates, or nil when it is not shown.
+        func laneY(_ lane: Int) -> CGFloat? {
+            guard let index = track.lanes.firstIndex(of: lane) else { return nil }
+            return y + rowHeight + CGFloat(index) * TimelineViewModel.laneHeight
+        }
+
+        /// The lane at content y `contentY` inside this layout (nil in the row of clips). The spacing
+        /// below the last lane belongs to it.
+        func lane(atContentY contentY: CGFloat) -> Int? {
+            let below = contentY - (y + rowHeight)
+            guard below >= 0, !track.lanes.isEmpty else { return nil }
+            let index = min(track.lanes.count - 1, Int(below / TimelineViewModel.laneHeight))
+            return track.lanes[index]
+        }
     }
 
     enum Hit: Equatable {
         case clipBody(Int64)
         case clipHead(Int64)
         case clipTail(Int64)
-        case transition(Int64)
-        /// Within `transitionEdgeZone` of a transition band's left or right edge (resize).
-        case transitionHead(Int64)
-        case transitionTail(Int64)
-        /// The fade-in / fade-out handle at an audio clip's top corner.
-        case fadeIn(Int64)
-        case fadeOut(Int64)
         /// The horizontal gain line of an audio clip.
         case gainLine(Int64)
-        /// A keyframe marker of a video clip: the start (seconds) of the frame that shows it (a
-        /// click seeks there, a drag moves its keyframes).
-        case keyframe(Int64, Double)
-        /// Empty space on a track.
+        /// A span's bar on its lane (a transition on lane 0 too).
+        case span(Int64)
+        /// Within `spanEdgeZone` of a span's start or end (trim; a transition's edge).
+        case spanHead(Int64)
+        case spanTail(Int64)
+        /// Empty space on a lane of a track.
+        case lane(track: Int64, lane: Int)
+        /// Empty space on a track's row.
         case track(Int64)
         /// Below the last track.
         case none
@@ -100,6 +180,8 @@ struct TimelineViewModel: Equatable {
         case playhead
         case clipStart(Int64)
         case clipEnd(Int64)
+        case spanStart(Int64)
+        case spanEnd(Int64)
     }
 
     struct Snap: Equatable {
@@ -115,32 +197,12 @@ struct TimelineViewModel: Equatable {
     static let trackSpacing: CGFloat = 2
     static let edgeZone: CGFloat = 8
     static let snapThreshold: CGFloat = 8
-    /// Height of the strip at the top of a row where transitions are drawn and hit.
-    static let transitionStripHeight: CGFloat = 16
-    /// Width of the resize zone at each edge of a transition band (at most a quarter of it).
-    static let transitionEdgeZone: CGFloat = 5
-    /// Fade handles: a square this big at the clip's top corner (at the fade's end), hit within
-    /// `fadeHandleHitRadius` horizontally and the top `fadeHandleZoneHeight` points vertically.
-    static let fadeHandleSize: CGFloat = 7
-    static let fadeHandleHitRadius: CGFloat = 6
-    static let fadeHandleZoneHeight: CGFloat = 12
-    /// On a clip narrower than `narrowClipWidth` points the handles are hit only within the
-    /// drawn square (the top `narrowFadeHandleZoneHeight` points), leaving most of its label to
-    /// select and move it.
-    static let narrowClipWidth: CGFloat = 40
-    static let narrowFadeHandleZoneHeight: CGFloat = 1 + fadeHandleSize
-
-    /// Height of the top zone of `clip`'s row in which its fade handles are hit.
-    func fadeHandleZoneHeight(forClip clip: Clip) -> CGFloat {
-        guard let rect = rect(forClip: clip) else { return 0 }
-        return rect.width < Self.narrowClipWidth ? Self.narrowFadeHandleZoneHeight : Self.fadeHandleZoneHeight
-    }
-    /// Keyframe markers: diamonds this big along the bottom of a video clip, centred on the frame
-    /// that shows the keyframe, hit within `keyframeHitRadius` horizontally in the bottom
-    /// `keyframeZoneHeight` points of the row.
-    static let keyframeMarkerSize: CGFloat = 7
-    static let keyframeHitRadius: CGFloat = 5
-    static let keyframeZoneHeight: CGFloat = 11
+    /// Height of a lane under a track's row.
+    static let laneHeight: CGFloat = 14
+    /// Effect lanes (1-3) a track has at most; lane 0 holds its transitions.
+    static let maxEffectLanes = 3
+    /// Width of the trim zone at each edge of a span's bar (at most a quarter of it).
+    static let spanEdgeZone: CGFloat = 5
     /// The gain line is hit within this many points vertically.
     static let gainLineHitDistance: CGFloat = 3
     /// Gain line mapping: the top of the content area is `gainMaxDb`, its bottom `gainMinDb`.
@@ -167,12 +229,17 @@ struct TimelineViewModel: Equatable {
         }
     }
 
-    var transitions: [Transition] = []
+    var spans: [Span] = [] {
+        didSet {
+            spanIndex = Dictionary(spans.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        }
+    }
 
     /// Rows in display order with their geometry (derived from `tracks`, computed once per change).
     private(set) var trackLayouts: [TrackLayout] = []
-    /// Index of each clip in `clips` (derived).
+    /// Index of each clip in `clips` and each span in `spans` (derived).
     private var clipIndex: [Int64: Int] = [:]
+    private var spanIndex: [Int64: Int] = [:]
 
     // MARK: Layout
 
@@ -181,15 +248,31 @@ struct TimelineViewModel: Equatable {
         trackLayouts.map(\.track)
     }
 
+    /// The lanes a track shows under its row, top to bottom: none for a track without clips or one
+    /// whose lanes are `collapsed`; lane 0 while one of `spans` is a transition or
+    /// `revealTransitionLane` (a transition is dragged over the timeline); then effect lanes 1 up to
+    /// the highest one in use plus one empty lane (to create spans on), at most `maxEffectLanes`.
+    static func lanes(hasClips: Bool, spans: [Span], collapsed: Bool, revealTransitionLane: Bool) -> [Int] {
+        guard hasClips, !collapsed else { return [] }
+        var lanes: [Int] = []
+        if revealTransitionLane || spans.contains(where: { $0.lane == 0 }) {
+            lanes.append(0)
+        }
+        let highest = spans.map(\.lane).filter { $0 >= 1 }.max() ?? 0
+        lanes.append(contentsOf: 1 ... min(maxEffectLanes, highest + 1))
+        return lanes
+    }
+
     private static func layouts(for tracks: [Track]) -> [TrackLayout] {
         let video = tracks.filter { $0.kind == .video }.sorted { $0.index > $1.index }
         let audio = tracks.filter { $0.kind == .audio }.sorted { $0.index < $1.index }
         var y: CGFloat = 0
         var layouts: [TrackLayout] = []
         for track in video + audio {
-            let height = track.collapsed ? Self.collapsedTrackHeight
+            let row = track.collapsed ? Self.collapsedTrackHeight
                 : track.kind == .video ? Self.videoTrackHeight : Self.audioTrackHeight
-            layouts.append(TrackLayout(track: track, y: y, height: height))
+            let height = row + CGFloat(track.lanes.count) * Self.laneHeight
+            layouts.append(TrackLayout(track: track, y: y, height: height, rowHeight: row))
             y += height + Self.trackSpacing
         }
         return layouts
@@ -228,32 +311,55 @@ struct TimelineViewModel: Equatable {
         trackLayouts.first { $0.track.id == id } // a handful of rows: a scan beats hashing
     }
 
-    /// Row under a y coordinate (visible space).
+    /// Row under a y coordinate (visible space): the row of clips, its lanes and the spacing below.
     func layout(atY y: CGFloat) -> TrackLayout? {
         let contentY = y + scrollY
         return trackLayouts.first { contentY >= $0.y && contentY < $0.y + $0.height + Self.trackSpacing }
     }
 
+    /// The rectangle of the clip's row part (its lanes are below it).
     func rect(forClip clip: Clip) -> CGRect? {
         guard let layout = layout(forTrack: clip.trackID) else { return nil }
         let x0 = x(forTime: clip.start)
         let x1 = x(forTime: clip.end)
-        return CGRect(x: x0, y: layout.y - scrollY, width: max(1, x1 - x0), height: layout.height)
+        return CGRect(x: x0, y: layout.y - scrollY, width: max(1, x1 - x0), height: layout.rowHeight)
     }
 
-    func rect(forTransition transition: Transition) -> CGRect? {
-        guard let layout = layout(forTrack: transition.trackID) else { return nil }
-        let x0 = x(forTime: transition.start)
-        let x1 = x(forTime: transition.end)
-        return CGRect(x: x0, y: layout.y - scrollY, width: max(4, x1 - x0), height: Self.transitionStripHeight)
+    /// The visible rectangle of `lane` of a track (the whole width), or nil when it is not shown.
+    func laneRect(track id: Int64, lane: Int, width: CGFloat) -> CGRect? {
+        guard let layout = layout(forTrack: id), let top = layout.laneY(lane) else { return nil }
+        return CGRect(x: 0, y: top - scrollY, width: width, height: Self.laneHeight)
+    }
+
+    /// The bar of a span on its lane (nil when the lane is not shown): an effect span over its range
+    /// within its clip's x range; a transition over its whole range, across its cut.
+    func rect(forSpan span: Span) -> CGRect? {
+        guard let layout = layout(forTrack: span.trackID), let top = layout.laneY(span.lane) else { return nil }
+        var x0 = x(forTime: span.start)
+        var x1 = x(forTime: span.end)
+        if span.kind != .transition, let clip = clip(id: span.clipID) {
+            x0 = max(x0, x(forTime: clip.start))
+            x1 = min(x1, x(forTime: clip.end))
+        }
+        return CGRect(x: x0, y: top - scrollY + 1, width: max(3, x1 - x0), height: Self.laneHeight - 2)
     }
 
     func clip(id: Int64) -> Clip? {
         clipIndex[id].map { clips[$0] }
     }
 
-    func transition(id: Int64) -> Transition? {
-        transitions.first { $0.id == id }
+    func span(id: Int64) -> Span? {
+        spanIndex[id].map { spans[$0] }
+    }
+
+    /// The spans of a clip on one lane, in time order.
+    func spans(ofClip clipID: Int64, lane: Int) -> [Span] {
+        spans.filter { $0.clipID == clipID && $0.lane == lane }.sorted { $0.start < $1.start }
+    }
+
+    /// The clip of `trackID` whose time range contains `seconds` (its start included), if any.
+    func clip(onTrack trackID: Int64, at seconds: Double) -> Clip? {
+        clips.first { $0.trackID == trackID && $0.start <= seconds && seconds < $0.end }
     }
 
     /// The part of a clip's rect below its label, where waveforms, fades and the gain line are.
@@ -276,24 +382,6 @@ struct TimelineViewModel: Equatable {
         return (Self.gainMaxDb - Self.gainMinDb) / Double(max(height, 1)) * (fine ? 0.1 : 1)
     }
 
-    /// Centre of the fade-in (`fadeIn` true) or fade-out handle of an audio clip.
-    func fadeHandleCenter(forClip clip: Clip, fadeIn: Bool) -> CGPoint? {
-        guard clip.isAudio, let rect = rect(forClip: clip) else { return nil }
-        let inset = Self.fadeHandleSize / 2 + 1
-        let x = fadeIn ? max(x(forTime: clip.start + clip.fadeIn), rect.minX + inset)
-            : min(x(forTime: clip.end - clip.fadeOut), rect.maxX - inset)
-        return CGPoint(x: x, y: rect.minY + 1 + inset)
-    }
-
-    /// Centre of the marker of the keyframe shown by the frame starting at `time` (inside the
-    /// clip's rect, whatever the zoom).
-    func keyframeMarkerCenter(forClip clip: Clip, time: Double) -> CGPoint? {
-        guard !clip.isAudio, let rect = rect(forClip: clip) else { return nil }
-        let inset = min(Self.keyframeMarkerSize / 2 + 1, rect.width / 2)
-        let x = min(max(x(forTime: time + frameSeconds / 2), rect.minX + inset), rect.maxX - inset)
-        return CGPoint(x: x, y: rect.maxY - Self.keyframeMarkerSize / 2 - 2)
-    }
-
     /// Clips whose rect intersects the horizontal range [minX, maxX] (visible culling).
     func clips(visibleIn width: CGFloat) -> [Clip] {
         let start = time(forX: 0)
@@ -301,60 +389,23 @@ struct TimelineViewModel: Equatable {
         return clips.filter { $0.end >= start && $0.start <= end }
     }
 
+    /// Spans whose range intersects the visible width (visible culling).
+    func spans(visibleIn width: CGFloat) -> [Span] {
+        let start = time(forX: 0)
+        let end = time(forX: width)
+        return spans.filter { $0.end >= start && $0.start <= end }
+    }
+
     // MARK: Hit testing
 
-    /// What a press at `point` grabs, by priority: a transition band (its edges resize it), an
-    /// audio clip's fade handle (top corner zone), a video clip's keyframe marker (bottom zone; a
-    /// trim edge nearer than the marker wins there), a clip edge (trim), an audio clip's gain line,
-    /// a clip body, empty track space.
+    /// What a press at `point` grabs. On a lane: a span's edge (the nearer one within
+    /// `spanEdgeZone`, trim), else its bar, else the empty lane. On the row of clips: a clip edge
+    /// (trim; between two touching clips the closer edge wins), an audio clip's gain line, a clip
+    /// body, else empty track space.
     func hitTest(_ point: CGPoint) -> Hit {
         guard let layout = layout(atY: point.y) else { return .none }
-        let rowTop = layout.y - scrollY
-        if point.y - rowTop < Self.transitionStripHeight {
-            for transition in transitions where transition.trackID == layout.track.id {
-                if let r = rect(forTransition: transition), point.x >= r.minX - 1, point.x <= r.maxX + 1 {
-                    let zone = min(Self.transitionEdgeZone, r.width / 4)
-                    if point.x <= r.minX + zone { return .transitionHead(transition.id) }
-                    if point.x >= r.maxX - zone { return .transitionTail(transition.id) }
-                    return .transition(transition.id)
-                }
-            }
-        }
-        if layout.track.kind == .audio, point.y - rowTop < Self.fadeHandleZoneHeight {
-            var best: (hit: Hit, distance: CGFloat)?
-            for clip in clips where clip.trackID == layout.track.id && clip.isAudio {
-                guard point.y - rowTop < fadeHandleZoneHeight(forClip: clip) else { continue }
-                for fadeIn in [true, false] {
-                    guard let center = fadeHandleCenter(forClip: clip, fadeIn: fadeIn) else { continue }
-                    let distance = abs(point.x - center.x)
-                    if distance <= Self.fadeHandleHitRadius, best.map({ distance < $0.distance }) ?? true {
-                        best = (fadeIn ? .fadeIn(clip.id) : .fadeOut(clip.id), distance)
-                    }
-                }
-            }
-            if let best { return best.hit }
-        }
-        if layout.track.kind == .video, point.y >= rowTop + layout.height - Self.keyframeZoneHeight {
-            var best: (hit: Hit, distance: CGFloat)?
-            for clip in clips where clip.trackID == layout.track.id && !clip.keyframes.isEmpty {
-                guard let r = rect(forClip: clip), point.x >= r.minX - Self.keyframeHitRadius,
-                      point.x <= r.maxX + Self.keyframeHitRadius else { continue }
-                // A trim edge nearer than the marker keeps the press (a marker on the clip's first or
-                // last frame sits a few points inside its edge).
-                let zone = min(Self.edgeZone, r.width / 3)
-                let head = point.x <= r.minX + zone ? abs(point.x - r.minX) : .infinity
-                let tail = point.x >= r.maxX - zone ? abs(point.x - r.maxX) : .infinity
-                let edge = min(head, tail)
-                for time in clip.keyframes {
-                    guard let center = keyframeMarkerCenter(forClip: clip, time: time) else { continue }
-                    let distance = abs(point.x - center.x)
-                    if distance <= Self.keyframeHitRadius, distance < edge,
-                       best.map({ distance < $0.distance }) ?? true {
-                        best = (.keyframe(clip.id, time), distance)
-                    }
-                }
-            }
-            if let best { return best.hit }
+        if let lane = layout.lane(atContentY: point.y + scrollY) {
+            return laneHit(point, track: layout.track.id, lane: lane)
         }
         // Edge zones win over bodies so the edit point between two touching clips can be trimmed
         // from either side (the closer edge wins).
@@ -388,6 +439,24 @@ struct TimelineViewModel: Equatable {
         return .track(layout.track.id)
     }
 
+    /// A press on `lane` of `track`: the nearest span edge within its zone, a span's bar, or the lane.
+    private func laneHit(_ point: CGPoint, track: Int64, lane: Int) -> Hit {
+        var edge: (hit: Hit, distance: CGFloat)?
+        var body: Hit?
+        for span in spans where span.trackID == track && span.lane == lane {
+            guard let r = rect(forSpan: span), point.x >= r.minX - 1, point.x <= r.maxX + 1 else { continue }
+            let zone = min(Self.spanEdgeZone, r.width / 4)
+            for (hit, x) in [(Hit.spanHead(span.id), r.minX), (Hit.spanTail(span.id), r.maxX)] {
+                let distance = abs(point.x - x)
+                if distance <= zone, edge.map({ distance < $0.distance }) ?? true {
+                    edge = (hit, distance)
+                }
+            }
+            if point.x >= r.minX, point.x <= r.maxX { body = .span(span.id) }
+        }
+        return edge?.hit ?? body ?? .lane(track: track, lane: lane)
+    }
+
     /// Clips whose rect intersects `rect` (visible space), for marquee selection.
     func clipIDs(intersecting area: CGRect) -> Set<Int64> {
         let normalized = area.standardized
@@ -412,9 +481,9 @@ struct TimelineViewModel: Equatable {
     // MARK: Snapping
 
     /// Snap candidates in seconds: the sequence start, the playhead (unless `includePlayhead` is
-    /// false, e.g. while the playhead itself is dragged) and every clip edge except those of
-    /// `excluding`.
-    func snapCandidates(excluding: Set<Int64> = [],
+    /// false, e.g. while the playhead itself is dragged), every clip edge except those of
+    /// `excluding` and, when `excludingSpans` is given (a span drag), every span edge but those.
+    func snapCandidates(excluding: Set<Int64> = [], excludingSpans: Set<Int64>? = nil,
                         includePlayhead: Bool = true) -> [(time: Double, target: SnapTarget)] {
         var result: [(Double, SnapTarget)] = [(0, .sequenceStart)]
         if includePlayhead {
@@ -424,16 +493,23 @@ struct TimelineViewModel: Equatable {
             result.append((clip.start, .clipStart(clip.id)))
             result.append((clip.end, .clipEnd(clip.id)))
         }
+        if let excludingSpans {
+            for span in spans where !excludingSpans.contains(span.id) {
+                result.append((span.start, .spanStart(span.id)))
+                result.append((span.end, .spanEnd(span.id)))
+            }
+        }
         return result
     }
 
     /// The candidate nearest to `seconds` within the snap threshold (in points), if any.
-    func snap(_ seconds: Double, excluding: Set<Int64> = [], includePlayhead: Bool = true,
-              thresholdPoints: CGFloat = snapThreshold) -> Snap? {
+    func snap(_ seconds: Double, excluding: Set<Int64> = [], excludingSpans: Set<Int64>? = nil,
+              includePlayhead: Bool = true, thresholdPoints: CGFloat = snapThreshold) -> Snap? {
         let threshold = Double(thresholdPoints) / pixelsPerSecond
         var best: Snap?
         var bestDistance = Double.infinity
-        for candidate in snapCandidates(excluding: excluding, includePlayhead: includePlayhead) {
+        for candidate in snapCandidates(excluding: excluding, excludingSpans: excludingSpans,
+                                        includePlayhead: includePlayhead) {
             let distance = abs(candidate.time - seconds)
             if distance <= threshold, distance < bestDistance {
                 best = Snap(time: candidate.time, target: candidate.target)
@@ -445,9 +521,10 @@ struct TimelineViewModel: Equatable {
 
     /// Snaps a moved range [start + delta, end + delta]: whichever edge is closer to a candidate
     /// decides. Returns the adjusted delta and the snap used.
-    func snapMove(start: Double, end: Double, delta: Double, excluding: Set<Int64>) -> (delta: Double, snap: Snap?) {
-        let startSnap = snap(start + delta, excluding: excluding)
-        let endSnap = snap(end + delta, excluding: excluding)
+    func snapMove(start: Double, end: Double, delta: Double, excluding: Set<Int64>,
+                  excludingSpans: Set<Int64>? = nil) -> (delta: Double, snap: Snap?) {
+        let startSnap = snap(start + delta, excluding: excluding, excludingSpans: excludingSpans)
+        let endSnap = snap(end + delta, excluding: excluding, excludingSpans: excludingSpans)
         switch (startSnap, endSnap) {
         case let (s?, e?):
             let ds = abs(s.time - (start + delta))

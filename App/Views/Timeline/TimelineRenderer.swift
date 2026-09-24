@@ -12,15 +12,17 @@ enum TimelineDiagnostics {
     static var kenBurnsBandUpdates = 0
 }
 
-/// Draws the track area of the timeline into a SwiftUI `GraphicsContext`: rows, clips with
-/// thumbnail strips (video) or pre-rendered waveform strips (audio), transitions, the snap line
-/// and the marquee. Only what intersects the visible width is drawn. The playhead is not drawn
-/// here: it is an overlay of its own, so moving it never redraws the clips.
+/// Draws the track area of the timeline into a SwiftUI `GraphicsContext`: rows and their lanes,
+/// clips with thumbnail strips (video) or pre-rendered waveform strips (audio), the spans on the
+/// lanes (transitions on lane 0 across their cut, effect spans within their clip), the span being
+/// created by a range drag, a transition drop's target, the snap line and the marquee. Only what
+/// intersects the visible width is drawn. The playhead is not drawn here: it is an overlay of its
+/// own, so moving it never redraws the clips.
 @MainActor
 struct TimelineRenderer {
     let model: TimelineViewModel
     let selection: Set<Int64>
-    let selectedTransitionID: Int64?
+    let selectedSpanID: Int64?
     let targetTrackIDs: Set<Int64>
     let assets: [VEAssetID: VEAssetInfo]
     let thumbnails: ThumbnailCache
@@ -29,8 +31,12 @@ struct TimelineRenderer {
     let marquee: CGRect?
     /// Gain value shown next to the pointer (gain line hovered or dragged).
     var gainTooltip: TimelineGestureController.GainTooltip?
-    /// Where a transition dragged from the Transitions panel would land.
+    /// Where a transition dragged from the Effects tab would land.
     var transitionDrop: TimelineGestureController.TransitionDropTarget?
+    /// Where an effect dragged from the Effects tab would land.
+    var effectDrop: TimelineGestureController.EffectDropTarget?
+    /// The span a range drag on an empty lane is creating.
+    var creation: TimelineGestureController.SpanCreation?
     /// Formats a transition's duration in sequence frames for its band.
     var formatFrames: (Int64) -> String = { "\($0)f" }
 
@@ -43,9 +49,17 @@ struct TimelineRenderer {
         for clip in model.clips(visibleIn: size.width) {
             drawClip(clip, in: &context, size: size)
         }
-        drawTransitions(&context, size: size)
+        for span in model.spans(visibleIn: size.width) {
+            drawSpan(span, in: &context)
+        }
+        if let creation {
+            drawCreation(creation, in: &context, size: size)
+        }
         if let transitionDrop {
             drawDropTarget(transitionDrop, in: &context, size: size)
+        }
+        if let effectDrop {
+            drawEffectDrop(effectDrop, in: &context, size: size)
         }
         if let snapTime {
             let x = model.x(forTime: snapTime)
@@ -77,17 +91,114 @@ struct TimelineRenderer {
 
     private func drawRows(_ context: inout GraphicsContext, size: CGSize) {
         for layout in model.trackLayouts {
-            let rect = CGRect(x: 0, y: layout.y - model.scrollY, width: size.width, height: layout.height)
-            guard rect.maxY >= 0, rect.minY <= size.height else { continue }
+            let whole = CGRect(x: 0, y: layout.y - model.scrollY, width: size.width, height: layout.height)
+            guard whole.maxY >= 0, whole.minY <= size.height else { continue }
+            let row = CGRect(x: 0, y: whole.minY, width: size.width, height: layout.rowHeight)
             let base = layout.track.kind == .video ? Color.blue.opacity(0.06) : Color.green.opacity(0.05)
-            context.fill(Path(rect), with: .color(base))
+            context.fill(Path(row), with: .color(base))
+            // The lanes: a darker strip each, a hairline between them.
+            for lane in layout.lanes {
+                guard let rect = model.laneRect(track: layout.track.id, lane: lane, width: size.width) else { continue }
+                context.fill(Path(rect), with: .color(Color.primary.opacity(lane == 0 ? 0.07 : 0.045)))
+                context.fill(Path(CGRect(x: 0, y: rect.minY, width: size.width, height: 0.5)),
+                             with: .color(Color.primary.opacity(0.12)))
+            }
             if targetTrackIDs.contains(layout.track.id) {
-                context.fill(Path(CGRect(x: 0, y: rect.minY, width: 3, height: rect.height)), with: .color(.accentColor))
+                context.fill(Path(CGRect(x: 0, y: row.minY, width: 3, height: row.height)), with: .color(.accentColor))
             }
             if layout.track.locked {
-                context.fill(Path(rect), with: .color(Color.gray.opacity(0.15)))
+                context.fill(Path(whole), with: .color(Color.gray.opacity(0.15)))
             }
         }
+    }
+
+    /// The fill of a span's bar by kind.
+    static func color(_ kind: TimelineViewModel.SpanKind) -> Color {
+        switch kind {
+        case .transition: return Color.purple
+        case .motion: return Color(red: 0.85, green: 0.52, blue: 0.16)
+        case .opacity: return Color(red: 0.2, green: 0.6, blue: 0.7)
+        case .gain: return Color(red: 0.55, green: 0.66, blue: 0.18)
+        }
+    }
+
+    /// A span: a rounded bar on its lane with its kind's icon and name (and a transition's length),
+    /// a transition's cut marked by a line, a white outline when selected.
+    private func drawSpan(_ span: TimelineViewModel.Span, in context: inout GraphicsContext) {
+        guard let rect = model.rect(forSpan: span) else { return }
+        let selected = span.id == selectedSpanID
+        let shape = Path(roundedRect: rect, cornerRadius: 3)
+        context.fill(shape, with: .color(Self.color(span.kind).opacity(selected ? 1 : 0.85)))
+        var inner = context
+        inner.clip(to: shape)
+        if span.kind == .transition {
+            let cutX = model.x(forTime: span.cut)
+            if cutX > rect.minX + 1, cutX < rect.maxX - 1 {
+                inner.stroke(Path { $0.move(to: CGPoint(x: cutX, y: rect.minY)); $0.addLine(to: CGPoint(x: cutX, y: rect.maxY)) },
+                             with: .color(.white.opacity(0.85)), lineWidth: 1.5)
+            }
+        }
+        let visibleMinX = max(rect.minX, 0)
+        var x = visibleMinX + 3
+        if rect.width >= 16 {
+            var icon = inner.resolve(Image(systemName: span.systemImage))
+            icon.shading = .color(.white)
+            let side = rect.height - 3
+            inner.draw(icon, in: CGRect(x: x, y: rect.midY - side / 2, width: side, height: side))
+            x += side + 3
+        }
+        var title = span.title
+        if span.kind == .transition {
+            let frames = Int64(((span.end - span.start) / max(model.frameSeconds, 1e-9)).rounded())
+            title += "  " + formatFrames(frames)
+        }
+        let label = inner.resolve(Text(title).font(.system(size: 9, weight: .semibold)).foregroundColor(.white))
+        let labelSize = label.measure(in: CGSize(width: 400, height: rect.height))
+        if x + labelSize.width <= rect.maxX - 2 {
+            inner.draw(label, at: CGPoint(x: x, y: rect.midY), anchor: .leading)
+        }
+        context.stroke(shape, with: .color(selected ? .white : .black.opacity(0.35)), lineWidth: selected ? 1.5 : 0.5)
+    }
+
+    /// The span a range drag on an empty lane creates: its kind's colour, outlined, or red with the
+    /// reason when it cannot go there.
+    private func drawCreation(_ creation: TimelineGestureController.SpanCreation, in context: inout GraphicsContext,
+                              size: CGSize) {
+        guard let lane = model.laneRect(track: creation.trackID, lane: creation.lane, width: size.width) else { return }
+        let x0 = model.x(forTime: creation.start)
+        let x1 = model.x(forTime: creation.end)
+        let rect = CGRect(x: x0, y: lane.minY + 1, width: max(2, x1 - x0), height: lane.height - 2)
+        let color = creation.problem == nil ? Self.color(creation.kind) : Color.red
+        context.fill(Path(roundedRect: rect, cornerRadius: 3), with: .color(color.opacity(0.45)))
+        context.stroke(Path(roundedRect: rect, cornerRadius: 3), with: .color(color), lineWidth: 1.5)
+    }
+
+    /// An effect dragged from the Effects tab: the range it would get on its lane (green), or the
+    /// lane in red with the reason.
+    private func drawEffectDrop(_ target: TimelineGestureController.EffectDropTarget, in context: inout GraphicsContext,
+                                size: CGSize) {
+        guard let lane = model.laneRect(track: target.trackID, lane: target.lane, width: size.width) else { return }
+        let color: Color = target.allowed ? .green : .red
+        let x0 = model.x(forTime: target.start)
+        let x1 = model.x(forTime: target.end)
+        let band = CGRect(x: x0, y: lane.minY + 1, width: max(4, x1 - x0), height: lane.height - 2)
+        context.fill(Path(roundedRect: band, cornerRadius: 3), with: .color(color.opacity(0.45)))
+        context.stroke(Path(roundedRect: band, cornerRadius: 3), with: .color(color), lineWidth: 1.5)
+        guard !target.message.isEmpty else { return }
+        drawNote(target.message, at: CGPoint(x: x0, y: lane.maxY + 2), color: target.allowed ? .black : .red,
+                 in: &context, size: size)
+    }
+
+    /// A small note box below `point` (kept inside the canvas).
+    private func drawNote(_ text: String, at point: CGPoint, color: Color, in context: inout GraphicsContext,
+                          size: CGSize) {
+        let label = context.resolve(Text(text).font(.system(size: 10, weight: .medium)).foregroundColor(.white))
+        let textSize = label.measure(in: CGSize(width: 360, height: 60))
+        var box = CGRect(x: point.x, y: point.y, width: textSize.width + 10, height: textSize.height + 4)
+        if box.maxX > size.width { box.origin.x = max(0, size.width - box.width) }
+        if box.maxY > size.height { box.origin.y = max(0, point.y - box.height - 18) }
+        context.fill(Path(roundedRect: box, cornerRadius: 4), with: .color(color.opacity(0.8)))
+        context.draw(label, at: CGPoint(x: box.midX, y: box.midY), anchor: .center)
     }
 
     private func drawClip(_ clip: TimelineViewModel.Clip, in context: inout GraphicsContext, size: CGSize) {
@@ -130,35 +241,12 @@ struct TimelineRenderer {
         inner.draw(text, at: CGPoint(x: labelX, y: body.minY + 2), anchor: .topLeading)
 
         context.stroke(shape, with: .color(isSelected ? .white : Color.black.opacity(0.5)), lineWidth: isSelected ? 2 : 1)
-        if isAudio {
-            drawFadeHandles(clip, in: &context)
-        } else if !clip.keyframes.isEmpty {
-            drawKeyframeMarkers(clip, in: &context, size: size, selected: isSelected)
-        }
     }
 
-    /// Keyframe markers: small diamonds along a video clip's bottom edge, one per frame that shows
-    /// a Motion keyframe (click one to move the playhead there).
-    private func drawKeyframeMarkers(_ clip: TimelineViewModel.Clip, in context: inout GraphicsContext, size: CGSize,
-                                     selected: Bool) {
-        let half = TimelineViewModel.keyframeMarkerSize / 2
-        for time in clip.keyframes {
-            guard let center = model.keyframeMarkerCenter(forClip: clip, time: time),
-                  center.x >= -half, center.x <= size.width + half else { continue }
-            var diamond = Path()
-            diamond.move(to: CGPoint(x: center.x, y: center.y - half))
-            diamond.addLine(to: CGPoint(x: center.x + half, y: center.y))
-            diamond.addLine(to: CGPoint(x: center.x, y: center.y + half))
-            diamond.addLine(to: CGPoint(x: center.x - half, y: center.y))
-            diamond.closeSubpath()
-            context.fill(diamond, with: .color(selected ? .yellow : Color.white.opacity(0.9)))
-            context.stroke(diamond, with: .color(.black.opacity(0.7)), lineWidth: 1)
-        }
-    }
-
-    /// The volume envelope over an audio clip's waveform: the gain line, the fade-in rising from
-    /// silence at the clip start to the gain line and the fade-out falling back to silence at
-    /// its end, with the silenced area above the fades darkened.
+    /// The volume envelope over an audio clip's waveform: the gain line (the clip's static gain,
+    /// dragged vertically), the fade-in rising from silence at the clip start to the gain line and
+    /// the fade-out falling back to silence at its end (its lane-0 fades), with the silenced area
+    /// above the fades darkened.
     private func drawFadesAndGain(_ clip: TimelineViewModel.Clip, in content: CGRect, context: inout GraphicsContext) {
         guard content.height > 4 else { return }
         let gainY = TimelineViewModel.gainY(clip.gainDb, in: content)
@@ -191,17 +279,6 @@ struct TimelineRenderer {
         envelope.addLine(to: CGPoint(x: fadeOutX, y: gainY))
         envelope.addLine(to: CGPoint(x: endX, y: clip.fadeOut > 0 ? content.maxY : gainY))
         context.stroke(envelope, with: .color(Color.yellow.opacity(0.9)), lineWidth: 1.2)
-    }
-
-    /// The fade handles: small squares at the top corners (at each fade's end).
-    private func drawFadeHandles(_ clip: TimelineViewModel.Clip, in context: inout GraphicsContext) {
-        let size = TimelineViewModel.fadeHandleSize
-        for fadeIn in [true, false] {
-            guard let center = model.fadeHandleCenter(forClip: clip, fadeIn: fadeIn) else { continue }
-            let square = CGRect(x: center.x - size / 2, y: center.y - size / 2, width: size, height: size)
-            context.fill(Path(square), with: .color(.white))
-            context.stroke(Path(square), with: .color(.black.opacity(0.6)), lineWidth: 1)
-        }
     }
 
     private func drawThumbnails(_ clip: TimelineViewModel.Clip, asset: VEAssetInfo, in rect: CGRect,
@@ -260,65 +337,27 @@ struct TimelineRenderer {
         }
     }
 
-    /// Transitions: a band across the cut at the top of the row with its duration, resize
-    /// handles at both edges and a white outline when selected.
-    private func drawTransitions(_ context: inout GraphicsContext, size: CGSize) {
-        for transition in model.transitions {
-            guard let rect = model.rect(forTransition: transition), rect.maxX >= 0, rect.minX <= size.width else { continue }
-            let band = rect.insetBy(dx: 0, dy: 1)
-            let shape = Path(roundedRect: band, cornerRadius: 3)
-            context.fill(shape, with: .color(Color.purple.opacity(0.9)))
-            var diagonal = Path()
-            diagonal.move(to: CGPoint(x: band.minX, y: band.maxY))
-            diagonal.addLine(to: CGPoint(x: band.maxX, y: band.minY))
-            context.stroke(diagonal, with: .color(.white.opacity(0.35)), lineWidth: 1)
-            let cutX = model.x(forTime: transition.cut(in: model))
-            context.stroke(Path { $0.move(to: CGPoint(x: cutX, y: band.minY)); $0.addLine(to: CGPoint(x: cutX, y: band.maxY)) },
-                           with: .color(.white.opacity(0.6)), lineWidth: 1)
-            let frames = Int64(((transition.end - transition.start) / max(model.frameSeconds, 1e-9)).rounded())
-            let label = context.resolve(Text(formatFrames(frames)).font(.system(size: 9, weight: .semibold).monospacedDigit())
-                .foregroundColor(.white))
-            let labelSize = label.measure(in: CGSize(width: 200, height: band.height))
-            if labelSize.width + 12 < band.width {
-                context.draw(label, at: CGPoint(x: band.midX, y: band.midY), anchor: .center)
-            }
-            let isSelected = transition.id == selectedTransitionID
-            let handleWidth: CGFloat = 3
-            if band.width > 12 {
-                for x in [band.minX + 1, band.maxX - 1 - handleWidth] {
-                    let handle = CGRect(x: x, y: band.minY + 2, width: handleWidth, height: band.height - 4)
-                    context.fill(Path(roundedRect: handle, cornerRadius: 1), with: .color(.white.opacity(isSelected ? 0.95 : 0.6)))
-                }
-            }
-            context.stroke(shape, with: .color(isSelected ? .white : .black.opacity(0.4)), lineWidth: isSelected ? 2 : 1)
-        }
-    }
-
-    /// Drop feedback for a transition dragged from the panel: the cut is highlighted with the
-    /// band the transition would get (green) or in red when it cannot take one, with the reason.
+    /// Drop feedback for a transition dragged from the Effects tab: the cut or clip edge it would
+    /// go on is highlighted on lane 0 with the span it would get (green), or in red when it cannot
+    /// take one, with the reason.
     private func drawDropTarget(_ target: TimelineGestureController.TransitionDropTarget,
                                 in context: inout GraphicsContext, size: CGSize) {
         guard let layout = model.layout(forTrack: target.trackID) else { return }
-        let rowTop = layout.y - model.scrollY
+        let top = layout.y - model.scrollY
         let color: Color = target.allowed ? .green : .red
         let cutX = model.x(forTime: target.cut)
-        context.stroke(Path { $0.move(to: CGPoint(x: cutX, y: rowTop)); $0.addLine(to: CGPoint(x: cutX, y: rowTop + layout.height)) },
+        context.stroke(Path { $0.move(to: CGPoint(x: cutX, y: top)); $0.addLine(to: CGPoint(x: cutX, y: top + layout.height)) },
                        with: .color(color), lineWidth: 2)
-        if target.allowed {
+        if target.allowed, let lane = model.laneRect(track: target.trackID, lane: 0, width: size.width) {
             let x0 = model.x(forTime: target.start)
             let x1 = model.x(forTime: target.end)
-            let band = CGRect(x: x0, y: rowTop + 1, width: max(4, x1 - x0), height: TimelineViewModel.transitionStripHeight - 2)
+            let band = CGRect(x: x0, y: lane.minY + 1, width: max(4, x1 - x0), height: lane.height - 2)
             context.fill(Path(roundedRect: band, cornerRadius: 3), with: .color(color.opacity(0.45)))
             context.stroke(Path(roundedRect: band, cornerRadius: 3), with: .color(color), lineWidth: 1.5)
         }
-        let text = target.message.isEmpty ? "\(target.kind.title) · \(formatFrames(target.frames))" : target.message
-        let label = context.resolve(Text(text).font(.system(size: 10, weight: .medium)).foregroundColor(.white))
-        let textSize = label.measure(in: CGSize(width: 360, height: 60))
-        var box = CGRect(x: cutX + 8, y: rowTop + TimelineViewModel.transitionStripHeight + 2,
-                         width: textSize.width + 10, height: textSize.height + 4)
-        if box.maxX > size.width { box.origin.x = max(0, cutX - box.width - 8) }
-        context.fill(Path(roundedRect: box, cornerRadius: 4), with: .color((target.allowed ? Color.black : Color.red).opacity(0.8)))
-        context.draw(label, at: CGPoint(x: box.midX, y: box.midY), anchor: .center)
+        let text = target.message.isEmpty ? "\(target.title) · \(formatFrames(target.frames))" : target.message
+        drawNote(text, at: CGPoint(x: cutX + 8, y: top + 2), color: target.allowed ? .black : .red, in: &context,
+                 size: size)
     }
 }
 

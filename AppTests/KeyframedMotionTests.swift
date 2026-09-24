@@ -1036,7 +1036,7 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertEqual(rect.minX, 4 * 80 - 40, accuracy: 1e-9)
         XCTAssertEqual(rect.maxX, timeline.x(forTime: 6), accuracy: 1e-9)
         XCTAssertEqual(rect.minY, row.y - timeline.scrollY)
-        XCTAssertEqual(rect.height, row.height)
+        XCTAssertEqual(rect.height, row.rowHeight)
         XCTAssertNil(KenBurnsBandView.rect(for: KenBurnsBandRange(clipID: 9999, start: 0, end: 1), in: timeline))
 
         // Hidden when the helper closes: Cancel, Apply, and a selection that drops the clip.
@@ -1211,52 +1211,5 @@ final class KeyframedMotionTests: XCTestCase {
         XCTAssertTrue(store.engine.removeClips([NSNumber(value: d)]).ok)
         XCTAssertNil(model.next)
         XCTAssertFalse(model.leadsIntoNext)
-    }
-
-    // MARK: Add Motion Keyframe and the timeline's markers (inert)
-
-    func testControlKIsAddMotionKeyframe() {
-        XCTAssertEqual(KeyboardController.action(keyCode: 40, characters: "k", modifiers: .control), .toggleMotionKeyframes)
-        XCTAssertEqual(KeyboardController.action(keyCode: 40, characters: "k", modifiers: []), .shuttleStop)
-        XCTAssertNil(KeyboardController.action(keyCode: 40, characters: "k", modifiers: .command), "Split: the menu's")
-        XCTAssertNil(KeyboardController.action(keyCode: 40, characters: "k", modifiers: [.control, .shift]))
-        XCTAssertFalse(KeyboardController.Action.toggleMotionKeyframes.isTransportOrCancel, "editor window only")
-    }
-
-    func testAddMotionKeyframeIsRefusedWithTheReasonAndItsMenuItemsAreDisabled() async throws {
-        let id = try await placedClip()
-        store.playheadTime = frames(10)
-        let changes = store.changeCount
-        KeyboardController(store: store).perform(.toggleMotionKeyframes, on: store)
-        XCTAssertEqual(store.statusMessage, InspectorModel.keyframesMovedMessage)
-        XCTAssertEqual(store.changeCount, changes)
-        XCTAssertTrue(try clip(id).spans.isEmpty)
-        XCTAssertFalse(store.hasAllMotionKeyframesAtPlayhead(try clip(id)))
-        XCTAssertFalse(store.motionKeyframeMenuState(at: frames(10)).enabled)
-
-        // The timeline's context menu has the item, disabled like the Clip menu's.
-        store.selection = []
-        let gestures = TimelineGestureController(store: store)
-        let model = store.timelineModel
-        let row = try XCTUnwrap(model.layout(forTrack: try clip(id).trackID))
-        let items = gestures.contextMenuItems(at: CGPoint(x: model.x(forTime: 1), y: row.y + 20))
-        let add = try XCTUnwrap(items.first { $0.title == "Add Motion Keyframe  ⌃K" })
-        XCTAssertFalse(add.isEnabled)
-    }
-
-    func testClipsHaveNoKeyframeMarkersEvenWithMotionSpans() async throws {
-        let id = try await placedClip()
-        XCTAssertEqual(store.timelineModel.clip(id: id)?.keyframes, [])
-        try kenBurns(id, start: VEMotionFraming(x: 0, y: 0, scale: 1), end: VEMotionFraming(x: 0, y: 0, scale: 2),
-                     interpolation: .linear)
-        XCTAssertEqual(store.timelineModel.clip(id: id)?.keyframes, [], "spans are drawn on lanes (next round)")
-        let center = CGPoint(x: 20, y: 66 + 64 - 4)
-        XCTAssertEqual(store.timelineModel.hitTest(center), .clipBody(id))
-        // A press there drags the clip as usual.
-        let gestures = TimelineGestureController(store: store)
-        gestures.changed(location: center, startLocation: center, modifiers: [])
-        gestures.changed(location: CGPoint(x: center.x + 50, y: center.y), startLocation: center, modifiers: [])
-        gestures.ended()
-        XCTAssertEqual(try clip(id).timelineStart, frames(30), "50 pt at 50 pt/s: a second")
     }
 }

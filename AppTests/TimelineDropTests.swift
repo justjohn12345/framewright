@@ -66,8 +66,16 @@ final class TimelineDropTests: XCTestCase {
             XCTAssertFalse(declared.isDynamic)
         }
         XCTAssertEqual(Set(TimelineDropDelegate.types),
-                       Set([.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade]
-                           + MediaDrop.types), "in-app types, and media files and file promises (Photos)")
+                       Set([.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade,
+                            .framewrightFadeEffect, .framewrightGainEffect] + MediaDrop.types),
+                       "in-app types, and media files and file promises (Photos)")
+        for kind in EffectKind.allCases {
+            let provider = NSItemProvider()
+            provider.register(EffectReference(kind: kind))
+            XCTAssertTrue(provider.hasItemConformingToTypeIdentifier(kind.contentType.identifier))
+            let declared = try XCTUnwrap(UTType(kind.contentType.identifier))
+            XCTAssertTrue(declared.isDeclared, "\(kind.contentType.identifier) is declared in Info.plist")
+        }
     }
 
     func testATransitionDroppedOnACutIsAdded() async throws {

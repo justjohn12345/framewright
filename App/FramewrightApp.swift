@@ -119,7 +119,7 @@ struct AppCommands: Commands {
             Button("Delete  ⌫") { store.deleteSelection(ripple: false) }
                 .disabled(!store.canDelete)
             Button("Delete Transition Only  ⌥⌫") { store.deleteSelectedTransitionOnly() }
-                .disabled(store.focusArea != .timeline || !store.selection.isEmpty || store.selectedTransitionID == nil)
+                .disabled(store.focusArea != .timeline || store.selectedTransitionID == nil)
             Button("Ripple Delete  ⇧⌫") { store.deleteSelection(ripple: true) }
                 .disabled(store.focusArea != .timeline || store.selection.isEmpty)
             Divider()
@@ -136,8 +136,10 @@ struct AppCommands: Commands {
             Button("Transition Duration…") { store.editTransitionDuration() }
                 .disabled(store.selectedTransitionID == nil)
             Divider()
-            // Control-K is handled by KeyboardController (like Delete), so a text field keeps it.
-            MotionKeyframeMenuItem(store: store, playhead: store.playhead)
+            // Control-K is handled by KeyboardController (like Delete), so a text field keeps it. The
+            // command refuses with the reason when there is no clip under the playhead.
+            Button("Add Motion Span at Playhead  ⌃K") { store.addMotionSpanAtPlayhead() }
+                .disabled(store.isGestureActive)
             Divider()
             Button("Raise Gain 1 dB  ]") { store.nudgeGain(1) }
                 .disabled(store.selection.isEmpty)
@@ -216,19 +218,5 @@ struct AppCommands: Commands {
     private static func textFieldCan(undo: Bool) -> Bool {
         guard let text = NSApp.keyWindow?.firstResponder as? NSTextView, let manager = text.undoManager else { return false }
         return undo ? manager.canUndo : manager.canRedo
-    }
-}
-
-/// Clip > Add (or Remove) Motion Keyframe: observes the playhead, so its title says what Control-K
-/// does on the frame under it, and it is disabled while the playhead is off the clip. Its own view,
-/// so the playhead moving re-evaluates this item only, not the whole menu bar.
-struct MotionKeyframeMenuItem: View {
-    @ObservedObject var store: ProjectStore
-    @ObservedObject var playhead: PlayheadModel
-
-    var body: some View {
-        let state = store.motionKeyframeMenuState(at: playhead.time)
-        Button(state.title) { store.toggleMotionKeyframes() }
-            .disabled(!state.enabled)
     }
 }

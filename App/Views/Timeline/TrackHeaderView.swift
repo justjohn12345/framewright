@@ -1,31 +1,67 @@
 import SwiftUI
 import FramewrightEngine
 
-/// Header of one track row: collapse toggle (empty tracks only), name, target indicator,
-/// mute/solo/lock toggles.
+/// Header of one track row: the disclosure (an empty track collapses its row, a track with clips
+/// its lanes), name, target indicator, mute/solo/lock toggles, and below them the names of the
+/// lanes shown (Transitions for lane 0, Effects 1-3).
 struct TrackHeaderView: View {
     @ObservedObject var store: ProjectStore
     let track: TimelineViewModel.Track
+    /// The row and its lanes.
     let height: CGFloat
+    /// The row of clips.
+    var rowHeight: CGFloat? = nil
+
+    /// The disclosure's state: collapsed (pointing right) or expanded.
+    private var isCollapsed: Bool { track.isEmpty ? track.collapsed : track.lanesCollapsed }
+
+    private var disclosureHelp: String {
+        if track.isEmpty {
+            return track.collapsed ? "Expand track \(track.name)" : "Collapse the empty track \(track.name)"
+        }
+        return track.lanesCollapsed ? "Show the lanes of track \(track.name) (transitions and effect spans)"
+            : "Hide the lanes of track \(track.name)"
+    }
 
     private var isTarget: Bool {
         track.kind == .video ? store.targetVideoTrackID == track.id : store.targetAudioTrackID == track.id
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            controls
+                .frame(height: rowHeight ?? height)
+            ForEach(track.lanes, id: \.self) { lane in
+                Text(lane == 0 ? "Transitions" : "Effects \(lane)")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 22)
+                    .frame(height: TimelineViewModel.laneHeight)
+                    .background(Color.primary.opacity(lane == 0 ? 0.07 : 0.045))
+            }
+        }
+        .frame(height: height, alignment: .top)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .contextMenu {
+            Button("Delete Track \(track.name)") {
+                store.report(store.engine.removeTrack(track.id))
+            }
+        }
+    }
+
+    private var controls: some View {
         HStack(spacing: 4) {
             Button {
-                store.setTrack(track.id, collapsed: !track.collapsed)
+                store.toggleDisclosure(ofTrack: track.id)
             } label: {
-                Image(systemName: track.collapsed ? "chevron.right" : "chevron.down")
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(track.isEmpty ? Color.secondary : Color.secondary.opacity(0.35))
+                    .foregroundStyle(Color.secondary)
                     .frame(width: 12, height: 18)
             }
             .buttonStyle(.plain)
-            .disabled(!track.isEmpty && !track.collapsed)
-            .help(track.collapsed ? "Expand track \(track.name)"
-                : track.isEmpty ? "Collapse the empty track \(track.name)" : "Only empty tracks collapse")
+            .help(disclosureHelp)
             .accessibilityIdentifier("TrackCollapse.\(track.name)")
             Button {
                 if track.kind == .video {
@@ -57,13 +93,6 @@ struct TrackHeaderView: View {
             }
         }
         .padding(.horizontal, 6)
-        .frame(height: height)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .contextMenu {
-            Button("Delete Track \(track.name)") {
-                store.report(store.engine.removeTrack(track.id))
-            }
-        }
     }
 
     private func toggle(isOn: Bool, on: String, off: String, help: String, action: @escaping () -> Void) -> some View {

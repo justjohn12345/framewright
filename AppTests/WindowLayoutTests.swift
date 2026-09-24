@@ -257,7 +257,7 @@ final class WindowLayoutTests: XCTestCase {
         // A clip placed on the collapsed track shows it at full height again.
         try fixture.placeMovie(movie, at: 3, track: v2)
         XCTAssertFalse(store.isTrackCollapsed(v2))
-        XCTAssertEqual(store.timelineModel.trackLayouts.first { $0.track.id == v2 }?.height,
+        XCTAssertEqual(store.timelineModel.trackLayouts.first { $0.track.id == v2 }?.rowHeight,
                        TimelineViewModel.videoTrackHeight)
         store.setTrack(v2, collapsed: false)
         XCTAssertFalse(store.collapsedTrackIDs.contains(v2))

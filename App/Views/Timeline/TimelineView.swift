@@ -13,50 +13,37 @@ import FramewrightEngine
 /// semantics), dragging within 8 pt of a clip edge trims it. Every drag is one coalesced undo
 /// step, committed on release; Escape cancels it. Dragging in the ruler scrubs the program
 /// monitor (silently; the frame shows as soon as it decodes), and so does dragging the playhead
-/// line in the track area (press on empty space next to it, or anywhere with Option held; see
-/// `TimelineGestureController`). A press anywhere gives the timeline the keyboard focus (a text
-/// field that had it ends editing). Media dropped from the bin lands
-/// at the drop position and row (overwrite; hold Command to insert). Scroll to pan,
-/// Option/Command-scroll to zoom.
+/// line in the track area (press on empty space next to it, or anywhere but a lane with Option
+/// held). A press anywhere gives the timeline the keyboard focus (a text field that had it ends
+/// editing). Media dropped from the bin lands at the drop position and row (overwrite; hold
+/// Command to insert). Scroll to pan, Option/Command-scroll to zoom.
 ///
-/// Transitions are bands across their cut at the top of the row, labelled with their duration:
-/// click selects (Delete removes it with its linked transition, Option-Delete only it; a right-click
-/// offers both), double-click edits the duration in the inspector), dragging an
-/// edge resizes symmetrically about the cut (whole frames, bounded by the media beyond the cut,
-/// which the status line names when the drag reaches it; the linked transition follows unless the
-/// Transition inspector's "Also change the linked transition" is off). Transitions dragged from
-/// the Effects tab highlight the cut they would land on (red, with the reason, when it cannot
-/// take one). Audio clips show their volume envelope over the waveform: a fade handle in each top
-/// corner (drag to set the fade, never overlapping the other) and the gain line (drag vertically;
-/// Option for fine steps; the value shows next to the pointer). Every such drag is one undo step.
-///
-/// Corner zones of audio clips: the top 16 pt of a row hold the transition strip, the clip's name
-/// label and the fade handles at once. Priority is transition band, then fade handle, then clip
-/// edge, gain line and body, so a press within `fadeHandleHitRadius` of a handle in the top
-/// `fadeHandleZoneHeight` points grabs the handle (dragging the first points of a label that
-/// starts at a zero-length fade adjusts the fade-in instead of moving the clip, as in Premiere).
-/// On a clip narrower than `narrowClipWidth` the handle zone is only
-/// `narrowFadeHandleZoneHeight` points tall (hit testing only; the handles are drawn the same),
-/// so most of a small clip's label still selects and moves it.
-///
-/// Video clips with Motion keyframes show a diamond along their bottom edge for every frame that
-/// shows a keyframe (where the keyframe plays with the clip's speed); clicking one moves the
-/// playhead to that frame (and selects the clip), dragging it sideways moves its keyframes (every
-/// parameter keyed on that frame, together) to another frame between their neighbours, one undo
-/// step (Escape cancels). The clip is moved by dragging its body above the markers.
-///
-/// While the Ken Burns helper is open, the clip it edits shows the move's range as an accent band
-/// with a green start edge and a red end edge (the rectangles' colours), following the range as it
-/// changes (`KenBurnsBandView`).
+/// Lanes (see `TimelineViewModel`): under each track with clips, lane 0 (its transitions: cross
+/// dissolves / crossfades across a cut, fades from and to black or silence; shown while it has one
+/// or a transition is dragged over the timeline) and its effect lanes 1-3 (Motion and Fade spans on
+/// video, Gain spans on audio; the lanes in use plus one empty lane). The disclosure in a track's
+/// header collapses its lanes (an empty track's row instead). A span is a bar with its kind's icon
+/// and name: click selects it (the inspector shows it; a Motion span opens the Ken Burns editor on
+/// the program monitor), drag it to move it within its clip, drag an edge to trim it (both snap to
+/// the playhead, the cuts and the other spans' edges; one undo step, Escape cancels), Delete removes
+/// it, right-click offers Set Interpolation, Move to Lane and Remove. A range drag on an empty
+/// effect lane over a clip creates a span there (Motion on video, with Option a Fade, Gain on audio).
+/// Transitions are bars on lane 0 across their cut (the cut marked), labelled with their duration:
+/// each edge drags on its own (the share of each side of the cut; dragging a dissolve's end onto its
+/// clip's end makes it a fade out), the bar slides the split, double-click edits the duration in
+/// the inspector, Delete removes it with its linked transition (Option-Delete only it). Transitions
+/// dragged from the Effects tab show lane 0 and highlight the cut or free clip edge they would land
+/// on (red, with the reason, when it cannot take one); the Fade and Gain effects drop onto an
+/// effect lane. Audio clips show their volume envelope over the waveform (the gain line: drag
+/// vertically; Option for fine steps; the value shows next to the pointer).
 ///
 /// Durations (transition labels, drop feedback) follow Settings > Editing > "Show durations as"
 /// and re-format as soon as it changes (`ProjectStore.preferences`).
 ///
-/// Redraw budget: the canvas depends on the model (`ProjectStore`, rebuilt once per model change),
-/// the viewport and the Editing preferences, never on the playhead. The playhead line, the ruler
-/// marker and the timecode are overlays observing `PlayheadModel` alone, so playback at the
-/// display rate does not redraw the clips; the Ken Burns band observes `KenBurnsTimelineBand`
-/// alone, so a range moving with the playhead or with typing does not either.
+/// Redraw budget: the canvas depends on the model (`ProjectStore`, rebuilt once per model change,
+/// lane collapse or transition lane reveal), the viewport and the Editing preferences, never on the
+/// playhead. The playhead line, the ruler marker and the timecode are overlays observing
+/// `PlayheadModel` alone, so playback at the display rate does not redraw the clips.
 struct TimelineView: View {
     @ObservedObject var store: ProjectStore
     @ObservedObject var viewport: TimelineViewport
@@ -183,7 +170,7 @@ struct TimelineView: View {
         ZStack(alignment: .topLeading) {
             Color(nsColor: .windowBackgroundColor)
             ForEach(model.trackLayouts, id: \.track.id) { layout in
-                TrackHeaderView(store: store, track: layout.track, height: layout.height)
+                TrackHeaderView(store: store, track: layout.track, height: layout.height, rowHeight: layout.rowHeight)
                     .offset(y: layout.y - model.scrollY)
             }
         }
@@ -195,10 +182,11 @@ struct TimelineView: View {
     private func trackArea(_ model: TimelineViewModel) -> some View {
         let renderer = TimelineRenderer(
             model: model, selection: store.selection,
-            selectedTransitionID: store.selectedTransitionID,
+            selectedSpanID: store.selectedSpanID,
             targetTrackIDs: [store.targetVideoTrackID, store.targetAudioTrackID], assets: store.assetsByID,
             thumbnails: thumbnails, waveforms: waveforms, snapTime: store.snapIndicator, marquee: gestures.marquee,
-            gainTooltip: gestures.gainTooltip, transitionDrop: gestures.transitionDrop,
+            gainTooltip: gestures.gainTooltip, transitionDrop: gestures.transitionDrop, effectDrop: gestures.effectDrop,
+            creation: gestures.creation,
             formatFrames: { [frameDuration = store.frameDuration, display = store.editingPreferences.durationDisplay] in
                 DurationFormat.shortString(frames: $0, frameDuration: frameDuration, display: display)
             }
@@ -399,7 +387,7 @@ struct KenBurnsBandView: View {
         }
         let x0 = model.x(forTime: range.start)
         let x1 = model.x(forTime: range.end)
-        return CGRect(x: x0, y: row.y - model.scrollY, width: max(1, x1 - x0), height: row.height)
+        return CGRect(x: x0, y: row.y - model.scrollY, width: max(1, x1 - x0), height: row.rowHeight)
     }
 
     private static func draw(_ rect: CGRect, in context: inout GraphicsContext) {
@@ -436,17 +424,19 @@ extension DropInfo: TimelineDropInfo {}
 
 /// Drops on the track area: media from the bin (placed at the drop point, overwrite; hold
 /// Command to insert), media files from the Finder and file promises from Photos (imported, then
-/// placed there once they have arrived; `MediaDrop`, `IncomingMedia`) and transitions from the
-/// Effects tab (added on the nearest cut; the cut is highlighted while dragging, in red with the
-/// reason when it cannot take one). A transition is recognised by its exported content type
-/// (`TransitionKind.contentType`, declared in Info.plist), which the Effects tab's drag source
-/// (`TransitionReference`) provides; the payload itself is not read. The `handle...` methods take
+/// placed there once they have arrived; `MediaDrop`, `IncomingMedia`), transitions from the
+/// Effects tab (on lane 0: across the nearest cut, or a fade at a free clip end or start; lane 0 is
+/// shown and the target highlighted while dragging, in red with the reason when it cannot take
+/// one) and the Effects tab's Fade and Gain effects (a span on the effect lane under the pointer,
+/// or the first one with room). A transition or an effect is recognised by its exported content
+/// type (`TransitionKind.contentType`, `EffectKind.contentType`, declared in Info.plist), which the
+/// Effects tab's drag sources provide; the payload itself is not read. The `handle...` methods take
 /// any `TimelineDropInfo`, so the drop logic is tested without a real drag (which only a person or
 /// a UI test can perform).
 @MainActor
 struct TimelineDropDelegate: DropDelegate {
-    static let types: [UTType] = [.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade]
-        + MediaDrop.types
+    static let types: [UTType] = [.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade,
+                                  .framewrightFadeEffect, .framewrightGainEffect] + MediaDrop.types
 
     let gestures: TimelineGestureController
     @Binding var isAssetTargeted: Bool
@@ -455,6 +445,10 @@ struct TimelineDropDelegate: DropDelegate {
 
     static func transitionKind(_ info: some TimelineDropInfo) -> TransitionKind? {
         TransitionKind.allCases.first { info.hasItemsConforming(to: [$0.contentType]) }
+    }
+
+    static func effectKind(_ info: some TimelineDropInfo) -> EffectKind? {
+        EffectKind.allCases.first { info.hasItemsConforming(to: [$0.contentType]) }
     }
 
     func validateDrop(info: DropInfo) -> Bool { handleValidate(info) }
@@ -470,18 +464,25 @@ struct TimelineDropDelegate: DropDelegate {
     }
 
     func handleEntered(_ info: some TimelineDropInfo) {
-        if Self.transitionKind(info) == nil { isAssetTargeted = true }
+        if Self.transitionKind(info) == nil, Self.effectKind(info) == nil { isAssetTargeted = true }
     }
 
     func handleUpdated(_ info: some TimelineDropInfo) -> DropProposal? {
-        guard let kind = Self.transitionKind(info) else { return DropProposal(operation: .copy) }
-        let target = gestures.transitionDragUpdated(kind: kind, at: info.location)
-        return DropProposal(operation: target?.allowed == true ? .copy : .forbidden)
+        if let kind = Self.transitionKind(info) {
+            let target = gestures.transitionDragUpdated(kind: kind, at: info.location)
+            return DropProposal(operation: target?.allowed == true ? .copy : .forbidden)
+        }
+        if let kind = Self.effectKind(info) {
+            let target = gestures.effectDragUpdated(kind: kind, at: info.location)
+            return DropProposal(operation: target?.allowed == true ? .copy : .forbidden)
+        }
+        return DropProposal(operation: .copy)
     }
 
     func handleExited(_ info: some TimelineDropInfo) {
         isAssetTargeted = false
         gestures.transitionDragExited()
+        gestures.effectDragExited()
     }
 
     /// `dragContents`: the drag pasteboard's files and promises (a real drop); see `MediaDrop`.
@@ -490,6 +491,9 @@ struct TimelineDropDelegate: DropDelegate {
         isAssetTargeted = false
         if let kind = Self.transitionKind(info) {
             return gestures.dropTransition(kind: kind, at: info.location)
+        }
+        if let kind = Self.effectKind(info) {
+            return gestures.dropEffect(kind: kind, at: info.location)
         }
         guard let provider = info.itemProviders(for: [.framewrightAssetReference]).first else {
             guard MediaDrop.accepts(info) else { return false }
