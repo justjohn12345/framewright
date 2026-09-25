@@ -275,6 +275,17 @@ final class KenBurnsEditorTests: XCTestCase {
         XCTAssertEqual(model.end.center.y, -216, accuracy: 1e-6)
         XCTAssertEqual(try span(id).endValues.x, 1920 + 384 - 960, accuracy: 1e-6)
         XCTAssertEqual(try span(id).endValues.y, -216 - 540, accuracy: 1e-6)
+        // A box placed further out (typed in the inspector) is not pulled in by a drag's first step:
+        // it moves by the drag, and back towards the frame freely.
+        store.inspector.commitSpanValue(.positionX, atEnd: true, "3000")
+        XCTAssertEqual(model.end.center.x, 3960, accuracy: 1e-6)
+        let far = model.end
+        model.applyDrag(.body(.end), origin: far, translation: CGSize(width: 10, height: 0))
+        XCTAssertEqual(model.end.center.x, 3960, accuracy: 1e-6, "no further out")
+        model.applyDrag(.body(.end), origin: far, translation: CGSize(width: -40, height: 0))
+        XCTAssertEqual(model.end.center.x, 3920, accuracy: 1e-6, "no jump: 40 px back in")
+        model.endDrag()
+        XCTAssertEqual(try span(id).endValues.x, 2960, accuracy: 1e-6)
         // A corner pulled past the centre stops at the smallest box (2 % of the frame's width), one
         // pulled far out at ten frames.
         model.applyDrag(.corner(.end, .bottomRight), origin: model.end,
