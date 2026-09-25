@@ -6,6 +6,7 @@
 // the hold after each span) evaluated at the source time the frame shows, so an edit that shifted,
 // stretched or re-evaluated a span by a frame, or lost a hold, would show.
 
+#include "../../Engine/Facade/VEFacadeCommands+Internal.h"
 #include "../Model/SpanReference.h"
 #include "EditTestSupport.h"
 
@@ -278,3 +279,71 @@ TEST_CASE("Span pictures: a still's spans keep their timeline places through a h
         CHECK(close(motionValuesAt(fx.clip(still), f30(f)).scale, reference(f, 70)));
     }
 }
+
+TEST_CASE("Span pictures: a split between and inside two chained spans on one lane keeps every frame") {
+    // The review's test gap 4: lane 1 holds the move [1.5 s, 3.5 s) and, after it, a chained span
+    // [3.6 s, 3.9 s) (x 0 -> -50, scale 1 -> 0.9) that applies on top of the move's held end.
+    auto reference = [](double s) {
+        VideoParams v = referenceMove(s);
+        v.x += referenceHeldSpanValue(3.6, 3.9, 0, -50, KI::Linear, s).value_or(0);
+        v.scale *= referenceHeldSpanValue(3.6, 3.9, 1, 0.9, KI::Linear, s).value_or(1);
+        return v;
+    };
+    for (const std::int64_t at : {20, 76, 78, 80, 87}) {
+        CAPTURE(at);
+        Moving fx;
+        SpanTracks nudge;
+        nudge.x = rampTrack(0, -50, CMTimeMake(3, 10));
+        nudge.scale = rampTrack(1, 0.9, CMTimeMake(3, 10));
+        const SpanId chained = fx.addSpan(fx.v, SpanKind::Motion, 1, CMTimeMake(36, 10), CMTimeMake(39, 10), nudge);
+        fx.requireValid();
+        SplitClip split(fx.seq, fx.v, f30(at));
+        const EditResult r = applyReversible(fx.project, split);
+        CHECK(r.droppedSpanIds.empty());
+        const ClipId right = split.createdClipIds()[0];
+        int checked = 0;
+        for (const ClipId id : {fx.v, right}) {
+            const Clip &clip = fx.clip(id);
+            const auto [first, last] = framesOf(clip);
+            for (std::int64_t f = first; f < last; ++f) {
+                const auto source = clip.exactSourceTimeAt(f30(f));
+                REQUIRE(source.has_value());
+                const VideoParams want = reference(source->toDouble());
+                const VideoParams shown = motionValuesAt(clip, f30(f));
+                INFO("clip " << id.value() << " frame " << f);
+                CHECK(close(shown.x, want.x));
+                CHECK(close(shown.scale, want.scale));
+                CHECK(close(shown.opacity, want.opacity));
+                ++checked;
+            }
+        }
+        CHECK(checked == 90);
+        // The right piece keeps whatever of the chained span is after the cut (its left part's id
+        // stays on the left when the cut divides it); what lay wholly before it folded into statics.
+        const bool divided = at > 78 && at < 87;
+        CHECK((fx.clip(fx.v).findSpan(chained) != nullptr) == (at > 78));
+        CHECK(fx.clip(right).spans.empty() == (at >= 87));
+        if (at >= 76) {
+            CHECK(fx.clip(right).video.x == 12 + 200 + (at >= 87 ? -50 : 0));
+        }
+        if (divided) {
+            CHECK(fx.clip(right).findSpan(chained) == nullptr);
+            CHECK(fx.clip(right).spans.size() == 1u);
+        }
+    }
+}
+
+TEST_CASE("Span pictures: moving a clip onto a clip with spans keeps the frames left of it (MoveClips)") {
+    // The review's test gap 4: a clip dragged (the facade's MoveClips) from V2 onto the middle of
+    // the moving clip on V1 overwrites frames 30-50 of it; the two pieces left show exactly what
+    // they showed, the right one with the move's held values where it lies after them.
+    Moving fx;
+    const ClipId other = fx.addClip(fx.v2, fx.av30, 0, 20, 1500);
+    fx.requireValid();
+    facade::MoveClips move(fx.seq, {other}, f30(30), -1, TrackKind::Video);
+    const EditResult r = applyReversible(fx.project, move);
+    CHECK(r.droppedSpanIds.empty());
+    CHECK(fx.sequence().findClip(other)->timelineStart == f30(30));
+    CHECK(fx.checkPictures() == 70);
+}
+

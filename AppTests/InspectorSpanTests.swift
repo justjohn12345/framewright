@@ -125,6 +125,37 @@ final class InspectorSpanTests: XCTestCase {
         XCTAssertEqual(inspector.message, "“big” is not a valid scale in %.")
     }
 
+    /// The review's test gap 4: over a base of scale 0 (the clip's static scale is 0) the engine
+    /// reports the base as 0, and a typed scale or a Ken Burns drag is refused with the reason (a
+    /// factor over 0 shows 0 whatever it is); a position still takes.
+    func testAScaleOverABaseOfZeroIsRefusedWithTheReason() async throws {
+        let clip = try await longClip()
+        XCTAssertTrue(store.engine.setVideoParams(VEVideoParams(x: 10, y: 0, scale: 0, rotationDegrees: 0, opacity: 1),
+                                                  forClip: clip).ok)
+        let id = try addSpan(.motion, lane: 1, clip: clip, 0, 60, startValues: values(scale: 1), endValues: values(scale: 2))
+        var base = VESpanValuesUnchanged()
+        XCTAssertTrue(try XCTUnwrap(store.clips[clip]).getBaseValues(&base, underSpan: id, atEnd: true,
+                                                                     frameDuration: store.frameDuration))
+        XCTAssertEqual(base.scale, 0)
+        XCTAssertEqual(base.x, 10)
+        store.select(span: id)
+        let changes = store.changeCount
+        inspector.commitSpanValue(.scale, atEnd: true, "150 %")
+        XCTAssertEqual(store.changeCount, changes, "refused")
+        XCTAssertEqual(try span(id).endValues.scale, 2, accuracy: 1e-12)
+        XCTAssertTrue(inspector.message?.hasPrefix("The rest of the clip has scale 0 here") == true, inspector.message ?? "")
+        inspector.commitSpanValue(.positionX, atEnd: true, "30")
+        XCTAssertEqual(try span(id).endValues.x, 20, accuracy: 1e-12, "30 px over the static 10")
+        // The Ken Burns editor refuses a drag with the note, and writes nothing.
+        let model = try XCTUnwrap(store.kenBurns)
+        let before = store.changeCount
+        model.applyDrag(.corner(.end, .bottomRight), origin: model.end, translation: CGSize(width: -100, height: 0),
+                        location: CGPoint(x: model.end.maxX - 100, y: model.end.maxY - 56))
+        model.endDrag()
+        XCTAssertEqual(store.changeCount, before)
+        XCTAssertEqual(model.note, "The rest of the clip has scale 0 here, so the move cannot change what it shows.")
+    }
+
     func testOpacityAndGainValuesAreAbsolute() async throws {
         let clip = try await longClip()
         XCTAssertTrue(store.engine.setVideoParams(VEVideoParams(x: 0, y: 0, scale: 1, rotationDegrees: 0, opacity: 0.8),

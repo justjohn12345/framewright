@@ -454,6 +454,46 @@ final class KenBurnsEditorTests: XCTestCase {
         XCTAssertFalse(store.kenBurns?.leadsIntoNext ?? true)
     }
 
+    /// The review's test gap 1 (the removed speed test had no replacement): the picture under the
+    /// rectangles is the source frame at the playhead through the clip's speed, and a still shows
+    /// its one picture, pillarboxed as the compositor fits it.
+    func testThePictureFollowsTheSpeedAndAStillHasOnePicture() async throws {
+        let clip = try await longClip() // 300 frames
+        XCTAssertTrue(store.engine.setSpeed(2, forClip: clip).ok)
+        XCTAssertEqual(store.clips[clip]?.duration, frames(150))
+        let id = try motionSpan(clip, 30, 90)
+        store.select(span: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        model.setPlayhead(frames(60))
+        XCTAssertEqual(model.pictureFrame, frames(60))
+        XCTAssertEqual(model.pictureSeconds, 4, accuracy: 1e-9, "2 s into the clip at 2x: source second 4")
+        model.setPlayhead(frames(200))
+        XCTAssertEqual(model.pictureFrame, frames(89), "after the span: its last frame")
+        XCTAssertEqual(model.pictureSeconds, 89.0 / 15, accuracy: 1e-9)
+
+        // A portrait still (240x320 in a 1920x1080 frame).
+        let url = fixture.directory.appendingPathComponent("portrait.heic")
+        try TestMediaFactory.writeHEIC(to: url, width: 240, height: 320)
+        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([url]) { continuation.resume(returning: $0) }
+        }
+        let photo = try XCTUnwrap(imported.first)
+        XCTAssertTrue(photo.isStill)
+        let v2 = try XCTUnwrap(store.videoTracks.last).trackID
+        let still = try fixture.placeMovie(photo, at: 20, track: v2)
+        store.playheadTime = frames(600)
+        store.addMotionSpanAtPlayhead(clip: still)
+        let onStill = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(onStill.pictureSeconds, 0, "one picture")
+        onStill.setPlayhead(frames(650))
+        XCTAssertEqual(onStill.pictureSeconds, 0)
+        XCTAssertEqual(onStill.pictureBounds.width, 810, accuracy: 1e-9, "fitted to the frame's height")
+        XCTAssertEqual(onStill.pictureBounds.midX, 960, accuracy: 1e-9)
+        // The push in frames the still as the frame shows it (pillars and all), centred.
+        XCTAssertEqual(onStill.end.width, 1920 * ProjectStore.defaultPushInFraction, accuracy: 1e-6)
+        XCTAssertEqual(onStill.end.midX, 960, accuracy: 1e-6)
+    }
+
     // MARK: A clip placed smaller or off centre (review C1)
 
     /// A picture-in-picture clip (static scale 0.3 at the lower right): the editor frames the clip's

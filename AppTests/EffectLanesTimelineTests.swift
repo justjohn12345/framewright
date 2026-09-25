@@ -507,6 +507,60 @@ final class EffectLanesTimelineTests: XCTestCase {
         XCTAssertEqual(store.engine.spanInfo(fadeIn)?.start, .zero)
     }
 
+    /// The review's test gap 6: a linked dissolve and crossfade dragged asymmetrically through the
+    /// gesture keep the same shares; Escape in the middle of the drag puts both back, ignores the
+    /// rest of the gesture and leaves no undo step.
+    func testALinkedPairFollowsAnAsymmetricDragAndEscapeRevertsBoth() async throws {
+        store.resizesLinkedTransitions = true
+        let (movie, tone) = try await fixture.importMedia()
+        let a = try place(movie, at: 0, from: 0, to: 1, video: v1)
+        let b = try place(movie, at: 1, from: 1, to: 2, video: v1)
+        let sa = try place(tone, at: 0, from: 0, to: 1, audio: a1)
+        let sb = try place(tone, at: 1, from: 1, to: 2, audio: a1)
+        XCTAssertTrue(store.engine.linkClip(a, withClip: sa).ok)
+        XCTAssertTrue(store.engine.linkClip(b, withClip: sb).ok)
+        let added = store.engine.addTransition(fromClip: a, toClip: b, duration: frames(10),
+                                               options: [.includeLinked])
+        XCTAssertTrue(added.ok, added.message)
+        let dissolve = try XCTUnwrap(added.createdIDs.first?.int64Value)
+        let crossfade = try XCTUnwrap(store.engine.spanInfo(dissolve)?.linkedSpanID)
+        XCTAssertNotEqual(crossfade, 0)
+        store.refreshModel()
+        func shares(_ id: VESpanID) throws -> [Int64] {
+            let span = try XCTUnwrap(store.engine.spanInfo(id))
+            return [store.frames(span.shareBeforeCut), store.frames(span.shareAfterCut)]
+        }
+        let gestures = TimelineGestureController(store: store)
+        // The dissolve's end 10 pt right: 6 frames more after the cut, on both.
+        let end = try lanePoint(v1, lane: 0, at: 35.0 / 30)
+        drag(gestures, from: CGPoint(x: end.x - 1, y: end.y), to: [CGPoint(x: end.x + 9, y: end.y)])
+        XCTAssertEqual(try shares(dissolve), [5, 11])
+        XCTAssertEqual(try shares(crossfade), [5, 11], "the linked crossfade follows")
+        XCTAssertEqual(store.undoActionName, "Change Transitions", "one step for the pair")
+        let undoName = store.undoActionName
+        let changes = store.changeCount
+
+        // Its start 10 pt left, then Escape mid-drag: both back, the rest of the gesture ignored.
+        let start = try lanePoint(v1, lane: 0, at: 25.0 / 30)
+        drag(gestures, from: CGPoint(x: start.x + 1, y: start.y), to: [CGPoint(x: start.x - 9, y: start.y)], end: false)
+        XCTAssertEqual(try shares(dissolve), [11, 11])
+        XCTAssertEqual(try shares(crossfade), [11, 11])
+        XCTAssertTrue(store.isGestureActive)
+        store.cancelActiveGesture?()
+        XCTAssertEqual(try shares(dissolve), [5, 11])
+        XCTAssertEqual(try shares(crossfade), [5, 11])
+        gestures.changed(location: CGPoint(x: start.x - 20, y: start.y), startLocation: CGPoint(x: start.x + 1, y: start.y),
+                         modifiers: [])
+        XCTAssertEqual(try shares(dissolve), [5, 11], "the rest of the gesture is ignored")
+        gestures.ended()
+        XCTAssertFalse(store.isGestureActive)
+        XCTAssertEqual(store.undoActionName, undoName, "no undo step")
+        XCTAssertGreaterThanOrEqual(store.changeCount, changes)
+        store.undo()
+        XCTAssertEqual(try shares(dissolve), [5, 5])
+        XCTAssertEqual(try shares(crossfade), [5, 5], "the drag was one step for both")
+    }
+
     /// Audio crossfades and fades are lane-0 spans on the audio track, dragged like video ones.
     func testAudioFadesAreDraggedOnLaneZero() async throws {
         let (_, tone) = try await fixture.importMedia()
