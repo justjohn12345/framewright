@@ -134,6 +134,11 @@ final class KenBurnsModel: ObservableObject {
     /// A rectangle drag is in progress (its coalescing group is open).
     @Published private(set) var isDragging = false
 
+    /// The drag in progress was cancelled (Escape, Undo, or an edit that ended its group): the rest
+    /// of that gesture writes nothing, until it ends (`endDrag`, `gestureAbandoned`). Without it the
+    /// next movement of the same gesture would open a new group and the release commit it.
+    private(set) var dragCancelled = false
+
     /// The bases the span's values apply onto at its start and end, read when a drag starts.
     private var dragBase: (start: VESpanValues, end: VESpanValues)?
 
@@ -370,7 +375,7 @@ final class KenBurnsModel: ObservableObject {
     /// span's values inside it. A drag that has not moved changes nothing. Refused during another
     /// gesture (a timeline drag): nothing happens and the note says why.
     func applyDrag(_ target: KenBurnsHit.Target, origin: CGRect, translation: CGSize, location: CGPoint) {
-        guard translation != .zero else { return }
+        guard translation != .zero, !dragCancelled else { return }
         if !isDragging, !beginDrag() { return }
         let rect: CGRect
         switch target {
@@ -420,14 +425,18 @@ final class KenBurnsModel: ObservableObject {
         guard !result.ok else { return }
         note = result.message
         if result.errorCode == .busy {
-            // Another edit ended the group (committing what the drag did): the drag stops.
+            // Another edit ended the group (committing what the drag did): the drag stops, and the
+            // rest of the gesture is ignored.
             finishDrag()
+            dragCancelled = true
             readFramings()
         }
     }
 
-    /// The drag was released: its group ends (one undo step).
+    /// The drag was released: its group ends (one undo step). A cancelled drag's gesture ends here
+    /// too (the next gesture drags again).
     func endDrag() {
+        dragCancelled = false
         guard isDragging else { return }
         if store.engine.coalescingKey == Self.dragGroup {
             store.engine.endCoalescing()
@@ -436,14 +445,23 @@ final class KenBurnsModel: ObservableObject {
         readFramings()
     }
 
-    /// Escape (or Undo) mid-drag, or a drag the system abandoned: reverts what the drag did.
+    /// Escape (or Undo) mid-drag, or a drag the system abandoned: reverts what the drag did. The
+    /// rest of the gesture is ignored until it ends.
     func cancelDrag() {
         guard isDragging else { return }
         if store.engine.coalescingKey == Self.dragGroup {
             store.engine.cancelCoalescing()
         }
         finishDrag()
+        dragCancelled = true
         readFramings()
+    }
+
+    /// The gesture went away without a release (the system abandoned it): a drag in progress is
+    /// reverted, and a cancelled one's gesture is over.
+    func gestureAbandoned() {
+        cancelDrag()
+        dragCancelled = false
     }
 
     private func finishDrag() {

@@ -216,6 +216,8 @@ final class KenBurnsEditorTests: XCTestCase {
         XCTAssertEqual(model.end, pushIn)
         XCTAssertEqual(store.undoActionName, undoName)
         XCTAssertGreaterThanOrEqual(store.changeCount, changes)
+        model.endDrag() // the cancelled gesture's release
+        XCTAssertEqual(store.undoActionName, undoName)
         // A click without movement opens nothing.
         model.applyDrag(.body(.end), origin: pushIn, translation: .zero, location: .zero)
         XCTAssertFalse(model.isDragging)
@@ -231,6 +233,50 @@ final class KenBurnsEditorTests: XCTestCase {
         XCTAssertFalse(model.isDragging)
         XCTAssertEqual(model.note, "Finish the current drag first.")
         store.cancelActiveGesture = nil
+    }
+
+    /// Escape or Undo in the middle of a drag cancels the rest of that drag: the pointer moving on
+    /// before the release writes nothing and opens no new undo step (review H2).
+    func testMovementAfterACancelledDragChangesNothingUntilTheRelease() async throws {
+        let clip = try await longClip()
+        store.playheadTime = .zero
+        store.addMotionSpanAtPlayhead(clip: clip)
+        let model = try XCTUnwrap(store.kenBurns)
+        let id = model.spanID
+        let pushIn = model.end
+        let undoName = store.undoActionName
+        let before = try span(id)
+
+        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 60, height: 0), location: .zero)
+        XCTAssertTrue(model.isDragging)
+        store.cancelActiveGesture?() // Escape, or Cmd-Z through the store
+        XCTAssertFalse(model.isDragging)
+        XCTAssertFalse(store.isGestureActive)
+        // The same gesture moves on: nothing is written, no group opens.
+        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 120, height: 40), location: .zero)
+        model.applyDrag(.corner(.end, .topLeft), origin: pushIn, translation: CGSize(width: 30, height: 0),
+                        location: CGPoint(x: 400, y: 300))
+        XCTAssertFalse(model.isDragging)
+        XCTAssertNil(store.engine.coalescingKey)
+        XCTAssertEqual(try span(id).endValues.x, before.endValues.x, accuracy: 1e-12)
+        XCTAssertEqual(try span(id).endValues.scale, before.endValues.scale, accuracy: 1e-12)
+        XCTAssertEqual(model.end, pushIn)
+        model.endDrag() // the release
+        XCTAssertEqual(store.undoActionName, undoName, "no undo step")
+        XCTAssertEqual(try span(id).endValues.x, before.endValues.x, accuracy: 1e-12)
+        XCTAssertEqual(model.end, pushIn)
+        // The next gesture drags again.
+        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 100, height: 0), location: .zero)
+        model.endDrag()
+        XCTAssertEqual(try span(id).endValues.x, -125, accuracy: 1e-9)
+        XCTAssertEqual(store.undoActionName, "Change Span Values")
+        // A gesture the system abandons after a cancel (no release) also ends the cancelled state.
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 10, height: 0), location: .zero)
+        model.cancelDrag()
+        model.gestureAbandoned()
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 10, height: 0), location: .zero)
+        XCTAssertTrue(model.isDragging, "a new gesture after the abandoned one drags")
+        model.endDrag()
     }
 
     // MARK: Re-reading

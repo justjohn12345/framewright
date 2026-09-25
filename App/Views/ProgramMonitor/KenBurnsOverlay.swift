@@ -59,9 +59,9 @@ struct KenBurnsOverlay: View {
         .onChange(of: playhead.time, initial: true) { _, time in model.setPlayhead(time) }
         .onChange(of: model.pictureSeconds, initial: true) { _, seconds in picture.want(seconds: seconds) }
         // A drag the system abandoned without an end (the view went away, another gesture won) is
-        // reverted; a released drag has ended already.
+        // reverted; a released drag has ended already (and a cancelled one is over).
         .onChange(of: drag == nil) { _, ended in
-            if ended, model.isDragging { model.cancelDrag() }
+            if ended { model.gestureAbandoned() }
         }
     }
 
