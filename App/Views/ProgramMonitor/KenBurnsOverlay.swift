@@ -119,8 +119,8 @@ struct KenBurnsOverlay: View {
         }
     }
 
-    /// Another clip's box: a thin, dim outline and its track's name at its top-left corner (kept on
-    /// screen for a box larger than the area).
+    /// Another clip's box: a thin, dim, dashed outline (unlike the frame's solid edge) and its
+    /// track's name at its top-left corner (kept on screen for a box larger than the area).
     private func outlineView(_ outline: KenBurnsModel.Outline) -> some View {
         let box = viewport.view(outline.box)
         let corner = box.corner(.topLeft)
@@ -128,7 +128,7 @@ struct KenBurnsOverlay: View {
                             y: min(max(corner.y, 2), max(2, viewport.monitor.height - 14)))
         return ZStack(alignment: .topLeading) {
             path(box)
-                .stroke(Color.white.opacity(0.45), lineWidth: 1)
+                .stroke(Color.white.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
             Text(outline.trackName)
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.8))
