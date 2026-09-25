@@ -125,8 +125,9 @@ final class ProjectStore: ObservableObject {
     @Published var focusArea: FocusArea = .timeline
     /// Empty tracks whose rows the user collapsed (a track with clips always shows full height).
     @Published private(set) var collapsedTrackIDs: Set<VETrackID> = []
-    /// The kind of track whose lane 0 is shown for a transition dragged over the timeline.
-    @Published private(set) var revealedTransitionLane: TimelineViewModel.TrackKind?
+    /// The track whose lane 0 is shown for a transition dragged over it (the row under the pointer
+    /// only, so no other row moves while dragging; review M6).
+    @Published private(set) var revealedTransitionTrack: VETrackID?
     /// Last refused edit, edit note or import problem, shown in the transport bar.
     @Published var statusMessage: String?
     /// The snap line shown while dragging (seconds), or nil.
@@ -193,7 +194,7 @@ final class ProjectStore: ObservableObject {
         let changeCount: UInt64
         let collapsedTracks: Set<VETrackID>
         let collapsedLanes: Set<String>
-        let revealedTransitionLane: TimelineViewModel.TrackKind?
+        let revealedTransitionTrack: VETrackID?
     }
     private var observers: [NSObjectProtocol] = []
     private var preferencesForwarding: AnyCancellable?
@@ -270,6 +271,8 @@ final class ProjectStore: ObservableObject {
         refreshAssets()
         refreshModel()
         playhead.apply(engine.playbackStatus)
+        // First launch (or a layout that was fitting): the timeline gets its rows' height, stored.
+        layout.adoptInitialTimelineHeight(rowsHeight: timelineContent.rowsHeightWithoutLanes)
     }
 
     deinit {
@@ -355,15 +358,21 @@ final class ProjectStore: ObservableObject {
         return model
     }
 
-    /// Height of the timeline's rows (for sizing the timeline pane to its content).
+    /// Height of the timeline's rows with their lanes (what a double-click on the divider fits).
     var timelineContentHeight: CGFloat {
         timelineContent.contentHeight
+    }
+
+    /// A double-click on the divider above the timeline: fits it once to the rows it shows now, in a
+    /// window content `windowHeight` points tall (stored; nothing re-fits it later).
+    func fitTimelineHeight(windowHeight: CGFloat) {
+        layout.fitTimeline(contentHeight: timelineContentHeight, windowHeight: windowHeight)
     }
 
     private var timelineContent: TimelineViewModel {
         let key = TimelineCacheKey(changeCount: changeCount, collapsedTracks: collapsedTrackIDs,
                                    collapsedLanes: layout.collapsedLaneTracks,
-                                   revealedTransitionLane: revealedTransitionLane)
+                                   revealedTransitionTrack: revealedTransitionTrack)
         if let cached = cachedTimeline, cached.key == key {
             return cached.model
         }
@@ -390,7 +399,7 @@ final class ProjectStore: ObservableObject {
             track.lanesCollapsed = lanesCollapsed
             track.lanes = TimelineViewModel.lanes(hasClips: hasClips, spans: spansByTrack[$0.trackID] ?? [],
                                                   collapsed: lanesCollapsed,
-                                                  revealTransitionLane: revealedTransitionLane == kind)
+                                                  revealTransitionLane: revealedTransitionTrack == $0.trackID)
             return track
         }
         model.clips = clips.values.map {
@@ -654,11 +663,11 @@ final class ProjectStore: ObservableObject {
         }
     }
 
-    /// Shows lane 0 on every track of `kind` while a transition is dragged over the timeline (nil
-    /// when none is), so it can be dropped there. Publishes only a change.
-    func revealTransitionLane(_ kind: TimelineViewModel.TrackKind?) {
-        if revealedTransitionLane != kind { revealedTransitionLane = kind }
-        if kind == nil { clampTimelineScroll() }
+    /// Shows lane 0 on the track `id` while a transition is dragged over its row (nil when none is),
+    /// so it can be dropped there; only that row grows, below its clips. Publishes only a change.
+    func revealTransitionLane(onTrack id: VETrackID?) {
+        if revealedTransitionTrack != id { revealedTransitionTrack = id }
+        if id == nil { clampTimelineScroll() }
     }
 
     // MARK: Selection
@@ -1302,7 +1311,7 @@ final class ProjectStore: ObservableObject {
         selection = []
         selectedSpanID = nil
         selectedAssetID = nil
-        revealedTransitionLane = nil
+        revealedTransitionTrack = nil
         collapsedTrackIDs = [] // track ids restart per project
         source = SourceMonitorState()
         sourcePlayhead.reset()

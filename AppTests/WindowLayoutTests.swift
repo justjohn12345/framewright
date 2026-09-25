@@ -84,7 +84,8 @@ final class WindowLayoutTests: XCTestCase {
         XCTAssertFalse(first.showsSourceMonitor)
         XCTAssertEqual(first.inspectorTab, .inspector)
         XCTAssertEqual(first.mediaBinWidth, WindowLayoutModel.defaultMediaBinWidth)
-        XCTAssertNil(first.timelineHeight, "fits its tracks until dragged")
+        XCTAssertFalse(first.hasStoredTimelineHeight, "nothing stored before the first launch's fit")
+        XCTAssertEqual(first.timelineHeight, WindowLayoutModel.defaultTimelineHeight)
         first.showsSourceMonitor = true
         first.inspectorTab = .effects
         first.setMediaBinWidth(300)
@@ -111,10 +112,11 @@ final class WindowLayoutTests: XCTestCase {
         clamped.setInspectorWidth(10)
         XCTAssertEqual(clamped.inspectorWidth, WindowLayoutModel.inspectorWidths.lowerBound)
 
-        // Double-click on the divider: fit again (and forget the dragged height).
-        clamped.fitTimelineToContent()
-        XCTAssertNil(clamped.timelineHeight)
-        XCTAssertNil(WindowLayoutModel(defaults: defaults).timelineHeight)
+        // Double-click on the divider: a one-shot fit, stored like a dragged height.
+        clamped.fitTimeline(contentHeight: 200, windowHeight: 900)
+        let fitted = WindowLayoutModel.fittedTimelineHeight(contentHeight: 200)
+        XCTAssertEqual(clamped.timelineHeight, fitted)
+        XCTAssertEqual(WindowLayoutModel(defaults: defaults).timelineHeight, fitted)
         clamped.resetToDefaults()
         let reset = WindowLayoutModel(defaults: defaults)
         XCTAssertFalse(reset.showsSourceMonitor)
@@ -193,7 +195,10 @@ final class WindowLayoutTests: XCTestCase {
 
     // MARK: Timeline height
 
-    func testTheTimelineFitsItsTracksWithinBounds() throws {
+    /// Review D2: the split is the user's. The first launch stores the rows' height without lanes; a
+    /// drag or a double-click (a one-shot fit) stores a new one; nothing re-fits it; the monitors
+    /// keep at least `minimumMonitorHeight`.
+    func testTheTimelineHeightIsTheUsersAndAFitIsOneShot() throws {
         let layout = WindowLayoutModel(defaults: nil)
         let chrome = TimelineView.rulerHeight + TimelineView.scrollBarHeight
         // Two video and two audio rows (the default sequence): 64 + 64 + 48 + 48 + 3 spacings.
@@ -201,23 +206,74 @@ final class WindowLayoutTests: XCTestCase {
         let fitted = WindowLayoutModel.fittedTimelineHeight(contentHeight: content)
         XCTAssertGreaterThanOrEqual(fitted, content + chrome)
         XCTAssertLessThan(fitted, content + chrome + 8)
-        XCTAssertEqual(layout.timelineHeight(contentHeight: content, windowHeight: 900), fitted,
-                       "the rows, nothing more: the monitors get the rest")
-        // Few tracks: the minimum. Many: at most the maximum share, the monitors keep their room.
-        XCTAssertEqual(layout.timelineHeight(contentHeight: 20, windowHeight: 900), WindowLayoutModel.minimumTimelineHeight)
-        let tall = layout.timelineHeight(contentHeight: 2000, windowHeight: 900)
-        XCTAssertEqual(tall, 900 * WindowLayoutModel.maximumTimelineShare)
-        XCTAssertLessThanOrEqual(tall, 900 - WindowLayoutModel.minimumMonitorHeight)
-        // Dragged: kept whatever the tracks, but never more than the window allows.
-        layout.setTimelineHeight(400, windowHeight: 900)
-        XCTAssertEqual(layout.timelineHeight(contentHeight: content, windowHeight: 900), 400)
-        XCTAssertEqual(layout.timelineHeight(contentHeight: content, windowHeight: 640),
-                       min(640 * WindowLayoutModel.maximumTimelineShare,
-                           640 - WindowLayoutModel.minimumMonitorHeight - WindowLayoutModel.dividerThickness),
+        layout.adoptInitialTimelineHeight(rowsHeight: content)
+        XCTAssertTrue(layout.hasStoredTimelineHeight)
+        XCTAssertEqual(layout.timelineHeight, fitted, "the rows, nothing more: the monitors get the rest")
+        XCTAssertEqual(layout.timelineHeight(windowHeight: 900), fitted)
+        // Adopted once: later rows (a later project, more tracks) do not change it.
+        layout.adoptInitialTimelineHeight(rowsHeight: content + 300)
+        XCTAssertEqual(layout.timelineHeight, fitted)
+
+        // A double-click fits the rows shown now, once: few rows give the minimum, many at most the
+        // fit's share of the window.
+        layout.fitTimeline(contentHeight: 20, windowHeight: 900)
+        XCTAssertEqual(layout.timelineHeight, WindowLayoutModel.minimumTimelineHeight)
+        layout.fitTimeline(contentHeight: 2000, windowHeight: 900)
+        XCTAssertEqual(layout.timelineHeight, 900 * WindowLayoutModel.maximumTimelineShare)
+
+        // A drag may take more than a fit, but the monitors keep their minimum.
+        let most = 900 - WindowLayoutModel.minimumMonitorHeight - WindowLayoutModel.dividerThickness
+        layout.setTimelineHeight(600, windowHeight: 900)
+        XCTAssertEqual(layout.timelineHeight, 600)
+        layout.setTimelineHeight(5000, windowHeight: 900)
+        XCTAssertEqual(layout.timelineHeight, most)
+        XCTAssertEqual(layout.timelineHeight(windowHeight: 640),
+                       640 - WindowLayoutModel.minimumMonitorHeight - WindowLayoutModel.dividerThickness,
                        "a height saved on a larger screen still leaves the monitors their room")
-        XCTAssertEqual(layout.timelineHeight, 400, "the saved height itself is kept for a larger window")
+        XCTAssertEqual(layout.timelineHeight, most, "the saved height itself is kept for a larger window")
         layout.setTimelineHeight(10, windowHeight: 900)
         XCTAssertEqual(layout.timelineHeight, WindowLayoutModel.minimumTimelineHeight)
+    }
+
+    /// Review D2: a layout saved by an earlier version while it was fitting has no height; it gets
+    /// the rows' height once, stored, and keeps it across launches.
+    func testAFittingLayoutFromAnEarlierVersionGetsAStoredHeight() throws {
+        let defaults = try suite()
+        defaults.set(true, forKey: WindowLayoutModel.sourceMonitorKey) // an earlier version's layout
+        let upgraded = WindowLayoutModel(defaults: defaults)
+        XCTAssertFalse(upgraded.hasStoredTimelineHeight)
+        upgraded.adoptInitialTimelineHeight(rowsHeight: 230)
+        let fitted = WindowLayoutModel.fittedTimelineHeight(contentHeight: 230)
+        XCTAssertEqual(defaults.double(forKey: WindowLayoutModel.timelineHeightKey), Double(fitted))
+        let relaunched = WindowLayoutModel(defaults: defaults)
+        XCTAssertTrue(relaunched.hasStoredTimelineHeight)
+        relaunched.adoptInitialTimelineHeight(rowsHeight: 500)
+        XCTAssertEqual(relaunched.timelineHeight, fitted, "a stored height is kept")
+        // Reset Window Layout returns to this launch's fit of the rows, stored.
+        relaunched.setTimelineHeight(400, windowHeight: 900)
+        relaunched.resetToDefaults()
+        XCTAssertEqual(relaunched.timelineHeight, WindowLayoutModel.fittedTimelineHeight(contentHeight: 500))
+        XCTAssertTrue(WindowLayoutModel(defaults: defaults).hasStoredTimelineHeight)
+    }
+
+    /// Review D2 (and M6's mid-drag resize): lanes appearing, a transition's lane 0 revealed while
+    /// dragging, never change the panes; a double-click fits the rows with their lanes, once.
+    func testLanesNeverResizeThePanesAndTheDoubleClickFitsThem() async throws {
+        let store = fixture.store
+        let initial = store.layout.timelineHeight
+        XCTAssertEqual(initial, WindowLayoutModel.fittedTimelineHeight(
+            contentHeight: store.timelineModel.rowsHeightWithoutLanes), "the store adopted its rows' height")
+        let (movie, _) = try await fixture.importMedia()
+        let clip = try fixture.placeMovie(movie, at: 0)
+        XCTAssertTrue(store.engine.addSpan(kind: .motion, lane: 1, clip: clip,
+                                           range: CMTimeRange(start: .zero, duration: CMTime(value: 30, timescale: 30))).ok)
+        store.revealTransitionLane(onTrack: store.clips[clip]?.trackID)
+        XCTAssertGreaterThan(store.timelineContentHeight, store.timelineModel.rowsHeightWithoutLanes)
+        XCTAssertEqual(store.layout.timelineHeight(windowHeight: 900), min(initial, 900 - 245), "unchanged")
+        store.revealTransitionLane(onTrack: nil)
+        store.fitTimelineHeight(windowHeight: 900)
+        XCTAssertEqual(store.layout.timelineHeight,
+                       WindowLayoutModel.fittedTimelineHeight(contentHeight: store.timelineContentHeight))
     }
 
     func testTheTimelineContentHeightFollowsTracksAndCollapsedRows() throws {

@@ -145,10 +145,10 @@ final class TimelineDropTests: XCTestCase {
         XCTAssertEqual(delegate.handleUpdated(dissolve)?.operation, .copy, "refused, but the drop still happens")
         let shown = try XCTUnwrap(gestures.transitionDrop)
         XCTAssertFalse(shown.allowed)
-        XCTAssertNotNil(store.revealedTransitionLane)
+        XCTAssertNotNil(store.revealedTransitionTrack)
         XCTAssertFalse(delegate.handlePerform(dissolve))
         XCTAssertNil(gestures.transitionDrop, "the red pill goes")
-        XCTAssertNil(store.revealedTransitionLane, "and lane 0 with it")
+        XCTAssertNil(store.revealedTransitionTrack, "and lane 0 with it")
         XCTAssertEqual(store.statusMessage, shown.message)
         XCTAssertTrue(store.sequence.transitions.isEmpty)
 
@@ -158,7 +158,7 @@ final class TimelineDropTests: XCTestCase {
         XCTAssertEqual(delegate.handleUpdated(nowhere)?.operation, .copy)
         XCTAssertNil(gestures.transitionDrop)
         XCTAssertFalse(delegate.handlePerform(nowhere))
-        XCTAssertNil(store.revealedTransitionLane)
+        XCTAssertNil(store.revealedTransitionTrack)
         XCTAssertTrue(store.statusMessage?.hasPrefix("Drop Cross Dissolve on a cut") == true, store.statusMessage ?? "")
 
         // An effect on the locked track: the same.
@@ -183,19 +183,19 @@ final class TimelineDropTests: XCTestCase {
         let atCut = CGPoint(x: model.x(forTime: 2) + 3, y: row.y + 20)
         XCTAssertNotNil(gestures.transitionDragUpdated(kind: .crossDissolve, at: atCut))
         XCTAssertNotNil(gestures.effectDragUpdated(kind: .fade, at: CGPoint(x: model.x(forTime: 0.5), y: row.y + 20)))
-        XCTAssertNotNil(store.revealedTransitionLane)
+        XCTAssertNotNil(store.revealedTransitionTrack)
         // No perform, no exit: the session just ended. The pointer moves over the timeline.
         gestures.hover(at: CGPoint(x: 10, y: row.y + 10))
         XCTAssertNil(gestures.transitionDrop)
         XCTAssertNil(gestures.effectDrop)
-        XCTAssertNil(store.revealedTransitionLane)
+        XCTAssertNil(store.revealedTransitionTrack)
         // A press clears it too (and is handled as a press).
         XCTAssertNotNil(gestures.transitionDragUpdated(kind: .crossDissolve, at: atCut))
         let empty = CGPoint(x: model.x(forTime: 5), y: row.y + 20)
         gestures.changed(location: empty, startLocation: empty, modifiers: [])
         gestures.ended()
         XCTAssertNil(gestures.transitionDrop)
-        XCTAssertNil(store.revealedTransitionLane)
+        XCTAssertNil(store.revealedTransitionTrack)
     }
 
     /// UX round review test gap 5: a dissolve dropped from the Effects tab on a plain split (both

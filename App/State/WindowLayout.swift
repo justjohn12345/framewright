@@ -23,11 +23,15 @@ enum InspectorTab: String, CaseIterable, Identifiable {
 /// Layout (see `ContentView`): the media bin (left), the monitors and the transport bar (centre),
 /// the inspector with its Inspector/Effects tabs (right), and the timeline below them. The program
 /// monitor takes the whole centre unless the source monitor is shown (View > Show Source Monitor,
-/// Shift+Cmd+2; hidden until media is opened in it). The timeline's height fits its tracks (rows +
-/// ruler + scroll bar, between `minimumTimelineHeight` and `maximumTimelineShare` of the window)
-/// until the user drags the divider above it; from then on the dragged height is kept (a double-click
-/// on the divider returns to fitting). Widths and the dragged height are clamped whenever they are
-/// used, so a height saved on a larger screen still leaves the monitors room on a smaller one.
+/// Shift+Cmd+2; hidden until media is opened in it). The split between the monitors and the
+/// timeline belongs to the user (review D2): `timelineHeight` is always a stored value, set once on
+/// first launch from the tracks' rows without their lanes (`adoptInitialTimelineHeight`; a layout
+/// saved by an earlier version that was fitting, i.e. has no height, gets one the same way), then
+/// only by dragging the divider or a double-click on it (a one-shot fit to the tracks as they are,
+/// `fitTimeline`, which is stored too). It is never re-fitted automatically: lanes and tracks scroll
+/// inside the timeline. The monitors keep at least `minimumMonitorHeight`. Widths and the height
+/// are clamped whenever they are used, so a height saved on a larger screen still leaves the
+/// monitors room on a smaller one.
 ///
 /// Also the tracks whose effect lanes the user collapsed (the disclosure in a track header), by the
 /// track's kind and number ("V1", "A2": track ids restart per project, the numbers are what the
@@ -50,8 +54,11 @@ final class WindowLayoutModel: ObservableObject {
     static let defaultSourceFraction = 0.42
     static let sourceFractions: ClosedRange<Double> = 0.25 ... 0.6
     static let minimumTimelineHeight: CGFloat = 140
-    /// The timeline never takes more than this share of the window's height (the monitors keep the rest).
+    /// A fit (first launch, a double-click on the divider) takes at most this share of the window's
+    /// height; a drag may take more, as long as the monitors keep `minimumMonitorHeight`.
     static let maximumTimelineShare: CGFloat = 0.6
+    /// The height before the first fit (a store adopts its rows' height at once).
+    static let defaultTimelineHeight: CGFloat = 240
     /// Height the monitors and transport bar keep at least.
     static let minimumMonitorHeight: CGFloat = 240
     /// Thickness of a divider (the drag handle between panes).
@@ -68,8 +75,13 @@ final class WindowLayoutModel: ObservableObject {
     @Published private(set) var mediaBinWidth: CGFloat
     @Published private(set) var inspectorWidth: CGFloat
     @Published private(set) var sourceMonitorFraction: Double
-    /// The height the user dragged the timeline to; nil while it fits its content.
-    @Published private(set) var timelineHeight: CGFloat?
+    /// The timeline's height: the user's (dragged, or fitted by a double-click), else the rows'
+    /// height at first launch. Always stored once set.
+    @Published private(set) var timelineHeight: CGFloat
+    /// Whether a height has been stored (false only before the first fit of a first launch).
+    private(set) var hasStoredTimelineHeight: Bool
+    /// The first launch's fit (the rows without lanes), which Reset Window Layout returns to.
+    private var initialTimelineHeight: CGFloat = WindowLayoutModel.defaultTimelineHeight
     /// The tracks whose lanes are collapsed, by `laneKey(video:index:)`.
     @Published private(set) var collapsedLaneTracks: Set<String>
 
@@ -87,7 +99,9 @@ final class WindowLayoutModel: ObservableObject {
         let fraction = defaults?.object(forKey: Self.sourceFractionKey) as? Double
         sourceMonitorFraction = fraction.map { min(Self.sourceFractions.upperBound, max(Self.sourceFractions.lowerBound, $0)) }
             ?? Self.defaultSourceFraction
-        timelineHeight = Self.stored(defaults, Self.timelineHeightKey).map { max(Self.minimumTimelineHeight, $0) }
+        let storedHeight = Self.stored(defaults, Self.timelineHeightKey).map { max(Self.minimumTimelineHeight, $0) }
+        timelineHeight = storedHeight ?? Self.defaultTimelineHeight
+        hasStoredTimelineHeight = storedHeight != nil
         collapsedLaneTracks = Set((defaults?.array(forKey: Self.collapsedLanesKey) as? [String]) ?? [])
     }
 
@@ -146,17 +160,34 @@ final class WindowLayoutModel: ObservableObject {
     /// `windowHeight` points.
     func setTimelineHeight(_ height: CGFloat, windowHeight: CGFloat) {
         guard height.isFinite else { return }
-        let clamped = Self.clamp(height, Self.timelineHeights(windowHeight: windowHeight))
-        guard clamped != timelineHeight else { return }
-        timelineHeight = clamped
-        defaults?.set(Double(clamped), forKey: Self.timelineHeightKey)
+        storeTimelineHeight(Self.clamp(height, Self.timelineHeights(windowHeight: windowHeight)))
     }
 
-    /// Back to fitting the timeline to its tracks (double-click on the divider).
-    func fitTimelineToContent() {
-        guard timelineHeight != nil else { return }
-        timelineHeight = nil
-        defaults?.removeObject(forKey: Self.timelineHeightKey)
+    /// A double-click on the divider: the timeline fits the rows it shows now (`contentHeight`,
+    /// lanes included), within `fittedTimelineHeights(windowHeight:)`, once; the height is stored
+    /// like a dragged one (nothing re-fits it later).
+    func fitTimeline(contentHeight: CGFloat, windowHeight: CGFloat) {
+        guard contentHeight.isFinite else { return }
+        storeTimelineHeight(Self.clamp(Self.fittedTimelineHeight(contentHeight: contentHeight),
+                                       Self.fittedTimelineHeights(windowHeight: windowHeight)))
+    }
+
+    /// First launch (or a layout from an earlier version, which fitted instead of storing a
+    /// height): the timeline gets the height of `rowsHeight` (the tracks' rows without their lanes),
+    /// stored. A stored height is kept. Either way `rowsHeight` is what Reset Window Layout returns to.
+    func adoptInitialTimelineHeight(rowsHeight: CGFloat) {
+        guard rowsHeight.isFinite else { return }
+        initialTimelineHeight = max(Self.minimumTimelineHeight, Self.fittedTimelineHeight(contentHeight: rowsHeight))
+        guard !hasStoredTimelineHeight else { return }
+        storeTimelineHeight(initialTimelineHeight)
+    }
+
+    private func storeTimelineHeight(_ height: CGFloat) {
+        let height = max(Self.minimumTimelineHeight, height)
+        guard height != timelineHeight || !hasStoredTimelineHeight else { return }
+        if height != timelineHeight { timelineHeight = height }
+        defaults?.set(Double(height), forKey: Self.timelineHeightKey)
+        hasStoredTimelineHeight = true
     }
 
     /// Restores every default (panels, tab, splits and lanes).
@@ -166,22 +197,31 @@ final class WindowLayoutModel: ObservableObject {
         mediaBinWidth = Self.defaultMediaBinWidth
         inspectorWidth = Self.defaultInspectorWidth
         sourceMonitorFraction = Self.defaultSourceFraction
-        timelineHeight = nil
+        timelineHeight = initialTimelineHeight
         collapsedLaneTracks = []
         for key in [Self.sourceMonitorKey, Self.inspectorTabKey, Self.mediaBinWidthKey, Self.inspectorWidthKey,
                     Self.sourceFractionKey, Self.timelineHeightKey, Self.collapsedLanesKey] {
             defaults?.removeObject(forKey: key)
         }
+        // The first launch's fit, stored: the split stays the user's.
+        defaults?.set(Double(timelineHeight), forKey: Self.timelineHeightKey)
+        hasStoredTimelineHeight = true
     }
 
     // MARK: Sizing
 
-    /// The heights the timeline may have in a window content `windowHeight` points tall.
+    /// The heights the timeline may have in a window content `windowHeight` points tall: at least
+    /// `minimumTimelineHeight`, and the monitors keep `minimumMonitorHeight`.
     static func timelineHeights(windowHeight: CGFloat) -> ClosedRange<CGFloat> {
-        let byShare = windowHeight * maximumTimelineShare
         let byMonitors = windowHeight - minimumMonitorHeight - dividerThickness
-        let upper = max(minimumTimelineHeight, min(byShare, byMonitors))
-        return minimumTimelineHeight ... upper
+        return minimumTimelineHeight ... max(minimumTimelineHeight, byMonitors)
+    }
+
+    /// The heights a fit may give: as `timelineHeights`, and at most `maximumTimelineShare` of the
+    /// window (many tracks do not push the monitors down to their minimum on their own).
+    static func fittedTimelineHeights(windowHeight: CGFloat) -> ClosedRange<CGFloat> {
+        let range = timelineHeights(windowHeight: windowHeight)
+        return range.lowerBound ... max(range.lowerBound, min(range.upperBound, windowHeight * maximumTimelineShare))
     }
 
     /// The height a timeline showing `contentHeight` points of rows needs: the rows, the ruler,
@@ -190,11 +230,11 @@ final class WindowLayoutModel: ObservableObject {
         contentHeight + TimelineView.rulerHeight + TimelineView.scrollBarHeight + 1 + 2
     }
 
-    /// The timeline's height in a window content `windowHeight` points tall: the dragged height,
-    /// else the fitted one, within `timelineHeights(windowHeight:)`.
-    func timelineHeight(contentHeight: CGFloat, windowHeight: CGFloat) -> CGFloat {
-        let wanted = timelineHeight ?? Self.fittedTimelineHeight(contentHeight: contentHeight)
-        return Self.clamp(wanted, Self.timelineHeights(windowHeight: windowHeight))
+    /// The timeline's height in a window content `windowHeight` points tall: the stored height
+    /// within `timelineHeights(windowHeight:)` (the stored value itself stays for a larger window).
+    /// It does not depend on the tracks: lanes appearing never resize the panes.
+    func timelineHeight(windowHeight: CGFloat) -> CGFloat {
+        Self.clamp(timelineHeight, Self.timelineHeights(windowHeight: windowHeight))
     }
 
     private static func clamp(_ value: CGFloat, _ range: ClosedRange<CGFloat>) -> CGFloat {

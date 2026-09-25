@@ -201,9 +201,9 @@ final class EffectLanesTimelineTests: XCTestCase {
         }).spanID).ok)
         store.refreshModel()
         XCTAssertEqual(lanes(v1), [1, 2, 3])
-        store.revealTransitionLane(.video)
+        store.revealTransitionLane(onTrack: v1)
         XCTAssertEqual(lanes(v1), [0, 1, 2, 3])
-        store.revealTransitionLane(nil)
+        store.revealTransitionLane(onTrack: nil)
         XCTAssertEqual(lanes(v1), [1, 2, 3])
 
         // The header's row keeps the row's height; its lanes follow below it.
@@ -614,6 +614,46 @@ final class EffectLanesTimelineTests: XCTestCase {
         XCTAssertNil(store.statusMessage)
     }
 
+    /// Review M6: a transition dragged over two video tracks shows lane 0 on the row under the
+    /// pointer only, below its clips, so a pointer held still keeps targeting the same row (with
+    /// lane 0 shown on both rows the upper one grew and the lower one slid under the pointer).
+    func testATransitionDragRevealsLaneZeroOnlyUnderThePointer() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let v2 = try XCTUnwrap(store.videoTracks.last).trackID
+        XCTAssertNotEqual(v1, v2)
+        _ = try place(movie, at: 0, from: 0, to: 1, video: v1)
+        _ = try place(movie, at: 1, from: 1, to: 2, video: v1)
+        _ = try place(movie, at: 0, from: 0, to: 1, video: v2)
+        _ = try place(movie, at: 1, from: 1, to: 2, video: v2)
+        let gestures = TimelineGestureController(store: store)
+        let before = store.timelineModel
+        let lower = try XCTUnwrap(before.layout(forTrack: v1))
+        let upper = try XCTUnwrap(before.layout(forTrack: v2))
+        XCTAssertLessThan(upper.y, lower.y, "V2 is drawn above V1")
+        // Near the top of V1's row, at the cut.
+        let pointer = CGPoint(x: before.x(forTime: 1) + 3, y: lower.y - before.scrollY + 5)
+        for _ in 0 ..< 4 {
+            let target = try XCTUnwrap(gestures.transitionDragUpdated(kind: .crossDissolve, at: pointer))
+            XCTAssertEqual(target.trackID, v1, "the row under the pointer, every time")
+            XCTAssertEqual(store.revealedTransitionTrack, v1)
+            XCTAssertEqual(lanes(v1).first, 0)
+            XCTAssertFalse(lanes(v2).contains(0), "the other row does not grow")
+            XCTAssertEqual(store.timelineModel.layout(forTrack: v1)?.y, lower.y, "V1 did not move")
+        }
+        // Over V2: V2 shows lane 0 instead, and V1 gives its own back.
+        let above = CGPoint(x: pointer.x, y: upper.y - before.scrollY + 5)
+        let target = try XCTUnwrap(gestures.transitionDragUpdated(kind: .crossDissolve, at: above))
+        XCTAssertEqual(target.trackID, v2)
+        XCTAssertEqual(store.revealedTransitionTrack, v2)
+        XCTAssertFalse(lanes(v1).contains(0))
+        XCTAssertEqual(lanes(v2).first, 0)
+        // A crossfade over a video row targets nothing and reveals nothing.
+        XCTAssertNil(gestures.transitionDragUpdated(kind: .audioCrossfade, at: above))
+        XCTAssertNil(store.revealedTransitionTrack)
+        gestures.transitionDragExited()
+        XCTAssertNil(store.revealedTransitionTrack)
+    }
+
     /// Review H4: a dissolve dropped on a clip's free edge becomes a fade, and says so: the preview is
     /// labelled "Fade" and the note says what it adds; a clip that already fades out says so (and
     /// how to change it), and the drop goes on the clip's other free edge when that is in reach.
@@ -681,7 +721,7 @@ final class EffectLanesTimelineTests: XCTestCase {
         // Dragging a transition over the timeline shows lane 0 on the video tracks.
         let atEnd = CGPoint(x: 97, y: row.y + 30)
         let target = try XCTUnwrap(gestures.transitionDragUpdated(kind: .crossDissolve, at: atEnd))
-        XCTAssertEqual(store.revealedTransitionLane, .video)
+        XCTAssertEqual(store.revealedTransitionTrack, v1, "on the row under the pointer")
         XCTAssertEqual(lanes(v1), [0, 1])
         XCTAssertEqual(target.placement, .fadeOut(clip: b), "B's free end: a fade out")
         XCTAssertEqual(target.title, "Fade Out")
@@ -689,14 +729,14 @@ final class EffectLanesTimelineTests: XCTestCase {
         XCTAssertEqual(target.start, 1.5, accuracy: 1e-9)
         XCTAssertEqual(target.end, 2, accuracy: 1e-9)
         gestures.transitionDragExited()
-        XCTAssertNil(store.revealedTransitionLane)
+        XCTAssertNil(store.revealedTransitionTrack)
         XCTAssertEqual(lanes(v1), [1])
         // Dropped on lane 0 at the free end: a fade out span; at A's free start a fade in.
         XCTAssertTrue(gestures.dropTransition(kind: .crossDissolve, at: CGPoint(x: 97, y: row.y + 70)))
         let fadeOut = try XCTUnwrap(store.selectedSpanID)
         XCTAssertEqual(store.engine.spanInfo(fadeOut)?.transitionStyle, .fadeOut)
         XCTAssertEqual(store.engine.spanInfo(fadeOut)?.clipID, b)
-        XCTAssertNil(store.revealedTransitionLane)
+        XCTAssertNil(store.revealedTransitionTrack)
         XCTAssertTrue(gestures.dropTransition(kind: .crossDissolve, at: CGPoint(x: 3, y: row.y + 30)))
         XCTAssertEqual(store.selectedSpan?.transitionStyle, .fadeIn)
         XCTAssertEqual(store.selectedSpan?.clipID, a)

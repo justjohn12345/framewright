@@ -250,7 +250,7 @@ struct TimelineViewModel: Equatable {
 
     /// The lanes a track shows under its row, top to bottom: none for a track without clips or one
     /// whose lanes are `collapsed`; lane 0 while one of `spans` is a transition or
-    /// `revealTransitionLane` (a transition is dragged over the timeline); then effect lanes 1 up to
+    /// `revealTransitionLane` (a transition is dragged over the track's row); then effect lanes 1 up to
     /// the highest one in use plus one empty lane (to create spans on), at most `maxEffectLanes`.
     static func lanes(hasClips: Bool, spans: [Span], collapsed: Bool, revealTransitionLane: Bool) -> [Int] {
         guard hasClips, !collapsed else { return [] }
@@ -276,6 +276,17 @@ struct TimelineViewModel: Equatable {
             y += height + Self.trackSpacing
         }
         return layouts
+    }
+
+    /// Height of all rows without their lanes (the first launch's timeline height, review D2).
+    var rowsHeightWithoutLanes: CGFloat {
+        let bare = tracks.map { track -> Track in
+            var track = track
+            track.lanes = []
+            return track
+        }
+        guard let last = Self.layouts(for: bare).last else { return 0 }
+        return last.y + last.height
     }
 
     /// Total height of all rows.

@@ -17,19 +17,27 @@ struct PaneDivider: View {
     var onBegin: () -> Void
     var onDrag: (CGFloat) -> Void
     var onDoubleClick: (() -> Void)?
+    /// Draws a grip in the middle while the pointer is over the divider or drags it (review D2: the
+    /// split above the timeline is the user's, so its handle shows).
+    var showsGrip = false
 
     @State private var dragging = false
+    @State private var hovering = false
     /// The pointer shape (set, never pushed: see `DividerCursor`).
     @State private var cursor: DividerCursor
 
     init(orientation: Orientation, onBegin: @escaping () -> Void = {}, onDrag: @escaping (CGFloat) -> Void,
-         onDoubleClick: (() -> Void)? = nil) {
+         onDoubleClick: (() -> Void)? = nil, showsGrip: Bool = false) {
         self.orientation = orientation
         self.onBegin = onBegin
         self.onDrag = onDrag
         self.onDoubleClick = onDoubleClick
+        self.showsGrip = showsGrip
         _cursor = State(initialValue: DividerCursor(orientation: orientation))
     }
+
+    /// The grip's size (along the divider, across it).
+    static let gripSize = CGSize(width: 36, height: 3)
 
     var body: some View {
         let thickness = WindowLayoutModel.dividerThickness
@@ -37,6 +45,13 @@ struct PaneDivider: View {
             Rectangle()
                 .fill(Color(nsColor: .separatorColor))
                 .frame(width: orientation == .vertical ? 1 : nil, height: orientation == .horizontal ? 1 : nil)
+            if showsGrip, hovering || dragging {
+                Capsule()
+                    .fill(Color.secondary.opacity(0.8))
+                    .frame(width: orientation == .horizontal ? Self.gripSize.width : Self.gripSize.height,
+                           height: orientation == .horizontal ? Self.gripSize.height : Self.gripSize.width)
+                    .accessibilityIdentifier("PaneDividerGrip")
+            }
         }
         .frame(width: orientation == .vertical ? thickness : nil, height: orientation == .horizontal ? thickness : nil)
         .frame(maxWidth: orientation == .horizontal ? .infinity : nil, maxHeight: orientation == .vertical ? .infinity : nil)
@@ -47,7 +62,10 @@ struct PaneDivider: View {
         .onPreferenceChange(DividerFrameKey.self) { frame in
             MainActor.assumeIsolated { cursor.frame = frame }
         }
-        .onHover { inside in cursor.hover(inside: inside) }
+        .onHover { inside in
+            hovering = inside
+            cursor.hover(inside: inside)
+        }
         .gesture(
             DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .onChanged { value in

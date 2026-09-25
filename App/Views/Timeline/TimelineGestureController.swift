@@ -944,23 +944,28 @@ final class TimelineGestureController: ObservableObject {
     private func clearStaleDropPreview() {
         if transitionDrop != nil { transitionDrop = nil }
         if effectDrop != nil { effectDrop = nil }
-        store.revealTransitionLane(nil)
+        store.revealTransitionLane(onTrack: nil)
     }
 
-    /// A transition from the Effects tab is dragged over `location`: shows lane 0 on the tracks of
-    /// its kind, finds where it would land (the nearest cut, or free clip end or start, on that row
-    /// within `dropCutDistance` points) and whether it fits.
+    /// A transition from the Effects tab is dragged over `location`: finds where it would land (the
+    /// nearest cut, or free clip end or start, on the row under the pointer within `dropCutDistance`
+    /// points) and whether it fits, by the geometry as it is shown now, then shows lane 0 on that
+    /// row only (review M6: revealing it on every track of the kind moved the rows below under the
+    /// pointer, which could then target another track). Lane 0 opens below the row's clips, so the
+    /// row under the pointer stays under it.
     @discardableResult
     func transitionDragUpdated(kind: TransitionKind, at location: CGPoint) -> TransitionDropTarget? {
-        store.revealTransitionLane(kind.trackKind == .video ? .video : .audio)
         let target = dropTarget(kind: kind, at: location)
+        let row = store.timelineModel.layout(atY: location.y).map(\.track)
+        let matching = row.flatMap { ($0.kind == .video) == (kind.trackKind == .video) ? $0.id : nil }
+        store.revealTransitionLane(onTrack: target?.trackID ?? matching)
         if target != transitionDrop { transitionDrop = target }
         return target
     }
 
     func transitionDragExited() {
         if transitionDrop != nil { transitionDrop = nil }
-        store.revealTransitionLane(nil)
+        store.revealTransitionLane(onTrack: nil)
     }
 
     /// Drops a transition: a cross dissolve / crossfade on the target cut (see
@@ -971,7 +976,7 @@ final class TimelineGestureController: ObservableObject {
     func dropTransition(kind: TransitionKind, at location: CGPoint) -> Bool {
         let target = dropTarget(kind: kind, at: location)
         transitionDrop = nil
-        store.revealTransitionLane(nil)
+        store.revealTransitionLane(onTrack: nil)
         store.focusArea = .timeline
         guard let target else {
             store.statusMessage = dropMissMessage(kind: kind, at: location)

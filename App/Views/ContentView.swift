@@ -3,9 +3,10 @@ import FramewrightEngine
 
 /// The editor window, laid out so the program monitor dominates (see `WindowLayoutModel`): the
 /// media bin (left), the program monitor with the transport bar and, when shown, the source
-/// monitor beside it (centre), the Inspector/Effects panel (right), and the timeline below, sized
-/// to its tracks. The dividers between them can be dragged (the positions are remembered); a
-/// double-click on the one above the timeline fits it to its tracks again.
+/// monitor beside it (centre), the Inspector/Effects panel (right), and the timeline below at the
+/// height the user gave it (`WindowLayoutModel.timelineHeight`). The dividers between them can be
+/// dragged (the positions are remembered); a double-click on the one above the timeline fits it to
+/// its tracks once.
 struct ContentView: View {
     /// Version line, e.g. "Engine 0.1.0 · FFmpeg 7.1.5".
     static var versionText: String {
@@ -33,8 +34,8 @@ struct ContentView: View {
 
     var body: some View {
         GeometryReader { window in
-            let timelineHeight = layout.timelineHeight(contentHeight: store.timelineContentHeight,
-                                                       windowHeight: window.size.height)
+            // The user's split (never the tracks' height: lanes appearing never resize the panes).
+            let timelineHeight = layout.timelineHeight(windowHeight: window.size.height)
             let sides = Self.sideWidths(windowWidth: window.size.width, binWidth: layout.mediaBinWidth,
                                         inspectorWidth: layout.inspectorWidth)
             VStack(spacing: 0) {
@@ -54,8 +55,9 @@ struct ContentView: View {
                 PaneDivider(orientation: .horizontal, onBegin: { dragStartTimelineHeight = timelineHeight },
                             onDrag: { layout.setTimelineHeight(dragStartTimelineHeight - $0,
                                                                windowHeight: window.size.height) },
-                            onDoubleClick: { layout.fitTimelineToContent() })
-                    .help("Drag to resize the timeline; double-click to fit it to its tracks")
+                            onDoubleClick: { store.fitTimelineHeight(windowHeight: window.size.height) },
+                            showsGrip: true)
+                    .help("Drag to resize the timeline; double-click to fit it to its tracks once")
                 TimelineView(store: store)
                     .frame(height: timelineHeight)
             }
