@@ -274,6 +274,17 @@ final class InspectorSpanTests: XCTestCase {
         inspector.commitShare(before: false, "150 %")
         XCTAssertEqual(inspector.transitionShares?.after, 10, "at most all of it")
         XCTAssertEqual(inspector.message, "A share is 0 % to 100 %.")
+        // Review L3: all of it before the cut would be a fade out; the dissolve keeps a frame after.
+        inspector.commitShare(before: true, "100 %")
+        XCTAssertEqual(inspector.transitionShares?.before, 9)
+        XCTAssertEqual(inspector.transitionShares?.after, 1)
+        XCTAssertEqual(store.engine.spanInfo(id)?.transitionStyle, .crossDissolve)
+        XCTAssertEqual(inspector.message, InspectorModel.lastFrameAfterCutNote)
+        inspector.nudgeShare(before: true, steps: 1)
+        XCTAssertEqual(inspector.transitionShares?.after, 1, "a nudge stops there too")
+        XCTAssertEqual(store.engine.spanInfo(id)?.transitionStyle, .crossDissolve)
+        inspector.commitShare(before: false, "0")
+        XCTAssertEqual(inspector.transitionShares?.after, 1)
         // A fade has no shares.
         XCTAssertTrue(store.engine.removeTransition(id).ok)
         XCTAssertTrue(store.addFade(at: .end, of: b, frames: 10))

@@ -734,12 +734,20 @@ final class InspectorModel: ObservableObject {
         setShares(before: before ? clamped : total - clamped, total: total, clampNote: nil)
     }
 
-    private func setShares(before: Int64, total: Int64, clampNote: String?) {
+    /// The note when a share would leave nothing after the cut (review L3).
+    static let lastFrameAfterCutNote = "A cross dissolve keeps at least a frame after the cut (with none it would be "
+        + "a fade out)."
+
+    private func setShares(before wanted: Int64, total: Int64, clampNote: String?) {
         guard canEdit(), let transition else { return }
         guard !store.isGestureActive else {
             message = "Finish the current drag first."
             return
         }
+        // Each side within [0, total - 1] frames: all of it before the cut would turn the dissolve
+        // (and its linked crossfade) into a fade out, which the shares never do (review L3).
+        let before = min(max(0, wanted), max(0, total - 1))
+        let clampNote = before != wanted ? Self.lastFrameAfterCutNote : clampNote
         endNudgeBurst()
         let cut = CMTimeAdd(transition.start, transition.shareBeforeCut)
         let start = CMTimeSubtract(cut, store.time(frames: before))
