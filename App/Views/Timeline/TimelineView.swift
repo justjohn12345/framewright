@@ -407,14 +407,18 @@ struct TimelineDropDelegate: DropDelegate {
         if Self.transitionKind(info) == nil, Self.effectKind(info) == nil { isAssetTargeted = true }
     }
 
+    /// A transition or an effect is always offered as a copy, even where it cannot land (the
+    /// preview says so in red, the status line after the drop): after `.forbidden` the system never
+    /// calls `performDrop`, and did not reliably call `dropExited` either, which left the refused
+    /// preview and the lane-0 reveal on screen for good (review H3). The drop clears both.
     func handleUpdated(_ info: some TimelineDropInfo) -> DropProposal? {
         if let kind = Self.transitionKind(info) {
-            let target = gestures.transitionDragUpdated(kind: kind, at: info.location)
-            return DropProposal(operation: target?.allowed == true ? .copy : .forbidden)
+            gestures.transitionDragUpdated(kind: kind, at: info.location)
+            return DropProposal(operation: .copy)
         }
         if let kind = Self.effectKind(info) {
-            let target = gestures.effectDragUpdated(kind: kind, at: info.location)
-            return DropProposal(operation: target?.allowed == true ? .copy : .forbidden)
+            gestures.effectDragUpdated(kind: kind, at: info.location)
+            return DropProposal(operation: .copy)
         }
         return DropProposal(operation: .copy)
     }

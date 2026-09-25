@@ -216,6 +216,7 @@ final class TimelineGestureController: ObservableObject {
     /// The pointer moved (or was pressed: the first event of a gesture). `clickCount` is the
     /// press's click count (2 for a double-click).
     func changed(location: CGPoint, startLocation: CGPoint, modifiers: NSEvent.ModifierFlags, clickCount: Int = 1) {
+        if drag == .idle { clearStaleDropPreview() }
         let model = store.timelineModel
         switch drag {
         case .idle:
@@ -796,6 +797,7 @@ final class TimelineGestureController: ObservableObject {
     /// is over now (a split-view divider sets its own). The gain tooltip follows the gain line.
     func hover(at point: CGPoint?) {
         guard drag == .idle else { return }
+        clearStaleDropPreview()
         guard let point else {
             if hover != nil { hover = nil }
             if gainTooltip != nil { gainTooltip = nil }
@@ -927,6 +929,15 @@ final class TimelineGestureController: ObservableObject {
     }
 
     // MARK: Transition drops
+
+    /// A pointer hovering or pressing on the track area means no drag session is over it: a drop
+    /// preview or a lane-0 reveal still shown is stale (a session that ended without a drop or an
+    /// exit) and goes (review H3).
+    private func clearStaleDropPreview() {
+        if transitionDrop != nil { transitionDrop = nil }
+        if effectDrop != nil { effectDrop = nil }
+        store.revealTransitionLane(nil)
+    }
 
     /// A transition from the Effects tab is dragged over `location`: shows lane 0 on the tracks of
     /// its kind, finds where it would land (the nearest cut, or free clip end or start, on that row

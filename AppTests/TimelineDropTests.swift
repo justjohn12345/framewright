@@ -106,13 +106,96 @@ final class TimelineDropTests: XCTestCase {
 
         // A crossfade over a video row is refused, as is anything that is not ours.
         let wrongRow = FakeDropInfo(location: atCut, providers: [transitionProvider(.audioCrossfade)])
-        XCTAssertEqual(delegate.handleUpdated(wrongRow)?.operation, .forbidden)
+        // Offered as a copy all the same (review H3), so the drop runs and says why.
+        XCTAssertEqual(delegate.handleUpdated(wrongRow)?.operation, .copy)
+        XCTAssertNil(gestures.transitionDrop)
         XCTAssertFalse(delegate.handlePerform(wrongRow))
         XCTAssertTrue(store.statusMessage?.contains("audio track") == true, store.statusMessage ?? "")
         let text = NSItemProvider(object: "hello" as NSString)
         XCTAssertFalse(delegate.handleValidate(FakeDropInfo(location: atCut, providers: [text])))
         delegate.handleExited(dissolve)
         XCTAssertNil(gestures.transitionDrop)
+    }
+
+    /// The provider the Effects tab's `.draggable(EffectReference(kind:))` hands the drag.
+    private func effectProvider(_ kind: EffectKind) -> NSItemProvider {
+        let provider = NSItemProvider()
+        provider.register(EffectReference(kind: kind))
+        return provider
+    }
+
+    /// Review H3: a refused transition or effect drop (a locked track) still offers a copy, so the
+    /// system performs the drop and the red preview and the lane-0 reveal go; the status line says
+    /// why. SwiftUI never calls performDrop after `.forbidden`, and did not always call dropExited.
+    func testARefusedDropClearsItsPreviewAndTheLaneReveal() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let v1 = try XCTUnwrap(store.videoTracks.first).trackID
+        _ = try fixture.placeMovie(movie, at: 0, track: v1)
+        _ = try fixture.placeMovie(movie, at: 2, track: v1)
+        XCTAssertTrue(store.engine.setTrack(v1, locked: true).ok)
+        let gestures = TimelineGestureController(store: store)
+        var targeted = false
+        let delegate = TimelineDropDelegate(gestures: gestures,
+                                            isAssetTargeted: Binding(get: { targeted }, set: { targeted = $0 }))
+        let model = store.timelineModel
+        let row = try XCTUnwrap(model.layout(forTrack: v1))
+        let atCut = CGPoint(x: model.x(forTime: 2) + 3, y: row.y + 20)
+        let dissolve = FakeDropInfo(location: atCut, providers: [transitionProvider(.crossDissolve)])
+        delegate.handleEntered(dissolve)
+        XCTAssertEqual(delegate.handleUpdated(dissolve)?.operation, .copy, "refused, but the drop still happens")
+        let shown = try XCTUnwrap(gestures.transitionDrop)
+        XCTAssertFalse(shown.allowed)
+        XCTAssertNotNil(store.revealedTransitionLane)
+        XCTAssertFalse(delegate.handlePerform(dissolve))
+        XCTAssertNil(gestures.transitionDrop, "the red pill goes")
+        XCTAssertNil(store.revealedTransitionLane, "and lane 0 with it")
+        XCTAssertEqual(store.statusMessage, shown.message)
+        XCTAssertTrue(store.sequence.transitions.isEmpty)
+
+        // Nowhere to land: a copy too, and the drop says where it would go.
+        let nowhere = FakeDropInfo(location: CGPoint(x: model.x(forTime: 12), y: row.y + 20),
+                                   providers: [transitionProvider(.crossDissolve)])
+        XCTAssertEqual(delegate.handleUpdated(nowhere)?.operation, .copy)
+        XCTAssertNil(gestures.transitionDrop)
+        XCTAssertFalse(delegate.handlePerform(nowhere))
+        XCTAssertNil(store.revealedTransitionLane)
+        XCTAssertTrue(store.statusMessage?.hasPrefix("Drop Cross Dissolve on a cut") == true, store.statusMessage ?? "")
+
+        // An effect on the locked track: the same.
+        let fade = FakeDropInfo(location: CGPoint(x: model.x(forTime: 0.5), y: row.y + 20), providers: [effectProvider(.fade)])
+        XCTAssertEqual(delegate.handleUpdated(fade)?.operation, .copy)
+        XCTAssertEqual(gestures.effectDrop?.allowed, false)
+        XCTAssertFalse(delegate.handlePerform(fade))
+        XCTAssertNil(gestures.effectDrop)
+        XCTAssertEqual(store.statusMessage, "Track \(row.track.name) is locked.")
+    }
+
+    /// Review H3, defensively: a drag session that ended without a perform or an exit leaves a stale
+    /// preview; the next hover or press in the track area clears it and the lane-0 reveal.
+    func testAStaleDropPreviewIsClearedByTheNextHoverOrPress() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let v1 = try XCTUnwrap(store.videoTracks.first).trackID
+        _ = try fixture.placeMovie(movie, at: 0, track: v1)
+        _ = try fixture.placeMovie(movie, at: 2, track: v1)
+        let gestures = TimelineGestureController(store: store)
+        let model = store.timelineModel
+        let row = try XCTUnwrap(model.layout(forTrack: v1))
+        let atCut = CGPoint(x: model.x(forTime: 2) + 3, y: row.y + 20)
+        XCTAssertNotNil(gestures.transitionDragUpdated(kind: .crossDissolve, at: atCut))
+        XCTAssertNotNil(gestures.effectDragUpdated(kind: .fade, at: CGPoint(x: model.x(forTime: 0.5), y: row.y + 20)))
+        XCTAssertNotNil(store.revealedTransitionLane)
+        // No perform, no exit: the session just ended. The pointer moves over the timeline.
+        gestures.hover(at: CGPoint(x: 10, y: row.y + 10))
+        XCTAssertNil(gestures.transitionDrop)
+        XCTAssertNil(gestures.effectDrop)
+        XCTAssertNil(store.revealedTransitionLane)
+        // A press clears it too (and is handled as a press).
+        XCTAssertNotNil(gestures.transitionDragUpdated(kind: .crossDissolve, at: atCut))
+        let empty = CGPoint(x: model.x(forTime: 5), y: row.y + 20)
+        gestures.changed(location: empty, startLocation: empty, modifiers: [])
+        gestures.ended()
+        XCTAssertNil(gestures.transitionDrop)
+        XCTAssertNil(store.revealedTransitionLane)
     }
 
     /// UX round review test gap 5: a dissolve dropped from the Effects tab on a plain split (both
