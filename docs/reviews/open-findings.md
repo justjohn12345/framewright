@@ -3,186 +3,55 @@
 Only what is still open. Fixed findings are in the history table of `README.md` (fix commits and regression tests);
 the full reports are in git history at the commits the table names.
 
-## Effect lanes (2026-09-24 review, `2026-09-24-effect-lanes-review.md`)
-Closed in the fix round (see `integration-notes.md`, "Effect lanes review fix round"): C1 on the app side (the Ken
-Burns editor frames a placed clip inside its own window), H1-H4, M1-M8, L1-L11, D2 (the user-owned split) and test
-gaps 1-6. The Ken Burns editor round (2026-09-25, see `integration-notes.md`, "Ken Burns editor round") replaced C1's
-open engine part: the user chose the placement-box model (the editor moves, sizes and turns the clip's placement on
-the composed program; a span still composes onto the clip's static values), so there is no engine crop and no schema
-6. The same round closed two user reports: Control-K fell through to another track's clip when the selected clip's
-track was locked (it now acts on the selected clip only), and the divider between the source and program monitors
-could not be grabbed while the source played (the dividers take their drags in AppKit). Still open:
-- D1 (compact rows) and D3 (restoring the window frame): design items, not started.
+## Design items (effect lanes review, 2026-09-24; report in git history at fea82c0)
+- D1, compact rows as in Resolve: a "Compact Tracks" toggle (View menu, timeline corner) and per-track compact rows
+  when lanes are collapsed: about 22 pt video / 20 pt audio with the clip name only, a 3 pt strip at the clip's
+  bottom marking spans and transitions in their kind colours (click expands the lanes), a one-line header (name,
+  eye/mute, lock; solo and target in the context menu). Files: `TimelineViewModel` (a `Track.compact` flag, row
+  heights, `lanes()` empty when compact), `TimelineRenderer` (compact clip + marker strip), `TrackHeaderView`,
+  `WindowLayout` (persist next to `collapsedLaneTracks`), `ProjectStore` (cache key), `TimelineGestureController`
+  (trim zones on 20 pt rows; no span hits when collapsed), redraw and lane tests.
+- D3, restore the window frame, clamped to the displays present: nothing persists the frame today (SwiftUI `Window`,
+  `FramewrightApp.swift`, no autosave). Save the frame and its screen's frame under a `WindowLayoutModel` key on
+  resize/move (debounced, through `WindowAccessor.CloseGuard`) and on close. Restore once on first attach: the screen
+  containing the saved centre, else main; width/height = min(saved, visible), not below 1100×640 unless the display
+  is smaller; shift inside the visible frame; `setFrame`. Re-clamp on `didChangeScreenParametersNotification`. Set
+  `isRestorable = false` so SwiftUI restoration does not fight it. A pure
+  `restoredFrame(saved:savedScreen:screens:minimum:)` unit-tested for external-monitor → laptop.
+
+## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
-
-## Keyframed Motion, Ken Burns and Photos drops (2026-09-24 review; report in git history at 3fcd6ac)
-Effect lanes round 2 replaced the keyframe-era app tests (`KeyframedMotionTests`, `MotionReviewTests`): the Ken Burns
-geometry, the picture loader (3), the press rules (12) and the loader's engine path now live in `KenBurnsEditorTests`
-(the Ken Burns editor round removed the picture loader, and finding 3's tests with it: the editor draws over the
-program monitor's own picture),
-the static values and matching in `StaticMotionTests`, held Control-K (15) in `EffectLanesTimelineTests`; the tests of
-the removed range fields, markers and Apply (11, 16-18, 25) went with the UI they covered (see "Effect lanes round 2").
-Effect lanes round 1 removed the keyframe API with its tests (`KeyframeInsertTests.cpp`, `KeyframeEditTests.cpp`,
-`KeyframeRefusalTests.cpp`, `VEEngineKeyframe*Tests.mm` and the keyframe app tests): the same guarantees for spans
-(no frame changes on a split, a cut or an added span; exact values against a Newton reference) are in
-`EffectSpanTests.cpp`, `SpanEditTests.cpp`, `SpanPictureTests.cpp` and `SchedulerSpanTests.cpp`.
-All twenty-six findings are fixed and test gaps 1-5 are covered, except the items listed under the UI-test section
-below (see `integration-notes.md`, "Motion/Photos review fix round"):
-1. Adding a keyframe keeps every frame (`insertKeyframeKeepingValues`): `KeyframeInsertTests.cpp` (AddKeyframe, the
-   Control-K toggle and SetMotionValue's add path inside a hold, a linear, each ease and a custom curve, every frame
-   against the value before and an independent Newton reference), `VEEngineKeyframeReviewTests.testAddingKeyframesInsideAHoldAndAnEaseKeepsEveryFrame`,
-   `KeyframedMotionTests.testTheDiamondInsideAHoldOrAnEaseKeepsTheSegmentAndTheInspectorSaysWhatItIs`.
-2. Live Photos pair within one promise only; Settings > Media > Live Photos: `PhotosDropTests.testUnrelatedItemsWithOneNameAreNeverPairedNorDeleted`,
-   `testTheLivePhotoSettingRoundTripsWithTheQuestionsRememberedChoice`.
-3. The Ken Burns loader's own bounded cache: `KeyframedMotionTests.testKenBurnsPictureLoaderShowsEveryLandedPictureWhileScrubbingOneFetchAtATime`,
-   `...MovesOnAfterAFailedFetchAndKeepsTheLastPicture`, `...MemoryIsBounded`,
-   `testTheKenBurnsHelperLoadsItsPictureFromTheEngineWithoutTheSharedCache`,
-   `TimelineRedrawTests.testKenBurnsPicturesLandingRedrawNeitherTheTimelineNorTheBin` (overlay, bin and timeline hosted: 0/0/0).
-4. A value on a frame whose keyframe is elsewhere in its span lands on the frame's start (`planMotionValueAtFrame`):
-   `KeyframeInsertTests` ("a split's out point", "a 1.5x clip"), `VEEngineKeyframeReviewTests.testAValueTypedOnASplitsLastFrameShowsExactlyAndANudgeBurstIsOneStep`,
-   `testAValueTypedOnAFrameOfASpedUpClipShowsExactly`, `MotionReviewTests.testANudgeOnASplitsLastFrameShowsExactlyWhatWasTyped`.
-5. Frames evaluate at the keyframe tick (`motionTimeAt`): `KeyframeInsertTests` ("Keyframe on the next precise tick ...
-   after a hold (NTSC, 999/1000)").
-6. Late placement checks the timeline: `PhotosReceivingTests.testMediaArrivingAfterAnEditStaysInTheBinWithAMessage`,
-   `testMediaArrivingDuringAGestureOrANudgeBurstStaysInTheBin`, `testARefusedPlacementSaysWhyAndAnOccupiedDropPointTakesAnInsert`,
-   `testADropOffTheTracksImportsIntoTheBin`.
-7. Quit, close, New and Open ask while media arrives: `PhotosReceivingTests.testQuitNewAndOpenAskWhileMediaIsArriving`.
-8. Only a chosen Media folder is stored; Save As and copies use their own: `PhotosReceivingTests.testSaveAsElsewhereAndACopiedProjectFolderUseTheirOwnMediaFolder`,
-   `testAnEarlierVersionsStoredMediaFolderIsDroppedOnSaveAsAndInACopy`, `PhotosMediaTests.testTheMediaFolderBookmarkIsSavedWithTheProject`.
-9. Pasteboard promises settle each reader call: `PhotosReceivingTests.testAPasteboardPromiseMovesEachFileOutOfStagingAndCompletesAtThePromisedCount`,
-   `testFewerReaderCallsThanPromisedKeepTheItemUntilCancelWhichDeletesWhatArrivedAtOnce`, `testMoreReaderCallsThanPromisedImportTheExtraFilesToo`,
-   `testAReaderErrorFailsOnlyItsFile`, `testAPromiseReleasedWhilePendingDeletesWhatArrivedAndWhatComesLater`.
-10. Media folder marker, staging, non-media, refused imports: `PhotosReceivingTests.testThePanelsFolderGetsAMediaFolderAndAnExistingMediaFolderNeedsTheMarker`,
-    `testWhenTheProjectsFolderIsNotWritableThePanelAsksWithTheReason`, `testTwoPromisedFilesWithOneNameBothArrive`,
-    `testTheDragPasteboardIsPartitionedOncePerItemAndNonMediaPromisesAreRefused`, `testANonMediaPromiseIsNotReceivedAndAFileTheImportRefusesIsDeleted`.
-11. Typed range text survives model changes: `MotionReviewTests.testTypedRangeTextSurvivesASaveAModelChangeAndThePlayhead`.
-12. The start rectangle is reachable: `MotionReviewTests.testTheStartRectangleIsReachableUnderTheEnd`, `testCoincidingRectanglesShareTheirHandles`.
-13. The parity movement check measures the animation: `ExportParityTests.testAnAnimatedClipExportsTheMonitorsPictures`.
-14. Thread-safe `adopt`: `PhotosReceivingTests.testAdoptingFromManyThreadsNeverLosesAFile`.
-15. Held Control-K: `MotionReviewTests.testHeldControlKTogglesOnce` (through `KeyboardController.handle`).
-16. Drag state and clicks: `MotionReviewTests.testAClickWithoutMovementDoesNotPinARectangle`.
-17. A duration off the clip is refused: `MotionReviewTests.testADurationTypedWithThePlayheadOffTheClipIsRefused`.
-18. A moved rectangle survives its neighbour going: `MotionReviewTests.testARectangleMovedNextToANeighbourStaysWhenTheNeighbourGoes`.
-19. Curve order and overshoot: `KeyframeTests.cpp` ("validation", "a curve part divided again ..."), `KeyframeInsertTests`
-    ("an overshooting custom curve ..."), `ProjectJSONTests` ("backwards").
-20. Animated still pieces: `KeyframeRefusalTests.cpp` ("isThroughEdit: pieces of an animated still ...").
-21. Keyframes on every edit path, refusal codes: `KeyframeRefusalTests.cpp`, `VEEngineKeyframeReviewTests.testAnUnknownMotionParameterIsRefusedNotTreatedAsPositionX`.
-22. JSON: `ProjectJSONTests.cpp` ("keyframe errors and warnings", "a model keyframe that is not custom ..."); the v4
-    golden test no longer writes its file.
-23. Trash, stale and failed bookmarks, scope past New, one partition: `PhotosReceivingTests.testAStoredFolderInTheTrashOrGoneIsNotUsedAndAMovedOneIsFollowed`,
-    `testTheFoldersSecurityScopeOutlivesNewWhileAPromiseMayStillDeliver`, `testTheDragPasteboardIsPartitionedOncePerItemAndNonMediaPromisesAreRefused`.
-24. PHPicker and bundles, question queue: `PhotosReceivingTests.testAPickedLivePhotoBundleIsUnpackedAndThePartNotChosenLeavesNoBundle`,
-    `testAPickerWhoseSheetWentAwayWithoutItsDelegateCanBeShownAgain`, `testLivePhotoQuestionsWaitForAGestureAndNeverStack`,
-    `testCancellingTheLivePhotoQuestionLeavesNothingBehind`, `testAdoptingFromManyThreadsNeverLosesAFile` (names).
-25. UI details: `MotionReviewTests` (`testTheClipMenuItemFollowsThePlayhead`, `testPaddedOrEquivalentTextChangesNothing`,
-    `testKenBurnsReopenedOnTheSameClipKeepsItAndAMultiSelectionClosesIt`, `testTheDurationFormatFollowsThePreferenceWhileOpen`,
-    `testATrimEdgeNearerThanAMarkerKeepsThePress`, `testAnAbandonedMarkerDragPutsTheKeyframesBack`).
-26. Build and test plumbing: `PhotosDropTests.testTheDropTargetsAcceptEveryPromiseType`,
-    `PhotosMediaTests.testTheSlowMotionTableMatchesTheScript`, `testAnIncompleteOrOutdatedTestMediaDirectoryIsRecognised`.
-Test gaps: 1 and 2 by `KeyframeInsertTests.cpp` (also "Animated clips: a split at 1.5x, an overwrite inside, a move onto
-and a ripple keep the pictures"), `KeyframeTests.cpp`; 3 by `VEEngineKeyframeReviewTests.mm` and `PhotosMediaTests`; 4 by
-`KeyframedMotionTests`, `MotionReviewTests`, `TimelineRedrawTests` (the band test now asserts its host draws); 5 by
-`PhotosReceivingTests` and `PhotosDropTests` (the provider double completes once; a source completing after cancel is
-`testASourceCompletingAfterCancelIsIgnoredAndItsFilesDeleted`; an item-provider error and a cancel before the main hop are
-`testAnItemProviderErrorAndACancelBeforeTheMainHop`).
-Still open, with reasons:
-- `VEEditErrorNotRepresentable` from the keyframe calls needs a 128-bit overflow of a clip's source time: no facade
-  input reaches it, so its message is covered by reading only.
+- `VEEditErrorNotRepresentable` from the span calls needs a 128-bit overflow of a clip's source time: no facade input
+  reaches it, so its message is covered by reading only.
 - What the real Photos drag hands over (one listed type per file for a Live Photo? a rename or an overwrite when two
   promised files share a name in the staging folder?) is not observable in the test host; the double of the
-  receiver's contract covers both counts, errors and collisions (by hand, below).
+  receiver's contract covers both counts, errors and collisions.
 
 ## Test gaps that need a UI-test target (XCUITest) or a person
 The xctest host is not sandboxed and its synthesised NSEvents never reach SwiftUI's gesture system or the window
 server's drag session, so these are covered at the model level only:
-- Real SwiftUI gesture path (full review gap 9): `TimelineGestureTests.testARealDragThroughSwiftUIIsCommittedAndNotReverted`
-  drives the hosted TimelineView through `NSWindow.sendEvent` and skips with that reason.
+- Real SwiftUI gesture path: `TimelineGestureTests.testARealDragThroughSwiftUIIsCommittedAndNotReverted` drives the
+  hosted TimelineView through `NSWindow.sendEvent` and skips with that reason. The same applies to the timeline's lane
+  drags (ranges, spans, transition edges), the Ken Burns overlay's box drags and the Effects-tab drags onto a cut; the
+  controllers and models behind them are tested with synthetic points.
 - Sandbox-hosted export round trip (phase 7 gap 7): choose a file in the real save panel, switch the container, export.
   The model side (a container change clears the choice and asks again) is tested in `ExportModelTests`.
 - A real-sandbox save/open round trip, and a main-window smoke test that triggers the thumbnail/waveform fetches it
-  asserts (full review gap 11).
-- Dragging a transition from the Effects tab onto a cut: the exported types (`TransitionReference`) and everything
-  `TimelineDropDelegate` does with a drop are unit-tested (`TimelineDropTests`); the drag itself is not.
+  asserts.
 - The program output on a physical second display: window, engine attachment, Escape, screen removal, key scoping and
   hide/reshow on deactivate are tested over an injected screen list and posted notifications (`OutputDisplayTests`);
   that the picture reaches the display, covers it, follows a hot-unplug and a real Cmd-Tab needs a person.
-- The timeline's right-click menu is built and tested as items (`contextMenuItems(at:)`); the NSMenu pop-up from a real
-  right-click, and the look of the resize cursor over a real divider (`DividerCursor.apply` is observed in tests), are by hand.
-- Keyframed Motion (feature request 8): the inspector's keyframe logic (`InspectorModel`), the Ken Burns rectangles
-  (`KenBurnsModel`: geometry, limits, swap, apply, lifetime) and the timeline markers (positions, hit testing, a click
-  through `TimelineGestureController`) are tested at the model level; dragging the rectangles' bodies and corners on the
-  real program monitor (`KenBurnsOverlay`'s SwiftUI gestures), the look of the keyframe controls and the markers, and
-  watching an animated clip play are by hand. Ken Burns range and neighbour matching: the range, duration, picture
-  time, picture pacing (`KenBurnsPictureLoader`), neighbour toggles, Match and Control-K are tested at the model and
-  engine level; by hand: the helper's bar (Move menu, Duration field with Return also pressing Apply, the neighbour
-  checkboxes) at narrow monitor widths, the picture following a real scrub smoothly, the inspector's Match menu, and
-  that the keyframe diamonds and interpolation checkmarks redraw after each click (the SwiftUI diff itself; the
-  controls now draw only from `KeyframeControlState`, whose changes are tested). Since the Motion/Photos fix round,
-  also by hand: a real press on the overlay reaching the rectangle `KenBurnsHit` picks and a cancelled drag resetting
-  its `@GestureState` (the hit rules and `applyDrag` are tested), the inspector's Video rows keeping a field's focus
-  when the clip gets its first keyframe (one `VideoParameterRows` view either way), and the Clip menu's Add/Remove
-  Motion Keyframe title in the real menu bar as the playhead moves (`motionKeyframeMenuState` is tested). Ken Burns editing: the existing-move
-  detection, the Custom range (parsing, clamping, the mode switch, Apply), the timeline band (geometry, its redraw
-  budget, pixels at its edges) and marker drags through `TimelineGestureController` (groups, limits, one undo step,
-  Escape, the helper following) are tested; by hand: Return in the Start/End/Duration fields committing the field
-  without pressing Apply and then pressing it (the default-button shortcut is dropped while `hasUncommittedText`;
-  AppKit's key-equivalent routing itself is not observable in the test host), the bar's layout with the three fields
-  at narrow monitor widths, and a real mouse drag of a marker through SwiftUI.
-- Photos drops and Import from Photos (feature request 9): everything after a drop reaches the drop delegates
-  (`MediaBinDropDelegate`, `TimelineDropDelegate`, with a fake promise-carrying `NSItemProvider`), the promise receiving,
-  progress, cancellation, the Media folder (next to a saved project; asked once for an untitled one and kept with it),
-  Live Photo choice and timeline placement are tested (`PhotosDropTests`, `PhotosReceivingTests`), and
-  HEIC/HEVC/slow-motion media through the
-  engine (`PhotosMediaTests`). By hand: a real drag from Photos.app (the window server's promise session and
-  `NSFilePromiseReceiver` reading the drag pasteboard, which a test cannot produce; `PasteboardFilePromise` is tested
-  over a double of its contract and `DragContents` over item descriptions), an iCloud original downloading during a
-  drop, what Photos hands over for a Live Photo and a slow-motion clip on a given macOS version (and whether it renames
-  or overwrites a same-named file in the staging folder), the PHPicker sheet itself (`PhotosImportPicker.present`; its
-  configuration, stale-sheet recovery and result handling are tested), the folder panel in the real sandbox (writing
-  next to a project the sandbox granted only as a file falls back to it; simulated with a read-only folder), and a
-  security-scoped Media folder bookmark going stale (a plain bookmark's rewrite is tested).
-
-## Effect lanes round 1: by hand
-- Open a project saved by the previous version with keyframed Motion, audio fades and dissolves: the program
-  monitor, playback and an export look and sound as before (the render is proven equal frame by frame in
-  `MigrationRenderTests`; this checks the app path end to end on real media).
-
-## Effect lanes round 2: by hand
-The gesture controller, the store, the inspector model and the Ken Burns model are tested with synthetic points and
-direct calls (`EffectLanesTimelineTests`, `InspectorSpanTests`, `KenBurnsEditorTests`, `TimelineRedrawTests`); what the
-test host cannot drive:
-- Real mouse drags through SwiftUI on the lanes: a range drag on an empty lane (Option for a fade), moving and trimming
-  a span, a transition's edges and bar, the snap line and the status line while dragging, the cursor over span edges.
-- The Ken Burns overlay's real drags (the SwiftUI gesture calling `applyDrag`/`endDrag`, a cancelled gesture reverting
-  through `cancelDrag`), Escape mid-drag from the keyboard, and the program monitor following each drag step.
-- Dragging a transition, Fade or Gain from the Effects tab onto a cut, a free clip edge or a lane (lane 0 appearing
-  under the tracks while a transition is dragged); `TimelineDropDelegate` is tested with a drop double.
-- The right-click menu's Set Interpolation and Move to Lane submenus in a real NSMenu (the items and actions are tested).
-- The look: span bars, icons and labels at several zooms, the header's lane names and disclosure, the readout of a
-  Fade or Gain span on the monitor, the inspector's span section and the overlay's bar at narrow widths; Return and
-  focus loss committing the range fields (`NumericField`); Escape with a text field focused leaving the editor open.
+- The timeline's right-click menu (Set Interpolation, Move to Lane) is built and tested as items; the NSMenu pop-up from
+  a real right-click is by hand.
+- Photos drops: a real drag from Photos.app (the window server's promise session and `NSFilePromiseReceiver` reading
+  the drag pasteboard), an iCloud original downloading during a drop, the PHPicker sheet itself, the folder panel in
+  the real sandbox, and a security-scoped Media folder bookmark going stale (a plain bookmark's rewrite is tested).
 - `VEEnginePlaybackTests.testPlayStartLatencyThroughTheFacade` on AirPods or another Bluetooth output: it skips and
   its message and log line give the measured latency (the decision is read from CoreAudio at run time).
-
-## Ken Burns editor round: by hand
-The model, the geometry, the margin and the store are tested with direct calls (`KenBurnsEditorTests`), the dividers
-through `NSWindow.sendEvent` (`PaneDividerTests`); what the test host cannot drive or see:
-- A picture in picture at 30 % in the lower right: select its Motion span, drag the End box to the top of the frame;
-  the monitor shows the composed program (the other tracks too) and follows every drag step; the inspector's End
-  Position Y matches; play the span: the clip slides up. A corner drag of either box scales about its centre.
-- A full-frame clip with the default push in: the End box is 1.25 times the frame, its corners and label in the dimmed
-  margin, grabbable; the frame's edge a thin line; closing the editor (Esc, Close, deselecting) gives the monitor its
-  full size back; the playback HUD and a Fade or Gain span's readout still sit at the top-left.
-- A zoomed-in background clip (V1 at 150 %) under a picture in picture on V2: V1's dashed outline reaches past the
-  frame into the margin, labelled "V1"; hiding V1 removes it; scrubbing moves the outlines with the playhead.
-- A turned clip (rotation in the inspector): its boxes, labels and handles turn with it; a corner drag scales along
-  the turned diagonal.
-- Control-K with V2 locked and its clip selected: nothing is added (no span on V1's clip), the status line says
-  "“V2” is locked.", and Clip > Add Motion Span at Playhead is disabled; with nothing selected, "Select a clip first.".
-- The divider between the source and program monitors while the source plays, then while the program plays: the
-  resize cursor on hover, a smooth drag, the double-click and the grip on the divider above the timeline, the
-  tooltip on it; the dividers beside the bin and the inspector.
+- The divider between the source and program monitors while the source plays: the AppKit handle's drag is tested
+  through `NSWindow.sendEvent` during playback, and the user confirmed the grab by hand on 2026-09-25; the original
+  SwiftUI failure was never reproduced in the test host.
 
 ## Test gaps that need media or a performance scheme (phase 7)
 - Gap 8, size estimate against a real export in quality mode: the estimate is a bits-per-pixel heuristic (labelled "≈");

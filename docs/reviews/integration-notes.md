@@ -885,7 +885,7 @@ calls and app controls described here are gone. Kept for the history of the eval
   40 ms (`kLatencyTestMaximumOutputLatency`); EngineTests links CoreAudio. The keyframe-era app test files are
   replaced: `EffectLanesTimelineTests`, `KenBurnsEditorTests`, `InspectorSpanTests`, `StaticMotionTests`.
 
-## Effect lanes review fix round (report `docs/reviews/2026-09-24-effect-lanes-review.md`)
+## Effect lanes review fix round (report in git history at fea82c0)
 Closed: C1 (app side only), H1-H4, M1-M8, L1-L11, D2 and test gaps 1-6 (except re-recording the render goldens:
 their tool needed the schema-4 engine; test gap 3's two cases are checked against version 4's rule computed
 independently instead). Not started, per the brief: D1 (compact rows), D3 (window frame restore), the engine crop.
