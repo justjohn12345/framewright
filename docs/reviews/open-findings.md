@@ -22,6 +22,10 @@ the full reports are in git history at the commits the table names.
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
+- The Ken Burns editor's mode per span (Ken Burns or Transform) is remembered for the session of the project only:
+  the only persisted UI state is the app-wide window layout, span ids restart per project, and a project-side store
+  would be a schema change (out of scope for the Ken Burns and Transform round). A reopened project opens every span
+  in the automatic mode.
 - `VEEditErrorNotRepresentable` from the span calls needs a 128-bit overflow of a clip's source time: no facade input
   reaches it, so its message is covered by reading only.
 - What the real Photos drag hands over (one listed type per file for a Live Photo? a rename or an overwrite when two
@@ -33,8 +37,8 @@ The xctest host is not sandboxed and its synthesised NSEvents never reach SwiftU
 server's drag session, so these are covered at the model level only:
 - Real SwiftUI gesture path: `TimelineGestureTests.testARealDragThroughSwiftUIIsCommittedAndNotReverted` drives the
   hosted TimelineView through `NSWindow.sendEvent` and skips with that reason. The same applies to the timeline's lane
-  drags (ranges, spans, transition edges), the Ken Burns overlay's box drags and the Effects-tab drags onto a cut; the
-  controllers and models behind them are tested with synthetic points.
+  drags (ranges, spans, transition edges), the Ken Burns overlay's box and rectangle drags and its mode switch, and the
+  Effects-tab drags onto a cut or a lane; the controllers and models behind them are tested with synthetic points.
 - Sandbox-hosted export round trip (phase 7 gap 7): choose a file in the real save panel, switch the container, export.
   The model side (a container change clears the choice and asks again) is tested in `ExportModelTests`.
 - A real-sandbox save/open round trip, and a main-window smoke test that triggers the thumbnail/waveform fetches it

@@ -1041,3 +1041,95 @@ idea in the review's C1 text is dropped.
   `TimelineRedrawTests.testKenBurnsOutlinesFollowingThePlayheadRedrawNeitherTheTimelineNorTheBin` replaces the
   landing-pictures test (0 timeline builds, 0 canvas draws, 0 tile bodies for 9 playhead steps with the editor open).
 - By hand: see `open-findings.md`, "Ken Burns editor round: by hand".
+
+## Ken Burns and Transform modes (2026-09-25; user feedback on the Ken Burns editor round)
+The Motion span editor has two modes that choose the same values (where the clip sits at the span's start and end:
+the edge's composed Motion M = static values with every started span applied, `VEClipInfo.getMotion(_:atEdgeOfSpan:)`),
+so switching writes nothing. No model or schema change.
+- Geometry (`KenBurnsModel`, sequence pixels, +y down, F the frame's centre, R(θ) clockwise on screen; the compositor
+  draws a fitted picture point p at F + (x, y) + s R(θ)(p - F)):
+  - Transform (`box(for:picture:sequence:)`, unchanged): the fitted picture scaled by s about its centre, centred at
+    F + (x, y), turned by θ. Inverse `motion(for:picture:sequence:)`: s = box width / fitted width, (x, y) = centre - F.
+  - Ken Burns (`rect(for:sequence:)`): the part of the unplaced picture that fills the frame, the frame's preimage:
+    size = frame / s, centre = F - R(-θ)(x, y) / s, turned by -θ (so its corners map exactly onto the frame's). With
+    θ = 0 the centre is F - (x, y) / s, the original editor's `rect(for:)` (history before 666143e), whose centre already
+    used R(-θ) but which drew the rectangle unturned. Inverse `motion(forRect:sequence:)`: s = frame width / rect width,
+    θ = -rect rotation (kept), (x, y) = -s R(θ)(centre - F); nil for an empty rectangle (an edge at scale 0).
+  - `KenBurnsModesTests.testTheTwoGeometriesDescribeTheSamePlacement` checks both against the compositor's map, each
+    round trip and each into the other through the values to 1e-9.
+- Deviation from the brief: it gave the rectangle's centre as F - (x, y) / s "drawn turned by M.rotation". That holds
+  only without rotation; the exact preimage has the centre F - R(-θ)(x, y) / s and turns by -θ (the frame turned
+  clockwise inside the picture shows a rectangle turned the other way). Implemented the exact form.
+- Ken Burns drags: a body drag pans (`panned`), a corner drag zooms about the centre by the corner's movement along the
+  diagonal (`zoomed`), the frame's aspect kept; a rectangle stays inside the fitted picture (`pictureBounds`; with a
+  turned rectangle, its axis-aligned half extents) and is at least `minimumRectFraction` (a tenth) of the frame wide; a
+  zoom out stops at `maximumRectWidth(rotationDegrees:)`, the widest turned rectangle the picture holds, and a rectangle
+  grown against the picture's edge moves in to stay inside (so "about the centre" gives way at the edge). A rectangle
+  already outside the picture (typed values, a portrait still's full frame, values made in Transform mode) is not pulled
+  in by a drag's first step and moves back in freely (`keptInPicture`); one wider than the picture on an axis stays on
+  the picture's centre there. Escape mid-drag (H2), one undo step per drag, the zero-scale refusal (the edge at scale 0
+  has an empty rectangle: the note says the base is 0, or that the edge shows nothing) and the redraw budget hold in both
+  modes (`checkCancelledDrag(in:)`, `InspectorSpanTests.testAScaleOverABaseOfZeroIsRefusedWithTheReason`,
+  `TimelineRedrawTests.testAKenBurnsDragBuildsNoTimelineModelAndRedrawsNoClips` loop over the modes).
+- Engine, the program preview solo: `Scheduler::soloGraphAt(sequence, project, clip, time, identityMotion)` (the clip's
+  layer alone, any track visibility, no transition, the time held on its first frame before it and its last from its
+  end, identity VideoParams with opacity 1 or its own Motion); `PlaybackController::setPreviewSolo(optional<PreviewSolo>)`
+  / `previewSolo()`: the primary frame source (the program view) resolves the solo graph, a Mirror source (the output
+  window) keeps the program; the paused picture's requests, the stopped lookahead and pre-roll targets add the solo
+  layer when the program does not show it (`layersToDecodeLocked`); cleared by `setSequence` (New/Open) and by
+  `modelChanged` when the clip is gone or off the video tracks; refused (cleared) for a clip that is not a video clip.
+  Export never uses a controller. Facade: `-setProgramPreviewSoloClip:identityMotion:` (NO when refused),
+  `-clearProgramPreviewSolo`, `programPreviewSoloClipID` (0: the program), `programPreviewSoloIdentityMotion`. Tests:
+  `SchedulerTests` ("a solo graph shows one clip alone ..."), `PlaybackPreviewSoloTests` (pixels equal to the clip alone
+  at identity, the mirror, held/scrubbed/played frames, removal, New), `VEEngineProgramSoloTests` (an export made while
+  it is set renders the program).
+- App: `KenBurnsMode` (.kenBurns, .transform; `title`, `caption`); `KenBurnsModel.mode`, `setMode(_:)` (refused
+  mid-drag; re-reads the shapes and the outlines, calls `ProjectStore.kenBurnsModeDidChange`), `modeCaption`,
+  `automaticMode(start:picture:sequence:)` (Ken Burns when the Start placement box contains the frame's four corners),
+  `pictureBounds`, `fitsInPicture`, `maximumRectWidth`, `panned`, `zoomed`; `start` / `end` are the current mode's
+  shapes (`KenBurnsBox` either way, so `KenBurnsHit` and the overlay are shared); `outlines` are empty in Ken Burns mode.
+  `KenBurnsModel.init(... mode:)` (nil: automatic). The store: `kenBurnsModes` (span id -> mode), `kenBurnsMode` (the
+  open editor's, published for the layout), `rememberKenBurnsMode(_:for:)`, `syncProgramPreview()` (sets or clears the
+  engine's solo from the editor; run after every `syncKenBurns`, `closeKenBurns`, a mode switch and New/Open).
+  `ProgramMonitorLayout`: no margin in Ken Burns mode, `KenBurnsViewport.marginFraction` in Transform mode. The bar has
+  the mode's caption and the Ken Burns | Transform segmented control next to Smoothing.
+- Mode memory: the only persisted UI state is the app-wide window layout (`WindowLayoutModel` in the standard defaults,
+  keyed by track kind and number, not per project), and span ids restart per project, so the map lives in the store for
+  the session of the project (cleared on New and Open, kept across undo). An asked mode (an entry point) is remembered;
+  the automatic outcome is not (it is recomputed when the span is opened).
+- Entry points (`ProjectStore.addSpan(... motionMode:)`, `addMotionSpanAtPlayhead(clip:mode:)`): `EffectKind.kenBurns`
+  and `.move` (Effects tab tiles, `motionMode` .kenBurns / .transform, exported types
+  `com.justjohn12345.framewright.effect.ken-burns` / `.effect.move` in project.yml and Info.plist) drop on an effect
+  lane as a 5 s span from the drop point (or to the clip's end) or add at the playhead with "+"; Ken Burns is the push
+  in (End rectangle 1 / 1.25 of the frame), Move ends where it starts (no end scale). Clip menu and the clip context
+  menu: "Add Ken Burns…" (.kenBurns) and "Add Motion Span" (.transform) replace "Add Motion Span at Playhead", with the
+  Control-K rules (selected clip only; disabled without one or on a locked track; the context menu acts on the clicked
+  clip). Control-K: the push in, automatic mode. Asked again on a frame where a Motion span starts, the span is
+  selected in the asked mode. Range-drag creation on a lane uses the automatic mode.
+- By hand: a full-frame clip with Ken Burns from the Effects tab (drag onto a lane, or "+"): the monitor shows the clip
+  alone, the End rectangle smaller; shrink it and see the composite (close the editor, or switch to Transform) zoom in
+  accordingly; drag a rectangle to the picture's edge (it stops there) and a corner out (it stops at the picture). The
+  same span switched to Transform and back: the inspector's values do not change, the rectangles come back the same. A
+  picture in picture with Control-K: it opens in Transform mode over the program. A turned clip (rotation 30°, scale 2)
+  in Ken Burns mode: the rectangles are turned the other way. Playing and scrubbing with the editor in Ken Burns mode
+  (the clip alone; off the clip its first or last frame). The output window on a second display while the editor is in
+  Ken Burns mode: it shows the program.
+
+## The frame in the monitors (2026-09-25, same round)
+- `MonitorFrame` (KenBurnsOverlay.swift): `fitted(_:in:)` (the frame's aspect fitted into an area, `KenBurnsViewport`
+  with no margin; the whole area without a size), `outsideColor` (white 0.16, the Ken Burns margin's shade),
+  `programArea` (where the program's picture area was laid out, for tests). `ProgramMonitorLayout` always sizes the
+  picture view to the sequence's frame (closed and in Ken Burns mode fitted into the whole area, in Transform mode inside
+  the margin) over the outside shade; `SourceMonitorView` sizes it to the asset's picture (its display size), black
+  without a picture. The output window is unchanged (its content view is the preview view, the compositor clears to
+  black). Why a shade and not a hairline: a line at the frame's edge sits exactly where a placed picture's own edge is and
+  reads as part of it (or as the Ken Burns editor's frame edge), while two tones read at a glance, also where the frame is
+  empty.
+- Tests: `MonitorFrameTests` (the fit in 10:7, tall, wide and exact monitors; the hosted program monitor's picture view
+  and shaded bands, and its size in both editor modes; the source monitor's pillarboxed still and letterboxed movie),
+  `OutputDisplayTests.testTheOutputWindowStaysBlackOutsideTheFrame` (16:9 on a 16:10 display, black bands; the program,
+  not the solo picture), `MainWindowSmokeTests` now measures the monitor's area (`MonitorFrame.programArea`) and checks
+  the picture view is the fitted frame.
+- By hand: a window whose program monitor is not 16:9: the bands are a lighter grey than the frame's black, so a clip
+  placed short of the frame's edge shows the black of the frame beside it; the source monitor with a portrait photo; the
+  output window on a second display stays black outside the frame.

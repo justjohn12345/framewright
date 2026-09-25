@@ -41,12 +41,17 @@ audited the code line by line.
   press Control-K for a Motion span at the playhead; drag a span to move it and its edges to trim it (snapping to
   the playhead, the cuts and the other spans; one undo step each); drag a transition's edges to change each side
   of its cut (a dissolve pulled back to its clip's end becomes a fade out). The Effects tab's transitions drop on a
-  cut or a clip's free start or end, its Fade and Gain effects on a lane. The inspector shows a span's range and
-  the values its start and end show on screen, editable, and a transition's share of each side of the cut. A track
-  header's disclosure hides its lanes. Selecting a Motion span opens the Ken Burns editor (as in Final Cut Pro)
-  over the program monitor: drag the green start and red end rectangles and the move follows as you drag (one undo
-  step per drag), with smoothing, swap and continuing a touching clip's framing. Projects from earlier versions open
-  with their keyframes and fades as spans and look and sound the same.
+  cut or a clip's free start or end, its Ken Burns, Move, Fade and Gain effects on a lane. The inspector shows a
+  span's range and the values its start and end show on screen, editable, and a transition's share of each side of
+  the cut. A track header's disclosure hides its lanes. Selecting a Motion span opens its editor over the program
+  monitor in one of two modes that set the same values, switched on its bar: Ken Burns shows the clip alone and
+  unplaced, and its green start and red end rectangles are the part of the picture that fills the frame (shrink
+  one to zoom in); Transform shows the program, and its boxes are where the clip sits (a picture in picture moves
+  and zooms where it is). Every drag edits the span live (one undo step per drag), with smoothing, swap and
+  continuing a touching clip's framing; Ken Burns and Move in the Effects tab or the Clip menu open in their mode,
+  Control-K in Ken Burns mode when the clip covers the frame. The monitors shade the area around the frame so its
+  edge shows. Projects from earlier versions open with their keyframes and fades as spans and look and sound the
+  same.
 - Inspector for the clips' position, scale, rotation, opacity, gain, fades and exact speed; transitions
   kept together with their linked partner (Delete removes both, Option-Delete one; a change also changes
   the linked one unless turned off); a note when a dissolve sits on a plain split (both sides show the
