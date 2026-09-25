@@ -78,12 +78,28 @@ struct TimelineView: View {
                 cornerControls
                     .frame(width: Self.headerWidth, height: Self.rulerHeight)
                 ruler(model)
+                    .background(GeometryReader { geometry in
+                        Color.clear
+                            .onAppear { TimelineDiagnostics.rulerFrame = geometry.frame(in: .global) }
+                            .onChange(of: geometry.frame(in: .global)) { _, frame in
+                                TimelineDiagnostics.rulerFrame = frame
+                            }
+                    })
             }
             Divider()
             HStack(spacing: 0) {
+                // The line between the headers and the tracks lies over the headers' edge, so the
+                // track area starts at `headerWidth` as the ruler and the scroll bar do (review L1:
+                // a divider between them put every clip, the playhead line and each hit 1 pt right
+                // of the ruler).
                 headers(model)
                     .frame(width: Self.headerWidth)
-                Divider()
+                    .overlay(alignment: .trailing) {
+                        Rectangle()
+                            .fill(Color(nsColor: .separatorColor))
+                            .frame(width: 1)
+                            .allowsHitTesting(false)
+                    }
                 trackArea(model)
             }
             HStack(spacing: 0) {
@@ -209,8 +225,12 @@ struct TimelineView: View {
         }
         .background(GeometryReader { geometry in
             Color.clear
-                .onAppear { canvasResized(geometry.size) }
+                .onAppear {
+                    canvasResized(geometry.size)
+                    TimelineDiagnostics.trackAreaFrame = geometry.frame(in: .global)
+                }
                 .onChange(of: geometry.size) { _, newSize in canvasResized(newSize) }
+                .onChange(of: geometry.frame(in: .global)) { _, frame in TimelineDiagnostics.trackAreaFrame = frame }
         })
         .contentShape(Rectangle())
         .gesture(
@@ -260,6 +280,7 @@ struct TimelineView: View {
     /// offsets are kept inside the content (review M5).
     private func canvasResized(_ size: CGSize) {
         canvasSize = size
+        TimelineDiagnostics.trackAreaFrame.size = size
         store.timelineViewportWidth = size.width
         store.timelineViewportHeight = size.height
         store.clampTimelineScroll()

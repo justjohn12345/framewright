@@ -343,6 +343,29 @@ final class TimelineRedrawTests: XCTestCase {
         }
     }
 
+    /// Review L1: the track area starts where the ruler does (the playhead line under the ruler's
+    /// triangle, clips and hits at the ruler's x), and the time scroll bar too.
+    func testTheTrackAreaAndTheRulerShareTheirOrigin() async throws {
+        let store = fixture.store
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 400),
+                              styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: TimelineView(store: store))
+        window.contentView = host
+        window.orderFront(nil)
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        for _ in 0 ..< 5 { await Self.display(host) }
+        let rulerFrame = TimelineDiagnostics.rulerFrame
+        let tracksFrame = TimelineDiagnostics.trackAreaFrame
+        XCTAssertGreaterThan(rulerFrame.width, 100)
+        XCTAssertEqual(tracksFrame.minX, rulerFrame.minX, accuracy: 0.01, "the same origin: \(tracksFrame) \(rulerFrame)")
+        XCTAssertEqual(tracksFrame.maxX, rulerFrame.maxX, accuracy: 0.01)
+        XCTAssertEqual(tracksFrame.minX, TimelineView.headerWidth, accuracy: 0.01)
+    }
+
     func testTimelinePaintsItsClips() async throws {
         let store = fixture.store
         let (movie, tone) = try await fixture.importMedia()

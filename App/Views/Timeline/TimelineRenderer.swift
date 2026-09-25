@@ -8,6 +8,9 @@ enum TimelineDiagnostics {
     static var canvasDraws = 0
     /// Playhead overlay body evaluations.
     static var playheadUpdates = 0
+    /// Where the ruler and the track area were last laid out (window coordinates; tests).
+    static var rulerFrame: CGRect = .zero
+    static var trackAreaFrame: CGRect = .zero
 }
 
 /// Draws the track area of the timeline into a SwiftUI `GraphicsContext`: rows and their lanes,
