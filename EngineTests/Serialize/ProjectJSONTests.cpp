@@ -535,17 +535,31 @@ TEST_CASE("ProjectJSON: malformed input yields clear errors, never exceptions") 
         j = good;
         j["nextId"] = 1;
         CHECK(contains(loadError(j), "id generator"));
-        j = good;
-        j["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][2]["lane"] = 1; // meets the Motion span
-        CHECK(contains(loadError(j), "overlap on lane 1"));
-        j = good;
-        j["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][0]["end"] = frames(90); // longer than B
-        CHECK(contains(loadError(j), "longer than clip"));
     }
-    SUBCASE("a transition whose cut is gone") {
+    // Since the effect lanes review (M8) loading repairs what has one safe reading, with a warning
+    // (see "loading repairs what it safely can"): these were refusals before.
+    SUBCASE("repaired: an effect span meeting another on its lane moves to a free lane") {
+        json j = good;
+        j["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][2]["lane"] = 1; // meets the Motion span
+        const ProjectLoadResult r = projectFromJson(j);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(anyContains(r.warnings, "on lane 1; moved to lane 2"));
+    }
+    SUBCASE("repaired: a transition longer than the next clip is removed") {
+        json j = good;
+        j["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][0]["end"] = frames(90); // longer than B
+        const ProjectLoadResult r = projectFromJson(j);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(anyContains(r.warnings, "was removed: "));
+        CHECK(anyContains(r.warnings, "longer than clip"));
+        CHECK(r.project->sequences[0].videoTracks[0].clips[0].transitionAt(ClipEdge::Tail) == nullptr);
+    }
+    SUBCASE("repaired: a transition whose cut is gone is removed") {
         json j = good;
         j["sequences"][0]["videoTracks"][0]["clips"][1]["timelineStart"] = frames(61);
-        CHECK(contains(loadError(j), "no clip touches that end"));
+        const ProjectLoadResult r = projectFromJson(j);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(anyContains(r.warnings, "no clip touches that end"));
     }
 }
 
@@ -758,6 +772,119 @@ TEST_CASE("ProjectJSON: a version 4 fade out reaching into an incoming crossfade
     CHECK(anyContains(loaded.warnings, "the fade out (57/30 "));
     CHECK(anyContains(loaded.warnings, "would meet the crossfade at the clip's start; shortened to 55/30 "));
     CHECK_FALSE(validateProject(*loaded.project).has_value());
+}
+
+namespace {
+
+// V1: clip A [0,90) with a Motion span on lane 1 [0,30), an Opacity span on lane 2 [15,60) and a
+// Motion span on lane 3 [40,70); clip B [90,150) touching A's end.
+struct RepairFixture : Fixture {
+    ClipId a, b;
+    SpanId motion, opacity, late;
+    RepairFixture() {
+        a = addClip(v1, av30, 0, 90, 0);
+        b = addClip(v1, av30, 90, 60, 300);
+        SpanTracks zoom;
+        zoom.scale = {key(kCMTimeZero, 1, KeyframeInterpolation::EaseInOut), key(f30(30), 2)};
+        motion = addSpan(a, SpanKind::Motion, 1, f30(0), f30(30), zoom);
+        SpanTracks fade;
+        fade.opacity = {key(kCMTimeZero, 1), key(f30(45), 0.5)};
+        opacity = addSpan(a, SpanKind::Opacity, 2, f30(15), f30(60), fade);
+        SpanTracks pan;
+        pan.x = {key(kCMTimeZero, 0), key(f30(30), 100)};
+        late = addSpan(a, SpanKind::Motion, 3, f30(40), f30(70), pan);
+        requireValid();
+    }
+    json document() const {
+        return projectToJson(project);
+    }
+    // Clip `index` of V1's spans in `doc`.
+    static json &spans(json &doc, std::size_t index) {
+        return doc.at("sequences")[0].at("videoTracks")[0].at("clips")[index].at("spans");
+    }
+};
+
+json &spanWithId(json &list, SpanId id) {
+    for (json &span : list) {
+        if (span.at("id") == id.value()) {
+            return span;
+        }
+    }
+    FAIL("no span " << id.value());
+    return list;
+}
+
+} // namespace
+
+TEST_CASE("ProjectJSON: loading repairs what it safely can and refuses the rest (review M8)") {
+    RepairFixture fx;
+    SUBCASE("repaired: spans out of order are sorted, with a warning") {
+        json doc = fx.document();
+        json &spans = RepairFixture::spans(doc, 0);
+        std::reverse(spans.begin(), spans.end());
+        const ProjectLoadResult r = projectFromJson(doc);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(*r.project == fx.project);
+        CHECK(anyContains(r.warnings, "spans were not in lane and time order; sorted"));
+    }
+    SUBCASE("repaired: a fade in on a clip another clip touches is removed, with a warning") {
+        const SpanId fadeIn = fx.addFade(fx.b, ClipEdge::Head, f30(10)); // invalid: A touches B's start
+        json doc = fx.document();
+        const ProjectLoadResult r = projectFromJson(doc);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(r.project->sequences[0].findSpan(fadeIn) == nullptr);
+        CHECK(anyContains(r.warnings, "was removed: "));
+        CHECK(anyContains(r.warnings, "touches the start of clip " + std::to_string(fx.b.value())));
+        CHECK_FALSE(validateProject(*r.project).has_value());
+    }
+    SUBCASE("repaired: a span on lane 4 moves to the first effect lane with room, with a warning") {
+        json doc = fx.document();
+        spanWithId(RepairFixture::spans(doc, 0), fx.late)["lane"] = 4;
+        const ProjectLoadResult r = projectFromJson(doc);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        const EffectSpan *moved = r.project->sequences[0].findSpan(fx.late);
+        REQUIRE(moved != nullptr);
+        CHECK(moved->lane == 1); // lane 1 is free after frame 30; the composition does not depend on the lane
+        CHECK(anyContains(r.warnings, "lane 4 is not an effect lane (1 to 3); moved to lane 1"));
+    }
+    SUBCASE("repaired: two spans starting together on one lane: the later one moves to a free lane") {
+        json doc = fx.document();
+        json &spans = RepairFixture::spans(doc, 0);
+        json &late = spanWithId(spans, fx.late);
+        late["lane"] = 2;
+        late["start"] = timeToJson(f30(15));
+        late["end"] = timeToJson(f30(45));
+        const ProjectLoadResult r = projectFromJson(doc);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(r.project->sequences[0].findSpan(fx.opacity)->lane == 2);
+        CHECK(r.project->sequences[0].findSpan(fx.late)->lane == 3);
+        CHECK(anyContains(r.warnings, "overlaps span " + std::to_string(fx.opacity.value()) + " on lane 2; moved to lane 3"));
+    }
+    SUBCASE("refused: overlapping spans with no effect lane free for one of them") {
+        json doc = fx.document();
+        json &spans = RepairFixture::spans(doc, 0);
+        for (const SpanId id : {fx.motion, fx.opacity, fx.late}) {
+            json &span = spanWithId(spans, id);
+            span["start"] = timeToJson(f30(10));
+            span["end"] = timeToJson(f30(40));
+        }
+        json extra = spanWithId(spans, fx.late);
+        extra["id"] = 999;
+        extra["lane"] = 1;
+        spans.push_back(extra);
+        doc["nextId"] = 1000;
+        const ProjectLoadResult r = projectFromJson(doc);
+        CHECK_FALSE(r.ok());
+        CHECK(r.error.find("no effect lane has room") != std::string::npos);
+    }
+    SUBCASE("refused: a keyframe without a value (nothing to repair it from), naming its path") {
+        json doc = fx.document();
+        json &span = spanWithId(RepairFixture::spans(doc, 0), fx.motion);
+        span.at("tracks").at("scale")[1]["value"] = nullptr;
+        const ProjectLoadResult r = projectFromJson(doc);
+        CHECK_FALSE(r.ok());
+        CHECK(r.error.find("tracks.scale[1].value") != std::string::npos);
+    }
 }
 
 TEST_CASE("ProjectJSON: the checked-in version 5 project matches the current writer byte for byte") {

@@ -10,6 +10,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace ve {
 
@@ -64,6 +65,15 @@ struct TransitionIssue {
 // other lane-0 span or the next clip's tail span.
 std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const Track &track, const Clip &owner,
                                                    const EffectSpan &span, CMTime frameDuration);
+
+// Removes the lane-0 spans of `sequence` that are not valid transitions (checkTransitionSpan), as
+// every edit does after it ran (normalizeSequence) and loading does: two transitions that meet (a
+// cross dissolve into a clip whose own tail span it now reaches) are resolved from the right (the
+// later clip's span is checked first and kept), except that a fade out gives way to a cross
+// dissolve coming into its clip: it is shortened to the rest of the clip, or removed when nothing
+// is left. Clips must be in start order. `notes`, when given, receives a sentence per removed or
+// shortened span.
+void pruneInvalidTransitions(Sequence &sequence, const Project &project, std::vector<std::string> *notes = nullptr);
 
 // First violated invariant of `sequence` (tracks, clips, links, spans and transitions), or
 // nullopt. Every clip and span time must be an exact model time (numeric, no

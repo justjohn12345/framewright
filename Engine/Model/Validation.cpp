@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -381,6 +382,61 @@ std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const
         }
     }
     return std::nullopt;
+}
+
+void pruneInvalidTransitions(Sequence &sequence, const Project &project, std::vector<std::string> *notes) {
+    const std::string where = "sequence " + std::to_string(sequence.id.value());
+    for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (Track &track : *list) {
+            for (std::size_t i = track.clips.size(); i-- > 0;) {
+                Clip &clip = track.clips[i];
+                for (const ClipEdge edge : {ClipEdge::Tail, ClipEdge::Head}) {
+                    const EffectSpan *span = clip.transitionAt(edge);
+                    if (span == nullptr) {
+                        continue;
+                    }
+                    auto issue = checkTransitionSpan(project, track, clip, *span, sequence.frameDuration);
+                    if (issue && issue->kind == TransitionIssueKind::Overlap && edge == ClipEdge::Tail &&
+                        kCMTimeZero < span->end && i + 1 < track.clips.size() &&
+                        track.clips[i + 1].timelineStart == clip.timelineEnd()) {
+                        // The next clip's fade out meets this dissolve: shorten it, if that is all.
+                        Clip &next = track.clips[i + 1];
+                        EffectSpan *fade = next.transitionAt(ClipEdge::Tail);
+                        const auto room = checkedSubtract(next.timelineDuration, span->end);
+                        if (fade != nullptr && fade->end == kCMTimeZero && room) {
+                            const Clip before = next;
+                            const SpanId fadeId = fade->id;
+                            const auto start = checkedNegate(maxTime(*room, kCMTimeZero));
+                            const bool kept = start && kCMTimeZero < *room;
+                            if (kept) {
+                                fade->start = *start;
+                            } else {
+                                std::erase_if(next.spans, [fadeId](const EffectSpan &s) { return s.id == fadeId; });
+                            }
+                            issue = checkTransitionSpan(project, track, clip, *span, sequence.frameDuration);
+                            if (issue) {
+                                next = before; // the dissolve goes anyway: the fade out stays as it was
+                            } else if (notes != nullptr) {
+                                notes->push_back(where + ": clip " + std::to_string(next.id.value()) + ": the fade out (transition " +
+                                                 std::to_string(fadeId.value()) + ") was " +
+                                                 (kept ? "shortened to " + describe(*room) : std::string("removed")) +
+                                                 ": the cross dissolve " + std::to_string(span->id.value()) +
+                                                 " into the clip needs " + describe(span->end));
+                            }
+                        }
+                    }
+                    if (issue) {
+                        const SpanId id = span->id;
+                        if (notes != nullptr) {
+                            notes->push_back(where + ": clip " + std::to_string(clip.id.value()) + ": transition " +
+                                             std::to_string(id.value()) + " was removed: " + issue->message);
+                        }
+                        std::erase_if(clip.spans, [id](const EffectSpan &s) { return s.id == id; });
+                    }
+                }
+            }
+        }
+    }
 }
 
 std::optional<std::string> validateSequence(const Sequence &sequence, const Project &project) {

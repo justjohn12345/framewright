@@ -342,54 +342,15 @@ void normalizeSequence(Sequence &sequence, const Project &project) {
         }
     }
 
-    // Spans in order; transition spans that are no longer valid go. Two transitions that meet (a
-    // cross dissolve into a clip whose own tail span it now reaches) are resolved from the right:
-    // the later clip's span is checked first and kept; except that a fade out gives way to a cross
-    // dissolve coming into its clip (it is shortened to the rest of the clip, or removed when
-    // nothing is left), since a trim of the faded clip must not remove the cut's dissolve.
+    // Spans in order; transition spans that are no longer valid go (see pruneInvalidTransitions).
     for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
         for (Track &track : *list) {
             for (Clip &clip : track.clips) {
                 clip.sortSpans();
             }
-            for (std::size_t i = track.clips.size(); i-- > 0;) {
-                Clip &clip = track.clips[i];
-                for (const ClipEdge edge : {ClipEdge::Tail, ClipEdge::Head}) {
-                    const EffectSpan *span = clip.transitionAt(edge);
-                    if (span == nullptr) {
-                        continue;
-                    }
-                    auto issue = checkTransitionSpan(project, track, clip, *span, sequence.frameDuration);
-                    if (issue && issue->kind == TransitionIssueKind::Overlap && edge == ClipEdge::Tail &&
-                        kCMTimeZero < span->end && i + 1 < track.clips.size() &&
-                        track.clips[i + 1].timelineStart == clip.timelineEnd()) {
-                        // The next clip's fade out meets this dissolve: shorten it, if that is all.
-                        Clip &next = track.clips[i + 1];
-                        EffectSpan *fade = next.transitionAt(ClipEdge::Tail);
-                        const auto room = checkedSubtract(next.timelineDuration, span->end);
-                        if (fade != nullptr && fade->end == kCMTimeZero && room) {
-                            const Clip before = next;
-                            const auto start = checkedNegate(maxTime(*room, kCMTimeZero));
-                            if (start && *start != kCMTimeZero && kCMTimeZero < *room) {
-                                fade->start = *start;
-                            } else {
-                                const SpanId fadeId = fade->id;
-                                std::erase_if(next.spans, [fadeId](const EffectSpan &s) { return s.id == fadeId; });
-                            }
-                            issue = checkTransitionSpan(project, track, clip, *span, sequence.frameDuration);
-                            if (issue) {
-                                next = before; // the dissolve goes anyway: the fade out stays as it was
-                            }
-                        }
-                    }
-                    if (issue) {
-                        const SpanId id = span->id;
-                        std::erase_if(clip.spans, [id](const EffectSpan &s) { return s.id == id; });
-                    }
-                }
-            }
         }
     }
+    pruneInvalidTransitions(sequence, project);
 }
 
 } // namespace ve

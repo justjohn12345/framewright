@@ -1257,6 +1257,114 @@ std::optional<std::string> migrateProjectJson(json &document, int fromVersion, s
     return std::nullopt;
 }
 
+namespace {
+
+// Repairs, with a warning each, what a file may hold that the model forbids but that has one safe
+// reading (review M8): clips and spans out of order are sorted; a transition off lane 0 goes to
+// lane 0; an effect span off lanes 1-3, or overlapping an earlier span of its lane, moves to the
+// first effect lane where it overlaps nothing (the composition does not depend on the lane: its
+// operations commute), refused when no lane has room; transitions that are not valid (a fade in on
+// a clip another clip touches, a dissolve whose handles are gone...) are removed as every edit
+// removes them. Everything else (an inexact time, overlapping clips, a keyframe without a value...)
+// is left to validateProject or the parser, which refuse the file.
+std::optional<std::string> repairSequence(Sequence &sequence, const Project &project, Warnings &warnings) {
+    const std::string where = "sequence " + std::to_string(sequence.id.value());
+    // A time that is not an exact model time (rounded, another epoch, not numeric) has no safe
+    // reading: nothing is repaired, and validation refuses the file with that time.
+    for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (const Track &track : *list) {
+            for (const Clip &clip : track.clips) {
+                for (const CMTime t : {clip.timelineStart, clip.timelineDuration, clip.sourceIn}) {
+                    if (modelTimeProblem(t, "time")) {
+                        return std::nullopt;
+                    }
+                }
+                for (const EffectSpan &span : clip.spans) {
+                    if (modelTimeProblem(span.start, "time") || modelTimeProblem(span.end, "time")) {
+                        return std::nullopt;
+                    }
+                }
+            }
+        }
+    }
+    for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (Track &track : *list) {
+            const bool clipsInOrder = std::is_sorted(track.clips.begin(), track.clips.end(), [](const Clip &a, const Clip &b) {
+                return a.timelineStart < b.timelineStart;
+            });
+            if (!clipsInOrder) {
+                track.sortClips();
+                warnings.push_back(where + ": track " + std::to_string(track.id.value()) +
+                                   ": its clips were not in time order; sorted");
+            }
+            for (Clip &clip : track.clips) {
+                const std::string clipWhere = where + ": clip " + std::to_string(clip.id.value());
+                std::vector<SpanId> order;
+                for (const EffectSpan &span : clip.spans) {
+                    order.push_back(span.id);
+                }
+                // Lanes, in the file's order: each effect span keeps its lane unless that is not an
+                // effect lane or an earlier span of the lane overlaps it.
+                std::vector<const EffectSpan *> placed;
+                auto overlapping = [&](const EffectSpan &span, int lane) -> const EffectSpan * {
+                    for (const EffectSpan *other : placed) {
+                        if (other->lane == lane && span.start < other->end && other->start < span.end) {
+                            return other;
+                        }
+                    }
+                    return nullptr;
+                };
+                for (EffectSpan &span : clip.spans) {
+                    const std::string spanWhere = clipWhere + ": span " + std::to_string(span.id.value());
+                    if (span.isTransition()) {
+                        if (span.lane != kTransitionLane) {
+                            warnings.push_back(spanWhere + ": a transition lies on lane 0, found lane " +
+                                               std::to_string(span.lane) + "; moved to lane 0");
+                            span.lane = kTransitionLane;
+                        }
+                        continue;
+                    }
+                    const bool effectLane = kFirstEffectLane <= span.lane && span.lane <= kLastLane;
+                    const EffectSpan *blocker = effectLane ? overlapping(span, span.lane) : nullptr;
+                    if (!effectLane || blocker != nullptr) {
+                        std::optional<int> free;
+                        for (int lane = kFirstEffectLane; lane <= kLastLane && !free; ++lane) {
+                            if (overlapping(span, lane) == nullptr) {
+                                free = lane;
+                            }
+                        }
+                        const std::string problem =
+                            effectLane ? "overlaps span " + std::to_string(blocker->id.value()) + " on lane " +
+                                             std::to_string(span.lane)
+                                       : "lane " + std::to_string(span.lane) + " is not an effect lane (" +
+                                             std::to_string(kFirstEffectLane) + " to " + std::to_string(kLastLane) + ")";
+                        if (!free) {
+                            return spanWhere + ": " + problem + ", and no effect lane has room for it";
+                        }
+                        warnings.push_back(spanWhere + ": " + problem + "; moved to lane " + std::to_string(*free));
+                        span.lane = *free;
+                    }
+                    placed.push_back(&span);
+                }
+                clip.sortSpans();
+                bool sorted = true;
+                for (std::size_t k = 0; k < order.size(); ++k) {
+                    sorted = sorted && clip.spans[k].id == order[k];
+                }
+                if (!sorted) {
+                    warnings.push_back(clipWhere + ": its spans were not in lane and time order; sorted");
+                }
+            }
+        }
+    }
+    std::vector<std::string> removed;
+    pruneInvalidTransitions(sequence, project, &removed);
+    warnings.insert(warnings.end(), removed.begin(), removed.end());
+    return std::nullopt;
+}
+
+} // namespace
+
 ProjectLoadResult projectFromJson(const json &document) {
     ProjectLoadResult result;
     try {
@@ -1269,6 +1377,12 @@ ProjectLoadResult projectFromJson(const json &document) {
             project = parseProjectNode(Node(upgraded, ""), warnings);
         } else {
             project = parseProjectNode(Node(document, ""), warnings);
+        }
+        for (Sequence &sequence : project.sequences) {
+            if (auto problem = repairSequence(sequence, project, warnings)) {
+                result.error = "invalid project: " + *problem;
+                return result;
+            }
         }
         if (auto problem = validateProject(project)) {
             result.error = "invalid project: " + *problem;
