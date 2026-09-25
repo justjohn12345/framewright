@@ -3,6 +3,18 @@
 Only what is still open. Fixed findings are in the history table of `README.md` (fix commits and regression tests);
 the full reports are in git history at the commits the table names.
 
+## Effect lanes (2026-09-24 review, `2026-09-24-effect-lanes-review.md`)
+One CRITICAL (the Ken Burns editor assumes a full-frame clip: on a picture-in-picture it draws the picture full size,
+the rectangles many frames wide, and the first drag destroys the framing; a true crop needs an engine window/scissor,
+a user decision), four HIGH (a v4 project with a fade out under an incoming crossfade refuses to open; Escape/Undo
+mid Ken Burns drag is reopened by the next mouse move; a refused transition drop leaves its red pill and the lane-0
+reveal on screen; a dissolve dropped near a lone clip's edge silently becomes a fade), eight MEDIUM (silent drops of
+fades/dissolves/spans by edits, a dissolve changing partner after a ripple delete, fades deleting incoming crossfades,
+the scroll wheel changing axis, no vertical scroll bar, mid-drag row shifts from the lane-0 reveal, the redraw budget
+during Ken Burns drags, loading that refuses instead of repairing), eleven LOW, and three design items from the
+user's notes (compact rows, a user-owned preview/timeline split, restoring the window frame). All open; the next fix
+round works from the report.
+
 ## Keyframed Motion, Ken Burns and Photos drops (2026-09-24 review; report in git history at b9add9f)
 Effect lanes round 2 replaced the keyframe-era app tests (`KeyframedMotionTests`, `MotionReviewTests`): the Ken Burns
 geometry, the picture loader (3), the press rules (12) and the loader's engine path now live in `KenBurnsEditorTests`,
