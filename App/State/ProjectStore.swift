@@ -99,6 +99,8 @@ final class ProjectStore: ObservableObject {
         didSet {
             if selectedSpanID != nil, !selection.isEmpty { selection = [] }
             if selectedSpanID != oldValue { kenBurnsClosedSpan = nil }
+            // A span on collapsed lanes is shown before it is edited (review L7): its track's lanes open.
+            if let id = selectedSpanID, id != oldValue { revealLanes(ofSpan: id) }
             // Selecting a Motion span opens its Ken Burns editor; anything else closes it.
             syncKenBurns()
         }
@@ -195,6 +197,8 @@ final class ProjectStore: ObservableObject {
     }
     /// Every span seen, with its clip, as they were the last time it was there (`dropNote`).
     private(set) var spanMemory = SpanMemory()
+    /// New or Open is replacing the project (its model changes are not edits of this one).
+    private var replacingProject = false
     /// What the timeline's content model depends on besides the engine's model (whose change count
     /// covers the clips, the spans and so the lanes in use).
     private struct TimelineCacheKey: Equatable {
@@ -293,7 +297,9 @@ final class ProjectStore: ObservableObject {
     /// Re-reads the sequence, tracks, clips and undo state from the engine.
     func refreshModel() {
         sequence = engine.sequence
+        let previousTracks = tracks
         tracks = engine.allTracks
+        followLaneCollapse(from: previousTracks)
         var byID: [VEClipID: VEClipInfo] = [:]
         for clip in engine.allClips {
             byID[clip.clipID] = clip
@@ -670,6 +676,35 @@ final class ProjectStore: ObservableObject {
         layout.setLanesCollapsed(collapsed, key: WindowLayoutModel.laneKey(video: track.kind == .video,
                                                                           index: track.index))
         clampTimelineScroll()
+    }
+
+    /// Lane collapse is kept by the track's kind and number ("V2"); when tracks are removed, added
+    /// or reordered within a project the numbers of the others change, so the collapse moves with
+    /// its track (review L7: deleting V1 made V2's collapse state V1's). A track that is gone takes
+    /// its state with it; keys of numbers no track had are left alone. Not across projects (their
+    /// track ids restart; `resetUIState` empties `tracks` first).
+    private func followLaneCollapse(from previous: [VETrackInfo]) {
+        guard !previous.isEmpty, !replacingProject else { return }
+        let before = Dictionary(previous.map { ($0.trackID, $0) }, uniquingKeysWith: { first, _ in first })
+        let after = Dictionary(tracks.map { ($0.trackID, $0) }, uniquingKeysWith: { first, _ in first })
+        func key(_ track: VETrackInfo) -> String {
+            WindowLayoutModel.laneKey(video: track.kind == .video, index: track.index)
+        }
+        let moved = before.values.contains { old in after[old.trackID].map { key($0) != key(old) } ?? true }
+            || after.values.contains { before[$0.trackID] == nil }
+        guard moved else { return }
+        let collapsed = layout.collapsedLaneTracks
+        var keys = collapsed.subtracting(previous.map(key))
+        for old in previous where collapsed.contains(key(old)) {
+            if let now = after[old.trackID] { keys.insert(key(now)) }
+        }
+        if keys != collapsed { layout.setCollapsedLaneTracks(keys) }
+    }
+
+    /// Opens the lanes of the track holding span `id` when they are collapsed.
+    private func revealLanes(ofSpan id: VESpanID) {
+        guard let span = engine.spanInfo(id), areLanesCollapsed(ofTrack: span.trackID) else { return }
+        setLanes(ofTrack: span.trackID, collapsed: false)
     }
 
     /// Whether the user collapsed the track's lanes.
@@ -1300,12 +1335,16 @@ final class ProjectStore: ObservableObject {
     /// Discards the open project (callers confirm unsaved changes first).
     func newProject() {
         cancelActiveGesture?()
+        replacingProject = true
+        defer { replacingProject = false }
         engine.newProject(withName: "Untitled")
         resetUIState()
     }
 
     func open(url: URL) throws {
         cancelActiveGesture?()
+        replacingProject = true
+        defer { replacingProject = false }
         try engine.openProject(at: url)
         resetUIState()
         let missing = engine.missingAssetIDs.count

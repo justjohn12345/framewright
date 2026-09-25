@@ -228,6 +228,36 @@ final class EffectLanesTimelineTests: XCTestCase {
         XCTAssertTrue(WindowLayoutModel(defaults: defaults).collapsedLaneTracks.isEmpty)
     }
 
+    /// Review L7: a track's lane collapse stays with it when the tracks' numbers change (V1 removed:
+    /// V2 becomes V1 and stays collapsed; a new track does not inherit it), and selecting a span on
+    /// collapsed lanes opens them so it is never edited unseen.
+    func testLaneCollapseFollowsItsTrackAndASelectedSpanOpensItsLanes() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let v2 = try XCTUnwrap(store.videoTracks.last).trackID
+        let clip = try place(movie, at: 0, from: 0, to: 2, video: v2)
+        let span = try addSpan(.motion, lane: 1, clip: clip, 0, 30)
+        store.setLanes(ofTrack: v2, collapsed: true)
+        XCTAssertEqual(store.layout.collapsedLaneTracks, ["V2"])
+        XCTAssertTrue(store.engine.removeTrack(v1).ok)
+        XCTAssertEqual(store.track(v2)?.index, 0, "V2 is V1 now")
+        XCTAssertEqual(store.layout.collapsedLaneTracks, ["V1"], "the collapse went with it")
+        XCTAssertTrue(store.areLanesCollapsed(ofTrack: v2))
+        XCTAssertTrue(store.engine.addTrack(of: .video, name: nil).ok)
+        let added = try XCTUnwrap(store.videoTracks.first { $0.trackID != v2 }).trackID
+        XCTAssertFalse(store.areLanesCollapsed(ofTrack: added), "a new track starts open")
+        XCTAssertTrue(store.areLanesCollapsed(ofTrack: v2))
+        XCTAssertEqual(lanes(v2), [])
+        // A span of the collapsed track selected (the inspector, a menu, undo): its lanes open.
+        store.select(span: span)
+        XCTAssertFalse(store.areLanesCollapsed(ofTrack: v2))
+        XCTAssertEqual(lanes(v2), [1, 2])
+        // A new project's tracks do not take over the collapse by id.
+        store.setLanes(ofTrack: v2, collapsed: true)
+        store.newProject()
+        XCTAssertEqual(store.layout.collapsedLaneTracks, ["V1"], "kept by number across projects")
+    }
+
+    // MARK: Selection
     // MARK: Selection
 
     func testASpanClickSelectsItAloneAndAClipClickClearsIt() async throws {

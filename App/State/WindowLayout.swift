@@ -122,6 +122,14 @@ final class WindowLayoutModel: ObservableObject {
         defaults?.set(keys.sorted(), forKey: Self.collapsedLanesKey)
     }
 
+    /// Replaces the collapsed tracks' keys (the store keeps them with their tracks when the tracks'
+    /// numbers change).
+    func setCollapsedLaneTracks(_ keys: Set<String>) {
+        guard keys != collapsedLaneTracks else { return }
+        collapsedLaneTracks = keys
+        defaults?.set(keys.sorted(), forKey: Self.collapsedLanesKey)
+    }
+
     // MARK: Setters (clamped, persisted)
 
     func setMediaBinWidth(_ width: CGFloat) {
