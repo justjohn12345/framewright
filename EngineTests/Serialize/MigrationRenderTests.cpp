@@ -10,6 +10,7 @@
 
 #include "../../Engine/Render/Scheduler.h"
 #include "../Model/ModelFixtures.h"
+#include "../Model/SpanReference.h"
 
 #include <algorithm>
 #include <cmath>
@@ -247,3 +248,79 @@ TEST_CASE("Migration render: the changes a migration only warns about render as 
         }
     }
 }
+
+TEST_CASE("Migration render: an opacity-only clip and a custom curve cut at a clip's edge render as version 4") {
+    // The review's test gap 3 (the goldens cannot be re-recorded: their tool needed the schema-4
+    // engine), checked instead against version 4's rule computed independently: a keyframed
+    // parameter follows its keyframes over source time and holds the first and last values
+    // outside them. Clip 10 [0, 60) from source 0 has opacity keyframes only (1 at 0.5 s, 0.2 at
+    // 1.5 s, linear); clip 11 [60, 120) from source 1 s has x on a custom curve from 0 at 0.5 s to
+    // 300 at 2 s, so its in point cuts the curve.
+    auto time = [](std::int64_t frames) { return json{{"value", frames}, {"timescale", 30}}; };
+    auto key = [&](std::int64_t frames, double value, const char *interpolation) {
+        return json{{"time", time(frames)}, {"value", value}, {"interpolation", interpolation}};
+    };
+    json curved = key(15, 0, "bezier");
+    curved["curve"] = json::array({0.3, 0.1, 0.6, 0.95});
+    auto clip = [&](std::uint64_t id, std::int64_t start, std::int64_t in, const json &keyframes) {
+        return json{{"id", id},
+                    {"assetId", 1},
+                    {"trackId", 3},
+                    {"timelineStart", time(start)},
+                    {"duration", time(60)},
+                    {"sourceIn", time(in)},
+                    {"speed", {{"num", 1}, {"den", 1}}},
+                    {"video",
+                     {{"x", 0.0}, {"y", 0.0}, {"scale", 1.0}, {"rotationDegrees", 0.0}, {"opacity", 0.5},
+                      {"keyframes", keyframes}}},
+                    {"audio", {{"gainDb", 0.0}, {"fadeInDuration", time(0)}, {"fadeOutDuration", time(0)}}}};
+    };
+    const json document{
+        {"schemaVersion", 4},
+        {"name", "v4"},
+        {"nextId", 100},
+        {"activeSequenceId", 2},
+        {"assets", json::array({json{{"id", 1}, {"name", "av.mov"}, {"url", "/av.mov"}, {"kind", "av"},
+                                     {"duration", time(1800)}, {"videoDuration", time(1800)},
+                                     {"frameDuration", time(1)}, {"width", 1920}, {"height", 1080},
+                                     {"audioSampleRate", 48000}, {"audioChannels", 2}}})},
+        {"sequences",
+         json::array({json{{"id", 2},
+                           {"name", "S"},
+                           {"frameDuration", time(1)},
+                           {"width", 1920},
+                           {"height", 1080},
+                           {"videoTracks",
+                            json::array({json{{"id", 3},
+                                              {"kind", "video"},
+                                              {"name", "V1"},
+                                              {"clips", json::array({clip(10, 0, 0, {{"opacity", json::array({key(15, 1, "linear"), key(45, 0.2, "linear")})}}),
+                                                                     clip(11, 60, 30, {{"x", json::array({curved, key(60, 300, "linear")})}})})}}})},
+                           {"audioTracks", json::array({json{{"id", 4}, {"kind", "audio"}, {"name", "A1"}, {"clips", json::array()}}})},
+                           {"transitions", json::array()}}})}};
+    const ProjectLoadResult loaded = projectFromJson(document);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(loaded.warnings.empty());
+    const Project &project = *loaded.project;
+    const Sequence &sequence = project.sequences[0];
+    for (std::int64_t f = 0; f < 120; ++f) {
+        const RenderGraph graph = Scheduler::renderGraphAt(sequence, project, CMTimeMake(f, 30));
+        REQUIRE(graph.layers.size() == 1);
+        const VideoLayer &layer = graph.layers[0];
+        INFO("frame " << f);
+        if (f < 60) {
+            const double s = f / 30.0;
+            const double opacity = s < 0.5 ? 1.0 : s >= 1.5 ? 0.2 : 1.0 + (0.2 - 1.0) * (s - 0.5);
+            CHECK(layer.clipId.value() == 10u);
+            CHECK(near(layer.opacity, opacity));
+            CHECK(near(layer.transform.x, 0));
+        } else {
+            const double s = 1.0 + (f - 60) / 30.0;
+            const double x = s >= 2 ? 300.0 : 300.0 * referenceCurve(0.3, 0.1, 0.6, 0.95, (s - 0.5) / 1.5);
+            CHECK(layer.clipId.value() == 11u);
+            CHECK(std::fabs(layer.transform.x - x) < 1e-6);
+            CHECK(near(layer.opacity, 0.5)); // not keyframed: the static value (unused where keyframed)
+        }
+    }
+}
+
