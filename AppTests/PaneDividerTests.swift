@@ -186,8 +186,9 @@ final class PaneDividerTests: XCTestCase {
                 // The playing monitor re-renders between the steps.
                 await StoreFixture.wait(until: { false }, timeout: 0.05)
                 send(.leftMouseDragged, NSPoint(x: press.x + CGFloat(step) * 5, y: press.y), to: window)
-                XCTAssertEqual(store.layout.sourceMonitorFraction, startFraction + Double(CGFloat(step) * 5 / areaWidth),
-                               accuracy: 1e-9, "step \(step) moves the divider")
+                let expected = startFraction + Double(CGFloat(step) * 5 / areaWidth)
+                XCTAssertEqual(store.layout.sourceMonitorFraction, expected, accuracy: 1e-9,
+                               "step \(step) moves the divider")
             }
             await StoreFixture.wait(until: { false }, timeout: 0.05)
             send(.leftMouseUp, NSPoint(x: press.x + 40, y: press.y), to: window)
