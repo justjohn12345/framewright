@@ -86,6 +86,7 @@ struct PlaybackController::Core {
         uint64_t mirrorSerial = 0; // serials of a mirror's own frames
         std::shared_ptr<const Project> project;
         SequenceId sequenceId;
+        std::optional<PreviewSolo> solo; // applied by the primary source only
         uint64_t snapshotVersion = 0;
         uint64_t sequenceGeneration = 0; // of the pictures held below
 
@@ -119,6 +120,7 @@ struct PlaybackController::Core {
     std::mutex snapshotMutex; // held only to copy/replace the pointer
     std::shared_ptr<const Project> project;
     SequenceId sequenceId;
+    std::optional<PreviewSolo> solo; // snapshotMutex; the primary source's override (setPreviewSolo)
     uint64_t sequenceGeneration = 0; // snapshotMutex; bumped by setSequence (another sequence)
     std::atomic<uint64_t> snapshotVersion{1};
 
@@ -192,6 +194,16 @@ struct PlaybackController::Core {
         snapshotVersion.fetch_add(1, std::memory_order_acq_rel);
     }
 
+    /// The primary source's solo override changed: every source re-resolves its frame (the
+    /// version is the snapshot's, so a paused view re-renders on its next request).
+    void setSolo(std::optional<PreviewSolo> value) {
+        {
+            std::lock_guard<std::mutex> lock(snapshotMutex);
+            solo = value;
+        }
+        snapshotVersion.fetch_add(1, std::memory_order_acq_rel);
+    }
+
     void resetFps() {
         fps.store(0.0, std::memory_order_relaxed);
         lastClockPresentNanos.store(0, std::memory_order_relaxed);
@@ -211,6 +223,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
             previous = std::move(rs.project);
             rs.project = project;
             rs.sequenceId = sequenceId;
+            rs.solo = solo;
             generation = sequenceGeneration;
         }
         rs.snapshotVersion = version;
@@ -273,7 +286,12 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
         return false;
     }
 
-    RenderGraph graph = Scheduler::renderGraphAt(*sequence, *rs.project, timeForFrame(index, fd));
+    // The program monitor with a solo override shows that clip alone; a mirror always the program.
+    RenderGraph graph =
+        rs.primary && rs.solo
+            ? Scheduler::soloGraphAt(*sequence, *rs.project, rs.solo->clip, timeForFrame(index, fd),
+                                     rs.solo->identityMotion)
+            : Scheduler::renderGraphAt(*sequence, *rs.project, timeForFrame(index, fd));
     const size_t n = graph.layers.size();
     // A fresh frame: its status reports only this frame's problems (the view clears lastError
     // with the first frame whose status is ok).
@@ -664,9 +682,9 @@ void PlaybackController::retargetLocked(CMTime at, double rate, CMTime window, d
         if (index < 0 || index > lastIndex) {
             break;
         }
-        const RenderGraph graph = Scheduler::renderGraphAt(*sequence, *project_, timeForFrame(index, fd));
-        for (size_t i = 0; i < graph.layers.size(); ++i) {
-            const VideoLayer &layer = graph.layers[i];
+        const std::vector<VideoLayer> layers = layersToDecodeLocked(*sequence, timeForFrame(index, fd));
+        for (size_t i = 0; i < layers.size(); ++i) {
+            const VideoLayer &layer = layers[i];
             if (std::find(seen.begin(), seen.end(), layer.clipId) != seen.end()) {
                 continue;
             }
@@ -713,12 +731,12 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
     if (!pool_ || !sequence) {
         return;
     }
-    const RenderGraph graph = Scheduler::renderGraphAt(*sequence, *project_, at);
+    const std::vector<VideoLayer> layers = layersToDecodeLocked(*sequence, at);
     std::weak_ptr<Core> weakCore = core_;
     std::weak_ptr<ObserverHub> weakHub = hub_;
     const uint64_t generation = core_->beginDisplayRequests();
-    for (size_t i = 0; i < graph.layers.size(); ++i) {
-        const VideoLayer &layer = graph.layers[i];
+    for (size_t i = 0; i < layers.size(); ++i) {
+        const VideoLayer &layer = layers[i];
         const MediaAsset *asset = project_->findAsset(layer.assetId);
         if (!asset || cache_->contains(layer.assetId, pictureTimeFor(layer, *asset))) {
             continue;
@@ -754,11 +772,70 @@ bool PlaybackController::firstFramesReadyLocked(CMTime at) const {
     if (!sequence) {
         return true;
     }
-    const RenderGraph graph = Scheduler::renderGraphAt(*sequence, *project_, at);
-    return std::all_of(graph.layers.begin(), graph.layers.end(), [&](const VideoLayer &layer) {
+    const std::vector<VideoLayer> layers = layersToDecodeLocked(*sequence, at);
+    return std::all_of(layers.begin(), layers.end(), [&](const VideoLayer &layer) {
         const MediaAsset *asset = project_->findAsset(layer.assetId);
         return !asset || cache_->contains(layer.assetId, pictureTimeFor(layer, *asset));
     });
+}
+
+std::vector<VideoLayer> PlaybackController::layersToDecodeLocked(const Sequence &sequence, CMTime at) const {
+    std::vector<VideoLayer> layers = Scheduler::renderGraphAt(sequence, *project_, at).layers;
+    if (solo_) {
+        const bool present = std::any_of(layers.begin(), layers.end(),
+                                         [&](const VideoLayer &layer) { return layer.clipId == solo_->clip; });
+        if (!present) {
+            RenderGraph alone = Scheduler::soloGraphAt(sequence, *project_, solo_->clip, at, solo_->identityMotion);
+            for (VideoLayer &layer : alone.layers) {
+                layers.push_back(std::move(layer));
+            }
+        }
+    }
+    return layers;
+}
+
+bool PlaybackController::soloValidLocked(const PreviewSolo &solo) const {
+    const Sequence *sequence = sequenceLocked();
+    if (!sequence) {
+        return false;
+    }
+    const std::optional<ClipLocation> location = sequence->locateClip(solo.clip);
+    return location && location->trackKind == TrackKind::Video;
+}
+
+void PlaybackController::setPreviewSolo(std::optional<PreviewSolo> solo) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (solo && !soloValidLocked(*solo)) {
+        solo.reset(); // nothing of the sequence to show alone
+    }
+    if (solo == solo_) {
+        return;
+    }
+    solo_ = solo;
+    core_->setSolo(solo_);
+    switch (state_) {
+    case PlaybackState::Playing:
+        lastRetarget_ = kCMTimeInvalid; // the tick thread retargets with the solo layer at once
+        break;
+    case PlaybackState::Prerolling:
+        preroll_.retargeted = false; // the pre-roll's targets and first frames include it
+        requestDisplayFramesLocked(preroll_.at);
+        break;
+    case PlaybackState::Stopped:
+    case PlaybackState::Scrubbing:
+        requestDisplayFramesLocked(displayTime_); // decodes the picture shown now; asks for a redraw
+        // The stopped lookahead follows the new layers (the audio at the paused frame is unchanged).
+        displayChangedAt_ = std::chrono::steady_clock::now();
+        stoppedLookaheadPending_ = true;
+        break;
+    }
+    postNeedsDisplay();
+    tickCv_.notify_all();
+}
+
+std::optional<PlaybackController::PreviewSolo> PlaybackController::previewSolo() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return solo_;
 }
 
 // MARK: Transport internals (mutex_ held)
@@ -1095,6 +1172,10 @@ void PlaybackController::setSequence(std::shared_ptr<const Project> project, Seq
     pauseLocked();
     project_ = std::move(project);
     sequenceId_ = sequenceId;
+    if (solo_) {
+        solo_.reset(); // another sequence (New/Open): clip ids name other clips
+        core_->setSolo(std::nullopt);
+    }
     core_->setSnapshot(project_, sequenceId_, /*newSequence*/ true);
     registerAssetsLocked();
     state_ = PlaybackState::Stopped;
@@ -1112,6 +1193,10 @@ void PlaybackController::setSequence(std::shared_ptr<const Project> project, Seq
 void PlaybackController::modelChanged(std::shared_ptr<const Project> project) {
     std::lock_guard<std::mutex> lock(mutex_);
     project_ = std::move(project);
+    if (solo_ && !soloValidLocked(*solo_)) {
+        solo_.reset(); // the clip went away (or left the video tracks): the program again
+        core_->setSolo(std::nullopt);
+    }
     core_->setSnapshot(project_, sequenceId_, /*newSequence*/ false);
     registerAssetsLocked();
     if (!sequenceLocked()) {

@@ -38,6 +38,18 @@ class Scheduler {
     // The layers visible at `time` (snapped down to the sequence frame containing it).
     static RenderGraph renderGraphAt(const Sequence &sequence, const Project &project, CMTime time);
 
+    // One clip alone (the program monitor's solo preview, PlaybackController::setPreviewSolo): the
+    // graph of the frame containing `time` with only `clipId`'s layer, whatever its track's
+    // visibility, without a transition. The time is held inside the clip: before its first frame
+    // the layer shows that frame, from its end on its last frame, so the picture never goes away
+    // while the playhead leaves the clip. `identityMotion`: the layer has identity VideoParams
+    // (no offset, scale 1, no rotation, opacity 1: the picture fitted into the frame as the
+    // compositor places it); otherwise its Motion there (motionAt), still alone. `graph.time` is
+    // the frame containing `time` (what the monitor is showing), not the held one. Empty (black)
+    // when the clip is not a video clip of `sequence` or its asset is missing.
+    static RenderGraph soloGraphAt(const Sequence &sequence, const Project &project, ClipId clipId, CMTime time,
+                                   bool identityMotion);
+
     // Audio contributions over `range` (sequence time).
     static AudioGraph audioGraphFor(const Sequence &sequence, const Project &project, CMTimeRange range);
     static AudioGraph audioGraphFor(const Sequence &sequence, const Project &project, const TimeRange &range);

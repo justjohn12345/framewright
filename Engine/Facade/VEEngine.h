@@ -601,6 +601,24 @@ NS_SWIFT_UI_ACTOR
 /// Same as seekToTime: (kept for callers that only show stills).
 - (void)showProgramFrameAtTime:(CMTime)time;
 
+/// Shows `clipID` alone in the program monitor (the Ken Burns editor's picture): only that clip,
+/// whatever its track's visibility and without its transitions, held on its first frame while the
+/// playhead is before it and on its last from its end; with `identityMotion` at identity Motion
+/// (no offset, scale 1, no rotation, opacity 1: its picture fitted into the frame), otherwise with
+/// its own Motion. Seeking, scrubbing and playback work as usual (the audio is the program's). Only
+/// the program view shows it: the output view (attachOutputView:) keeps showing the program, and
+/// an export renders the program. Replaces a previous solo clip. Returns NO (and clears the
+/// override) when `clipID` is not a video clip of the active sequence. The override ends with
+/// clearProgramPreviewSolo, when the clip is removed (or leaves the video tracks) and on New/Open.
+- (BOOL)setProgramPreviewSoloClip:(VEClipID)clipID
+                   identityMotion:(BOOL)identityMotion NS_SWIFT_NAME(setProgramPreviewSolo(clip:identityMotion:));
+/// Shows the program again in the program monitor.
+- (void)clearProgramPreviewSolo;
+/// The clip the program monitor shows alone (0: the program).
+@property (nonatomic, readonly) VEClipID programPreviewSoloClipID;
+/// Whether that clip is shown at identity Motion (NO without a solo clip).
+@property (nonatomic, readonly) BOOL programPreviewSoloIdentityMotion;
+
 - (void)play;
 - (void)pause;
 - (void)togglePlay;

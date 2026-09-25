@@ -186,6 +186,44 @@ RenderGraph Scheduler::renderGraphAt(const Sequence &sequence, const Project &pr
     return graph;
 }
 
+RenderGraph Scheduler::soloGraphAt(const Sequence &sequence, const Project &project, ClipId clipId, CMTime time,
+                                   bool identityMotion) {
+    RenderGraph graph;
+    graph.width = sequence.width;
+    graph.height = sequence.height;
+    if (!isNumeric(time) || !isPositive(sequence.frameDuration)) {
+        return graph;
+    }
+    const CMTime fd = sequence.frameDuration;
+    graph.time = snapToFrame(time, fd, SnapMode::Floor);
+    const std::optional<ClipLocation> location = sequence.locateClip(clipId);
+    if (!location || location->trackKind != TrackKind::Video) {
+        return graph;
+    }
+    const Clip &clip = *sequence.findClip(clipId);
+    const MediaAsset *asset = project.findAsset(clip.assetId);
+    if (!asset || !(clip.timelineDuration > kCMTimeZero)) {
+        return graph;
+    }
+    // The clip's frames on the sequence grid: from the first frame starting at or after its start
+    // to the last frame starting before its end (clips are placed on whole frames, so these are
+    // its first and last frames).
+    const std::int64_t first = frameIndexAt(clip.timelineStart, fd, SnapMode::Ceil);
+    const std::int64_t last = std::max(first, frameIndexAt(clip.timelineEnd(), fd, SnapMode::Ceil) - 1);
+    const std::int64_t wanted = frameIndexAt(graph.time, fd, SnapMode::Floor);
+    CMTime held = timeForFrame(std::clamp(wanted, first, last), fd);
+    if (held < clip.timelineStart || held >= clip.timelineEnd()) {
+        held = clip.timelineStart; // a clip shorter than a frame, off the grid
+    }
+    VideoLayer layer = makeLayer(clip, *asset, held);
+    if (identityMotion) {
+        layer.transform = VideoParams{};
+        layer.opacity = 1.0;
+    }
+    graph.layers.push_back(std::move(layer));
+    return graph;
+}
+
 AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &project, CMTimeRange range) {
     return audioGraphFor(sequence, project, TimeRange::fromCMTimeRange(range));
 }

@@ -320,6 +320,24 @@ class PlaybackController {
     /// asset meanwhile) and before handing over the new project.
     void forgetMedia();
 
+    /// The program monitor shows one clip alone (the Ken Burns editor's picture): while set, the
+    /// primary frame source (the program monitor) resolves Scheduler::soloGraphAt for `clip`
+    /// instead of the program (only that clip, whatever its track's visibility, held on its first
+    /// frame before it and its last from its end; with `identityMotion` at identity VideoParams,
+    /// opacity 1), and its pictures are decoded with the program's (the paused picture's
+    /// requests, the lookahead and pre-roll targets include the solo layer). A mirror source (the
+    /// output window) keeps showing the program, the audio is the program's, and transport works as
+    /// usual. Export never uses a controller, so it is unaffected. Setting a clip that is not a
+    /// video clip of the current sequence clears the override; so does setSequence() (New/Open), and
+    /// modelChanged() when the clip is gone or no longer on a video track.
+    struct PreviewSolo {
+        ClipId clip;
+        bool identityMotion = true;
+        friend bool operator==(const PreviewSolo &, const PreviewSolo &) = default;
+    };
+    void setPreviewSolo(std::optional<PreviewSolo> solo);
+    std::optional<PreviewSolo> previewSolo() const;
+
     // MARK: Transport
 
     void play();
@@ -428,6 +446,12 @@ class PlaybackController {
     void noteDisplayChangedLocked(); // stopped: the paused frame moved (re-warm the audio later)
     void warmAudioLocked();
     bool firstFramesReadyLocked(CMTime at) const;
+    /// The layers to decode for the frame at `at`: the program's, plus the solo clip's layer
+    /// (setPreviewSolo) when that clip is not among them (held on its edge frame, or on a hidden
+    /// track).
+    std::vector<VideoLayer> layersToDecodeLocked(const Sequence &sequence, CMTime at) const;
+    /// Whether `solo` names a video clip of the current sequence.
+    bool soloValidLocked(const PreviewSolo &solo) const;
     void pauseLocked(std::optional<CMTime> at = std::nullopt);
     /// Targets for playing from `at` at `rate` (decodeLookahead scaled by the speed).
     void retargetLocked(CMTime at, double rate);
@@ -497,6 +521,7 @@ class PlaybackController {
     std::optional<std::chrono::steady_clock::time_point> lastActivity_; // see touchIdleLocked()
     std::vector<audio::AudioOutputEvent> outputEvents_;
     std::optional<PlaybackError> lastError_;
+    std::optional<PreviewSolo> solo_; // setPreviewSolo (also in the core, for the frame sources)
     std::map<AssetId, std::string> registeredPaths_;
     std::map<AssetId, media::RoutedMediaInfo> routing_;
     bool stopTick_ = false;

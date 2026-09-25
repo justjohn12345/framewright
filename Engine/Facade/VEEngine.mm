@@ -3105,6 +3105,31 @@ static bool isRunning(playback::PlaybackState state) {
     return _programView;
 }
 
+- (BOOL)setProgramPreviewSoloClip:(VEClipID)clipID identityMotion:(BOOL)identityMotion {
+    VE_ASSERT_MAIN();
+    // The controller has the current model (every model change is published to it at once).
+    _playback->setPreviewSolo(playback::PlaybackController::PreviewSolo{ClipId(static_cast<ClipId::ValueType>(clipID)),
+                                                                        identityMotion == YES});
+    return _playback->previewSolo().has_value();
+}
+
+- (void)clearProgramPreviewSolo {
+    VE_ASSERT_MAIN();
+    _playback->setPreviewSolo(std::nullopt);
+}
+
+- (VEClipID)programPreviewSoloClipID {
+    VE_ASSERT_MAIN();
+    const auto solo = _playback->previewSolo();
+    return solo ? static_cast<VEClipID>(solo->clip.value()) : 0;
+}
+
+- (BOOL)programPreviewSoloIdentityMotion {
+    VE_ASSERT_MAIN();
+    const auto solo = _playback->previewSolo();
+    return solo && solo->identityMotion ? YES : NO;
+}
+
 - (void)attachOutputView:(VEPreviewView *)view {
     VE_ASSERT_MAIN();
     if (_outputView != nil && _outputView != view) {

@@ -604,3 +604,63 @@ TEST_CASE("Scheduler: a Motion span over the first 5 s of a 30 s clip holds its 
         }
     }
 }
+
+TEST_CASE("Scheduler: a solo graph shows one clip alone, held inside it, at identity or with its Motion") {
+    Fixture fx;
+    // V1: a background clip [0, 60) and after a dissolve a second clip [60, 120); V2: a picture in
+    // picture [30, 90) from source frame 300, placed small, turned and half transparent, with a
+    // Motion span; V2 is hidden.
+    const ClipId background = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
+    const ClipId second = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
+    fx.addTransition(fx.v1, background, second, 10); // [55, 65)
+    const ClipId pip = fx.addClip(fx.v2, fx.av30, 30, 60, 300);
+    fx.sequence().findClip(pip)->video = VideoParams{690, 324, 0.3, 30, 0.5};
+    SpanTracks motion;
+    motion.x = {key(f30(0), 0, KeyframeInterpolation::Linear), key(f30(30), 300)};
+    fx.addSpan(pip, SpanKind::Motion, 1, f30(300), f30(330), motion);
+    fx.track(fx.v2).muted = true;
+    const ClipId audio = fx.addClip(fx.a1, fx.av30, 0, 30);
+    fx.requireValid();
+
+    auto solo = [&](ClipId clip, std::int64_t frame, bool identity) {
+        return Scheduler::soloGraphAt(fx.sequence(), fx.project, clip, f30(frame), identity);
+    };
+    // The hidden picture in picture alone, at identity, whatever the program shows there.
+    const RenderGraph alone = solo(pip, 45, true);
+    REQUIRE(layerClips(alone) == std::vector<ClipId>{pip});
+    CHECK(alone.width == 1920);
+    CHECK(alone.height == 1080);
+    CHECK(alone.time == f30(45));
+    CHECK(alone.layers[0].transform == VideoParams{});
+    CHECK(alone.layers[0].opacity == 1.0);
+    CHECK_FALSE(alone.layers[0].transition.has_value());
+    CHECK(alone.layers[0].sourceTime == f30(315));
+    CHECK(alone.layers[0].trackId == fx.v2);
+    CHECK_MESSAGE(layerClips(graphAt(fx, 45)) == std::vector<ClipId>{background}, "the program does not show it");
+    // With its own Motion: what the program would draw for it (its static values and its span).
+    const RenderGraph moved = solo(pip, 45, false);
+    REQUIRE(moved.layers.size() == 1);
+    CHECK(moved.layers[0].transform == Scheduler::motionAt(*fx.sequence().findClip(pip), f30(45)));
+    CHECK(moved.layers[0].transform.x == doctest::Approx(690 + 150));
+    CHECK(moved.layers[0].opacity == 0.5);
+    // Before the clip: its first frame; from its end on: its last frame. The graph's time stays
+    // the frame asked for.
+    const RenderGraph before = solo(pip, 3, true);
+    REQUIRE(before.layers.size() == 1);
+    CHECK(before.time == f30(3));
+    CHECK(before.layers[0].sourceTime == f30(300));
+    CHECK(solo(pip, 90, true).layers.at(0).sourceTime == f30(359));
+    CHECK(solo(pip, 500, true).layers.at(0).sourceTime == f30(359));
+    // Inside a dissolve: the clip alone, without the transition or its partner.
+    const RenderGraph dissolving = solo(background, 58, true);
+    REQUIRE(layerClips(dissolving) == std::vector<ClipId>{background});
+    CHECK_FALSE(dissolving.layers[0].transition.has_value());
+    CHECK(dissolving.layers[0].sourceTime == f30(88));
+    CHECK(layerClips(graphAt(fx, 58)) == std::vector<ClipId>{background, second});
+    // After the dissolve, the background's last frame (its handle is not the clip).
+    CHECK(solo(background, 62, true).layers.at(0).sourceTime == f30(89));
+    // Not a video clip of the sequence: black.
+    CHECK(solo(audio, 10, true).isEmpty());
+    CHECK(solo(ClipId(987654), 10, true).isEmpty());
+    CHECK(Scheduler::soloGraphAt(fx.sequence(), fx.project, pip, kCMTimeInvalid, true).isEmpty());
+}
