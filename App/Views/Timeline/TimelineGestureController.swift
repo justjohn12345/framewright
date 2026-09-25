@@ -133,6 +133,14 @@ final class TimelineGestureController: ObservableObject {
             }
         }
 
+        /// The label of the preview on lane 0: the transition's name across a cut, "Fade" where a
+        /// dissolve dropped on a free clip edge becomes a fade (drawn in the transitions' colour, so
+        /// the conversion shows).
+        var previewLabel: String {
+            if case .cut = placement { return kind.title }
+            return "Fade"
+        }
+
         /// What the drop adds ("Cross Dissolve", "Fade Out", ...).
         var title: String {
             switch placement {
@@ -989,21 +997,21 @@ final class TimelineGestureController: ObservableObject {
     /// Distance (points) from the pointer within which a cut or clip edge takes a dropped transition.
     static let dropCutDistance: CGFloat = 40
 
+    /// Where a transition dropped at `location` lands: the nearest cut or free clip edge on the row
+    /// under the pointer within `dropCutDistance` (a cut wins a tie with a fade). When that is a free
+    /// edge that cannot take a fade (it already fades), the next free edge in reach that can takes
+    /// it (a dissolve dropped near a short clip's faded end goes on its free start; review H4); a
+    /// refused cut is never swapped for a fade. Else the nearest, with its refusal.
     private func dropTarget(kind: TransitionKind, at location: CGPoint) -> TransitionDropTarget? {
         let model = store.timelineModel
         guard let row = model.layout(atY: location.y),
               (row.track.kind == .video) == (kind.trackKind == .video) else { return nil }
         let onTrack = model.clips.filter { $0.trackID == row.track.id }
-        var best: (placement: TransitionPlacement, x: Double, distance: CGFloat)?
+        var candidates: [(placement: TransitionPlacement, seconds: Double, distance: CGFloat)] = []
         func consider(_ placement: TransitionPlacement, at seconds: Double) {
             let distance = abs(model.x(forTime: seconds) - location.x)
             guard distance <= Self.dropCutDistance else { return }
-            // A cut wins a tie with a fade (the cut is what a transition usually goes on).
-            if let current = best {
-                if distance > current.distance { return }
-                if distance == current.distance, case .cut = current.placement { return }
-            }
-            best = (placement, seconds, distance)
+            candidates.append((placement, seconds, distance))
         }
         for clip in onTrack {
             let next = onTrack.first { abs($0.start - clip.end) < 1e-9 && $0.id != clip.id }
@@ -1017,7 +1025,30 @@ final class TimelineGestureController: ObservableObject {
                 consider(.fadeIn(clip: clip.id), at: clip.start)
             }
         }
-        guard let (placement, cut, _) = best else { return nil }
+        func isCut(_ placement: TransitionPlacement) -> Bool {
+            if case .cut = placement { return true }
+            return false
+        }
+        candidates.sort { a, b in
+            a.distance != b.distance ? a.distance < b.distance : isCut(a.placement) && !isCut(b.placement)
+        }
+        var nearest: TransitionDropTarget?
+        for candidate in candidates {
+            if nearest != nil, isCut(candidate.placement) { continue }
+            guard let target = dropTarget(kind: kind, row: row, placement: candidate.placement, at: candidate.seconds,
+                                          model: model) else { continue }
+            if target.allowed { return target }
+            if nearest == nil {
+                nearest = target
+                if isCut(candidate.placement) { break }
+            }
+        }
+        return nearest
+    }
+
+    /// What a transition gets at one cut or free clip edge of `row`.
+    private func dropTarget(kind: TransitionKind, row: TimelineViewModel.TrackLayout, placement: TransitionPlacement,
+                            at cut: Double, model: TimelineViewModel) -> TransitionDropTarget? {
         let wanted = store.editingPreferences.transitionFrames(frameDuration: store.frameDuration)
         let frameSeconds = model.frameSeconds
         var frames = wanted
@@ -1050,14 +1081,21 @@ final class TimelineGestureController: ObservableObject {
             let other = fadeIn ? tail.map { $0.cut - $0.start } ?? 0 : head.map { $0.end - $0.start } ?? 0
             let room = max(0, clipFrames - Int64((other / max(frameSeconds, 1e-9)).rounded()))
             frames = min(wanted, room)
+            let silence = kind.trackKind == .video ? "black" : "silence"
             if allowed, (fadeIn ? head : tail) != nil {
                 allowed = false
-                message = "“\(clip.name)” already has a \(fadeIn ? "fade in" : "transition at its end")."
+                message = "“\(clip.name)” already fades \(fadeIn ? "in" : "out"): drag the fade's edge to lengthen "
+                    + "it, or delete it."
             } else if allowed, frames <= 0 {
                 allowed = false
                 message = "“\(clip.name)” has no room for a fade."
-            } else if allowed, frames < wanted {
-                message = "Shortened to \(store.durationString(frames: frames)): what “\(clip.name)” has room for."
+            } else if allowed {
+                // The dissolve becomes a fade: say so.
+                message = fadeIn ? "No clip precedes: this adds a fade from \(silence)."
+                    : "No clip follows: this adds a fade to \(silence)."
+                if frames < wanted {
+                    message += " Shortened to \(store.durationString(frames: frames)): what “\(clip.name)” has room for."
+                }
             }
             let length = Double(max(frames, 1)) * frameSeconds
             return TransitionDropTarget(kind: kind, trackID: row.track.id, placement: placement, cut: cut,

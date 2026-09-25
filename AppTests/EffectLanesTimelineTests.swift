@@ -504,6 +504,62 @@ final class EffectLanesTimelineTests: XCTestCase {
 
     // MARK: Drops from the Effects tab
 
+    /// Review H4: a dissolve dropped on a clip's free edge becomes a fade, and says so: the preview is
+    /// labelled "Fade" and the note says what it adds; a clip that already fades out says so (and
+    /// how to change it), and the drop goes on the clip's other free edge when that is in reach.
+    func testADissolveOnAFreeEdgeSaysItBecomesAFade() async throws {
+        store.defaults.set(0.2, forKey: EditingPreferences.defaultTransitionSecondsKey) // 6 frames
+        let (movie, tone) = try await fixture.importMedia()
+        let a = try place(movie, at: 0, from: 0, to: 1, video: v1) // x 0...50, alone
+        let b = try place(movie, at: 3, from: 0, to: 0.5, video: v1) // x 150...175, alone and short
+        let gestures = TimelineGestureController(store: store)
+        let row = try XCTUnwrap(store.timelineModel.layout(forTrack: v1))
+        let nearAsEnd = CGPoint(x: 47, y: row.y + 30)
+
+        let fade = try XCTUnwrap(gestures.transitionDragUpdated(kind: .crossDissolve, at: nearAsEnd))
+        XCTAssertEqual(fade.placement, .fadeOut(clip: a))
+        XCTAssertTrue(fade.allowed)
+        XCTAssertEqual(fade.previewLabel, "Fade", "the preview shows the conversion")
+        XCTAssertEqual(fade.message, "No clip follows: this adds a fade to black.")
+        XCTAssertTrue(gestures.dropTransition(kind: .crossDissolve, at: nearAsEnd))
+        XCTAssertEqual(store.selectedSpan?.transitionStyle, .fadeOut)
+
+        // Again at A's end: it already fades out (its start is out of reach).
+        let again = try XCTUnwrap(gestures.transitionDragUpdated(kind: .crossDissolve, at: nearAsEnd))
+        XCTAssertFalse(again.allowed)
+        XCTAssertEqual(again.message, "“clip.mov” already fades out: drag the fade's edge to lengthen it, or delete it.")
+        XCTAssertFalse(gestures.dropTransition(kind: .crossDissolve, at: nearAsEnd))
+        XCTAssertEqual(store.statusMessage, again.message)
+
+        // B is short: with its end fading out, a drop near its end goes on its free start.
+        let nearBsEnd = CGPoint(x: 173, y: row.y + 30)
+        XCTAssertTrue(gestures.dropTransition(kind: .crossDissolve, at: nearBsEnd))
+        XCTAssertEqual(store.selectedSpan?.transitionStyle, .fadeOut)
+        let other = try XCTUnwrap(gestures.transitionDragUpdated(kind: .crossDissolve, at: nearBsEnd))
+        XCTAssertEqual(other.placement, .fadeIn(clip: b), "the other free edge, in reach")
+        XCTAssertTrue(other.allowed)
+        XCTAssertEqual(other.previewLabel, "Fade")
+        XCTAssertEqual(other.message, "No clip precedes: this adds a fade from black.")
+        XCTAssertTrue(gestures.dropTransition(kind: .crossDissolve, at: nearBsEnd))
+        XCTAssertEqual(store.selectedSpan?.transitionStyle, .fadeIn)
+        XCTAssertEqual(store.selectedSpan?.clipID, b)
+
+        // Across a cut the preview is the transition itself.
+        _ = try place(movie, at: 1, from: 1, to: 2, video: v1) // x 50...100, touching A's end
+        let cut = try XCTUnwrap(gestures.transitionDragUpdated(kind: .crossDissolve, at: CGPoint(x: 52, y: row.y + 30)))
+        XCTAssertEqual(cut.previewLabel, "Cross Dissolve")
+        gestures.transitionDragExited()
+
+        // On audio the fade goes to silence.
+        _ = try place(tone, at: 0, from: 0, to: 2, audio: a1)
+        let audioRow = try XCTUnwrap(store.timelineModel.layout(forTrack: a1))
+        let silence = try XCTUnwrap(gestures.transitionDragUpdated(kind: .audioCrossfade,
+                                                                   at: CGPoint(x: 97, y: audioRow.y + 20)))
+        XCTAssertEqual(silence.message, "No clip follows: this adds a fade to silence.")
+        XCTAssertEqual(silence.previewLabel, "Fade")
+        gestures.transitionDragExited()
+    }
+
     func testTransitionsAndEffectsDropOntoLanes() async throws {
         // Half a second: a fade in, a dissolve and a fade out all fit on two 1 s clips.
         store.defaults.set(0.5, forKey: EditingPreferences.defaultTransitionSecondsKey)
@@ -539,8 +595,8 @@ final class EffectLanesTimelineTests: XCTestCase {
         XCTAssertEqual(store.sequence.transitions.count, 1)
         // A second fade out at B's end is refused with the reason.
         XCTAssertFalse(gestures.dropTransition(kind: .crossDissolve, at: CGPoint(x: 98, y: row.y + 30)))
-        XCTAssertTrue(store.statusMessage?.contains("already has a transition at its end") == true,
-                      store.statusMessage ?? "")
+        XCTAssertEqual(store.statusMessage,
+                       "“clip.mov” already fades out: drag the fade's edge to lengthen it, or delete it.")
 
         // The Fade effect onto an effect lane: an Opacity span of the default length from the drop
         // point, fading out when it reaches the clip's end.

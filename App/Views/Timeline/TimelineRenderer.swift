@@ -336,13 +336,14 @@ struct TimelineRenderer {
     }
 
     /// Drop feedback for a transition dragged from the Effects tab: the cut or clip edge it would
-    /// go on is highlighted on lane 0 with the span it would get (green), or in red when it cannot
-    /// take one, with the reason.
+    /// go on is highlighted on lane 0 with the span it would get, in the transitions' colour and
+    /// labelled with what it becomes ("Cross Dissolve", or "Fade" on a free clip edge), or in red
+    /// when it cannot take one, with the reason.
     private func drawDropTarget(_ target: TimelineGestureController.TransitionDropTarget,
                                 in context: inout GraphicsContext, size: CGSize) {
         guard let layout = model.layout(forTrack: target.trackID) else { return }
         let top = layout.y - model.scrollY
-        let color: Color = target.allowed ? .green : .red
+        let color: Color = target.allowed ? Self.color(.transition) : .red
         let cutX = model.x(forTime: target.cut)
         context.stroke(Path { $0.move(to: CGPoint(x: cutX, y: top)); $0.addLine(to: CGPoint(x: cutX, y: top + layout.height)) },
                        with: .color(color), lineWidth: 2)
@@ -350,8 +351,13 @@ struct TimelineRenderer {
             let x0 = model.x(forTime: target.start)
             let x1 = model.x(forTime: target.end)
             let band = CGRect(x: x0, y: lane.minY + 1, width: max(4, x1 - x0), height: lane.height - 2)
-            context.fill(Path(roundedRect: band, cornerRadius: 3), with: .color(color.opacity(0.45)))
+            context.fill(Path(roundedRect: band, cornerRadius: 3), with: .color(color.opacity(0.6)))
             context.stroke(Path(roundedRect: band, cornerRadius: 3), with: .color(color), lineWidth: 1.5)
+            var inner = context
+            inner.clip(to: Path(band))
+            let label = inner.resolve(Text(target.previewLabel).font(.system(size: 9, weight: .semibold))
+                .foregroundColor(.white))
+            inner.draw(label, at: CGPoint(x: band.minX + 4, y: band.midY), anchor: .leading)
         }
         let text = target.message.isEmpty ? "\(target.title) · \(formatFrames(target.frames))" : target.message
         drawNote(text, at: CGPoint(x: cutX + 8, y: top + 2), color: target.allowed ? .black : .red, in: &context,
