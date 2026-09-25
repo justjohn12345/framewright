@@ -705,6 +705,15 @@ final class EffectLanesTimelineTests: XCTestCase {
         XCTAssertTrue(store.sequence.transitions.isEmpty)
         XCTAssertEqual(store.statusMessage,
                        "Removed the cross dissolve between “clip.mov” and “clip.mov”: “clip.mov” now follows “clip.mov”.")
+        // Split inside a dissolve (Split at Playhead, Removing Transitions): said as a split.
+        store.undo()
+        XCTAssertEqual(store.sequence.transitions.count, 1)
+        store.selection = [a]
+        store.playheadTime = store.frameTime(0.5 - 1.0 / 30)
+        store.splitAtPlayhead(breakingTransitions: true)
+        XCTAssertTrue(store.sequence.transitions.isEmpty)
+        XCTAssertEqual(store.statusMessage,
+                       "Removed the cross dissolve between “clip.mov” and “clip.mov”: “clip.mov” was split inside it.")
     }
 
     /// A head trim past a Motion span folds what it held into the clip's values, and a tail trim

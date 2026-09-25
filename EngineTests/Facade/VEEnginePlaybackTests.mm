@@ -565,7 +565,9 @@ static bool showsFrame(int shown, int64_t f) {
     r = [engine splitClips:@[ @(clips[0].clipID) ] atTime:CMTimeMake(58, 30) breakingTransitions:YES];
     XCTAssertTrue(r.ok, @"%@", r.message);
     XCTAssertEqualObjects(r.droppedTransitionIDs, @[ @(transition) ]);
-    XCTAssertGreaterThan(r.note.length, 0u);
+    // What was removed is in droppedTransitionIDs; the app words it (effect lanes review M1), so the
+    // note carries no generic sentence about it.
+    XCTAssertEqual(r.note.length, 0u, @"%@", r.note);
     XCTAssertNil([engine transitionInfo:transition]);
     XCTAssertTrue([engine undo]);
     XCTAssertNotNil([engine transitionInfo:transition], @"undo restores it");

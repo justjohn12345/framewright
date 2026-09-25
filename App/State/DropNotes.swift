@@ -116,6 +116,10 @@ extension ProjectStore {
             let between = "Removed the \(what) between “\(owner.name)” and “\(partnerName)”\(also)"
             if let after = touching(owner, atStart: false) {
                 if after.clipID != partnerID {
+                    // The rest of the owner itself (a split inside the dissolve), or another clip.
+                    if after.assetID == owner.assetID, after.sourceIn == owner.sourceOut {
+                        return between + ": “\(owner.name)” was split inside it."
+                    }
                     return between + ": “\(after.name)” now follows “\(owner.name)”."
                 }
                 return between + ": the clips no longer have the media it needs."
