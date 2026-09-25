@@ -884,3 +884,92 @@ calls and app controls described here are gone. Kept for the history of the eval
   default output device is Bluetooth (CoreAudio `kAudioDevicePropertyTransportType`) or `stats.outputLatency` is above
   40 ms (`kLatencyTestMaximumOutputLatency`); EngineTests links CoreAudio. The keyframe-era app test files are
   replaced: `EffectLanesTimelineTests`, `KenBurnsEditorTests`, `InspectorSpanTests`, `StaticMotionTests`.
+
+## Effect lanes review fix round (report `docs/reviews/2026-09-24-effect-lanes-review.md`)
+Closed: C1 (app side only), H1-H4, M1-M8, L1-L11, D2 and test gaps 1-6 (except re-recording the render goldens:
+their tool needed the schema-4 engine; test gap 3's two cases are checked against version 4's rule computed
+independently instead). Not started, per the brief: D1 (compact rows), D3 (window frame restore), the engine crop.
+- C1, the crop caveat (user decision pending). The Ken Burns editor now frames a clip placed smaller, off centre or
+  turned inside its own window: `KenBurnsModel.windowFraming(_:in:)` expresses an edge's composed motion M relative to
+  the clip's static framing S (Φ = (R(-θs)(xm - xs, ym - ys) / ss, sm / ss, θm - θs)), the rectangles come from
+  `rect(for: Φ)`, and a dragged rectangle goes back through `absoluteFraming(_:in:)` (M' = (xs + ss R(θs) Φ'.xy,
+  ss Φ'.scale)) and `ProjectStore.relativeFraming`. `clipWindow` / `clipWindowCorners` / `windowCaption` ("Inside the
+  clip's framing: 30 %, lower right") draw the dashed outline and its caption; `startFraming` / `endFraming` are the
+  on-screen framings (S included); `startRotation` / `endRotation` are the rotation inside the window. Identity statics
+  give the old math. The engine still has no crop: a zoom in on a picture in picture enlarges it about its centre
+  (the default push in grows a 0.3 clip to 0.375) instead of cropping inside its box. A true crop needs a window quad
+  on `VideoLayer` from `Scheduler::motionAt` that the compositor scissors to, motion spans composing in window space,
+  the v4 migration dividing animated positions by ss on non-neutral statics (with a render test) and a static crop
+  field for `fitSpans` (schema 6).
+- `KenBurnsModel.span`, `clip`, `staticFraming` are published from `update` (L2). `dragCancelled`: set by
+  `cancelDrag` (and when an edit ends the drag's group), honoured by `applyDrag` until `endDrag` (the release) or
+  `gestureAbandoned` (the overlay calls it when its `@GestureState` resets) (H2). `KenBurnsModel.problem(span:clip:
+  asset:sequence:)` says why the editor cannot open; the store remembers the span it failed on
+  (`kenBurnsOpenFailures` counts) and tries again only when the selection changes or `showKenBurns` asks (L8).
+- Migration (H1): a v4 fade out with an incoming crossfade is limited to duration - ceil(n/2) of that crossfade's
+  frames (or dropped), with a warning, as the fade in already was. Loading (M8): `projectFromJson` repairs before
+  `validateProject`, each with a warning: clips and spans sorted; a transition off lane 0 put on lane 0; an effect span
+  off lanes 1-3 or overlapping an earlier span of its lane (file order) moved to the first effect lane where it
+  overlaps nothing (the composition's operations commute, so the picture is unchanged); invalid transitions pruned
+  (`pruneInvalidTransitions`, Validation.h, shared with `normalizeSequence`, with a sentence per removal). Refused:
+  no effect lane with room, any inexact time in the sequence (then nothing is repaired), a keyframe without a value.
+  The app shows the load warnings also when media is missing (L11).
+- Edits (engine): `SequenceCommand::apply` records every dissolve's partner before `perform` and, before normalizing,
+  removes one whose partner changed (a ripple delete, an insert or an overwrite at the cut); it is reported in
+  `droppedTransitionIds` and undo restores it; a split keeps the left piece's id, so a split partner keeps its dissolve
+  (M2). `incomingTransitionInside(track, clip)` (Sequence.h): the part of an incoming dissolve inside a clip;
+  `setClipFade` refuses a fade out longer than the clip less its fade in and that part, `fadeLimitFrames` (now with
+  the track; `addTransitionAtEdge`, `transitionLimitForTransition`, `setRangeOfTransition`'s offsets) and the
+  inspector's limit (`ProjectStore.incomingTransitionFrames(of:)`) stop there, and normalizing shortens a fade out
+  that meets an incoming dissolve (removes it when nothing is left, reported) instead of dropping the dissolve (M3).
+- Drop notes (M1): the facade no longer appends its generic sentences for dropped ids to `VEEditResult.note` (they
+  were sometimes wrong, "its cut no longer exists" for a touched fade in); the app words each one
+  (`ProjectStore.notes(of:)` = note + `dropNote(for:)`), from `SpanMemory` (every span with its clip as they were the
+  last time it was there, refreshed with the model, so a coalesced drag still finds them): "Removed the fade in on
+  “B”: “A” now touches its start.", "Removed the cross dissolve between “A” and “B”: “C” now follows “A”.", "The
+  Motion span before the new start of “B” was folded into the clip's values." (when the static values changed),
+  "Removed the ... span on “B”: nothing of it is left inside the clip.", and for a split inside a dissolve "“A” was
+  split inside it". Transitions of a deleted clip get no sentence. Every app path that showed a result's note goes through `notes(of:)` (report, moves, transition drags,
+  the inspector, the speed sheet, Ken Burns).
+- Drops (H3, H4, M6): transitions and effects are always offered as `.copy` (the red preview says a drop will be
+  refused; the drop clears it); a hover or press in the track area clears a stale preview and reveal. Lane 0 is
+  revealed on the row under the pointer only (`revealTransitionLane(onTrack:)`, `revealedTransitionTrack`), after
+  targeting by the geometry as shown. A dissolve on a free edge: preview labelled "Fade" (`previewLabel`) in the
+  transitions' colour, note "No clip follows: this adds a fade to black." (from black / silence); a clip that already
+  fades: "“x” already fades out: drag the fade's edge to lengthen it, or delete it."; a refused free edge falls back to
+  the next free edge in reach (a refused cut never becomes a fade).
+- Timeline scrolling (M4, M5, L1): `TimelineScrolling.action(for:headerWidth:rulerHeight:)` (a notched wheel scrolls
+  time, Shift or the headers the tracks; `ScrollWheelCatcher.Scroll.isPrecise` from `hasPreciseScrollingDeltas`
+  scrolls both axes; Option/Command zoom). `ScrollBarGeometry` drives both bars; the vertical one overlays the track
+  area's trailing edge while the rows are taller. `ProjectStore.timelineViewportHeight` and `clampTimelineScroll()`
+  (model changes except mid-drag, lane and row collapses, the reveal ending, zoom, scroll, resize). The line between
+  headers and tracks is an overlay on the headers, so the track area starts at `headerWidth` like the ruler
+  (`TimelineDiagnostics.rulerFrame` / `trackAreaFrame` measure it).
+- D2: `WindowLayoutModel.timelineHeight` is non-optional; `adoptInitialTimelineHeight(rowsHeight:)` (the store, at
+  init, with `TimelineViewModel.rowsHeightWithoutLanes`; a stored nil migrates the same way),
+  `setTimelineHeight(_:windowHeight:)` (drags: up to window - 240 - divider), `fitTimeline(contentHeight:
+  windowHeight:)` (the divider's double-click through `ProjectStore.fitTimelineHeight(windowHeight:)`: at most 60 % of
+  the window, stored), `timelineHeight(windowHeight:)` (shown); Reset Window Layout returns to the launch's fit.
+  `ContentView` no longer reads `timelineContentHeight`. `PaneDivider(showsGrip:)` shows a grip on hover.
+- Redraws (M7, L9): the timeline content model is rebuilt only when the drawn content (tracks and lanes, clips, span
+  ranges) changes (compared after each model change; `timelineBuildCount` counts real builds); the canvas is
+  `TrackAreaCanvas`, an Equatable view over `TimelineRenderer.drawsLike` and the redraw token. `ClipIndex` (EditOps.h)
+  gives snapshots of all clips one lookup table for linked transitions (`makeClipInfo` / `makeEffectSpan` take it);
+  `selectedTransitionID` and `selectedSpan` read `ProjectStore.spansByID`; the inspector reads the selected transition
+  and its limit once per model change (`engineTransitionReads`).
+- Scheduler (L10, verified first with a failing test): a Gain span whose timeline start has no CMTime is active over
+  the piece from the rounded cut (decided at the piece's middle, starting at the span's start value); the eased-gain
+  steps are enumerated only within the plan window (`Scheduler::stepsWithin`).
+- Smaller: shares keep a dissolve a frame after its cut (L3, `InspectorModel.lastFrameAfterCutNote`); span drags are
+  limited to the lane's free space (L4); a fade out's bar is refused up front (L5); Control-K skips locked and hidden
+  tracks, asks for one clip when several are selected, and selects the span it added instead of stacking another on
+  the same frame (L6); lane collapse follows its track when tracks are removed or added (not across New/Open), and
+  selecting a span on collapsed lanes opens them (L7, `WindowLayoutModel.setCollapsedLaneTracks`).
+- By hand only (the test host cannot drive these): real drags of the Ken Burns rectangles and corners on a picture in
+  picture, an offset clip and a turned clip (the dashed window outline and caption, the program monitor following);
+  Escape and Cmd-Z in the middle of a real Ken Burns drag, then moving the mouse before releasing; a real transition
+  drag from the Effects tab onto a locked track, a cut without handles and a lone clip's end (the pill clears on
+  release; lane 0 opens only under the pointer; the "Fade" preview); the wheel on a notched mouse (time; Shift and the
+  headers: tracks) and on a trackpad (both axes); the vertical scroll bar's knob; dragging the divider above the
+  timeline (the grip on hover, the monitors keeping 240 pt) and its double-click fit; the 1 pt alignment of clips
+  under the ruler at several zooms; Control-K on a locked or hidden top track.

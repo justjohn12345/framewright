@@ -4,16 +4,14 @@ Only what is still open. Fixed findings are in the history table of `README.md` 
 the full reports are in git history at the commits the table names.
 
 ## Effect lanes (2026-09-24 review, `2026-09-24-effect-lanes-review.md`)
-One CRITICAL (the Ken Burns editor assumes a full-frame clip: on a picture-in-picture it draws the picture full size,
-the rectangles many frames wide, and the first drag destroys the framing; a true crop needs an engine window/scissor,
-a user decision), four HIGH (a v4 project with a fade out under an incoming crossfade refuses to open; Escape/Undo
-mid Ken Burns drag is reopened by the next mouse move; a refused transition drop leaves its red pill and the lane-0
-reveal on screen; a dissolve dropped near a lone clip's edge silently becomes a fade), eight MEDIUM (silent drops of
-fades/dissolves/spans by edits, a dissolve changing partner after a ripple delete, fades deleting incoming crossfades,
-the scroll wheel changing axis, no vertical scroll bar, mid-drag row shifts from the lane-0 reveal, the redraw budget
-during Ken Burns drags, loading that refuses instead of repairing), eleven LOW, and three design items from the
-user's notes (compact rows, a user-owned preview/timeline split, restoring the window frame). All open; the next fix
-round works from the report.
+Closed in the fix round (see `integration-notes.md`, "Effect lanes review fix round"): C1 on the app side (the Ken
+Burns editor frames a placed clip inside its own window), H1-H4, M1-M8, L1-L11, D2 (the user-owned split) and test
+gaps 1-6. Still open:
+- C1's engine part, a user decision: the engine has no crop, so a zoom in on a picture in picture enlarges it about
+  its centre instead of cropping inside its box (a window quad on `VideoLayer`, a compositor scissor, schema 6).
+- D1 (compact rows) and D3 (restoring the window frame): design items, not started.
+- The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
+  against version 4's rule computed independently instead.
 
 ## Keyframed Motion, Ken Burns and Photos drops (2026-09-24 review; report in git history at b9add9f)
 Effect lanes round 2 replaced the keyframe-era app tests (`KeyframedMotionTests`, `MotionReviewTests`): the Ken Burns
