@@ -16,7 +16,9 @@ import FramewrightEngine
 /// line in the track area (press on empty space next to it, or anywhere but a lane with Option
 /// held). A press anywhere gives the timeline the keyboard focus (a text field that had it ends
 /// editing). Media dropped from the bin lands at the drop position and row (overwrite; hold
-/// Command to insert). Scroll to pan, Option/Command-scroll to zoom.
+/// Command to insert). The wheel scrolls time (with Shift or over the headers, the tracks), a trackpad
+/// both (`TimelineScrolling`); Option/Command-scroll zooms. A vertical bar shows while the rows are
+/// taller than the track area.
 ///
 /// Lanes (see `TimelineViewModel`): under each track with clips, lane 0 (its transitions: cross
 /// dissolves / crossfades across a cut, fades from and to black or silence; shown while it has one

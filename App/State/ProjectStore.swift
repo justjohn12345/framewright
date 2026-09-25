@@ -700,7 +700,7 @@ final class ProjectStore: ObservableObject {
     /// or reordered within a project the numbers of the others change, so the collapse moves with
     /// its track (review L7: deleting V1 made V2's collapse state V1's). A track that is gone takes
     /// its state with it; keys of numbers no track had are left alone. Not across projects (their
-    /// track ids restart; `resetUIState` empties `tracks` first).
+    /// track ids restart: New and Open set `replacingProject` while the engine replaces it).
     private func followLaneCollapse(from previous: [VETrackInfo]) {
         guard !previous.isEmpty, !replacingProject else { return }
         let before = Dictionary(previous.map { ($0.trackID, $0) }, uniquingKeysWith: { first, _ in first })

@@ -80,7 +80,8 @@ final class WindowLayoutModel: ObservableObject {
     @Published private(set) var timelineHeight: CGFloat
     /// Whether a height has been stored (false only before the first fit of a first launch).
     private(set) var hasStoredTimelineHeight: Bool
-    /// The first launch's fit (the rows without lanes), which Reset Window Layout returns to.
+    /// The fit of this launch's rows without lanes (`adoptInitialTimelineHeight`), which Reset Window
+    /// Layout returns to.
     private var initialTimelineHeight: CGFloat = WindowLayoutModel.defaultTimelineHeight
     /// The tracks whose lanes are collapsed, by `laneKey(video:index:)`.
     @Published private(set) var collapsedLaneTracks: Set<String>
@@ -211,7 +212,7 @@ final class WindowLayoutModel: ObservableObject {
                     Self.sourceFractionKey, Self.timelineHeightKey, Self.collapsedLanesKey] {
             defaults?.removeObject(forKey: key)
         }
-        // The first launch's fit, stored: the split stays the user's.
+        // This launch's fit of the rows, stored: the split stays the user's.
         defaults?.set(Double(timelineHeight), forKey: Self.timelineHeightKey)
         hasStoredTimelineHeight = true
     }
