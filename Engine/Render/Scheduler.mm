@@ -326,8 +326,10 @@ AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &pro
                         }
                         const double seconds = toSeconds(nextAt - at);
                         const auto steps = static_cast<std::int64_t>(std::ceil(seconds / kEasedGainStep));
-                        for (std::int64_t step = 1; step < steps; ++step) {
-                            addCut(at + scaleTime(nextAt - at, Ratio{step, steps}));
+                        if (const auto within = stepsWithin(at, nextAt, steps, *active)) {
+                            for (std::int64_t step = within->first; step <= within->second; ++step) {
+                                addCut(at + scaleTime(nextAt - at, Ratio{step, steps}));
+                            }
                         }
                     }
                 }
@@ -337,11 +339,14 @@ AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &pro
 
             const bool hasGainSpans =
                 std::any_of(clip.spans.begin(), clip.spans.end(), [](const EffectSpan &s) { return s.kind == SpanKind::Gain; });
-            // The level over [a, b): the static gain plus what the Gain spans that have started by a
+            // The level over [a, b): the static gain plus what the Gain spans acting over the piece
             // contribute (composeGainDb's order and rule: the moving value inside a span, its end
             // value held after it, a later span on the lane on top), at a and as b is approached. The
             // pieces are cut at every span edge and keyframe, so over a piece each span is either
-            // one segment of its ramp or its held level, flat.
+            // one segment of its ramp or its held level, flat. Whether a span acts is decided at the
+            // piece's middle: a span edge whose timeline time has no CMTime is cut at the nearest
+            // tick, which may lie a hair before the span's start, and deciding at `a` left the whole
+            // piece without the span (review L10); the piece then starts at the span's start value.
             auto levelOver = [&](CMTime a, CMTime b) {
                 DecibelRamp level{clip.audio.gainDb, clip.audio.gainDb};
                 if (!hasGainSpans) {
@@ -353,12 +358,18 @@ AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &pro
                     return level;
                 }
                 const bool instant = from->compare(*to) == 0;
+                const auto middle = instant ? from : spanEvaluationTime(clip, a + scaleTime(b - a, Ratio{1, 2}));
+                if (!middle) {
+                    return level;
+                }
                 for (int lane = kFirstEffectLane; lane <= kLastLane; ++lane) {
                     for (const EffectSpan &gain : clip.spans) {
-                        if (gain.lane != lane || gain.kind != SpanKind::Gain || !spanActsAt(gain, *from)) {
+                        if (gain.lane != lane || gain.kind != SpanKind::Gain || !spanActsAt(gain, *middle)) {
                             continue;
                         }
-                        level.start += spanContributionAt(gain, SpanParameter::Gain, *from);
+                        const auto spanStart = ExactTime::from(gain.start);
+                        const ExactTime first = spanActsAt(gain, *from) || !spanStart ? *from : *spanStart;
+                        level.start += spanContributionAt(gain, SpanParameter::Gain, first);
                         level.end += instant ? spanContributionAt(gain, SpanParameter::Gain, *to)
                                              : spanContributionFromLeft(gain, SpanParameter::Gain, *to);
                     }
@@ -394,6 +405,25 @@ AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &pro
         }
     }
     return graph;
+}
+
+std::optional<std::pair<std::int64_t, std::int64_t>> Scheduler::stepsWithin(CMTime from, CMTime to,
+                                                                                std::int64_t steps,
+                                                                                const TimeRange &window) {
+    if (steps < 2 || !isNumeric(from) || !isNumeric(to) || !(from < to)) {
+        return std::nullopt;
+    }
+    // Step k lies at from + (to - from) * k / steps; the window's edges give k in doubles, widened by
+    // one on each side for rounding (the caller filters exactly).
+    const double length = toSeconds(to - from);
+    const double lo = std::floor(toSeconds(window.start - from) / length * static_cast<double>(steps)) - 1;
+    const double hi = std::ceil(toSeconds(window.end - from) / length * static_cast<double>(steps)) + 1;
+    const double first = std::max(1.0, lo);
+    const double last = std::min(static_cast<double>(steps - 1), hi);
+    if (!(first <= last)) {
+        return std::nullopt;
+    }
+    return std::make_pair(static_cast<std::int64_t>(first), static_cast<std::int64_t>(last));
 }
 
 std::optional<ClipId> Scheduler::clipAt(const Sequence &sequence, TrackId trackId, CMTime time) {

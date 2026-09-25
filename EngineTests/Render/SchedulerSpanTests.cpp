@@ -305,6 +305,75 @@ TEST_CASE("Scheduler spans: Gain spans add decibels exactly; eased ones in steps
     CHECK(heldSegments == 1);
 }
 
+TEST_CASE("Scheduler spans: a Gain span whose start has no CMTime on the timeline acts from its start (review L10)") {
+    // At 7x the timeline time of a span starting one tick (1/705600000 s) after source second 1 is
+    // 1/7 s + 1/4939200000 s: no CMTime, so the audio plan's cut there is rounded, here to the tick
+    // before it, whose source time (exactly 1 s) is before the span's start. The level over the
+    // piece from that cut must still include the span.
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 0, 90, 0, 7.0);
+    const CMTime start = CMTimeMake(kPreciseTimescale + 1, kPreciseTimescale);
+    const CMTime end = CMTimeMake(8, 1);
+    SpanTracks ramp;
+    ramp.gain = rampTrack(-6, -30, end - start, KI::Linear);
+    fx.addSpan(c, SpanKind::Gain, 1, start, end, ramp);
+    fx.requireValid();
+    REQUIRE_FALSE(fx.clip(c).exactTimelineTimeAt(start)->toTime().has_value());
+    const AudioGraph graph = wholeAudio(fx);
+    for (int k = 1; k < 240; ++k) {
+        const CMTime t = CMTimeMake(k, 240);
+        const auto gain = gainAt(graph, c, t);
+        REQUIRE(gain.has_value());
+        const auto source = fx.clip(c).exactSourceTimeAt(t);
+        REQUIRE(source.has_value());
+        const double want = composeGainDb(fx.clip(c), *source);
+        CAPTURE(k);
+        CHECK(std::fabs(20 * std::log10(*gain) - want) < 1e-6);
+    }
+}
+
+TEST_CASE("Scheduler spans: a short plan window of a long eased Gain span cuts only its own steps (review L10)") {
+    // stepsWithin never leaves out a step inside the window, against brute force.
+    const CMTime from = CMTimeMake(1, 3);
+    const CMTime to = CMTimeMake(611, 3); // 203.33 s: 40667 steps of 5 ms
+    const auto steps = static_cast<std::int64_t>(std::ceil(seconds(to - from) / Scheduler::kEasedGainStep));
+    for (const auto &[a, b] : std::vector<std::pair<CMTime, CMTime>>{
+             {CMTimeMake(0, 1), CMTimeMake(1, 2)}, {CMTimeMake(100, 1), CMTimeMake(2002, 20)},
+             {CMTimeMake(7, 48000), CMTimeMake(1031, 48000)}, {CMTimeMake(203, 1), CMTimeMake(300, 1)},
+             {CMTimeMake(500, 1), CMTimeMake(501, 1)}}) {
+        const TimeRange window{a, b};
+        const auto within = Scheduler::stepsWithin(from, to, steps, window);
+        std::int64_t inside = 0;
+        for (std::int64_t k = 1; k < steps; ++k) {
+            const CMTime t = from + scaleTime(to - from, Ratio{k, steps});
+            if (a < t && t < b) {
+                ++inside;
+                REQUIRE(within.has_value());
+                CHECK(within->first <= k);
+                CHECK(k <= within->second);
+            }
+        }
+        if (within) {
+            CHECK(within->second - within->first + 1 <= inside + 4); // its own steps, two either side at most
+        }
+    }
+    // The graph of a short window is the whole graph's there.
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 0, 900, 0);
+    SpanTracks swell;
+    swell.gain = rampTrack(0, 9, CMTimeMake(28, 1), KI::EaseInOut);
+    fx.addSpan(c, SpanKind::Gain, 1, CMTimeMake(1, 1), CMTimeMake(29, 1), swell);
+    fx.requireValid();
+    const AudioGraph whole = wholeAudio(fx);
+    const TimeRange window{CMTimeMake(12, 1), CMTimeMake(12, 1) + CMTimeMake(1, 50)};
+    const AudioGraph part = Scheduler::audioGraphFor(fx.sequence(), fx.project, window);
+    REQUIRE(part.segments.size() >= 4);
+    for (int k = 0; k < 20; ++k) {
+        const CMTime t = window.start + CMTimeMake(k, 1000);
+        CHECK(close(*gainAt(part, c, t), *gainAt(whole, c, t), 1e-12));
+    }
+}
+
 TEST_CASE("Scheduler spans: held values per frame at 29.97 and 999/1000, on a chained lane, a still, a tail handle") {
     Fixture fx;
     fx.sequence().frameDuration = CMTimeMake(1001, 30000);

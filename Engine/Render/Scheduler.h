@@ -13,7 +13,9 @@
 
 #include <CoreMedia/CMTimeRange.h>
 
+#include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace ve {
@@ -24,6 +26,14 @@ class Scheduler {
     // length, each linear in dB between the ramp's exact values at its ends.
     static constexpr double kEasedGainStep = 0.005; // seconds
 
+    // The steps k in [1, steps - 1] of a ramp from `from` to `to` cut into `steps` equal parts
+    // whose times from + (to - from) * k / steps can lie inside `window` (open): the first and
+    // last, or nullopt when none can. May include a step just outside (the caller keeps only the
+    // times inside); never leaves one out. So a short plan window looks at its few steps, not at
+    // every step of a long eased span (review L10).
+    static std::optional<std::pair<std::int64_t, std::int64_t>> stepsWithin(CMTime from, CMTime to,
+                                                                              std::int64_t steps,
+                                                                              const TimeRange &window);
 
     // The layers visible at `time` (snapped down to the sequence frame containing it).
     static RenderGraph renderGraphAt(const Sequence &sequence, const Project &project, CMTime time);
