@@ -56,8 +56,8 @@ struct ContentView: View {
                             onDrag: { layout.setTimelineHeight(dragStartTimelineHeight - $0,
                                                                windowHeight: window.size.height) },
                             onDoubleClick: { store.fitTimelineHeight(windowHeight: window.size.height) },
-                            showsGrip: true)
-                    .help("Drag to resize the timeline; double-click to fit it to its tracks once")
+                            showsGrip: true,
+                            help: "Drag to resize the timeline; double-click to fit it to its tracks once")
                 TimelineView(store: store)
                     .frame(height: timelineHeight)
             }

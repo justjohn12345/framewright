@@ -5,6 +5,18 @@ import SwiftUI
 /// cursor). `onDrag` receives the drag's total translation along the divider's axis since the
 /// press (positive: right or down), so the owner resizes relative to the size it had then
 /// (`onBegin`). A double-click calls `onDoubleClick` (e.g. fit the pane to its content).
+///
+/// The line and the grip are SwiftUI; the grab area is an AppKit view (`DividerHandleView`) that
+/// takes the press, the drag, the double-click, the hover and the pointer shape itself. As a SwiftUI
+/// `DragGesture` with `onHover` and `NSCursor.set()`, the divider between the monitors could not be
+/// grabbed while the source monitor played. The divider itself was neither re-rendered nor
+/// replaced then, but the source monitor beside it (its scrubber, timecode and play button follow
+/// its playhead) and the transport re-render at the display rate inside the same hosting view, and
+/// the press, the drag and the pointer shape all went through SwiftUI's event and hover handling of
+/// that hosting view. AppKit delivers a press, its drags and its release to the view that took the
+/// press whatever SwiftUI redraws meanwhile, and asks that view for the pointer shape
+/// (`cursorUpdate`) whenever the pointer is over it, so neither monitor's playback reaches the
+/// divider.
 struct PaneDivider: View {
     enum Orientation {
         /// Between two columns: drags left and right.
@@ -20,20 +32,20 @@ struct PaneDivider: View {
     /// Draws a grip in the middle while the pointer is over the divider or drags it (review D2: the
     /// split above the timeline is the user's, so its handle shows).
     var showsGrip = false
+    /// The divider's tooltip.
+    var help: String?
 
     @State private var dragging = false
     @State private var hovering = false
-    /// The pointer shape (set, never pushed: see `DividerCursor`).
-    @State private var cursor: DividerCursor
 
     init(orientation: Orientation, onBegin: @escaping () -> Void = {}, onDrag: @escaping (CGFloat) -> Void,
-         onDoubleClick: (() -> Void)? = nil, showsGrip: Bool = false) {
+         onDoubleClick: (() -> Void)? = nil, showsGrip: Bool = false, help: String? = nil) {
         self.orientation = orientation
         self.onBegin = onBegin
         self.onDrag = onDrag
         self.onDoubleClick = onDoubleClick
         self.showsGrip = showsGrip
-        _cursor = State(initialValue: DividerCursor(orientation: orientation))
+        self.help = help
     }
 
     /// The grip's size (along the divider, across it).
@@ -55,45 +67,164 @@ struct PaneDivider: View {
         }
         .frame(width: orientation == .vertical ? thickness : nil, height: orientation == .horizontal ? thickness : nil)
         .frame(maxWidth: orientation == .horizontal ? .infinity : nil, maxHeight: orientation == .vertical ? .infinity : nil)
-        .contentShape(Rectangle())
-        .background(GeometryReader { proxy in
-            Color.clear.preference(key: DividerFrameKey.self, value: proxy.frame(in: .global))
-        })
-        .onPreferenceChange(DividerFrameKey.self) { frame in
-            MainActor.assumeIsolated { cursor.frame = frame }
-        }
-        .onHover { inside in
-            hovering = inside
-            cursor.hover(inside: inside)
-        }
-        .gesture(
-            DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                .onChanged { value in
-                    if !dragging {
-                        dragging = true
-                        onBegin()
-                    }
-                    cursor.dragChanged()
-                    onDrag(orientation == .vertical ? value.translation.width : value.translation.height)
-                }
-                .onEnded { value in
-                    dragging = false
-                    // Hover is not reported during a drag: the pointer may have left the divider
-                    // (a pane at its size limit stops following it).
-                    cursor.dragEnded(at: value.location)
-                }
+        .overlay(
+            DividerHandle(orientation: orientation, help: help, onBegin: onBegin, onDrag: onDrag,
+                          onDoubleClick: onDoubleClick,
+                          onHover: { inside in if hovering != inside { hovering = inside } },
+                          onDragging: { active in if dragging != active { dragging = active } })
         )
-        .onTapGesture(count: 2) { onDoubleClick?() }
-        .onDisappear { cursor.disappeared() }
     }
 }
 
-/// The divider's grab area in global coordinates (where a drag's end location is reported).
-private struct DividerFrameKey: PreferenceKey {
-    static let defaultValue = CGRect.zero
+/// The divider's grab area: a `DividerHandleView` over the line, fed the current closures on every
+/// update (they capture the owner's sizes, so they change with the layout).
+private struct DividerHandle: NSViewRepresentable {
+    let orientation: PaneDivider.Orientation
+    let help: String?
+    let onBegin: () -> Void
+    let onDrag: (CGFloat) -> Void
+    let onDoubleClick: (() -> Void)?
+    let onHover: (Bool) -> Void
+    let onDragging: (Bool) -> Void
 
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        value = nextValue()
+    func makeNSView(context: Context) -> DividerHandleView {
+        let view = DividerHandleView(orientation: orientation)
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: DividerHandleView, context: Context) {
+        view.onBegin = onBegin
+        view.onDrag = onDrag
+        view.onDoubleClick = onDoubleClick
+        view.onHover = onHover
+        view.onDragging = onDragging
+        if view.toolTip != help { view.toolTip = help }
+    }
+
+    static func dismantleNSView(_ view: DividerHandleView, coordinator: ()) {
+        view.cancelDrag()
+    }
+}
+
+/// The AppKit grab area of a `PaneDivider`: a press and its drags move the divider (the
+/// translation along its axis since the press, positive right or down; the drag starts after a
+/// point of movement, as SwiftUI's `DragGesture(minimumDistance: 1)` did), a double-click fits,
+/// and the pointer shows the resize cursor over it and while dragging (`DividerCursor`, told by a
+/// tracking area and AppKit's `cursorUpdate`). It takes the first click of an inactive window, as a
+/// split view's divider does.
+@MainActor
+final class DividerHandleView: NSView {
+    let orientation: PaneDivider.Orientation
+    let cursor: DividerCursor
+    var onBegin: () -> Void = {}
+    var onDrag: (CGFloat) -> Void = { _ in }
+    var onDoubleClick: (() -> Void)?
+    var onHover: (Bool) -> Void = { _ in }
+    var onDragging: (Bool) -> Void = { _ in }
+
+    /// Where the press was, in window coordinates (nil: no press in progress).
+    private var pressLocation: NSPoint?
+    /// The press has moved a point or more: the divider is being dragged.
+    private(set) var isDragging = false
+    /// Drags reported (diagnostics and tests).
+    private(set) var dragSteps = 0
+    private var trackingArea: NSTrackingArea?
+
+    init(orientation: PaneDivider.Orientation) {
+        self.orientation = orientation
+        cursor = DividerCursor(orientation: orientation)
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .cursorUpdate, .activeInActiveApp,
+                                                         .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        cursor.frame = bounds
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        cursor.frame = bounds
+        if window == nil {
+            cancelDrag()
+            cursor.disappeared()
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHover(true)
+        cursor.hover(inside: true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHover(false)
+        cursor.hover(inside: false)
+    }
+
+    /// AppKit asks for the pointer shape over the divider (the pointer came in, or something reset
+    /// the cursor meanwhile).
+    override func cursorUpdate(with event: NSEvent) {
+        cursor.cursorUpdate()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            pressLocation = nil
+            onDoubleClick?()
+            return
+        }
+        pressLocation = event.locationInWindow
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let press = pressLocation else { return }
+        let location = event.locationInWindow
+        // Window coordinates grow upwards: a drag down is a positive translation.
+        let translation = orientation == .vertical ? location.x - press.x : press.y - location.y
+        if !isDragging {
+            guard hypot(location.x - press.x, location.y - press.y) >= 1 else { return }
+            isDragging = true
+            onDragging(true)
+            onBegin()
+        }
+        cursor.dragChanged()
+        dragSteps += 1
+        onDrag(translation)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        pressLocation = nil
+        guard isDragging else { return }
+        isDragging = false
+        onDragging(false)
+        cursor.dragEnded(at: convert(event.locationInWindow, from: nil))
+    }
+
+    /// The divider went away mid-drag (out of the window, or dismantled by SwiftUI): the drag ends
+    /// where it is. Nothing is reported, since its owner is going away with it (and SwiftUI may be
+    /// in the middle of an update).
+    func cancelDrag() {
+        pressLocation = nil
+        isDragging = false
     }
 }
 
@@ -115,7 +246,8 @@ final class DividerCursor {
     /// Number of cursor changes it made (tests).
     private(set) var changes = 0
     private(set) var isDragging = false
-    /// The divider's grab area in the drag's coordinate space (global).
+    /// The divider's grab area in the coordinates a drag's end is reported in (the handle view's
+    /// own bounds).
     var frame: CGRect = .zero
     /// Sets the cursor (tests observe it instead).
     var apply: (Shape) -> Void = { $0.nsCursor.set() }
@@ -133,13 +265,22 @@ final class DividerCursor {
         }
     }
 
+    /// AppKit asks for the pointer shape over the divider (`cursorUpdate`): the resize cursor is
+    /// set even when this divider set it last, since another view may have changed the cursor
+    /// since (a view that re-renders every frame resets it).
+    func cursorUpdate() {
+        current = resize
+        changes += 1
+        apply(resize)
+    }
+
     /// A drag of the divider moved.
     func dragChanged() {
         isDragging = true
         set(resize)
     }
 
-    /// The drag ended with the pointer at `location` (global coordinates).
+    /// The drag ended with the pointer at `location` (in `frame`'s coordinates).
     func dragEnded(at location: CGPoint) {
         isDragging = false
         if frame.contains(location) {
