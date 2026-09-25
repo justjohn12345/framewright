@@ -556,7 +556,7 @@ final class TimelineGestureController: ObservableObject {
         let result = store.engine.performInCoalescingGroup(Self.moveGroup) {
             store.engine.moveClips(ids.map { NSNumber(value: $0) }, by: deltaTime, trackOffset: trackOffset, of: kind)
         }
-        store.statusMessage = result.ok ? nil : result.message
+        store.statusMessage = result.ok ? store.notes(of: result) : result.message
     }
 
     /// Moves the playhead to the pointer (snapping to clip edges, never to itself).
@@ -672,7 +672,7 @@ final class TimelineGestureController: ObservableObject {
         } else {
             text = "Transition"
         }
-        if !result.note.isEmpty { text += ". " + result.note }
+        if let notes = store.notes(of: result) { text += ". " + notes }
         return text
     }
 

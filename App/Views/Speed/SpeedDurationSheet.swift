@@ -159,8 +159,7 @@ final class SpeedDurationModel: ObservableObject {
         }
         message = adjusted
         if let adjusted {
-            store.statusMessage = [adjusted, result.note.isEmpty ? nil : result.note].compactMap { $0 }
-                .joined(separator: " ")
+            store.statusMessage = [adjusted, store.notes(of: result)].compactMap { $0 }.joined(separator: " ")
         }
         store.speedSheetClipIDs = nil
         return true

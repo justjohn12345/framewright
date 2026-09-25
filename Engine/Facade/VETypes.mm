@@ -971,23 +971,9 @@ VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *crea
     for (SpanId id : result.droppedSpanIds) {
         [droppedSpans addObject:@(static_cast<VESpanID>(id.value()))];
     }
+    // What the edit removed as a side effect is in droppedTransitionIDs / droppedSpanIDs, not in the
+    // note: the app says what each one was and why (it knows the spans as they were before the edit).
     NSString *text = note ?: @"";
-    auto append = [&](NSString *sentence) {
-        text = text.length > 0 ? [NSString stringWithFormat:@"%@ %@", text, sentence] : sentence;
-    };
-    if (dropped.count > 0) {
-        append(dropped.count == 1
-                   ? @"1 transition was removed because its cut no longer exists."
-                   : [NSString stringWithFormat:@"%lu transitions were removed because their cuts no longer exist.",
-                                                (unsigned long)dropped.count]);
-    }
-    if (droppedSpans.count > 0) {
-        append(droppedSpans.count == 1
-                   ? @"1 effect span was removed because nothing of it is left in its clip."
-                   : [NSString stringWithFormat:@"%lu effect spans were removed because nothing of them is left in "
-                                                @"their clips.",
-                                                (unsigned long)droppedSpans.count]);
-    }
     return [[VEEditResult alloc] initWithCode:VEEditErrorNone
                                       message:@""
                                    createdIDs:created ?: @[]

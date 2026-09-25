@@ -681,7 +681,7 @@ final class InspectorModel: ObservableObject {
         }
         endNudgeBurst()
         let result = store.matchSpanEdge(span.spanID, edge)
-        message = result.ok ? (result.note.isEmpty ? nil : result.note) : result.message
+        message = result.ok ? store.notes(of: result) : result.message
     }
 
     /// The span section's Remove button.
@@ -927,7 +927,7 @@ final class InspectorModel: ObservableObject {
     /// component's message, such as a timeline drag's).
     private func handle(_ result: VEEditResult, mode: Mode, clampNote: String?) {
         if result.ok {
-            let note = [clampNote, result.note.isEmpty ? nil : result.note].compactMap { $0 }.joined(separator: " ")
+            let note = [clampNote, store.notes(of: result)].compactMap { $0 }.joined(separator: " ")
             message = note.isEmpty ? nil : note
             if let message {
                 store.statusMessage = message

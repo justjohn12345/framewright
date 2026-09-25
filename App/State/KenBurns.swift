@@ -499,7 +499,7 @@ final class KenBurnsModel: ObservableObject {
     }
 
     private func report(_ result: VEEditResult) {
-        note = result.ok ? (result.note.isEmpty ? nil : result.note) : result.message
+        note = result.ok ? store.notes(of: result) : result.message
         if !result.ok { store.statusMessage = result.message }
     }
 

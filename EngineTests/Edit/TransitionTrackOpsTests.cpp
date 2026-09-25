@@ -296,6 +296,38 @@ TEST_CASE("Edits that break a cut remove its transition; undo restores it") {
     }
 }
 
+TEST_CASE("A fade in goes, reported, when an insert, ripple, overwrite or tail extension touches its start") {
+    // V1: A [0,30), a gap, B [60,120) with a 10-frame fade in; V2: G [30,60).
+    Fixture fx;
+    const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 30, 0);
+    const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
+    const ClipId g = fx.addClip(fx.v2, fx.av30, 30, 30, 600);
+    const SpanId fade = fx.addFade(b, ClipEdge::Head, f30(10));
+    fx.requireValid();
+    auto droppedOnly = [&](const EditResult &r) {
+        CHECK(fx.span(fade) == nullptr);
+        CHECK(r.droppedTransitionIds == std::vector<SpanId>{fade});
+    };
+    SUBCASE("an insert at B's start: the new clip touches it") {
+        InsertClip insert(fx.seq, f30(60), {place(fx.v1, fx.av30, 900, 930)});
+        droppedOnly(applyReversible(fx.project, insert));
+    }
+    SUBCASE("a ripple delete on another track closes the gap") {
+        RippleDelete ripple(fx.seq, {g});
+        const EditResult r = applyReversible(fx.project, ripple);
+        CHECK(fx.clip(b).timelineStart == f30(30));
+        droppedOnly(r);
+    }
+    SUBCASE("an overwrite into the gap up to B's start") {
+        OverwriteClip overwrite(fx.seq, f30(40), {place(fx.v1, fx.av30, 900, 920)});
+        droppedOnly(applyReversible(fx.project, overwrite));
+    }
+    SUBCASE("extending A's tail to B's start") {
+        TrimClipTail extend(fx.seq, a, f30(60));
+        droppedOnly(applyReversible(fx.project, extend));
+    }
+}
+
 TEST_CASE("A dissolve whose partner clip changes is removed and reported, not moved (review M2)") {
     // V1: A [0,60) | B [60,120) | C [120,180), an A -> B dissolve of 10 frames; the same on A1 with
     // a crossfade (linked pairs, so ripple and insert move both).

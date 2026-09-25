@@ -412,7 +412,8 @@ typedef NS_ENUM(NSInteger, VEEditErrorCode) {
 /// A successful span edit: the span as it is after the edit (nil otherwise).
 @property (nonatomic, readonly, nullable) VEEffectSpan *span;
 /// Something the user should know about a successful edit ("" when nothing): a ripple that fell
-/// back to the synced tracks, removed transitions.
+/// back to the synced tracks, a transition fitted to its cut. What the edit removed as a side
+/// effect is not in it: see droppedTransitionIDs and droppedSpanIDs (the app words them).
 @property (nonatomic, readonly, copy) NSString *note;
 + (instancetype)success;
 + (instancetype)successWithCreatedIDs:(NSArray<NSNumber *> *)createdIDs;

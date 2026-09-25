@@ -504,6 +504,71 @@ final class EffectLanesTimelineTests: XCTestCase {
 
     // MARK: Drops from the Effects tab
 
+    // MARK: What edits remove as a side effect (review M1)
+
+    /// A move that makes a clip touch another's faded start removes the fade in: the status line
+    /// says so, naming both clips.
+    func testAMoveThatRemovesAFadeInSaysSo() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let a = try place(movie, at: 0, from: 0, to: 1, video: v1) // x 0...50
+        let b = try place(movie, at: 3, from: 0, to: 1, video: v1) // x 150...200
+        XCTAssertTrue(store.addFade(at: .start, of: b, frames: 10))
+        let fade = try XCTUnwrap(store.selectedSpanID)
+        store.selection = [a]
+        let row = try XCTUnwrap(store.timelineModel.layout(forTrack: v1))
+        let gestures = TimelineGestureController(store: store)
+        // Drag A's body 100 pt (2 s) right: A [2, 3) touches B's start.
+        gestures.changed(location: CGPoint(x: 25, y: row.y + 20), startLocation: CGPoint(x: 25, y: row.y + 20),
+                         modifiers: [])
+        gestures.changed(location: CGPoint(x: 125, y: row.y + 20), startLocation: CGPoint(x: 25, y: row.y + 20),
+                         modifiers: [])
+        gestures.ended()
+        XCTAssertEqual(try XCTUnwrap(store.clips[a]).timelineStart, store.frameTime(2))
+        XCTAssertNil(store.engine.spanInfo(fade))
+        XCTAssertEqual(store.statusMessage, "Removed the fade in on “clip.mov”: “clip.mov” now touches its start.")
+        // Undo brings it back; the next plain edit's status line says nothing of it.
+        store.undo()
+        XCTAssertNotNil(store.engine.spanInfo(fade))
+    }
+
+    /// A ripple delete that brings another clip to the dissolve's clip removes the dissolve (review
+    /// M2) and says which clip now follows.
+    func testARippleDeleteThatRemovesADissolveSaysSo() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let a = try place(movie, at: 0, from: 0.5, to: 1, video: v1)
+        let b = try place(movie, at: 0.5, from: 0.5, to: 1, video: v1)
+        _ = try place(movie, at: 1, from: 0.5, to: 1, video: v1)
+        XCTAssertTrue(store.engine.addTransition(fromClip: a, toClip: b, duration: store.time(frames: 6)).ok)
+        store.selection = [b]
+        store.deleteSelection(ripple: true)
+        XCTAssertTrue(store.sequence.transitions.isEmpty)
+        XCTAssertEqual(store.statusMessage,
+                       "Removed the cross dissolve between “clip.mov” and “clip.mov”: “clip.mov” now follows “clip.mov”.")
+    }
+
+    /// A head trim past a Motion span folds what it held into the clip's values, and a tail trim
+    /// that leaves nothing of a span removes it: both say so.
+    func testATrimThatRemovesASpanSaysWhatBecameOfIt() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let clip = try place(movie, at: 0, from: 0, to: 2, video: v1) // 60 frames
+        let zoom = try addSpan(.motion, lane: 1, clip: clip, 0, 10)
+        var to = VESpanValuesUnchanged()
+        to.scale = 2
+        XCTAssertTrue(store.engine.setSpanValues(zoom, start: VESpanValuesUnchanged(), end: to).ok)
+        let late = try addSpan(.opacity, lane: 2, clip: clip, 50, 60)
+        XCTAssertTrue(store.report(store.engine.trimClipHead(clip, to: store.time(frames: 20), clamp: false)))
+        XCTAssertNil(store.engine.spanInfo(zoom))
+        XCTAssertEqual(try XCTUnwrap(store.clips[clip]).videoParams.scale, 2, accuracy: 1e-12)
+        XCTAssertEqual(store.statusMessage,
+                       "The Motion span before the new start of “clip.mov” was folded into the clip's values.")
+        XCTAssertTrue(store.report(store.engine.trimClipTail(clip, to: store.time(frames: 45), clamp: false)))
+        XCTAssertNil(store.engine.spanInfo(late))
+        XCTAssertEqual(store.statusMessage, "Removed the Fade span on “clip.mov”: nothing of it is left inside the clip.")
+        // A plain edit afterwards says nothing more.
+        XCTAssertTrue(store.report(store.engine.trimClipTail(clip, to: store.time(frames: 40), clamp: false)))
+        XCTAssertNil(store.statusMessage)
+    }
+
     /// Review H4: a dissolve dropped on a clip's free edge becomes a fade, and says so: the preview is
     /// labelled "Fade" and the note says what it adds; a clip that already fades out says so (and
     /// how to change it), and the drop goes on the clip's other free edge when that is in reach.

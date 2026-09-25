@@ -183,6 +183,8 @@ final class ProjectStore: ObservableObject {
     /// diagnostics and tests).
     private(set) var timelineBuildCount = 0
     private var cachedTimeline: (key: TimelineCacheKey, model: TimelineViewModel)?
+    /// Every span seen, with its clip, as they were the last time it was there (`dropNote`).
+    private(set) var spanMemory = SpanMemory()
     /// What the timeline's content model depends on besides the engine's model (whose change count
     /// covers the clips, the spans and so the lanes in use).
     private struct TimelineCacheKey: Equatable {
@@ -281,6 +283,7 @@ final class ProjectStore: ObservableObject {
             byID[clip.clipID] = clip
         }
         clips = byID
+        spanMemory.remember(byID)
         let kept = selection.filter { byID[$0] != nil }
         if kept != selection { selection = kept }
         if let span = selectedSpanID, engine.spanInfo(span) == nil {
@@ -429,7 +432,7 @@ final class ProjectStore: ObservableObject {
     @discardableResult
     func report(_ result: VEEditResult) -> Bool {
         if result.ok {
-            statusMessage = result.note.isEmpty ? nil : result.note
+            statusMessage = notes(of: result)
         } else {
             statusMessage = result.message
         }
@@ -1281,6 +1284,7 @@ final class ProjectStore: ObservableObject {
         scrollX = 0
         scrollY = 0
         statusMessage = nil
+        spanMemory.forget() // span ids restart per project
         refreshAssets()
         refreshModel()
     }
