@@ -13,7 +13,7 @@ gaps 1-6. Still open:
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
 
-## Keyframed Motion, Ken Burns and Photos drops (2026-09-24 review; report in git history at b9add9f)
+## Keyframed Motion, Ken Burns and Photos drops (2026-09-24 review; report in git history at 3fcd6ac)
 Effect lanes round 2 replaced the keyframe-era app tests (`KeyframedMotionTests`, `MotionReviewTests`): the Ken Burns
 geometry, the picture loader (3), the press rules (12) and the loader's engine path now live in `KenBurnsEditorTests`,
 the static values and matching in `StaticMotionTests`, held Control-K (15) in `EffectLanesTimelineTests`; the tests of

@@ -2,7 +2,7 @@
 
 Reviewer: Claude (lead) with one read-only Opus reviewer (which split its reading into engine model/edit ops,
 serialization/audio, and app), plus the user's hands-on notes with screenshots from the round 2 build. Scope:
-commits 65999f5..292f060 (the plan, round 1 engine, round 1b hold-after, round 2 app; 17 commits). The lead
+commits 4807ed3..55525d8 (the plan, round 1 engine, round 1b hold-after, round 2 app; 17 commits). The lead
 verified C1, H2, H3, H4 and M1 by reading the cited code; items marked "(reviewer)" rest on the reviewer's
 reading, "(reproduced)" on a scratch run it made. Tree state: full scheme green (447 EngineTests incl. 222
 doctest cases, 197 AppTests), zero warnings, all 447 EngineTests clean under ThreadSanitizer (lead's run).
@@ -24,7 +24,7 @@ transition limits and linked pairs, the audio law, migration proofs, one push pe
 selection, coalesced drags with Escape.
 
 ## Status after the fix round (2026-09-25)
-The fix round (fef92be..02eebd3, 26 commits, one Opus implementer; verified by the lead: full scheme 448 EngineTests
+The fix round (666143e..32351bc, 26 commits, one Opus implementer; verified by the lead: full scheme 448 EngineTests
 incl. 234 doctest cases, 224 AppTests, zero warnings, EngineTests clean under ThreadSanitizer) closed C1 on the app
 side, H1-H4, M1-M8, L1-L11, D2 and test gaps 1-6. The API changes and the by-hand checklist are in
 `integration-notes.md`, "Effect lanes review fix round". The findings below are kept as written for the record;

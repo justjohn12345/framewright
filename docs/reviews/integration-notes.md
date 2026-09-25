@@ -281,7 +281,7 @@ in the history table of `README.md`.
   `ScreenProviding` (`SystemScreens`, or a test double); the output window is an `OutputWindow`
   (borderless, can become key, Escape closes); `KeyboardController` takes transport keys from it too.
 
-## UX round fixes (report in git history at 95f445d)
+## UX round fixes (report in git history at c55f96a)
 - Pictures by time (finding 1). `playback::pictureTimeFor(layer, asset)` (PlaybackController.h) is the
   source time of a layer's picture: the layer's source time (on the asset's grid for CFR media, exact for
   VFR), 0 for stills. Look it up with FrameCache's containment lookup (`acquire/get/contains(asset, CMTime)`:
@@ -564,7 +564,7 @@ calls and app controls described here are gone. Kept for the history of the eval
   30 fps around a 240 fps section; `slowmoFrameTime` / `slowmoFrameAt` in TestMedia.h), which
   regenerates the generated test media once.
 
-## Motion/Photos review fix round (2026-09-24 review; report in git history at b9add9f)
+## Motion/Photos review fix round (2026-09-24 review; report in git history at 3fcd6ac)
 - Keyframe inserts (engine). `insertKeyframeKeepingValues(track, staticValue, time)` (Keyframes.h) adds a
   keyframe that changes no value: inside a segment it divides it exactly like a split (`splitTrack`, the
   boundary once): a hold stays a hold, a linear segment linear, an eased or custom segment becomes its two
