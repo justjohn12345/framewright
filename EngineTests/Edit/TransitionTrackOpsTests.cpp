@@ -296,6 +296,63 @@ TEST_CASE("Edits that break a cut remove its transition; undo restores it") {
     }
 }
 
+TEST_CASE("A dissolve whose partner clip changes is removed and reported, not moved (review M2)") {
+    // V1: A [0,60) | B [60,120) | C [120,180), an A -> B dissolve of 10 frames; the same on A1 with
+    // a crossfade (linked pairs, so ripple and insert move both).
+    CutFixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 120, 60, 900);
+    const SpanId t = fx.addTransition(fx.v1, fx.a, fx.b, 10);
+    fx.requireValid();
+    SUBCASE("ripple deleting B: C comes to touch A, and the dissolve does not become A -> C") {
+        RippleDelete ripple(fx.seq, {fx.b});
+        const EditResult r = applyReversible(fx.project, ripple);
+        CHECK(fx.clip(c).timelineStart == f30(60));
+        CHECK(fx.span(t) == nullptr);
+        CHECK(r.droppedTransitionIds == std::vector<SpanId>{t});
+    }
+    SUBCASE("inserting at the cut: the new clip touches A") {
+        InsertClip insert(fx.seq, f30(60), {place(fx.v1, fx.av30, 600, 630)});
+        const EditResult r = applyReversible(fx.project, insert);
+        CHECK(fx.span(t) == nullptr);
+        CHECK(r.droppedTransitionIds == std::vector<SpanId>{t});
+    }
+    SUBCASE("overwriting the start of B: the new clip touches A") {
+        OverwriteClip overwrite(fx.seq, f30(60), {place(fx.v1, fx.av30, 600, 630)});
+        const EditResult r = applyReversible(fx.project, overwrite);
+        CHECK(fx.span(t) == nullptr);
+        CHECK(r.droppedTransitionIds == std::vector<SpanId>{t});
+    }
+    SUBCASE("splitting B keeps it: B's left piece keeps B's id") {
+        SplitClip split(fx.seq, fx.b, f30(90));
+        const EditResult r = applyReversible(fx.project, split);
+        REQUIRE(fx.span(t) != nullptr);
+        CHECK(findTransition(fx.sequence(), t)->partner->id == fx.b);
+        CHECK(r.droppedTransitionIds.empty());
+    }
+    SUBCASE("splitting A keeps it: its right piece owns it, the partner is still B") {
+        SplitClip split(fx.seq, fx.a, f30(30));
+        const EditResult r = applyReversible(fx.project, split);
+        REQUIRE(fx.span(t) != nullptr);
+        CHECK(findTransition(fx.sequence(), t)->partner->id == fx.b);
+        CHECK(r.droppedTransitionIds.empty());
+    }
+    SUBCASE("a linked crossfade goes with its dissolve") {
+        const ClipId aa = fx.addClip(fx.a1, fx.av30, 0, 60, 30);
+        const ClipId ab = fx.addClip(fx.a1, fx.av30, 60, 60, 300);
+        const ClipId ac = fx.addClip(fx.a1, fx.av30, 120, 60, 900);
+        fx.link(fx.a, aa);
+        fx.link(fx.b, ab);
+        fx.link(c, ac);
+        const SpanId crossfade = fx.addTransition(fx.a1, aa, ab, 10);
+        fx.requireValid();
+        RippleDelete ripple(fx.seq, {fx.b});
+        const EditResult r = applyReversible(fx.project, ripple);
+        CHECK(fx.span(t) == nullptr);
+        CHECK(fx.span(crossfade) == nullptr);
+        CHECK(r.droppedTransitionIds.size() == 2);
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Links
 

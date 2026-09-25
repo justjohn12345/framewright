@@ -220,6 +220,54 @@ std::vector<SpanRecord> spanRecords(const Sequence &sequence) {
     return records;
 }
 
+// Every cross dissolve (a tail span reaching past its clip's end into the clip touching it) and
+// that partner clip.
+std::vector<std::pair<SpanId, ClipId>> dissolvePartners(const Sequence &sequence) {
+    std::vector<std::pair<SpanId, ClipId>> partners;
+    for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (const Track &track : *list) {
+            for (const Clip &clip : track.clips) {
+                const EffectSpan *span = clip.transitionAt(ClipEdge::Tail);
+                if (span == nullptr) {
+                    continue;
+                }
+                const auto placement = placeTransition(track, clip, *span);
+                if (placement && placement->role == TransitionRole::CrossDissolve && placement->partner != nullptr) {
+                    partners.emplace_back(span->id, placement->partner->id);
+                }
+            }
+        }
+    }
+    return partners;
+}
+
+// A dissolve belongs to its cut, and version 5 stores it on the outgoing clip only: an edit that
+// brings another clip to touch the owner's end (a ripple delete, an insert or an overwrite at the
+// cut) would silently make it dissolve into that clip. Such a dissolve is removed instead (the
+// command reports it as dropped). A split keeps the left piece's id, so a split partner keeps it.
+// Runs before normalizeSequence, so what normalizing does (fitting a partner's fade out to an
+// incoming dissolve, resolving transitions that meet) never counts a removed dissolve.
+void removeDissolvesWithNewPartners(Sequence &sequence, const std::vector<std::pair<SpanId, ClipId>> &before) {
+    for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (Track &track : *list) {
+            track.sortClips(); // touchingClip needs start order
+        }
+    }
+    for (const auto &[id, partner] : before) {
+        Clip *owner = nullptr;
+        Track *track = nullptr;
+        const EffectSpan *span = sequence.findSpan(id, &owner, &track);
+        if (span == nullptr) {
+            continue;
+        }
+        const auto placement = placeTransition(*track, *owner, *span);
+        if (placement && placement->role == TransitionRole::CrossDissolve && placement->partner != nullptr &&
+            placement->partner->id != partner) {
+            std::erase_if(owner->spans, [id](const EffectSpan &s) { return s.id == id; });
+        }
+    }
+}
+
 } // namespace
 
 EditResult SequenceCommand::apply(Project &project) {
@@ -242,10 +290,12 @@ EditResult SequenceCommand::apply(Project &project) {
     Sequence working = *sequence;
     IdGenerator ids = project.ids;
     removedOnPurpose_.clear();
+    const std::vector<std::pair<SpanId, ClipId>> partners = dissolvePartners(*sequence);
     EditResult result = perform(project, working, ids);
     if (!result) {
         return result;
     }
+    removeDissolvesWithNewPartners(working, partners);
     normalizeSequence(working, project);
     if (auto problem = validateSequence(working, project)) {
         return EditResult::failure(EditError::InvariantViolation,
