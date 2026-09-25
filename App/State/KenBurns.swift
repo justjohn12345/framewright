@@ -37,6 +37,19 @@ import FramewrightEngine
 /// the frame never shows past the picture's edge) and is at least a tenth of the frame wide (a
 /// 1000 % zoom). The clip's rotation is kept: a rectangle frames the unrotated picture and the frame
 /// shows it turned by the rotation at that edge of the span.
+///
+/// A clip placed smaller, off centre or turned (its static framing S, e.g. a picture in picture at
+/// 30 % in the lower right) is framed inside its own window, as Final Cut's Ken Burns crops the
+/// clip's own picture within the clip's framing: the window is the frame box through S
+/// (`clipWindow`, outlined on the monitor with `windowCaption`), and a rectangle is the part of the
+/// picture that fills that window. An edge's composed motion M is expressed relative to S,
+/// Φ = (R(-θs)(xm - xs, ym - ys) / ss, sm / ss, θm - θs) (`windowFraming`), and a rectangle from
+/// `rect(for: Φ)`; a dragged rectangle's Φ' goes back to the frame as
+/// M' = (xs + ss R(θs) Φ'.xy, ss Φ'.scale, θs + Φ'.rotation) (`absoluteFraming`) and then to the
+/// span's relative values over its base (`ProjectStore.relativeFraming`). For a clip with no static
+/// framing (S the identity) Φ = M. The engine has no crop: a zoom in on a picture in picture
+/// enlarges it about its centre rather than cropping inside its window (a user decision, see the
+/// effect lanes review, C1).
 @MainActor
 final class KenBurnsModel: ObservableObject {
     enum Framing: CaseIterable {
@@ -85,9 +98,12 @@ final class KenBurnsModel: ObservableObject {
 
     private unowned let store: ProjectStore
     let spanID: VESpanID
-    /// The span and its clip as they are now (every model change passes through `update`).
-    private(set) var span: VEEffectSpan
-    private(set) var clip: VEClipInfo
+    /// The span and its clip as they are now (every model change passes through `update`, which
+    /// publishes them: the caption, the neighbour toggles and the picture's time read them).
+    @Published private(set) var span: VEEffectSpan
+    @Published private(set) var clip: VEClipInfo
+    /// The clip's static framing (S): the window the rectangles frame the picture in.
+    @Published private(set) var staticFraming: VEVideoParams
     let assetID: VEAssetID
     let sequenceSize: CGSize
     let frameDuration: CMTime
@@ -99,7 +115,8 @@ final class KenBurnsModel: ObservableObject {
     /// The rectangles as the span's edges show them (or as a drag in progress has put them).
     @Published private(set) var start: CGRect = .zero
     @Published private(set) var end: CGRect = .zero
-    /// The rotation the picture has at each edge (the rectangles are drawn with it).
+    /// The rotation the picture has inside the clip's window at each edge (the edge's rotation less
+    /// the static one; a rectangle's framing turns the picture by it).
     @Published private(set) var startRotation: Double = 0
     @Published private(set) var endRotation: Double = 0
     /// How the span moves (its interpolation).
@@ -150,6 +167,7 @@ final class KenBurnsModel: ObservableObject {
         rangeStart = span.start
         rangeEnd = span.end
         pictureBounds = Self.fittedPicture(width: Double(asset.width), height: Double(asset.height), in: sequenceSize)
+        staticFraming = clip.videoParams
         self.previous = Neighbour(previous, atEnd: true, frameDuration: frame)
         self.next = Neighbour(next, atEnd: false, frameDuration: frame)
         readFramings()
@@ -163,6 +181,8 @@ final class KenBurnsModel: ObservableObject {
         guard span.spanID == spanID else { return }
         self.span = span
         self.clip = clip
+        let framing = clip.videoParams
+        if !Self.sameParams(framing, staticFraming) { staticFraming = framing }
         if interpolation != span.interpolation { interpolation = span.interpolation }
         if rangeStart != span.start { rangeStart = span.start }
         if rangeEnd != span.end { rangeEnd = span.end }
@@ -183,27 +203,129 @@ final class KenBurnsModel: ObservableObject {
         return clip.motion(at: atEnd ? CMTimeSubtract(span.end, frameDuration) : span.start)
     }
 
-    /// Re-reads both rectangles from the span's edges.
+    /// Re-reads both rectangles from the span's edges, inside the clip's window.
     private func readFramings() {
-        let first = edgeMotion(atEnd: false)
-        let last = edgeMotion(atEnd: true)
-        let startRect = Self.rect(for: VEMotionFraming(x: first.x, y: first.y, scale: first.scale),
-                                  sequence: sequenceSize, rotationDegrees: first.rotationDegrees)
-        let endRect = Self.rect(for: VEMotionFraming(x: last.x, y: last.y, scale: last.scale),
-                                sequence: sequenceSize, rotationDegrees: last.rotationDegrees)
+        let first = Self.windowFraming(edgeMotion(atEnd: false), in: staticFraming)
+        let last = Self.windowFraming(edgeMotion(atEnd: true), in: staticFraming)
+        let startRect = Self.rect(for: first.framing, sequence: sequenceSize, rotationDegrees: first.rotationDegrees)
+        let endRect = Self.rect(for: last.framing, sequence: sequenceSize, rotationDegrees: last.rotationDegrees)
         if start != startRect { start = startRect }
         if end != endRect { end = endRect }
         if startRotation != first.rotationDegrees { startRotation = first.rotationDegrees }
         if endRotation != last.rotationDegrees { endRotation = last.rotationDegrees }
     }
 
-    /// The framings the rectangles give (position and scale).
+    /// The framings the rectangles give on screen (position and scale, the clip's static framing
+    /// included: what the monitor shows at that edge).
     var startFraming: VEMotionFraming {
-        Self.framing(for: start, sequence: sequenceSize, rotationDegrees: startRotation)
+        absoluteFraming(start, rotationDegrees: startRotation)
     }
 
     var endFraming: VEMotionFraming {
-        Self.framing(for: end, sequence: sequenceSize, rotationDegrees: endRotation)
+        absoluteFraming(end, rotationDegrees: endRotation)
+    }
+
+    /// The on-screen framing that makes `rect` fill the clip's window.
+    private func absoluteFraming(_ rect: CGRect, rotationDegrees: Double) -> VEMotionFraming {
+        Self.absoluteFraming(Self.framing(for: rect, sequence: sequenceSize, rotationDegrees: rotationDegrees),
+                             in: staticFraming)
+    }
+
+    // MARK: The clip's window
+
+    /// The clip's window: the frame box through its static framing, before its rotation (centre and
+    /// size, in sequence pixels); nil for a clip without a static framing (it fills the frame).
+    var clipWindow: CGRect? {
+        guard !Self.isIdentity(staticFraming) else { return nil }
+        let scale = staticFraming.scale
+        let size = CGSize(width: sequenceSize.width * scale, height: sequenceSize.height * scale)
+        return CGRect(x: sequenceSize.width / 2 + staticFraming.x - size.width / 2,
+                      y: sequenceSize.height / 2 + staticFraming.y - size.height / 2, width: size.width,
+                      height: size.height)
+    }
+
+    /// The window's corners (top-left, top-right, bottom-right, bottom-left) turned by the static
+    /// rotation about its centre, as the compositor turns the clip; empty without a window.
+    var clipWindowCorners: [CGPoint] {
+        guard let window = clipWindow else { return [] }
+        let theta = staticFraming.rotationDegrees * .pi / 180
+        let centre = CGPoint(x: window.midX, y: window.midY)
+        return [CGPoint(x: window.minX, y: window.minY), CGPoint(x: window.maxX, y: window.minY),
+                CGPoint(x: window.maxX, y: window.maxY), CGPoint(x: window.minX, y: window.maxY)].map { corner in
+            let dx = Double(corner.x - centre.x)
+            let dy = Double(corner.y - centre.y)
+            return CGPoint(x: Double(centre.x) + cos(theta) * dx - sin(theta) * dy,
+                           y: Double(centre.y) + sin(theta) * dx + cos(theta) * dy)
+        }
+    }
+
+    /// What the window outline's caption says ("Inside the clip's framing: 30 %, lower right");
+    /// nil without a window.
+    var windowCaption: String? {
+        Self.windowCaption(for: staticFraming)
+    }
+
+    static func windowCaption(for framing: VEVideoParams) -> String? {
+        guard !isIdentity(framing) else { return nil }
+        let percent = framing.scale * 100
+        let scaleText = abs(percent - percent.rounded()) < 0.05
+            ? String(Int(percent.rounded())) : String(format: "%.1f", percent)
+        var parts = ["\(scaleText) %"]
+        let horizontal = framing.x > 0.5 ? "right" : framing.x < -0.5 ? "left" : nil
+        let vertical = framing.y > 0.5 ? "lower" : framing.y < -0.5 ? "upper" : nil
+        switch (vertical, horizontal) {
+        case let (v?, h?): parts.append("\(v) \(h)")
+        case let (v?, nil): parts.append(v == "lower" ? "below centre" : "above centre")
+        case let (nil, h?): parts.append("\(h) of centre")
+        case (nil, nil): parts.append("centred")
+        }
+        let degrees = framing.rotationDegrees
+        if abs(degrees) > 1e-9 {
+            let text = abs(degrees - degrees.rounded()) < 0.05 ? String(Int(degrees.rounded()))
+                : String(format: "%.1f", degrees)
+            parts.append("turned \(text)°")
+        }
+        return "Inside the clip's framing: " + parts.joined(separator: ", ")
+    }
+
+    /// No static framing: centred, full size, unturned.
+    static func isIdentity(_ framing: VEVideoParams) -> Bool {
+        framing.x == 0 && framing.y == 0 && framing.scale == 1 && framing.rotationDegrees == 0
+    }
+
+    private static func sameParams(_ a: VEVideoParams, _ b: VEVideoParams) -> Bool {
+        a.x == b.x && a.y == b.y && a.scale == b.scale && a.rotationDegrees == b.rotationDegrees
+    }
+
+    /// `motion` (an edge's composed framing, as the monitor shows it) relative to the clip's window
+    /// `window` (its static framing S): Φ = (R(-θs)(xm - xs, ym - ys) / ss, sm / ss), and the
+    /// rotation inside the window θm - θs. The identity window gives `motion` back.
+    static func windowFraming(_ motion: VEVideoParams,
+                              in window: VEVideoParams) -> (framing: VEMotionFraming, rotationDegrees: Double) {
+        let scale = windowScale(window)
+        let theta = window.rotationDegrees * .pi / 180
+        let dx = motion.x - window.x
+        let dy = motion.y - window.y
+        let x = (cos(theta) * dx + sin(theta) * dy) / scale
+        let y = (-sin(theta) * dx + cos(theta) * dy) / scale
+        return (VEMotionFraming(x: x, y: y, scale: motion.scale / scale),
+                motion.rotationDegrees - window.rotationDegrees)
+    }
+
+    /// The inverse of `windowFraming`: the on-screen framing of `framing` inside `window`,
+    /// M = (xs + ss R(θs) Φ.xy, ss Φ.scale).
+    static func absoluteFraming(_ framing: VEMotionFraming, in window: VEVideoParams) -> VEMotionFraming {
+        let scale = windowScale(window)
+        let theta = window.rotationDegrees * .pi / 180
+        let x = window.x + scale * (cos(theta) * framing.x - sin(theta) * framing.y)
+        let y = window.y + scale * (sin(theta) * framing.x + cos(theta) * framing.y)
+        return VEMotionFraming(x: x, y: y, scale: scale * framing.scale)
+    }
+
+    /// The window's scale, 1 for a window of scale 0 (the clip is invisible; the span cannot change
+    /// that, `zeroScaleNote`), so the rectangles stay finite.
+    private static func windowScale(_ window: VEVideoParams) -> Double {
+        window.scale.isFinite && abs(window.scale) > 1e-12 ? window.scale : 1
     }
 
     /// The span ends before its clip does: its end framing holds after it (`holdCaption`).
@@ -285,8 +407,7 @@ final class KenBurnsModel: ObservableObject {
     /// Writes one rectangle as a step of the drag.
     private func write(_ which: Framing, _ rect: CGRect) {
         guard isDragging, let base = dragBase else { return }
-        let rotation = which == .start ? startRotation : endRotation
-        let framing = Self.framing(for: rect, sequence: sequenceSize, rotationDegrees: rotation)
+        let framing = absoluteFraming(rect, rotationDegrees: which == .start ? startRotation : endRotation)
         guard let (from, to) = values(start: which == .start ? framing : nil, end: which == .end ? framing : nil,
                                       base: base) else {
             note = Self.zeroScaleNote

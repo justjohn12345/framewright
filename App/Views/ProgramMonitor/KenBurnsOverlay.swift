@@ -41,6 +41,7 @@ struct KenBurnsOverlay: View {
                     Color.black
                     picture(mapping)
                     shade(mapping)
+                    windowOutline(mapping)
                     arrow(mapping)
                     ForEach([KenBurnsModel.Framing.start, .end], id: \.self) { which in
                         framingView(which, mapping: mapping)
@@ -117,6 +118,22 @@ struct KenBurnsOverlay: View {
         }
         .fill(Color.black.opacity(0.4), style: FillStyle(eoFill: true))
         .allowsHitTesting(false)
+    }
+
+    /// The clip's window (its static framing applied to the frame box) as a dashed outline, for a
+    /// clip placed smaller, off centre or turned: the rectangles frame the picture inside it.
+    @ViewBuilder
+    private func windowOutline(_ mapping: Mapping) -> some View {
+        let corners = model.clipWindowCorners.map { mapping.view($0) }
+        if corners.count == 4 {
+            Path { path in
+                path.addLines(corners)
+                path.closeSubpath()
+            }
+            .stroke(Color.yellow.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+            .allowsHitTesting(false)
+            .accessibilityIdentifier("KenBurnsClipWindow")
+        }
     }
 
     /// The direction the picture travels: from the start rectangle's centre to the end's.
@@ -201,6 +218,15 @@ struct KenBurnsOverlay: View {
     private var rangeControls: some View {
         VStack(alignment: .leading, spacing: 4) {
             rangeRow
+            if let window = model.windowCaption {
+                Label(window, systemImage: "rectangle.dashed")
+                    .foregroundStyle(.yellow)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(window + ". The rectangles frame the clip's own picture inside the dashed outline, "
+                        + "where the clip sits in the frame.")
+                    .accessibilityIdentifier("KenBurnsWindowCaption")
+            }
             if let text = model.note ?? model.caption {
                 Text(text)
                     .foregroundStyle(model.note != nil ? .orange : .secondary)

@@ -345,6 +345,27 @@ final class KenBurnsEditorTests: XCTestCase {
         model.setContinuesFromPrevious(false)
         XCTAssertFalse(model.continuesFromPrevious)
         XCTAssertEqual(model.startFraming.scale, 1, accuracy: 1e-12)
+        XCTAssertEqual(model.start, fullFrame)
+        // B placed at half size, 200 px right (its own window): the toggles still match what the
+        // neighbours show on screen, and the rectangles frame B's picture inside B's window. A's
+        // 1.5x at -100 is 3x inside a 0.5 window 200 px right: a 640 px rectangle whose centre is
+        // 600 window px / 3 = 200 px right of the frame's.
+        XCTAssertTrue(store.engine.setVideoParams(VEVideoParams(x: 200, y: 0, scale: 0.5, rotationDegrees: 0, opacity: 1),
+                                                  forClip: b).ok)
+        XCTAssertEqual(model.start, fullFrame, "neutral: B's whole picture in its window")
+        XCTAssertEqual(model.startFraming.scale, 0.5, accuracy: 1e-12, "on screen: B's own half size")
+        XCTAssertFalse(model.continuesFromPrevious)
+        model.setContinuesFromPrevious(true)
+        XCTAssertTrue(model.continuesFromPrevious)
+        XCTAssertEqual(model.startFraming.scale, 1.5, accuracy: 1e-9)
+        XCTAssertEqual(model.startFraming.x, -100, accuracy: 1e-6)
+        XCTAssertEqual(try span(id).startValues.scale, 3, accuracy: 1e-9)
+        XCTAssertEqual(model.start.width, 640, accuracy: 1e-6)
+        XCTAssertEqual(model.start.midX, 960 + 200, accuracy: 1e-6)
+        XCTAssertEqual(model.windowCaption, "Inside the clip's framing: 50 %, right of centre")
+        model.setContinuesFromPrevious(false)
+        XCTAssertEqual(try span(id).startValues.scale, 1, accuracy: 1e-12)
+        XCTAssertEqual(model.start, fullFrame)
         // A span not starting on the clip's first frame cannot continue the previous clip.
         let later = try motionSpan(b, lane: 2, 70, 100)
         store.select(span: later)
@@ -354,6 +375,125 @@ final class KenBurnsEditorTests: XCTestCase {
         XCTAssertTrue(store.engine.removeClips([NSNumber(value: d)]).ok)
         XCTAssertNil(store.kenBurns?.next)
         XCTAssertFalse(store.kenBurns?.leadsIntoNext ?? true)
+    }
+
+    // MARK: A clip placed smaller or off centre (review C1)
+
+    /// A picture-in-picture clip (static scale 0.3 at the lower right): the editor frames the clip's
+    /// own picture inside its window, as Final Cut does. The rectangles are what the window shows (the
+    /// whole frame box while the span is neutral), the window is outlined with a caption, and a drag
+    /// stores values relative to the framing the clip already has (a scale near 1, never the ~3-8
+    /// that made the clip a full-frame crop).
+    func testAPictureInPictureClipIsEditedInsideItsOwnFraming() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let clip = try fixture.placeMovie(movie, at: 0) // [0, 60)
+        let neighbour = try fixture.placeMovie(movie, at: 2) // [60, 120)
+        let pip = VEVideoParams(x: 690, y: 324, scale: 0.3, rotationDegrees: 0, opacity: 1)
+        XCTAssertTrue(store.engine.setVideoParams(pip, forClip: clip).ok)
+        XCTAssertTrue(store.engine.setVideoParams(pip, forClip: neighbour).ok)
+        store.playheadTime = .zero
+        store.addMotionSpanAtPlayhead(clip: clip)
+        let model = try XCTUnwrap(store.kenBurns)
+        let id = model.spanID
+
+        // The neutral start is the whole picture; the push in is 80 % of it, centred.
+        XCTAssertEqual(model.start.minX, 0, accuracy: 1e-6)
+        XCTAssertEqual(model.start.width, 1920, accuracy: 1e-6, "not 6400 px wide")
+        XCTAssertEqual(model.end.width, 1920 * ProjectStore.defaultPushInFraction, accuracy: 1e-6)
+        XCTAssertEqual(model.end.midX, 960, accuracy: 1e-6)
+        XCTAssertEqual(model.end.midY, 540, accuracy: 1e-6)
+        // The clip's window: the frame box through its static framing, outlined with a caption.
+        let window = try XCTUnwrap(model.clipWindow)
+        XCTAssertEqual(window.width, 576, accuracy: 1e-9)
+        XCTAssertEqual(window.height, 324, accuracy: 1e-9)
+        XCTAssertEqual(window.midX, 960 + 690, accuracy: 1e-9)
+        XCTAssertEqual(window.midY, 540 + 324, accuracy: 1e-9)
+        XCTAssertEqual(model.windowCaption, "Inside the clip's framing: 30 %, lower right")
+
+        // A first drag step keeps the picture in its window: relative values near neutral.
+        let pushIn = model.end
+        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 100, height: 0), location: .zero)
+        XCTAssertEqual(try span(id).endValues.scale, 1.25, accuracy: 1e-9, "the push in's scale kept, not ~3.3")
+        XCTAssertEqual(try span(id).endValues.x, -37.5, accuracy: 1e-9, "100 window px at 1.25x, in a 0.3 window")
+        XCTAssertEqual(try span(id).endValues.y, 0, accuracy: 1e-9)
+        model.endDrag()
+        XCTAssertEqual(model.end.minX, pushIn.minX + 100, accuracy: 1e-6, "re-read from the span")
+        var edge = VEVideoParams()
+        XCTAssertTrue(try XCTUnwrap(store.clips[clip]).getMotion(&edge, atEdgeOfSpan: id, atEnd: true,
+                                                                 frameDuration: store.frameDuration))
+        XCTAssertEqual(edge.scale, 0.375, accuracy: 1e-9, "on screen: 1.25 x 0.3")
+        XCTAssertEqual(edge.x, 690 - 37.5, accuracy: 1e-9)
+
+        // A corner drag to half the frame is a 2x zoom inside the window.
+        model.applyDrag(.corner(.start, .bottomRight), origin: model.start, translation: CGSize(width: -960, height: 0),
+                        location: CGPoint(x: 960, y: 540))
+        model.endDrag()
+        XCTAssertEqual(model.start.width, 960, accuracy: 1e-6)
+        XCTAssertEqual(try span(id).startValues.scale, 2, accuracy: 1e-9)
+        // The top-left quarter's centre (480 px left of and 270 px above the frame's) moves to the
+        // window's centre at 2x: (960, 540) window px, 0.3 of that on screen.
+        XCTAssertEqual(try span(id).startValues.x, 0.3 * 960, accuracy: 1e-9)
+        XCTAssertEqual(try span(id).startValues.y, 0.3 * 540, accuracy: 1e-9)
+
+        // Swap exchanges the two framings; the picture stays in its window.
+        let (start, end) = (model.start, model.end)
+        model.swap()
+        XCTAssertEqual(model.start.width, end.width, accuracy: 1e-6)
+        XCTAssertEqual(model.end.width, start.width, accuracy: 1e-6)
+        XCTAssertEqual(model.end.midX, start.midX, accuracy: 1e-6)
+        XCTAssertEqual(try span(id).startValues.scale, 1.25, accuracy: 1e-9)
+        XCTAssertEqual(try span(id).endValues.scale, 2, accuracy: 1e-9)
+
+        // The neighbour toggle: the next clip starts neutral in the same window, so leading into it
+        // gives the end the window's own framing (relative scale 1), and turning it off does too.
+        XCTAssertEqual(model.next?.clipID, neighbour)
+        XCTAssertFalse(model.leadsIntoNext)
+        model.setLeadsIntoNext(true)
+        XCTAssertTrue(model.leadsIntoNext)
+        XCTAssertEqual(try span(id).endValues.scale, 1, accuracy: 1e-9)
+        XCTAssertEqual(try span(id).endValues.x, 0, accuracy: 1e-9)
+        XCTAssertEqual(model.end.width, 1920, accuracy: 1e-6)
+        XCTAssertEqual(model.endFraming.scale, 0.3, accuracy: 1e-9, "the framing on screen")
+        XCTAssertEqual(model.endFraming.x, 690, accuracy: 1e-9)
+        model.setLeadsIntoNext(false)
+        XCTAssertEqual(try span(id).endValues.scale, 1, accuracy: 1e-12)
+        XCTAssertEqual(try span(id).startValues.scale, 1.25, accuracy: 1e-9, "the start keeps its framing")
+    }
+
+    /// An offset and turned clip: the rectangles move in the window's own axes, and the values
+    /// written go back through the window's rotation and scale.
+    func testATurnedAndOffsetClipIsEditedInItsWindowsAxes() async throws {
+        let clip = try await longClip()
+        let placed = VEVideoParams(x: 100, y: 0, scale: 0.5, rotationDegrees: 90, opacity: 1)
+        XCTAssertTrue(store.engine.setVideoParams(placed, forClip: clip).ok)
+        let id = try motionSpan(clip, 0, 90)
+        store.select(span: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.start, fullFrame, "neutral: the whole picture")
+        XCTAssertEqual(model.windowCaption, "Inside the clip's framing: 50 %, right of centre, turned 90°")
+        model.applyDrag(.corner(.end, .bottomRight), origin: model.end, translation: CGSize(width: -960, height: -540),
+                        location: CGPoint(x: 960, y: 540))
+        model.endDrag()
+        XCTAssertEqual(try span(id).endValues.scale, 2, accuracy: 1e-9)
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 100, height: 0), location: .zero)
+        model.endDrag()
+        // The half-frame rectangle at the top-left is (960, 540) in the window's axes; moved 100 px
+        // right it is (760, 540). Turned 90° (clockwise, +y down) and scaled by 0.5 on screen:
+        // (-270, 380) from the clip's position.
+        XCTAssertEqual(try span(id).endValues.x, -270, accuracy: 1e-6)
+        XCTAssertEqual(try span(id).endValues.y, 380, accuracy: 1e-6)
+        XCTAssertEqual(try span(id).endValues.scale, 2, accuracy: 1e-9)
+        XCTAssertEqual(model.end.minX, 100, accuracy: 1e-6)
+        XCTAssertEqual(model.end.minY, 0, accuracy: 1e-6)
+        var edge = VEVideoParams()
+        XCTAssertTrue(try XCTUnwrap(store.clips[clip]).getMotion(&edge, atEdgeOfSpan: id, atEnd: true,
+                                                                 frameDuration: store.frameDuration))
+        XCTAssertEqual(edge.scale, 1, accuracy: 1e-9)
+        XCTAssertEqual(edge.rotationDegrees, 90, accuracy: 1e-9)
+        let rect = KenBurnsModel.rect(for: KenBurnsModel.windowFraming(edge, in: placed).framing,
+                                      sequence: model.sequenceSize, rotationDegrees: 0)
+        XCTAssertEqual(rect.minX, model.end.minX, accuracy: 1e-6)
+        XCTAssertEqual(rect.minY, model.end.minY, accuracy: 1e-6)
     }
 
     // MARK: Geometry
