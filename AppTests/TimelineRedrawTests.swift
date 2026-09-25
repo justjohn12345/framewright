@@ -209,25 +209,35 @@ final class TimelineRedrawTests: XCTestCase {
 
         let builds = store.timelineBuildCount
         let canvasDraws = TimelineDiagnostics.canvasDraws
-        let changes = store.changeCount
-        let origin = model.end
-        for step in 1 ... 20 {
-            // The end's bottom-right corner pulled in: a zoom that grows with every step.
-            let pulled = CGFloat(step) * 20
-            model.applyDrag(.corner(.end, .bottomRight), origin: origin,
-                            translation: CGSize(width: -pulled, height: -pulled * 9 / 16))
+        var redrawn = 0
+        // In both of the editor's modes (the full-frame clip opens in Ken Burns mode).
+        XCTAssertEqual(model.mode, .kenBurns)
+        for mode in [KenBurnsMode.kenBurns, .transform] {
+            model.setMode(mode)
             await Self.display(host)
+            let modeBuilds = store.timelineBuildCount
+            let modeDraws = TimelineDiagnostics.canvasDraws
+            let changes = store.changeCount
+            let origin = model.end
+            for step in 1 ... 20 {
+                // The end's bottom-right corner pulled in: a zoom that grows with every step.
+                let pulled = CGFloat(step) * 20
+                model.applyDrag(.corner(.end, .bottomRight), origin: origin,
+                                translation: CGSize(width: -pulled, height: -pulled * 9 / 16))
+                await Self.display(host)
+            }
+            model.endDrag()
+            await Self.display(host)
+            let rebuilt = store.timelineBuildCount - modeBuilds
+            let modeRedrawn = TimelineDiagnostics.canvasDraws - modeDraws
+            redrawn += modeRedrawn
+            print("20 Ken Burns drag steps (\(mode.title)): timeline model builds \(rebuilt), canvas draws "
+                + "\(modeRedrawn), model changes \(store.changeCount - changes)")
+            XCTAssertGreaterThanOrEqual(store.changeCount - changes, 20, "every step changed the model (\(mode))")
+            XCTAssertEqual(rebuilt, 0, "a drag step changes nothing the timeline draws (\(mode))")
+            XCTAssertLessThanOrEqual(modeRedrawn, 2, "and redraws no clips (\(mode))")
+            XCTAssertEqual(store.undoActionName, "Change Span Values")
         }
-        model.endDrag()
-        await Self.display(host)
-        let rebuilt = store.timelineBuildCount - builds
-        let redrawn = TimelineDiagnostics.canvasDraws - canvasDraws
-        print("20 Ken Burns drag steps: timeline model builds \(rebuilt), canvas draws \(redrawn), "
-            + "model changes \(store.changeCount - changes)")
-        XCTAssertGreaterThanOrEqual(store.changeCount - changes, 20, "every step changed the model")
-        XCTAssertEqual(rebuilt, 0, "a drag step changes nothing the timeline draws")
-        XCTAssertLessThanOrEqual(redrawn, 2, "and redraws no clips")
-        XCTAssertEqual(store.undoActionName, "Change Span Values")
 
         // A span range change is drawn: one build.
         XCTAssertTrue(store.engine.setSpanRange(motion.spanID, range: CMTimeRange(start: CMTime(value: 2, timescale: 30),
@@ -275,6 +285,7 @@ final class TimelineRedrawTests: XCTestCase {
                                                         range: CMTimeRange(start: .zero, duration: CMTime(value: 30, timescale: 30))).span)
         store.select(span: motion.spanID)
         let model = try XCTUnwrap(store.kenBurns)
+        model.setMode(.transform) // the outlines are Transform mode's (Ken Burns shows the clip alone)
         // Thumbnails, waveforms and the tiles settle.
         var last = (-1, -1)
         for _ in 0 ..< 60 where last != (TimelineDiagnostics.canvasDraws, MediaBinDiagnostics.tileBodies) {

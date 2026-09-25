@@ -161,6 +161,16 @@ final class ProjectStore: ObservableObject {
     private var kenBurnsFailedSpan: VESpanID?
     /// Times the editor could not open (diagnostics and tests).
     private(set) var kenBurnsOpenFailures = 0
+    /// The open Ken Burns editor's mode (nil while it is closed), republished by the store so the
+    /// program monitor's layout (which observes the store) follows a mode switch: Ken Burns shows the
+    /// picture without a margin, Transform inside one.
+    @Published private(set) var kenBurnsMode: KenBurnsMode?
+    /// The Ken Burns editor's mode the user chose for each Motion span (the editor's switch, or an
+    /// entry point with an intent: the Effects tab's Ken Burns and Move, Clip > Add Ken Burns… and
+    /// Add Motion Span). A span without one opens in the automatic mode. Kept for the session of the
+    /// project (span ids restart per project, and the only persisted UI state is the app-wide window
+    /// layout): cleared on New and Open.
+    private(set) var kenBurnsModes: [VESpanID: KenBurnsMode] = [:]
     /// Asks the inspector to focus a field (double-clicking a transition focuses its duration).
     @Published private(set) var inspectorFocusRequest: InspectorFocusRequest?
     /// The coalescing group of the inspector's keyboard-nudge burst, while one is open. Unlike a
@@ -1023,6 +1033,9 @@ final class ProjectStore: ObservableObject {
     /// Motion span is selected, updated with the span as it is now, closed for anything else. Opening
     /// pauses playback. A clip without a picture says why in the status line.
     func syncKenBurns() {
+        // Whatever happens below, the program monitor follows the editor (the clip alone in Ken
+        // Burns mode, the program otherwise).
+        defer { syncProgramPreview() }
         guard let id = selectedSpanID, kenBurnsClosedSpan != id, let span = engine.spanInfo(id), span.kind == .motion,
               let clip = clips[span.clipID] ?? engine.clipInfo(span.clipID) else {
             if kenBurns != nil { kenBurns = nil }
@@ -1047,7 +1060,8 @@ final class ProjectStore: ObservableObject {
         }
         var reason = ""
         guard let model = KenBurnsModel(store: self, span: span, clip: clip, asset: info, sequence: sequence,
-                                        playhead: playheadTime, previous: previous, next: next, reason: &reason) else {
+                                        playhead: playheadTime, mode: kenBurnsModes[id], previous: previous,
+                                        next: next, reason: &reason) else {
             failKenBurns(id, reason)
             return
         }
@@ -1082,6 +1096,41 @@ final class ProjectStore: ObservableObject {
         kenBurns.cancelDrag()
         kenBurnsClosedSpan = kenBurns.spanID
         self.kenBurns = nil
+        syncProgramPreview()
+    }
+
+    /// The editor's mode was switched (`KenBurnsModel.setMode`): remembered for its span, and the
+    /// program monitor follows.
+    func kenBurnsModeDidChange(_ model: KenBurnsModel) {
+        guard model === kenBurns else { return }
+        kenBurnsModes[model.spanID] = model.mode
+        syncProgramPreview()
+    }
+
+    /// Remembers the Ken Burns editor's mode for a span (an entry point with an intent); the open
+    /// editor on that span switches to it.
+    func rememberKenBurnsMode(_ mode: KenBurnsMode, for span: VESpanID) {
+        kenBurnsModes[span] = mode
+        if let kenBurns, kenBurns.spanID == span {
+            kenBurns.setMode(mode)
+        }
+    }
+
+    /// The program monitor shows the Ken Burns editor's clip alone, at identity, while the editor is
+    /// open in Ken Burns mode (`VEEngine.setProgramPreviewSolo`), and the program otherwise (the
+    /// editor closed, in Transform mode, on another span's clip, after New or Open). The output window
+    /// and export always show the program. Also republishes `kenBurnsMode`.
+    func syncProgramPreview() {
+        let mode = kenBurns?.mode
+        if kenBurnsMode != mode { kenBurnsMode = mode }
+        if let kenBurns, kenBurns.mode == .kenBurns {
+            let clip = kenBurns.clip.clipID
+            if engine.programPreviewSoloClipID != clip || !engine.programPreviewSoloIdentityMotion {
+                engine.setProgramPreviewSolo(clip: clip, identityMotion: true)
+            }
+        } else if engine.programPreviewSoloClipID != 0 {
+            engine.clearProgramPreviewSolo()
+        }
     }
 
     // MARK: Speed
@@ -1402,6 +1451,8 @@ final class ProjectStore: ObservableObject {
         kenBurns = nil
         kenBurnsClosedSpan = nil
         kenBurnsFailedSpan = nil
+        kenBurnsModes = [:] // span ids restart per project
+        syncProgramPreview()
         // Media still arriving belongs to the previous project (its Media folder).
         incoming.discardAll()
         mediaFolder.reset()

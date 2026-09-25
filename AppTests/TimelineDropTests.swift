@@ -67,14 +67,20 @@ final class TimelineDropTests: XCTestCase {
         }
         XCTAssertEqual(Set(TimelineDropDelegate.types),
                        Set([.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade,
-                            .framewrightFadeEffect, .framewrightGainEffect] + MediaDrop.types),
+                            .framewrightFadeEffect, .framewrightGainEffect, .framewrightKenBurnsEffect,
+                            .framewrightMoveEffect] + MediaDrop.types),
                        "in-app types, and media files and file promises (Photos)")
         for kind in EffectKind.allCases {
             let provider = NSItemProvider()
             provider.register(EffectReference(kind: kind))
             XCTAssertTrue(provider.hasItemConformingToTypeIdentifier(kind.contentType.identifier))
+            for other in EffectKind.allCases where other != kind {
+                XCTAssertFalse(provider.hasItemConformingToTypeIdentifier(other.contentType.identifier),
+                               "\(kind) is told apart from \(other) before the drop")
+            }
             let declared = try XCTUnwrap(UTType(kind.contentType.identifier))
             XCTAssertTrue(declared.isDeclared, "\(kind.contentType.identifier) is declared in Info.plist")
+            XCTAssertFalse(declared.isDynamic)
         }
     }
 

@@ -977,14 +977,20 @@ final class EffectLanesTimelineTests: XCTestCase {
         keyboard.perform(.addMotionSpan, on: store)
         XCTAssertEqual(store.changeCount, before)
         store.cancelActiveGesture = nil
-        // The clip's context menu offers it.
+        // The clip's context menu offers Ken Burns and a Move (at the playhead, on the clicked clip).
         let gestures = TimelineGestureController(store: store)
         let items = gestures.contextMenuItems(at: CGPoint(x: 20, y: 90))
         XCTAssertEqual(items.filter { !$0.isSeparator }.map(\.title),
-                       ["Delete", "Ripple Delete", "Link", "Speed/Duration…", "Add Motion Span at Playhead"])
-        try XCTUnwrap(items.first { $0.title == "Add Motion Span at Playhead" }).action()
+                       ["Delete", "Ripple Delete", "Link", "Speed/Duration…", "Add Ken Burns…", "Add Motion Span"])
+        try XCTUnwrap(items.first { $0.title == "Add Ken Burns…" }).action()
         XCTAssertEqual(store.selectedEffectSpan?.start, frames(220))
         XCTAssertEqual(store.selectedEffectSpan?.lane, 2, "lane 1 has the span added near the end")
+        XCTAssertEqual(store.kenBurns?.mode, .kenBurns)
+        store.playheadTime = frames(221)
+        let moveItems = gestures.contextMenuItems(at: CGPoint(x: 20, y: 90))
+        try XCTUnwrap(moveItems.first { $0.title == "Add Motion Span" }).action()
+        XCTAssertEqual(store.selectedEffectSpan?.start, frames(221))
+        XCTAssertEqual(store.kenBurns?.mode, .transform)
     }
 
     /// Control-K (and Clip > Add Motion Span at Playhead) acts on the selected clip only, never on

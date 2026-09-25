@@ -192,8 +192,19 @@ final class KenBurnsEditorTests: XCTestCase {
         store.addMotionSpanAtPlayhead(clip: clip)
         let model = try XCTUnwrap(store.kenBurns)
         XCTAssertEqual(model.spanID, store.selectedSpanID)
+        // A full-frame clip opens in Ken Burns mode (the automatic rule): the start rectangle is the
+        // whole picture, the push in's end rectangle 1 / 1.25 of the frame about the same centre, and
+        // the monitor shows the clip alone.
+        XCTAssertEqual(model.mode, .kenBurns)
+        assertBox(model.start, center: fullFrame.center, size: fullFrame.size, "the whole picture fills the frame")
+        assertBox(model.end, center: CGPoint(x: 960, y: 540), size: CGSize(width: 1536, height: 864), "the push in")
+        XCTAssertEqual(store.engine.programPreviewSoloClipID, clip)
+        XCTAssertEqual(store.kenBurnsMode, .kenBurns)
+        // In Transform mode the same values: the clip where it is, the whole frame, and a box 1.25
+        // times the frame about the same centre.
+        model.setMode(.transform)
+        XCTAssertEqual(store.engine.programPreviewSoloClipID, 0, "the program again")
         XCTAssertEqual(model.start, fullFrame, "the clip where it is: the whole frame")
-        // A full-frame clip's push in is a box 1.25 times the frame about the same centre.
         assertBox(model.end, center: CGPoint(x: 960, y: 540), size: CGSize(width: 2400, height: 1350), "the push in")
         XCTAssertEqual(model.endFraming.scale, 1.25, accuracy: 1e-12)
         XCTAssertEqual(model.interpolation, .easeInOut, "FCP's default smoothing")
@@ -207,8 +218,13 @@ final class KenBurnsEditorTests: XCTestCase {
     func testDragsWriteTheSpanLiveOneUndoStepEachAndEscapeCancels() async throws {
         let clip = try await longClip()
         store.playheadTime = .zero
-        store.addMotionSpanAtPlayhead(clip: clip)
+        store.addMotionSpanAtPlayhead(clip: clip, mode: .transform)
         let model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.mode, .transform, "Transform mode's boxes (Ken Burns mode: `testKenBurnsMode...`)")
+        // The push in, asked for in Transform mode (a Move would end where it starts).
+        var zoom = VESpanValuesUnchanged()
+        zoom.scale = 1.25
+        XCTAssertTrue(store.engine.setSpanValues(model.spanID, start: VESpanValuesUnchanged(), end: zoom).ok)
         let id = model.spanID
         let pushIn = model.end
         XCTAssertEqual(try span(id).endValues.x, 0, accuracy: 1e-9)
@@ -311,11 +327,23 @@ final class KenBurnsEditorTests: XCTestCase {
         let clip = try await longClip()
         store.playheadTime = .zero
         store.addMotionSpanAtPlayhead(clip: clip)
+        for mode in [KenBurnsMode.kenBurns, .transform] {
+            try checkCancelledDrag(in: mode)
+        }
+    }
+
+    /// `testMovementAfterACancelledDragChangesNothingUntilTheRelease` in one of the editor's modes. A
+    /// body drag of 100 px moves the clip 100 px (Transform), or pans the rectangle 100 px over the
+    /// picture, which moves the clip 125 px the other way at the push in's 1.25x (Ken Burns).
+    private func checkCancelledDrag(in mode: KenBurnsMode) throws {
         let model = try XCTUnwrap(store.kenBurns)
+        model.setMode(mode)
+        XCTAssertEqual(model.mode, mode)
         let id = model.spanID
         let pushIn = model.end
         let undoName = store.undoActionName
         let before = try span(id)
+        let moved = mode == .transform ? 100.0 : -125.0
 
         model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 60, height: 0))
         XCTAssertTrue(model.isDragging)
@@ -337,7 +365,7 @@ final class KenBurnsEditorTests: XCTestCase {
         // The next gesture drags again.
         model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 100, height: 0))
         model.endDrag()
-        XCTAssertEqual(try span(id).endValues.x, 100, accuracy: 1e-9)
+        XCTAssertEqual(try span(id).endValues.x, before.endValues.x + moved, accuracy: 1e-9, "\(mode)")
         XCTAssertEqual(store.undoActionName, "Change Span Values")
         // A gesture the system abandons after a cancel (no release) also ends the cancelled state.
         model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 10, height: 0))
@@ -346,6 +374,10 @@ final class KenBurnsEditorTests: XCTestCase {
         model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 10, height: 0))
         XCTAssertTrue(model.isDragging, "a new gesture after the abandoned one drags")
         model.endDrag()
+        // Back to where this mode started (two drags, two undo steps).
+        store.undo()
+        store.undo()
+        XCTAssertEqual(try span(id).endValues.x, before.endValues.x, accuracy: 1e-9)
     }
 
     /// Review L8: when the editor cannot open on the selected span, the status line says why once;
@@ -389,6 +421,7 @@ final class KenBurnsEditorTests: XCTestCase {
         let later = try motionSpan(clip, 90, 150)
         store.select(span: later)
         let model = try XCTUnwrap(store.kenBurns)
+        model.setMode(.transform)
         XCTAssertEqual(model.start.size.width, 3840, accuracy: 1e-6, "the zoom's held 2x")
         XCTAssertEqual(model.end.size.width, 3840, accuracy: 1e-6)
         XCTAssertEqual(model.caption, KenBurnsModel.holdCaption, "it ends before the clip")
@@ -472,6 +505,7 @@ final class KenBurnsEditorTests: XCTestCase {
         let id = try motionSpan(b, 60, 120)
         store.select(span: id)
         let model = try XCTUnwrap(store.kenBurns)
+        model.setMode(.transform)
         XCTAssertEqual(model.previous?.clipID, a)
         XCTAssertEqual(model.next?.clipID, d)
         XCTAssertTrue(model.canContinueFromPrevious)

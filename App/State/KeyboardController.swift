@@ -41,8 +41,9 @@ final class KeyboardController {
         case selectAll
         /// `]` / `[`: gain of the selected audio clips ±1 dB (with Shift, `}` / `{`: ±10 dB).
         case gainUp(big: Bool), gainDown(big: Bool)
-        /// Control-K: Add Motion Span at Playhead on the selected clip (Final Cut Pro's Add Keyframe
-        /// key; `ProjectStore.motionSpanTarget`).
+        /// Control-K: a Motion span at the playhead on the selected clip (Final Cut Pro's Add Keyframe
+        /// key; `ProjectStore.motionSpanTarget`), the push in, opened in the automatic mode (Ken Burns
+        /// on a clip that covers the frame, Transform otherwise).
         case addMotionSpan
 
         /// The keys the program output window takes: the transport (play, shuttle, step, start/end)

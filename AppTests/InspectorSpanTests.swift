@@ -153,6 +153,17 @@ final class InspectorSpanTests: XCTestCase {
         model.endDrag()
         XCTAssertEqual(store.changeCount, before)
         XCTAssertEqual(model.note, "The rest of the clip has scale 0 here, so the move cannot change what it shows.")
+        // The same in Ken Burns mode: the edge shows nothing, so neither a pan nor a zoom of its
+        // (empty) rectangle can be written.
+        XCTAssertEqual(model.mode, .transform, "a clip at scale 0 does not cover the frame")
+        model.setMode(.kenBurns)
+        XCTAssertNil(model.note)
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 40, height: 0))
+        model.endDrag()
+        model.applyDrag(.corner(.end, .bottomRight), origin: model.end, translation: CGSize(width: -100, height: -56))
+        model.endDrag()
+        XCTAssertEqual(store.changeCount, before)
+        XCTAssertEqual(model.note, "The rest of the clip has scale 0 here, so the move cannot change what it shows.")
     }
 
     func testOpacityAndGainValuesAreAbsolute() async throws {

@@ -14,11 +14,18 @@ extension UTType {
     static let framewrightFadeEffect = UTType(exportedAs: "com.justjohn12345.framewright.effect.fade")
     /// A Gain span (audio) dragged from the Effects tab (declared in Info.plist).
     static let framewrightGainEffect = UTType(exportedAs: "com.justjohn12345.framewright.effect.gain")
+    /// A Ken Burns Motion span dragged from the Effects tab (declared in Info.plist).
+    static let framewrightKenBurnsEffect = UTType(exportedAs: "com.justjohn12345.framewright.effect.ken-burns")
+    /// A Move (a Motion span that starts still) dragged from the Effects tab (declared in Info.plist).
+    static let framewrightMoveEffect = UTType(exportedAs: "com.justjohn12345.framewright.effect.move")
 }
 
-/// The effects of the Effects tab that go on an effect lane (1-3) of a clip: a Fade (an Opacity
-/// span on a video clip) and a Gain span (an audio clip).
+/// The effects of the Effects tab that go on an effect lane (1-3) of a clip: Ken Burns and Move
+/// (Motion spans on a video clip, with the intent recorded as the mode their Ken Burns editor opens
+/// in), a Fade (an Opacity span on a video clip) and a Gain span (an audio clip).
 enum EffectKind: String, CaseIterable, Identifiable, Codable {
+    case kenBurns
+    case move
     case fade
     case gain
 
@@ -26,6 +33,8 @@ enum EffectKind: String, CaseIterable, Identifiable, Codable {
 
     var title: String {
         switch self {
+        case .kenBurns: return "Ken Burns"
+        case .move: return "Move"
         case .fade: return "Fade"
         case .gain: return "Gain"
         }
@@ -33,6 +42,8 @@ enum EffectKind: String, CaseIterable, Identifiable, Codable {
 
     var detail: String {
         switch self {
+        case .kenBurns: return "Pan and zoom inside the picture"
+        case .move: return "Move or scale the clip in the frame"
         case .fade: return "Video opacity span"
         case .gain: return "Audio level span"
         }
@@ -40,6 +51,8 @@ enum EffectKind: String, CaseIterable, Identifiable, Codable {
 
     var systemImage: String {
         switch self {
+        case .kenBurns: return "crop"
+        case .move: return "arrow.up.and.down.and.arrow.left.and.right"
         case .fade: return "circle.lefthalf.filled"
         case .gain: return "speaker.wave.2"
         }
@@ -47,7 +60,7 @@ enum EffectKind: String, CaseIterable, Identifiable, Codable {
 
     var trackKind: VETrackKind {
         switch self {
-        case .fade: return .video
+        case .kenBurns, .move, .fade: return .video
         case .gain: return .audio
         }
     }
@@ -55,13 +68,27 @@ enum EffectKind: String, CaseIterable, Identifiable, Codable {
     /// The span it adds.
     var spanKind: VESpanKind {
         switch self {
+        case .kenBurns, .move: return .motion
         case .fade: return .opacity
         case .gain: return .gain
         }
     }
 
+    /// The mode a Motion span it adds opens its Ken Burns editor in (nil for the other kinds): Ken
+    /// Burns (the push in: the End rectangle 1 / 1.25 of the frame, centred) or Transform (Move: the
+    /// End where the Start is, nothing moves until a box is dragged).
+    var motionMode: KenBurnsMode? {
+        switch self {
+        case .kenBurns: return .kenBurns
+        case .move: return .transform
+        case .fade, .gain: return nil
+        }
+    }
+
     var contentType: UTType {
         switch self {
+        case .kenBurns: return .framewrightKenBurnsEffect
+        case .move: return .framewrightMoveEffect
         case .fade: return .framewrightFadeEffect
         case .gain: return .framewrightGainEffect
         }
@@ -77,6 +104,10 @@ struct EffectReference: Codable, Transferable, Hashable {
             .exportingCondition { $0.kind == .fade }
         CodableRepresentation(contentType: .framewrightGainEffect)
             .exportingCondition { $0.kind == .gain }
+        CodableRepresentation(contentType: .framewrightKenBurnsEffect)
+            .exportingCondition { $0.kind == .kenBurns }
+        CodableRepresentation(contentType: .framewrightMoveEffect)
+            .exportingCondition { $0.kind == .move }
     }
 }
 

@@ -114,6 +114,26 @@
 			<key>UTTypeIdentifier</key>
 			<string>com.justjohn12345.framewright.effect.gain</string>
 		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Ken Burns Effect</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.effect.ken-burns</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Move Effect</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.effect.move</string>
+		</dict>
 	</array>
 </dict>
 </plist>

@@ -211,12 +211,17 @@ extension ProjectStore {
     /// (timeline, whole frames) on `lane`, or on the first effect lane with room when `lane` is nil,
     /// with its default values, as one undo step ("Add ... Span"), and selects it. Defaults: a Motion
     /// span is the Ken Burns push in: it starts on the placement the clip has there (no jump) and ends
-    /// on a box 1.25 times larger about the same centre (`defaultPushInFraction`), eased in and out. An
-    /// Opacity span fades: 1 -> 0 when it touches the clip's end, 0 -> 1 at its start, else 1 -> 1.
-    /// A Gain span is 0 -> 0 dB. A refusal is reported (with the free range for an overlap) and
-    /// changes nothing.
+    /// on a box 1.25 times larger about the same centre (`defaultPushInFraction`: in Ken Burns terms,
+    /// an end rectangle 1 / 1.25 of the start's), eased in and out; asked for as a move
+    /// (`motionMode` .transform, the Effects tab's Move) it ends where it starts, so nothing moves
+    /// until a box is dragged. `motionMode` is also the mode its Ken Burns editor opens in (remembered
+    /// for the span); nil leaves it to the automatic rule (`KenBurnsModel.automaticMode`). An Opacity
+    /// span fades: 1 -> 0 when it touches the clip's end, 0 -> 1 at its start, else 1 -> 1. A Gain
+    /// span is 0 -> 0 dB. A refusal is reported (with the free range for an overlap) and changes
+    /// nothing.
     @discardableResult
-    func addSpan(kind: VESpanKind, lane: Int?, clip id: VEClipID, range: CMTimeRange) -> VEEditResult {
+    func addSpan(kind: VESpanKind, lane: Int?, clip id: VEClipID, range: CMTimeRange,
+                 motionMode: KenBurnsMode? = nil) -> VEEditResult {
         guard !isGestureActive else {
             statusMessage = "Finish the current drag first."
             return VEEditResult.failure(with: .busy, message: "Finish the current drag first.")
@@ -240,7 +245,7 @@ extension ProjectStore {
             }
             return added
         }
-        let defaults = applyDefaults(to: span, key: key)
+        let defaults = applyDefaults(to: span, key: key, pushIn: motionMode != .transform)
         guard defaults.ok else {
             engine.cancelCoalescing()
             statusMessage = defaults.message
@@ -248,12 +253,16 @@ extension ProjectStore {
         }
         engine.endCoalescing()
         statusMessage = nil
+        if span.kind == .motion, let motionMode {
+            rememberKenBurnsMode(motionMode, for: span.spanID) // before selecting: it opens in this mode
+        }
         select(span: span.spanID)
         return VEEditResult.success(withCreatedIDs: [NSNumber(value: span.spanID)])
     }
 
-    /// Sets a new span's default values inside the adding group (see `addSpan`).
-    private func applyDefaults(to span: VEEffectSpan, key: String) -> VEEditResult {
+    /// Sets a new span's default values inside the adding group (see `addSpan`); `pushIn` false: a
+    /// Motion span ends where it starts.
+    private func applyDefaults(to span: VEEffectSpan, key: String, pushIn: Bool) -> VEEditResult {
         guard let clip = engine.clipInfo(span.clipID) else { return .success() }
         switch span.kind {
         case .opacity:
@@ -268,12 +277,14 @@ extension ProjectStore {
         case .motion:
             // The Ken Burns default: from the framing the clip has there to a gentle push in on it (the
             // end 1 / defaultPushInFraction larger, around the same point), easing in and out.
-            var end = VESpanValuesUnchanged()
-            end.scale = 1 / Self.defaultPushInFraction
-            let values = engine.performInCoalescingGroup(key) {
-                self.engine.setSpanValues(span.spanID, start: VESpanValuesUnchanged(), end: end)
+            if pushIn {
+                var end = VESpanValuesUnchanged()
+                end.scale = 1 / Self.defaultPushInFraction
+                let values = engine.performInCoalescingGroup(key) {
+                    self.engine.setSpanValues(span.spanID, start: VESpanValuesUnchanged(), end: end)
+                }
+                guard values.ok else { return values }
             }
-            guard values.ok else { return values }
             return engine.performInCoalescingGroup(key) {
                 self.engine.setSpanInterpolation(span.spanID, interpolation: .easeInOut)
             }
@@ -350,14 +361,17 @@ extension ProjectStore {
         return true
     }
 
-    /// Control-K, Clip > Add Motion Span at Playhead (`clip` nil: the selected clip, see
-    /// `motionSpanTarget`), and the clip's context menu (`clip`: the clicked one): a Motion span from
-    /// the frame under the playhead, 5 s long or to the clip's end if shorter, on the first effect
-    /// lane with room, with the default values (see `addSpan`); it is selected, which opens the Ken
-    /// Burns editor. Refused with the reason in the status line: during a gesture, without a selected
-    /// clip (never another clip under the playhead), on a locked track, with the playhead off the clip
-    /// or on its last frame, or when no lane has room.
-    func addMotionSpanAtPlayhead(clip id: VEClipID? = nil) {
+    /// Control-K (`mode` nil: the automatic mode, the push in), Clip > Add Ken Burns… (`mode`
+    /// .kenBurns: the push in, opened in Ken Burns mode) and Clip > Add Motion Span (`mode`
+    /// .transform: a move that ends where it starts, opened in Transform mode), on the selected clip
+    /// (`clip` nil, see `motionSpanTarget`), and the same two in the clip's context menu (`clip`: the
+    /// clicked one): a Motion span from the frame under the playhead, 5 s long or to the clip's end if
+    /// shorter, on the first effect lane with room, with the default values (see `addSpan`); it is
+    /// selected, which opens the Ken Burns editor. Refused with the reason in the status line: during a
+    /// gesture, without a selected clip (never another clip under the playhead), on a locked track,
+    /// with the playhead off the clip or on its last frame, or when no lane has room. A Motion span
+    /// already starting on that frame is selected instead (in `mode` when one is asked for).
+    func addMotionSpanAtPlayhead(clip id: VEClipID? = nil, mode: KenBurnsMode? = nil) {
         guard !isGestureActive else {
             statusMessage = "Finish the current drag first."
             return
@@ -389,6 +403,7 @@ extension ProjectStore {
         // Pressed again on the same frame: the span it added is selected, not a second push in on
         // top of it (review L6: repeated presses stacked 1.25 x 1.25 x 1.25).
         if let existing = clip.spans.first(where: { $0.kind == .motion && $0.start == start }) {
+            if let mode { rememberKenBurnsMode(mode, for: existing.spanID) }
             select(span: existing.spanID)
             statusMessage = "“\(clip.name)” already has a Motion span starting here: it is selected (drag on an empty "
                 + "lane to add another)."
@@ -401,7 +416,7 @@ extension ProjectStore {
                 + "needs at least two."
             return
         }
-        addSpan(kind: .motion, lane: nil, clip: clip.clipID, range: CMTimeRange(start: start, end: end))
+        addSpan(kind: .motion, lane: nil, clip: clip.clipID, range: CMTimeRange(start: start, end: end), motionMode: mode)
     }
 
     // MARK: Changing

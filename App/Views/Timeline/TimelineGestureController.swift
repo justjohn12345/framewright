@@ -864,7 +864,8 @@ final class TimelineGestureController: ObservableObject {
     /// selected first (as in Premiere): a transition offers Delete (with its linked transition),
     /// Delete This Transition Only and Transition Duration…; an effect span Set Interpolation, Move
     /// to Lane and Remove; a clip Delete, Ripple Delete, Link/Unlink, Speed/Duration… and, for a
-    /// video clip, Add Motion Span at Playhead. Nothing during a drag or over empty space.
+    /// video clip, Add Ken Burns… and Add Motion Span (at the playhead, on the clicked clip). Nothing
+    /// during a drag or over empty space.
     func contextMenuItems(at location: CGPoint) -> [ContextMenuItem] {
         guard drag == .idle, !store.isGestureActive else { return [] }
         let store = self.store
@@ -898,10 +899,13 @@ final class TimelineGestureController: ObservableObject {
             if let clip = store.clips[id], clip.trackKind == .video {
                 let t = store.playheadTime
                 let locked = store.track(clip.trackID)?.locked ?? false
+                let enabled = !locked && clip.timelineStart <= t && t < clip.timelineEnd
                 items.append(.separator)
-                items.append(ContextMenuItem(title: "Add Motion Span at Playhead",
-                                             isEnabled: !locked && clip.timelineStart <= t && t < clip.timelineEnd) {
-                    store.addMotionSpanAtPlayhead(clip: id)
+                items.append(ContextMenuItem(title: "Add Ken Burns…", isEnabled: enabled) {
+                    store.addMotionSpanAtPlayhead(clip: id, mode: .kenBurns)
+                })
+                items.append(ContextMenuItem(title: "Add Motion Span", isEnabled: enabled) {
+                    store.addMotionSpanAtPlayhead(clip: id, mode: .transform)
                 })
             }
             return items
@@ -1143,7 +1147,8 @@ final class TimelineGestureController: ObservableObject {
     }
 
     /// Drops an effect: adds its span with the default values (`ProjectStore.addSpan`, one undo
-    /// step) and selects it; a refused drop says why.
+    /// step; Ken Burns and Move with their intent, the mode their editor opens in) and selects it; a
+    /// refused drop says why.
     @discardableResult
     func dropEffect(kind: EffectKind, at location: CGPoint) -> Bool {
         let target = effectTarget(kind: kind, at: location)
@@ -1159,13 +1164,16 @@ final class TimelineGestureController: ObservableObject {
             return false
         }
         let range = CMTimeRange(start: store.frameTime(target.start), end: store.frameTime(target.end))
-        return store.addSpan(kind: kind.spanKind, lane: target.lane, clip: target.clipID, range: range).ok
+        return store.addSpan(kind: kind.spanKind, lane: target.lane, clip: target.clipID, range: range,
+                             motionMode: kind.motionMode).ok
     }
 
-    /// Where an effect dropped at `location` goes: on the clip under the pointer, from the drop
-    /// point (snapped) for the default transition duration or to the clip's end (a drop near its end
-    /// fades out there), on the effect lane under the pointer, or the first lane with room when it is
-    /// dropped on the clip or lane 0.
+    /// Where an effect dropped at `location` goes: on the clip under the pointer, on the effect lane
+    /// under the pointer, or the first lane with room when it is dropped on the clip or lane 0. A Fade
+    /// or Gain runs from the drop point (snapped) for the default transition duration or to the clip's
+    /// end (a drop near its end fades out there); a Ken Burns or Move span, like Control-K, from the
+    /// drop point for `ProjectStore.motionSpanSeconds` or to the clip's end if that comes first (at
+    /// least two frames: one dropped on the last frame starts a frame earlier).
     private func effectTarget(kind: EffectKind, at location: CGPoint) -> EffectDropTarget? {
         let model = store.timelineModel
         guard let row = model.layout(atY: location.y), (row.track.kind == .video) == (kind.trackKind == .video)
@@ -1174,10 +1182,18 @@ final class TimelineGestureController: ObservableObject {
         guard let clip = model.clip(onTrack: row.track.id, at: seconds) else { return nil }
         if let snap = model.snap(seconds, excludingSpans: []) { seconds = snap.time }
         let frame = max(model.frameSeconds, 1e-9)
-        let length = Double(store.editingPreferences.transitionFrames(frameDuration: store.frameDuration)) * frame
         var start = min(max(model.snapToFrame(seconds), clip.start), clip.end)
-        if start + length > clip.end { start = max(clip.start, clip.end - length) }
-        let end = min(clip.end, start + length)
+        let end: Double
+        if kind.spanKind == .motion {
+            let length = CMTime.onFrameGrid(seconds: ProjectStore.motionSpanSeconds,
+                                            frameDuration: store.frameDuration).secondsOrZero
+            if clip.end - start < 2 * frame { start = max(clip.start, clip.end - 2 * frame) }
+            end = min(clip.end, start + length)
+        } else {
+            let length = Double(store.editingPreferences.transitionFrames(frameDuration: store.frameDuration)) * frame
+            if start + length > clip.end { start = max(clip.start, clip.end - length) }
+            end = min(clip.end, start + length)
+        }
         let pointed = row.lane(atContentY: location.y + model.scrollY)
         func free(_ lane: Int) -> Bool {
             !model.spans(ofClip: clip.id, lane: lane).contains { $0.start < end - 1e-9 && $0.end > start + 1e-9 }

@@ -3,33 +3,74 @@ import CoreMedia
 import Foundation
 import FramewrightEngine
 
-/// The Ken Burns editor of one Motion span, drawn over the program monitor: the monitor keeps
-/// showing the composed program at the playhead (every track, re-rendered live as a drag edits the
-/// span), fitted inside a margin that stands for the space off the frame (`KenBurnsViewport`), and
-/// the editor draws the clip's placement box at the span's start (green) and at its end (red) over
-/// it, plus a thin outline of every other visible clip's box at the playhead.
+/// The two ways the Ken Burns editor shows a Motion span's edges (`KenBurnsModel.mode`). Both
+/// choose the same values (where the clip sits at the span's start and end: its composed position,
+/// scale and rotation), so switching between them writes nothing and loses nothing.
+enum KenBurnsMode: String, CaseIterable, Identifiable {
+    /// The classic Ken Burns crop: the program monitor shows the clip alone, unplaced (identity
+    /// Motion, fitted, the other tracks not shown, `VEEngine.setProgramPreviewSolo`), and each
+    /// rectangle is the part of that picture that fills the frame at the edge; a smaller rectangle
+    /// zooms in.
+    case kenBurns
+    /// Placement boxes over the composed program: each box is where the clip sits in the frame at
+    /// the edge (a picture in picture moves and zooms where it is).
+    case transform
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .kenBurns: return "Ken Burns"
+        case .transform: return "Transform"
+        }
+    }
+
+    /// The editor's one-line explanation of what it draws.
+    var caption: String {
+        switch self {
+        case .kenBurns: return "The rectangle is what fills the frame."
+        case .transform: return "The box is where the clip sits."
+        }
+    }
+}
+
+/// The Ken Burns editor of one Motion span, drawn over the program monitor in one of two modes
+/// (`KenBurnsMode`, switched on its bar; both edit the same values):
 ///
-/// A box is where the clip's picture sits in the frame at that edge: the picture fitted into the
-/// frame as the compositor places a clip with identity values, scaled about its centre by the
-/// edge's scale, moved by its position and turned by its rotation (`box(for:picture:sequence:)`).
+/// - Transform: the monitor keeps showing the composed program at the playhead (every track,
+///   re-rendered live as a drag edits the span), fitted inside a margin that stands for the space off
+///   the frame (`KenBurnsViewport`), and the editor draws the clip's placement box at the span's start
+///   (green) and at its end (red) over it, plus a thin outline of every other visible clip's box at the
+///   playhead. A box is where the clip's picture sits in the frame at that edge: the picture fitted
+///   into the frame as the compositor places a clip with identity values, scaled about its centre by
+///   the edge's scale, moved by its position and turned by its rotation (`box(for:picture:sequence:)`).
+///   Dragging a box's body moves it (position), dragging a corner scales it about its centre (the
+///   aspect stays the picture's).
+/// - Ken Burns: the monitor shows this clip alone at identity (fitted, unturned, no other track;
+///   the engine's program preview solo, set by the store while this mode is open), without a margin,
+///   and each rectangle is the part of that picture that fills the frame at the edge
+///   (`rect(for:sequence:)`): the frame's size divided by the edge's scale, centred where the frame's
+///   centre falls in the picture, turned against the edge's rotation. Dragging a rectangle pans,
+///   dragging a corner zooms (about its centre, the frame's aspect kept); a rectangle stays inside the
+///   picture (the frame never shows past its edge) and is at least a tenth of the frame wide.
+///
 /// The edge's values are its composed Motion (the clip's static values with every span that has
-/// started applied, this one at that edge, `VEClipInfo.getMotion(_:atEdgeOfSpan:)`), so a picture in
-/// picture at 30 % in the lower right shows its Start box around the picture in the lower right.
-/// Dragging a box's body moves it (position), dragging a corner scales it about its centre (the
-/// aspect stays the picture's); its rotation is the inspector's. A dragged box goes back to the
-/// absolute values that place the picture there (`motion(for:picture:sequence:)`) and those to the
-/// span's relative values over what the rest of the clip composes to there
-/// (`ProjectStore.relativeFraming`), so the inspector's absolute values are what the box shows.
+/// started applied, this one at that edge, `VEClipInfo.getMotion(_:atEdgeOfSpan:)`). A dragged box or
+/// rectangle goes back to the absolute values it stands for (`motion(for:picture:sequence:)`,
+/// `motion(forRect:sequence:)`) and those to the span's relative values over what the rest of the
+/// clip composes to there (`ProjectStore.relativeFraming`), so the inspector's absolute values are
+/// what the editor shows. The rotation is the inspector's in both modes (kept by every drag).
 ///
 /// Bound to the span and live: it opens when a Motion span is selected (the store keeps it keyed by
-/// `spanID`) and every drag of a box or a corner writes the span's values as it moves, inside one
-/// coalescing group (`beginDrag`, `applyDrag`, `endDrag`: one undo step per drag; Escape mid-drag
-/// cancels it through the group, `cancelDrag`, and the rest of that gesture writes nothing). There is
-/// no Apply or Cancel: Undo reverts a drag. The Start, End and Duration fields edit the span's range
-/// (`commitRange`, limited to the clip and the free space of its lane), Smoothing its
-/// interpolation, Swap exchanges the two placements (one step), and the neighbour toggles make the
-/// span continue the previous clip's last frame or lead into the next clip's first frame
-/// (`VEEngine.matchSpanEdge`; turning one off gives that edge the clip's own placement back).
+/// `spanID`, in the mode remembered for the span, else the automatic one: Ken Burns when the clip
+/// covers the frame at the span's start, `automaticMode`) and every drag of a box or a corner writes
+/// the span's values as it moves, inside one coalescing group (`beginDrag`, `applyDrag`, `endDrag`:
+/// one undo step per drag; Escape mid-drag cancels it through the group, `cancelDrag`, and the rest of
+/// that gesture writes nothing). There is no Apply or Cancel: Undo reverts a drag. The Start, End and
+/// Duration fields edit the span's range (`commitRange`, limited to the clip and the free space of its
+/// lane), Smoothing its interpolation, Swap exchanges the two placements (one step), and the neighbour
+/// toggles make the span continue the previous clip's last frame or lead into the next clip's first
+/// frame (`VEEngine.matchSpanEdge`; turning one off gives that edge the clip's own placement back).
 ///
 /// The boxes are never cached across edits: span values are relative and cumulative (a span applies
 /// on top of what the rest of the clip composes to, earlier spans' held end values included), so an
@@ -83,8 +124,11 @@ final class KenBurnsModel: ObservableObject {
 
     /// The interpolations the editor offers (FCP's smoothing choices).
     static let interpolations: [VEKeyframeInterpolation] = [.easeInOut, .easeOut, .easeIn, .linear]
-    /// The smallest box a corner drag makes, as a fraction of the frame's width.
+    /// The smallest box a corner drag makes, as a fraction of the frame's width (Transform).
     static let minimumBoxFraction: CGFloat = 0.02
+    /// The smallest rectangle a corner drag makes, as a fraction of the frame's width (Ken Burns: a
+    /// 1000 % zoom).
+    static let minimumRectFraction: CGFloat = 0.1
     /// The largest box a corner drag makes, in frame widths (a 1000 % zoom of a full-frame clip).
     static let maximumBoxFrames: CGFloat = 10
     /// How far a box's centre may be dragged off the frame, as a fraction of the frame's size on
@@ -110,11 +154,14 @@ final class KenBurnsModel: ObservableObject {
     /// boxes fit into the frame.
     let pictureSize: CGSize
 
-    /// The boxes as the span's edges show them (or as a drag in progress has put them), in
-    /// sequence pixels.
+    /// How the edges are shown and dragged (the bar's Ken Burns | Transform switch).
+    @Published private(set) var mode: KenBurnsMode
+    /// The boxes (Transform) or rectangles (Ken Burns) as the span's edges show them (or as a drag
+    /// in progress has put them), in sequence pixels.
     @Published private(set) var start: KenBurnsBox
     @Published private(set) var end: KenBurnsBox
-    /// The other visible clips' boxes at `outlineTime` (the program playhead).
+    /// The other visible clips' boxes at `outlineTime` (the program playhead); none in Ken Burns
+    /// mode (the monitor shows the clip alone).
     @Published private(set) var outlines: [Outline] = []
     /// The time the outlines are read at: the program playhead (the monitor shows that frame).
     private(set) var outlineTime: CMTime
@@ -154,9 +201,11 @@ final class KenBurnsModel: ObservableObject {
     }
 
     /// Nil when the span is not a Motion span of a video clip with a picture; `reason` says why.
-    /// `playhead` is the program playhead (the outlines' time).
+    /// `playhead` is the program playhead (the outlines' time). `mode` nil: the automatic mode
+    /// (`automaticMode`, from the clip's placement at the span's start).
     init?(store: ProjectStore, span: VEEffectSpan, clip: VEClipInfo, asset: VEAssetInfo, sequence: VESequenceInfo,
-          playhead: CMTime, previous: VEClipInfo? = nil, next: VEClipInfo? = nil, reason: inout String) {
+          playhead: CMTime, mode: KenBurnsMode? = nil, previous: VEClipInfo? = nil, next: VEClipInfo? = nil,
+          reason: inout String) {
         if let problem = Self.problem(span: span, clip: clip, asset: asset, sequence: sequence) {
             reason = problem
             return nil
@@ -176,10 +225,50 @@ final class KenBurnsModel: ObservableObject {
         rangeEnd = span.end
         start = KenBurnsBox(center: .zero, size: .zero, rotationDegrees: 0)
         end = KenBurnsBox(center: .zero, size: .zero, rotationDegrees: 0)
+        self.mode = .transform // until every property is set (the automatic mode reads the span's start)
         self.previous = Neighbour(previous, atEnd: true, frameDuration: frame)
         self.next = Neighbour(next, atEnd: false, frameDuration: frame)
+        self.mode = mode ?? Self.automaticMode(start: edgeMotion(atEnd: false), picture: pictureSize,
+                                               sequence: sequenceSize)
         readBoxes()
         readOutlines()
+    }
+
+    // MARK: Mode
+
+    /// The automatic mode of a span whose start shows the clip placed by `start` (its composed
+    /// Motion there): Ken Burns when the clip's placement box there contains the whole frame (a
+    /// full-frame clip, or one zoomed in on: the rectangle can frame it), Transform otherwise (a
+    /// picture in picture, an offset or scaled-down clip, a pillarboxed portrait).
+    static func automaticMode(start: VEVideoParams, picture: CGSize, sequence: CGSize) -> KenBurnsMode {
+        let placed = box(for: start, picture: picture, sequence: sequence)
+        let w = placed.size.width / 2
+        let h = placed.size.height / 2
+        guard w > 0, h > 0 else { return .transform }
+        let tolerance = 1e-6 * max(1, sequence.width, sequence.height)
+        let frame = [CGPoint(x: 0, y: 0), CGPoint(x: sequence.width, y: 0), CGPoint(x: sequence.width, y: sequence.height),
+                     CGPoint(x: 0, y: sequence.height)]
+        let covers = frame.allSatisfy { corner in
+            let p = placed.local(corner)
+            return abs(p.x) <= w + tolerance && abs(p.y) <= h + tolerance
+        }
+        return covers ? .kenBurns : .transform
+    }
+
+    /// Switches between Ken Burns and Transform: both edges are re-read in the other geometry from
+    /// the same values; nothing is written. The store remembers the choice for the span and shows the
+    /// clip alone in Ken Burns mode (`ProjectStore.kenBurnsModeDidChange`). Refused during a drag.
+    func setMode(_ newMode: KenBurnsMode) {
+        guard newMode != mode else { return }
+        guard !isDragging else {
+            note = "Finish the current drag first."
+            return
+        }
+        mode = newMode
+        note = nil
+        readBoxes()
+        readOutlines()
+        store.kenBurnsModeDidChange(self)
     }
 
     // MARK: The span and its clip
@@ -212,22 +301,41 @@ final class KenBurnsModel: ObservableObject {
         return clip.motion(at: atEnd ? CMTimeSubtract(span.end, frameDuration) : span.start)
     }
 
-    /// Re-reads both boxes from the span's edges.
+    /// Re-reads both boxes (or rectangles) from the span's edges.
     private func readBoxes() {
-        let first = Self.box(for: edgeMotion(atEnd: false), picture: pictureSize, sequence: sequenceSize)
-        let last = Self.box(for: edgeMotion(atEnd: true), picture: pictureSize, sequence: sequenceSize)
+        let first = shape(for: edgeMotion(atEnd: false))
+        let last = shape(for: edgeMotion(atEnd: true))
         if start != first { start = first }
         if end != last { end = last }
     }
 
-    /// The placements the boxes give (position and scale, absolute: what the monitor shows at that
-    /// edge and the inspector's Start and End values).
+    /// What the current mode draws for an edge whose composed Motion is `motion`: its placement box
+    /// (Transform) or the rectangle that fills the frame (Ken Burns).
+    private func shape(for motion: VEVideoParams) -> KenBurnsBox {
+        switch mode {
+        case .transform: return Self.box(for: motion, picture: pictureSize, sequence: sequenceSize)
+        case .kenBurns: return Self.rect(for: motion, sequence: sequenceSize)
+        }
+    }
+
+    /// The placement a box (Transform) or rectangle (Ken Burns) of the current mode stands for
+    /// (absolute position and scale); nil for a rectangle without a size (an edge at scale 0 has
+    /// nothing that fills the frame).
+    private func framing(of shape: KenBurnsBox) -> VEMotionFraming? {
+        switch mode {
+        case .transform: return Self.motion(for: shape, picture: pictureSize, sequence: sequenceSize).framing
+        case .kenBurns: return Self.motion(forRect: shape, sequence: sequenceSize)?.framing
+        }
+    }
+
+    /// The placements the edges show (position and scale, absolute: what the monitor shows at that
+    /// edge and the inspector's Start and End values), from the boxes or rectangles as drawn.
     var startFraming: VEMotionFraming {
-        Self.motion(for: start, picture: pictureSize, sequence: sequenceSize).framing
+        framing(of: start) ?? edgeFraming(atEnd: false)
     }
 
     var endFraming: VEMotionFraming {
-        Self.motion(for: end, picture: pictureSize, sequence: sequenceSize).framing
+        framing(of: end) ?? edgeFraming(atEnd: true)
     }
 
     func box(_ which: Framing) -> KenBurnsBox {
@@ -239,6 +347,9 @@ final class KenBurnsModel: ObservableObject {
         span.end < clip.timelineEnd ? Self.holdCaption : nil
     }
 
+    /// What the mode draws, in a sentence (`KenBurnsMode.caption`).
+    var modeCaption: String { mode.caption }
+
     // MARK: The other clips
 
     /// The program playhead moved: the other clips' outlines are read at it.
@@ -249,7 +360,8 @@ final class KenBurnsModel: ObservableObject {
     }
 
     private func readOutlines() {
-        let found = Self.outlines(at: outlineTime, excluding: clip.clipID, store: store, sequence: sequenceSize)
+        let found = mode == .transform
+            ? Self.outlines(at: outlineTime, excluding: clip.clipID, store: store, sequence: sequenceSize) : []
         if found != outlines { outlines = found }
     }
 
@@ -304,26 +416,34 @@ final class KenBurnsModel: ObservableObject {
     }
 
     private static let zeroScaleNote = "The rest of the clip has scale 0 here, so the move cannot change what it shows."
+    private static let emptyRectNote = "This edge shows the clip at scale 0, so no part of its picture fills the frame: "
+        + "give it a scale in the inspector."
 
     // MARK: Drags
 
-    /// A drag on the overlay: `target` (a box's body or corner, `KenBurnsHit`) grabbed with the box
-    /// at `origin`, now `translation` (sequence pixels) from where it started. A body drag moves the
-    /// box (its centre stays within `reachFraction` of the frame, or where it already was); a corner
-    /// drag scales it about its centre by how far the grabbed corner moved along its diagonal (the
-    /// aspect stays, between `minimumBoxFraction` and `maximumBoxFrames` of the frame's width). The
-    /// first step that moves opens the drag's coalescing group; every step writes the span's values
-    /// inside it. A drag that has not moved changes nothing. Refused during another gesture (a
-    /// timeline drag): nothing happens and the note says why.
+    /// A drag on the overlay: `target` (a box's or rectangle's body or corner, `KenBurnsHit`)
+    /// grabbed with it at `origin`, now `translation` (sequence pixels) from where it started.
+    /// Transform: a body drag moves the box (its centre stays within `reachFraction` of the frame, or
+    /// where it already was); a corner drag scales it about its centre by how far the grabbed corner
+    /// moved along its diagonal (the aspect stays, between `minimumBoxFraction` and `maximumBoxFrames`
+    /// of the frame's width). Ken Burns: a body drag pans the rectangle and a corner drag zooms it the
+    /// same way, kept inside the picture and at least `minimumRectFraction` of the frame wide
+    /// (`panned`, `zoomed`). The first step that moves opens the drag's coalescing group; every step
+    /// writes the span's values inside it. A drag that has not moved changes nothing. Refused during
+    /// another gesture (a timeline drag): nothing happens and the note says why.
     func applyDrag(_ target: KenBurnsHit.Target, origin: KenBurnsBox, translation: CGSize) {
         guard translation != .zero, !dragCancelled else { return }
         if !isDragging, !beginDrag() { return }
         let box: KenBurnsBox
-        switch target {
-        case .body:
+        switch (mode, target) {
+        case (.transform, .body):
             box = moved(origin, by: translation)
-        case let .corner(_, corner):
+        case let (.transform, .corner(_, corner)):
             box = resized(origin, corner: corner, by: translation)
+        case (.kenBurns, .body):
+            box = panned(origin, by: translation)
+        case let (.kenBurns, .corner(_, corner)):
+            box = zoomed(origin, corner: corner, by: translation)
         }
         write(target.framing, box)
     }
@@ -350,10 +470,14 @@ final class KenBurnsModel: ObservableObject {
         return true
     }
 
-    /// Writes one box as a step of the drag.
+    /// Writes one box (or rectangle) as a step of the drag.
     private func write(_ which: Framing, _ box: KenBurnsBox) {
         guard isDragging, let base = dragBase else { return }
-        let framing = Self.motion(for: box, picture: pictureSize, sequence: sequenceSize).framing
+        guard let framing = framing(of: box) else {
+            let baseScale = which == .start ? base.start.scale : base.end.scale
+            note = baseScale == 0 ? Self.zeroScaleNote : Self.emptyRectNote
+            return
+        }
         guard let (from, to) = values(start: which == .start ? framing : nil, end: which == .end ? framing : nil,
                                       base: base) else {
             note = Self.zeroScaleNote
@@ -444,6 +568,101 @@ final class KenBurnsModel: ObservableObject {
         let smallest = min(1, sequenceSize.width * Self.minimumBoxFraction / origin.size.width)
         let largest = max(1, sequenceSize.width * Self.maximumBoxFrames / origin.size.width)
         return origin.scaled(by: min(max(wanted, smallest), largest))
+    }
+
+    // MARK: Ken Burns rectangles
+
+    /// The picture as the Ken Burns mode shows it (identity: fitted into the frame, centred), in
+    /// sequence pixels: what a rectangle stays inside.
+    var pictureBounds: CGRect {
+        let fitted = Self.fittedSize(picture: pictureSize, sequence: sequenceSize)
+        return CGRect(x: (sequenceSize.width - fitted.width) / 2, y: (sequenceSize.height - fitted.height) / 2,
+                      width: fitted.width, height: fitted.height)
+    }
+
+    /// Half the width and height of the smallest axis-aligned rectangle around `rect` (turned).
+    private static func halfExtents(_ rect: KenBurnsBox) -> CGSize {
+        let theta = rect.rotationDegrees * .pi / 180
+        let c = abs(cos(theta))
+        let s = abs(sin(theta))
+        let w = rect.size.width / 2
+        let h = rect.size.height / 2
+        return CGSize(width: c * w + s * h, height: s * w + c * h)
+    }
+
+    /// Where the centre of a rectangle like `rect` may be for it to stay inside the picture (per
+    /// axis; a rectangle wider or taller than the picture on an axis has the picture's centre there).
+    private func centreRange(for rect: KenBurnsBox) -> (x: ClosedRange<CGFloat>, y: ClosedRange<CGFloat>) {
+        let bounds = pictureBounds
+        let half = Self.halfExtents(rect)
+        func range(_ low: CGFloat, _ high: CGFloat, _ mid: CGFloat) -> ClosedRange<CGFloat> {
+            low <= high ? low ... high : mid ... mid
+        }
+        return (range(bounds.minX + half.width, bounds.maxX - half.width, bounds.midX),
+                range(bounds.minY + half.height, bounds.maxY - half.height, bounds.midY))
+    }
+
+    /// `rect` lies inside the picture (to a millionth of a pixel).
+    func fitsInPicture(_ rect: KenBurnsBox) -> Bool {
+        let bounds = pictureBounds.insetBy(dx: -1e-6, dy: -1e-6)
+        return rect.corners.allSatisfy { bounds.contains($0) }
+    }
+
+    /// The widest rectangle with the frame's aspect, turned by `rotationDegrees`, that fits inside the
+    /// picture (a zoom out stops there: the frame never shows past the picture's edge).
+    func maximumRectWidth(rotationDegrees: Double) -> CGFloat {
+        let theta = rotationDegrees * .pi / 180
+        let c = abs(cos(theta))
+        let s = abs(sin(theta))
+        let bounds = pictureBounds
+        let w = sequenceSize.width
+        let h = sequenceSize.height
+        let byWidth = c * w + s * h > 0 ? bounds.width / (c * w + s * h) : .infinity
+        let byHeight = s * w + c * h > 0 ? bounds.height / (s * w + c * h) : .infinity
+        return max(0, min(byWidth, byHeight)) * w
+    }
+
+    /// `rect` with its centre moved into the picture's allowed range for its size, or kept where
+    /// `origin`'s centre was when the drag started from a rectangle already outside the picture (a
+    /// rectangle framing past the picture's edge, typed in the inspector or made in Transform mode, is
+    /// not pulled in by a drag's first step; it can be moved back in freely).
+    private func keptInPicture(_ rect: KenBurnsBox, origin: KenBurnsBox) -> KenBurnsBox {
+        var range = centreRange(for: rect)
+        if !fitsInPicture(origin) {
+            range = (min(range.x.lowerBound, origin.center.x) ... max(range.x.upperBound, origin.center.x),
+                     min(range.y.lowerBound, origin.center.y) ... max(range.y.upperBound, origin.center.y))
+        }
+        var kept = rect
+        kept.center = CGPoint(x: min(max(rect.center.x, range.x.lowerBound), range.x.upperBound),
+                              y: min(max(rect.center.y, range.y.lowerBound), range.y.upperBound))
+        return kept
+    }
+
+    /// Ken Burns: `origin` panned by `translation`, kept inside the picture (see `keptInPicture`).
+    func panned(_ origin: KenBurnsBox, by translation: CGSize) -> KenBurnsBox {
+        var rect = origin
+        rect.center = CGPoint(x: origin.center.x + translation.width, y: origin.center.y + translation.height)
+        return keptInPicture(rect, origin: origin)
+    }
+
+    /// Ken Burns: `origin` zoomed by dragging `corner` by `translation`: scaled about its centre by how
+    /// far the corner moved along the rectangle's diagonal through it (the frame's aspect stays),
+    /// between `minimumRectFraction` of the frame's width and the widest rectangle inside the picture
+    /// (a rectangle already outside those keeps its size as the limit); a rectangle grown against the
+    /// picture's edge moves in to stay inside it. A rectangle without a size keeps it.
+    func zoomed(_ origin: KenBurnsBox, corner: Corner, by translation: CGSize) -> KenBurnsBox {
+        let from = origin.corner(corner)
+        let diagonal = CGPoint(x: from.x - origin.center.x, y: from.y - origin.center.y)
+        let length = diagonal.x * diagonal.x + diagonal.y * diagonal.y
+        guard length > 1e-9, origin.size.width > 0 else { return origin }
+        let to = CGPoint(x: from.x + translation.width - origin.center.x,
+                         y: from.y + translation.height - origin.center.y)
+        let wanted = (to.x * diagonal.x + to.y * diagonal.y) / length
+        let widest = maximumRectWidth(rotationDegrees: origin.rotationDegrees)
+        let narrowest = min(widest, sequenceSize.width * Self.minimumRectFraction)
+        let smallest = min(1, narrowest / origin.size.width)
+        let largest = max(1, widest / origin.size.width)
+        return keptInPicture(origin.scaled(by: min(max(wanted, smallest), largest)), origin: origin)
     }
 
     // MARK: Commands
@@ -611,6 +830,47 @@ final class KenBurnsModel: ObservableObject {
         return KenBurnsBox(center: CGPoint(x: sequence.width / 2 + params.x, y: sequence.height / 2 + params.y),
                            size: CGSize(width: fitted.width * scale, height: fitted.height * scale),
                            rotationDegrees: params.rotationDegrees)
+    }
+
+    /// Ken Burns: the part of the clip's picture (fitted into the frame at identity, unturned, in
+    /// sequence pixels) that fills the frame when the clip is placed by `params`. The compositor draws
+    /// a picture point p (from the picture's centre) at the frame point centre + (x, y) + s R(θ) p
+    /// (R turning clockwise on screen), so the frame's points come from p = R(-θ)(q - (x, y)) / s: a
+    /// rectangle the frame's size divided by the scale, centred at the frame's centre
+    /// - R(-θ)(x, y) / s, turned by -θ (against the clip's rotation; with no rotation the centre is
+    /// the frame's centre - (x, y) / s, the original editor's `rect(for:)`). A scale of 0 or less
+    /// gives an empty rectangle at the frame's centre (nothing of the clip is on screen).
+    static func rect(for params: VEVideoParams, sequence: CGSize) -> KenBurnsBox {
+        let middle = CGPoint(x: sequence.width / 2, y: sequence.height / 2)
+        guard params.scale.isFinite, params.scale > 0 else {
+            return KenBurnsBox(center: middle, size: .zero, rotationDegrees: -params.rotationDegrees)
+        }
+        let s = params.scale
+        let theta = params.rotationDegrees * .pi / 180
+        let c = cos(theta)
+        let n = sin(theta)
+        // R(-θ)(x, y) = (c x + n y, -n x + c y).
+        let offset = CGPoint(x: (c * params.x + n * params.y) / s, y: (-n * params.x + c * params.y) / s)
+        return KenBurnsBox(center: CGPoint(x: middle.x - offset.x, y: middle.y - offset.y),
+                           size: CGSize(width: sequence.width / s, height: sequence.height / s),
+                           rotationDegrees: -params.rotationDegrees)
+    }
+
+    /// The inverse of `rect(for:sequence:)`: the position and scale that make `rect` fill the frame
+    /// (scale = frame width / rectangle width; (x, y) = -s R(θ) (rectangle centre - frame centre)),
+    /// with the rotation it was drawn for kept (θ = -its rotation). Nil for a rectangle without a width.
+    static func motion(forRect rect: KenBurnsBox,
+                       sequence: CGSize) -> (framing: VEMotionFraming, rotationDegrees: Double)? {
+        guard rect.size.width > 0, rect.size.width.isFinite else { return nil }
+        let s = Double(sequence.width / rect.size.width)
+        let rotation = -rect.rotationDegrees
+        let theta = rotation * .pi / 180
+        let c = cos(theta)
+        let n = sin(theta)
+        let dx = Double(rect.center.x - sequence.width / 2)
+        let dy = Double(rect.center.y - sequence.height / 2)
+        // R(θ)(dx, dy) = (c dx - n dy, n dx + c dy).
+        return (VEMotionFraming(x: -s * (c * dx - n * dy), y: -s * (n * dx + c * dy), scale: s), rotation)
     }
 
     /// The inverse of `box(for:picture:sequence:)`: the position, scale and rotation that place the

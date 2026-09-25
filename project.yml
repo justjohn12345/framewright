@@ -236,6 +236,15 @@ targets:
             UTTypeDescription: Framewright Gain Effect
             UTTypeConformsTo:
               - public.data
+          # ... and its Motion spans with an intent (Ken Burns, Move).
+          - UTTypeIdentifier: com.justjohn12345.framewright.effect.ken-burns
+            UTTypeDescription: Framewright Ken Burns Effect
+            UTTypeConformsTo:
+              - public.data
+          - UTTypeIdentifier: com.justjohn12345.framewright.effect.move
+            UTTypeDescription: Framewright Move Effect
+            UTTypeConformsTo:
+              - public.data
         # No imported declarations: the app makes the file promise types and the Live Photo bundle
         # type with UTType(importedAs:) (App/State/PromisedFiles.swift), which works whether or not
         # the system declares them (com.apple.NSFilePromiseItemMetaData is a pasteboard type, not a

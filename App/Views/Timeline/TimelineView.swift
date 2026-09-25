@@ -417,8 +417,8 @@ extension DropInfo: TimelineDropInfo {}
 /// placed there once they have arrived; `MediaDrop`, `IncomingMedia`), transitions from the
 /// Effects tab (on lane 0: across the nearest cut, or a fade at a free clip end or start; lane 0 is
 /// shown and the target highlighted while dragging, in red with the reason when it cannot take
-/// one) and the Effects tab's Fade and Gain effects (a span on the effect lane under the pointer,
-/// or the first one with room). A transition or an effect is recognised by its exported content
+/// one) and the Effects tab's lane effects, Ken Burns, Move, Fade and Gain (a span on the effect lane
+/// under the pointer, or the first one with room). A transition or an effect is recognised by its exported content
 /// type (`TransitionKind.contentType`, `EffectKind.contentType`, declared in Info.plist), which the
 /// Effects tab's drag sources provide; the payload itself is not read. The `handle...` methods take
 /// any `TimelineDropInfo`, so the drop logic is tested without a real drag (which only a person or
@@ -426,7 +426,8 @@ extension DropInfo: TimelineDropInfo {}
 @MainActor
 struct TimelineDropDelegate: DropDelegate {
     static let types: [UTType] = [.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade,
-                                  .framewrightFadeEffect, .framewrightGainEffect] + MediaDrop.types
+                                  .framewrightFadeEffect, .framewrightGainEffect, .framewrightKenBurnsEffect,
+                                  .framewrightMoveEffect] + MediaDrop.types
 
     let gestures: TimelineGestureController
     @Binding var isAssetTargeted: Bool

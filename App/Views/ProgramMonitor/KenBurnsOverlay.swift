@@ -5,12 +5,14 @@ import FramewrightEngine
 /// The program monitor's picture area and, while a Motion span is selected, its Ken Burns editor
 /// (see `KenBurnsModel`). Closed, the picture fills the area (letterboxed by the preview view as
 /// usual). Open, the same picture (the same `VEPreviewView`, not a second render path) is drawn
-/// fitted inside a margin (`KenBurnsViewport`): the dimmed area around it is the space off the
-/// frame, the frame's edge a thin line, so a box larger than the frame or partly off it keeps its
-/// corners and body on screen; the editor's boxes and the other clips' outlines are drawn over the
-/// whole area and its bar (range, caption, toggles, smoothing, Swap, Close) below it. A selected
-/// Opacity or Gain span shows its readout instead. The debug HUD sits at the area's top-left.
-/// Observes the store to notice the editor opening, closing and switching.
+/// fitted to the frame: in Ken Burns mode (the clip alone) without a margin, in Transform mode inside
+/// a margin (`KenBurnsViewport`) that stands for the space off the frame, so a box larger than the
+/// frame or partly off it keeps its corners and body on screen. The dimmed area around it is the
+/// space off the frame, the frame's edge a thin line; the editor's boxes or rectangles and the other
+/// clips' outlines are drawn over the whole area and its bar (range, caption, toggles, mode,
+/// smoothing, Swap, Close) below it. A selected Opacity or Gain span shows its readout instead. The
+/// debug HUD sits at the area's top-left. Observes the store to notice the editor opening, closing,
+/// switching spans and switching modes (`ProjectStore.kenBurnsMode`).
 struct ProgramMonitorLayout<Picture: View>: View {
     @ObservedObject var store: ProjectStore
     var showsHUD = false
@@ -18,9 +20,12 @@ struct ProgramMonitorLayout<Picture: View>: View {
 
     var body: some View {
         let editor = store.kenBurns
+        let margin = store.kenBurnsMode == .transform ? KenBurnsViewport.marginFraction : 0
         VStack(spacing: 0) {
             GeometryReader { geometry in
-                let viewport = editor.map { KenBurnsViewport(sequence: $0.sequenceSize, monitor: geometry.size) }
+                let viewport = editor.map {
+                    KenBurnsViewport(sequence: $0.sequenceSize, monitor: geometry.size, margin: margin)
+                }
                 let frame = viewport?.frame ?? CGRect(origin: .zero, size: geometry.size)
                 ZStack(alignment: .topLeading) {
                     editor == nil ? Color.black : KenBurnsOverlay.marginColor
@@ -54,12 +59,13 @@ struct ProgramMonitorLayout<Picture: View>: View {
 }
 
 /// The Ken Burns editor's drawing over the program picture (`ProgramMonitorLayout` places it over
-/// the whole picture area, margin included): the frame's edge, a thin outline of every other clip
-/// visible at the playhead labelled with its track, the start box (green) and the end box (red) of
-/// the span with their corner handles, an arrow from the start's centre to the end's (as in FCP),
-/// and the drag layer. Drag a box to move the clip, a corner to scale it about its centre: every
-/// drag writes the span as it moves and is one undo step; Escape mid-drag cancels it. There is no
-/// Apply or Cancel.
+/// the whole picture area, margin included): the frame's edge, in Transform mode a thin outline of
+/// every other clip visible at the playhead labelled with its track, the start box or rectangle
+/// (green) and the end one (red) of the span with their corner handles, an arrow from the start's
+/// centre to the end's (as in FCP), and the drag layer. Transform: drag a box to move the clip, a
+/// corner to scale it about its centre. Ken Burns: drag a rectangle to pan over the picture, a corner
+/// to zoom (a smaller rectangle zooms in). Every drag writes the span as it moves and is one undo
+/// step; Escape mid-drag cancels it. There is no Apply or Cancel.
 ///
 /// Everything drawn comes from observed objects (the model, the playhead), so a change of either
 /// redraws the overlay; the model re-reads the span and the outlines on every model change.
@@ -303,7 +309,25 @@ struct KenBurnsControls: View {
         HStack(spacing: 8) {
             Label("Start", systemImage: "square").foregroundStyle(.green)
             Label("End", systemImage: "square").foregroundStyle(.red)
+            Text(model.modeCaption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(-1)
+                .accessibilityIdentifier("KenBurnsModeCaption")
             Spacer(minLength: 4)
+            Picker("Mode", selection: Binding(get: { model.mode }, set: { model.setMode($0) })) {
+                ForEach(KenBurnsMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("Ken Burns: the clip alone, each rectangle is the part of its picture that fills the frame (a "
+                + "smaller rectangle zooms in). Transform: the program, each box is where the clip sits in the frame. "
+                + "Both edit the same values.")
+            .accessibilityIdentifier("KenBurnsMode")
             Picker("Smoothing", selection: Binding(get: { model.interpolation },
                                                    set: { model.setInterpolation($0) })) {
                 ForEach(KenBurnsModel.interpolations, id: \.rawValue) { choice in

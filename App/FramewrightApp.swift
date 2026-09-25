@@ -136,10 +136,14 @@ struct AppCommands: Commands {
             Button("Transition Duration…") { store.editTransitionDuration() }
                 .disabled(store.selectedTransitionID == nil)
             Divider()
-            // Control-K is handled by KeyboardController (like Delete), so a text field keeps it. It
-            // acts on the selected clip only: disabled without one, or when its track is locked (the
-            // key then says why in the status line).
-            Button("Add Motion Span at Playhead  ⌃K") { store.addMotionSpanAtPlayhead() }
+            // A Motion span at the playhead on the selected clip only (disabled without one, or when
+            // its track is locked), with an intent: Ken Burns (the push in, opened in Ken Burns mode)
+            // or a move (ends where it starts, opened in Transform mode). Control-K, handled by
+            // KeyboardController (like Delete, so a text field keeps it), adds the push in in the
+            // automatic mode.
+            Button("Add Ken Burns…") { store.addMotionSpanAtPlayhead(mode: .kenBurns) }
+                .disabled(!store.canAddMotionSpanAtPlayhead)
+            Button("Add Motion Span") { store.addMotionSpanAtPlayhead(mode: .transform) }
                 .disabled(!store.canAddMotionSpanAtPlayhead)
             Divider()
             Button("Raise Gain 1 dB  ]") { store.nudgeGain(1) }
