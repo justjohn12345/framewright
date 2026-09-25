@@ -1050,8 +1050,28 @@ void migrateSequenceV4ToV5(json &sequenceJson, const Node &sequence, std::uint64
                         head = span;
                     }
                 }
-                if (kCMTimeZero < legacy.fadeOut && !tail) {
-                    const auto start = checkedNegate(legacy.fadeOut);
+                CMTime fadeOut = legacy.fadeOut;
+                if (kCMTimeZero < fadeOut && !tail) {
+                    if (const LegacyTransition *crossfade = incoming(clip.id)) {
+                        // Version 4 multiplied a fade out with a crossfade into the clip; a fade
+                        // span must leave room for the crossfade's part inside the clip (its
+                        // centred span's end: ceil(n / 2) frames).
+                        const std::int64_t frames =
+                            frameIndexAt(crossfade->duration, frameDuration, SnapMode::Round);
+                        const auto inside = checkedTimeForFrame(frames - frames / 2, frameDuration);
+                        const auto room = inside ? checkedSubtract(clip.timelineDuration, *inside) : std::nullopt;
+                        if (!room || *room < fadeOut) {
+                            const CMTime kept = room ? maxTime(*room, kCMTimeZero) : kCMTimeZero;
+                            warnings.push_back(legacy.path + ".audio.fadeOutDuration: the fade out (" +
+                                               describe(fadeOut) + ") would meet the crossfade at the clip's start; " +
+                                               (kCMTimeZero < kept ? "shortened to " + describe(kept)
+                                                                   : std::string("dropped")));
+                            fadeOut = kept;
+                        }
+                    }
+                }
+                if (kCMTimeZero < fadeOut && !tail) {
+                    const auto start = checkedNegate(fadeOut);
                     if (!start) {
                         Node(clipJson, legacy.path).fail("its fade out cannot be converted");
                     }

@@ -731,6 +731,35 @@ TEST_CASE("ProjectJSON: the checked-in version 4 project (keyframes, fades, a tr
     CHECK(*again.project == *loaded.project);
 }
 
+TEST_CASE("ProjectJSON: a version 4 fade out reaching into an incoming crossfade opens (review H1)") {
+    // The render golden with audio clip 14 (60 frames, 5 of them under the 10-frame crossfade 16
+    // from clip 12) fading out over 57 frames: version 4 played both; version 5 refused to open
+    // it ("transition 16: meets the transition at the end of clip 14").
+    json document = json::parse(readFile(goldenPath("project-v4-render.json")));
+    bool found = false;
+    for (json &track : document.at("sequences")[0].at("audioTracks")) {
+        for (json &clip : track.at("clips")) {
+            if (clip.at("id") == 14) {
+                clip.at("audio")["fadeOutDuration"] = json{{"value", 57}, {"timescale", 30}};
+                found = true;
+            }
+        }
+    }
+    REQUIRE(found);
+    const ProjectLoadResult loaded = parseProject(document.dump());
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    const Sequence &sequence = loaded.project->sequences[0];
+    const Clip *clip = sequence.findClip(ClipId{14});
+    REQUIRE(clip != nullptr);
+    CHECK(clipFadeLength(*clip, ClipEdge::Tail) == f30(55)); // 60 - ceil(10 / 2)
+    const EffectSpan *crossfade = sequence.findSpan(SpanId{16});
+    REQUIRE(crossfade != nullptr);
+    CHECK(crossfade->end == f30(5));
+    CHECK(anyContains(loaded.warnings, "the fade out (57/30 "));
+    CHECK(anyContains(loaded.warnings, "would meet the crossfade at the clip's start; shortened to 55/30 "));
+    CHECK_FALSE(validateProject(*loaded.project).has_value());
+}
+
 TEST_CASE("ProjectJSON: the checked-in version 5 project matches the current writer byte for byte") {
     const Fixture expected = richFixture();
     const std::string path = goldenPath("project-v5.json");
@@ -789,6 +818,29 @@ TEST_CASE("ProjectJSON: version 4 to 5 migration rules") {
         const ProjectLoadResult r = load(doc);
         CHECK(clipFadeLength(onlyClip(*r.project, TrackKind::Audio), ClipEdge::Head) == f30(12));
         CHECK(anyContains(r.warnings, "would meet the crossfade at the clip's end; shortened to"));
+    }
+    SUBCASE("a fade out that would meet the incoming crossfade is shortened, with a warning (review H1)") {
+        // Version 4 multiplied a fade out with a crossfade into the clip; version 5 keeps the fade
+        // out of the crossfade's part inside the clip (ceil(n / 2) frames of a centred crossfade).
+        const json doc = v4Document(json::array(),
+                                    json::array({v4Clip(10, 4, 0, 60, 0), v4Clip(11, 4, 60, 30, 100, {{"audio", fades(0, 28)}})}),
+                                    json::array({v4Transition(12, 4, 10, 11, 11)}));
+        const ProjectLoadResult r = load(doc);
+        const Clip &second = onlyClip(*r.project, TrackKind::Audio, 1);
+        CHECK(clipFadeLength(second, ClipEdge::Tail) == f30(24)); // 30 - ceil(11 / 2)
+        CHECK(onlyClip(*r.project, TrackKind::Audio, 0).transitionAt(ClipEdge::Tail)->id == SpanId{12});
+        CHECK(anyContains(r.warnings, "clips[1].audio.fadeOutDuration: the fade out (28/30 "));
+        CHECK(anyContains(r.warnings, "would meet the crossfade at the clip's start; shortened to 24/30 "));
+    }
+    SUBCASE("a fade out with no room left beside the incoming crossfade is dropped, with a warning") {
+        const json doc = v4Document(json::array(),
+                                    json::array({v4Clip(10, 4, 0, 60, 0), v4Clip(11, 4, 60, 5, 100, {{"audio", fades(0, 3)}})}),
+                                    json::array({v4Transition(12, 4, 10, 11, 10)}));
+        const ProjectLoadResult r = load(doc);
+        CHECK(clipFadeLength(onlyClip(*r.project, TrackKind::Audio, 1), ClipEdge::Tail) == kCMTimeZero);
+        CHECK(onlyClip(*r.project, TrackKind::Audio, 0).transitionAt(ClipEdge::Tail)->id == SpanId{12});
+        CHECK(anyContains(r.warnings, "clips[1].audio.fadeOutDuration: the fade out (3/30 "));
+        CHECK(anyContains(r.warnings, "would meet the crossfade at the clip's start; dropped"));
     }
     SUBCASE("fades on video clips never sounded and are dropped") {
         const json doc = v4Document(json::array({v4Clip(10, 3, 0, 60, 0, {{"audio", fades(5, 6)}})}), json::array());
