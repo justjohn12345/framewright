@@ -280,6 +280,19 @@ extension ProjectStore {
         }
     }
 
+    /// Frames of `clip` under a cross dissolve or crossfade coming into it (the previous clip's tail
+    /// transition's share after the cut); 0 when none comes in.
+    func incomingTransitionFrames(of clip: VEClipInfo) -> Int64 {
+        for other in clips.values where other.trackID == clip.trackID && other.clipID != clip.clipID {
+            if let span = other.spans.first(where: {
+                $0.kind == .transition && $0.transitionStyle == .crossDissolve && $0.partnerClipID == clip.clipID
+            }) {
+                return frames(span.shareAfterCut)
+            }
+        }
+        return 0
+    }
+
     /// The relative Motion values that show `framing` (position and scale) over `base`; nil when
     /// the base's scale is 0.
     static func relativeFraming(_ framing: VEMotionFraming, base: VESpanValues) -> VESpanValues? {

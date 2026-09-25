@@ -302,14 +302,20 @@ final class InspectorModel: ObservableObject {
         case .opacity: return 0 ... 100
         case .gain: return -96 ... 24
         case .fadeIn, .fadeOut:
-            let clip = audioTargets.first
-            let length = clip.map { Double(store.frames($0.duration)) } ?? 0
-            let other = clip.map { value(parameter == .fadeIn ? .fadeOut : .fadeIn, of: $0) } ?? 0
-            return 0 ... max(0, length - other)
+            return 0 ... (audioTargets.first.map { fadeRoom(parameter, of: $0) } ?? 0)
         case .speed: return 1 ... 10000
         case .transitionDuration:
             return 1 ... Double(max(1, transitionLimit?.maximumFrames ?? 1))
         }
+    }
+
+    /// The longest fade (frames) `clip` takes: its length less its other fade and, for a fade out,
+    /// less the part of a crossfade coming into it (review M3).
+    private func fadeRoom(_ parameter: InspectorParameter, of clip: VEClipInfo) -> Double {
+        let length = Double(store.frames(clip.duration))
+        let other = value(parameter == .fadeIn ? .fadeOut : .fadeIn, of: clip)
+        let incoming = parameter == .fadeOut ? Double(store.incomingTransitionFrames(of: clip)) : 0
+        return max(0, length - other - incoming)
     }
 
     /// The slider's span (typed values may go beyond it).
@@ -844,9 +850,8 @@ final class InspectorModel: ObservableObject {
             let requested = transform(value(parameter, of: clip))
             var bounds = range(parameter)
             if parameter == .fadeIn || parameter == .fadeOut {
-                // Each clip's own room: fadeIn + fadeOut <= duration.
-                let other = value(parameter == .fadeIn ? .fadeOut : .fadeIn, of: clip)
-                bounds = 0 ... max(0, Double(store.frames(clip.duration)) - other)
+                // Each clip's own room: fadeIn + fadeOut (+ an incoming crossfade's part) <= duration.
+                bounds = 0 ... fadeRoom(parameter, of: clip)
             }
             let newValue = min(bounds.upperBound, max(bounds.lowerBound, requested))
             if abs(newValue - requested) > 1e-9 { clamped = true }

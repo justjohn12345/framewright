@@ -135,6 +135,29 @@ final class InspectorModelTests: XCTestCase {
         XCTAssertEqual(store.frames(audio(toneClip).fadeOutDuration), 30)
     }
 
+    /// Review M3: a fade out typed in the inspector leaves the crossfade coming into the clip its
+    /// frames (B: 75 frames, 15 under a 30-frame crossfade from A: 60 at most), and the crossfade stays.
+    func testATypedFadeOutStopsAtTheIncomingCrossfade() async throws {
+        let (_, tone) = try await fixture.importMedia()
+        let a1 = try XCTUnwrap(store.audioTracks.first).trackID
+        XCTAssertTrue(store.place(asset: tone.assetID, at: .zero, videoTrack: 0, audioTrack: a1, sourceIn: .zero,
+                                  sourceOut: store.time(frames: 30), overwrite: true))
+        let a = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.place(asset: tone.assetID, at: store.time(frames: 30), videoTrack: 0, audioTrack: a1,
+                                  sourceIn: store.time(frames: 15), sourceOut: store.time(frames: 90), overwrite: true))
+        let b = try XCTUnwrap(store.selection.first)
+        let crossfade = store.engine.addTransition(fromClip: a, toClip: b, duration: store.time(frames: 30))
+        XCTAssertTrue(crossfade.ok, crossfade.message)
+        store.selection = [b]
+        XCTAssertEqual(store.incomingTransitionFrames(of: try XCTUnwrap(store.clips[b])), 15)
+        XCTAssertEqual(inspector.range(.fadeOut).upperBound, 60)
+        XCTAssertEqual(inspector.range(.fadeIn).upperBound, 75, "a fade in is refused at a touched start anyway")
+        inspector.commitText(.fadeOut, "80f")
+        XCTAssertEqual(store.frames(audio(b).fadeOutDuration), 60)
+        XCTAssertTrue(inspector.message?.contains("limited") == true, inspector.message ?? "")
+        XCTAssertEqual(store.sequence.transitions.count, 1, "the crossfade stays")
+    }
+
     func testMultiSelectionEditsEveryClipOfTheMatchingKindInOneStep() async throws {
         let (movie, tone) = try await fixture.importMedia()
         let first = try fixture.placeMovie(movie, at: 0)

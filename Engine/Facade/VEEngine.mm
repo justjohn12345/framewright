@@ -2357,22 +2357,31 @@ static NSString *fadeTarget(const Track &track) {
     return track.kind == TrackKind::Video ? @"black" : @"silence";
 }
 
-/// The longest fade (whole frames) `clip` takes at `edge`: its length less its other lane-0 span's
-/// part inside it; and why not longer.
-static int64_t fadeLimitFrames(const Clip &clip, ClipEdge edge, CMTime frameDuration, NSString **reason,
-                               EditError *error) {
+/// The longest fade (whole frames) `clip` (of `track`) takes at `edge`: its length less its other
+/// lane-0 span's part inside it and, for a fade out, less the part inside it of a cross dissolve
+/// coming into it; and why not longer.
+static int64_t fadeLimitFrames(const Clip &clip, const Track &track, ClipEdge edge, CMTime frameDuration,
+                               NSString **reason, EditError *error) {
     CMTime taken = kCMTimeZero;
+    CMTime incoming = kCMTimeZero;
     if (edge == ClipEdge::Head) {
         if (const EffectSpan *tail = clip.transitionAt(ClipEdge::Tail)) {
             taken = -tail->start;
         }
     } else {
         taken = clipFadeLength(clip, ClipEdge::Head);
+        incoming = incomingTransitionInside(track, clip);
     }
-    const CMTime room = clip.timelineDuration - taken;
-    *reason = taken == kCMTimeZero ? @"A fade cannot be longer than its clip."
-                                   : @"It would overlap the transition at the clip's other end.";
-    *error = taken == kCMTimeZero ? EditError::InvalidArgument : EditError::Overlap;
+    const CMTime room = clip.timelineDuration - taken - incoming;
+    if (kCMTimeZero < incoming) {
+        *reason = track.kind == TrackKind::Audio ? @"It would meet the crossfade coming into the clip."
+                                                 : @"It would meet the cross dissolve coming into the clip.";
+        *error = EditError::Overlap;
+    } else {
+        *reason = taken == kCMTimeZero ? @"A fade cannot be longer than its clip."
+                                       : @"It would overlap the transition at the clip's other end.";
+        *error = taken == kCMTimeZero ? EditError::InvalidArgument : EditError::Overlap;
+    }
     return std::max<int64_t>(0, frameIndexAt(room, frameDuration, SnapMode::Floor));
 }
 
@@ -2420,7 +2429,7 @@ static int64_t fadeLimitFrames(const Clip &clip, ClipEdge edge, CMTime frameDura
         }
         NSString *reason = nil;
         EditError error = EditError::None;
-        const int64_t limitFrames = fadeLimitFrames(owner, side, frameDuration, &reason, &error);
+        const int64_t limitFrames = fadeLimitFrames(owner, ownerTrack, side, frameDuration, &reason, &error);
         int64_t length = frames;
         if (length > limitFrames) {
             if (!(options & VETransitionOptionFitToCut) || limitFrames == 0) {
@@ -2509,7 +2518,7 @@ static std::pair<CMTime, CMTime> resizedOffsets(const TransitionPlacement &trans
         // The fade's own length does not count against it.
         Clip without = *transition.owner;
         std::erase_if(without.spans, [&](const EffectSpan &s) { return s.id == transition.span->id; });
-        limit.maximumFrames = fadeLimitFrames(without, edge, fd, &reason, &error);
+        limit.maximumFrames = fadeLimitFrames(without, *transition.track, edge, fd, &reason, &error);
         limit.maximum = limit.maximumFrames > 0 ? timeForFrame(limit.maximumFrames, fd) : kCMTimeZero;
         limit.limitError = error;
         limit.reason = toStd(reason);
@@ -2687,7 +2696,7 @@ static std::pair<CMTime, CMTime> resizedOffsets(const TransitionPlacement &trans
         EditError error = EditError::None;
         Clip without = owner;
         std::erase_if(without.spans, [&](const EffectSpan &s) { return s.id == transition.span->id; });
-        const int64_t limit = fadeLimitFrames(without, ClipEdge::Head, fd, &reason, &error);
+        const int64_t limit = fadeLimitFrames(without, *transition.track, ClipEdge::Head, fd, &reason, &error);
         int64_t length = frameIndexAt(range.duration(), fd, SnapMode::Round);
         if (length > limit) {
             length = limit;
@@ -2741,7 +2750,7 @@ static std::pair<CMTime, CMTime> resizedOffsets(const TransitionPlacement &trans
         EditError error = EditError::None;
         Clip without = owner;
         std::erase_if(without.spans, [&](const EffectSpan &s) { return s.id == transition.span->id; });
-        const int64_t limit = fadeLimitFrames(without, ClipEdge::Tail, fd, &reason, &error);
+        const int64_t limit = fadeLimitFrames(without, *transition.track, ClipEdge::Tail, fd, &reason, &error);
         if (before > limit) {
             before = limit;
             [notes addObject:[NSString stringWithFormat:@"%@ was shortened to %@: %@", who, describeFrames(before, fd), reason]];

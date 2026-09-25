@@ -64,6 +64,10 @@ bool operator==(const Sequence &a, const Sequence &b);
 // starting exactly where it ends (Tail); nullptr when there is none (a gap, the track's end).
 const Clip *touchingClip(const Track &track, const Clip &clip, ClipEdge edge);
 
+// The part inside `clip` of a cross dissolve coming into it: the tail span of the clip of `track`
+// touching `clip`'s start, when it reaches past that clip's end (its `end`); zero when there is none.
+CMTime incomingTransitionInside(const Track &track, const Clip &clip);
+
 // A transition span resolved in its sequence.
 struct TransitionPlacement {
     const Track *track = nullptr;

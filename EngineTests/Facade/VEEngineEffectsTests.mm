@@ -322,6 +322,48 @@ CMTime frames30(int64_t n) {
     XCTAssertFalse([swapped.note containsString:@"linked clips"], @"%@", swapped.note);
 }
 
+/// Review M3: a fade out leaves the crossfade coming into its clip its frames. B is 90 frames with
+/// 15 of them under a 30-frame crossfade from A: an 80-frame fade out is refused (75 is the most),
+/// fitted to 75 with FitToCut, and a fade's limit and range edits stop there too.
+- (void)testAFadeOutLeavesTheIncomingCrossfadeItsFrames {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    const auto a = [self place:engine asset:asset at:0 from:30 to:90];
+    const auto b = [self place:engine asset:asset at:60 from:120 to:210];
+    VEEditResult *crossfade = [engine addTransitionFromClip:a.second toClip:b.second duration:frames30(30)
+                                                    options:VETransitionOptionNone];
+    XCTAssertTrue(crossfade.ok, @"%@", crossfade.message);
+    const VETransitionID crossfadeID = crossfade.createdIDs.firstObject.longLongValue;
+
+    VEEditResult *tooLong = [engine addTransitionAtEdge:VEClipEdgeEnd ofClip:b.second duration:frames30(80)
+                                                options:VETransitionOptionNone];
+    XCTAssertFalse(tooLong.ok);
+    XCTAssertTrue([tooLong.message containsString:@"It would meet the crossfade coming into the clip."], @"%@",
+                  tooLong.message);
+    XCTAssertTrue([tooLong.message containsString:@"The longest it allows is 75"], @"%@", tooLong.message);
+
+    VEEditResult *fitted = [engine addTransitionAtEdge:VEClipEdgeEnd ofClip:b.second duration:frames30(80)
+                                               options:VETransitionOptionFitToCut];
+    XCTAssertTrue(fitted.ok, @"%@", fitted.message);
+    XCTAssertEqual(fitted.droppedTransitionIDs.count, 0u);
+    XCTAssertTrue(CMTimeCompare([engine clipInfo:b.second].audioParams.fadeOutDuration, frames30(75)) == 0);
+    XCTAssertNotNil([engine spanInfo:crossfadeID], @"the crossfade stays");
+    const VETransitionID fade = fitted.createdIDs.firstObject.longLongValue;
+    XCTAssertEqual([engine transitionLimitForTransition:fade].maximumFrames, 75);
+
+    // Dragging the fade's start 10 frames further in is limited to the same 75 frames.
+    VEClipInfo *clip = [engine clipInfo:b.second];
+    VEEditResult *longer = [engine setRangeOfTransition:fade
+                                                  range:CMTimeRangeFromTimeToTime(
+                                                            CMTimeSubtract(clip.timelineEnd, frames30(85)),
+                                                            clip.timelineEnd)
+                                        includingLinked:NO];
+    XCTAssertTrue(longer.ok, @"%@", longer.message);
+    XCTAssertTrue([longer.note containsString:@"crossfade coming into the clip"], @"%@", longer.note);
+    XCTAssertTrue(CMTimeCompare([engine clipInfo:b.second].audioParams.fadeOutDuration, frames30(75)) == 0);
+    XCTAssertNotNil([engine spanInfo:crossfadeID]);
+}
+
 - (void)testTransitionDurationIsBoundedByTheCut {
     VEAssetInfo *asset = nil;
     VEEngine *engine = [self engineWithAsset:&asset];

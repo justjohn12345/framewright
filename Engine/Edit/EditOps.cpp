@@ -1613,6 +1613,19 @@ EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime len
                                    "another clip touches the start of clip " + idString(clip.id.value()) +
                                        ", so the cut belongs to that clip: use a crossfade there instead of a fade in");
     }
+    if (edge == ClipEdge::Tail) {
+        // A cross dissolve coming into the clip keeps its part inside it: the fade out has the rest.
+        const CMTime incoming = incomingTransitionInside(track, clip);
+        const auto room = checkedSubtract(clip.timelineDuration, incoming);
+        if (kCMTimeZero < incoming && (!room || *room < length)) {
+            return EditResult::failure(
+                EditError::InvalidTime,
+                "a fade out of " + describe(length) + " would meet the " +
+                    (track.kind == TrackKind::Audio ? "crossfade" : "cross dissolve") + " coming into clip " +
+                    idString(clip.id.value()) + ": it has room for " + describe(room ? maxTime(*room, kCMTimeZero)
+                                                                                     : kCMTimeZero));
+        }
+    }
     const CMTime other = edge == ClipEdge::Head ? [&] {
         const EffectSpan *tail = clip.transitionAt(ClipEdge::Tail);
         return tail != nullptr ? -tail->start : kCMTimeZero;

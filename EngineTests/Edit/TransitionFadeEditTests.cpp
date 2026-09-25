@@ -209,3 +209,50 @@ TEST_CASE("Fades always fit the clip after edits that shorten it") {
         CHECK(fx.clip(c).spans.empty());
     }
 }
+
+TEST_CASE("A fade out never removes the crossfade coming into its clip (review M3)") {
+    // A1: A [0,60), B [60,150) (90 frames), a 30-frame crossfade A -> B: 15 frames inside B.
+    Fixture fx;
+    const ClipId a = fx.addClip(fx.a1, fx.audioOnly, 0, 60, 0);
+    const ClipId b = fx.addClip(fx.a1, fx.audioOnly, 60, 90, 300);
+    const SpanId crossfade = fx.addTransition(fx.a1, a, b, 30);
+    fx.requireValid();
+    REQUIRE(fx.span(crossfade)->end == f30(15));
+    auto fadeOutOf = [&](ClipId clip, CMTime length) {
+        ClipParamsChange change;
+        change.clipId = clip;
+        change.fadeOut = length;
+        return std::vector<ClipParamsChange>{change};
+    };
+    SUBCASE("an 80-frame fade out is refused with its room; 75 frames fit beside the crossfade") {
+        SetClipsParams tooLong(fx.seq, fadeOutOf(b, f30(80)));
+        const EditResult r = applyRefused(fx.project, tooLong, EditError::InvalidTime);
+        CHECK(r.message.find("crossfade coming into clip") != std::string::npos);
+        CHECK(r.message.find("75/30") != std::string::npos);
+        CHECK(fx.span(crossfade) != nullptr);
+        SetClipsParams fits(fx.seq, fadeOutOf(b, f30(75)));
+        const EditResult ok = applyReversible(fx.project, fits);
+        CHECK(ok.droppedTransitionIds.empty());
+        CHECK(fadeOut(fx, b) == f30(75));
+        CHECK(fx.span(crossfade) != nullptr);
+    }
+    SUBCASE("a tail trim shortens the fade out to leave the crossfade its frames") {
+        SetClipsParams fade(fx.seq, fadeOutOf(b, f30(70)));
+        applyReversible(fx.project, fade);
+        TrimClipTail trim(fx.seq, b, f30(140)); // B is 80 frames now
+        const EditResult r = applyReversible(fx.project, trim);
+        CHECK(r.droppedTransitionIds.empty());
+        CHECK(fx.span(crossfade) != nullptr);
+        CHECK(fadeOut(fx, b) == f30(65));
+    }
+    SUBCASE("a trim leaving no room removes the fade out (reported), never the crossfade") {
+        SetClipsParams fade(fx.seq, fadeOutOf(b, f30(70)));
+        applyReversible(fx.project, fade);
+        const SpanId out = fx.clip(b).transitionAt(ClipEdge::Tail)->id;
+        TrimClipTail trim(fx.seq, b, f30(75)); // B is 15 frames: all under the crossfade
+        const EditResult r = applyReversible(fx.project, trim);
+        CHECK(fx.span(crossfade) != nullptr);
+        CHECK(fadeOut(fx, b) == kCMTimeZero);
+        CHECK(r.droppedTransitionIds == std::vector<SpanId>{out});
+    }
+}
