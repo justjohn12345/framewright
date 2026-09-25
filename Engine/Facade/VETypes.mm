@@ -744,7 +744,8 @@ std::optional<KeyframeInterpolation> fromVE(VEKeyframeInterpolation interpolatio
     return std::nullopt;
 }
 
-VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project, const Sequence &sequence) {
+VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project, const Sequence &sequence,
+                         const ClipIndex *index) {
     VEClipInfo *info = [[VEClipInfo alloc] initInternal];
     info->_clip = clip;
     info.clipID = static_cast<VEClipID>(clip.id.value());
@@ -767,13 +768,14 @@ VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &pr
     info.audioParams = audioParamsOf(clip);
     NSMutableArray<VEEffectSpan *> *spans = [NSMutableArray arrayWithCapacity:clip.spans.size()];
     for (const EffectSpan &span : clip.spans) {
-        [spans addObject:makeEffectSpan(span, clip, track, sequence)];
+        [spans addObject:makeEffectSpan(span, clip, track, sequence, index)];
     }
     info.spans = spans;
     return info;
 }
 
-VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Track &track, const Sequence &sequence) {
+VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Track &track, const Sequence &sequence,
+                             const ClipIndex *index) {
     VEEffectSpan *info = [[VEEffectSpan alloc] initInternal];
     info.spanID = static_cast<VESpanID>(span.id.value());
     info.clipID = static_cast<VEClipID>(clip.id.value());
@@ -805,7 +807,8 @@ VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Tra
             info.shareBeforeCut = placement->cut - placement->range.start;
             info.shareAfterCut = placement->range.end - placement->cut;
         }
-        const auto linked = linkedTransition(sequence, span.id);
+        const auto linked = index != nullptr ? index->linkedTransition(track, clip, span)
+                                             : linkedTransition(sequence, span.id);
         info.linkedSpanID = linked ? static_cast<VESpanID>(linked->value()) : 0;
     }
     return info;

@@ -1798,15 +1798,18 @@ EditResult SetTransitionRanges::perform(const Project &project, Sequence &sequen
     return EditResult::success();
 }
 
-std::optional<SpanId> linkedTransition(const Sequence &sequence, SpanId spanId) {
-    const auto transition = findTransition(sequence, spanId);
-    if (!transition || !transition->owner->linkedClipId) {
+namespace {
+
+// linkedTransition for the lane-0 `span` of `owner` on `track`, with `find` looking clips up by id.
+template <typename Find>
+std::optional<SpanId> linkedTransitionOf(const Track &track, const Clip &owner, const EffectSpan &span, Find find) {
+    const auto transition = placeTransition(track, owner, span);
+    if (!transition || !owner.linkedClipId) {
         return std::nullopt;
     }
-    const Clip *partnerOwner = sequence.findClip(*transition->owner->linkedClipId);
-    const Track *partnerTrack = partnerOwner != nullptr ? sequence.trackOfClip(partnerOwner->id) : nullptr;
-    const EffectSpan *candidate = partnerOwner != nullptr ? partnerOwner->transitionAt(transition->span->edge) : nullptr;
-    if (candidate == nullptr) {
+    const auto [partnerOwner, partnerTrack] = find(*owner.linkedClipId);
+    const EffectSpan *candidate = partnerOwner != nullptr ? partnerOwner->transitionAt(span.edge) : nullptr;
+    if (candidate == nullptr || partnerTrack == nullptr) {
         return std::nullopt;
     }
     const auto other = placeTransition(*partnerTrack, *partnerOwner, *candidate);
@@ -1821,6 +1824,43 @@ std::optional<SpanId> linkedTransition(const Sequence &sequence, SpanId spanId) 
         }
     }
     return candidate->id;
+}
+
+} // namespace
+
+std::optional<SpanId> linkedTransition(const Sequence &sequence, SpanId spanId) {
+    const Clip *owner = nullptr;
+    const Track *track = nullptr;
+    const EffectSpan *span = sequence.findSpan(spanId, &owner, &track);
+    if (span == nullptr || !span->isTransition()) {
+        return std::nullopt;
+    }
+    return linkedTransitionOf(*track, *owner, *span, [&](ClipId id) {
+        const Clip *clip = sequence.findClip(id);
+        return std::make_pair(clip, clip != nullptr ? sequence.trackOfClip(id) : nullptr);
+    });
+}
+
+ClipIndex::ClipIndex(const Sequence &sequence) {
+    for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (const Track &track : *list) {
+            for (const Clip &clip : track.clips) {
+                clips_.emplace(clip.id, std::make_pair(&clip, &track));
+            }
+        }
+    }
+}
+
+std::pair<const Clip *, const Track *> ClipIndex::find(ClipId id) const {
+    const auto it = clips_.find(id);
+    return it != clips_.end() ? it->second : std::make_pair<const Clip *, const Track *>(nullptr, nullptr);
+}
+
+std::optional<SpanId> ClipIndex::linkedTransition(const Track &track, const Clip &owner, const EffectSpan &span) const {
+    if (!span.isTransition()) {
+        return std::nullopt;
+    }
+    return linkedTransitionOf(track, owner, span, [this](ClipId id) { return find(id); });
 }
 
 bool isThroughEdit(const Sequence &sequence, ClipId fromClipId, ClipId toClipId) {

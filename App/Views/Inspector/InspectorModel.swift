@@ -215,11 +215,23 @@ final class InspectorModel: ObservableObject {
         return clip.flatMap { $0.isStill ? nil : $0 }
     }
 
-    /// The selected transition (shown when no clip is selected).
+    /// The selected transition (shown when no clip is selected). Read from the engine once per model
+    /// change and selection (review L9: the inspector's body read it about ten times per redraw).
     var transition: VETransitionInfo? {
         guard store.selection.isEmpty, let id = store.selectedTransitionID else { return nil }
-        return engine.transitionInfo(id)
+        if let cached = transitionCache, cached.id == id, cached.changeCount == store.changeCount {
+            return cached.info
+        }
+        engineTransitionReads += 1
+        let info = engine.transitionInfo(id)
+        transitionCache = (id, store.changeCount, info)
+        return info
     }
+
+    private var transitionCache: (id: VETransitionID, changeCount: UInt64, info: VETransitionInfo?)?
+    private var transitionLimitCache: (id: VETransitionID, changeCount: UInt64, limit: VETransitionLimit)?
+    /// Engine reads of the selected transition and its limit (diagnostics and tests).
+    private(set) var engineTransitionReads = 0
 
     var transitionKind: TransitionKind? {
         guard let transition, let track = store.track(transition.trackID) else { return nil }
@@ -337,7 +349,15 @@ final class InspectorModel: ObservableObject {
     }
 
     var transitionLimit: VETransitionLimit? {
-        transition.map { engine.transitionLimit(forTransition: $0.transitionID) }
+        guard let transition else { return nil }
+        let id = transition.transitionID
+        if let cached = transitionLimitCache, cached.id == id, cached.changeCount == store.changeCount {
+            return cached.limit
+        }
+        engineTransitionReads += 1
+        let limit = engine.transitionLimit(forTransition: id)
+        transitionLimitCache = (id, store.changeCount, limit)
+        return limit
     }
 
     // MARK: Text

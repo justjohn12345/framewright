@@ -1081,8 +1081,10 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     const Track *track = [self activeSequence].findTrack(TrackId(static_cast<TrackId::ValueType>(trackID)));
     NSMutableArray<VEClipInfo *> *clips = [NSMutableArray array];
     if (track != nullptr) {
+        const Sequence &sequence = [self activeSequence];
+        const ClipIndex index(sequence);
         for (const Clip &clip : track->clips) {
-            [clips addObject:makeClipInfo(clip, *track, _project, [self activeSequence])];
+            [clips addObject:makeClipInfo(clip, *track, _project, sequence, &index)];
         }
     }
     return clips;
@@ -1091,11 +1093,13 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 - (NSArray<VEClipInfo *> *)allClips {
     VE_ASSERT_MAIN();
     const Sequence &sequence = [self activeSequence];
+    // One lookup table for every span's linked transition (not a scan of the sequence per span).
+    const ClipIndex index(sequence);
     NSMutableArray<VEClipInfo *> *clips = [NSMutableArray array];
     for (const auto *list : {&sequence.videoTracks, &sequence.audioTracks}) {
         for (const Track &track : *list) {
             for (const Clip &clip : track.clips) {
-                [clips addObject:makeClipInfo(clip, track, _project, sequence)];
+                [clips addObject:makeClipInfo(clip, track, _project, sequence, &index)];
             }
         }
     }
@@ -1899,9 +1903,10 @@ static std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
     const Track *track = sequence.findTrack(TrackId(static_cast<TrackId::ValueType>(trackID)));
     NSMutableArray<VEEffectSpan *> *spans = [NSMutableArray array];
     if (track != nullptr) {
+        const ClipIndex index(sequence);
         for (const Clip &clip : track->clips) {
             for (const EffectSpan &span : clip.spans) {
-                [spans addObject:makeEffectSpan(span, clip, *track, sequence)];
+                [spans addObject:makeEffectSpan(span, clip, *track, sequence, &index)];
             }
         }
     }

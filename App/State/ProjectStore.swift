@@ -114,7 +114,8 @@ final class ProjectStore: ObservableObject {
     /// selects that span; setting nil deselects a selected transition (an effect span stays).
     var selectedTransitionID: VETransitionID? {
         get {
-            guard let id = selectedSpanID, engine.transitionInfo(id) != nil else { return nil }
+            // From the model snapshot, not the engine: views read it many times per redraw (review L9).
+            guard let id = selectedSpanID, spansByID[id]?.kind == .transition else { return nil }
             return id
         }
         set {
@@ -205,6 +206,8 @@ final class ProjectStore: ObservableObject {
         let clips: [TimelineViewModel.Clip]
         let spans: [TimelineViewModel.Span]
     }
+    /// The spans of `clips` by id (rebuilt with them).
+    private(set) var spansByID: [VESpanID: VEEffectSpan] = [:]
     /// Every span seen, with its clip, as they were the last time it was there (`dropNote`).
     private(set) var spanMemory = SpanMemory()
     /// New or Open is replacing the project (its model changes are not edits of this one).
@@ -314,11 +317,16 @@ final class ProjectStore: ObservableObject {
         for clip in engine.allClips {
             byID[clip.clipID] = clip
         }
+        var spans: [VESpanID: VEEffectSpan] = [:]
+        for clip in byID.values {
+            for span in clip.spans { spans[span.spanID] = span }
+        }
+        spansByID = spans
         clips = byID
         spanMemory.remember(byID)
         let kept = selection.filter { byID[$0] != nil }
         if kept != selection { selection = kept }
-        if let span = selectedSpanID, engine.spanInfo(span) == nil {
+        if let span = selectedSpanID, spans[span] == nil {
             selectedSpanID = nil
         }
         // The editor re-reads its span and framings on every model change (an edit of an earlier

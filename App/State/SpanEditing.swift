@@ -155,9 +155,10 @@ extension ProjectStore {
         }
     }
 
-    /// The selected span as the engine has it now (nil when none).
+    /// The selected span as the model has it now (nil when none), from the snapshot every model
+    /// change refreshes (review L9: not an engine call per read).
     var selectedSpan: VEEffectSpan? {
-        selectedSpanID.flatMap { engine.spanInfo($0) }
+        selectedSpanID.flatMap { spansByID[$0] }
     }
 
     /// The selected span when it is an effect span (lanes 1-3; not a transition).

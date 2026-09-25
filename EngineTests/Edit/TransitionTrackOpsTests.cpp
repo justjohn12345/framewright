@@ -385,6 +385,40 @@ TEST_CASE("A dissolve whose partner clip changes is removed and reported, not mo
     }
 }
 
+TEST_CASE("ClipIndex finds each transition's linked one as linkedTransition does (review L9)") {
+    Fixture fx;
+    const auto [va, aa] = fx.addLinkedPair(0, 60, 30);
+    const auto [vb, ab] = fx.addLinkedPair(60, 60, 300);
+    const ClipId lone = fx.addClip(fx.v2, fx.av30, 0, 60, 600);
+    const SpanId dissolve = fx.addTransition(fx.v1, va, vb, 10);
+    const SpanId crossfade = fx.addTransition(fx.a1, aa, ab, 10);
+    const SpanId fadeOut = fx.addFade(vb, ClipEdge::Tail, f30(12));
+    const SpanId audioFadeOut = fx.addFade(ab, ClipEdge::Tail, f30(12));
+    const SpanId loneFade = fx.addFade(lone, ClipEdge::Head, f30(5));
+    fx.addSpan(va, SpanKind::Motion, 1, f30(30), f30(60));
+    fx.requireValid();
+    const Sequence &sequence = fx.sequence();
+    const ClipIndex index(sequence);
+    CHECK(index.find(vb).first == sequence.findClip(vb));
+    CHECK(index.find(ClipId{9999}).first == nullptr);
+    std::size_t transitions = 0;
+    for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (const Track &track : *list) {
+            for (const Clip &clip : track.clips) {
+                for (const EffectSpan &span : clip.spans) {
+                    CHECK(index.linkedTransition(track, clip, span) == linkedTransition(sequence, span.id));
+                    transitions += span.isTransition() ? 1 : 0;
+                }
+            }
+        }
+    }
+    CHECK(transitions == 5);
+    CHECK(linkedTransition(sequence, dissolve) == crossfade);
+    CHECK(linkedTransition(sequence, crossfade) == dissolve);
+    CHECK(linkedTransition(sequence, fadeOut) == audioFadeOut);
+    CHECK_FALSE(linkedTransition(sequence, loneFade).has_value());
+}
+
 // ---------------------------------------------------------------------------------------------
 // Links
 

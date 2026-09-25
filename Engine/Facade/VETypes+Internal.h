@@ -45,9 +45,12 @@ VETransitionStyle toVE(TransitionRole role);
 double spanValueIn(const VESpanValues &values, SpanParameter parameter);
 
 VEAssetInfo *makeAssetInfo(const MediaAsset &asset, const AssetDetails *details, bool missing, NSInteger useCount);
-VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project, const Sequence &sequence);
+// `index` (optional): the sequence's clips by id, when many snapshots are made at once (review L9).
+VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project, const Sequence &sequence,
+                         const ClipIndex *index = nullptr);
 VETrackInfo *makeTrackInfo(const Track &track, NSInteger index);
-VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Track &track, const Sequence &sequence);
+VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Track &track, const Sequence &sequence,
+                             const ClipIndex *index = nullptr);
 VETransitionInfo *makeTransitionInfo(const TransitionPlacement &transition);
 VESequenceInfo *makeSequenceInfo(const Sequence &sequence);
 VEHardwareCaps *makeHardwareCaps();

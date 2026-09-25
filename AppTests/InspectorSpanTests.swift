@@ -285,6 +285,23 @@ final class InspectorSpanTests: XCTestCase {
         XCTAssertEqual(store.engine.spanInfo(id)?.transitionStyle, .crossDissolve)
         inspector.commitShare(before: false, "0")
         XCTAssertEqual(inspector.transitionShares?.after, 1)
+        // Review L9: the inspector reads the selected transition and its limit from the engine once
+        // per model change, however often its body reads them; the store answers from its snapshot.
+        let reads = inspector.engineTransitionReads
+        for _ in 0 ..< 10 {
+            _ = inspector.transition
+            _ = inspector.transitionShares
+            _ = inspector.transitionKind
+            _ = inspector.transitionTiming
+            _ = inspector.transitionLimit
+            _ = inspector.shareText(before: true)
+            XCTAssertEqual(store.selectedTransitionID, id)
+        }
+        XCTAssertLessThanOrEqual(inspector.engineTransitionReads - reads, 2)
+        inspector.nudgeShare(before: false, steps: 1)
+        _ = inspector.transitionLimit
+        XCTAssertEqual(inspector.transitionShares?.after, 2, "re-read after the model changed")
+        XCTAssertLessThanOrEqual(inspector.engineTransitionReads - reads, 4)
         // A fade has no shares.
         XCTAssertTrue(store.engine.removeTransition(id).ok)
         XCTAssertTrue(store.addFade(at: .end, of: b, frames: 10))

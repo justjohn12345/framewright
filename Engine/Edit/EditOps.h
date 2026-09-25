@@ -34,6 +34,8 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace ve {
@@ -632,6 +634,20 @@ std::optional<TransitionPlacement> findTransition(const Sequence &sequence, Span
 // crossfade under a video dissolve, and the other way round). Nullopt when the owner is unlinked,
 // the partners do not meet at a cut, or no transition is there.
 std::optional<SpanId> linkedTransition(const Sequence &sequence, SpanId spanId);
+
+// Every clip of a sequence by id, found once (linkedTransition looks the owner and its partner up
+// by scanning the sequence; building a snapshot of every span that way is quadratic, review L9).
+class ClipIndex {
+  public:
+    explicit ClipIndex(const Sequence &sequence);
+    // The clip `id` and its track, or {nullptr, nullptr}.
+    std::pair<const Clip *, const Track *> find(ClipId id) const;
+    // linkedTransition for the lane-0 `span` of `owner` on `track` (all of this sequence).
+    std::optional<SpanId> linkedTransition(const Track &track, const Clip &owner, const EffectSpan &span) const;
+
+  private:
+    std::unordered_map<ClipId, std::pair<const Clip *, const Track *>> clips_;
+};
 
 // Whether the cut from `fromClipId` to `toClipId` is a through edit: both clips play the same
 // asset at the same speed with the same static parameters and no effect spans, and the second
