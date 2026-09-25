@@ -23,6 +23,41 @@ The core holds: same-lane overlap refused on every path, held-value folding on e
 transition limits and linked pairs, the audio law, migration proofs, one push per facade call, exclusive
 selection, coalesced drags with Escape.
 
+## Status after the fix round (2026-09-25)
+The fix round (fef92be..02eebd3, 26 commits, one Opus implementer; verified by the lead: full scheme 448 EngineTests
+incl. 234 doctest cases, 224 AppTests, zero warnings, EngineTests clean under ThreadSanitizer) closed C1 on the app
+side, H1-H4, M1-M8, L1-L11, D2 and test gaps 1-6. The API changes and the by-hand checklist are in
+`integration-notes.md`, "Effect lanes review fix round". The findings below are kept as written for the record;
+what is still open:
+
+- **C1, engine part (a user decision).** The editor now frames a placed clip inside its own window, but the engine
+  has no crop: a zoom in on a picture in picture still enlarges it about its centre instead of cropping inside its
+  box (the default push-in grows 0.3 → 0.375). A true crop needs the window quad on `VideoLayer`, the compositor
+  scissor, spans composing in window space, the migration change and a static crop field (schema 6), as the C1
+  text describes.
+- **D1, compact rows.** Not started; the plan under "Design items" stands.
+- **D3, window frame restore.** Not started; the plan under "Design items" stands.
+- **Test gap 3, the render goldens.** They cannot be re-recorded (the recording tool needed the schema-4 engine);
+  the opacity-only and curve-cut cases are checked against version 4's rule computed independently instead.
+- **By hand, not yet done** (the test host cannot drive these): real Ken Burns drags on a 30 % lower-right, an
+  offset and a turned clip (the dashed window outline and caption, the monitor following); Escape and Cmd-Z
+  mid-drag then moving before release; a Cross Dissolve dragged onto a locked track, a cut without handles and a
+  lone clip's end (the pill clears, lane 0 opens only under the pointer, the "Fade" preview and the "No clip
+  follows" note); the wheel on a notched mouse (time; Shift or the headers for tracks) versus a trackpad (both
+  axes); the vertical scroll bar appearing, dragging and disappearing with no blank space left; the divider (240 pt
+  minimum for the monitors, the grip on hover, double-click fits once, lanes never resize the panes, the height
+  persists); clips and the playhead exactly under the ruler at several zooms; Control-K with a locked or hidden top
+  track and twice on one frame; the status wording after a real ripple delete, trim or move removes a fade or
+  dissolve.
+
+Small choices made in the round, recorded so they are not mistaken for oversights: a refused drop returns `.copy`
+(the red preview says why); the H4 fallback only moves between free edges, never from a cut to a fade; `setClipFade`
+refuses an over-long fade out with the room it has rather than clamping; `refreshModel` does not clamp scroll
+during a gesture; M8 repairs by moving a span to the first free effect lane (composition is add and multiply, so
+only the last floating-point bit can differ) and still refuses no free lane, an inexact time and a keyframe without
+a value; a divider drag may pass 60 % of the window while the monitors keep 240 pt, fits are capped at 60 %; L6 only
+avoids stacking on the same frame; undoing a track deletion does not restore its lane-collapse state.
+
 ## Ranked findings
 
 ### CRITICAL
