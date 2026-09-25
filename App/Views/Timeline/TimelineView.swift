@@ -196,10 +196,8 @@ struct TimelineView: View {
         // Reading the caches' versions makes new thumbnails and waveforms redraw the canvas, and
         // the preferences' revision re-formats the labels when the duration display changes.
         let redrawToken = thumbnails.version &+ waveforms.version &+ store.preferences.revision
-        return Canvas { context, size in
-            _ = redrawToken
-            renderer.draw(in: &context, size: size)
-        }
+        return TrackAreaCanvas(renderer: renderer, redrawToken: redrawToken)
+            .equatable()
         .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
         .overlay(alignment: .topLeading) {
             PlayheadMarker(playhead: store.playhead, viewport: viewport, style: .line)
@@ -320,6 +318,26 @@ struct TimelineView: View {
             })
             .accessibilityIdentifier("TimelineVerticalScrollBar")
         }
+    }
+}
+
+/// The track area's canvas, drawn again only when what it draws changes (review M7): the timeline
+/// view re-renders on every store change (a Ken Burns drag step changes the model many times a
+/// second), but an equal renderer (the content model, the viewport, the selection, the drag
+/// feedback) and an equal redraw token (the thumbnail and waveform caches, the duration format) draw
+/// the same picture, so SwiftUI keeps it.
+struct TrackAreaCanvas: View, Equatable {
+    let renderer: TimelineRenderer
+    let redrawToken: Int
+
+    var body: some View {
+        Canvas { context, size in
+            renderer.draw(in: &context, size: size)
+        }
+    }
+
+    nonisolated static func == (a: TrackAreaCanvas, b: TrackAreaCanvas) -> Bool {
+        MainActor.assumeIsolated { a.redrawToken == b.redrawToken && a.renderer.drawsLike(b.renderer) }
     }
 }
 

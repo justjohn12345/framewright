@@ -35,8 +35,19 @@ struct TimelineRenderer {
     var effectDrop: TimelineGestureController.EffectDropTarget?
     /// The span a range drag on an empty lane is creating.
     var creation: TimelineGestureController.SpanCreation?
-    /// Formats a transition's duration in sequence frames for its band.
+    /// Formats a transition's duration in sequence frames for its band (a function of the sequence's
+    /// frame duration and the duration display, which the redraw token covers).
     var formatFrames: (Int64) -> String = { "\($0)f" }
+
+    /// Whether `other` draws the same picture (everything but `formatFrames`, whose inputs change the
+    /// canvas's redraw token).
+    func drawsLike(_ other: TimelineRenderer) -> Bool {
+        model == other.model && selection == other.selection && selectedSpanID == other.selectedSpanID
+            && targetTrackIDs == other.targetTrackIDs && assets == other.assets && thumbnails === other.thumbnails
+            && waveforms === other.waveforms && snapTime == other.snapTime && marquee == other.marquee
+            && gainTooltip == other.gainTooltip && transitionDrop == other.transitionDrop
+            && effectDrop == other.effectDrop && creation == other.creation
+    }
 
     static let thumbnailMaxDimension = 160
     static let labelHeight: CGFloat = 16

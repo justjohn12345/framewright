@@ -182,10 +182,17 @@ final class ProjectStore: ObservableObject {
         return key != nudgeGroup
     }
 
-    /// Number of times the timeline's content model was rebuilt (once per model change;
+    /// Number of times the timeline's content model was rebuilt (once per change of what it draws;
     /// diagnostics and tests).
     private(set) var timelineBuildCount = 0
-    private var cachedTimeline: (key: TimelineCacheKey, model: TimelineViewModel)?
+    private var cachedTimeline: (key: TimelineCacheKey, drawn: DrawnTimeline, model: TimelineViewModel)?
+    /// What the timeline's content model is made of (compared to decide whether to rebuild it).
+    private struct DrawnTimeline: Equatable {
+        let frameSeconds: Double
+        let tracks: [TimelineViewModel.Track]
+        let clips: [TimelineViewModel.Clip]
+        let spans: [TimelineViewModel.Span]
+    }
     /// Every span seen, with its clip, as they were the last time it was there (`dropNote`).
     private(set) var spanMemory = SpanMemory()
     /// What the timeline's content model depends on besides the engine's model (whose change count
@@ -369,6 +376,10 @@ final class ProjectStore: ObservableObject {
         layout.fitTimeline(contentHeight: timelineContentHeight, windowHeight: windowHeight)
     }
 
+    /// The timeline's content model. Rebuilt only when what it draws changes (review M7): after a
+    /// model change (or a lane collapse or reveal) the drawn content is assembled from the snapshots
+    /// and compared with the cached one; an edit that changes nothing drawn (a Ken Burns drag step, a
+    /// span's values, a clip's Motion) reuses the cached model, so the canvas has nothing new to draw.
     private var timelineContent: TimelineViewModel {
         let key = TimelineCacheKey(changeCount: changeCount, collapsedTracks: collapsedTrackIDs,
                                    collapsedLanes: layout.collapsedLaneTracks,
@@ -376,9 +387,24 @@ final class ProjectStore: ObservableObject {
         if let cached = cachedTimeline, cached.key == key {
             return cached.model
         }
+        let drawn = drawnTimeline()
+        if let cached = cachedTimeline, cached.drawn == drawn {
+            cachedTimeline = (key, drawn, cached.model)
+            return cached.model
+        }
         timelineBuildCount += 1
         var model = TimelineViewModel()
-        model.frameSeconds = frameDuration.secondsOrZero
+        model.frameSeconds = drawn.frameSeconds
+        model.tracks = drawn.tracks
+        model.clips = drawn.clips
+        model.spans = drawn.spans
+        cachedTimeline = (key, drawn, model)
+        return model
+    }
+
+    /// Everything the timeline's content model is made of, from the snapshots (sorted, so equal
+    /// content compares equal).
+    private func drawnTimeline() -> DrawnTimeline {
         let occupied = Set(clips.values.map(\.trackID))
         var spans: [TimelineViewModel.Span] = []
         for clip in clips.values {
@@ -387,7 +413,7 @@ final class ProjectStore: ObservableObject {
             }
         }
         let spansByTrack = Dictionary(grouping: spans, by: \.trackID)
-        model.tracks = tracks.map {
+        let rows: [TimelineViewModel.Track] = tracks.map {
             let kind: TimelineViewModel.TrackKind = $0.kind == .video ? .video : .audio
             let hasClips = occupied.contains($0.trackID)
             let lanesCollapsed = layout.collapsedLaneTracks.contains(
@@ -402,7 +428,7 @@ final class ProjectStore: ObservableObject {
                                                   revealTransitionLane: revealedTransitionTrack == $0.trackID)
             return track
         }
-        model.clips = clips.values.map {
+        let drawnClips: [TimelineViewModel.Clip] = clips.values.map {
             let audio = $0.audioParams
             return TimelineViewModel.Clip(id: $0.clipID, trackID: $0.trackID, assetID: $0.assetID, name: $0.name,
                                           start: $0.timelineStart.secondsOrZero, end: $0.timelineEnd.secondsOrZero,
@@ -411,10 +437,9 @@ final class ProjectStore: ObservableObject {
                                           isAudio: $0.trackKind == .audio, gainDb: audio.gainDb,
                                           fadeIn: audio.fadeInDuration.secondsOrZero,
                                           fadeOut: audio.fadeOutDuration.secondsOrZero)
-        }.sorted { $0.start < $1.start }
-        model.spans = spans.sorted { ($0.trackID, $0.lane, $0.start) < ($1.trackID, $1.lane, $1.start) }
-        cachedTimeline = (key, model)
-        return model
+        }.sorted { ($0.start, $0.id) < ($1.start, $1.id) }
+        return DrawnTimeline(frameSeconds: frameDuration.secondsOrZero, tracks: rows, clips: drawnClips,
+                             spans: spans.sorted { ($0.trackID, $0.lane, $0.start, $0.id) < ($1.trackID, $1.lane, $1.start, $1.id) })
     }
 
     /// A span of `clip` as the timeline draws it (timeline seconds).

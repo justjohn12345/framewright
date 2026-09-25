@@ -170,6 +170,74 @@ final class TimelineRedrawTests: XCTestCase {
         XCTAssertEqual(store.timelineModel.span(id: motion.spanID)?.start ?? -1, 2.0 / 30, accuracy: 1e-9)
     }
 
+    /// Review M7 (the replacement for the Ken Burns band test the lanes round removed): every step of
+    /// a Ken Burns drag changes the model (the span's values), but nothing the timeline draws, so no
+    /// step rebuilds the timeline's content model or redraws its clips; the drag's end neither. A
+    /// span range change afterwards rebuilds it once. A positive control first proves the canvas
+    /// does redraw in this host.
+    func testAKenBurnsDragBuildsNoTimelineModelAndRedrawsNoClips() async throws {
+        try await makeTwentyClipSequence()
+        let store = fixture.store
+        let first = try XCTUnwrap(store.clips.values.filter { $0.trackKind == .video }.min { $0.timelineStart < $1.timelineStart })
+        let motion = try XCTUnwrap(store.engine.addSpan(kind: .motion, lane: 1, clip: first.clipID,
+                                                        range: CMTimeRange(start: .zero, duration: CMTime(value: 20, timescale: 30))).span)
+        store.refreshModel()
+        store.select(span: motion.spanID)
+        let model = try XCTUnwrap(store.kenBurns)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 500),
+                              styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: TimelineView(store: store))
+        window.contentView = host
+        window.orderFront(nil)
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        var lastDraws = -1
+        for _ in 0 ..< 50 where lastDraws != TimelineDiagnostics.canvasDraws {
+            lastDraws = TimelineDiagnostics.canvasDraws
+            await Self.display(host)
+            await StoreFixture.wait(until: { false }, timeout: 0.1)
+        }
+        let controlDraws = TimelineDiagnostics.canvasDraws
+        store.snapIndicator = 0.5
+        await Self.display(host)
+        store.snapIndicator = nil
+        await Self.display(host)
+        XCTAssertGreaterThan(TimelineDiagnostics.canvasDraws, controlDraws, "the canvas draws in this host")
+
+        let builds = store.timelineBuildCount
+        let canvasDraws = TimelineDiagnostics.canvasDraws
+        let changes = store.changeCount
+        let origin = model.end
+        for step in 1 ... 20 {
+            // The end's bottom-right corner pulled in: a zoom that grows with every step.
+            let pulled = CGFloat(step) * 20
+            model.applyDrag(.corner(.end, .bottomRight), origin: origin, translation: CGSize(width: -pulled, height: 0),
+                            location: CGPoint(x: origin.maxX - pulled, y: origin.maxY - pulled * 9 / 16))
+            await Self.display(host)
+        }
+        model.endDrag()
+        await Self.display(host)
+        let rebuilt = store.timelineBuildCount - builds
+        let redrawn = TimelineDiagnostics.canvasDraws - canvasDraws
+        print("20 Ken Burns drag steps: timeline model builds \(rebuilt), canvas draws \(redrawn), "
+            + "model changes \(store.changeCount - changes)")
+        XCTAssertGreaterThanOrEqual(store.changeCount - changes, 20, "every step changed the model")
+        XCTAssertEqual(rebuilt, 0, "a drag step changes nothing the timeline draws")
+        XCTAssertLessThanOrEqual(redrawn, 2, "and redraws no clips")
+        XCTAssertEqual(store.undoActionName, "Change Span Values")
+
+        // A span range change is drawn: one build.
+        XCTAssertTrue(store.engine.setSpanRange(motion.spanID, range: CMTimeRange(start: CMTime(value: 2, timescale: 30),
+                                                                                    duration: CMTime(value: 20, timescale: 30))).ok)
+        await Self.display(host)
+        _ = store.timelineModel
+        XCTAssertEqual(store.timelineBuildCount - builds, 1)
+        XCTAssertGreaterThan(TimelineDiagnostics.canvasDraws, canvasDraws + redrawn, "and redrawn")
+    }
+
     /// The Ken Burns editor open over the program monitor while its pictures land during a scrub,
     /// hosted with the timeline and the media bin in one window: the pictures have their own cache
     /// (`KenBurnsPictureLoader`), so a landing redraws the editor's overlay only, never the timeline
