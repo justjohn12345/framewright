@@ -68,8 +68,9 @@ final class ProjectStore: ObservableObject {
     @Published private(set) var tracks: [VETrackInfo] = []
     @Published private(set) var clips: [VEClipID: VEClipInfo] = [:]
     @Published private(set) var assets: [VEAssetInfo] = []
-    /// `assets` by id (rebuilt with `assets`).
-    private(set) var assetsByID: [VEAssetID: VEAssetInfo] = [:]
+    /// `assets` by id (rebuilt with `assets`; tests remove an entry to stand for media the store has
+    /// not caught up with yet).
+    var assetsByID: [VEAssetID: VEAssetInfo] = [:]
     @Published private(set) var changeCount: UInt64 = 0
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
@@ -98,7 +99,10 @@ final class ProjectStore: ObservableObject {
     @Published var selectedSpanID: VESpanID? {
         didSet {
             if selectedSpanID != nil, !selection.isEmpty { selection = [] }
-            if selectedSpanID != oldValue { kenBurnsClosedSpan = nil }
+            if selectedSpanID != oldValue {
+                kenBurnsClosedSpan = nil
+                kenBurnsFailedSpan = nil
+            }
             // A span on collapsed lanes is shown before it is edited (review L7): its track's lanes open.
             if let id = selectedSpanID, id != oldValue { revealLanes(ofSpan: id) }
             // Selecting a Motion span opens its Ken Burns editor; anything else closes it.
@@ -149,6 +153,12 @@ final class ProjectStore: ObservableObject {
     /// The Motion span whose editor the user closed (Escape, Close): it stays closed while that span
     /// stays selected, until it is reopened (Ken Burns…, a click on the span).
     private var kenBurnsClosedSpan: VESpanID?
+    /// The selected Motion span the Ken Burns editor could not open for (the status line said why):
+    /// not tried again on every model change, only when the selection changes or Ken Burns… asks
+    /// (review L8).
+    private var kenBurnsFailedSpan: VESpanID?
+    /// Times the editor could not open (diagnostics and tests).
+    private(set) var kenBurnsOpenFailures = 0
     /// Asks the inspector to focus a field (double-clicking a transition focuses its duration).
     @Published private(set) var inspectorFocusRequest: InspectorFocusRequest?
     /// The coalescing group of the inspector's keyboard-nudge burst, while one is open. Unlike a
@@ -1017,8 +1027,18 @@ final class ProjectStore: ObservableObject {
             return
         }
         kenBurns?.cancelDrag()
+        // It could not open for this span: said once, not retried on every model change.
+        guard kenBurnsFailedSpan != id else {
+            if kenBurns != nil { kenBurns = nil }
+            return
+        }
         guard let info = asset(clip.assetID) else {
-            kenBurns = nil
+            failKenBurns(id, "The media of “\(clip.name)” is not in the project, so Ken Burns has no picture.")
+            return
+        }
+        // The loader is made only for a span the editor can open.
+        if let reason = KenBurnsModel.problem(span: span, clip: clip, asset: info, sequence: sequence) {
+            failKenBurns(id, reason)
             return
         }
         var reason = ""
@@ -1026,12 +1046,18 @@ final class ProjectStore: ObservableObject {
         guard let model = KenBurnsModel(store: self, span: span, clip: clip, asset: info, sequence: sequence,
                                         playhead: playheadTime, picture: picture, previous: previous, next: next,
                                         reason: &reason) else {
-            kenBurns = nil
-            statusMessage = reason
+            failKenBurns(id, reason)
             return
         }
         engine.pause()
         kenBurns = model
+    }
+
+    private func failKenBurns(_ id: VESpanID, _ reason: String) {
+        kenBurns = nil
+        kenBurnsFailedSpan = id
+        kenBurnsOpenFailures += 1
+        statusMessage = reason
     }
 
     /// Ken Burns… in the inspector, or a click on the selected Motion span: selects the span and
@@ -1039,6 +1065,7 @@ final class ProjectStore: ObservableObject {
     func showKenBurns(span id: VESpanID) {
         guard engine.spanInfo(id)?.kind == .motion else { return }
         kenBurnsClosedSpan = nil
+        kenBurnsFailedSpan = nil // asked for explicitly: try again
         if selectedSpanID != id {
             select(span: id)
         } else {
@@ -1367,6 +1394,7 @@ final class ProjectStore: ObservableObject {
         kenBurns?.cancelDrag()
         kenBurns = nil
         kenBurnsClosedSpan = nil
+        kenBurnsFailedSpan = nil
         // Media still arriving belongs to the previous project (its Media folder).
         incoming.discardAll()
         mediaFolder.reset()

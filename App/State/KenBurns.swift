@@ -142,23 +142,29 @@ final class KenBurnsModel: ObservableObject {
     /// The bases the span's values apply onto at its start and end, read when a drag starts.
     private var dragBase: (start: VESpanValues, end: VESpanValues)?
 
+    /// Why the editor cannot open on `span` of `clip` (nil when it can): not a Motion span, a clip
+    /// without a picture, a sequence without a frame size.
+    static func problem(span: VEEffectSpan, clip: VEClipInfo, asset: VEAssetInfo, sequence: VESequenceInfo) -> String? {
+        guard span.kind == .motion else { return "Ken Burns edits a Motion span." }
+        guard clip.trackKind == .video, asset.hasVideo, asset.width > 0, asset.height > 0 else {
+            return "Ken Burns works on a clip with a picture."
+        }
+        let frame = sequence.frameDuration
+        guard sequence.width > 0, sequence.height > 0, frame.isNumeric, frame.secondsOrZero > 0 else {
+            return "The sequence has no frame size."
+        }
+        return nil
+    }
+
     /// Nil when the span is not a Motion span of a video clip with a picture; `reason` says why.
     init?(store: ProjectStore, span: VEEffectSpan, clip: VEClipInfo, asset: VEAssetInfo, sequence: VESequenceInfo,
           playhead: CMTime, picture: KenBurnsPictureLoader? = nil, previous: VEClipInfo? = nil,
           next: VEClipInfo? = nil, reason: inout String) {
-        guard span.kind == .motion else {
-            reason = "Ken Burns edits a Motion span."
-            return nil
-        }
-        guard clip.trackKind == .video, asset.hasVideo, asset.width > 0, asset.height > 0 else {
-            reason = "Ken Burns works on a clip with a picture."
+        if let problem = Self.problem(span: span, clip: clip, asset: asset, sequence: sequence) {
+            reason = problem
             return nil
         }
         let frame = sequence.frameDuration
-        guard sequence.width > 0, sequence.height > 0, frame.isNumeric, frame.secondsOrZero > 0 else {
-            reason = "The sequence has no frame size."
-            return nil
-        }
         self.store = store
         spanID = span.spanID
         self.span = span

@@ -279,6 +279,37 @@ final class KenBurnsEditorTests: XCTestCase {
         model.endDrag()
     }
 
+    /// Review L8: when the editor cannot open on the selected span, the status line says why once;
+    /// later model changes do not try again (no picture loader, no status rewrite) until the
+    /// selection changes or Ken Burns… is asked for. And why it cannot, for a clip without a picture.
+    func testAnEditorThatCannotOpenIsNotRetriedOnEveryModelChange() async throws {
+        let clip = try await longClip()
+        let id = try motionSpan(clip, 0, 60)
+        let assetID = try XCTUnwrap(store.clips[clip]).assetID
+        store.assetsByID[assetID] = nil // the store has not caught up with the media
+        store.select(span: id)
+        XCTAssertNil(store.kenBurns)
+        XCTAssertEqual(store.kenBurnsOpenFailures, 1)
+        XCTAssertEqual(store.statusMessage, "The media of “long.mov” is not in the project, so Ken Burns has no picture.")
+        store.statusMessage = "something else"
+        for n in 1 ... 5 {
+            XCTAssertTrue(store.engine.setSpanInterpolation(id, interpolation: n % 2 == 0 ? .linear : .easeIn).ok)
+        }
+        XCTAssertEqual(store.kenBurnsOpenFailures, 1, "not retried per model change")
+        XCTAssertEqual(store.statusMessage, "something else")
+        // Asked for again (Ken Burns…), with the media there: it opens.
+        store.refreshAssets()
+        store.showKenBurns(span: id)
+        XCTAssertEqual(store.kenBurns?.spanID, id)
+        // The reason for a clip without a picture.
+        let (_, tone) = try await fixture.importMedia()
+        let span = try XCTUnwrap(store.engine.spanInfo(id))
+        XCTAssertEqual(KenBurnsModel.problem(span: span, clip: try XCTUnwrap(store.clips[clip]), asset: tone,
+                                             sequence: store.sequence), "Ken Burns works on a clip with a picture.")
+        XCTAssertNil(KenBurnsModel.problem(span: span, clip: try XCTUnwrap(store.clips[clip]),
+                                           asset: try XCTUnwrap(store.asset(assetID)), sequence: store.sequence))
+    }
+
     // MARK: Re-reading
 
     func testTheFramingsAreReReadAfterAnEarlierSpanChanges() async throws {
