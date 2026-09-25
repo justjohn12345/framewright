@@ -106,24 +106,31 @@ final class MainWindowSmokeTests: XCTestCase {
         var previews = allPreviewViews(in: host)
         XCTAssertEqual(previews.count, 1, "only the program monitor: the source monitor is hidden by default")
         let program = try XCTUnwrap(previews.first)
-        let wide = program.convert(program.bounds, to: nil)
+        // The monitor's area (the picture view inside it is the sequence's frame fitted into it).
+        let wide = MonitorFrame.programArea
         XCTAssertGreaterThan(wide.width, 800, "the program monitor spans the centre (\(wide))")
         // The timeline fits its four tracks, so the monitor keeps most of the height.
         let fitted = WindowLayoutModel.fittedTimelineHeight(contentHeight: store.timelineContentHeight)
         XCTAssertLessThan(fitted, 300)
         XCTAssertGreaterThan(wide.height, 900 - fitted - 120, "the monitors get the height the tracks do not need (\(wide))")
+        // The picture view is the 16:9 frame fitted into the area (the rest is the shade around it).
+        let picture = program.convert(program.bounds, to: nil)
+        let expected = MonitorFrame.fitted(CGSize(width: 1920, height: 1080), in: wide.size)
+        XCTAssertEqual(picture.width, expected.width, accuracy: 1, "\(picture) in \(wide)")
+        XCTAssertEqual(picture.height, expected.height, accuracy: 1, "\(picture) in \(wide)")
 
         store.showInSourceMonitor(movie.assetID)
         await settle()
         previews = allPreviewViews(in: host)
         XCTAssertEqual(previews.count, 2, "opening media shows the source monitor")
-        let narrowed = program.convert(program.bounds, to: nil)
+        let narrowed = MonitorFrame.programArea
         XCTAssertLessThan(narrowed.width, wide.width - 200, "the program monitor makes room for it")
 
         store.setSourceMonitorVisible(false)
         await settle()
         XCTAssertEqual(allPreviewViews(in: host).count, 1)
-        XCTAssertEqual(program.convert(program.bounds, to: nil).width, wide.width, accuracy: 1)
+        XCTAssertEqual(MonitorFrame.programArea.width, wide.width, accuracy: 1)
+        XCTAssertEqual(program.convert(program.bounds, to: nil).width, picture.width, accuracy: 1)
 
         store.layout.inspectorTab = .effects
         await settle()

@@ -2,17 +2,39 @@ import CoreMedia
 import SwiftUI
 import FramewrightEngine
 
+/// Where a monitor's frame sits in its area, and the shade around it. The in-window monitors (the
+/// program and the source monitor) size their picture view to the frame, fitted into the area with
+/// its aspect kept (`fitted`), and fill the rest of the area with `outsideColor`, a dark grey a step
+/// lighter than the frame's black: a letterboxed or pillarboxed frame is visible as a frame, so a
+/// placed picture that stops short of the frame's edge shows the frame's black between it and the
+/// band. A shade rather than a line at the frame's edge: a line would sit exactly where a picture's
+/// own edge is and read as part of it (or as the Ken Burns editor's frame edge), while two tones
+/// read at a glance, also where the frame is empty. The second-display output window does not use
+/// it: it stays black outside the frame (`OutputDisplayController`).
+enum MonitorFrame {
+    /// The area outside the frame (letterbox and pillarbox bands, the Ken Burns editor's margin).
+    static let outsideColor = Color(white: 0.16)
+    /// Where the program monitor's picture area was last laid out (window coordinates; tests).
+    @MainActor static var programArea: CGRect = .zero
+
+    /// A frame of `content`'s aspect fitted into `area` (the whole area when `content` has no size).
+    static func fitted(_ content: CGSize, in area: CGSize) -> CGRect {
+        guard content.width > 0, content.height > 0 else { return CGRect(origin: .zero, size: area) }
+        return KenBurnsViewport(sequence: content, monitor: area, margin: 0).frame
+    }
+}
+
 /// The program monitor's picture area and, while a Motion span is selected, its Ken Burns editor
-/// (see `KenBurnsModel`). Closed, the picture fills the area (letterboxed by the preview view as
-/// usual). Open, the same picture (the same `VEPreviewView`, not a second render path) is drawn
-/// fitted to the frame: in Ken Burns mode (the clip alone) without a margin, in Transform mode inside
-/// a margin (`KenBurnsViewport`) that stands for the space off the frame, so a box larger than the
-/// frame or partly off it keeps its corners and body on screen. The dimmed area around it is the
-/// space off the frame, the frame's edge a thin line; the editor's boxes or rectangles and the other
-/// clips' outlines are drawn over the whole area and its bar (range, caption, toggles, mode,
-/// smoothing, Swap, Close) below it. A selected Opacity or Gain span shows its readout instead. The
-/// debug HUD sits at the area's top-left. Observes the store to notice the editor opening, closing,
-/// switching spans and switching modes (`ProjectStore.kenBurnsMode`).
+/// (see `KenBurnsModel`). The picture view (the same `VEPreviewView` open or closed, not a second
+/// render path) is sized to the sequence's frame: closed, and in Ken Burns mode (the clip alone),
+/// fitted into the whole area; in Transform mode fitted inside a margin (`KenBurnsViewport`) that
+/// stands for the space off the frame, so a box larger than the frame or partly off it keeps its
+/// corners and body on screen. The area around the frame is `MonitorFrame.outsideColor`, the frame's
+/// edge a thin line while the editor is open; the editor's boxes or rectangles and the other clips'
+/// outlines are drawn over the whole area and its bar (range, caption, toggles, mode, smoothing,
+/// Swap, Close) below it. A selected Opacity or Gain span shows its readout instead. The debug HUD
+/// sits at the area's top-left. Observes the store to notice the editor opening, closing, switching
+/// spans and switching modes (`ProjectStore.kenBurnsMode`).
 struct ProgramMonitorLayout<Picture: View>: View {
     @ObservedObject var store: ProjectStore
     var showsHUD = false
@@ -20,25 +42,27 @@ struct ProgramMonitorLayout<Picture: View>: View {
 
     var body: some View {
         let editor = store.kenBurns
+        let sequenceSize = CGSize(width: store.sequence.width, height: store.sequence.height)
         let margin = store.kenBurnsMode == .transform ? KenBurnsViewport.marginFraction : 0
         VStack(spacing: 0) {
             GeometryReader { geometry in
-                let viewport = editor.map {
-                    KenBurnsViewport(sequence: $0.sequenceSize, monitor: geometry.size, margin: margin)
-                }
-                let frame = viewport?.frame ?? CGRect(origin: .zero, size: geometry.size)
+                let viewport = KenBurnsViewport(sequence: sequenceSize, monitor: geometry.size, margin: margin)
+                let frame = sequenceSize.width > 0 && sequenceSize.height > 0
+                    ? viewport.frame : CGRect(origin: .zero, size: geometry.size)
                 ZStack(alignment: .topLeading) {
-                    editor == nil ? Color.black : KenBurnsOverlay.marginColor
+                    MonitorFrame.outsideColor
                     // The same picture view open or closed (its place in the tree never changes), only
                     // its frame.
                     picture
                         .frame(width: max(frame.width, 1), height: max(frame.height, 1))
                         .position(x: frame.midX, y: frame.midY)
-                    if let editor, let viewport {
+                    if let editor {
                         KenBurnsOverlay(model: editor, playhead: store.playhead, viewport: viewport)
                     }
                 }
                 .clipped()
+                .onAppear { MonitorFrame.programArea = geometry.frame(in: .global) }
+                .onChange(of: geometry.frame(in: .global)) { _, area in MonitorFrame.programArea = area }
             }
             .overlay(alignment: .topLeading) {
                 if let span = store.selectedEffectSpan, editor == nil, span.kind == .opacity || span.kind == .gain {
@@ -85,8 +109,6 @@ struct KenBurnsOverlay: View {
     }
 
     static let handleSize: CGFloat = 9
-    /// The area around the frame while the editor is open (the space off the frame).
-    static let marginColor = Color(white: 0.16)
 
     var body: some View {
         ZStack(alignment: .topLeading) {

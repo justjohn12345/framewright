@@ -44,12 +44,22 @@ struct SourceMonitorView: View {
                 .help("Hide the source monitor (⇧⌘2); the program monitor takes its place")
                 .accessibilityIdentifier("HideSourceMonitor")
             }
-            ZStack {
-                PreviewViewRepresentable(isPlaying: playhead.isRunning,
-                                         configurationID: ObjectIdentifier(store)) { view in
-                    store.attachSourceView(view)
+            GeometryReader { geometry in
+                // The picture view is sized to the asset's frame (its display size's aspect), the rest
+                // of the area shaded (`MonitorFrame`); without a picture (nothing open, a sound) it
+                // fills the area, black.
+                let frame = MonitorFrame.fitted(pictureSize, in: geometry.size)
+                ZStack(alignment: .topLeading) {
+                    pictureSize == .zero ? Color.black : MonitorFrame.outsideColor
+                    PreviewViewRepresentable(isPlaying: playhead.isRunning,
+                                             configurationID: ObjectIdentifier(store)) { view in
+                        store.attachSourceView(view)
+                    }
+                    .frame(width: max(frame.width, 1), height: max(frame.height, 1))
+                    .position(x: frame.midX, y: frame.midY)
+                    overlay
+                        .frame(width: geometry.size.width, height: geometry.size.height)
                 }
-                overlay
             }
             .background(Color.black)
             .clipShape(RoundedRectangle(cornerRadius: 3))
@@ -69,6 +79,13 @@ struct SourceMonitorView: View {
 
     private var currentAsset: VEAssetInfo? {
         store.source.assetID.flatMap { store.asset($0) }
+    }
+
+    /// The shown asset's picture size (display size, what the engine's source frame is), or zero when
+    /// there is no picture to frame.
+    private var pictureSize: CGSize {
+        guard let asset = currentAsset, asset.hasVideo, asset.width > 0, asset.height > 0 else { return .zero }
+        return CGSize(width: asset.width, height: asset.height)
     }
 
     @ViewBuilder

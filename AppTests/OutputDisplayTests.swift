@@ -266,4 +266,80 @@ final class OutputDisplayTests: XCTestCase {
         XCTAssertTrue(output.isShowing)
         output.hide()
     }
+
+    /// The pixel of `image` at the fractions (`fx`, `fy`) of its width and height from its top-left
+    /// corner (RGB 0...255).
+    private func pixel(_ image: CGImage, _ fx: Double, _ fy: Double) -> (r: Int, g: Int, b: Int)? {
+        let width = image.width
+        let height = image.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn: Bool = pixels.withUnsafeMutableBytes { buffer in
+            guard let space = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB),
+                  let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: width * 4, space: space,
+                                          bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return false }
+            context.setBlendMode(.copy)
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return nil }
+        let x = min(width - 1, Int(Double(width) * fx))
+        let y = min(height - 1, Int(Double(height) * fy))
+        let offset = (y * width + x) * 4
+        return (Int(pixels[offset]), Int(pixels[offset + 1]), Int(pixels[offset + 2]))
+    }
+
+    /// Ken Burns and Transform round, item 3: the in-window monitors shade the area outside the frame,
+    /// the output window does not. On a 16:10 display the 16:9 program is letterboxed in black (the
+    /// window's content is the preview view itself, over a black window); and while the Ken Burns
+    /// editor shows the clip alone in the program monitor, the output shows the program (the clip at
+    /// half size, black around it inside the frame).
+    func testTheOutputWindowStaysBlackOutsideTheFrame() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        let (movie, _) = try await fixture.importMedia()
+        let clip = try fixture.placeMovie(movie, at: 0)
+        XCTAssertTrue(store.engine.setVideoParams(VEVideoParams(x: 0, y: 0, scale: 0.5, rotationDegrees: 0, opacity: 1),
+                                                  forClip: clip).ok)
+        let screens = FakeScreens([main, external], editor: 7)
+        let output = OutputDisplayController(store: store, screens: screens, center: NotificationCenter())
+        store.outputDisplay = output
+        output.show()
+        defer { output.hide() }
+        let window = try XCTUnwrap(output.window)
+        let view = try XCTUnwrap(window.contentView as? VEPreviewView)
+        XCTAssertEqual(window.frame, main.frame, "the 16:10 display")
+        XCTAssertEqual(view.frame.size, main.frame.size, "the picture view is the whole window (no shaded area)")
+        XCTAssertEqual(window.backgroundColor, .black)
+        // The Ken Burns editor in Ken Burns mode: the program monitor shows the clip alone.
+        store.selection = [clip]
+        store.playheadTime = .zero
+        store.addMotionSpanAtPlayhead(mode: .kenBurns)
+        XCTAssertEqual(store.engine.programPreviewSoloClipID, clip)
+
+        func render() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                view.renderOnce { _ in continuation.resume() }
+            }
+        }
+        var shown: CGImage?
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            await render()
+            if let image = view.snapshot(), let centre = pixel(image, 0.5, 0.5), centre.g > 40 {
+                shown = image
+                break
+            }
+        }
+        let image = try XCTUnwrap(shown, "the clip's picture never reached the output view")
+        // The letterbox: a 16:9 frame on 16:10 leaves 5 % of the height above and below it, black.
+        for fy in [0.01, 0.99] {
+            let band = try XCTUnwrap(pixel(image, 0.5, fy))
+            XCTAssertTrue(band.r < 3 && band.g < 3 && band.b < 3, "the band at \(fy) is black: \(band)")
+        }
+        // Inside the frame, beside the half-size clip: the program's black (not the solo picture,
+        // which would fill the frame).
+        let beside = try XCTUnwrap(pixel(image, 0.1, 0.5))
+        XCTAssertTrue(beside.r < 3 && beside.g < 3 && beside.b < 3, "the program, clip at half size: \(beside)")
+        store.closeKenBurns()
+    }
 }

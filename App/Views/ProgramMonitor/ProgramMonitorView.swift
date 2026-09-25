@@ -1,7 +1,8 @@
 import SwiftUI
 import FramewrightEngine
 
-/// Program monitor: the sequence frame at the playhead, letterboxed in black.
+/// Program monitor: the sequence frame at the playhead (the layout around it, `ProgramMonitorLayout`,
+/// sizes this view to the frame and shades the area outside it).
 ///
 /// `attach` receives the monitor's `VEPreviewView` when it is created and again whenever
 /// `attachID` changes; the app hands it to the engine (`ProjectStore.attachProgramView`), which
