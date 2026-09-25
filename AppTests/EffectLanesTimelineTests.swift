@@ -842,14 +842,26 @@ final class EffectLanesTimelineTests: XCTestCase {
         XCTAssertEqual([first.start, first.end], [frames(60), frames(210)], "5 s from the playhead")
         XCTAssertEqual(first.lane, 1)
         XCTAssertEqual(store.undoActionName, "Add Motion Span")
-        // Again at the same frame: the next lane with room, then the third; then no room.
-        keyboard.perform(.addMotionSpan, on: store)
-        XCTAssertEqual(store.selectedEffectSpan?.lane, 2)
-        keyboard.perform(.addMotionSpan, on: store)
-        XCTAssertEqual(store.selectedEffectSpan?.lane, 3)
+        // Again at the same frame (review L6): the span is selected, no second push in stacks on it.
         let changes = store.changeCount
+        store.select(span: try XCTUnwrap(store.clips[clip]?.spans.first).spanID)
+        store.selection = [clip]
         keyboard.perform(.addMotionSpan, on: store)
         XCTAssertEqual(store.changeCount, changes)
+        XCTAssertEqual(store.selectedSpanID, first.spanID)
+        XCTAssertEqual(store.statusMessage, "“long.mov” already has a Motion span starting here: it is selected (drag "
+            + "on an empty lane to add another).")
+        // A frame later: the next lane with room, then the third; then no room.
+        store.playheadTime = frames(61)
+        keyboard.perform(.addMotionSpan, on: store)
+        XCTAssertEqual(store.selectedEffectSpan?.lane, 2)
+        store.playheadTime = frames(62)
+        keyboard.perform(.addMotionSpan, on: store)
+        XCTAssertEqual(store.selectedEffectSpan?.lane, 3)
+        let full = store.changeCount
+        store.playheadTime = frames(63)
+        keyboard.perform(.addMotionSpan, on: store)
+        XCTAssertEqual(store.changeCount, full)
         XCTAssertTrue(store.statusMessage?.hasPrefix("No effect lane of “long.mov” has room there") == true,
                       store.statusMessage ?? "")
         // Near the clip's end: to its end.
@@ -880,6 +892,28 @@ final class EffectLanesTimelineTests: XCTestCase {
         try XCTUnwrap(items.first { $0.title == "Add Motion Span at Playhead" }).action()
         XCTAssertEqual(store.selectedEffectSpan?.start, frames(220))
         XCTAssertEqual(store.selectedEffectSpan?.lane, 2, "lane 1 has the span added near the end")
+    }
+
+    /// Review L6: with nothing selected Control-K skips a locked or hidden top track (the clip below
+    /// gets the span), and with two video clips selected it asks for one.
+    func testControlKSkipsALockedOrHiddenTopTrackAndAsksForOneClip() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let v2 = try XCTUnwrap(store.videoTracks.last).trackID
+        let lower = try place(movie, at: 0, from: 0, to: 2, video: v1)
+        let upper = try place(movie, at: 0, from: 0, to: 2, video: v2)
+        store.selection = []
+        store.playheadTime = frames(10)
+        XCTAssertEqual(store.motionSpanClip()?.clipID, upper, "the top-most by default")
+        XCTAssertTrue(store.engine.setTrack(v2, locked: true).ok)
+        XCTAssertEqual(store.motionSpanClip()?.clipID, lower, "not the locked one")
+        XCTAssertTrue(store.engine.setTrack(v2, locked: false).ok)
+        XCTAssertTrue(store.engine.setTrack(v2, muted: true).ok)
+        XCTAssertEqual(store.motionSpanClip()?.clipID, lower, "not the hidden one")
+        store.addMotionSpanAtPlayhead()
+        XCTAssertEqual(store.selectedEffectSpan?.clipID, lower)
+        store.selection = [lower, upper]
+        store.addMotionSpanAtPlayhead()
+        XCTAssertEqual(store.statusMessage, "Select one video clip to add a Motion span (2 are selected).")
     }
 
     /// Held Control-K through the key monitor adds one span: the auto-repeat is swallowed.

@@ -306,7 +306,8 @@ extension ProjectStore {
 
     /// The clip Add Motion Span at Playhead works on: the selected video clip (a linked pair counts
     /// as its video clip) or the selected span's clip; with nothing selected, the top-most video
-    /// clip under the playhead. Nil when there is none.
+    /// clip under the playhead on a track that is neither locked nor hidden (review L6). Nil when
+    /// there is none.
     func motionSpanClip() -> VEClipInfo? {
         let video = selectedClips.filter { $0.trackKind == .video }
         if video.count == 1 { return video[0] }
@@ -314,6 +315,7 @@ extension ProjectStore {
         if let span = selectedSpan, let clip = clips[span.clipID], clip.trackKind == .video { return clip }
         let t = playheadTime
         for trackID in sequence.videoTrackIDs.map(\.int64Value).reversed() {
+            guard let track = track(trackID), !track.locked, !track.muted else { continue }
             if let clip = clips.values.first(where: {
                 $0.trackID == trackID && $0.timelineStart <= t && t < $0.timelineEnd
             }) {
@@ -334,12 +336,23 @@ extension ProjectStore {
             return
         }
         guard let clip = id.flatMap({ clips[$0] }) ?? motionSpanClip(), clip.trackKind == .video else {
-            statusMessage = "Select a video clip, or move the playhead over one, to add a Motion span."
+            let selectedVideo = selectedClips.filter { $0.trackKind == .video }.count
+            statusMessage = selectedVideo > 1
+                ? "Select one video clip to add a Motion span (\(selectedVideo) are selected)."
+                : "Select a video clip, or move the playhead over one, to add a Motion span."
             return
         }
         let start = frameTime(playheadTime.secondsOrZero)
         guard clip.timelineStart <= start, start < clip.timelineEnd else {
             statusMessage = "Move the playhead over “\(clip.name)” to add a Motion span there."
+            return
+        }
+        // Pressed again on the same frame: the span it added is selected, not a second push in on
+        // top of it (review L6: repeated presses stacked 1.25 x 1.25 x 1.25).
+        if let existing = clip.spans.first(where: { $0.kind == .motion && $0.start == start }) {
+            select(span: existing.spanID)
+            statusMessage = "“\(clip.name)” already has a Motion span starting here: it is selected (drag on an empty "
+                + "lane to add another)."
             return
         }
         let length = CMTime.onFrameGrid(seconds: Self.motionSpanSeconds, frameDuration: frameDuration)
