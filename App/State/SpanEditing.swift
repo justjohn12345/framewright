@@ -305,43 +305,80 @@ extension ProjectStore {
         return values
     }
 
-    /// The clip Add Motion Span at Playhead works on: the selected video clip (a linked pair counts
-    /// as its video clip) or the selected span's clip; with nothing selected, the top-most video
-    /// clip under the playhead on a track that is neither locked nor hidden (review L6). Nil when
-    /// there is none.
-    func motionSpanClip() -> VEClipInfo? {
+    /// The clip Add Motion Span at Playhead (Control-K, the Clip menu) works on: the selected clip only
+    /// (a linked pair counts as its video clip), or the selected span's clip (a span belongs to one
+    /// clip, and selecting it deselects the clips). `.failure` carries what the status line says
+    /// instead: nothing selected, an audio clip, several video clips, or a clip on a locked track. It
+    /// never falls through to another clip or track (the clip under the playhead on some other track
+    /// is not what the user selected).
+    func motionSpanTarget() -> Result<VEClipInfo, MotionSpanRefusal> {
+        let clip: VEClipInfo
         let video = selectedClips.filter { $0.trackKind == .video }
-        if video.count == 1 { return video[0] }
-        if !selection.isEmpty { return nil }
-        if let span = selectedSpan, let clip = clips[span.clipID], clip.trackKind == .video { return clip }
-        let t = playheadTime
-        for trackID in sequence.videoTrackIDs.map(\.int64Value).reversed() {
-            guard let track = track(trackID), !track.locked, !track.muted else { continue }
-            if let clip = clips.values.first(where: {
-                $0.trackID == trackID && $0.timelineStart <= t && t < $0.timelineEnd
-            }) {
-                return clip
-            }
+        if video.count > 1 {
+            let text = "Select one video clip to add a Motion span (\(video.count) are selected)."
+            return .failure(MotionSpanRefusal(text))
+        } else if let only = video.first {
+            clip = only
+        } else if !selection.isEmpty {
+            return .failure(MotionSpanRefusal("Select a video clip first: a Motion span moves a picture."))
+        } else if let span = selectedSpan, let owner = clips[span.clipID], owner.trackKind == .video {
+            clip = owner
+        } else {
+            return .failure(MotionSpanRefusal("Select a clip first."))
         }
-        return nil
+        if let track = track(clip.trackID), track.locked {
+            return .failure(MotionSpanRefusal("“\(track.name)” is locked."))
+        }
+        return .success(clip)
     }
 
-    /// Control-K, Clip > Add Motion Span at Playhead, and the clip's context menu (`clip`): a Motion
-    /// span from the frame under the playhead, 5 s long or to the clip's end if shorter, on the first
-    /// effect lane with room, with the default values (see `addSpan`); it is selected, which opens the
-    /// Ken Burns editor. Refused with the reason: during a gesture, without a video clip, with the
-    /// playhead off the clip or on its last frame, or when no lane has room.
+    /// Why Add Motion Span at Playhead does nothing (the status line's sentence).
+    struct MotionSpanRefusal: Error, Equatable {
+        let message: String
+
+        init(_ message: String) {
+            self.message = message
+        }
+    }
+
+    /// The Clip menu's Add Motion Span at Playhead is enabled: no gesture, and a selected clip it can
+    /// act on (`motionSpanTarget`). Where the playhead is is not part of it (the menu does not follow
+    /// the playhead; a press with the playhead off the clip says so).
+    var canAddMotionSpanAtPlayhead: Bool {
+        guard !isGestureActive, case .success = motionSpanTarget() else { return false }
+        return true
+    }
+
+    /// Control-K, Clip > Add Motion Span at Playhead (`clip` nil: the selected clip, see
+    /// `motionSpanTarget`), and the clip's context menu (`clip`: the clicked one): a Motion span from
+    /// the frame under the playhead, 5 s long or to the clip's end if shorter, on the first effect
+    /// lane with room, with the default values (see `addSpan`); it is selected, which opens the Ken
+    /// Burns editor. Refused with the reason in the status line: during a gesture, without a selected
+    /// clip (never another clip under the playhead), on a locked track, with the playhead off the clip
+    /// or on its last frame, or when no lane has room.
     func addMotionSpanAtPlayhead(clip id: VEClipID? = nil) {
         guard !isGestureActive else {
             statusMessage = "Finish the current drag first."
             return
         }
-        guard let clip = id.flatMap({ clips[$0] }) ?? motionSpanClip(), clip.trackKind == .video else {
-            let selectedVideo = selectedClips.filter { $0.trackKind == .video }.count
-            statusMessage = selectedVideo > 1
-                ? "Select one video clip to add a Motion span (\(selectedVideo) are selected)."
-                : "Select a video clip, or move the playhead over one, to add a Motion span."
-            return
+        let clip: VEClipInfo
+        if let id {
+            guard let chosen = clips[id], chosen.trackKind == .video else {
+                statusMessage = "Motion spans are added to video clips."
+                return
+            }
+            if let track = track(chosen.trackID), track.locked {
+                statusMessage = "“\(track.name)” is locked."
+                return
+            }
+            clip = chosen
+        } else {
+            switch motionSpanTarget() {
+            case let .success(target): clip = target
+            case let .failure(refusal):
+                statusMessage = refusal.message
+                return
+            }
         }
         let start = frameTime(playheadTime.secondsOrZero)
         guard clip.timelineStart <= start, start < clip.timelineEnd else {

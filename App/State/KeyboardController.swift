@@ -20,8 +20,10 @@ import Foundation
 /// audio clips ±1 dB, with Shift ±10 dB; a burst is one undo step), Escape (cancel the drag in
 /// progress, a Ken Burns rectangle drag too; else close the Ken Burns editor; passed on when there is
 /// neither), Command-A (select all clips), Control-K (Add Motion
-/// Span at Playhead: a Motion span from the playhead, 5 s or to the clip's end, which opens the Ken
-/// Burns editor). Auto-repeat of Space, J/K/L and Control-K is ignored (holding L does not race to
+/// Span at Playhead: a Motion span on the selected clip from the playhead, 5 s or to the clip's
+/// end, which opens the Ken Burns editor; only the selected clip, or the selected span's clip, never
+/// another clip under the playhead: with none selected, or its track locked, it only says why in the
+/// status line). Auto-repeat of Space, J/K/L and Control-K is ignored (holding L does not race to
 /// 8x, holding Space does not toggle, holding Control-K adds one span). Transport keys drive the
 /// monitor that has focus (see `PlaybackActions`).
 @MainActor
@@ -39,7 +41,8 @@ final class KeyboardController {
         case selectAll
         /// `]` / `[`: gain of the selected audio clips ±1 dB (with Shift, `}` / `{`: ±10 dB).
         case gainUp(big: Bool), gainDown(big: Bool)
-        /// Control-K: Add Motion Span at Playhead (Final Cut Pro's Add Keyframe key).
+        /// Control-K: Add Motion Span at Playhead on the selected clip (Final Cut Pro's Add Keyframe
+        /// key; `ProjectStore.motionSpanTarget`).
         case addMotionSpan
 
         /// The keys the program output window takes: the transport (play, shuttle, step, start/end)

@@ -897,9 +897,10 @@ final class TimelineGestureController: ObservableObject {
             ]
             if let clip = store.clips[id], clip.trackKind == .video {
                 let t = store.playheadTime
+                let locked = store.track(clip.trackID)?.locked ?? false
                 items.append(.separator)
                 items.append(ContextMenuItem(title: "Add Motion Span at Playhead",
-                                             isEnabled: clip.timelineStart <= t && t < clip.timelineEnd) {
+                                             isEnabled: !locked && clip.timelineStart <= t && t < clip.timelineEnd) {
                     store.addMotionSpanAtPlayhead(clip: id)
                 })
             }

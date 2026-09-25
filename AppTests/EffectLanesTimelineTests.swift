@@ -924,10 +924,10 @@ final class EffectLanesTimelineTests: XCTestCase {
         XCTAssertFalse(KeyboardController.Action.addMotionSpan.isTransportOrCancel, "editor window only")
         XCTAssertTrue(KeyboardController.Action.addMotionSpan.ignoresRepeat)
         store.addMotionSpanAtPlayhead()
-        XCTAssertEqual(store.statusMessage, "Select a video clip, or move the playhead over one, to add a Motion span.")
+        XCTAssertEqual(store.statusMessage, "Select a clip first.")
 
         let clip = try await longClip()
-        store.selection = []
+        store.selection = [clip]
         store.playheadTime = frames(60)
         let keyboard = KeyboardController(store: store)
         keyboard.perform(.addMotionSpan, on: store)
@@ -987,26 +987,82 @@ final class EffectLanesTimelineTests: XCTestCase {
         XCTAssertEqual(store.selectedEffectSpan?.lane, 2, "lane 1 has the span added near the end")
     }
 
-    /// Review L6: with nothing selected Control-K skips a locked or hidden top track (the clip below
-    /// gets the span), and with two video clips selected it asks for one.
-    func testControlKSkipsALockedOrHiddenTopTrackAndAsksForOneClip() async throws {
+    /// Control-K (and Clip > Add Motion Span at Playhead) acts on the selected clip only, never on
+    /// another clip under the playhead: with nothing selected, a locked selected clip or two video
+    /// clips selected it only says why, and the menu item is disabled. The context menu acts on the
+    /// clicked clip (not on a locked one). A hidden track's selected clip still gets the span.
+    func testControlKActsOnlyOnTheSelectedClip() async throws {
         let (movie, _) = try await fixture.importMedia()
         let v2 = try XCTUnwrap(store.videoTracks.last).trackID
         let lower = try place(movie, at: 0, from: 0, to: 2, video: v1)
         let upper = try place(movie, at: 0, from: 0, to: 2, video: v2)
-        store.selection = []
+        let keyboard = KeyboardController(store: store)
         store.playheadTime = frames(10)
-        XCTAssertEqual(store.motionSpanClip()?.clipID, upper, "the top-most by default")
+        let spansBefore = {
+            self.store.engine.spans(forClip: lower).count + self.store.engine.spans(forClip: upper).count
+        }
+
+        // Nothing selected: nothing added, even with clips under the playhead.
+        store.selection = []
+        XCTAssertFalse(store.canAddMotionSpanAtPlayhead, "the menu item is disabled")
+        let changes = store.changeCount
+        keyboard.perform(.addMotionSpan, on: store)
+        XCTAssertEqual(store.changeCount, changes)
+        XCTAssertEqual(spansBefore(), 0)
+        XCTAssertEqual(store.statusMessage, "Select a clip first.")
+        XCTAssertNil(store.kenBurns)
+
+        // V2 locked with its clip selected (the user's report): nothing, not the V1 clip below.
         XCTAssertTrue(store.engine.setTrack(v2, locked: true).ok)
-        XCTAssertEqual(store.motionSpanClip()?.clipID, lower, "not the locked one")
+        store.refreshModel()
+        store.selection = [upper]
+        XCTAssertFalse(store.canAddMotionSpanAtPlayhead)
+        let locked = store.changeCount
+        keyboard.perform(.addMotionSpan, on: store)
+        XCTAssertEqual(store.changeCount, locked)
+        XCTAssertEqual(spansBefore(), 0, "no span on V1's clip either")
+        XCTAssertEqual(store.statusMessage, "“\(try XCTUnwrap(store.track(v2)).name)” is locked.")
+        XCTAssertNil(store.kenBurns)
+        // Its context menu item is disabled, and acting on it anyway refuses with the same reason.
+        store.addMotionSpanAtPlayhead(clip: upper)
+        XCTAssertEqual(store.changeCount, locked)
+        XCTAssertEqual(store.statusMessage, "“\(try XCTUnwrap(store.track(v2)).name)” is locked.")
+
+        // The V1 clip selected: it gets the span (selected, the editor opens on it).
+        store.selection = [lower]
+        XCTAssertTrue(store.canAddMotionSpanAtPlayhead)
+        keyboard.perform(.addMotionSpan, on: store)
+        XCTAssertEqual(store.selectedEffectSpan?.clipID, lower)
+        XCTAssertEqual(store.kenBurns?.spanID, store.selectedSpanID)
+        XCTAssertEqual(store.engine.spans(forClip: upper).count, 0)
+        // The selected span's clip counts as selected: a frame later it gets another span.
+        store.playheadTime = frames(11)
+        XCTAssertTrue(store.canAddMotionSpanAtPlayhead)
+        keyboard.perform(.addMotionSpan, on: store)
+        XCTAssertEqual(store.selectedEffectSpan?.clipID, lower)
+        XCTAssertEqual(store.engine.spans(forClip: lower).count, 2)
+
+        // A hidden (muted) unlocked track's selected clip is acted on.
         XCTAssertTrue(store.engine.setTrack(v2, locked: false).ok)
         XCTAssertTrue(store.engine.setTrack(v2, muted: true).ok)
-        XCTAssertEqual(store.motionSpanClip()?.clipID, lower, "not the hidden one")
-        store.addMotionSpanAtPlayhead()
-        XCTAssertEqual(store.selectedEffectSpan?.clipID, lower)
+        store.refreshModel()
+        store.selection = [upper]
+        keyboard.perform(.addMotionSpan, on: store)
+        XCTAssertEqual(store.selectedEffectSpan?.clipID, upper)
+
+        // Two video clips selected: asks for one.
         store.selection = [lower, upper]
+        XCTAssertFalse(store.canAddMotionSpanAtPlayhead)
+        let beforeTwo = store.changeCount
         store.addMotionSpanAtPlayhead()
+        XCTAssertEqual(store.changeCount, beforeTwo)
         XCTAssertEqual(store.statusMessage, "Select one video clip to add a Motion span (2 are selected).")
+        // During a gesture the menu item is disabled too.
+        store.selection = [lower]
+        store.cancelActiveGesture = {}
+        XCTAssertFalse(store.canAddMotionSpanAtPlayhead)
+        store.cancelActiveGesture = nil
+        XCTAssertTrue(store.canAddMotionSpanAtPlayhead)
     }
 
     /// Held Control-K through the key monitor adds one span: the auto-repeat is swallowed.

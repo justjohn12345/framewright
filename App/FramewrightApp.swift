@@ -136,10 +136,11 @@ struct AppCommands: Commands {
             Button("Transition Duration…") { store.editTransitionDuration() }
                 .disabled(store.selectedTransitionID == nil)
             Divider()
-            // Control-K is handled by KeyboardController (like Delete), so a text field keeps it. The
-            // command refuses with the reason when there is no clip under the playhead.
+            // Control-K is handled by KeyboardController (like Delete), so a text field keeps it. It
+            // acts on the selected clip only: disabled without one, or when its track is locked (the
+            // key then says why in the status line).
             Button("Add Motion Span at Playhead  ⌃K") { store.addMotionSpanAtPlayhead() }
-                .disabled(store.isGestureActive)
+                .disabled(!store.canAddMotionSpanAtPlayhead)
             Divider()
             Button("Raise Gain 1 dB  ]") { store.nudgeGain(1) }
                 .disabled(store.selection.isEmpty)
