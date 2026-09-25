@@ -973,3 +973,71 @@ independently instead). Not started, per the brief: D1 (compact rows), D3 (windo
   headers: tracks) and on a trackpad (both axes); the vertical scroll bar's knob; dragging the divider above the
   timeline (the grip on hover, the monitors keeping 240 pt) and its double-click fit; the 1 pt alignment of clips
   under the ruler at several zooms; Control-K on a locked or hidden top track.
+
+## Ken Burns editor round (2026-09-25; user feedback on the C1 fix)
+Replaces the fix round's crop model of the Ken Burns editor (the window outline, `windowFraming`, the picture loader)
+with the placement-box model the user asked for. No engine change, no schema change; the "engine crop / schema 6"
+idea in the review's C1 text is dropped.
+- The model: the program monitor keeps showing the composed program at the playhead (every track, live through each
+  drag step). A box is the clip's placement at a span edge: the asset's picture (display size) fitted into the frame
+  as the compositor places a clip with identity values, scaled about its centre by the edge's composed scale, moved by
+  its x/y (sequence pixels from the frame's centre), turned clockwise by its rotation about its centre. Start is what
+  `getMotion(_:atEdgeOfSpan:atEnd: false)` composes to, End what it composes to at the end. A body drag moves the box
+  (its centre within 20 % of the frame beyond each edge, `KenBurnsModel.reachFraction`, or where it already was); a
+  corner drag scales it about its centre by the grabbed corner's movement along its (turned) diagonal, between 2 % and
+  10 frame widths (`minimumBoxFraction`, `maximumBoxFrames`); the rotation is the inspector's (there was and is no
+  rotation handle). The dragged box goes back as absolute values (`motion(for:picture:sequence:)`) and those through
+  `ProjectStore.relativeFraming` over the base read at the drag's start, so the inspector's absolute Start/End values
+  are what the box shows. The default new span is unchanged (Start the clip's placement, End 1.25 times larger about
+  the same centre: for a full-frame clip a box larger than the frame).
+- API (app): `KenBurnsModel.box(for:picture:sequence:) -> KenBurnsBox`, `motion(for:picture:sequence:) -> (framing,
+  rotationDegrees)`, `fittedSize(picture:sequence:)`; `KenBurnsBox` (centre, size, rotation; `corner(_:)`, `corners`,
+  `local(_:)`, `point(local:)`, `scaled(by:)`); `KenBurnsModel.start` / `end` are boxes (sequence pixels),
+  `box(_:)`, `startFraming` / `endFraming` the absolute placement, `pictureSize`; `applyDrag(_:origin:translation:)`
+  (no location; the origin is a box), `moved(_:by:)`, `resized(_:corner:by:)`, `reach(including:)`.
+  `KenBurnsModel.outlines` (`Outline`: clip, track name, box) lists every other video clip under the playhead on a
+  track that is not hidden (muted), at `clip.motion(at:)`, bottom track first; read on `setPlayhead(_:)` (the overlay
+  feeds it the program playhead) and on every model change (`update`), published only when it changes (a drag step
+  republishes nothing). `KenBurnsHit.target(at:start:end:)` takes boxes and tests corners, labels, edges and the inside
+  in each box's own axes. `KenBurnsModel.init` takes `playhead` (the outlines' time) and no picture loader.
+- The margin: `KenBurnsViewport(sequence:monitor:margin:)` fits the frame inside the monitor less 15 % of its width
+  and height on each side (`marginFraction`) and maps points both ways (`view(_:)`, `sequence(_:)`). The program
+  monitor is laid out by `ProgramMonitorLayout` (observes the store): closed, the picture fills the area as before;
+  open, the same `VEPreviewView` (same place in the tree, only its frame changes) is sized to the viewport's frame on a
+  dimmed margin, `KenBurnsOverlay` draws the frame's edge, the dashed outlines with track names, the arrow and the two
+  boxes over the whole area, and `KenBurnsControls` (the bar) sits under the picture. The HUD and a Fade or Gain span's
+  readout (`SpanReadout`) are overlays of the picture area. `ProgramMonitorHost` wraps the layout; `KenBurnsOverlayHost`
+  is gone.
+- Removed: `KenBurnsPictureLoader` (and its memory-pressure hook; it never used `ThumbnailCache`, so `MediaCaches` is
+  unchanged), `pictureBounds`, `pictureFrame`, `pictureSeconds`, the picture following the playhead, `staticFraming`,
+  `clipWindow`, `clipWindowCorners`, `windowCaption`, `windowFraming`, `absoluteFraming`, `rect(for:)`, `framing(for:)`,
+  `fittedPicture`, `largestRect`, `scaled`, `constrained`, `startRotation` / `endRotation`. Kept: the L8 failure memory
+  (`kenBurnsFailedSpan`): the editor can still fail to open (media not in the project, no picture) and would otherwise
+  rewrite the status line on every model change; its message now says Ken Burns does not know the picture's size.
+- Control-K (`ProjectStore.motionSpanTarget()`, `canAddMotionSpanAtPlayhead`, `MotionSpanRefusal`): Add Motion Span at
+  Playhead acts only on the selected video clip (a linked pair counts as its video clip) or the selected span's clip,
+  never another clip under the playhead. Nothing selected: "Select a clip first."; audio only: "Select a video clip
+  first: ..."; two video clips: "Select one video clip ... (2 are selected)."; its track locked: "“V2” is locked.". The
+  Clip menu item is disabled in those states (and during a gesture); where the playhead is is not part of that (a press
+  with the playhead off the clip says so). The clip context menu acts on the clicked clip, disabled on a locked track.
+  `motionSpanClip()` is gone.
+- Dividers (`PaneDivider`): the grab area is an AppKit view, `DividerHandleView` (via the private `DividerHandle`
+  representable): `mouseDown` / `mouseDragged` / `mouseUp` (the drag starts after a point, the translation is along
+  the axis since the press, positive right or down), a double-click on the second press, `acceptsFirstMouse`, a
+  tracking area for hover (the grip) and `cursorUpdate` for the pointer shape (`DividerCursor.cursorUpdate()` sets the
+  resize cursor even when it set it last). A drag cut off by the view leaving the window ends silently. The tooltip is
+  `PaneDivider(help:)` (a SwiftUI `.help` does not reach the AppKit view); `DividerCursor.frame` is the handle's bounds.
+  Cause of the user's report, as far as the test host shows it: the divider was a SwiftUI `DragGesture` with `onHover`
+  and `NSCursor.set()`; during source playback it was neither re-rendered nor replaced (0 body evaluations, 0
+  appear/disappear, hit testing of the gap unchanged, no cursor-rect invalidations, measured with a temporary probe),
+  while the source monitor beside it and the transport re-render at the display rate in the same hosting view. Real
+  mouse events cannot be posted to SwiftUI gestures in the test host (no accessibility trust; synthetic events do not
+  reach them), so the SwiftUI failure itself was not reproduced; the AppKit handle takes the press, drag and pointer
+  shape out of SwiftUI's event handling, and `PaneDividerTests` drives it through `NSWindow.sendEvent` while the source
+  and then the program plays.
+- Tests: `KenBurnsEditorTests` rewritten around boxes (the loader tests and the crop and window tests deleted);
+  `EffectLanesTimelineTests.testControlKActsOnlyOnTheSelectedClip` replaces
+  `testControlKSkipsALockedOrHiddenTopTrackAndAsksForOneClip`; `PaneDividerTests` (new);
+  `TimelineRedrawTests.testKenBurnsOutlinesFollowingThePlayheadRedrawNeitherTheTimelineNorTheBin` replaces the
+  landing-pictures test (0 timeline builds, 0 canvas draws, 0 tile bodies for 9 playhead steps with the editor open).
+- By hand: see `open-findings.md`, "Ken Burns editor round: by hand".

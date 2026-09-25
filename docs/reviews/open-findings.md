@@ -6,16 +6,21 @@ the full reports are in git history at the commits the table names.
 ## Effect lanes (2026-09-24 review, `2026-09-24-effect-lanes-review.md`)
 Closed in the fix round (see `integration-notes.md`, "Effect lanes review fix round"): C1 on the app side (the Ken
 Burns editor frames a placed clip inside its own window), H1-H4, M1-M8, L1-L11, D2 (the user-owned split) and test
-gaps 1-6. Still open:
-- C1's engine part, a user decision: the engine has no crop, so a zoom in on a picture in picture enlarges it about
-  its centre instead of cropping inside its box (a window quad on `VideoLayer`, a compositor scissor, schema 6).
+gaps 1-6. The Ken Burns editor round (2026-09-25, see `integration-notes.md`, "Ken Burns editor round") replaced C1's
+open engine part: the user chose the placement-box model (the editor moves, sizes and turns the clip's placement on
+the composed program; a span still composes onto the clip's static values), so there is no engine crop and no schema
+6. The same round closed two user reports: Control-K fell through to another track's clip when the selected clip's
+track was locked (it now acts on the selected clip only), and the divider between the source and program monitors
+could not be grabbed while the source played (the dividers take their drags in AppKit). Still open:
 - D1 (compact rows) and D3 (restoring the window frame): design items, not started.
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
 
 ## Keyframed Motion, Ken Burns and Photos drops (2026-09-24 review; report in git history at 3fcd6ac)
 Effect lanes round 2 replaced the keyframe-era app tests (`KeyframedMotionTests`, `MotionReviewTests`): the Ken Burns
-geometry, the picture loader (3), the press rules (12) and the loader's engine path now live in `KenBurnsEditorTests`,
+geometry, the picture loader (3), the press rules (12) and the loader's engine path now live in `KenBurnsEditorTests`
+(the Ken Burns editor round removed the picture loader, and finding 3's tests with it: the editor draws over the
+program monitor's own picture),
 the static values and matching in `StaticMotionTests`, held Control-K (15) in `EffectLanesTimelineTests`; the tests of
 the removed range fields, markers and Apply (11, 16-18, 25) went with the UI they covered (see "Effect lanes round 2").
 Effect lanes round 1 removed the keyframe API with its tests (`KeyframeInsertTests.cpp`, `KeyframeEditTests.cpp`,
@@ -159,6 +164,25 @@ test host cannot drive:
   focus loss committing the range fields (`NumericField`); Escape with a text field focused leaving the editor open.
 - `VEEnginePlaybackTests.testPlayStartLatencyThroughTheFacade` on AirPods or another Bluetooth output: it skips and
   its message and log line give the measured latency (the decision is read from CoreAudio at run time).
+
+## Ken Burns editor round: by hand
+The model, the geometry, the margin and the store are tested with direct calls (`KenBurnsEditorTests`), the dividers
+through `NSWindow.sendEvent` (`PaneDividerTests`); what the test host cannot drive or see:
+- A picture in picture at 30 % in the lower right: select its Motion span, drag the End box to the top of the frame;
+  the monitor shows the composed program (the other tracks too) and follows every drag step; the inspector's End
+  Position Y matches; play the span: the clip slides up. A corner drag of either box scales about its centre.
+- A full-frame clip with the default push in: the End box is 1.25 times the frame, its corners and label in the dimmed
+  margin, grabbable; the frame's edge a thin line; closing the editor (Esc, Close, deselecting) gives the monitor its
+  full size back; the playback HUD and a Fade or Gain span's readout still sit at the top-left.
+- A zoomed-in background clip (V1 at 150 %) under a picture in picture on V2: V1's dashed outline reaches past the
+  frame into the margin, labelled "V1"; hiding V1 removes it; scrubbing moves the outlines with the playhead.
+- A turned clip (rotation in the inspector): its boxes, labels and handles turn with it; a corner drag scales along
+  the turned diagonal.
+- Control-K with V2 locked and its clip selected: nothing is added (no span on V1's clip), the status line says
+  "“V2” is locked.", and Clip > Add Motion Span at Playhead is disabled; with nothing selected, "Select a clip first.".
+- The divider between the source and program monitors while the source plays, then while the program plays: the
+  resize cursor on hover, a smooth drag, the double-click and the grip on the divider above the timeline, the
+  tooltip on it; the dividers beside the bin and the inspector.
 
 ## Test gaps that need media or a performance scheme (phase 7)
 - Gap 8, size estimate against a real export in quality mode: the estimate is a bits-per-pixel heuristic (labelled "≈");
