@@ -299,21 +299,53 @@ final class EffectLanesTimelineTests: XCTestCase {
         XCTAssertFalse(store.engine.isCoalescing)
     }
 
-    func testARefusedDragSaysWhereTheLaneIsFree() async throws {
+    /// Review L4: a span's drags stop at the next span of its lane (the free space around it), not at
+    /// the clip's edge: a fast drag into a neighbour ends touching it instead of short of it.
+    func testASpanDragStopsAtTheNextSpanOfItsLane() async throws {
         let clip = try await longClip()
         let first = try addSpan(.motion, lane: 1, clip: clip, 30, 60) // 1 s - 2 s
         try addSpan(.motion, lane: 1, clip: clip, 150, 210) // 5 s - 7 s
         store.refreshModel()
         let gestures = TimelineGestureController(store: store)
-        // Pull the first span's end into the second: refused, the free range named.
+        // Pull the first span's end into the second in one step: it stops touching it.
         let tail = try lanePoint(v1, lane: 1, at: 2)
         drag(gestures, from: CGPoint(x: tail.x - 1, y: tail.y), to: [try lanePoint(v1, lane: 1, at: 6)], end: false)
-        XCTAssertEqual(store.engine.spanInfo(first)?.end, frames(60), "refused: unchanged")
-        let message = try XCTUnwrap(store.statusMessage)
-        XCTAssertTrue(message.contains("The nearest free range is"), message)
-        XCTAssertTrue(message.contains("00:00:05:00"), message)
+        XCTAssertEqual(store.engine.spanInfo(first)?.end, frames(150), "up to the next span")
+        XCTAssertEqual(store.statusMessage, "Motion: 00:00:01:00 – 00:00:05:00")
         gestures.ended()
+        store.undo()
+        // The body flung past it: it ends where the next one starts.
+        drag(gestures, from: try lanePoint(v1, lane: 1, at: 1.5), to: [try lanePoint(v1, lane: 1, at: 8.5)])
+        XCTAssertEqual(store.engine.spanInfo(first)?.start, frames(120))
+        XCTAssertEqual(store.engine.spanInfo(first)?.end, frames(150))
+        store.undo()
         XCTAssertEqual(store.engine.spanInfo(first)?.end, frames(60))
+        // And the head of the second, pulled back into the first, stops at its end.
+        let head = try lanePoint(v1, lane: 1, at: 5)
+        drag(gestures, from: CGPoint(x: head.x + 1, y: head.y), to: [try lanePoint(v1, lane: 1, at: 0.5)])
+        XCTAssertEqual(store.engine.spanInfo(first)?.end, frames(60))
+        XCTAssertEqual(store.clips[clip]?.spans.first { $0.spanID != first && $0.lane == 1 }?.start, frames(60))
+    }
+
+    /// Review L5: a fade out's bar cannot slide (its end stays on its clip's end): refused up front, as
+    /// a fade in's start is, with the edge to drag instead.
+    func testAFadeOutsBarDoesNotSlide() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let clip = try place(movie, at: 0, from: 0, to: 2, video: v1)
+        XCTAssertTrue(store.addFade(at: .end, of: clip, frames: 15))
+        let fade = try XCTUnwrap(store.selectedSpanID)
+        store.refreshModel()
+        let gestures = TimelineGestureController(store: store)
+        drag(gestures, from: try lanePoint(v1, lane: 0, at: 1.75), to: [try lanePoint(v1, lane: 0, at: 1.3)], end: false)
+        XCTAssertFalse(store.engine.isCoalescing, "no group opens")
+        XCTAssertEqual(store.statusMessage, "A fade out ends on its clip's end: drag its left edge to change its length.")
+        gestures.ended()
+        XCTAssertEqual(store.engine.spanInfo(fade)?.start, frames(45))
+        XCTAssertEqual(store.engine.spanInfo(fade)?.end, frames(60))
+        // Its left edge still sets its length.
+        let edge = try lanePoint(v1, lane: 0, at: 1.5)
+        drag(gestures, from: CGPoint(x: edge.x + 1, y: edge.y), to: [CGPoint(x: edge.x - 24, y: edge.y)])
+        XCTAssertEqual(store.engine.spanInfo(fade)?.start, frames(30))
     }
 
     // MARK: Creating spans

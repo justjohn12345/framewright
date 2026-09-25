@@ -517,19 +517,29 @@ final class TimelineGestureController: ObservableObject {
                 store.statusMessage = "A fade in starts on its clip's start: drag its right edge to change its length."
                 return false
             }
+            if span.style == .fadeOut, head == nil {
+                // Sliding it would take its end off the clip's end, which only a clip following can
+                // take (review L5): its edges change it.
+                store.statusMessage = "A fade out ends on its clip's end: drag its left edge to change its length."
+                return false
+            }
             store.engine.beginCoalescing(withKey: Self.transitionGroup)
             drag = .transitionRange(id: id, head: head, origin: origin, start: span.start, end: span.end, cut: span.cut,
                                     clipStart: clip.start, fadeIn: fadeIn)
             return true
         }
+        // The free space of its lane around it within its clip (review L4: limited by the clip
+        // alone, a fast drag towards a neighbour span was refused and stopped short of it).
+        let neighbours = model.spans(ofClip: span.clipID, lane: span.lane).filter { $0.id != id }
+        let lower = neighbours.filter { $0.end <= span.start + 1e-9 }.map(\.end).reduce(clip.start, max)
+        let upper = neighbours.filter { $0.start >= span.end - 1e-9 }.map(\.start).reduce(clip.end, min)
         if let head {
             store.engine.beginCoalescing(withKey: Self.spanTrimGroup)
-            drag = .trimmingSpan(id: id, head: head, origin: origin, start: span.start, end: span.end, lower: clip.start,
-                                 upper: clip.end)
+            drag = .trimmingSpan(id: id, head: head, origin: origin, start: span.start, end: span.end, lower: lower,
+                                 upper: upper)
         } else {
             store.engine.beginCoalescing(withKey: Self.spanMoveGroup)
-            drag = .movingSpan(id: id, origin: origin, start: span.start, end: span.end, lower: clip.start,
-                               upper: clip.end)
+            drag = .movingSpan(id: id, origin: origin, start: span.start, end: span.end, lower: lower, upper: upper)
         }
         return true
     }
