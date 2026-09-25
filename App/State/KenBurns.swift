@@ -3,53 +3,41 @@ import CoreMedia
 import Foundation
 import FramewrightEngine
 
-/// The Ken Burns editor (Final Cut Pro's "Ken Burns" crop mode) of one Motion span: a start
-/// rectangle (green) and an end rectangle (red) drawn over the whole picture on the program
-/// monitor. Each rectangle is the part of the picture that fills the frame at that edge of the span
-/// (its start, and its end, where the end framing is reached).
+/// The Ken Burns editor of one Motion span, drawn over the program monitor: the monitor keeps
+/// showing the composed program at the playhead (every track, re-rendered live as a drag edits the
+/// span), fitted inside a margin that stands for the space off the frame (`KenBurnsViewport`), and
+/// the editor draws the clip's placement box at the span's start (green) and at its end (red) over
+/// it, plus a thin outline of every other visible clip's box at the playhead.
+///
+/// A box is where the clip's picture sits in the frame at that edge: the picture fitted into the
+/// frame as the compositor places a clip with identity values, scaled about its centre by the
+/// edge's scale, moved by its position and turned by its rotation (`box(for:picture:sequence:)`).
+/// The edge's values are its composed Motion (the clip's static values with every span that has
+/// started applied, this one at that edge, `VEClipInfo.getMotion(_:atEdgeOfSpan:)`), so a picture in
+/// picture at 30 % in the lower right shows its Start box around the picture in the lower right.
+/// Dragging a box's body moves it (position), dragging a corner scales it about its centre (the
+/// aspect stays the picture's); its rotation is the inspector's. A dragged box goes back to the
+/// absolute values that place the picture there (`motion(for:picture:sequence:)`) and those to the
+/// span's relative values over what the rest of the clip composes to there
+/// (`ProjectStore.relativeFraming`), so the inspector's absolute values are what the box shows.
 ///
 /// Bound to the span and live: it opens when a Motion span is selected (the store keeps it keyed by
-/// `spanID`) and every drag of a rectangle or a corner writes the span's values as it moves, inside
-/// one coalescing group (`beginDrag`, `applyDrag`, `endDrag`: one undo step per drag; Escape mid-drag
-/// cancels it through the group, `cancelDrag`). There is no Apply or Cancel: Undo reverts a drag.
-/// The Start, End and Duration fields edit the span's range (`commitRange`, limited to the clip and
-/// the free space of its lane), Smoothing its interpolation, Swap exchanges the two framings (one
-/// step), and the neighbour toggles make the span continue the previous clip's last frame or lead
-/// into the next clip's first frame (`VEEngine.matchSpanEdge`; turning one off gives that edge the
-/// clip's own framing back).
+/// `spanID`) and every drag of a box or a corner writes the span's values as it moves, inside one
+/// coalescing group (`beginDrag`, `applyDrag`, `endDrag`: one undo step per drag; Escape mid-drag
+/// cancels it through the group, `cancelDrag`, and the rest of that gesture writes nothing). There is
+/// no Apply or Cancel: Undo reverts a drag. The Start, End and Duration fields edit the span's range
+/// (`commitRange`, limited to the clip and the free space of its lane), Smoothing its
+/// interpolation, Swap exchanges the two placements (one step), and the neighbour toggles make the
+/// span continue the previous clip's last frame or lead into the next clip's first frame
+/// (`VEEngine.matchSpanEdge`; turning one off gives that edge the clip's own placement back).
 ///
-/// The rectangles are never cached across edits: span values are relative and cumulative (a span
-/// applies on top of what the rest of the clip composes to, earlier spans' held end values
-/// included), so an edit of an earlier span, an undo or a trim moves what this span shows while its
-/// own values stay. Every model change reaches `update(clip:previous:next:)`, which re-reads both
-/// framings (`VEClipInfo.getMotion(_:atEdgeOfSpan:)`) and the bases the span applies onto
-/// (`getBaseValues`). A drag converts a rectangle to a framing and the framing to the span's
-/// relative values over the base read when the drag started (the base does not depend on the
-/// span's own values, so every step of the drag is exact).
-///
-/// The picture under the rectangles follows the playhead, as in FCP: the clip's unanimated frame at
-/// the playhead, clamped to the span's range (its first frame before it, its last frame after it),
-/// loaded and paced by `KenBurnsPictureLoader`.
-///
-/// Geometry, in sequence pixels (origin at the frame's top-left corner, +y down): the picture is
-/// shown as the compositor fits it at scale 1 and no offset (`pictureBounds`). A rectangle keeps
-/// the sequence's aspect ratio (FCP locks it too), stays inside the picture while it is dragged (so
-/// the frame never shows past the picture's edge) and is at least a tenth of the frame wide (a
-/// 1000 % zoom). The clip's rotation is kept: a rectangle frames the unrotated picture and the frame
-/// shows it turned by the rotation at that edge of the span.
-///
-/// A clip placed smaller, off centre or turned (its static framing S, e.g. a picture in picture at
-/// 30 % in the lower right) is framed inside its own window, as Final Cut's Ken Burns crops the
-/// clip's own picture within the clip's framing: the window is the frame box through S
-/// (`clipWindow`, outlined on the monitor with `windowCaption`), and a rectangle is the part of the
-/// picture that fills that window. An edge's composed motion M is expressed relative to S,
-/// Φ = (R(-θs)(xm - xs, ym - ys) / ss, sm / ss, θm - θs) (`windowFraming`), and a rectangle from
-/// `rect(for: Φ)`; a dragged rectangle's Φ' goes back to the frame as
-/// M' = (xs + ss R(θs) Φ'.xy, ss Φ'.scale, θs + Φ'.rotation) (`absoluteFraming`) and then to the
-/// span's relative values over its base (`ProjectStore.relativeFraming`). For a clip with no static
-/// framing (S the identity) Φ = M. The engine has no crop: a zoom in on a picture in picture
-/// enlarges it about its centre rather than cropping inside its window (a user decision, see the
-/// effect lanes review, C1).
+/// The boxes are never cached across edits: span values are relative and cumulative (a span applies
+/// on top of what the rest of the clip composes to, earlier spans' held end values included), so an
+/// edit of an earlier span, an undo or a trim moves what this span shows while its own values stay.
+/// Every model change reaches `update(span:clip:previous:next:)`, which re-reads both boxes and the
+/// other clips' outlines. A drag converts a box to absolute values and those to relative values over
+/// the base read when the drag started (the base does not depend on the span's own values, so every
+/// step of the drag is exact).
 @MainActor
 final class KenBurnsModel: ObservableObject {
     enum Framing: CaseIterable {
@@ -58,7 +46,7 @@ final class KenBurnsModel: ObservableObject {
     }
 
     enum Corner: CaseIterable {
-        case topLeft, topRight, bottomLeft, bottomRight
+        case topLeft, topRight, bottomRight, bottomLeft
     }
 
     /// The Start, End and Duration fields.
@@ -86,39 +74,50 @@ final class KenBurnsModel: ObservableObject {
         }
     }
 
+    /// Another visible clip's placement box at the playhead, outlined thinly with its track's name.
+    struct Outline: Equatable {
+        let clipID: VEClipID
+        let trackName: String
+        let box: KenBurnsBox
+    }
+
     /// The interpolations the editor offers (FCP's smoothing choices).
     static let interpolations: [VEKeyframeInterpolation] = [.easeInOut, .easeOut, .easeIn, .linear]
-    /// The smallest rectangle, as a fraction of the frame's width (a 1000 % zoom).
-    static let minimumWidthFraction = 0.1
-    /// The coalescing group of a rectangle drag.
+    /// The smallest box a corner drag makes, as a fraction of the frame's width.
+    static let minimumBoxFraction: CGFloat = 0.02
+    /// The largest box a corner drag makes, in frame widths (a 1000 % zoom of a full-frame clip).
+    static let maximumBoxFrames: CGFloat = 10
+    /// How far a box's centre may be dragged off the frame, as a fraction of the frame's size on
+    /// each side: within the margin the editor shows around the frame (`KenBurnsViewport`), so a
+    /// dragged box can always be grabbed again.
+    static let reachFraction: CGFloat = 0.2
+    /// The coalescing group of a box drag.
     static let dragGroup = "kenBurns.drag"
     /// The caption shown while the span ends before its clip does (hold after).
-    static let holdCaption = "After the move its end framing holds until the clip ends; a later move on the "
+    static let holdCaption = "After the move its end placement holds until the clip ends; a later move on the "
         + "clip starts from it"
 
     private unowned let store: ProjectStore
     let spanID: VESpanID
     /// The span and its clip as they are now (every model change passes through `update`, which
-    /// publishes them: the caption, the neighbour toggles and the picture's time read them).
+    /// publishes them: the caption and the neighbour toggles read them).
     @Published private(set) var span: VEEffectSpan
     @Published private(set) var clip: VEClipInfo
-    /// The clip's static framing (S): the window the rectangles frame the picture in.
-    @Published private(set) var staticFraming: VEVideoParams
     let assetID: VEAssetID
     let sequenceSize: CGSize
     let frameDuration: CMTime
-    /// The picture as the compositor fits it into the frame at scale 1, no offset.
-    let pictureBounds: CGRect
-    /// Loads the picture under the rectangles.
-    let picture: KenBurnsPictureLoader?
+    /// The clip's picture size (the asset's display size, its container rotation applied): what the
+    /// boxes fit into the frame.
+    let pictureSize: CGSize
 
-    /// The rectangles as the span's edges show them (or as a drag in progress has put them).
-    @Published private(set) var start: CGRect = .zero
-    @Published private(set) var end: CGRect = .zero
-    /// The rotation the picture has inside the clip's window at each edge (the edge's rotation less
-    /// the static one; a rectangle's framing turns the picture by it).
-    @Published private(set) var startRotation: Double = 0
-    @Published private(set) var endRotation: Double = 0
+    /// The boxes as the span's edges show them (or as a drag in progress has put them), in
+    /// sequence pixels.
+    @Published private(set) var start: KenBurnsBox
+    @Published private(set) var end: KenBurnsBox
+    /// The other visible clips' boxes at `outlineTime` (the program playhead).
+    @Published private(set) var outlines: [Outline] = []
+    /// The time the outlines are read at: the program playhead (the monitor shows that frame).
+    private(set) var outlineTime: CMTime
     /// How the span moves (its interpolation).
     @Published private(set) var interpolation: VEKeyframeInterpolation
     /// The span's range, re-published with every change of it (the fields show it).
@@ -127,11 +126,9 @@ final class KenBurnsModel: ObservableObject {
     /// The clip touching this one's start / end on its track (nil when there is none).
     @Published private(set) var previous: Neighbour?
     @Published private(set) var next: Neighbour?
-    /// The program playhead (the picture follows it).
-    @Published private(set) var playhead: CMTime
     /// Why the last edit was refused or limited (nil when it went as asked).
     @Published private(set) var note: String?
-    /// A rectangle drag is in progress (its coalescing group is open).
+    /// A box drag is in progress (its coalescing group is open).
     @Published private(set) var isDragging = false
 
     /// The drag in progress was cancelled (Escape, Undo, or an edit that ended its group): the rest
@@ -157,9 +154,9 @@ final class KenBurnsModel: ObservableObject {
     }
 
     /// Nil when the span is not a Motion span of a video clip with a picture; `reason` says why.
+    /// `playhead` is the program playhead (the outlines' time).
     init?(store: ProjectStore, span: VEEffectSpan, clip: VEClipInfo, asset: VEAssetInfo, sequence: VESequenceInfo,
-          playhead: CMTime, picture: KenBurnsPictureLoader? = nil, previous: VEClipInfo? = nil,
-          next: VEClipInfo? = nil, reason: inout String) {
+          playhead: CMTime, previous: VEClipInfo? = nil, next: VEClipInfo? = nil, reason: inout String) {
         if let problem = Self.problem(span: span, clip: clip, asset: asset, sequence: sequence) {
             reason = problem
             return nil
@@ -171,29 +168,29 @@ final class KenBurnsModel: ObservableObject {
         self.clip = clip
         assetID = asset.assetID
         sequenceSize = CGSize(width: sequence.width, height: sequence.height)
+        pictureSize = CGSize(width: asset.width, height: asset.height)
         frameDuration = frame
-        self.picture = picture
-        self.playhead = playhead
+        outlineTime = playhead
         interpolation = span.interpolation
         rangeStart = span.start
         rangeEnd = span.end
-        pictureBounds = Self.fittedPicture(width: Double(asset.width), height: Double(asset.height), in: sequenceSize)
-        staticFraming = clip.videoParams
+        start = KenBurnsBox(center: .zero, size: .zero, rotationDegrees: 0)
+        end = KenBurnsBox(center: .zero, size: .zero, rotationDegrees: 0)
         self.previous = Neighbour(previous, atEnd: true, frameDuration: frame)
         self.next = Neighbour(next, atEnd: false, frameDuration: frame)
-        readFramings()
+        readBoxes()
+        readOutlines()
     }
 
     // MARK: The span and its clip
 
-    /// The span, its clip or a neighbour changed (an edit, an undo, a trim, an edit of an earlier
-    /// span): re-read everything the editor shows. A drag in progress keeps its rectangles.
+    /// The span, its clip, a neighbour or another clip changed (an edit, an undo, a trim, an edit of
+    /// an earlier span, a track hidden): re-read everything the editor shows. A drag in progress
+    /// keeps its boxes.
     func update(span: VEEffectSpan, clip: VEClipInfo, previous: VEClipInfo?, next: VEClipInfo?) {
         guard span.spanID == spanID else { return }
         self.span = span
         self.clip = clip
-        let framing = clip.videoParams
-        if !Self.sameParams(framing, staticFraming) { staticFraming = framing }
         if interpolation != span.interpolation { interpolation = span.interpolation }
         if rangeStart != span.start { rangeStart = span.start }
         if rangeEnd != span.end { rangeEnd = span.end }
@@ -201,11 +198,12 @@ final class KenBurnsModel: ObservableObject {
         let after = Neighbour(next, atEnd: false, frameDuration: frameDuration)
         if before != self.previous { self.previous = before }
         if after != self.next { self.next = after }
-        if !isDragging { readFramings() }
+        if !isDragging { readBoxes() }
+        readOutlines()
     }
 
-    /// The Motion an edge of the span shows (what a Ken Burns move sets), or the clip's framing
-    /// there if the engine cannot say.
+    /// The Motion an edge of the span shows (static values with every started span composed on, this
+    /// one at that edge), or the clip's Motion there if the engine cannot say.
     private func edgeMotion(atEnd: Bool) -> VEVideoParams {
         var motion = VEVideoParams()
         if clip.getMotion(&motion, atEdgeOfSpan: spanID, atEnd: atEnd, frameDuration: frameDuration) {
@@ -214,134 +212,68 @@ final class KenBurnsModel: ObservableObject {
         return clip.motion(at: atEnd ? CMTimeSubtract(span.end, frameDuration) : span.start)
     }
 
-    /// Re-reads both rectangles from the span's edges, inside the clip's window.
-    private func readFramings() {
-        let first = Self.windowFraming(edgeMotion(atEnd: false), in: staticFraming)
-        let last = Self.windowFraming(edgeMotion(atEnd: true), in: staticFraming)
-        let startRect = Self.rect(for: first.framing, sequence: sequenceSize, rotationDegrees: first.rotationDegrees)
-        let endRect = Self.rect(for: last.framing, sequence: sequenceSize, rotationDegrees: last.rotationDegrees)
-        if start != startRect { start = startRect }
-        if end != endRect { end = endRect }
-        if startRotation != first.rotationDegrees { startRotation = first.rotationDegrees }
-        if endRotation != last.rotationDegrees { endRotation = last.rotationDegrees }
+    /// Re-reads both boxes from the span's edges.
+    private func readBoxes() {
+        let first = Self.box(for: edgeMotion(atEnd: false), picture: pictureSize, sequence: sequenceSize)
+        let last = Self.box(for: edgeMotion(atEnd: true), picture: pictureSize, sequence: sequenceSize)
+        if start != first { start = first }
+        if end != last { end = last }
     }
 
-    /// The framings the rectangles give on screen (position and scale, the clip's static framing
-    /// included: what the monitor shows at that edge).
+    /// The placements the boxes give (position and scale, absolute: what the monitor shows at that
+    /// edge and the inspector's Start and End values).
     var startFraming: VEMotionFraming {
-        absoluteFraming(start, rotationDegrees: startRotation)
+        Self.motion(for: start, picture: pictureSize, sequence: sequenceSize).framing
     }
 
     var endFraming: VEMotionFraming {
-        absoluteFraming(end, rotationDegrees: endRotation)
+        Self.motion(for: end, picture: pictureSize, sequence: sequenceSize).framing
     }
 
-    /// The on-screen framing that makes `rect` fill the clip's window.
-    private func absoluteFraming(_ rect: CGRect, rotationDegrees: Double) -> VEMotionFraming {
-        Self.absoluteFraming(Self.framing(for: rect, sequence: sequenceSize, rotationDegrees: rotationDegrees),
-                             in: staticFraming)
+    func box(_ which: Framing) -> KenBurnsBox {
+        which == .start ? start : end
     }
 
-    // MARK: The clip's window
-
-    /// The clip's window: the frame box through its static framing, before its rotation (centre and
-    /// size, in sequence pixels); nil for a clip without a static framing (it fills the frame).
-    var clipWindow: CGRect? {
-        guard !Self.isIdentity(staticFraming) else { return nil }
-        let scale = staticFraming.scale
-        let size = CGSize(width: sequenceSize.width * scale, height: sequenceSize.height * scale)
-        return CGRect(x: sequenceSize.width / 2 + staticFraming.x - size.width / 2,
-                      y: sequenceSize.height / 2 + staticFraming.y - size.height / 2, width: size.width,
-                      height: size.height)
-    }
-
-    /// The window's corners (top-left, top-right, bottom-right, bottom-left) turned by the static
-    /// rotation about its centre, as the compositor turns the clip; empty without a window.
-    var clipWindowCorners: [CGPoint] {
-        guard let window = clipWindow else { return [] }
-        let theta = staticFraming.rotationDegrees * .pi / 180
-        let centre = CGPoint(x: window.midX, y: window.midY)
-        return [CGPoint(x: window.minX, y: window.minY), CGPoint(x: window.maxX, y: window.minY),
-                CGPoint(x: window.maxX, y: window.maxY), CGPoint(x: window.minX, y: window.maxY)].map { corner in
-            let dx = Double(corner.x - centre.x)
-            let dy = Double(corner.y - centre.y)
-            return CGPoint(x: Double(centre.x) + cos(theta) * dx - sin(theta) * dy,
-                           y: Double(centre.y) + sin(theta) * dx + cos(theta) * dy)
-        }
-    }
-
-    /// What the window outline's caption says ("Inside the clip's framing: 30 %, lower right");
-    /// nil without a window.
-    var windowCaption: String? {
-        Self.windowCaption(for: staticFraming)
-    }
-
-    static func windowCaption(for framing: VEVideoParams) -> String? {
-        guard !isIdentity(framing) else { return nil }
-        let percent = framing.scale * 100
-        let scaleText = abs(percent - percent.rounded()) < 0.05
-            ? String(Int(percent.rounded())) : String(format: "%.1f", percent)
-        var parts = ["\(scaleText) %"]
-        let horizontal = framing.x > 0.5 ? "right" : framing.x < -0.5 ? "left" : nil
-        let vertical = framing.y > 0.5 ? "lower" : framing.y < -0.5 ? "upper" : nil
-        switch (vertical, horizontal) {
-        case let (v?, h?): parts.append("\(v) \(h)")
-        case let (v?, nil): parts.append(v == "lower" ? "below centre" : "above centre")
-        case let (nil, h?): parts.append("\(h) of centre")
-        case (nil, nil): parts.append("centred")
-        }
-        let degrees = framing.rotationDegrees
-        if abs(degrees) > 1e-9 {
-            let text = abs(degrees - degrees.rounded()) < 0.05 ? String(Int(degrees.rounded()))
-                : String(format: "%.1f", degrees)
-            parts.append("turned \(text)°")
-        }
-        return "Inside the clip's framing: " + parts.joined(separator: ", ")
-    }
-
-    /// No static framing: centred, full size, unturned.
-    static func isIdentity(_ framing: VEVideoParams) -> Bool {
-        framing.x == 0 && framing.y == 0 && framing.scale == 1 && framing.rotationDegrees == 0
-    }
-
-    private static func sameParams(_ a: VEVideoParams, _ b: VEVideoParams) -> Bool {
-        a.x == b.x && a.y == b.y && a.scale == b.scale && a.rotationDegrees == b.rotationDegrees
-    }
-
-    /// `motion` (an edge's composed framing, as the monitor shows it) relative to the clip's window
-    /// `window` (its static framing S): Φ = (R(-θs)(xm - xs, ym - ys) / ss, sm / ss), and the
-    /// rotation inside the window θm - θs. The identity window gives `motion` back.
-    static func windowFraming(_ motion: VEVideoParams,
-                              in window: VEVideoParams) -> (framing: VEMotionFraming, rotationDegrees: Double) {
-        let scale = windowScale(window)
-        let theta = window.rotationDegrees * .pi / 180
-        let dx = motion.x - window.x
-        let dy = motion.y - window.y
-        let x = (cos(theta) * dx + sin(theta) * dy) / scale
-        let y = (-sin(theta) * dx + cos(theta) * dy) / scale
-        return (VEMotionFraming(x: x, y: y, scale: motion.scale / scale),
-                motion.rotationDegrees - window.rotationDegrees)
-    }
-
-    /// The inverse of `windowFraming`: the on-screen framing of `framing` inside `window`,
-    /// M = (xs + ss R(θs) Φ.xy, ss Φ.scale).
-    static func absoluteFraming(_ framing: VEMotionFraming, in window: VEVideoParams) -> VEMotionFraming {
-        let scale = windowScale(window)
-        let theta = window.rotationDegrees * .pi / 180
-        let x = window.x + scale * (cos(theta) * framing.x - sin(theta) * framing.y)
-        let y = window.y + scale * (sin(theta) * framing.x + cos(theta) * framing.y)
-        return VEMotionFraming(x: x, y: y, scale: scale * framing.scale)
-    }
-
-    /// The window's scale, 1 for a window of scale 0 (the clip is invisible; the span cannot change
-    /// that, `zeroScaleNote`), so the rectangles stay finite.
-    private static func windowScale(_ window: VEVideoParams) -> Double {
-        window.scale.isFinite && abs(window.scale) > 1e-12 ? window.scale : 1
-    }
-
-    /// The span ends before its clip does: its end framing holds after it (`holdCaption`).
+    /// The span ends before its clip does: its end placement holds after it (`holdCaption`).
     var caption: String? {
         span.end < clip.timelineEnd ? Self.holdCaption : nil
+    }
+
+    // MARK: The other clips
+
+    /// The program playhead moved: the other clips' outlines are read at it.
+    func setPlayhead(_ time: CMTime) {
+        guard time != outlineTime else { return }
+        outlineTime = time
+        readOutlines()
+    }
+
+    private func readOutlines() {
+        let found = Self.outlines(at: outlineTime, excluding: clip.clipID, store: store, sequence: sequenceSize)
+        if found != outlines { outlines = found }
+    }
+
+    /// The placement box of every video clip visible at `time` except `excluded` (the edited one):
+    /// clips under `time` on video tracks that are not hidden, whose media has a picture, bottom
+    /// track first, each at its composed Motion there (`VEClipInfo.motion(at:)`).
+    static func outlines(at time: CMTime, excluding excluded: VEClipID, store: ProjectStore,
+                         sequence: CGSize) -> [Outline] {
+        var found: [Outline] = []
+        for trackID in store.sequence.videoTrackIDs.map(\.int64Value) {
+            guard let track = store.track(trackID), !track.muted else { continue }
+            let under = store.clips.values.filter {
+                $0.trackID == trackID && $0.clipID != excluded && $0.timelineStart <= time && time < $0.timelineEnd
+            }
+            for clip in under.sorted(by: { $0.timelineStart < $1.timelineStart }) {
+                guard let asset = store.asset(clip.assetID), asset.hasVideo, asset.width > 0, asset.height > 0 else {
+                    continue
+                }
+                let picture = CGSize(width: asset.width, height: asset.height)
+                found.append(Outline(clipID: clip.clipID, trackName: track.name,
+                                     box: box(for: clip.motion(at: time), picture: picture, sequence: sequence)))
+            }
+        }
+        return found
     }
 
     // MARK: Writing
@@ -375,22 +307,25 @@ final class KenBurnsModel: ObservableObject {
 
     // MARK: Drags
 
-    /// A drag on the overlay: `target` (a rectangle's body or corner, `KenBurnsHit`) grabbed with the
-    /// rectangle at `origin`, now `translation` from where it started and at `location` (sequence
-    /// pixels). The first step that moves opens the drag's coalescing group; every step writes the
-    /// span's values inside it. A drag that has not moved changes nothing. Refused during another
-    /// gesture (a timeline drag): nothing happens and the note says why.
-    func applyDrag(_ target: KenBurnsHit.Target, origin: CGRect, translation: CGSize, location: CGPoint) {
+    /// A drag on the overlay: `target` (a box's body or corner, `KenBurnsHit`) grabbed with the box
+    /// at `origin`, now `translation` (sequence pixels) from where it started. A body drag moves the
+    /// box (its centre stays within `reachFraction` of the frame, or where it already was); a corner
+    /// drag scales it about its centre by how far the grabbed corner moved along its diagonal (the
+    /// aspect stays, between `minimumBoxFraction` and `maximumBoxFrames` of the frame's width). The
+    /// first step that moves opens the drag's coalescing group; every step writes the span's values
+    /// inside it. A drag that has not moved changes nothing. Refused during another gesture (a
+    /// timeline drag): nothing happens and the note says why.
+    func applyDrag(_ target: KenBurnsHit.Target, origin: KenBurnsBox, translation: CGSize) {
         guard translation != .zero, !dragCancelled else { return }
         if !isDragging, !beginDrag() { return }
-        let rect: CGRect
+        let box: KenBurnsBox
         switch target {
         case .body:
-            rect = constrained(origin.offsetBy(dx: translation.width, dy: translation.height))
+            box = moved(origin, by: translation)
         case let .corner(_, corner):
-            rect = resized(origin, corner: corner, to: location)
+            box = resized(origin, corner: corner, by: translation)
         }
-        write(target.framing, rect)
+        write(target.framing, box)
     }
 
     /// Opens the drag's coalescing group (one undo step) and makes Escape cancel it; false (with the
@@ -415,16 +350,16 @@ final class KenBurnsModel: ObservableObject {
         return true
     }
 
-    /// Writes one rectangle as a step of the drag.
-    private func write(_ which: Framing, _ rect: CGRect) {
+    /// Writes one box as a step of the drag.
+    private func write(_ which: Framing, _ box: KenBurnsBox) {
         guard isDragging, let base = dragBase else { return }
-        let framing = absoluteFraming(rect, rotationDegrees: which == .start ? startRotation : endRotation)
+        let framing = Self.motion(for: box, picture: pictureSize, sequence: sequenceSize).framing
         guard let (from, to) = values(start: which == .start ? framing : nil, end: which == .end ? framing : nil,
                                       base: base) else {
             note = Self.zeroScaleNote
             return
         }
-        if which == .start { start = rect } else { end = rect }
+        if which == .start { start = box } else { end = box }
         let result = store.engine.performInCoalescingGroup(Self.dragGroup) {
             self.store.engine.setSpanValues(self.spanID, start: from, end: to)
         }
@@ -435,7 +370,7 @@ final class KenBurnsModel: ObservableObject {
             // rest of the gesture is ignored.
             finishDrag()
             dragCancelled = true
-            readFramings()
+            readBoxes()
         }
     }
 
@@ -448,7 +383,7 @@ final class KenBurnsModel: ObservableObject {
             store.engine.endCoalescing()
         }
         finishDrag()
-        readFramings()
+        readBoxes()
     }
 
     /// Escape (or Undo) mid-drag, or a drag the system abandoned: reverts what the drag did. The
@@ -460,7 +395,7 @@ final class KenBurnsModel: ObservableObject {
         }
         finishDrag()
         dragCancelled = true
-        readFramings()
+        readBoxes()
     }
 
     /// The gesture went away without a release (the system abandoned it): a drag in progress is
@@ -476,6 +411,41 @@ final class KenBurnsModel: ObservableObject {
         store.cancelActiveGesture = nil
     }
 
+    /// Where a box's centre may be dragged: the frame and `reachFraction` of it around it, widened to
+    /// include `center` (a box already further out is not pulled in by the first step).
+    func reach(including center: CGPoint) -> CGRect {
+        let frame = CGRect(origin: .zero, size: sequenceSize)
+        let reach = frame.insetBy(dx: -sequenceSize.width * Self.reachFraction,
+                                  dy: -sequenceSize.height * Self.reachFraction)
+        return reach.union(CGRect(origin: center, size: .zero))
+    }
+
+    /// `origin` moved by `translation`, its centre kept within `reach`.
+    func moved(_ origin: KenBurnsBox, by translation: CGSize) -> KenBurnsBox {
+        let bounds = reach(including: origin.center)
+        var box = origin
+        box.center = CGPoint(x: min(max(origin.center.x + translation.width, bounds.minX), bounds.maxX),
+                             y: min(max(origin.center.y + translation.height, bounds.minY), bounds.maxY))
+        return box
+    }
+
+    /// `origin` scaled about its centre by dragging `corner` by `translation`: the factor is how far
+    /// the corner moved along the box's diagonal through it (the aspect stays), limited to boxes
+    /// between `minimumBoxFraction` and `maximumBoxFrames` of the frame's width (a box already
+    /// outside those keeps its size as the limit). A box without a size (scale 0) keeps it.
+    func resized(_ origin: KenBurnsBox, corner: Corner, by translation: CGSize) -> KenBurnsBox {
+        let from = origin.corner(corner)
+        let diagonal = CGPoint(x: from.x - origin.center.x, y: from.y - origin.center.y)
+        let length = diagonal.x * diagonal.x + diagonal.y * diagonal.y
+        guard length > 1e-9, origin.size.width > 0 else { return origin }
+        let to = CGPoint(x: from.x + translation.width - origin.center.x,
+                         y: from.y + translation.height - origin.center.y)
+        let wanted = (to.x * diagonal.x + to.y * diagonal.y) / length
+        let smallest = min(1, sequenceSize.width * Self.minimumBoxFraction / origin.size.width)
+        let largest = max(1, sequenceSize.width * Self.maximumBoxFrames / origin.size.width)
+        return origin.scaled(by: min(max(wanted, smallest), largest))
+    }
+
     // MARK: Commands
 
     /// Refuses a command during a gesture; true when it may go ahead.
@@ -488,7 +458,7 @@ final class KenBurnsModel: ObservableObject {
         return true
     }
 
-    /// Exchanges the start and end framings (FCP's swap button): one undo step.
+    /// Exchanges the start and end placements (FCP's swap button): one undo step.
     func swap() {
         guard mayEdit(), let base = bases() else { return }
         guard let (from, to) = values(start: endFraming, end: startFraming, base: base) else {
@@ -515,13 +485,13 @@ final class KenBurnsModel: ObservableObject {
     /// the clip's first frame.
     var canContinueFromPrevious: Bool { previous != nil && span.start == clip.timelineStart }
 
-    /// The start shows the framing the previous clip ends with.
+    /// The start shows the placement the previous clip ends with.
     var continuesFromPrevious: Bool {
         guard canContinueFromPrevious, let previous else { return false }
         return Self.sameFraming(edgeFraming(atEnd: false), previous.framing)
     }
 
-    /// The end shows the framing the next clip starts with.
+    /// The end shows the placement the next clip starts with.
     var leadsIntoNext: Bool {
         guard let next else { return false }
         return Self.sameFraming(edgeFraming(atEnd: true), next.framing)
@@ -533,14 +503,14 @@ final class KenBurnsModel: ObservableObject {
     }
 
     /// Turns "Continue from previous clip" on (the start matches the previous clip's last frame,
-    /// `VEEngine.matchSpanEdge`) or off (the start shows the clip's own framing: neutral start
+    /// `VEEngine.matchSpanEdge`) or off (the start shows the clip's own placement: neutral start
     /// values). One undo step.
     func setContinuesFromPrevious(_ on: Bool) {
         setFollows(.start, on)
     }
 
     /// Turns "Lead into next clip" on (the end matches the next clip's first frame) or off (the end
-    /// shows the clip's own framing). One undo step.
+    /// shows the clip's own placement). One undo step.
     func setLeadsIntoNext(_ on: Bool) {
         setFollows(.end, on)
     }
@@ -569,7 +539,7 @@ final class KenBurnsModel: ObservableObject {
     // MARK: Range
 
     /// A range field's value in the user's duration format: the span's start and end as timeline
-    /// times (the end is where the end framing is reached), its length.
+    /// times (the end is where the end placement is reached), its length.
     func rangeText(_ field: RangeField) -> String {
         switch field {
         case .start: return store.timelineTimeString(rangeStart)
@@ -620,151 +590,149 @@ final class KenBurnsModel: ObservableObject {
         return ok
     }
 
-    // MARK: Picture
-
-    /// The playhead moved: the picture follows it.
-    func setPlayhead(_ time: CMTime) {
-        guard time != playhead else { return }
-        playhead = time
-    }
-
-    /// Frames of `time` from zero on the sequence's frame grid (the frame containing it).
-    private func frameIndex(_ time: CMTime) -> Int64 {
-        let frame = frameDuration.secondsOrZero
-        guard frame > 0 else { return 0 }
-        return Int64((time.secondsOrZero / frame + 1e-6).rounded(.down))
-    }
-
-    /// The clip's frame the picture under the rectangles shows: the one under the playhead, clamped
-    /// to the span's range (its first frame before it, its last frame after it) and to the clip.
-    var pictureFrame: CMTime {
-        let first = max(frameIndex(span.start), frameIndex(clip.timelineStart))
-        let last = max(first, min(frameIndex(span.end), frameIndex(clip.timelineEnd)) - 1)
-        let frame = min(max(frameIndex(playhead), first), last)
-        return CMTimeMultiply(frameDuration, multiplier: Int32(clamping: frame))
-    }
-
-    /// Source seconds of that frame's picture, through the clip's speed (a still has one picture).
-    var pictureSeconds: Double {
-        guard !clip.isStill else { return 0 }
-        let offset = CMTimeSubtract(pictureFrame, clip.timelineStart)
-        return clip.sourceIn.secondsOrZero + offset.secondsOrZero * clip.speed
-    }
-
     // MARK: Geometry
 
-    /// The picture fitted into the frame (centred, aspect kept), as the compositor draws it.
-    static func fittedPicture(width: Double, height: Double, in sequence: CGSize) -> CGRect {
-        let fit = min(Double(sequence.width) / width, Double(sequence.height) / height)
-        let size = CGSize(width: width * fit, height: height * fit)
-        return CGRect(x: (sequence.width - size.width) / 2, y: (sequence.height - size.height) / 2,
-                      width: size.width, height: size.height)
+    /// The picture (display size `picture`) fitted into the frame, centred with its aspect kept: its
+    /// size as the compositor places a clip with identity values.
+    static func fittedSize(picture: CGSize, sequence: CGSize) -> CGSize {
+        guard picture.width > 0, picture.height > 0 else { return .zero }
+        let fit = min(sequence.width / picture.width, sequence.height / picture.height)
+        return CGSize(width: picture.width * fit, height: picture.height * fit)
     }
 
-    /// The largest rectangle of `aspect` (width / height) inside `bounds`, centred.
-    static func largestRect(in bounds: CGRect, aspect: CGFloat) -> CGRect {
-        let width = min(bounds.width, bounds.height * aspect)
-        let size = CGSize(width: width, height: width / aspect)
-        return CGRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width,
-                      height: size.height)
+    /// The placement box of a clip whose picture is `picture` (display size) with the Motion values
+    /// `params`, in sequence pixels (origin at the frame's top-left corner, +y down): the fitted
+    /// picture scaled about its centre by `params.scale`, its centre moved by `params.x`/`params.y`
+    /// from the frame's centre, turned clockwise by `params.rotationDegrees` about its centre (the
+    /// compositor's order). A scale of 0 or less gives an empty box at the centre.
+    static func box(for params: VEVideoParams, picture: CGSize, sequence: CGSize) -> KenBurnsBox {
+        let fitted = fittedSize(picture: picture, sequence: sequence)
+        let scale = params.scale.isFinite ? max(0, params.scale) : 0
+        return KenBurnsBox(center: CGPoint(x: sequence.width / 2 + params.x, y: sequence.height / 2 + params.y),
+                           size: CGSize(width: fitted.width * scale, height: fitted.height * scale),
+                           rotationDegrees: params.rotationDegrees)
     }
 
-    static func scaled(_ rect: CGRect, by factor: CGFloat) -> CGRect {
-        let size = CGSize(width: rect.width * factor, height: rect.height * factor)
-        return CGRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width,
-                      height: size.height)
-    }
-
-    /// The position and scale that make `rect` (sequence pixels of the unanimated picture) fill the
-    /// frame, the picture turned by `rotationDegrees` (clockwise, about its centre as the
-    /// compositor does): scale = frame width / rect width, and the rectangle's centre, scaled and
-    /// turned, moves to the frame's centre.
-    static func framing(for rect: CGRect, sequence: CGSize, rotationDegrees: Double) -> VEMotionFraming {
-        let scale = Double(sequence.width / rect.width)
-        let cx = Double(rect.midX - sequence.width / 2)
-        let cy = Double(rect.midY - sequence.height / 2)
-        let theta = rotationDegrees * .pi / 180
-        let vx = cos(theta) * cx - sin(theta) * cy
-        let vy = sin(theta) * cx + cos(theta) * cy
-        return VEMotionFraming(x: -scale * vx, y: -scale * vy, scale: scale)
-    }
-
-    /// The inverse of `framing(for:sequence:rotationDegrees:)`.
-    static func rect(for framing: VEMotionFraming, sequence: CGSize, rotationDegrees: Double) -> CGRect {
-        let scale = max(framing.scale, 1e-6)
-        let width = Double(sequence.width) / scale
-        let height = Double(sequence.height) / scale
-        let vx = -framing.x / scale
-        let vy = -framing.y / scale
-        let theta = rotationDegrees * .pi / 180
-        let cx = cos(theta) * vx + sin(theta) * vy
-        let cy = -sin(theta) * vx + cos(theta) * vy
-        return CGRect(x: Double(sequence.width) / 2 + cx - width / 2, y: Double(sequence.height) / 2 + cy - height / 2,
-                      width: width, height: height)
-    }
-
-    private var aspect: CGFloat { sequenceSize.width / sequenceSize.height }
-    private var maximumWidth: CGFloat { min(pictureBounds.width, pictureBounds.height * aspect) }
-    private var minimumWidth: CGFloat { min(maximumWidth, sequenceSize.width * Self.minimumWidthFraction) }
-
-    /// `rect` with the frame's aspect ratio, within the size limits, moved inside the picture.
-    func constrained(_ rect: CGRect) -> CGRect {
-        let width = min(maximumWidth, max(minimumWidth, rect.width))
-        let size = CGSize(width: width, height: width / aspect)
-        var origin = CGPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2)
-        origin.x = min(max(origin.x, pictureBounds.minX), pictureBounds.maxX - size.width)
-        origin.y = min(max(origin.y, pictureBounds.minY), pictureBounds.maxY - size.height)
-        return CGRect(origin: origin, size: size)
-    }
-
-    func rect(_ which: Framing) -> CGRect {
-        which == .start ? start : end
-    }
-
-    /// `original` resized by dragging `corner` to `point` (sequence pixels): the opposite corner
-    /// stays, the aspect ratio stays the frame's, and the rectangle stays inside the picture and
-    /// within the size limits.
-    func resized(_ original: CGRect, corner: Corner, to point: CGPoint) -> CGRect {
-        let anchor: CGPoint
-        let growsRight: Bool
-        let growsDown: Bool
-        switch corner {
-        case .topLeft:
-            anchor = CGPoint(x: original.maxX, y: original.maxY)
-            growsRight = false
-            growsDown = false
-        case .topRight:
-            anchor = CGPoint(x: original.minX, y: original.maxY)
-            growsRight = true
-            growsDown = false
-        case .bottomLeft:
-            anchor = CGPoint(x: original.maxX, y: original.minY)
-            growsRight = false
-            growsDown = true
-        case .bottomRight:
-            anchor = CGPoint(x: original.minX, y: original.minY)
-            growsRight = true
-            growsDown = true
-        }
-        let wanted = max(abs(point.x - anchor.x), abs(point.y - anchor.y) * aspect)
-        let roomX = growsRight ? pictureBounds.maxX - anchor.x : anchor.x - pictureBounds.minX
-        let roomY = growsDown ? pictureBounds.maxY - anchor.y : anchor.y - pictureBounds.minY
-        let width = max(min(minimumWidth, roomX, roomY * aspect), min(wanted, maximumWidth, roomX, roomY * aspect))
-        let height = width / aspect
-        let rect = CGRect(x: growsRight ? anchor.x : anchor.x - width, y: growsDown ? anchor.y : anchor.y - height,
-                          width: width, height: height)
-        return constrained(rect)
+    /// The inverse of `box(for:picture:sequence:)`: the position, scale and rotation that place the
+    /// picture in `box` (the scale from its width against the fitted picture's).
+    static func motion(for box: KenBurnsBox, picture: CGSize,
+                       sequence: CGSize) -> (framing: VEMotionFraming, rotationDegrees: Double) {
+        let fitted = fittedSize(picture: picture, sequence: sequence)
+        let scale = fitted.width > 0 ? Double(box.size.width / fitted.width) : 0
+        return (VEMotionFraming(x: box.center.x - sequence.width / 2, y: box.center.y - sequence.height / 2,
+                                scale: scale), box.rotationDegrees)
     }
 }
 
-/// What a press on the Ken Burns overlay grabs, from the two rectangles as drawn (view points). The
-/// end rectangle is drawn over the start, and with the default push in, or an unanimated placed clip,
-/// the two overlap or coincide; so the grab is decided by geometry, not by which is on top: the
-/// nearest corner handle, then a rectangle's label (the start's inside its top-left corner, the
-/// end's inside its bottom-right), then the nearest edge (a band either side of each edge), then the
-/// inside of a rectangle (inside both: the smaller one, whose edges are the nearer). Where the two coincide
-/// the start owns the top and left corners and edges, the end the bottom and right, and the inside
-/// drags the end.
+/// A clip's placement box: a rectangle of `size` centred on `center`, turned clockwise by
+/// `rotationDegrees` about its centre (+y down, so clockwise on screen). In sequence pixels in the
+/// model and in view points on the overlay (`KenBurnsViewport.view(_:)`).
+struct KenBurnsBox: Equatable {
+    var center: CGPoint
+    var size: CGSize
+    var rotationDegrees: Double
+
+    private var theta: Double { rotationDegrees * .pi / 180 }
+
+    /// A point given relative to the centre in the box's own (unturned) axes, on the page.
+    func point(local: CGPoint) -> CGPoint {
+        let c = cos(theta)
+        let s = sin(theta)
+        return CGPoint(x: center.x + c * local.x - s * local.y, y: center.y + s * local.x + c * local.y)
+    }
+
+    /// `point` relative to the centre in the box's own (unturned) axes.
+    func local(_ point: CGPoint) -> CGPoint {
+        let c = cos(theta)
+        let s = sin(theta)
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        return CGPoint(x: c * dx + s * dy, y: -s * dx + c * dy)
+    }
+
+    /// A corner, turned with the box (the top-left is the picture's top-left corner).
+    func corner(_ corner: KenBurnsModel.Corner) -> CGPoint {
+        let w = size.width / 2
+        let h = size.height / 2
+        switch corner {
+        case .topLeft: return point(local: CGPoint(x: -w, y: -h))
+        case .topRight: return point(local: CGPoint(x: w, y: -h))
+        case .bottomRight: return point(local: CGPoint(x: w, y: h))
+        case .bottomLeft: return point(local: CGPoint(x: -w, y: h))
+        }
+    }
+
+    /// The four corners, clockwise from the top-left.
+    var corners: [CGPoint] {
+        KenBurnsModel.Corner.allCases.map { corner($0) }
+    }
+
+    /// The box `factor` times larger about its centre.
+    func scaled(by factor: CGFloat) -> KenBurnsBox {
+        KenBurnsBox(center: center, size: CGSize(width: size.width * factor, height: size.height * factor),
+                    rotationDegrees: rotationDegrees)
+    }
+}
+
+/// Where the program picture sits in the monitor while the Ken Burns editor is open, and the
+/// mapping between monitor points and sequence pixels: the frame fitted (aspect kept, centred)
+/// inside the monitor less `margin` of its width on the left and right and of its height at the top
+/// and bottom. The margin stands for the space off the frame, so a box larger than the frame or
+/// partly off it keeps its corners and body on screen. With a margin of 0 it is the monitor's usual
+/// letterbox fit.
+struct KenBurnsViewport: Equatable {
+    /// The margin on each side while the editor is open, as a fraction of the monitor's size.
+    static let marginFraction: CGFloat = 0.15
+
+    let monitor: CGSize
+    /// The frame's rectangle in the monitor (points).
+    let frame: CGRect
+    /// Points per sequence pixel.
+    let scale: CGFloat
+
+    init(sequence: CGSize, monitor: CGSize, margin: CGFloat = KenBurnsViewport.marginFraction) {
+        self.monitor = monitor
+        let inner = CGSize(width: max(0, monitor.width * (1 - 2 * margin)),
+                           height: max(0, monitor.height * (1 - 2 * margin)))
+        let fit = sequence.width > 0 && sequence.height > 0
+            ? min(inner.width / sequence.width, inner.height / sequence.height) : 0
+        scale = max(fit, 1e-6)
+        let size = CGSize(width: sequence.width * fit, height: sequence.height * fit)
+        frame = CGRect(x: (monitor.width - size.width) / 2, y: (monitor.height - size.height) / 2, width: size.width,
+                       height: size.height)
+    }
+
+    /// Sequence pixels to monitor points.
+    func view(_ point: CGPoint) -> CGPoint {
+        CGPoint(x: frame.minX + point.x * scale, y: frame.minY + point.y * scale)
+    }
+
+    /// A box in monitor points (a uniform scale keeps its rotation).
+    func view(_ box: KenBurnsBox) -> KenBurnsBox {
+        KenBurnsBox(center: view(box.center),
+                    size: CGSize(width: box.size.width * scale, height: box.size.height * scale),
+                    rotationDegrees: box.rotationDegrees)
+    }
+
+    /// Monitor points to sequence pixels.
+    func sequence(_ point: CGPoint) -> CGPoint {
+        CGPoint(x: (point.x - frame.minX) / scale, y: (point.y - frame.minY) / scale)
+    }
+
+    /// A distance in monitor points to sequence pixels.
+    func sequence(_ size: CGSize) -> CGSize {
+        CGSize(width: size.width / scale, height: size.height / scale)
+    }
+}
+
+/// What a press on the Ken Burns overlay grabs, from the two boxes as drawn (view points). The end
+/// box is drawn over the start, and with the default push in, or an unanimated clip, the two nest or
+/// coincide; so the grab is decided by geometry, not by which is on top: the nearest corner handle,
+/// then a box's label (the start's inside its top-left corner, the end's inside its bottom-right),
+/// then the nearest edge (a band either side of each edge), then the inside of a box (inside both:
+/// the smaller one, whose edges are the nearer). Where the two coincide the start owns the top and
+/// left corners and edges, the end the bottom and right, and the inside drags the end. Corners,
+/// labels and edges turn with a turned box (the tests are made in each box's own axes).
 enum KenBurnsHit {
     enum Target: Equatable {
         case body(KenBurnsModel.Framing)
@@ -778,39 +746,31 @@ enum KenBurnsHit {
         }
     }
 
-    /// How far from a corner a press grabs it, and from an edge a press grabs the rectangle.
+    /// How far from a corner a press grabs it, and from an edge a press grabs the box.
     static let cornerRadius: CGFloat = 8
     static let edgeBand: CGFloat = 6
     /// The labels' hit areas.
     static let labelSize = CGSize(width: 40, height: 16)
 
-    /// Where a rectangle's label is drawn (inside it: the start's at the top-left, the end's at the
-    /// bottom-right).
-    static func labelRect(_ which: KenBurnsModel.Framing, of rect: CGRect) -> CGRect {
-        which == .start
-            ? CGRect(origin: rect.origin, size: labelSize)
-            : CGRect(x: rect.maxX - labelSize.width, y: rect.maxY - labelSize.height, width: labelSize.width,
-                     height: labelSize.height)
+    /// Where a box's label is, in the box's own axes relative to its centre (inside it: the start's
+    /// at the top-left, the end's at the bottom-right).
+    static func labelRect(_ which: KenBurnsModel.Framing, of box: KenBurnsBox) -> CGRect {
+        let w = box.size.width / 2
+        let h = box.size.height / 2
+        return which == .start
+            ? CGRect(origin: CGPoint(x: -w, y: -h), size: labelSize)
+            : CGRect(x: w - labelSize.width, y: h - labelSize.height, width: labelSize.width, height: labelSize.height)
     }
 
-    static func cornerPoint(_ corner: KenBurnsModel.Corner, of rect: CGRect) -> CGPoint {
-        switch corner {
-        case .topLeft: return CGPoint(x: rect.minX, y: rect.minY)
-        case .topRight: return CGPoint(x: rect.maxX, y: rect.minY)
-        case .bottomLeft: return CGPoint(x: rect.minX, y: rect.maxY)
-        case .bottomRight: return CGPoint(x: rect.maxX, y: rect.maxY)
-        }
-    }
-
-    /// The target at `point`, or nil (outside both rectangles and their handles).
-    static func target(at point: CGPoint, start: CGRect, end: CGRect) -> Target? {
-        let rects: [(KenBurnsModel.Framing, CGRect)] = [(.start, start), (.end, end)]
-        // Corners: the nearest within reach. On a tie (the rectangles coincide there) the start takes
-        // the left corners and the end the right ones.
+    /// The target at `point`, or nil (outside both boxes and their handles).
+    static func target(at point: CGPoint, start: KenBurnsBox, end: KenBurnsBox) -> Target? {
+        let boxes: [(KenBurnsModel.Framing, KenBurnsBox)] = [(.start, start), (.end, end)]
+        // Corners: the nearest within reach. On a tie (the boxes coincide there) the start takes the
+        // left corners and the end the right ones.
         var corners: [(target: Target, distance: CGFloat, owner: Bool)] = []
-        for (which, rect) in rects {
+        for (which, box) in boxes {
             for corner in KenBurnsModel.Corner.allCases {
-                let c = cornerPoint(corner, of: rect)
+                let c = box.corner(corner)
                 let distance = hypot(point.x - c.x, point.y - c.y)
                 guard distance <= cornerRadius else { continue }
                 let left = corner == .topLeft || corner == .bottomLeft
@@ -818,30 +778,34 @@ enum KenBurnsHit {
             }
         }
         if let target = nearest(corners) { return target }
-        // Labels (each inside its own rectangle, away from the other's).
-        for (which, rect) in rects where labelRect(which, of: rect).contains(point) {
+        // Labels (each inside its own box, away from the other's).
+        for (which, box) in boxes where labelRect(which, of: box).contains(box.local(point)) {
             return .body(which)
         }
         // Edges: the nearest within the band either side. On a tie the start takes the top and left
         // edges and the end the bottom and right ones.
         var edges: [(target: Target, distance: CGFloat, owner: Bool)] = []
-        for (which, rect) in rects {
-            guard point.x >= rect.minX - edgeBand, point.x <= rect.maxX + edgeBand,
-                  point.y >= rect.minY - edgeBand, point.y <= rect.maxY + edgeBand else { continue }
+        for (which, box) in boxes {
+            let p = box.local(point)
+            let w = box.size.width / 2
+            let h = box.size.height / 2
+            guard p.x >= -w - edgeBand, p.x <= w + edgeBand, p.y >= -h - edgeBand, p.y <= h + edgeBand else { continue }
             let sides: [(CGFloat, Bool)] = [ // (distance, a top or left edge)
-                (abs(point.x - rect.minX), true), (abs(point.y - rect.minY), true),
-                (abs(point.x - rect.maxX), false), (abs(point.y - rect.maxY), false),
+                (abs(p.x + w), true), (abs(p.y + h), true), (abs(p.x - w), false), (abs(p.y - h), false),
             ]
             for (distance, topOrLeft) in sides where distance <= edgeBand {
                 edges.append((.body(which), distance, (which == .start) == topOrLeft))
             }
         }
         if let target = nearest(edges) { return target }
-        // Inside: one rectangle, or the smaller of the two (the end when they coincide).
-        let inside = rects.filter { $0.1.contains(point) }
+        // Inside: one box, or the smaller of the two (the end when they coincide).
+        let inside = boxes.filter { _, box in
+            let p = box.local(point)
+            return abs(p.x) <= box.size.width / 2 && abs(p.y) <= box.size.height / 2
+        }
         if inside.count == 1 { return .body(inside[0].0) }
         if inside.count == 2 {
-            return .body(start.width * start.height < end.width * end.height ? .start : .end)
+            return .body(start.size.width * start.size.height < end.size.width * end.size.height ? .start : .end)
         }
         return nil
     }
@@ -851,138 +815,5 @@ enum KenBurnsHit {
         guard let closest = candidates.map(\.distance).min() else { return nil }
         let tied = candidates.filter { $0.distance <= closest + 0.5 }
         return (tied.first { $0.owner } ?? tied.first)?.target
-    }
-}
-
-/// Loads the Ken Burns editor's picture, paced for scrubbing, with a small cache of its own: the
-/// pictures are large (up to `maxDimension`, several MB each) and belong to the editor alone, so they
-/// never go through the shared `ThumbnailCache` (whose every landing redraws the timeline and the
-/// media bin, and whose entries have no byte budget). At most one fetch is in flight; when it lands
-/// its picture is shown at once (the playhead may have moved on: a picture a little behind the
-/// playhead beats a frozen one while scrubbing) and the latest wanted time is fetched next, the times
-/// in between skipped (like the program monitor's scrub coalescing). A failed fetch also moves on to
-/// the latest wanted time; a time that failed is not fetched again until another time was wanted.
-/// Until the first picture arrives nothing is shown. At most `capacity` pictures are kept (the least
-/// recently shown go first), so the loader's memory is bounded however long the scrub. Only the
-/// overlay observes it. Pictures are the whole, unanimated source frame, never the program view.
-@MainActor
-final class KenBurnsPictureLoader: ObservableObject {
-    /// The largest side of the fetched picture (enough for a monitor-sized overlay).
-    static let maxDimension = 1280
-    /// Pictures kept by default: the current one plus a few to step back to.
-    nonisolated static let defaultCapacity = 6
-
-    /// Fetches the unanimated picture of an asset at a source time, calling `completion` on the main
-    /// thread with it or the error (the engine's `thumbnail(forAsset:at:maxDimension:completion:)`).
-    typealias Fetch = (_ asset: VEAssetID, _ time: CMTime, _ maxDimension: Int,
-                       _ completion: @escaping (CGImage?, Error?) -> Void) -> Void
-
-    let assetID: VEAssetID
-    /// Pictures kept at most.
-    let capacity: Int
-    /// The picture to draw: the wanted one once it has arrived, else the last one that arrived.
-    @Published private(set) var image: CGImage?
-    /// The source seconds last asked for.
-    private(set) var wantedSeconds: Double?
-    /// The source seconds of the fetch in flight (nil when none).
-    private(set) var pendingSeconds: Double?
-    /// Fetches started, and those that failed (diagnostics and tests).
-    private(set) var fetchesStarted = 0
-    private(set) var fetchesFailed = 0
-
-    private let fetch: Fetch
-    /// Kept pictures by time (milliseconds), and their use order (oldest first).
-    private var pictures: [Int64: CGImage] = [:]
-    private var useOrder: [Int64] = []
-    /// Times whose fetch failed, not fetched again until another time was wanted.
-    private var failedMillis: Int64?
-
-    /// Pictures from `engine` (held weakly: the editor never keeps a closed project's engine).
-    convenience init(assetID: VEAssetID, engine: VEEngine, capacity: Int = KenBurnsPictureLoader.defaultCapacity) {
-        self.init(assetID: assetID, capacity: capacity) { [weak engine] asset, time, size, completion in
-            guard let engine else {
-                completion(nil, nil)
-                return
-            }
-            engine.thumbnail(forAsset: asset, at: time, maxDimension: size) { image, error in
-                completion(image, error)
-            }
-        }
-    }
-
-    init(assetID: VEAssetID, capacity: Int = KenBurnsPictureLoader.defaultCapacity, fetch: @escaping Fetch) {
-        self.assetID = assetID
-        self.capacity = max(1, capacity)
-        self.fetch = fetch
-    }
-
-    /// Pictures kept now (at most `capacity`).
-    var cachedCount: Int { pictures.count }
-
-    /// The picture at `seconds` (source time) is wanted now.
-    func want(seconds: Double) {
-        let millis = Self.millis(seconds)
-        if millis != wantedSeconds.map(Self.millis) {
-            failedMillis = nil // a new time: one that failed may be tried again later
-        }
-        wantedSeconds = seconds
-        drive()
-    }
-
-    /// Memory pressure: keeps only the picture on screen.
-    func handleMemoryPressure() {
-        for millis in useOrder where pictures[millis] !== image {
-            pictures[millis] = nil
-        }
-        useOrder.removeAll { pictures[$0] == nil }
-    }
-
-    static func millis(_ seconds: Double) -> Int64 {
-        Int64((max(0, seconds.isFinite ? seconds : 0) * 1000).rounded())
-    }
-
-    /// Shows the wanted picture when it is kept, else fetches it (one fetch at a time).
-    private func drive() {
-        guard let wanted = wantedSeconds else { return }
-        let millis = Self.millis(wanted)
-        if let kept = pictures[millis] {
-            touch(millis)
-            if image !== kept { image = kept }
-            return
-        }
-        guard pendingSeconds == nil, millis != failedMillis else { return }
-        pendingSeconds = wanted
-        fetchesStarted += 1
-        fetch(assetID, CMTime(value: millis, timescale: 1000), Self.maxDimension) { [weak self] picture, error in
-            MainActor.assumeIsolated {
-                self?.landed(millis: millis, picture: picture, error: error)
-            }
-        }
-    }
-
-    private func landed(millis: Int64, picture: CGImage?, error: Error?) {
-        pendingSeconds = nil
-        if let picture {
-            keep(picture, millis: millis)
-            image = picture // shown before the next fetch starts
-        } else if !isProjectClosed(error) {
-            fetchesFailed += 1
-            failedMillis = millis
-        }
-        drive() // the latest wanted time next (also after a failure)
-    }
-
-    private func keep(_ picture: CGImage, millis: Int64) {
-        pictures[millis] = picture
-        touch(millis)
-        while useOrder.count > capacity, let oldest = useOrder.first {
-            useOrder.removeFirst()
-            pictures[oldest] = nil
-        }
-    }
-
-    private func touch(_ millis: Int64) {
-        useOrder.removeAll { $0 == millis }
-        useOrder.append(millis)
     }
 }

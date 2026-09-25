@@ -154,9 +154,10 @@ final class ProjectStore: ObservableObject {
     /// The Motion span whose editor the user closed (Escape, Close): it stays closed while that span
     /// stays selected, until it is reopened (Ken Burns…, a click on the span).
     private var kenBurnsClosedSpan: VESpanID?
-    /// The selected Motion span the Ken Burns editor could not open for (the status line said why):
-    /// not tried again on every model change, only when the selection changes or Ken Burns… asks
-    /// (review L8).
+    /// The selected Motion span the Ken Burns editor could not open for (the status line said why:
+    /// media not in the project, a clip without a picture): not tried again on every model change,
+    /// which would rewrite the status line each time, only when the selection changes or Ken Burns…
+    /// asks (review L8).
     private var kenBurnsFailedSpan: VESpanID?
     /// Times the editor could not open (diagnostics and tests).
     private(set) var kenBurnsOpenFailures = 0
@@ -270,7 +271,6 @@ final class ProjectStore: ObservableObject {
             let critical = (note.userInfo?[VEEngineCriticalKey] as? NSNumber)?.boolValue ?? false
             store.thumbnails.handleMemoryPressure(critical: critical)
             store.waveforms.handleMemoryPressure(critical: critical)
-            store.kenBurns?.picture?.handleMemoryPressure()
         }
         preferencesForwarding = preferences.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
@@ -1041,19 +1041,13 @@ final class ProjectStore: ObservableObject {
             return
         }
         guard let info = asset(clip.assetID) else {
-            failKenBurns(id, "The media of “\(clip.name)” is not in the project, so Ken Burns has no picture.")
-            return
-        }
-        // The loader is made only for a span the editor can open.
-        if let reason = KenBurnsModel.problem(span: span, clip: clip, asset: info, sequence: sequence) {
-            failKenBurns(id, reason)
+            failKenBurns(id, "The media of “\(clip.name)” is not in the project, so Ken Burns does not know its "
+                + "picture's size.")
             return
         }
         var reason = ""
-        let picture = KenBurnsPictureLoader(assetID: info.assetID, engine: engine)
         guard let model = KenBurnsModel(store: self, span: span, clip: clip, asset: info, sequence: sequence,
-                                        playhead: playheadTime, picture: picture, previous: previous, next: next,
-                                        reason: &reason) else {
+                                        playhead: playheadTime, previous: previous, next: next, reason: &reason) else {
             failKenBurns(id, reason)
             return
         }

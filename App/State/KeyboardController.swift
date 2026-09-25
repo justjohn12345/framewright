@@ -18,7 +18,7 @@ import Foundation
 /// Option+Delete (only the selected transition), Shift+Delete (ripple delete), I/O (source
 /// in/out), = or + / - (zoom the timeline, like Command-= / Command--), ] / [ (gain of the selected
 /// audio clips ±1 dB, with Shift ±10 dB; a burst is one undo step), Escape (cancel the drag in
-/// progress, a Ken Burns rectangle drag too; else close the Ken Burns editor; passed on when there is
+/// progress, a Ken Burns box drag too; else close the Ken Burns editor; passed on when there is
 /// neither), Command-A (select all clips), Control-K (Add Motion
 /// Span at Playhead: a Motion span on the selected clip from the playhead, 5 s or to the clip's
 /// end, which opens the Ken Burns editor; only the selected clip, or the selected span's clip, never

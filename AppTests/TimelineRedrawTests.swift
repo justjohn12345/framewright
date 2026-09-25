@@ -214,8 +214,8 @@ final class TimelineRedrawTests: XCTestCase {
         for step in 1 ... 20 {
             // The end's bottom-right corner pulled in: a zoom that grows with every step.
             let pulled = CGFloat(step) * 20
-            model.applyDrag(.corner(.end, .bottomRight), origin: origin, translation: CGSize(width: -pulled, height: 0),
-                            location: CGPoint(x: origin.maxX - pulled, y: origin.maxY - pulled * 9 / 16))
+            model.applyDrag(.corner(.end, .bottomRight), origin: origin,
+                            translation: CGSize(width: -pulled, height: -pulled * 9 / 16))
             await Self.display(host)
         }
         model.endDrag()
@@ -238,19 +238,20 @@ final class TimelineRedrawTests: XCTestCase {
         XCTAssertGreaterThan(TimelineDiagnostics.canvasDraws, canvasDraws + redrawn, "and redrawn")
     }
 
-    /// The Ken Burns editor open over the program monitor while its pictures land during a scrub,
-    /// hosted with the timeline and the media bin in one window: the pictures have their own cache
-    /// (`KenBurnsPictureLoader`), so a landing redraws the editor's overlay only, never the timeline
-    /// model, the clips' canvas or a bin tile. Positive controls first prove the canvas and the tiles
-    /// do redraw in this host when what they show changes.
-    func testKenBurnsPicturesLandingRedrawNeitherTheTimelineNorTheBin() async throws {
+    /// The Ken Burns editor open over the program monitor (the layout the app uses, a plain picture
+    /// in place of the Metal view) while the playhead scrubs, hosted with the timeline and the media
+    /// bin in one window: the other clips' outlines follow the playhead (a different clip of V1 under
+    /// it at each step) and redraw the editor's overlay only, never the timeline model, the clips'
+    /// canvas or a bin tile. Positive controls first prove the canvas and the tiles do redraw in this
+    /// host when what they show changes.
+    func testKenBurnsOutlinesFollowingThePlayheadRedrawNeitherTheTimelineNorTheBin() async throws {
         try await makeTwentyClipSequence()
         let store = fixture.store
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900),
                               styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         let root = VStack(spacing: 0) {
-            KenBurnsOverlayHost(store: store)
+            ProgramMonitorLayout(store: store) { Color.black }
                 .frame(height: 420)
             HStack(spacing: 0) {
                 MediaBinView(store: store)
@@ -265,17 +266,16 @@ final class TimelineRedrawTests: XCTestCase {
             window.orderOut(nil)
             window.close()
         }
-        let clip = try XCTUnwrap(store.clips.values.filter { $0.trackKind == .video }
-            .min { $0.timelineStart < $1.timelineStart })
+        let videoClips = store.clips.values.filter { $0.trackKind == .video }
+            .sorted { $0.timelineStart < $1.timelineStart }
+        let clip = try XCTUnwrap(videoClips.first)
         store.playheadTime = .zero
-        // A Motion span over the first clip's second: the picture follows the playhead within it.
+        // A Motion span over the first clip's second: the editor opens on it.
         let motion = try XCTUnwrap(store.engine.addSpan(kind: .motion, lane: 1, clip: clip.clipID,
                                                         range: CMTimeRange(start: .zero, duration: CMTime(value: 30, timescale: 30))).span)
         store.select(span: motion.spanID)
-        let loader = try XCTUnwrap(store.kenBurns?.picture)
-        // Thumbnails, waveforms, the tiles and the first picture settle.
-        let firstPicture = await StoreFixture.wait(until: { loader.image != nil }, timeout: 20)
-        XCTAssertTrue(firstPicture, "the helper's first picture arrives")
+        let model = try XCTUnwrap(store.kenBurns)
+        // Thumbnails, waveforms and the tiles settle.
         var last = (-1, -1)
         for _ in 0 ..< 60 where last != (TimelineDiagnostics.canvasDraws, MediaBinDiagnostics.tileBodies) {
             last = (TimelineDiagnostics.canvasDraws, MediaBinDiagnostics.tileBodies)
@@ -301,32 +301,22 @@ final class TimelineRedrawTests: XCTestCase {
         let builds = store.timelineBuildCount
         let canvasDraws = TimelineDiagnostics.canvasDraws
         let tileBodies = MediaBinDiagnostics.tileBodies
-        let versionBefore = store.thumbnails.version
-        // A scrub through the clip's frames: wait for each picture to land and show.
-        var landed: [ObjectIdentifier] = []
-        for frame in stride(from: 3, through: 27, by: 3) {
-            let time = CMTime(value: CMTimeValue(frame), timescale: 30)
-            let before = loader.image.map(ObjectIdentifier.init)
-            store.playhead.setTime(time) // the overlay feeds the helper from the playhead
+        // A scrub over the next nine clips: the overlay reads each one's outline at the playhead.
+        var outlined: [VEClipID] = []
+        for index in 1 ... 9 {
+            store.playhead.setTime(CMTime(value: CMTimeValue(index * 30 + 15), timescale: 30))
             await Self.display(host)
-            let arrived = await StoreFixture.wait(until: {
-                loader.pendingSeconds == nil && loader.image.map(ObjectIdentifier.init) != before
-            }, timeout: 20)
-            XCTAssertTrue(arrived, "the picture for frame \(frame) lands")
-            if let image = loader.image { landed.append(ObjectIdentifier(image)) }
-            await Self.display(host)
-            XCTAssertLessThanOrEqual(loader.cachedCount, loader.capacity, "the helper's memory stays bounded")
+            outlined.append(contentsOf: model.outlines.map(\.clipID))
         }
         let rebuilt = store.timelineBuildCount - builds
         let redrawn = TimelineDiagnostics.canvasDraws - canvasDraws
         let tiles = MediaBinDiagnostics.tileBodies - tileBodies
-        print("\(landed.count) Ken Burns pictures landed: timeline model builds \(rebuilt), canvas draws \(redrawn), "
-            + "bin tile bodies \(tiles)")
-        XCTAssertEqual(Set(landed).count, 9, "nine distinct pictures landed and were shown")
+        print("9 playhead steps with the Ken Burns editor open: timeline model builds \(rebuilt), canvas draws "
+            + "\(redrawn), bin tile bodies \(tiles)")
+        XCTAssertEqual(outlined, videoClips[1 ... 9].map(\.clipID), "the overlay followed the playhead")
         XCTAssertEqual(rebuilt, 0, "the timeline model is not rebuilt")
         XCTAssertEqual(redrawn, 0, "the clips' canvas is not redrawn")
         XCTAssertEqual(tiles, 0, "no bin tile is redrawn")
-        XCTAssertEqual(store.thumbnails.version, versionBefore, "the shared thumbnail cache is untouched")
         store.closeKenBurns()
     }
 

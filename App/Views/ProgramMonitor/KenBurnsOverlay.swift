@@ -2,25 +2,72 @@ import CoreMedia
 import SwiftUI
 import FramewrightEngine
 
-/// The Ken Burns editor over the program monitor while a Motion span is selected (see
-/// `KenBurnsModel`): the whole picture of the clip, unanimated, with the start rectangle (green) and
-/// the end rectangle (red) of the span, an arrow showing the direction of travel (as in FCP), and a
-/// bar with the span's range (Start, End and Duration as timeline times), the hold-after caption or
-/// what limited the last edit, the neighbour toggles, the smoothing, Swap and Close. Drag a rectangle
-/// to pan, drag a corner to zoom (the aspect ratio stays the frame's): every drag writes the span as
-/// it moves and is one undo step; Escape mid-drag cancels it. There is no Apply or Cancel. The
-/// picture is the clip's unanimated frame at the playhead, clamped to the span's range, loaded by
-/// `KenBurnsPictureLoader` (its own small cache), never from the program view or the shared
-/// thumbnail cache, so pictures landing redraw this overlay alone.
+/// The program monitor's picture area and, while a Motion span is selected, its Ken Burns editor
+/// (see `KenBurnsModel`). Closed, the picture fills the area (letterboxed by the preview view as
+/// usual). Open, the same picture (the same `VEPreviewView`, not a second render path) is drawn
+/// fitted inside a margin (`KenBurnsViewport`): the dimmed area around it is the space off the
+/// frame, the frame's edge a thin line, so a box larger than the frame or partly off it keeps its
+/// corners and body on screen; the editor's boxes and the other clips' outlines are drawn over the
+/// whole area and its bar (range, caption, toggles, smoothing, Swap, Close) below it. A selected
+/// Opacity or Gain span shows its readout instead. The debug HUD sits at the area's top-left.
+/// Observes the store to notice the editor opening, closing and switching.
+struct ProgramMonitorLayout<Picture: View>: View {
+    @ObservedObject var store: ProjectStore
+    var showsHUD = false
+    @ViewBuilder var picture: Picture
+
+    var body: some View {
+        let editor = store.kenBurns
+        VStack(spacing: 0) {
+            GeometryReader { geometry in
+                let viewport = editor.map { KenBurnsViewport(sequence: $0.sequenceSize, monitor: geometry.size) }
+                let frame = viewport?.frame ?? CGRect(origin: .zero, size: geometry.size)
+                ZStack(alignment: .topLeading) {
+                    editor == nil ? Color.black : KenBurnsOverlay.marginColor
+                    // The same picture view open or closed (its place in the tree never changes), only
+                    // its frame.
+                    picture
+                        .frame(width: max(frame.width, 1), height: max(frame.height, 1))
+                        .position(x: frame.midX, y: frame.midY)
+                    if let editor, let viewport {
+                        KenBurnsOverlay(model: editor, playhead: store.playhead, viewport: viewport)
+                    }
+                }
+                .clipped()
+            }
+            .overlay(alignment: .topLeading) {
+                if let span = store.selectedEffectSpan, editor == nil, span.kind == .opacity || span.kind == .gain {
+                    SpanReadout(store: store, span: span)
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                if showsHUD {
+                    PlaybackHUD(engine: store.engine)
+                        .padding(6)
+                }
+            }
+            if let editor {
+                KenBurnsControls(store: store, model: editor)
+            }
+        }
+    }
+}
+
+/// The Ken Burns editor's drawing over the program picture (`ProgramMonitorLayout` places it over
+/// the whole picture area, margin included): the frame's edge, a thin outline of every other clip
+/// visible at the playhead labelled with its track, the start box (green) and the end box (red) of
+/// the span with their corner handles, an arrow from the start's centre to the end's (as in FCP),
+/// and the drag layer. Drag a box to move the clip, a corner to scale it about its centre: every
+/// drag writes the span as it moves and is one undo step; Escape mid-drag cancels it. There is no
+/// Apply or Cancel.
 ///
-/// Everything drawn comes from observed objects (the model, the playhead, the picture loader), so a
-/// change of any of them redraws the overlay; the model re-reads the span on every model change.
+/// Everything drawn comes from observed objects (the model, the playhead), so a change of either
+/// redraws the overlay; the model re-reads the span and the outlines on every model change.
 struct KenBurnsOverlay: View {
-    let store: ProjectStore
     @ObservedObject var model: KenBurnsModel
     @ObservedObject var playhead: PlayheadModel
-    @ObservedObject var picture: KenBurnsPictureLoader
-    /// The drag in progress: what it grabbed and the rectangle as it was when it started. A gesture
+    let viewport: KenBurnsViewport
+    /// The drag in progress: what it grabbed and the box as it was when it started. A gesture
     /// state, so it is reset when the drag ends or is cancelled (a stale origin never makes the next
     /// drag jump).
     @GestureState private var drag: ActiveDrag?
@@ -28,36 +75,28 @@ struct KenBurnsOverlay: View {
     struct ActiveDrag: Equatable {
         /// Nil when the press grabbed nothing.
         let target: KenBurnsHit.Target?
-        let origin: CGRect
+        let origin: KenBurnsBox
     }
 
     static let handleSize: CGFloat = 9
+    /// The area around the frame while the editor is open (the space off the frame).
+    static let marginColor = Color(white: 0.16)
 
     var body: some View {
-        VStack(spacing: 0) {
-            GeometryReader { geometry in
-                let mapping = Mapping(sequence: model.sequenceSize, view: geometry.size)
-                ZStack(alignment: .topLeading) {
-                    Color.black
-                    picture(mapping)
-                    shade(mapping)
-                    windowOutline(mapping)
-                    arrow(mapping)
-                    ForEach([KenBurnsModel.Framing.start, .end], id: \.self) { which in
-                        framingView(which, mapping: mapping)
-                    }
-                    dragLayer(mapping)
-                }
-                .clipped()
+        ZStack(alignment: .topLeading) {
+            frameEdge
+            ForEach(model.outlines, id: \.clipID) { outline in
+                outlineView(outline)
             }
-            rangeControls
-            controls
+            arrow
+            ForEach([KenBurnsModel.Framing.start, .end], id: \.self) { which in
+                boxView(which)
+            }
+            dragLayer
         }
-        .background(Color.black)
         .accessibilityIdentifier("KenBurnsOverlay")
-        // The picture follows the playhead (within the span's range).
+        // The outlines are read at the program playhead (the frame the monitor shows).
         .onChange(of: playhead.time, initial: true) { _, time in model.setPlayhead(time) }
-        .onChange(of: model.pictureSeconds, initial: true) { _, seconds in picture.want(seconds: seconds) }
         // A drag the system abandoned without an end (the view went away, another gesture won) is
         // reverted; a released drag has ended already (and a cancelled one is over).
         .onChange(of: drag == nil) { _, ended in
@@ -65,81 +104,47 @@ struct KenBurnsOverlay: View {
         }
     }
 
-    /// Sequence pixels to view points: the frame letterboxed into the view.
-    struct Mapping {
-        let scale: CGFloat
-        let origin: CGPoint
-
-        init(sequence: CGSize, view: CGSize) {
-            scale = max(1e-6, min(view.width / max(sequence.width, 1), view.height / max(sequence.height, 1)))
-            origin = CGPoint(x: (view.width - sequence.width * scale) / 2, y: (view.height - sequence.height * scale) / 2)
-        }
-
-        func view(_ rect: CGRect) -> CGRect {
-            CGRect(x: origin.x + rect.minX * scale, y: origin.y + rect.minY * scale, width: rect.width * scale,
-                   height: rect.height * scale)
-        }
-
-        func view(_ point: CGPoint) -> CGPoint {
-            CGPoint(x: origin.x + point.x * scale, y: origin.y + point.y * scale)
-        }
-
-        func sequence(_ point: CGPoint) -> CGPoint {
-            CGPoint(x: (point.x - origin.x) / scale, y: (point.y - origin.y) / scale)
-        }
-
-        func sequence(_ size: CGSize) -> CGSize {
-            CGSize(width: size.width / scale, height: size.height / scale)
-        }
-    }
-
-    @ViewBuilder
-    private func picture(_ mapping: Mapping) -> some View {
-        let bounds = mapping.view(model.pictureBounds)
-        if let image = picture.image {
-            Image(decorative: image, scale: 1)
-                .resizable()
-                .frame(width: bounds.width, height: bounds.height)
-                .offset(x: bounds.minX, y: bounds.minY)
-        } else {
-            Rectangle()
-                .fill(Color.gray.opacity(0.35))
-                .frame(width: bounds.width, height: bounds.height)
-                .offset(x: bounds.minX, y: bounds.minY)
-        }
-    }
-
-    /// Darkens the picture outside both rectangles.
-    private func shade(_ mapping: Mapping) -> some View {
-        Path { path in
-            path.addRect(mapping.view(model.pictureBounds))
-            path.addRect(mapping.view(model.start))
-            path.addRect(mapping.view(model.end))
-        }
-        .fill(Color.black.opacity(0.4), style: FillStyle(eoFill: true))
-        .allowsHitTesting(false)
-    }
-
-    /// The clip's window (its static framing applied to the frame box) as a dashed outline, for a
-    /// clip placed smaller, off centre or turned: the rectangles frame the picture inside it.
-    @ViewBuilder
-    private func windowOutline(_ mapping: Mapping) -> some View {
-        let corners = model.clipWindowCorners.map { mapping.view($0) }
-        if corners.count == 4 {
-            Path { path in
-                path.addLines(corners)
-                path.closeSubpath()
-            }
-            .stroke(Color.yellow.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+    /// The frame's edge, a thin line between the picture and the margin.
+    private var frameEdge: some View {
+        Path { path in path.addRect(viewport.frame) }
+            .stroke(Color.white.opacity(0.55), lineWidth: 1)
             .allowsHitTesting(false)
-            .accessibilityIdentifier("KenBurnsClipWindow")
+            .accessibilityIdentifier("KenBurnsFrameEdge")
+    }
+
+    private func path(_ box: KenBurnsBox) -> Path {
+        Path { path in
+            path.addLines(box.corners)
+            path.closeSubpath()
         }
     }
 
-    /// The direction the picture travels: from the start rectangle's centre to the end's.
-    private func arrow(_ mapping: Mapping) -> some View {
-        let from = mapping.view(CGPoint(x: model.start.midX, y: model.start.midY))
-        let to = mapping.view(CGPoint(x: model.end.midX, y: model.end.midY))
+    /// Another clip's box: a thin, dim outline and its track's name at its top-left corner (kept on
+    /// screen for a box larger than the area).
+    private func outlineView(_ outline: KenBurnsModel.Outline) -> some View {
+        let box = viewport.view(outline.box)
+        let corner = box.corner(.topLeft)
+        let label = CGPoint(x: min(max(corner.x, 2), max(2, viewport.monitor.width - 30)),
+                            y: min(max(corner.y, 2), max(2, viewport.monitor.height - 14)))
+        return ZStack(alignment: .topLeading) {
+            path(box)
+                .stroke(Color.white.opacity(0.45), lineWidth: 1)
+            Text(outline.trackName)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.8))
+                .padding(.horizontal, 3)
+                .background(Color.black.opacity(0.45))
+                .fixedSize()
+                .offset(x: label.x, y: label.y)
+        }
+        .allowsHitTesting(false)
+        .accessibilityIdentifier("KenBurns.outline.\(outline.trackName)")
+    }
+
+    /// The direction the clip travels: from the start box's centre to the end's.
+    private var arrow: some View {
+        let from = viewport.view(model.start.center)
+        let to = viewport.view(model.end.center)
         let angle = atan2(to.y - from.y, to.x - from.x)
         let head: CGFloat = 10
         return Path { path in
@@ -158,20 +163,19 @@ struct KenBurnsOverlay: View {
         which == .start ? .green : .red
     }
 
-    /// A rectangle as drawn: its border, its label (the start's at the top-left inside, the end's at
-    /// the bottom-right, so both show when the rectangles coincide) and its corner handles. Drawing
-    /// only: presses go to `dragLayer`, which decides what they grab by geometry (`KenBurnsHit`), so
-    /// the start stays reachable under the end.
-    private func framingView(_ which: KenBurnsModel.Framing, mapping: Mapping) -> some View {
-        let rect = mapping.view(model.rect(which))
+    /// A box as drawn: its border, its label (the start's at the top-left inside, the end's at the
+    /// bottom-right, so both show when the boxes coincide; turned with the box) and its corner
+    /// handles. Drawing only: presses go to `dragLayer`, which decides what they grab by geometry
+    /// (`KenBurnsHit`), so the start stays reachable under the end.
+    private func boxView(_ which: KenBurnsModel.Framing) -> some View {
+        let box = viewport.view(model.box(which))
         let tint = color(which)
         let name = which == .start ? "start" : "end"
-        let label = KenBurnsHit.labelRect(which, of: rect)
+        let label = KenBurnsHit.labelRect(which, of: box)
+        let labelCentre = box.point(local: CGPoint(x: label.midX, y: label.midY))
         return ZStack(alignment: .topLeading) {
-            Rectangle()
-                .strokeBorder(tint, lineWidth: 2)
-                .frame(width: rect.width, height: rect.height)
-                .offset(x: rect.minX, y: rect.minY)
+            path(box)
+                .stroke(tint, lineWidth: 2)
                 .accessibilityIdentifier("KenBurns.\(name)")
             Text(which == .start ? "Start" : "End")
                 .font(.caption2.weight(.semibold))
@@ -179,54 +183,59 @@ struct KenBurnsOverlay: View {
                 .padding(.horizontal, 4)
                 .background(tint)
                 .frame(width: label.width, height: label.height, alignment: which == .start ? .topLeading : .bottomTrailing)
-                .offset(x: label.minX, y: label.minY)
+                .rotationEffect(.degrees(box.rotationDegrees))
+                .position(labelCentre)
             ForEach(KenBurnsModel.Corner.allCases, id: \.self) { corner in
-                let point = KenBurnsHit.cornerPoint(corner, of: rect)
+                let point = box.corner(corner)
                 Rectangle()
                     .fill(tint)
                     .frame(width: Self.handleSize, height: Self.handleSize)
-                    .offset(x: point.x - Self.handleSize / 2, y: point.y - Self.handleSize / 2)
+                    .position(point)
                     .accessibilityIdentifier("KenBurns.\(name).\(String(describing: corner))")
             }
         }
         .allowsHitTesting(false)
     }
 
-    /// Takes every press on the picture area: what it grabs (a rectangle's label, corner, edge or
-    /// inside) is decided once when the drag starts; every movement writes the span (the model opens
-    /// the drag's undo group on the first one); the release ends the group.
-    private func dragLayer(_ mapping: Mapping) -> some View {
+    /// Takes every press on the picture area: what it grabs (a box's label, corner, edge or inside)
+    /// is decided once when the drag starts; every movement writes the span (the model opens the
+    /// drag's undo group on the first one); the release ends the group.
+    private var dragLayer: some View {
         Color.clear
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0)
                 .updating($drag) { value, state, _ in
                     if state == nil {
-                        let target = KenBurnsHit.target(at: value.startLocation, start: mapping.view(model.start),
-                                                        end: mapping.view(model.end))
-                        state = ActiveDrag(target: target, origin: target.map { model.rect($0.framing) } ?? .zero)
+                        let target = KenBurnsHit.target(at: value.startLocation, start: viewport.view(model.start),
+                                                        end: viewport.view(model.end))
+                        state = ActiveDrag(target: target, origin: target.map { model.box($0.framing) } ?? model.end)
                     }
                     guard let active = state, let target = active.target else { return }
-                    model.applyDrag(target, origin: active.origin, translation: mapping.sequence(value.translation),
-                                    location: mapping.sequence(value.location))
+                    model.applyDrag(target, origin: active.origin, translation: viewport.sequence(value.translation))
                 }
                 .onEnded { _ in model.endDrag() })
             .accessibilityIdentifier("KenBurnsDragArea")
     }
+}
 
-    /// The span's range, what the last edit hit (or the hold-after caption) and, next to touching
-    /// clips, whether the rectangles follow them.
+/// The Ken Burns editor's bar under the program picture: the span's range (Start, End and Duration
+/// as timeline times), the hold-after caption or what limited the last edit, the neighbour toggles
+/// next to touching clips, the smoothing, Swap and Close.
+struct KenBurnsControls: View {
+    let store: ProjectStore
+    @ObservedObject var model: KenBurnsModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            rangeControls
+            controls
+        }
+        .accessibilityIdentifier("KenBurnsControls")
+    }
+
     private var rangeControls: some View {
         VStack(alignment: .leading, spacing: 4) {
             rangeRow
-            if let window = model.windowCaption {
-                Label(window, systemImage: "rectangle.dashed")
-                    .foregroundStyle(.yellow)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .help(window + ". The rectangles frame the clip's own picture inside the dashed outline, "
-                        + "where the clip sits in the frame.")
-                    .accessibilityIdentifier("KenBurnsWindowCaption")
-            }
             if let text = model.note ?? model.caption {
                 Text(text)
                     .foregroundStyle(model.note != nil ? .orange : .secondary)
@@ -252,14 +261,14 @@ struct KenBurnsOverlay: View {
                 Toggle("Continue from previous clip",
                        isOn: Binding(get: { model.continuesFromPrevious }, set: { model.setContinuesFromPrevious($0) }))
                     .toggleStyle(.checkbox)
-                    .help("Start on the framing the previous clip ends with (the green rectangle)")
+                    .help("Start where the previous clip ends: its last frame's position and size (the green box)")
                     .accessibilityIdentifier("KenBurnsContinuePrevious")
             }
             if model.next != nil {
                 Toggle("Lead into next clip",
                        isOn: Binding(get: { model.leadsIntoNext }, set: { model.setLeadsIntoNext($0) }))
                     .toggleStyle(.checkbox)
-                    .help("End on the framing the next clip starts with (the red rectangle)")
+                    .help("End where the next clip starts: its first frame's position and size (the red box)")
                     .accessibilityIdentifier("KenBurnsLeadIntoNext")
             }
             Spacer(minLength: 0)
@@ -271,7 +280,7 @@ struct KenBurnsOverlay: View {
             Text("Motion span")
                 .font(.caption.weight(.semibold))
             field("Start", .start, help: "The move's first instant, as a timeline time (the ruler's)")
-            field("End", .end, help: "Where the move reaches its end framing, as a timeline time")
+            field("End", .end, help: "Where the move reaches its end placement, as a timeline time")
             field("Duration", .duration, help: "How long the move lasts: frames (45f), seconds (2.5s) or timecode")
             Spacer(minLength: 0)
         }
@@ -313,7 +322,7 @@ struct KenBurnsOverlay: View {
             } label: {
                 Image(systemName: "arrow.left.arrow.right")
             }
-            .help("Swap the start and end framings")
+            .help("Swap the start and end placements")
             .accessibilityIdentifier("KenBurnsSwap")
             Button {
                 store.closeKenBurns()
@@ -362,26 +371,5 @@ struct SpanReadout: View {
         .padding(8)
         .allowsHitTesting(false)
         .accessibilityIdentifier("SpanReadout")
-    }
-}
-
-/// Shows the Ken Burns editor over the program monitor while a Motion span is selected (and it was
-/// not closed), or the readout of a selected Opacity or Gain span. Observes the store to notice the
-/// selection and the editor changing.
-struct KenBurnsOverlayHost: View {
-    @ObservedObject var store: ProjectStore
-
-    var body: some View {
-        if let model = store.kenBurns, let picture = model.picture {
-            KenBurnsOverlay(store: store, model: model, playhead: store.playhead, picture: picture)
-        } else if let span = store.selectedEffectSpan, span.kind == .opacity || span.kind == .gain {
-            VStack {
-                HStack {
-                    SpanReadout(store: store, span: span)
-                    Spacer(minLength: 0)
-                }
-                Spacer(minLength: 0)
-            }
-        }
     }
 }

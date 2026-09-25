@@ -142,7 +142,8 @@ struct SpanEdge {
 extension ProjectStore {
     /// How long a Motion span added at the playhead is (or to its clip's end, if shorter).
     static let motionSpanSeconds = 5.0
-    /// The fraction of its start framing a new Motion span's end framing shows (the Ken Burns push in).
+    /// A new Motion span's push in: its end box is 1 / this (1.25 times) the size of its start box,
+    /// about the same centre (the clip grows by a quarter).
     static let defaultPushInFraction = 0.8
 
     // MARK: Selection
@@ -209,8 +210,8 @@ extension ProjectStore {
     /// Adds a span of `kind` (Motion or Opacity on a video clip, Gain on an audio clip) over `range`
     /// (timeline, whole frames) on `lane`, or on the first effect lane with room when `lane` is nil,
     /// with its default values, as one undo step ("Add ... Span"), and selects it. Defaults: a Motion
-    /// span is the Ken Burns push in: it starts on the framing the clip has there (no jump) and ends
-    /// on `defaultPushInFraction` of it around the same point (scale x 1.25), eased in and out. An
+    /// span is the Ken Burns push in: it starts on the placement the clip has there (no jump) and ends
+    /// on a box 1.25 times larger about the same centre (`defaultPushInFraction`), eased in and out. An
     /// Opacity span fades: 1 -> 0 when it touches the clip's end, 0 -> 1 at its start, else 1 -> 1.
     /// A Gain span is 0 -> 0 dB. A refusal is reported (with the free range for an overlap) and
     /// changes nothing.

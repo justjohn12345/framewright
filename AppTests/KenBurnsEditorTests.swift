@@ -5,14 +5,16 @@ import FramewrightEngine
 import XCTest
 @testable import Framewright
 
-/// The Ken Burns editor bound to a Motion span (effect lanes round 2, item 4): it opens when a
-/// Motion span is selected, switches with the selection, closes on deselecting, on selecting a clip
-/// and on Escape (the span stays selected; a click or Ken Burns… reopens it); rectangle and corner
-/// drags write the span as they move, one undo step each, Escape mid-drag cancels; the framings are
-/// re-read after an earlier span changes; the picture is clamped to the span's range; the hold-after
-/// caption; the range fields, the smoothing, Swap and the neighbour toggles. Also the geometry, the
-/// picture loader and which rectangle a press grabs. The movie is 2 s (60 frames) at 320x180 (it
-/// fills the 1920x1080 frame); the long movie 10 s (300 frames).
+/// The Ken Burns editor bound to a Motion span: it opens when a Motion span is selected, switches
+/// with the selection, closes on deselecting, on selecting a clip and on Escape (the span stays
+/// selected; a click or Ken Burns… reopens it). Its boxes are the clip's placement at the span's
+/// start and end (the picture fitted into the frame, then the edge's composed scale, position and
+/// rotation): a body drag moves the clip, a corner drag scales it about its centre, each written live
+/// as absolute placement converted over the base, one undo step each, Escape mid-drag cancels. The
+/// boxes are re-read after an earlier span changes; the other visible clips are outlined at the
+/// playhead; the hold-after caption; the range fields, the smoothing, Swap and the neighbour toggles.
+/// Also the box geometry, the margin's mapping and which box a press grabs. The movie is 2 s (60
+/// frames) at 320x180 (it fills the 1920x1080 frame); the long movie 10 s (300 frames).
 @MainActor
 final class KenBurnsEditorTests: XCTestCase {
     private var fixture: StoreFixture!
@@ -68,7 +70,42 @@ final class KenBurnsEditorTests: XCTestCase {
         try XCTUnwrap(store.engine.spanInfo(id))
     }
 
-    private var fullFrame: CGRect { CGRect(x: 0, y: 0, width: 1920, height: 1080) }
+    private let sequence = CGSize(width: 1920, height: 1080)
+
+    /// The box of a clip filling the frame (no static values).
+    private var fullFrame: KenBurnsBox {
+        KenBurnsBox(center: CGPoint(x: 960, y: 540), size: CGSize(width: 1920, height: 1080), rotationDegrees: 0)
+    }
+
+    private func assertBox(_ box: KenBurnsBox, center: CGPoint, size: CGSize, rotation: Double = 0,
+                           _ message: String = "", file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(box.center.x, center.x, accuracy: 1e-6, "centre x " + message, file: file, line: line)
+        XCTAssertEqual(box.center.y, center.y, accuracy: 1e-6, "centre y " + message, file: file, line: line)
+        XCTAssertEqual(box.size.width, size.width, accuracy: 1e-6, "width " + message, file: file, line: line)
+        XCTAssertEqual(box.size.height, size.height, accuracy: 1e-6, "height " + message, file: file, line: line)
+        XCTAssertEqual(box.rotationDegrees, rotation, accuracy: 1e-9, "rotation " + message, file: file, line: line)
+    }
+
+    /// The Motion an edge of `span` shows (absolute).
+    private func edge(_ span: VESpanID, of clip: VEClipID, atEnd: Bool) throws -> VEVideoParams {
+        var motion = VEVideoParams()
+        XCTAssertTrue(try XCTUnwrap(store.clips[clip]).getMotion(&motion, atEdgeOfSpan: span, atEnd: atEnd,
+                                                                 frameDuration: store.frameDuration))
+        return motion
+    }
+
+    /// A 240x320 portrait still on the last video track at `seconds`.
+    private func portraitStill(at seconds: Double) async throws -> VEClipID {
+        let url = fixture.directory.appendingPathComponent("portrait.heic")
+        try TestMediaFactory.writeHEIC(to: url, width: 240, height: 320)
+        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([url]) { continuation.resume(returning: $0) }
+        }
+        let photo = try XCTUnwrap(imported.first)
+        XCTAssertTrue(photo.isStill)
+        let v2 = try XCTUnwrap(store.videoTracks.last).trackID
+        return try fixture.placeMovie(photo, at: seconds, track: v2)
+    }
 
     // MARK: Opening and closing
 
@@ -155,9 +192,10 @@ final class KenBurnsEditorTests: XCTestCase {
         store.addMotionSpanAtPlayhead(clip: clip)
         let model = try XCTUnwrap(store.kenBurns)
         XCTAssertEqual(model.spanID, store.selectedSpanID)
-        XCTAssertEqual(model.start, fullFrame, "the whole picture")
-        XCTAssertEqual(model.end.width, 1920 * ProjectStore.defaultPushInFraction, accuracy: 1e-6, "a push in")
-        XCTAssertEqual(model.end.midX, 960, accuracy: 1e-6)
+        XCTAssertEqual(model.start, fullFrame, "the clip where it is: the whole frame")
+        // A full-frame clip's push in is a box 1.25 times the frame about the same centre.
+        assertBox(model.end, center: CGPoint(x: 960, y: 540), size: CGSize(width: 2400, height: 1350), "the push in")
+        XCTAssertEqual(model.endFraming.scale, 1.25, accuracy: 1e-12)
         XCTAssertEqual(model.interpolation, .easeInOut, "FCP's default smoothing")
         XCTAssertEqual(model.rangeText(.start), "00:00:02:00")
         XCTAssertEqual(model.rangeText(.end), "00:00:07:00")
@@ -175,40 +213,47 @@ final class KenBurnsEditorTests: XCTestCase {
         let pushIn = model.end
         XCTAssertEqual(try span(id).endValues.x, 0, accuracy: 1e-9)
 
-        // Each step of the drag writes the span at once, from the drag's origin.
-        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 100, height: 0), location: .zero)
+        // Each step of a body drag moves the clip by the drag, from the drag's origin.
+        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 100, height: 0))
         XCTAssertTrue(model.isDragging)
         XCTAssertTrue(store.isGestureActive)
-        XCTAssertEqual(try span(id).endValues.x, -125, accuracy: 1e-9, "100 px of the rectangle at 1.25x")
-        XCTAssertEqual(model.end.minX, pushIn.minX + 100, accuracy: 1e-9)
-        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 150, height: 0), location: .zero)
-        XCTAssertEqual(try span(id).endValues.x, -187.5, accuracy: 1e-9)
+        XCTAssertEqual(try span(id).endValues.x, 100, accuracy: 1e-9, "the box's 100 px")
+        XCTAssertEqual(model.end.center.x, 1060, accuracy: 1e-9)
+        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 150, height: -20))
+        XCTAssertEqual(try span(id).endValues.x, 150, accuracy: 1e-9)
+        XCTAssertEqual(try span(id).endValues.y, -20, accuracy: 1e-9)
         model.endDrag()
         XCTAssertFalse(model.isDragging)
         XCTAssertFalse(store.isGestureActive)
         XCTAssertEqual(store.undoActionName, "Change Span Values")
-        var edge = VEVideoParams()
-        XCTAssertTrue(try XCTUnwrap(store.clips[clip]).getMotion(&edge, atEdgeOfSpan: id, atEnd: true,
-                                                                 frameDuration: store.frameDuration))
-        XCTAssertEqual(edge.x, -187.5, accuracy: 1e-9, "the end shows the dragged rectangle")
+        XCTAssertEqual(try edge(id, of: clip, atEnd: true).x, 150, accuracy: 1e-9, "the end shows the dragged box")
+        XCTAssertEqual(try edge(id, of: clip, atEnd: true).scale, 1.25, accuracy: 1e-12, "its size kept")
         store.undo()
         XCTAssertEqual(try span(id).endValues.x, 0, accuracy: 1e-9, "the drag was one undo step")
         XCTAssertEqual(model.end, pushIn, "re-read from the span")
 
-        // A corner drag zooms: the opposite corner stays, the aspect stays the frame's.
-        model.applyDrag(.corner(.start, .bottomRight), origin: model.start, translation: CGSize(width: -960, height: 0),
-                        location: CGPoint(x: 960, y: 540))
+        // A corner drag scales about the centre: the bottom-right corner pulled out along its
+        // diagonal by a fifth of it is a box 1.2 times larger, centred where it was.
+        model.applyDrag(.corner(.start, .bottomRight), origin: model.start,
+                        translation: CGSize(width: 192, height: 108))
         model.endDrag()
-        XCTAssertEqual(model.start.minX, 0, accuracy: 1e-6)
-        XCTAssertEqual(model.start.width, 960, accuracy: 1e-6)
-        XCTAssertEqual(try span(id).startValues.scale, 2, accuracy: 1e-9)
+        assertBox(model.start, center: CGPoint(x: 960, y: 540), size: CGSize(width: 2304, height: 1296))
+        XCTAssertEqual(try span(id).startValues.scale, 1.2, accuracy: 1e-9)
+        XCTAssertEqual(try span(id).startValues.x, 0, accuracy: 1e-9)
+        // Only the movement along the diagonal counts (the aspect stays): the same corner moved
+        // across the diagonal changes nothing.
+        let grown = model.start
+        model.applyDrag(.corner(.start, .bottomRight), origin: grown, translation: CGSize(width: 54, height: -96))
+        XCTAssertEqual(model.start.size.width, grown.size.width, accuracy: 1e-6)
+        store.cancelActiveGesture?()
+        model.endDrag()
         store.undo()
         XCTAssertEqual(try span(id).startValues.scale, 1, accuracy: 1e-9)
 
         // Escape mid-drag reverts it; nothing is recorded.
         let undoName = store.undoActionName
         let changes = store.changeCount
-        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: -80, height: 30), location: .zero)
+        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: -80, height: 30))
         XCTAssertNotEqual(try span(id).endValues.x, 0)
         store.cancelActiveGesture?()
         XCTAssertFalse(model.isDragging)
@@ -219,17 +264,31 @@ final class KenBurnsEditorTests: XCTestCase {
         model.endDrag() // the cancelled gesture's release
         XCTAssertEqual(store.undoActionName, undoName)
         // A click without movement opens nothing.
-        model.applyDrag(.body(.end), origin: pushIn, translation: .zero, location: .zero)
+        model.applyDrag(.body(.end), origin: pushIn, translation: .zero)
         XCTAssertFalse(model.isDragging)
         XCTAssertNil(store.engine.coalescingKey)
-        // Rectangles stay inside the picture while dragged.
-        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 5000, height: -5000), location: .zero)
+        // A box goes off the frame, its centre up to a fifth of the frame beyond the edge (still
+        // inside the margin the editor shows).
+        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 5000, height: -5000))
         model.endDrag()
-        XCTAssertEqual(model.end.maxX, 1920, accuracy: 1e-6)
-        XCTAssertEqual(model.end.minY, 0, accuracy: 1e-6)
+        XCTAssertEqual(model.end.center.x, 1920 + 384, accuracy: 1e-6)
+        XCTAssertEqual(model.end.center.y, -216, accuracy: 1e-6)
+        XCTAssertEqual(try span(id).endValues.x, 1920 + 384 - 960, accuracy: 1e-6)
+        XCTAssertEqual(try span(id).endValues.y, -216 - 540, accuracy: 1e-6)
+        // A corner pulled past the centre stops at the smallest box (2 % of the frame's width), one
+        // pulled far out at ten frames.
+        model.applyDrag(.corner(.end, .bottomRight), origin: model.end,
+                        translation: CGSize(width: -5000, height: -5000))
+        model.endDrag()
+        XCTAssertEqual(model.end.size.width, 1920 * KenBurnsModel.minimumBoxFraction, accuracy: 1e-6)
+        model.applyDrag(.corner(.end, .bottomRight), origin: model.end,
+                        translation: CGSize(width: 90000, height: 50000))
+        model.endDrag()
+        XCTAssertEqual(model.end.size.width, 1920 * KenBurnsModel.maximumBoxFrames, accuracy: 1e-6)
+        XCTAssertEqual(try span(id).endValues.scale, KenBurnsModel.maximumBoxFrames, accuracy: 1e-9)
         // During another gesture a drag is refused with the reason.
         store.cancelActiveGesture = {}
-        model.applyDrag(.body(.start), origin: model.start, translation: CGSize(width: 10, height: 0), location: .zero)
+        model.applyDrag(.body(.start), origin: model.start, translation: CGSize(width: 10, height: 0))
         XCTAssertFalse(model.isDragging)
         XCTAssertEqual(model.note, "Finish the current drag first.")
         store.cancelActiveGesture = nil
@@ -247,15 +306,14 @@ final class KenBurnsEditorTests: XCTestCase {
         let undoName = store.undoActionName
         let before = try span(id)
 
-        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 60, height: 0), location: .zero)
+        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 60, height: 0))
         XCTAssertTrue(model.isDragging)
         store.cancelActiveGesture?() // Escape, or Cmd-Z through the store
         XCTAssertFalse(model.isDragging)
         XCTAssertFalse(store.isGestureActive)
         // The same gesture moves on: nothing is written, no group opens.
-        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 120, height: 40), location: .zero)
-        model.applyDrag(.corner(.end, .topLeft), origin: pushIn, translation: CGSize(width: 30, height: 0),
-                        location: CGPoint(x: 400, y: 300))
+        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 120, height: 40))
+        model.applyDrag(.corner(.end, .topLeft), origin: pushIn, translation: CGSize(width: 30, height: 0))
         XCTAssertFalse(model.isDragging)
         XCTAssertNil(store.engine.coalescingKey)
         XCTAssertEqual(try span(id).endValues.x, before.endValues.x, accuracy: 1e-12)
@@ -266,22 +324,22 @@ final class KenBurnsEditorTests: XCTestCase {
         XCTAssertEqual(try span(id).endValues.x, before.endValues.x, accuracy: 1e-12)
         XCTAssertEqual(model.end, pushIn)
         // The next gesture drags again.
-        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 100, height: 0), location: .zero)
+        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 100, height: 0))
         model.endDrag()
-        XCTAssertEqual(try span(id).endValues.x, -125, accuracy: 1e-9)
+        XCTAssertEqual(try span(id).endValues.x, 100, accuracy: 1e-9)
         XCTAssertEqual(store.undoActionName, "Change Span Values")
         // A gesture the system abandons after a cancel (no release) also ends the cancelled state.
-        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 10, height: 0), location: .zero)
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 10, height: 0))
         model.cancelDrag()
         model.gestureAbandoned()
-        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 10, height: 0), location: .zero)
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 10, height: 0))
         XCTAssertTrue(model.isDragging, "a new gesture after the abandoned one drags")
         model.endDrag()
     }
 
     /// Review L8: when the editor cannot open on the selected span, the status line says why once;
-    /// later model changes do not try again (no picture loader, no status rewrite) until the
-    /// selection changes or Ken Burns… is asked for. And why it cannot, for a clip without a picture.
+    /// later model changes do not try again (no status rewrite) until the selection changes or Ken
+    /// Burns… is asked for. And why it cannot, for a clip without a picture.
     func testAnEditorThatCannotOpenIsNotRetriedOnEveryModelChange() async throws {
         let clip = try await longClip()
         let id = try motionSpan(clip, 0, 60)
@@ -290,7 +348,8 @@ final class KenBurnsEditorTests: XCTestCase {
         store.select(span: id)
         XCTAssertNil(store.kenBurns)
         XCTAssertEqual(store.kenBurnsOpenFailures, 1)
-        XCTAssertEqual(store.statusMessage, "The media of “long.mov” is not in the project, so Ken Burns has no picture.")
+        XCTAssertEqual(store.statusMessage, "The media of “long.mov” is not in the project, so Ken Burns does not "
+            + "know its picture's size.")
         store.statusMessage = "something else"
         for n in 1 ... 5 {
             XCTAssertTrue(store.engine.setSpanInterpolation(id, interpolation: n % 2 == 0 ? .linear : .easeIn).ok)
@@ -312,47 +371,40 @@ final class KenBurnsEditorTests: XCTestCase {
 
     // MARK: Re-reading
 
-    func testTheFramingsAreReReadAfterAnEarlierSpanChanges() async throws {
+    func testTheBoxesAreReReadAfterAnEarlierSpanChanges() async throws {
         let clip = try await longClip()
         // Lane 1: a zoom to 2x over [0, 60), then a chained span over [90, 150) starting from it.
         let zoom = try motionSpan(clip, 0, 60, scale: (1, 2))
         let later = try motionSpan(clip, 90, 150)
         store.select(span: later)
         let model = try XCTUnwrap(store.kenBurns)
-        XCTAssertEqual(model.start.width, 960, accuracy: 1e-6, "the zoom's held 2x")
-        XCTAssertEqual(model.end.width, 960, accuracy: 1e-6)
+        XCTAssertEqual(model.start.size.width, 3840, accuracy: 1e-6, "the zoom's held 2x")
+        XCTAssertEqual(model.end.size.width, 3840, accuracy: 1e-6)
         XCTAssertEqual(model.caption, KenBurnsModel.holdCaption, "it ends before the clip")
-        // The earlier span's end changes: the later span's rectangles follow, its values stay.
+        // The earlier span's end changes: the later span's boxes follow, its values stay.
         var to = VESpanValuesUnchanged()
         to.scale = 4
         XCTAssertTrue(store.engine.setSpanValues(zoom, start: VESpanValuesUnchanged(), end: to).ok)
-        XCTAssertEqual(model.start.width, 480, accuracy: 1e-6)
+        XCTAssertEqual(model.start.size.width, 7680, accuracy: 1e-6)
         XCTAssertEqual(try span(later).startValues.scale, 1, accuracy: 1e-12)
         store.undo()
-        XCTAssertEqual(model.start.width, 960, accuracy: 1e-6)
-        // A drag on the later span is converted over the base it applies onto.
-        model.applyDrag(.corner(.end, .bottomRight), origin: model.end, translation: CGSize(width: -480, height: 0),
-                        location: CGPoint(x: model.end.minX + 480, y: model.end.minY + 270))
+        XCTAssertEqual(model.start.size.width, 3840, accuracy: 1e-6)
+        // A drag on the later span is converted over the base it applies onto: its end box pulled to
+        // twice its size shows 4x on screen, stored as 2x over the held 2x.
+        model.applyDrag(.corner(.end, .bottomRight), origin: model.end, translation: CGSize(width: 1920, height: 1080))
         model.endDrag()
-        XCTAssertEqual(model.end.width, 480, accuracy: 1e-6)
-        XCTAssertEqual(try span(later).endValues.scale, 2, accuracy: 1e-9, "4x on screen over the held 2x")
+        XCTAssertEqual(model.end.size.width, 7680, accuracy: 1e-6)
+        XCTAssertEqual(try span(later).endValues.scale, 2, accuracy: 1e-9)
+        XCTAssertEqual(try edge(later, of: clip, atEnd: true).scale, 4, accuracy: 1e-9)
     }
 
-    // MARK: Picture, caption, fields, commands
+    // MARK: Caption, fields, commands
 
-    func testThePictureIsClampedToTheSpanAndTheCaptionStatesTheHold() async throws {
+    func testTheCaptionStatesTheHold() async throws {
         let clip = try await longClip()
         let id = try motionSpan(clip, 60, 120)
         store.select(span: id)
-        let model = try XCTUnwrap(store.kenBurns)
-        model.setPlayhead(frames(10))
-        XCTAssertEqual(model.pictureFrame, frames(60), "before the span: its first frame")
-        model.setPlayhead(frames(200))
-        XCTAssertEqual(model.pictureFrame, frames(119), "after it: its last frame")
-        model.setPlayhead(frames(90))
-        XCTAssertEqual(model.pictureFrame, frames(90))
-        XCTAssertEqual(model.pictureSeconds, 3, accuracy: 1e-9)
-        XCTAssertEqual(model.caption, KenBurnsModel.holdCaption)
+        XCTAssertEqual(try XCTUnwrap(store.kenBurns).caption, KenBurnsModel.holdCaption)
         // A span reaching the clip's end holds nothing after it: no caption.
         let tail = try motionSpan(clip, lane: 2, 240, 300)
         store.select(span: tail)
@@ -385,13 +437,16 @@ final class KenBurnsEditorTests: XCTestCase {
         XCTAssertEqual(try span(id).interpolation, .linear)
         XCTAssertEqual(model.interpolation, .linear)
         XCTAssertEqual(store.undoActionName, "Change Span Interpolation")
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: -300, height: 100))
+        model.endDrag()
         let (start, end) = (model.start, model.end)
         model.swap()
-        XCTAssertEqual(model.start.width, end.width, accuracy: 1e-6)
-        XCTAssertEqual(model.end.width, start.width, accuracy: 1e-6)
+        assertBox(model.start, center: end.center, size: end.size, "swapped")
+        assertBox(model.end, center: start.center, size: start.size, "swapped")
         XCTAssertEqual(store.undoActionName, "Change Span Values")
         store.undo()
-        XCTAssertEqual(model.start.width, start.width, accuracy: 1e-6)
+        assertBox(model.start, center: start.center, size: start.size, "undone")
+        assertBox(model.end, center: end.center, size: end.size, "undone")
     }
 
     func testTheNeighbourTogglesMatchTheTouchingClips() async throws {
@@ -409,40 +464,38 @@ final class KenBurnsEditorTests: XCTestCase {
         XCTAssertEqual(model.previous?.clipID, a)
         XCTAssertEqual(model.next?.clipID, d)
         XCTAssertTrue(model.canContinueFromPrevious)
-        XCTAssertFalse(model.continuesFromPrevious, "B shows its own framing")
+        XCTAssertFalse(model.continuesFromPrevious, "B shows its own placement")
         model.setContinuesFromPrevious(true)
         XCTAssertTrue(model.continuesFromPrevious)
         XCTAssertEqual(store.undoActionName, "Match Previous Clip")
         XCTAssertEqual(model.startFraming.scale, 1.5, accuracy: 1e-9)
         XCTAssertEqual(model.startFraming.x, -100, accuracy: 1e-6)
+        assertBox(model.start, center: CGPoint(x: 860, y: 540), size: CGSize(width: 2880, height: 1620),
+                  "where A's last frame is")
         model.setLeadsIntoNext(true)
         XCTAssertTrue(model.leadsIntoNext)
         XCTAssertEqual(model.endFraming.scale, 1.2, accuracy: 1e-9)
-        // Off: that edge shows the clip's own framing again.
+        assertBox(model.end, center: CGPoint(x: 960, y: 580), size: CGSize(width: 2304, height: 1296),
+                  "where D's first frame is")
+        // Off: that edge shows the clip's own placement again.
         model.setContinuesFromPrevious(false)
         XCTAssertFalse(model.continuesFromPrevious)
-        XCTAssertEqual(model.startFraming.scale, 1, accuracy: 1e-12)
         XCTAssertEqual(model.start, fullFrame)
-        // B placed at half size, 200 px right (its own window): the toggles still match what the
-        // neighbours show on screen, and the rectangles frame B's picture inside B's window. A's
-        // 1.5x at -100 is 3x inside a 0.5 window 200 px right: a 640 px rectangle whose centre is
-        // 600 window px / 3 = 200 px right of the frame's.
+        // B placed at half size, 200 px right: its own placement is a half-frame box there, and
+        // continuing A puts the start box where A is (3x over B's half size, 300 px left of B).
         XCTAssertTrue(store.engine.setVideoParams(VEVideoParams(x: 200, y: 0, scale: 0.5, rotationDegrees: 0, opacity: 1),
                                                   forClip: b).ok)
-        XCTAssertEqual(model.start, fullFrame, "neutral: B's whole picture in its window")
-        XCTAssertEqual(model.startFraming.scale, 0.5, accuracy: 1e-12, "on screen: B's own half size")
+        assertBox(model.start, center: CGPoint(x: 1160, y: 540), size: CGSize(width: 960, height: 540))
+        XCTAssertEqual(model.startFraming.scale, 0.5, accuracy: 1e-12)
         XCTAssertFalse(model.continuesFromPrevious)
         model.setContinuesFromPrevious(true)
         XCTAssertTrue(model.continuesFromPrevious)
-        XCTAssertEqual(model.startFraming.scale, 1.5, accuracy: 1e-9)
-        XCTAssertEqual(model.startFraming.x, -100, accuracy: 1e-6)
+        assertBox(model.start, center: CGPoint(x: 860, y: 540), size: CGSize(width: 2880, height: 1620))
         XCTAssertEqual(try span(id).startValues.scale, 3, accuracy: 1e-9)
-        XCTAssertEqual(model.start.width, 640, accuracy: 1e-6)
-        XCTAssertEqual(model.start.midX, 960 + 200, accuracy: 1e-6)
-        XCTAssertEqual(model.windowCaption, "Inside the clip's framing: 50 %, right of centre")
+        XCTAssertEqual(try span(id).startValues.x, -300, accuracy: 1e-9)
         model.setContinuesFromPrevious(false)
         XCTAssertEqual(try span(id).startValues.scale, 1, accuracy: 1e-12)
-        XCTAssertEqual(model.start, fullFrame)
+        assertBox(model.start, center: CGPoint(x: 1160, y: 540), size: CGSize(width: 960, height: 540))
         // A span not starting on the clip's first frame cannot continue the previous clip.
         let later = try motionSpan(b, lane: 2, 70, 100)
         store.select(span: later)
@@ -454,54 +507,31 @@ final class KenBurnsEditorTests: XCTestCase {
         XCTAssertFalse(store.kenBurns?.leadsIntoNext ?? true)
     }
 
-    /// The review's test gap 1 (the removed speed test had no replacement): the picture under the
-    /// rectangles is the source frame at the playhead through the clip's speed, and a still shows
-    /// its one picture, pillarboxed as the compositor fits it.
-    func testThePictureFollowsTheSpeedAndAStillHasOnePicture() async throws {
-        let clip = try await longClip() // 300 frames
-        XCTAssertTrue(store.engine.setSpeed(2, forClip: clip).ok)
-        XCTAssertEqual(store.clips[clip]?.duration, frames(150))
-        let id = try motionSpan(clip, 30, 90)
-        store.select(span: id)
-        let model = try XCTUnwrap(store.kenBurns)
-        model.setPlayhead(frames(60))
-        XCTAssertEqual(model.pictureFrame, frames(60))
-        XCTAssertEqual(model.pictureSeconds, 4, accuracy: 1e-9, "2 s into the clip at 2x: source second 4")
-        model.setPlayhead(frames(200))
-        XCTAssertEqual(model.pictureFrame, frames(89), "after the span: its last frame")
-        XCTAssertEqual(model.pictureSeconds, 89.0 / 15, accuracy: 1e-9)
-
-        // A portrait still (240x320 in a 1920x1080 frame).
-        let url = fixture.directory.appendingPathComponent("portrait.heic")
-        try TestMediaFactory.writeHEIC(to: url, width: 240, height: 320)
-        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
-            store.importMedia([url]) { continuation.resume(returning: $0) }
-        }
-        let photo = try XCTUnwrap(imported.first)
-        XCTAssertTrue(photo.isStill)
-        let v2 = try XCTUnwrap(store.videoTracks.last).trackID
-        let still = try fixture.placeMovie(photo, at: 20, track: v2)
+    /// A portrait still is pillarboxed as the compositor fits it: its box is the fitted picture
+    /// (810x1080 for 240x320 in a 1920x1080 frame), and the push in grows that box.
+    func testAPortraitStillsBoxIsItsFittedPicture() async throws {
+        let still = try await portraitStill(at: 20)
+        store.selection = [still]
         store.playheadTime = frames(600)
-        store.addMotionSpanAtPlayhead(clip: still)
-        let onStill = try XCTUnwrap(store.kenBurns)
-        XCTAssertEqual(onStill.pictureSeconds, 0, "one picture")
-        onStill.setPlayhead(frames(650))
-        XCTAssertEqual(onStill.pictureSeconds, 0)
-        XCTAssertEqual(onStill.pictureBounds.width, 810, accuracy: 1e-9, "fitted to the frame's height")
-        XCTAssertEqual(onStill.pictureBounds.midX, 960, accuracy: 1e-9)
-        // The push in frames the still as the frame shows it (pillars and all), centred.
-        XCTAssertEqual(onStill.end.width, 1920 * ProjectStore.defaultPushInFraction, accuracy: 1e-6)
-        XCTAssertEqual(onStill.end.midX, 960, accuracy: 1e-6)
+        store.addMotionSpanAtPlayhead()
+        let model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.pictureSize, CGSize(width: 240, height: 320))
+        assertBox(model.start, center: CGPoint(x: 960, y: 540), size: CGSize(width: 810, height: 1080))
+        assertBox(model.end, center: CGPoint(x: 960, y: 540), size: CGSize(width: 1012.5, height: 1350))
+        // A corner drag keeps the picture's aspect, not the frame's.
+        model.applyDrag(.corner(.end, .topLeft), origin: model.end, translation: CGSize(width: 101.25, height: 135))
+        model.endDrag()
+        assertBox(model.end, center: CGPoint(x: 960, y: 540), size: CGSize(width: 810, height: 1080))
+        XCTAssertEqual(model.endFraming.scale, 1, accuracy: 1e-9)
     }
 
-    // MARK: A clip placed smaller or off centre (review C1)
+    // MARK: A clip placed smaller, off centre or turned (review C1, the placement-box model)
 
-    /// A picture-in-picture clip (static scale 0.3 at the lower right): the editor frames the clip's
-    /// own picture inside its window, as Final Cut does. The rectangles are what the window shows (the
-    /// whole frame box while the span is neutral), the window is outlined with a caption, and a drag
-    /// stores values relative to the framing the clip already has (a scale near 1, never the ~3-8
-    /// that made the clip a full-frame crop).
-    func testAPictureInPictureClipIsEditedInsideItsOwnFraming() async throws {
+    /// A picture in picture (static scale 0.3 at the lower right): the Start box is where the clip
+    /// is, the End box the push in about the same centre. Dragging the End box to the top of the
+    /// frame stores the matching position, a corner drag the matching scale, and the inspector's
+    /// absolute values are what the box shows.
+    func testAPictureInPictureIsMovedAndScaledWhereItIs() async throws {
         let (movie, _) = try await fixture.importMedia()
         let clip = try fixture.placeMovie(movie, at: 0) // [0, 60)
         let neighbour = try fixture.placeMovie(movie, at: 2) // [60, 120)
@@ -513,163 +543,260 @@ final class KenBurnsEditorTests: XCTestCase {
         let model = try XCTUnwrap(store.kenBurns)
         let id = model.spanID
 
-        // The neutral start is the whole picture; the push in is 80 % of it, centred.
-        XCTAssertEqual(model.start.minX, 0, accuracy: 1e-6)
-        XCTAssertEqual(model.start.width, 1920, accuracy: 1e-6, "not 6400 px wide")
-        XCTAssertEqual(model.end.width, 1920 * ProjectStore.defaultPushInFraction, accuracy: 1e-6)
-        XCTAssertEqual(model.end.midX, 960, accuracy: 1e-6)
-        XCTAssertEqual(model.end.midY, 540, accuracy: 1e-6)
-        // The clip's window: the frame box through its static framing, outlined with a caption.
-        let window = try XCTUnwrap(model.clipWindow)
-        XCTAssertEqual(window.width, 576, accuracy: 1e-9)
-        XCTAssertEqual(window.height, 324, accuracy: 1e-9)
-        XCTAssertEqual(window.midX, 960 + 690, accuracy: 1e-9)
-        XCTAssertEqual(window.midY, 540 + 324, accuracy: 1e-9)
-        XCTAssertEqual(model.windowCaption, "Inside the clip's framing: 30 %, lower right")
+        // The Start box is the picture in picture itself (576x324, centred 690 px right of and 324 px
+        // below the frame's centre); the End box the push in, 1.25 times larger, same centre.
+        assertBox(model.start, center: CGPoint(x: 1650, y: 864), size: CGSize(width: 576, height: 324), "the clip")
+        assertBox(model.end, center: CGPoint(x: 1650, y: 864), size: CGSize(width: 720, height: 405), "the push in")
+        XCTAssertEqual(model.startFraming.scale, 0.3, accuracy: 1e-12)
+        XCTAssertEqual(model.startFraming.x, 690, accuracy: 1e-12)
 
-        // A first drag step keeps the picture in its window: relative values near neutral.
+        // The End box dragged up until its top edge meets the frame's: the clip slides to the top.
         let pushIn = model.end
-        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 100, height: 0), location: .zero)
-        XCTAssertEqual(try span(id).endValues.scale, 1.25, accuracy: 1e-9, "the push in's scale kept, not ~3.3")
-        XCTAssertEqual(try span(id).endValues.x, -37.5, accuracy: 1e-9, "100 window px at 1.25x, in a 0.3 window")
-        XCTAssertEqual(try span(id).endValues.y, 0, accuracy: 1e-9)
+        model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 0, height: 202.5 - 864))
         model.endDrag()
-        XCTAssertEqual(model.end.minX, pushIn.minX + 100, accuracy: 1e-6, "re-read from the span")
-        var edge = VEVideoParams()
-        XCTAssertTrue(try XCTUnwrap(store.clips[clip]).getMotion(&edge, atEdgeOfSpan: id, atEnd: true,
-                                                                 frameDuration: store.frameDuration))
-        XCTAssertEqual(edge.scale, 0.375, accuracy: 1e-9, "on screen: 1.25 x 0.3")
-        XCTAssertEqual(edge.x, 690 - 37.5, accuracy: 1e-9)
+        assertBox(model.end, center: CGPoint(x: 1650, y: 202.5), size: CGSize(width: 720, height: 405))
+        XCTAssertEqual(model.end.corner(.topLeft).y, 0, accuracy: 1e-9, "at the top of the frame")
+        XCTAssertEqual(try span(id).endValues.y, 202.5 - 864, accuracy: 1e-9, "relative to the static 324")
+        XCTAssertEqual(try span(id).endValues.x, 0, accuracy: 1e-9)
+        XCTAssertEqual(try span(id).endValues.scale, 1.25, accuracy: 1e-9, "the push in's scale kept")
+        XCTAssertEqual(try edge(id, of: clip, atEnd: true).y, -337.5, accuracy: 1e-9, "on screen")
+        XCTAssertEqual(store.inspector.spanText(.positionY, atEnd: true, of: try span(id)), "-337.5 px",
+                       "the inspector shows the box's placement")
+        XCTAssertEqual(store.inspector.spanText(.positionY, atEnd: false, of: try span(id)), "324 px")
 
-        // A corner drag to half the frame is a 2x zoom inside the window.
-        model.applyDrag(.corner(.start, .bottomRight), origin: model.start, translation: CGSize(width: -960, height: 0),
-                        location: CGPoint(x: 960, y: 540))
+        // A corner drag to twice the box's size: 0.75 on screen, 2.5 over the static 0.3.
+        model.applyDrag(.corner(.end, .bottomRight), origin: model.end, translation: CGSize(width: 360, height: 202.5))
         model.endDrag()
-        XCTAssertEqual(model.start.width, 960, accuracy: 1e-6)
-        XCTAssertEqual(try span(id).startValues.scale, 2, accuracy: 1e-9)
-        // The top-left quarter's centre (480 px left of and 270 px above the frame's) moves to the
-        // window's centre at 2x: (960, 540) window px, 0.3 of that on screen.
-        XCTAssertEqual(try span(id).startValues.x, 0.3 * 960, accuracy: 1e-9)
-        XCTAssertEqual(try span(id).startValues.y, 0.3 * 540, accuracy: 1e-9)
+        assertBox(model.end, center: CGPoint(x: 1650, y: 202.5), size: CGSize(width: 1440, height: 810))
+        XCTAssertEqual(try span(id).endValues.scale, 2.5, accuracy: 1e-9)
+        XCTAssertEqual(try edge(id, of: clip, atEnd: true).scale, 0.75, accuracy: 1e-9)
+        XCTAssertEqual(store.inspector.spanText(.scale, atEnd: true, of: try span(id)), "75 %")
+        // The start is untouched.
+        assertBox(model.start, center: CGPoint(x: 1650, y: 864), size: CGSize(width: 576, height: 324))
 
-        // Swap exchanges the two framings; the picture stays in its window.
+        // Swap exchanges the two placements.
         let (start, end) = (model.start, model.end)
         model.swap()
-        XCTAssertEqual(model.start.width, end.width, accuracy: 1e-6)
-        XCTAssertEqual(model.end.width, start.width, accuracy: 1e-6)
-        XCTAssertEqual(model.end.midX, start.midX, accuracy: 1e-6)
-        XCTAssertEqual(try span(id).startValues.scale, 1.25, accuracy: 1e-9)
-        XCTAssertEqual(try span(id).endValues.scale, 2, accuracy: 1e-9)
+        XCTAssertEqual(model.start.center.y, end.center.y, accuracy: 1e-9)
+        XCTAssertEqual(model.start.size.width, end.size.width, accuracy: 1e-9)
+        XCTAssertEqual(model.end.size.width, start.size.width, accuracy: 1e-9)
+        store.undo()
 
-        // The neighbour toggle: the next clip starts neutral in the same window, so leading into it
-        // gives the end the window's own framing (relative scale 1), and turning it off does too.
+        // Leading into the next clip (the same picture in picture) puts the End box on it.
         XCTAssertEqual(model.next?.clipID, neighbour)
         XCTAssertFalse(model.leadsIntoNext)
         model.setLeadsIntoNext(true)
         XCTAssertTrue(model.leadsIntoNext)
+        assertBox(model.end, center: CGPoint(x: 1650, y: 864), size: CGSize(width: 576, height: 324))
         XCTAssertEqual(try span(id).endValues.scale, 1, accuracy: 1e-9)
-        XCTAssertEqual(try span(id).endValues.x, 0, accuracy: 1e-9)
-        XCTAssertEqual(model.end.width, 1920, accuracy: 1e-6)
-        XCTAssertEqual(model.endFraming.scale, 0.3, accuracy: 1e-9, "the framing on screen")
-        XCTAssertEqual(model.endFraming.x, 690, accuracy: 1e-9)
-        model.setLeadsIntoNext(false)
-        XCTAssertEqual(try span(id).endValues.scale, 1, accuracy: 1e-12)
-        XCTAssertEqual(try span(id).startValues.scale, 1.25, accuracy: 1e-9, "the start keeps its framing")
+        XCTAssertEqual(try span(id).endValues.y, 0, accuracy: 1e-9)
     }
 
-    /// An offset and turned clip: the rectangles move in the window's own axes, and the values
-    /// written go back through the window's rotation and scale.
-    func testATurnedAndOffsetClipIsEditedInItsWindowsAxes() async throws {
+    /// A turned, offset clip: its boxes turn with it (the corners where the compositor draws the
+    /// picture's corners); a corner drag scales along the turned diagonal, a body drag moves in the
+    /// frame's axes, and the rotation stays.
+    func testATurnedClipsBoxesTurnWithIt() async throws {
         let clip = try await longClip()
         let placed = VEVideoParams(x: 100, y: 0, scale: 0.5, rotationDegrees: 90, opacity: 1)
         XCTAssertTrue(store.engine.setVideoParams(placed, forClip: clip).ok)
         let id = try motionSpan(clip, 0, 90)
         store.select(span: id)
         let model = try XCTUnwrap(store.kenBurns)
-        XCTAssertEqual(model.start, fullFrame, "neutral: the whole picture")
-        XCTAssertEqual(model.windowCaption, "Inside the clip's framing: 50 %, right of centre, turned 90°")
-        model.applyDrag(.corner(.end, .bottomRight), origin: model.end, translation: CGSize(width: -960, height: -540),
-                        location: CGPoint(x: 960, y: 540))
+        assertBox(model.start, center: CGPoint(x: 1060, y: 540), size: CGSize(width: 960, height: 540), rotation: 90)
+        // The picture's top-left corner turned a quarter clockwise: right of and above the centre.
+        let corner = model.end.corner(.topLeft)
+        XCTAssertEqual(corner.x, 1060 + 270, accuracy: 1e-9)
+        XCTAssertEqual(corner.y, 540 - 480, accuracy: 1e-9)
+        // That corner pulled out half its diagonal again: 1.5x.
+        model.applyDrag(.corner(.end, .topLeft), origin: model.end, translation: CGSize(width: 135, height: -240))
         model.endDrag()
-        XCTAssertEqual(try span(id).endValues.scale, 2, accuracy: 1e-9)
-        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 100, height: 0), location: .zero)
+        assertBox(model.end, center: CGPoint(x: 1060, y: 540), size: CGSize(width: 1440, height: 810), rotation: 90)
+        XCTAssertEqual(try span(id).endValues.scale, 1.5, accuracy: 1e-9)
+        // A body drag down 100 px.
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 0, height: 100))
         model.endDrag()
-        // The half-frame rectangle at the top-left is (960, 540) in the window's axes; moved 100 px
-        // right it is (760, 540). Turned 90° (clockwise, +y down) and scaled by 0.5 on screen:
-        // (-270, 380) from the clip's position.
-        XCTAssertEqual(try span(id).endValues.x, -270, accuracy: 1e-6)
-        XCTAssertEqual(try span(id).endValues.y, 380, accuracy: 1e-6)
-        XCTAssertEqual(try span(id).endValues.scale, 2, accuracy: 1e-9)
-        XCTAssertEqual(model.end.minX, 100, accuracy: 1e-6)
-        XCTAssertEqual(model.end.minY, 0, accuracy: 1e-6)
-        var edge = VEVideoParams()
-        XCTAssertTrue(try XCTUnwrap(store.clips[clip]).getMotion(&edge, atEdgeOfSpan: id, atEnd: true,
-                                                                 frameDuration: store.frameDuration))
-        XCTAssertEqual(edge.scale, 1, accuracy: 1e-9)
-        XCTAssertEqual(edge.rotationDegrees, 90, accuracy: 1e-9)
-        let rect = KenBurnsModel.rect(for: KenBurnsModel.windowFraming(edge, in: placed).framing,
-                                      sequence: model.sequenceSize, rotationDegrees: 0)
-        XCTAssertEqual(rect.minX, model.end.minX, accuracy: 1e-6)
-        XCTAssertEqual(rect.minY, model.end.minY, accuracy: 1e-6)
+        XCTAssertEqual(try span(id).endValues.x, 0, accuracy: 1e-9)
+        XCTAssertEqual(try span(id).endValues.y, 100, accuracy: 1e-9)
+        let shown = try edge(id, of: clip, atEnd: true)
+        XCTAssertEqual(shown.rotationDegrees, 90, accuracy: 1e-9, "the rotation stays")
+        XCTAssertEqual(shown.scale, 0.75, accuracy: 1e-9)
+        let expected = KenBurnsModel.box(for: shown, picture: model.pictureSize, sequence: sequence)
+        assertBox(model.end, center: expected.center, size: expected.size, rotation: 90, "what the end shows")
+        // A press on the turned corner grabs it.
+        XCTAssertEqual(KenBurnsHit.target(at: model.end.corner(.bottomLeft), start: model.start, end: model.end),
+                       .corner(.end, .bottomLeft))
+    }
+
+    // MARK: The other clips
+
+    /// Every other clip visible at the playhead is outlined with its track's name, at its composed
+    /// placement there: a zoomed-in full-frame background clip's box reaches past the frame. The
+    /// edited clip, a clip away from the playhead and a hidden track's clip are not outlined.
+    func testTheOtherVisibleClipsAreOutlinedAtThePlayhead() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let tracks = store.videoTracks
+        XCTAssertGreaterThanOrEqual(tracks.count, 2)
+        let v1 = tracks[0]
+        let v2 = tracks[tracks.count - 1]
+        let background = try fixture.placeMovie(movie, at: 0, track: v1.trackID) // [0, 60)
+        let later = try fixture.placeMovie(movie, at: 2, track: v1.trackID) // [60, 120)
+        let pip = try fixture.placeMovie(movie, at: 0, track: v2.trackID)
+        let zoomed = VEVideoParams(x: 0, y: 0, scale: 1.5, rotationDegrees: 0, opacity: 1)
+        XCTAssertTrue(store.engine.setVideoParams(zoomed, forClip: background).ok)
+        let corner = VEVideoParams(x: 690, y: 324, scale: 0.3, rotationDegrees: 0, opacity: 1)
+        XCTAssertTrue(store.engine.setVideoParams(corner, forClip: pip).ok)
+        let id = try motionSpan(pip, 0, 30)
+        store.select(span: id)
+        let model = try XCTUnwrap(store.kenBurns)
+        model.setPlayhead(frames(10))
+        XCTAssertEqual(model.outlines.map(\.clipID), [background], "the clip under the edited one only")
+        let outline = try XCTUnwrap(model.outlines.first)
+        XCTAssertEqual(outline.trackName, v1.name)
+        assertBox(outline.box, center: CGPoint(x: 960, y: 540), size: CGSize(width: 2880, height: 1620),
+                  "a 1.5x full-frame clip reaches past the frame")
+        // Its own Motion span composes in: 2x over [0, 30), held after, so 3x at frame 40.
+        let zoom = try motionSpan(background, 0, 30, scale: (1, 2))
+        store.select(span: id)
+        XCTAssertNotNil(store.engine.spanInfo(zoom))
+        model.setPlayhead(frames(40))
+        assertBox(try XCTUnwrap(model.outlines.first).box, center: CGPoint(x: 960, y: 540),
+                  size: CGSize(width: 5760, height: 3240))
+        // Past the edited clip's end the next clip on V1 is outlined instead.
+        model.setPlayhead(frames(70))
+        XCTAssertEqual(model.outlines.map(\.clipID), [later])
+        // A hidden track is not outlined; shown again, it is.
+        model.setPlayhead(frames(10))
+        XCTAssertTrue(store.engine.setTrack(v1.trackID, muted: true).ok)
+        XCTAssertEqual(model.outlines, [], "V1 hidden")
+        XCTAssertTrue(store.engine.setTrack(v1.trackID, muted: false).ok)
+        XCTAssertEqual(model.outlines.map(\.clipID), [background])
     }
 
     // MARK: Geometry
 
-    func testKenBurnsGeometry() {
-        let sequence = CGSize(width: 1920, height: 1080)
-        // A rectangle's framing and back, with and without the clip's rotation.
-        for rotation in [0.0, 30.0, -90.0] {
-            let rect = CGRect(x: 300, y: 200, width: 960, height: 540)
-            let framing = KenBurnsModel.framing(for: rect, sequence: sequence, rotationDegrees: rotation)
-            XCTAssertEqual(framing.scale, 2, accuracy: 1e-12)
-            let back = KenBurnsModel.rect(for: framing, sequence: sequence, rotationDegrees: rotation)
-            XCTAssertEqual(back.minX, rect.minX, accuracy: 1e-9)
-            XCTAssertEqual(back.minY, rect.minY, accuracy: 1e-9)
-            XCTAssertEqual(back.width, rect.width, accuracy: 1e-9)
+    func testTheBoxGeometryAndItsInverse() {
+        let wide = CGSize(width: 320, height: 180)
+        // Identity: the fitted picture, filling the frame.
+        let identity = KenBurnsModel.box(for: VEVideoParams(x: 0, y: 0, scale: 1, rotationDegrees: 0, opacity: 1),
+                                         picture: wide, sequence: sequence)
+        assertBox(identity, center: fullFrame.center, size: fullFrame.size, "identity")
+        // 30 % in the lower right.
+        let pip = KenBurnsModel.box(for: VEVideoParams(x: 690, y: 324, scale: 0.3, rotationDegrees: 0, opacity: 1),
+                                    picture: wide, sequence: sequence)
+        assertBox(pip, center: CGPoint(x: 1650, y: 864), size: CGSize(width: 576, height: 324))
+        XCTAssertEqual(pip.corner(.bottomRight).x, 1938, accuracy: 1e-9, "18 px past the right edge")
+        // Turned 30°: the corners turn about the centre.
+        let turned = KenBurnsModel.box(for: VEVideoParams(x: -100, y: 50, scale: 0.5, rotationDegrees: 30, opacity: 1),
+                                       picture: wide, sequence: sequence)
+        assertBox(turned, center: CGPoint(x: 860, y: 590), size: CGSize(width: 960, height: 540), rotation: 30)
+        let corner = turned.corner(.topRight)
+        let theta = 30.0 * .pi / 180
+        XCTAssertEqual(corner.x, 860 + cos(theta) * 480 + sin(theta) * 270, accuracy: 1e-9)
+        XCTAssertEqual(corner.y, 590 + sin(theta) * 480 - cos(theta) * 270, accuracy: 1e-9)
+        XCTAssertEqual(turned.local(corner).x, 480, accuracy: 1e-9)
+        XCTAssertEqual(turned.local(corner).y, -270, accuracy: 1e-9)
+        // A portrait still is pillarboxed: its box is 607.5 wide in a 1920x1080 frame.
+        let portrait = CGSize(width: 1080, height: 1920)
+        XCTAssertEqual(KenBurnsModel.fittedSize(picture: portrait, sequence: sequence),
+                       CGSize(width: 607.5, height: 1080))
+        let tall = KenBurnsModel.box(for: VEVideoParams(x: 0, y: 0, scale: 2, rotationDegrees: 0, opacity: 1),
+                                     picture: portrait, sequence: sequence)
+        assertBox(tall, center: CGPoint(x: 960, y: 540), size: CGSize(width: 1215, height: 2160))
+        // Round trips: box -> values -> the same values.
+        let cases: [(VEVideoParams, CGSize)] = [
+            (VEVideoParams(x: 0, y: 0, scale: 1, rotationDegrees: 0, opacity: 1), wide),
+            (VEVideoParams(x: 690, y: 324, scale: 0.3, rotationDegrees: 0, opacity: 1), wide),
+            (VEVideoParams(x: -100, y: 50, scale: 0.5, rotationDegrees: 30, opacity: 1), wide),
+            (VEVideoParams(x: 12.5, y: -400, scale: 2, rotationDegrees: -90, opacity: 1), portrait),
+        ]
+        for (params, picture) in cases {
+            let box = KenBurnsModel.box(for: params, picture: picture, sequence: sequence)
+            let back = KenBurnsModel.motion(for: box, picture: picture, sequence: sequence)
+            XCTAssertEqual(back.framing.x, params.x, accuracy: 1e-9)
+            XCTAssertEqual(back.framing.y, params.y, accuracy: 1e-9)
+            XCTAssertEqual(back.framing.scale, params.scale, accuracy: 1e-12)
+            XCTAssertEqual(back.rotationDegrees, params.rotationDegrees, accuracy: 1e-12)
+            let again = KenBurnsModel.box(for: VEVideoParams(x: back.framing.x, y: back.framing.y,
+                                                             scale: back.framing.scale,
+                                                             rotationDegrees: back.rotationDegrees, opacity: 1),
+                                          picture: picture, sequence: sequence)
+            assertBox(again, center: box.center, size: box.size, rotation: box.rotationDegrees, "round trip")
         }
-        // Unrotated: the rectangle's centre (180 px right of and 70 px below the frame's centre, at
-        // 2x) moves to the frame's centre.
-        let framing = KenBurnsModel.framing(for: CGRect(x: 660, y: 340, width: 960, height: 540), sequence: sequence,
-                                            rotationDegrees: 0)
-        XCTAssertEqual(framing.x, -360, accuracy: 1e-9)
-        XCTAssertEqual(framing.y, -140, accuracy: 1e-9)
-        // The whole frame is the identity.
-        let whole = KenBurnsModel.framing(for: CGRect(origin: .zero, size: sequence), sequence: sequence,
-                                          rotationDegrees: 0)
-        XCTAssertEqual(whole.scale, 1, accuracy: 1e-12)
-        XCTAssertEqual(whole.x, 0, accuracy: 1e-12)
-        // A portrait picture is pillarboxed; the largest frame-shaped rectangle fits its width.
-        let portrait = KenBurnsModel.fittedPicture(width: 1080, height: 1920, in: sequence)
-        XCTAssertEqual(portrait.width, 607.5, accuracy: 1e-9)
-        let largest = KenBurnsModel.largestRect(in: portrait, aspect: 16.0 / 9.0)
-        XCTAssertEqual(largest.width, portrait.width, accuracy: 1e-9)
-        XCTAssertEqual(largest.midY, 540, accuracy: 1e-9)
+        // Scale 0: an empty box at its position.
+        let hidden = KenBurnsModel.box(for: VEVideoParams(x: 10, y: 0, scale: 0, rotationDegrees: 0, opacity: 1),
+                                       picture: wide, sequence: sequence)
+        XCTAssertEqual(hidden.size, .zero)
+        XCTAssertEqual(hidden.center, CGPoint(x: 970, y: 540))
     }
 
-    // MARK: Which rectangle a press grabs
+    /// The margin: the frame fitted inside the monitor less 15 % of it on each side, and monitor
+    /// points mapped to frame pixels and back. The default push in on a full-frame clip keeps its
+    /// four corners on screen.
+    func testTheMarginMapsMonitorPointsToFramePixelsAndBack() {
+        let viewport = KenBurnsViewport(sequence: sequence, monitor: CGSize(width: 1000, height: 700))
+        // Inside 700x490 the frame is 700 wide (height-limited it would be 871).
+        XCTAssertEqual(viewport.frame.width, 700, accuracy: 1e-9)
+        XCTAssertEqual(viewport.frame.height, 393.75, accuracy: 1e-9)
+        XCTAssertEqual(viewport.frame.minX, 150, accuracy: 1e-9)
+        XCTAssertEqual(viewport.frame.minY, 153.125, accuracy: 1e-9)
+        XCTAssertEqual(viewport.scale, 700.0 / 1920, accuracy: 1e-12)
+        XCTAssertEqual(viewport.view(CGPoint.zero).x, 150, accuracy: 1e-9)
+        XCTAssertEqual(viewport.view(CGPoint.zero).y, 153.125, accuracy: 1e-9)
+        XCTAssertEqual(viewport.view(CGPoint(x: 1920, y: 1080)).x, 850, accuracy: 1e-9)
+        XCTAssertEqual(viewport.view(CGPoint(x: 1920, y: 1080)).y, 546.875, accuracy: 1e-9)
+        for point in [CGPoint(x: 0, y: 0), CGPoint(x: 37, y: 900), CGPoint(x: -300, y: 1300)] {
+            let back = viewport.sequence(viewport.view(point))
+            XCTAssertEqual(back.x, point.x, accuracy: 1e-9)
+            XCTAssertEqual(back.y, point.y, accuracy: 1e-9)
+        }
+        // A monitor point in the margin is off the frame: negative frame pixels.
+        let off = viewport.sequence(CGPoint(x: 20, y: 20))
+        XCTAssertLessThan(off.x, 0)
+        XCTAssertLessThan(off.y, 0)
+        XCTAssertEqual(viewport.sequence(CGSize(width: 70, height: 35)).width, 192, accuracy: 1e-9)
+        // The 1.25x push in's corners lie inside the monitor.
+        let pushIn = viewport.view(fullFrame.scaled(by: 1.25))
+        for corner in pushIn.corners {
+            XCTAssertTrue(CGRect(origin: .zero, size: viewport.monitor).contains(corner), "\(corner)")
+        }
+        // A tall monitor: width-limited inside the margin, centred vertically.
+        let tall = KenBurnsViewport(sequence: sequence, monitor: CGSize(width: 600, height: 900))
+        XCTAssertEqual(tall.frame.width, 420, accuracy: 1e-9)
+        XCTAssertEqual(tall.frame.midY, 450, accuracy: 1e-9)
+        // No margin: the usual letterbox fit.
+        let closed = KenBurnsViewport(sequence: sequence, monitor: CGSize(width: 1920, height: 1200), margin: 0)
+        XCTAssertEqual(closed.frame, CGRect(x: 0, y: 60, width: 1920, height: 1080))
+    }
 
-    func testTheStartRectangleIsReachableUnderTheEnd() {
-        // The default push in: the end (80 %) centred inside the start.
-        let start = CGRect(x: 0, y: 0, width: 400, height: 225)
-        let end = CGRect(x: 40, y: 22.5, width: 320, height: 180)
-        XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 20, y: 100), start: start, end: end), .body(.start),
-                       "the start's margin around the end")
-        XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 200, y: 110), start: start, end: end), .body(.end),
+    // MARK: Which box a press grabs
+
+    private func box(_ rect: CGRect, rotation: Double = 0) -> KenBurnsBox {
+        KenBurnsBox(center: CGPoint(x: rect.midX, y: rect.midY), size: rect.size, rotationDegrees: rotation)
+    }
+
+    func testTheStartBoxIsReachableAroundAndInsideTheEnd() {
+        // The default push in: the end (1.25x) around the start.
+        let start = box(CGRect(x: 40, y: 22.5, width: 320, height: 180))
+        let end = box(CGRect(x: 0, y: 0, width: 400, height: 225))
+        XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 20, y: 100), start: start, end: end), .body(.end),
+                       "the end's margin around the start")
+        XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 200, y: 110), start: start, end: end), .body(.start),
                        "inside both: the smaller one")
-        XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 25, y: 10), start: start, end: end), .body(.start), "its label")
+        XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 65, y: 30), start: start, end: end), .body(.start),
+                       "its label")
         XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 398, y: 223), start: start, end: end),
-                       .corner(.start, .bottomRight))
-        XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 41, y: 23), start: start, end: end), .corner(.end, .topLeft))
-        XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 338, y: 195), start: start, end: end), .body(.end),
+                       .corner(.end, .bottomRight))
+        XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 41, y: 23), start: start, end: end), .corner(.start, .topLeft))
+        XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 380, y: 215), start: start, end: end), .body(.end),
                        "the end's label at its bottom-right")
         XCTAssertNil(KenBurnsHit.target(at: CGPoint(x: 500, y: 300), start: start, end: end))
     }
 
-    func testCoincidingRectanglesShareTheirHandles() {
-        // An unanimated placed clip: both rectangles are the clip's framing.
-        let rect = CGRect(x: 100, y: 50, width: 400, height: 225)
+    func testCoincidingBoxesShareTheirHandles() {
+        // An unanimated clip: both boxes are its placement.
+        let same = box(CGRect(x: 100, y: 50, width: 400, height: 225))
         func target(_ x: CGFloat, _ y: CGFloat) -> KenBurnsHit.Target? {
-            KenBurnsHit.target(at: CGPoint(x: x, y: y), start: rect, end: rect)
+            KenBurnsHit.target(at: CGPoint(x: x, y: y), start: same, end: same)
         }
         XCTAssertEqual(target(110, 55), .body(.start), "the start's label (top-left)")
         XCTAssertEqual(target(490, 270), .body(.end), "the end's label (bottom-right)")
@@ -684,145 +811,16 @@ final class KenBurnsEditorTests: XCTestCase {
         XCTAssertEqual(target(300, 160), .body(.end), "the inside")
     }
 
-    // MARK: Picture loader
-
-    /// A picture source the test answers by hand: each fetch waits until `land` or `fail`.
-    private final class ScriptedPictures {
-        struct Request {
-            let millis: Int64
-            let completion: (CGImage?, Error?) -> Void
-        }
-
-        private(set) var requests: [Request] = []
-        private var answered = 0
-
-        func fetch(_ asset: VEAssetID, _ time: CMTime, _ size: Int, _ completion: @escaping (CGImage?, Error?) -> Void) {
-            requests.append(Request(millis: time.value * 1000 / Int64(time.timescale), completion: completion))
-        }
-
-        var pending: Request? { answered < requests.count ? requests[answered] : nil }
-
-        /// Answers the oldest open request with a picture (1x1, tagged by its time in the colour).
-        @discardableResult
-        func land() -> CGImage? {
-            guard let request = pending else { return nil }
-            answered += 1
-            let image = Self.picture()
-            request.completion(image, nil)
-            return image
-        }
-
-        func fail() {
-            guard let request = pending else { return }
-            answered += 1
-            request.completion(nil, NSError(domain: "Test", code: 1))
-        }
-
-        static func picture() -> CGImage? {
-            CGContext(data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 0,
-                      space: CGColorSpaceCreateDeviceRGB(),
-                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
-        }
-    }
-
-    func testKenBurnsPictureLoaderShowsEveryLandedPictureWhileScrubbingOneFetchAtATime() throws {
-        let source = ScriptedPictures()
-        let loader = KenBurnsPictureLoader(assetID: 1, capacity: 4, fetch: source.fetch)
-        // A scrub: many times while nothing has landed start one fetch.
-        for frame in stride(from: 0, through: 12, by: 3) {
-            loader.want(seconds: Double(frame) / 30)
-        }
-        XCTAssertEqual(loader.fetchesStarted, 1)
-        XCTAssertEqual(source.pending?.millis, 0)
-        XCTAssertNil(loader.image, "nothing to show before the first picture")
-
-        // Three landings while the playhead keeps moving: each landed picture shows at once (the
-        // preview never freezes on the first one), and the latest wanted time is fetched next.
-        var shown: [CGImage] = []
-        for step in 1 ... 3 {
-            let landed = try XCTUnwrap(source.land())
-            XCTAssertTrue(loader.image === landed, "landing \(step) shows its picture")
-            shown.append(landed)
-            XCTAssertEqual(loader.fetchesStarted, step + 1, "the latest time follows")
-            XCTAssertEqual(source.pending?.millis, Int64((Double(12 + 3 * (step - 1)) / 30 * 1000).rounded()))
-            loader.want(seconds: Double(12 + 3 * step) / 30) // the scrub goes on
-        }
-        XCTAssertEqual(Set(shown.map(ObjectIdentifier.init)).count, 3)
-
-        // The scrub stops at 0.7 s: 0.6 s lands, then the wanted 0.7 s, which stays.
-        source.land()
-        let final = try XCTUnwrap(source.land())
-        XCTAssertTrue(loader.image === final)
-        XCTAssertNil(loader.pendingSeconds)
-        XCTAssertNil(source.pending)
-        // A kept time (0.5 s, the third landing) shows at once without a fetch; one the capacity of
-        // four pushed out (0 s, the first) is fetched again.
-        let fetches = loader.fetchesStarted
-        loader.want(seconds: 0.5)
-        XCTAssertTrue(loader.image === shown[2])
-        XCTAssertEqual(loader.fetchesStarted, fetches)
-        loader.want(seconds: 0)
-        XCTAssertEqual(loader.fetchesStarted, fetches + 1)
-        XCTAssertEqual(source.pending?.millis, 0)
-        XCTAssertTrue(loader.image === shown[2], "the last picture stays up meanwhile")
-    }
-
-    func testKenBurnsPictureLoaderMovesOnAfterAFailedFetchAndKeepsTheLastPicture() throws {
-        let source = ScriptedPictures()
-        let loader = KenBurnsPictureLoader(assetID: 1, capacity: 4, fetch: source.fetch)
-        loader.want(seconds: 1)
-        let first = try XCTUnwrap(source.land())
-        loader.want(seconds: 2)
-        loader.want(seconds: 3) // wanted while 2 is in flight
-        source.fail()
-        XCTAssertEqual(loader.fetchesFailed, 1)
-        XCTAssertTrue(loader.image === first, "the last picture stays up")
-        XCTAssertEqual(source.pending?.millis, 3000, "the failure re-drives the loader to the latest time")
-        source.fail()
-        XCTAssertNil(source.pending, "a time that just failed is not fetched again in a loop")
-        XCTAssertEqual(loader.fetchesStarted, 3)
-        // Wanting another time and coming back tries it again.
-        loader.want(seconds: 4)
-        let fourth = try XCTUnwrap(source.land())
-        XCTAssertTrue(loader.image === fourth)
-        loader.want(seconds: 3)
-        XCTAssertEqual(source.pending?.millis, 3000)
-    }
-
-    func testKenBurnsPictureLoaderMemoryIsBounded() throws {
-        let source = ScriptedPictures()
-        let loader = KenBurnsPictureLoader(assetID: 1, capacity: 5, fetch: source.fetch)
-        // A long scrub back and forth over 300 distinct frames.
-        for pass in 0 ..< 2 {
-            for frame in 0 ..< 150 {
-                loader.want(seconds: Double(pass == 0 ? frame : 149 - frame) / 30)
-                source.land()
-                XCTAssertLessThanOrEqual(loader.cachedCount, 5)
-            }
-        }
-        XCTAssertEqual(loader.cachedCount, 5)
-        // Memory pressure keeps only the picture on screen.
-        let onScreen = loader.image
-        loader.handleMemoryPressure()
-        XCTAssertEqual(loader.cachedCount, 1)
-        XCTAssertTrue(loader.image === onScreen)
-    }
-
-    func testTheEditorLoadsItsPictureFromTheEngineWithoutTheSharedCache() async throws {
-        let (movie, _) = try await fixture.importMedia()
-        let clip = try fixture.placeMovie(movie, at: 0)
-        store.select(span: try motionSpan(clip, 0, 60))
-        let loader = try XCTUnwrap(store.kenBurns?.picture)
-        let thumbnails = store.thumbnails
-        let requestsBefore = thumbnails.requestsStarted
-        let versionBefore = thumbnails.version
-        loader.want(seconds: 0.5)
-        let landed = await StoreFixture.wait(until: { loader.image != nil }, timeout: 20)
-        XCTAssertTrue(landed, "a real picture arrives from the engine")
-        XCTAssertEqual(loader.image?.width, min(KenBurnsPictureLoader.maxDimension, Int(movie.width)),
-                       "the whole picture, at most the editor's size")
-        await StoreFixture.wait(until: { false }, timeout: 0.2)
-        XCTAssertEqual(thumbnails.requestsStarted, requestsBefore, "the shared thumbnail cache is not used")
-        XCTAssertEqual(thumbnails.version, versionBefore, "nothing bumps the timeline's and bin's redraw token")
+    func testATurnedBoxIsGrabbedInItsOwnAxes() {
+        // A 200x100 box turned a quarter clockwise about (300, 300): it stands 100 wide, 200 tall.
+        let turned = KenBurnsBox(center: CGPoint(x: 300, y: 300), size: CGSize(width: 200, height: 100),
+                                 rotationDegrees: 90)
+        let far = KenBurnsBox(center: CGPoint(x: 900, y: 900), size: CGSize(width: 10, height: 10), rotationDegrees: 0)
+        XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 351, y: 201), start: turned, end: far),
+                       .corner(.start, .topLeft), "the picture's top-left corner is at the upper right")
+        XCTAssertEqual(KenBurnsHit.target(at: CGPoint(x: 300, y: 390), start: turned, end: far), .body(.start),
+                       "inside the standing box")
+        XCTAssertNil(KenBurnsHit.target(at: CGPoint(x: 390, y: 300), start: turned, end: far),
+                     "outside it, though inside the unturned box")
     }
 }

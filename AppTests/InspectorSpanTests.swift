@@ -149,8 +149,7 @@ final class InspectorSpanTests: XCTestCase {
         // The Ken Burns editor refuses a drag with the note, and writes nothing.
         let model = try XCTUnwrap(store.kenBurns)
         let before = store.changeCount
-        model.applyDrag(.corner(.end, .bottomRight), origin: model.end, translation: CGSize(width: -100, height: 0),
-                        location: CGPoint(x: model.end.maxX - 100, y: model.end.maxY - 56))
+        model.applyDrag(.corner(.end, .bottomRight), origin: model.end, translation: CGSize(width: -100, height: -56))
         model.endDrag()
         XCTAssertEqual(store.changeCount, before)
         XCTAssertEqual(model.note, "The rest of the clip has scale 0 here, so the move cannot change what it shows.")

@@ -21,27 +21,21 @@ struct ProgramMonitorView: View {
 }
 
 /// The program monitor wired to a store: runs while the program plays, shows the debug HUD when
-/// enabled, and the Ken Burns editor of the selected Motion span (or the readout of a selected Fade or
-/// Gain span). Observes only the playhead's transport state, not the window's model. A click gives
-/// the program (timeline) the transport keys and takes keyboard focus back from text fields.
+/// enabled, and the Ken Burns editor of the selected Motion span over the picture, inset in its
+/// margin (or the readout of a selected Fade or Gain span; see `ProgramMonitorLayout`). The picture
+/// view itself observes only the playhead's transport state; the layout around it observes the
+/// store for the editor. A click gives the program (timeline) the transport keys and takes keyboard
+/// focus back from text fields.
 struct ProgramMonitorHost: View {
     let store: ProjectStore
     @ObservedObject var playhead: PlayheadModel
     @AppStorage(PlaybackHUD.defaultsKey) private var showHUD = false
 
     var body: some View {
-        ProgramMonitorView(isPlaying: playhead.isRunning, attachID: ObjectIdentifier(store)) { view in
-            store.attachProgramView(view)
-        }
-        .overlay(alignment: .topLeading) {
-            if showHUD {
-                PlaybackHUD(engine: store.engine)
-                    .padding(6)
+        ProgramMonitorLayout(store: store, showsHUD: showHUD) {
+            ProgramMonitorView(isPlaying: playhead.isRunning, attachID: ObjectIdentifier(store)) { view in
+                store.attachProgramView(view)
             }
-        }
-        .overlay {
-            // The Ken Burns editor covers the monitor while a Motion span is selected.
-            KenBurnsOverlayHost(store: store)
         }
         .contentShape(Rectangle())
         .onTapGesture {
