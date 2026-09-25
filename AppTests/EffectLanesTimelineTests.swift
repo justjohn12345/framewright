@@ -504,6 +504,51 @@ final class EffectLanesTimelineTests: XCTestCase {
 
     // MARK: Drops from the Effects tab
 
+    // MARK: Scrolling (review M5)
+
+    /// The scroll offsets stay inside the content when the rows get shorter: collapsing lanes, a
+    /// removed span or track, a larger track area never leave the top rows hidden above blank space.
+    func testScrollYIsClampedWhenTheRowsGetShorter() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let clip = try place(movie, at: 0, from: 0, to: 2, video: v1)
+        try addSpan(.motion, lane: 1, clip: clip, 0, 10)
+        try addSpan(.opacity, lane: 2, clip: clip, 0, 10)
+        store.refreshModel()
+        store.timelineViewportWidth = 800
+        store.timelineViewportHeight = 60
+        let tall = store.timelineModel.contentHeight
+        XCTAssertGreaterThan(tall, 60)
+        store.scrollY = 10_000
+        store.clampTimelineScroll()
+        XCTAssertEqual(store.scrollY, tall - 60, "at most the content below the track area")
+        // Collapsing V1's lanes: the rows are shorter; the offset follows.
+        store.toggleDisclosure(ofTrack: v1)
+        XCTAssertTrue(store.areLanesCollapsed(ofTrack: v1))
+        let collapsed = store.timelineModel.contentHeight
+        XCTAssertLessThan(collapsed, tall)
+        XCTAssertEqual(store.scrollY, max(0, collapsed - 60))
+        // Expanding again and scrolling down, then a taller track area: clamped when it is resized.
+        store.toggleDisclosure(ofTrack: v1)
+        store.scrollY = 10_000
+        store.clampTimelineScroll()
+        store.timelineViewportHeight = 1000
+        store.clampTimelineScroll()
+        XCTAssertEqual(store.scrollY, 0, "everything fits")
+        // A model change (a span removed) clamps too.
+        store.timelineViewportHeight = 60
+        store.scrollY = 10_000
+        store.clampTimelineScroll()
+        let before = store.scrollY
+        let lane2 = try XCTUnwrap(store.clips[clip]?.spans.first { $0.lane == 2 })
+        XCTAssertTrue(store.engine.removeSpan(lane2.spanID).ok)
+        XCTAssertLessThan(store.scrollY, before)
+        XCTAssertEqual(store.scrollY, max(0, store.timelineModel.contentHeight - 60))
+        // Time too: zoomed out, the offset comes back inside the sequence.
+        store.scrollX = 50_000
+        store.clampTimelineScroll()
+        XCTAssertEqual(store.scrollX, max(0, store.timelineModel.contentWidth - 800))
+    }
+
     // MARK: What edits remove as a side effect (review M1)
 
     /// A move that makes a clip touch another's faded start removes the fade in: the status line

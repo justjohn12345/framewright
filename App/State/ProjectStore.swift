@@ -154,6 +154,8 @@ final class ProjectStore: ObservableObject {
 
     /// Width of the timeline's track area, for Zoom to Fit (updated by the timeline).
     var timelineViewportWidth: CGFloat = 800
+    /// Height of the timeline's track area (updated by the timeline; 0 until it is laid out).
+    var timelineViewportHeight: CGFloat = 0
 
     /// Cancels the timeline gesture in progress (set by the timeline while dragging).
     var cancelActiveGesture: (() -> Void)?
@@ -259,7 +261,11 @@ final class ProjectStore: ObservableObject {
             MainActor.assumeIsolated { engine?.sourceMonitorVisible = visible }
         }
         laneCollapseForwarding = layout.$collapsedLaneTracks.removeDuplicates().dropFirst().sink { [weak self] _ in
-            MainActor.assumeIsolated { self?.objectWillChange.send() }
+            MainActor.assumeIsolated {
+                self?.objectWillChange.send()
+                // After the change is stored (the sink runs before it): shorter rows keep the top shown.
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.clampTimelineScroll() } }
+            }
         }
         refreshAssets()
         refreshModel()
@@ -304,6 +310,9 @@ final class ProjectStore: ObservableObject {
         let audioIDs = sequence.audioTrackIDs.map(\.int64Value)
         if !videoIDs.contains(targetVideoTrackID) { targetVideoTrackID = videoIDs.first ?? 0 }
         if !audioIDs.contains(targetAudioTrackID) { targetAudioTrackID = audioIDs.first ?? 0 }
+        // Not while a drag previews its edits (the view would slide under the pointer); the drag's
+        // end is a model change too.
+        if !isGestureActive { clampTimelineScroll() }
     }
 
     func refreshAssets() {
@@ -569,6 +578,20 @@ final class ProjectStore: ObservableObject {
         model.zoom(by: factor, anchorX: anchorX)
         pixelsPerSecond = model.pixelsPerSecond
         scrollX = model.scrollX
+        clampTimelineScroll()
+    }
+
+    /// Keeps the timeline's scroll offsets inside its content (review M5): after every model change,
+    /// a lane collapse or reveal, a track row collapse, a zoom, a scroll and a resize of the track
+    /// area, so rows that got shorter never leave the top rows hidden above blank space. Nothing is
+    /// clamped until the timeline has been laid out (its viewport size is known).
+    func clampTimelineScroll() {
+        guard timelineViewportWidth > 0, timelineViewportHeight > 0 else { return }
+        let model = timelineModel
+        let x = min(max(0, scrollX), max(0, model.contentWidth - timelineViewportWidth))
+        let y = min(max(0, scrollY), max(0, model.contentHeight - timelineViewportHeight))
+        if x != scrollX { scrollX = x }
+        if y != scrollY { scrollY = y }
     }
 
     func zoomIn() { zoom(by: 1.5, anchorX: timelineModel.x(forTime: playheadTime.secondsOrZero)) }
@@ -598,6 +621,7 @@ final class ProjectStore: ObservableObject {
         } else {
             collapsedTrackIDs.remove(id)
         }
+        clampTimelineScroll()
     }
 
     /// Whether the track's row is shown collapsed (collapsed and still empty).
@@ -611,6 +635,7 @@ final class ProjectStore: ObservableObject {
         guard let track = track(id) else { return }
         layout.setLanesCollapsed(collapsed, key: WindowLayoutModel.laneKey(video: track.kind == .video,
                                                                           index: track.index))
+        clampTimelineScroll()
     }
 
     /// Whether the user collapsed the track's lanes.
@@ -633,6 +658,7 @@ final class ProjectStore: ObservableObject {
     /// when none is), so it can be dropped there. Publishes only a change.
     func revealTransitionLane(_ kind: TimelineViewModel.TrackKind?) {
         if revealedTransitionLane != kind { revealedTransitionLane = kind }
+        if kind == nil { clampTimelineScroll() }
     }
 
     // MARK: Selection

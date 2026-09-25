@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import Framewright
 
@@ -139,3 +140,60 @@ final class TimelineViewModelTests: XCTestCase {
         XCTAssertEqual(model.snapToFrame(-3), 0)
     }
 }
+
+/// The scroll wheel, the trackpad and the scroll bars (effect lanes review M4, M5).
+@MainActor
+final class TimelineScrollingTests: XCTestCase {
+    private func scroll(_ dx: CGFloat, _ dy: CGFloat, at point: CGPoint = CGPoint(x: 400, y: 100),
+                        _ modifiers: NSEvent.ModifierFlags = [], precise: Bool) -> TimelineScrolling.Action {
+        TimelineScrolling.action(for: ScrollWheelCatcher.Scroll(deltaX: dx, deltaY: dy, location: point,
+                                                                modifiers: modifiers, isPrecise: precise),
+                                 headerWidth: 170, rulerHeight: 26)
+    }
+
+    /// A notched wheel always scrolls time over the tracks, however tall they are (the mapping has no
+    /// input for it); Shift or the headers scroll the tracks; the ruler scrolls time.
+    func testANotchedWheelScrollsTimeAndShiftOrTheHeadersScrollTheTracks() {
+        XCTAssertEqual(scroll(0, -30, precise: false), .pan(dx: 30, dy: 0), "down the wheel: later in time")
+        XCTAssertEqual(scroll(0, 30, precise: false), .pan(dx: -30, dy: 0))
+        // AppKit turns Shift + wheel into a horizontal delta: still the tracks.
+        XCTAssertEqual(scroll(-30, 0, [.shift], precise: false), .pan(dx: 0, dy: 30))
+        XCTAssertEqual(scroll(0, -30, [.shift], precise: false), .pan(dx: 0, dy: 30))
+        XCTAssertEqual(scroll(0, -30, at: CGPoint(x: 60, y: 100), precise: false), .pan(dx: 0, dy: 30),
+                       "over the headers: the tracks")
+        XCTAssertEqual(scroll(0, -30, at: CGPoint(x: 400, y: 10), [.shift], precise: false), .pan(dx: 30, dy: 0),
+                       "over the ruler: time")
+    }
+
+    /// A trackpad scrolls both axes from its own deltas over the tracks, the tracks over the
+    /// headers, time over the ruler; Option or Command zooms about the pointer.
+    func testATrackpadScrollsBothAxesAndOptionZooms() {
+        XCTAssertEqual(scroll(-4, -7, precise: true), .pan(dx: 4, dy: 7))
+        XCTAssertEqual(scroll(-4, -7, at: CGPoint(x: 60, y: 100), precise: true), .pan(dx: 0, dy: 7))
+        XCTAssertEqual(scroll(-4, -7, at: CGPoint(x: 400, y: 10), precise: true), .pan(dx: 4, dy: 0))
+        XCTAssertEqual(scroll(0, -7, at: CGPoint(x: 400, y: 10), precise: true), .pan(dx: 7, dy: 0))
+        XCTAssertEqual(scroll(0, 50, at: CGPoint(x: 370, y: 100), [.option], precise: false),
+                       .zoom(factor: exp(Double(50) * 0.01), anchorX: 200))
+        XCTAssertEqual(scroll(0, -20, at: CGPoint(x: 100, y: 100), [.command], precise: true),
+                       .zoom(factor: exp(Double(-20) * 0.01), anchorX: 0))
+    }
+
+    func testScrollBarGeometry() {
+        let bar = ScrollBarGeometry(content: 1000, visible: 250, length: 200)
+        XCTAssertTrue(bar.isScrollable)
+        XCTAssertEqual(bar.maximumOffset, 750)
+        XCTAssertEqual(bar.knobLength, 50, "the visible quarter of the track")
+        XCTAssertEqual(bar.knobStart(offset: 0), 0)
+        XCTAssertEqual(bar.knobStart(offset: 750), 150)
+        XCTAssertEqual(bar.knobStart(offset: 5000), 150, "clamped")
+        XCTAssertEqual(bar.offset(knobCentreAt: 25), 0)
+        XCTAssertEqual(bar.offset(knobCentreAt: 100), 375)
+        XCTAssertEqual(bar.offset(knobCentreAt: 1000), 750)
+        let tiny = ScrollBarGeometry(content: 100_000, visible: 100, length: 100)
+        XCTAssertEqual(tiny.knobLength, ScrollBarGeometry.minimumKnob)
+        let fits = ScrollBarGeometry(content: 90, visible: 100, length: 100)
+        XCTAssertFalse(fits.isScrollable)
+        XCTAssertEqual(fits.offset(knobCentreAt: 60), 0)
+    }
+}
+

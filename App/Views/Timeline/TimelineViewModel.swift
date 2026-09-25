@@ -289,6 +289,11 @@ struct TimelineViewModel: Equatable {
         clips.map(\.end).max() ?? 0
     }
 
+    /// Width of the scrollable time: the sequence and 30 s after it, at the current zoom.
+    var contentWidth: CGFloat {
+        CGFloat((sequenceEnd + 30) * pixelsPerSecond)
+    }
+
     func x(forTime seconds: Double) -> CGFloat {
         CGFloat(seconds * pixelsPerSecond) - scrollX
     }

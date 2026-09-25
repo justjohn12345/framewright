@@ -60,6 +60,8 @@ struct TimelineView: View {
     static let headerWidth: CGFloat = 170
     static let rulerHeight: CGFloat = 26
     static let scrollBarHeight: CGFloat = 12
+    /// Width of the vertical scroll bar over the track area's trailing edge.
+    static let verticalScrollBarWidth: CGFloat = 10
 
     init(store: ProjectStore) {
         self.store = store
@@ -204,16 +206,13 @@ struct TimelineView: View {
                 .allowsHitTesting(false)
         }
         .overlay(isDropTargeted ? RoundedRectangle(cornerRadius: 2).stroke(Color.accentColor, lineWidth: 2) : nil)
+        .overlay(alignment: .topTrailing) {
+            verticalScrollBar(model)
+        }
         .background(GeometryReader { geometry in
             Color.clear
-                .onAppear {
-                    canvasSize = geometry.size
-                    store.timelineViewportWidth = geometry.size.width
-                }
-                .onChange(of: geometry.size) { _, newSize in
-                    canvasSize = newSize
-                    store.timelineViewportWidth = newSize.width
-                }
+                .onAppear { canvasResized(geometry.size) }
+                .onChange(of: geometry.size) { _, newSize in canvasResized(newSize) }
         })
         .contentShape(Rectangle())
         .gesture(
@@ -259,57 +258,67 @@ struct TimelineView: View {
 
     // MARK: Scrolling
 
-    private func contentWidth(_ model: TimelineViewModel) -> CGFloat {
-        CGFloat((model.sequenceEnd + 30) * model.pixelsPerSecond)
+    /// The track area's size changed (the window, the divider): the store learns it and the scroll
+    /// offsets are kept inside the content (review M5).
+    private func canvasResized(_ size: CGSize) {
+        canvasSize = size
+        store.timelineViewportWidth = size.width
+        store.timelineViewportHeight = size.height
+        store.clampTimelineScroll()
     }
 
-    private func clampScroll(_ model: TimelineViewModel) {
-        let maxX = max(0, contentWidth(model) - canvasSize.width)
-        store.scrollX = min(max(0, store.scrollX), maxX)
-        let maxY = max(0, model.contentHeight - canvasSize.height)
-        store.scrollY = min(max(0, store.scrollY), maxY)
-    }
-
+    /// The wheel and the trackpad (`TimelineScrolling`): the same mapping however tall the tracks are.
     private func handleScroll(_ scroll: ScrollWheelCatcher.Scroll) {
-        let model = store.timelineModel
-        if scroll.modifiers.contains(.option) || scroll.modifiers.contains(.command) {
-            let anchor = scroll.location.x - Self.headerWidth
-            store.zoom(by: exp(Double(scroll.deltaY) * 0.01), anchorX: max(0, anchor))
-            return
+        switch TimelineScrolling.action(for: scroll, headerWidth: Self.headerWidth, rulerHeight: Self.rulerHeight) {
+        case let .zoom(factor, anchorX):
+            store.zoom(by: factor, anchorX: anchorX)
+        case let .pan(dx, dy):
+            store.scrollX += dx
+            store.scrollY += dy
         }
-        let horizontal = abs(scroll.deltaX) > abs(scroll.deltaY) || scroll.modifiers.contains(.shift)
-        let tallContent = model.contentHeight > canvasSize.height
-        if horizontal {
-            store.scrollX -= abs(scroll.deltaX) > 0 ? scroll.deltaX : scroll.deltaY
-        } else if tallContent, scroll.location.y > Self.rulerHeight {
-            store.scrollY -= scroll.deltaY
-        } else {
-            store.scrollX -= scroll.deltaY
-        }
-        clampScroll(store.timelineModel)
+        store.clampTimelineScroll()
     }
 
+    /// The horizontal bar under the track area (time).
     private func scrollBar(_ model: TimelineViewModel) -> some View {
         GeometryReader { geometry in
-            let total = max(contentWidth(model), geometry.size.width)
-            let fraction = geometry.size.width / total
-            let knobWidth = max(30, geometry.size.width * fraction)
-            let travel = max(1, geometry.size.width - knobWidth)
-            let maxScroll = max(1, total - geometry.size.width)
-            let knobX = min(travel, max(0, store.scrollX / maxScroll * travel))
+            let bar = ScrollBarGeometry(content: max(model.contentWidth, geometry.size.width),
+                                        visible: geometry.size.width, length: geometry.size.width)
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.secondary.opacity(0.12))
                 Capsule().fill(Color.secondary.opacity(0.45))
-                    .frame(width: knobWidth)
-                    .offset(x: knobX)
+                    .frame(width: bar.knobLength)
+                    .offset(x: bar.knobStart(offset: store.scrollX))
             }
             .frame(height: 8)
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                let x = value.location.x - knobWidth / 2
-                store.scrollX = min(maxScroll, max(0, x / travel * maxScroll))
+                store.scrollX = bar.offset(knobCentreAt: value.location.x)
             })
+        }
+    }
+
+    /// The vertical bar over the track area's trailing edge (tracks), shown while the rows are
+    /// taller than the track area (review M5); the headers follow `scrollY` too.
+    @ViewBuilder
+    private func verticalScrollBar(_ model: TimelineViewModel) -> some View {
+        let bar = ScrollBarGeometry(content: model.contentHeight, visible: canvasSize.height,
+                                    length: canvasSize.height)
+        if bar.isScrollable {
+            ZStack(alignment: .top) {
+                Capsule().fill(Color.secondary.opacity(0.12))
+                Capsule().fill(Color.secondary.opacity(0.45))
+                    .frame(height: bar.knobLength)
+                    .offset(y: bar.knobStart(offset: store.scrollY))
+            }
+            .frame(width: 8)
+            .frame(width: Self.verticalScrollBarWidth, height: canvasSize.height)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                store.scrollY = bar.offset(knobCentreAt: value.location.y)
+            })
+            .accessibilityIdentifier("TimelineVerticalScrollBar")
         }
     }
 }

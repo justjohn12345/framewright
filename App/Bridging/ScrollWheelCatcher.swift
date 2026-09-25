@@ -15,6 +15,9 @@ struct ScrollWheelCatcher: NSViewRepresentable {
         /// Pointer location in this view's coordinates, origin top-left.
         var location: CGPoint
         var modifiers: NSEvent.ModifierFlags
+        /// A trackpad or another device with precise deltas (not a notched mouse wheel, whose
+        /// deltas are multiplied by 10 here).
+        var isPrecise: Bool = false
     }
 
     var onScroll: (Scroll) -> Void
@@ -51,7 +54,8 @@ struct ScrollWheelCatcher: NSViewRepresentable {
                 guard self.bounds.contains(point) else { return event }
                 let scale: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 10
                 self.onScroll?(Scroll(deltaX: event.scrollingDeltaX * scale, deltaY: event.scrollingDeltaY * scale,
-                                      location: point, modifiers: event.modifierFlags))
+                                      location: point, modifiers: event.modifierFlags,
+                                      isPrecise: event.hasPreciseScrollingDeltas))
                 return nil
             }
         }
