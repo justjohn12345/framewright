@@ -7,6 +7,15 @@ footage, arrange clips on a multi-track timeline, trim, split and move them, dis
 them, adjust motion and sound in an inspector, play it back with synced audio, and export.
 It runs on Apple silicon and uses the hardware wherever there is hardware to use.
 
+<p>
+<img src="docs/screenshots/transform-editor.png" alt="The Motion span editor in Transform mode: a picture-in-picture still on V2 with its Start and End boxes over the program, a dashed outline of the V1 clip beneath, and the effect lanes under each track" width="100%">
+</p>
+<p>
+<img src="docs/screenshots/fade-span.png" alt="A Fade span selected on V1: its opacity readout on the program monitor, the span section in the inspector, and the transitions and effect lanes in the timeline" width="100%">
+</p>
+
+Screenshots use footage from [Sintel](https://durian.blender.org) (Blender Foundation, CC BY 3.0).
+
 **This codebase is entirely AI-written.** Every line of engine code, UI, build script, test
 and document was produced by Claude Code: Claude Fable 5.1 acting as the lead (planning,
 review, verification) directing Claude Opus 5.5 subagents that implemented each phase, with a
