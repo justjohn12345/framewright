@@ -1382,12 +1382,17 @@ final class ProjectStore: ObservableObject {
         defer { replacingProject = false }
         try engine.openProject(at: url)
         resetUIState()
+        // What went missing and what the loader adjusted (a repaired or migrated file, each warned):
+        // both, so a missing file never hides an adjustment (review L11).
         let missing = engine.missingAssetIDs.count
+        var parts: [String] = []
         if missing > 0 {
-            statusMessage = missing == 1 ? "1 media file could not be found." : "\(missing) media files could not be found."
-        } else if !engine.loadWarnings.isEmpty {
-            statusMessage = "The project was adjusted to load: " + engine.loadWarnings.joined(separator: "; ")
+            parts.append(missing == 1 ? "1 media file could not be found." : "\(missing) media files could not be found.")
         }
+        if !engine.loadWarnings.isEmpty {
+            parts.append("The project was adjusted to load: " + engine.loadWarnings.joined(separator: "; "))
+        }
+        if !parts.isEmpty { statusMessage = parts.joined(separator: " ") }
     }
 
     func save(to url: URL) throws {

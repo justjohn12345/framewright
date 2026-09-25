@@ -11,6 +11,7 @@
 #include "../../Engine/Render/Scheduler.h"
 #include "../Model/ModelFixtures.h"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <map>
@@ -172,4 +173,77 @@ TEST_CASE("Migration render: hidden keyframes, speed, stills, VFR, fades and NTS
     CHECK(counts.frames > 150);
     CHECK(counts.transitionLayers > 0);
     CHECK(counts.audioContributions > 1000);
+}
+
+TEST_CASE("Migration render: the changes a migration only warns about render as warned (review L11)") {
+    // The render golden with three fades version 5 cannot keep as version 4 had them (each warned):
+    // audio clip 12 [0,60) fading in over 58 frames under the 10-frame crossfade 16 at its end (5
+    // frames inside it): shortened to 55; clip 14 [60,120) fading out over 57 frames with that
+    // crossfade coming in (5 frames inside it): shortened to 55 (review H1); clip 22 [150,180)
+    // fading in over 6 frames while clip 21 touches its start: dropped.
+    json document = json::parse(readFile(goldenPath("project-v4-render.json")));
+    std::size_t edited = 0;
+    for (json &track : document.at("sequences")[0].at("audioTracks")) {
+        for (json &clip : track.at("clips")) {
+            json &audio = clip.at("audio");
+            const auto id = clip.at("id").get<std::uint64_t>();
+            if (id == 12) {
+                audio["fadeInDuration"] = json{{"value", 58}, {"timescale", 30}};
+            } else if (id == 14) {
+                audio["fadeOutDuration"] = json{{"value", 57}, {"timescale", 30}};
+            } else if (id == 22) {
+                audio["fadeInDuration"] = json{{"value", 6}, {"timescale", 30}};
+            } else {
+                continue;
+            }
+            ++edited;
+        }
+    }
+    REQUIRE(edited == 3);
+    const ProjectLoadResult loaded = parseProject(document.dump());
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    auto warned = [&](const std::string &needle) {
+        return std::any_of(loaded.warnings.begin(), loaded.warnings.end(),
+                           [&](const std::string &w) { return w.find(needle) != std::string::npos; });
+    };
+    CHECK(warned("clips[0].audio.fadeInDuration: the fade in (58/30"));
+    CHECK(warned("would meet the crossfade at the clip's end; shortened to 55/30"));
+    CHECK(warned("would meet the crossfade at the clip's start; shortened to 55/30"));
+    CHECK(warned("clips[2].audio.fadeInDuration: the fade in (6/30"));
+
+    const Project &project = *loaded.project;
+    const Sequence &sequence = project.sequences[0];
+    const AudioGraph graph = Scheduler::audioGraphFor(sequence, project, TimeRange{kCMTimeZero, sequence.duration()});
+    auto gain = [&](std::uint64_t clip, CMTime t) -> std::optional<double> {
+        for (const AudioSegment &segment : graph.segments) {
+            if (segment.clipId.value() == clip && segment.timelineRange.contains(t)) {
+                return gainAt(segment, t);
+            }
+        }
+        return std::nullopt;
+    };
+    const double level14 = std::pow(10.0, -3.0 / 20); // clip 14's static gain
+    for (int k = 0; k < 240 * 6; ++k) {
+        const CMTime t = CMTimeMake(k, 240);
+        const double frame = k / 8.0; // 30 fps
+        INFO("at frame " << frame);
+        if (frame < 55) {
+            // Clip 12 fades in over 55 frames (not 58), alone.
+            const auto g = gain(12, t);
+            REQUIRE(g.has_value());
+            CHECK(near(*g, frame / 55));
+        }
+        if (frame >= 65 && frame < 120) {
+            // Clip 14 fades out over its last 55 frames (not 57), after the crossfade's part.
+            const auto g = gain(14, t);
+            REQUIRE(g.has_value());
+            CHECK(near(*g, level14 * (120 - frame) / 55));
+        }
+        if (frame >= 150 && frame < 170) {
+            // Clip 22 plays at full level from its first frame: no fade in (clip 21 touches it).
+            const auto g = gain(22, t);
+            REQUIRE(g.has_value());
+            CHECK(near(*g, 1.0));
+        }
+    }
 }

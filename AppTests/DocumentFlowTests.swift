@@ -124,6 +124,54 @@ final class DocumentFlowTests: XCTestCase {
         XCTAssertEqual(other.clips.count, 1)
         XCTAssertTrue(log.titles.isEmpty, "a clean launch opens without asking")
     }
+
+    /// Review L11: a project the loader had to adjust (here a fade in on a clip another clip touches,
+    /// which the loader removes, review M8) says so when it opens, with the warnings, and a missing
+    /// media file does not hide them.
+    func testOpeningAnAdjustedProjectShowsTheLoadWarnings() async throws {
+        let store = fixture.store
+        let (_, tone) = try await fixture.importMedia()
+        let a1 = try XCTUnwrap(store.audioTracks.first).trackID
+        XCTAssertTrue(store.place(asset: tone.assetID, at: .zero, videoTrack: 0, audioTrack: a1, sourceIn: .zero,
+                                  sourceOut: store.time(frames: 30), overwrite: true))
+        XCTAssertTrue(store.place(asset: tone.assetID, at: store.time(frames: 30), videoTrack: 0, audioTrack: a1,
+                                  sourceIn: store.time(frames: 30), sourceOut: store.time(frames: 60), overwrite: true))
+        let second = try XCTUnwrap(store.selection.first)
+        let url = fixture.directory.appendingPathComponent("Adjusted.framewright")
+        try store.save(to: url)
+        // Hand-edit the file: a fade in on the second clip, whose start the first clip touches.
+        var document = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var sequences = try XCTUnwrap(document["sequences"] as? [[String: Any]])
+        var audioTracks = try XCTUnwrap(sequences[0]["audioTracks"] as? [[String: Any]])
+        var clips = try XCTUnwrap(audioTracks[0]["clips"] as? [[String: Any]])
+        let index = try XCTUnwrap(clips.firstIndex { ($0["id"] as? NSNumber)?.int64Value == second })
+        let nextId = try XCTUnwrap(document["nextId"] as? NSNumber).int64Value
+        clips[index]["spans"] = [["id": nextId, "kind": "transition", "lane": 0, "edge": "head",
+                                  "start": ["value": 0, "timescale": 1], "end": ["value": 10, "timescale": 30]]]
+        document["nextId"] = nextId + 1
+        audioTracks[0]["clips"] = clips
+        sequences[0]["audioTracks"] = audioTracks
+        document["sequences"] = sequences
+        try JSONSerialization.data(withJSONObject: document).write(to: url)
+
+        try store.open(url: url)
+        let message = try XCTUnwrap(store.statusMessage)
+        XCTAssertTrue(message.hasPrefix("The project was adjusted to load: "), message)
+        XCTAssertTrue(message.contains("was removed"), message)
+        XCTAssertTrue(message.contains("touches the start of clip"), message)
+        XCTAssertTrue(store.clips[second]?.spans.isEmpty == true, "the fade in went")
+
+        // With its media missing too, both are said.
+        var moved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var assets = try XCTUnwrap(moved["assets"] as? [[String: Any]])
+        assets[0]["url"] = fixture.directory.appendingPathComponent("gone.wav").path
+        moved["assets"] = assets
+        moved["assetBookmarks"] = nil // the bookmark would still find the file
+        try JSONSerialization.data(withJSONObject: moved).write(to: url)
+        try store.open(url: url)
+        let both = try XCTUnwrap(store.statusMessage)
+        XCTAssertTrue(both.hasPrefix("1 media file could not be found. The project was adjusted to load: "), both)
+    }
 }
 
 /// A second store over its own engine (for flows that open a file into a fresh app).
@@ -132,4 +180,6 @@ enum StoreFixtureStore {
     static func make(in directory: URL) -> ProjectStore {
         ProjectStore(engine: VEEngine(cacheDirectory: directory.appendingPathComponent("Caches2")))
     }
+
 }
+
