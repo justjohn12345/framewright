@@ -52,7 +52,9 @@ enum KenBurnsMode: String, CaseIterable, Identifiable {
 ///   (`rect(for:sequence:)`): the frame's size divided by the edge's scale, centred where the frame's
 ///   centre falls in the picture, turned against the edge's rotation. Dragging a rectangle pans,
 ///   dragging a corner zooms (about its centre, the frame's aspect kept); a rectangle stays inside the
-///   picture (the frame never shows past its edge) and is at least a tenth of the frame wide.
+///   frame box (`frameBox`: what the monitor shows at 100 %, the bars of a source of another aspect
+///   included, so it can always go back to 100 % and pan over the bars as 100 % shows them) and is at
+///   least a tenth of the frame wide.
 ///
 /// The edge's values are its composed Motion (the clip's static values with every span that has
 /// started applied, this one at that edge, `VEClipInfo.getMotion(_:atEdgeOfSpan:)`). A dragged box or
@@ -427,7 +429,7 @@ final class KenBurnsModel: ObservableObject {
     /// where it already was); a corner drag scales it about its centre by how far the grabbed corner
     /// moved along its diagonal (the aspect stays, between `minimumBoxFraction` and `maximumBoxFrames`
     /// of the frame's width). Ken Burns: a body drag pans the rectangle and a corner drag zooms it the
-    /// same way, kept inside the picture and at least `minimumRectFraction` of the frame wide
+    /// same way, kept inside the frame box and at least `minimumRectFraction` of the frame wide
     /// (`panned`, `zoomed`). The first step that moves opens the drag's coalescing group; every step
     /// writes the span's values inside it. A drag that has not moved changes nothing. Refused during
     /// another gesture (a timeline drag): nothing happens and the note says why.
@@ -572,12 +574,14 @@ final class KenBurnsModel: ObservableObject {
 
     // MARK: Ken Burns rectangles
 
-    /// The picture as the Ken Burns mode shows it (identity: fitted into the frame, centred), in
-    /// sequence pixels: what a rectangle stays inside.
-    var pictureBounds: CGRect {
-        let fitted = Self.fittedSize(picture: pictureSize, sequence: sequenceSize)
-        return CGRect(x: (sequenceSize.width - fitted.width) / 2, y: (sequenceSize.height - fitted.height) / 2,
-                      width: fitted.width, height: fitted.height)
+    /// The frame box: the frame at identity, in sequence pixels, which is what the Ken Burns mode's
+    /// monitor shows at 100 % (the picture fitted into it, with the bars of a source whose aspect is
+    /// not the sequence's). A rectangle stays inside it: at most the whole frame (a 100 % zoom, bars
+    /// included), panned over the bars as far as 100 % shows them. Not the picture's own pixels: a
+    /// letterboxed or pillarboxed picture holds no rectangle of the frame's aspect as large as the
+    /// frame, so the identity rectangle would be out of reach.
+    var frameBox: CGRect {
+        CGRect(origin: .zero, size: sequenceSize)
     }
 
     /// Half the width and height of the smallest axis-aligned rectangle around `rect` (turned).
@@ -590,10 +594,10 @@ final class KenBurnsModel: ObservableObject {
         return CGSize(width: c * w + s * h, height: s * w + c * h)
     }
 
-    /// Where the centre of a rectangle like `rect` may be for it to stay inside the picture (per
-    /// axis; a rectangle wider or taller than the picture on an axis has the picture's centre there).
+    /// Where the centre of a rectangle like `rect` may be for it to stay inside the frame box (per
+    /// axis; a rectangle wider or taller than the frame on an axis has the frame's centre there).
     private func centreRange(for rect: KenBurnsBox) -> (x: ClosedRange<CGFloat>, y: ClosedRange<CGFloat>) {
-        let bounds = pictureBounds
+        let bounds = frameBox
         let half = Self.halfExtents(rect)
         func range(_ low: CGFloat, _ high: CGFloat, _ mid: CGFloat) -> ClosedRange<CGFloat> {
             low <= high ? low ... high : mid ... mid
@@ -602,19 +606,19 @@ final class KenBurnsModel: ObservableObject {
                 range(bounds.minY + half.height, bounds.maxY - half.height, bounds.midY))
     }
 
-    /// `rect` lies inside the picture (to a millionth of a pixel).
-    func fitsInPicture(_ rect: KenBurnsBox) -> Bool {
-        let bounds = pictureBounds.insetBy(dx: -1e-6, dy: -1e-6)
+    /// `rect` lies inside the frame box (to a millionth of a pixel).
+    func fitsInFrame(_ rect: KenBurnsBox) -> Bool {
+        let bounds = frameBox.insetBy(dx: -1e-6, dy: -1e-6)
         return rect.corners.allSatisfy { bounds.contains($0) }
     }
 
     /// The widest rectangle with the frame's aspect, turned by `rotationDegrees`, that fits inside the
-    /// picture (a zoom out stops there: the frame never shows past the picture's edge).
+    /// frame box (a zoom out stops there): the whole frame when unturned (a 100 % zoom).
     func maximumRectWidth(rotationDegrees: Double) -> CGFloat {
         let theta = rotationDegrees * .pi / 180
         let c = abs(cos(theta))
         let s = abs(sin(theta))
-        let bounds = pictureBounds
+        let bounds = frameBox
         let w = sequenceSize.width
         let h = sequenceSize.height
         let byWidth = c * w + s * h > 0 ? bounds.width / (c * w + s * h) : .infinity
@@ -622,13 +626,13 @@ final class KenBurnsModel: ObservableObject {
         return max(0, min(byWidth, byHeight)) * w
     }
 
-    /// `rect` with its centre moved into the picture's allowed range for its size, or kept where
-    /// `origin`'s centre was when the drag started from a rectangle already outside the picture (a
-    /// rectangle framing past the picture's edge, typed in the inspector or made in Transform mode, is
+    /// `rect` with its centre moved into the frame box's allowed range for its size, or kept where
+    /// `origin`'s centre was when the drag started from a rectangle already outside the frame box (a
+    /// rectangle framing past the frame's edge, typed in the inspector or made in Transform mode, is
     /// not pulled in by a drag's first step; it can be moved back in freely).
-    private func keptInPicture(_ rect: KenBurnsBox, origin: KenBurnsBox) -> KenBurnsBox {
+    private func keptInFrame(_ rect: KenBurnsBox, origin: KenBurnsBox) -> KenBurnsBox {
         var range = centreRange(for: rect)
-        if !fitsInPicture(origin) {
+        if !fitsInFrame(origin) {
             range = (min(range.x.lowerBound, origin.center.x) ... max(range.x.upperBound, origin.center.x),
                      min(range.y.lowerBound, origin.center.y) ... max(range.y.upperBound, origin.center.y))
         }
@@ -638,18 +642,18 @@ final class KenBurnsModel: ObservableObject {
         return kept
     }
 
-    /// Ken Burns: `origin` panned by `translation`, kept inside the picture (see `keptInPicture`).
+    /// Ken Burns: `origin` panned by `translation`, kept inside the frame box (see `keptInFrame`).
     func panned(_ origin: KenBurnsBox, by translation: CGSize) -> KenBurnsBox {
         var rect = origin
         rect.center = CGPoint(x: origin.center.x + translation.width, y: origin.center.y + translation.height)
-        return keptInPicture(rect, origin: origin)
+        return keptInFrame(rect, origin: origin)
     }
 
     /// Ken Burns: `origin` zoomed by dragging `corner` by `translation`: scaled about its centre by how
     /// far the corner moved along the rectangle's diagonal through it (the frame's aspect stays),
-    /// between `minimumRectFraction` of the frame's width and the widest rectangle inside the picture
+    /// between `minimumRectFraction` of the frame's width and the widest rectangle inside the frame box
     /// (a rectangle already outside those keeps its size as the limit); a rectangle grown against the
-    /// picture's edge moves in to stay inside it. A rectangle without a size keeps it.
+    /// frame's edge moves in to stay inside it. A rectangle without a size keeps it.
     func zoomed(_ origin: KenBurnsBox, corner: Corner, by translation: CGSize) -> KenBurnsBox {
         let from = origin.corner(corner)
         let diagonal = CGPoint(x: from.x - origin.center.x, y: from.y - origin.center.y)
@@ -662,7 +666,7 @@ final class KenBurnsModel: ObservableObject {
         let narrowest = min(widest, sequenceSize.width * Self.minimumRectFraction)
         let smallest = min(1, narrowest / origin.size.width)
         let largest = max(1, widest / origin.size.width)
-        return keptInPicture(origin.scaled(by: min(max(wanted, smallest), largest)), origin: origin)
+        return keptInFrame(origin.scaled(by: min(max(wanted, smallest), largest)), origin: origin)
     }
 
     // MARK: Commands

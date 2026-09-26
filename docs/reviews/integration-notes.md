@@ -1061,15 +1061,21 @@ so switching writes nothing. No model or schema change.
   only without rotation; the exact preimage has the centre F - R(-θ)(x, y) / s and turns by -θ (the frame turned
   clockwise inside the picture shows a rectangle turned the other way). Implemented the exact form.
 - Ken Burns drags: a body drag pans (`panned`), a corner drag zooms about the centre by the corner's movement along the
-  diagonal (`zoomed`), the frame's aspect kept; a rectangle stays inside the fitted picture (`pictureBounds`; with a
-  turned rectangle, its axis-aligned half extents) and is at least `minimumRectFraction` (a tenth) of the frame wide; a
-  zoom out stops at `maximumRectWidth(rotationDegrees:)`, the widest turned rectangle the picture holds, and a rectangle
-  grown against the picture's edge moves in to stay inside (so "about the centre" gives way at the edge). A rectangle
-  already outside the picture (typed values, a portrait still's full frame, values made in Transform mode) is not pulled
-  in by a drag's first step and moves back in freely (`keptInPicture`); one wider than the picture on an axis stays on
-  the picture's centre there. Escape mid-drag (H2), one undo step per drag, the zero-scale refusal (the edge at scale 0
-  has an empty rectangle: the note says the base is 0, or that the edge shows nothing) and the redraw budget hold in both
-  modes (`checkCancelledDrag(in:)`, `InspectorSpanTests.testAScaleOverABaseOfZeroIsRefusedWithTheReason`,
+  diagonal (`zoomed`), the frame's aspect kept; a rectangle stays inside the frame box (`frameBox`: the frame at
+  identity, what the monitor shows at 100 %, the bars of a letterboxed or pillarboxed source included; with a turned
+  rectangle, its axis-aligned half extents) and is at least `minimumRectFraction` (a tenth) of the frame wide; a zoom
+  out stops at `maximumRectWidth(rotationDegrees:)`, the widest turned rectangle the frame box holds (the whole frame,
+  100 %, unturned), and a rectangle grown against the frame's edge moves in to stay inside (so "about the centre" gives
+  way at the edge). Fix after the user's report: it was held to the fitted picture's pixels, so on a source of another
+  aspect (Sintel 2048x872, a portrait still) the identity rectangle was out of reach and a zoom out stopped at the
+  picture's height or width (about 132 % on 2.35:1); a pan may now show the bars, as 100 % does
+  (`KenBurnsModesTests.testALetterboxedSourcesRectanglesReachTheWholeFrame`, `...PillarboxedStills...`,
+  `testASecondSpanAfterAPushInZoomsBackOutToTheWholeFrame`). A rectangle already outside the frame box (typed values,
+  values made in Transform mode) is not pulled in by a drag's first step and moves back in freely (`keptInFrame`); one
+  wider than the frame on an axis stays on the frame's centre there. Escape mid-drag (H2), one undo step per drag, the
+  zero-scale refusal (the edge at scale 0 has an empty rectangle: the note says the base is 0, or that the edge shows
+  nothing) and the redraw budget hold in both modes (`checkCancelledDrag(in:)`,
+  `InspectorSpanTests.testAScaleOverABaseOfZeroIsRefusedWithTheReason`,
   `TimelineRedrawTests.testAKenBurnsDragBuildsNoTimelineModelAndRedrawsNoClips` loop over the modes).
 - Engine, the program preview solo: `Scheduler::soloGraphAt(sequence, project, clip, time, identityMotion)` (the clip's
   layer alone, any track visibility, no transition, the time held on its first frame before it and its last from its
@@ -1086,7 +1092,7 @@ so switching writes nothing. No model or schema change.
 - App: `KenBurnsMode` (.kenBurns, .transform; `title`, `caption`); `KenBurnsModel.mode`, `setMode(_:)` (refused
   mid-drag; re-reads the shapes and the outlines, calls `ProjectStore.kenBurnsModeDidChange`), `modeCaption`,
   `automaticMode(start:picture:sequence:)` (Ken Burns when the Start placement box contains the frame's four corners),
-  `pictureBounds`, `fitsInPicture`, `maximumRectWidth`, `panned`, `zoomed`; `start` / `end` are the current mode's
+  `frameBox`, `fitsInFrame`, `maximumRectWidth`, `panned`, `zoomed`; `start` / `end` are the current mode's
   shapes (`KenBurnsBox` either way, so `KenBurnsHit` and the overlay are shared); `outlines` are empty in Ken Burns mode.
   `KenBurnsModel.init(... mode:)` (nil: automatic). The store: `kenBurnsModes` (span id -> mode), `kenBurnsMode` (the
   open editor's, published for the layout), `rememberKenBurnsMode(_:for:)`, `syncProgramPreview()` (sets or clears the
@@ -1108,12 +1114,12 @@ so switching writes nothing. No model or schema change.
   selected in the asked mode. Range-drag creation on a lane uses the automatic mode.
 - By hand: a full-frame clip with Ken Burns from the Effects tab (drag onto a lane, or "+"): the monitor shows the clip
   alone, the End rectangle smaller; shrink it and see the composite (close the editor, or switch to Transform) zoom in
-  accordingly; drag a rectangle to the picture's edge (it stops there) and a corner out (it stops at the picture). The
-  same span switched to Transform and back: the inspector's values do not change, the rectangles come back the same. A
-  picture in picture with Control-K: it opens in Transform mode over the program. A turned clip (rotation 30°, scale 2)
-  in Ken Burns mode: the rectangles are turned the other way. Playing and scrubbing with the editor in Ken Burns mode
-  (the clip alone; off the clip its first or last frame). The output window on a second display while the editor is in
-  Ken Burns mode: it shows the program.
+  accordingly; drag a rectangle to the frame's edge (it stops there) and a corner out (it stops at the whole frame); on
+  a letterboxed or pillarboxed source the same, the bars included. The same span switched to Transform and back: the
+  inspector's values do not change, the rectangles come back the same. A picture in picture with Control-K: it opens in
+  Transform mode over the program. A turned clip (rotation 30°, scale 2) in Ken Burns mode: the rectangles are turned
+  the other way. Playing and scrubbing with the editor in Ken Burns mode (the clip alone; off the clip its first or last
+  frame). The output window on a second display while the editor is in Ken Burns mode: it shows the program.
 
 ## The frame in the monitors (2026-09-25, same round)
 - `MonitorFrame` (KenBurnsOverlay.swift): `fitted(_:in:)` (the frame's aspect fitted into an area, `KenBurnsViewport`

@@ -9,7 +9,8 @@ import XCTest
 /// alone at identity (the engine's program preview solo) with rectangles that are the part of the
 /// picture filling the frame, Transform the composed program with placement boxes; both express the
 /// same span values (the geometries and their round trip, a turned clip), switching writes nothing,
-/// the rectangles stay inside the picture and at least a tenth of the frame wide, and the mode is
+/// the rectangles stay inside the frame box (what the monitor shows at 100 %, the bars of a source of
+/// another aspect included) and are at least a tenth of the frame wide, and the mode is
 /// remembered per span. The entry points record their intent (the Effects tab's Ken Burns and Move,
 /// the Clip and context menus) and Control-K and selection use the automatic mode. The movie is 10 s
 /// (300 frames) at 320x180, filling the 1920x1080 frame.
@@ -193,9 +194,9 @@ final class KenBurnsModesTests: XCTestCase {
 
     /// Ken Burns mode on a full-frame clip: the monitor shows the clip alone (the engine's solo
     /// preview, identity); the start rectangle is the whole picture, the push in's end 1 / 1.25 of
-    /// the frame; a pan moves the clip the other way by the zoom; the rectangle stays inside the
-    /// picture and at least a tenth of the frame wide; a zoom out against the picture's edge moves it
-    /// in; one undo step per drag. Switching to Transform and back writes nothing and gives the same
+    /// the frame; a pan moves the clip the other way by the zoom; the rectangle stays inside the frame
+    /// box (here the picture: it fills the frame) and at least a tenth of the frame wide; a zoom out
+    /// against the frame's edge moves it in; one undo step per drag. Switching to Transform and back writes nothing and gives the same
     /// rectangles; the solo preview follows the mode and ends when the editor closes; the other
     /// clips are outlined in Transform mode only.
     func testKenBurnsModeFramesThePictureAloneAndSwitchesWithoutWriting() async throws {
@@ -217,7 +218,7 @@ final class KenBurnsModesTests: XCTestCase {
         XCTAssertTrue(store.engine.programPreviewSoloIdentityMotion)
         XCTAssertEqual(model.modeCaption, "The rectangle is what fills the frame.")
         XCTAssertEqual(model.outlines, [], "the other tracks are not shown")
-        XCTAssertEqual(model.pictureBounds, CGRect(origin: .zero, size: sequence))
+        XCTAssertEqual(model.frameBox, CGRect(origin: .zero, size: sequence))
         assertBox(model.start, center: CGPoint(x: 960, y: 540), size: sequence, "the whole picture")
         assertBox(model.end, center: CGPoint(x: 960, y: 540), size: CGSize(width: 1536, height: 864), "1 / 1.25")
         XCTAssertEqual(try span(id).endValues.scale, 1.25, accuracy: 1e-12)
@@ -235,7 +236,7 @@ final class KenBurnsModesTests: XCTestCase {
         XCTAssertEqual(store.undoActionName, "Change Span Values")
         store.undo()
         XCTAssertEqual(model.end, pushIn, "one undo step")
-        // Panned far: it stops at the picture's edge (the frame never shows past it).
+        // Panned far: it stops at the frame's edge (here the picture's: it fills the frame).
         model.applyDrag(.body(.end), origin: pushIn, translation: CGSize(width: 5000, height: 5000))
         model.endDrag()
         XCTAssertEqual(model.end.corner(.bottomRight).x, 1920, accuracy: 1e-9)
@@ -248,7 +249,7 @@ final class KenBurnsModesTests: XCTestCase {
         model.endDrag()
         assertBox(model.end, center: panned.center, size: CGSize(width: 192, height: 108), "the smallest")
         XCTAssertEqual(try span(id).endValues.scale, 10, accuracy: 1e-9)
-        // Pulled out far: the whole picture at most, moved in to stay inside it.
+        // Pulled out far: the whole frame at most, moved in to stay inside it.
         model.applyDrag(.corner(.end, .bottomRight), origin: model.end, translation: CGSize(width: 9000, height: 9000))
         model.endDrag()
         assertBox(model.end, center: CGPoint(x: 960, y: 540), size: sequence, "the whole picture again")
@@ -313,9 +314,9 @@ final class KenBurnsModesTests: XCTestCase {
     }
 
     /// A turned clip in Ken Burns mode: its rectangles are turned against the clip's rotation (the
-    /// frame's corners land on theirs), a pan stops where a turned corner meets the picture's edge,
-    /// and the rotation is kept.
-    func testATurnedClipsRectanglesTurnAgainstItsRotationAndStayInsideThePicture() async throws {
+    /// frame's corners land on theirs), a pan stops where a turned corner meets the frame's edge, and
+    /// the rotation is kept.
+    func testATurnedClipsRectanglesTurnAgainstItsRotationAndStayInsideTheFrame() async throws {
         let clip = try await longClip()
         let turned = VEVideoParams(x: 0, y: 0, scale: 2, rotationDegrees: 30, opacity: 1)
         XCTAssertTrue(store.engine.setVideoParams(turned, forClip: clip).ok)
@@ -328,12 +329,12 @@ final class KenBurnsModesTests: XCTestCase {
         assertBox(model.start, center: CGPoint(x: 960, y: 540), size: CGSize(width: 960, height: 540), rotation: -30)
         // The push in: 2.5x on screen.
         assertBox(model.end, center: CGPoint(x: 960, y: 540), size: CGSize(width: 768, height: 432), rotation: -30)
-        XCTAssertTrue(model.fitsInPicture(model.end))
-        // Panned far right: the rectangle's rightmost (turned) corner reaches the picture's right edge.
+        XCTAssertTrue(model.fitsInFrame(model.end))
+        // Panned far right: the rectangle's rightmost (turned) corner reaches the frame's right edge.
         model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 5000, height: 0))
         model.endDrag()
         XCTAssertEqual(model.end.corners.map(\.x).max() ?? 0, 1920, accuracy: 1e-9)
-        XCTAssertTrue(model.fitsInPicture(model.end))
+        XCTAssertTrue(model.fitsInFrame(model.end))
         XCTAssertEqual(model.end.rotationDegrees, -30, accuracy: 1e-12)
         let shown = try edge(id, of: clip, atEnd: true)
         XCTAssertEqual(shown.rotationDegrees, 30, accuracy: 1e-9, "the rotation is kept")
@@ -341,22 +342,22 @@ final class KenBurnsModesTests: XCTestCase {
         // What the edge shows is the rectangle: back through the values, the same one.
         assertBox(KenBurnsModel.rect(for: shown, sequence: sequence), center: model.end.center, size: model.end.size,
                   rotation: -30)
-        // The widest turned rectangle inside the picture is the zoom out's limit.
+        // The widest turned rectangle inside the frame is the zoom out's limit.
         let widest = model.maximumRectWidth(rotationDegrees: -30)
         model.applyDrag(.corner(.end, .bottomRight), origin: model.end, translation: CGSize(width: 9000, height: 5000))
         model.endDrag()
         XCTAssertEqual(model.end.size.width, widest, accuracy: 1e-6)
-        XCTAssertTrue(model.fitsInPicture(model.end))
+        XCTAssertTrue(model.fitsInFrame(model.end))
         let cosine = cos(Double.pi / 6)
         XCTAssertEqual(widest, 1920 * min(1920 / (cosine * 1920 + 0.5 * 1080), 1080 / (0.5 * 1920 + cosine * 1080)),
                        accuracy: 1e-6)
     }
 
-    /// On a pillarboxed portrait still (810 px of picture across the frame's 1920) a rectangle wider
-    /// than the picture stays centred on it; a rectangle placed past the picture's edge (typed values)
-    /// is not pulled in by a drag's first step and moves back in freely; once inside it stays inside,
-    /// and a zoom out stops at the widest rectangle the picture holds.
-    func testARectangleOutsideThePictureDoesNotJump() async throws {
+    /// On a pillarboxed portrait still (810 px of picture across the frame's 1920) the rectangles are
+    /// held to the frame box, not the picture: the push in's End pans over the bars; a rectangle placed
+    /// past the frame's edge (typed values) is not pulled in by a drag's first step and moves back in
+    /// freely; once inside it stays inside, and a zoom out stops at the whole frame.
+    func testARectangleOutsideTheFrameDoesNotJump() async throws {
         let url = fixture.directory.appendingPathComponent("portrait.heic")
         try TestMediaFactory.writeHEIC(to: url, width: 240, height: 320)
         let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
@@ -368,39 +369,183 @@ final class KenBurnsModesTests: XCTestCase {
         store.addMotionSpanAtPlayhead(mode: .kenBurns)
         let model = try XCTUnwrap(store.kenBurns)
         XCTAssertEqual(model.mode, .kenBurns, "asked for (the automatic mode would be Transform)")
-        XCTAssertEqual(model.pictureBounds, CGRect(x: 555, y: 0, width: 810, height: 1080))
-        // The push in's end is wider than the picture: it stays centred on it.
+        XCTAssertEqual(model.frameBox, CGRect(origin: .zero, size: sequence))
+        XCTAssertEqual(KenBurnsModel.fittedSize(picture: model.pictureSize, sequence: sequence),
+                       CGSize(width: 810, height: 1080))
+        // The push in's End (1536 px, wider than the picture) is inside the frame: it pans across the
+        // bars, as far as the frame's edge.
         let end = model.end
-        XCTAssertFalse(model.fitsInPicture(end))
+        XCTAssertTrue(model.fitsInFrame(end))
         model.applyDrag(.body(.end), origin: end, translation: CGSize(width: 150, height: 30))
         model.endDrag()
-        XCTAssertEqual(model.end.center.x, 960, accuracy: 1e-9, "no room across")
-        XCTAssertEqual(model.end.center.y, 570, accuracy: 1e-9, "room down (864 of the picture's 1080)")
-        // The start placed past the picture's left edge: 3x, 2000 px right (its centre 666.7 px left
-        // of the frame's).
+        XCTAssertEqual(model.end.center.x, 1110, accuracy: 1e-9, "room across (1536 of the frame's 1920)")
+        XCTAssertEqual(model.end.center.y, 570, accuracy: 1e-9, "room down (864 of the frame's 1080)")
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 500, height: 0))
+        model.endDrag()
+        XCTAssertEqual(model.end.corner(.topRight).x, 1920, accuracy: 1e-9, "stops at the frame's edge")
+        // The start placed past the frame's left edge: 3x, 2000 px right (its centre 666.7 px left of
+        // the frame's, its left edge 26.7 px off the frame).
         var typed = VESpanValuesUnchanged()
         typed.x = 2000
         typed.scale = 3
         XCTAssertTrue(store.engine.setSpanValues(model.spanID, start: typed, end: VESpanValuesUnchanged()).ok)
         let outside = model.start
         assertBox(outside, center: CGPoint(x: 960 - 2000.0 / 3, y: 540), size: CGSize(width: 640, height: 360))
-        XCTAssertFalse(model.fitsInPicture(outside))
+        XCTAssertFalse(model.fitsInFrame(outside))
         model.applyDrag(.body(.start), origin: outside, translation: CGSize(width: -10, height: 0))
         XCTAssertEqual(model.start.center.x, outside.center.x, accuracy: 1e-9, "no further out")
         model.applyDrag(.body(.start), origin: outside, translation: CGSize(width: 40, height: 0))
         XCTAssertEqual(model.start.center.x, outside.center.x + 40, accuracy: 1e-9, "no jump: 40 px in")
         model.endDrag()
-        // Moved into the picture it stops at its right edge.
+        // Moved into the frame it stops at its right edge, over the bar there.
         model.applyDrag(.body(.start), origin: model.start, translation: CGSize(width: 3000, height: 0))
         model.endDrag()
-        XCTAssertEqual(model.start.corner(.topRight).x, 1365, accuracy: 1e-9)
-        XCTAssertTrue(model.fitsInPicture(model.start))
-        // Zoomed out: at most the picture's width, moved in to stay inside it.
-        model.applyDrag(.corner(.start, .bottomRight), origin: model.start, translation: CGSize(width: 900, height: 500))
+        XCTAssertEqual(model.start.corner(.topRight).x, 1920, accuracy: 1e-9)
+        XCTAssertTrue(model.fitsInFrame(model.start))
+        // Zoomed out: at most the whole frame (100 %), moved in to stay inside it.
+        model.applyDrag(.corner(.start, .bottomRight), origin: model.start, translation: CGSize(width: 2000, height: 1200))
         model.endDrag()
-        assertBox(model.start, center: CGPoint(x: 960, y: 540), size: CGSize(width: 810, height: 455.625))
-        XCTAssertTrue(model.fitsInPicture(model.start))
-        XCTAssertEqual(model.startFraming.scale, 1920.0 / 810, accuracy: 1e-9)
+        assertBox(model.start, center: CGPoint(x: 960, y: 540), size: sequence)
+        XCTAssertTrue(model.fitsInFrame(model.start))
+        XCTAssertEqual(model.startFraming.scale, 1, accuracy: 1e-9)
+        XCTAssertEqual(model.startFraming.x, 0, accuracy: 1e-9)
+    }
+
+    // MARK: Sources of another aspect
+
+    /// A 2048x872 movie (Sintel's frame, 2.35:1: letterboxed in the 1920x1080 frame, 817.5 px of
+    /// picture down its 1080), 1 s long (30 frames: the writer fills every pixel), at 0 s on V1.
+    private func letterboxedClip() async throws -> VEClipID {
+        let url = fixture.directory.appendingPathComponent("letterboxed.mov")
+        try TestMediaFactory.writeMovie(to: url, frames: 30, width: 2048, height: 872)
+        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([url]) { continuation.resume(returning: $0) }
+        }
+        let movie = try XCTUnwrap(imported.first)
+        XCTAssertEqual(movie.width, 2048)
+        XCTAssertEqual(movie.height, 872)
+        return try fixture.placeMovie(movie, at: 0)
+    }
+
+    /// A 1080x1920 portrait still (pillarboxed in the 1920x1080 frame: 607.5 px of picture across its
+    /// 1920) at 0 s on V1.
+    private func portraitStill() async throws -> VEClipID {
+        let url = fixture.directory.appendingPathComponent("tall.heic")
+        try TestMediaFactory.writeHEIC(to: url, width: 1080, height: 1920)
+        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([url]) { continuation.resume(returning: $0) }
+        }
+        let photo = try XCTUnwrap(imported.first)
+        XCTAssertTrue(photo.isStill)
+        return try fixture.placeMovie(photo, at: 0)
+    }
+
+    /// Ken Burns mode on `clip`, whose fitted picture is `picture` (inside the frame, with bars): the
+    /// rectangles are held to the frame box (what the monitor shows at 100 %, bars included), not to
+    /// the picture's pixels, so a corner drag grows the push in's End back to the whole frame (100 %,
+    /// no offset) and a body drag pans a smaller rectangle to the frame's corners, over the bars.
+    private func checkRectanglesReachTheWholeFrame(of clip: VEClipID, picture: CGRect,
+                                                   file: StaticString = #filePath, line: UInt = #line) throws {
+        store.selection = [clip]
+        store.playheadTime = .zero
+        store.addMotionSpanAtPlayhead(mode: .kenBurns)
+        let model = try XCTUnwrap(store.kenBurns, file: file, line: line)
+        let id = model.spanID
+        XCTAssertEqual(model.mode, .kenBurns, file: file, line: line)
+        let fitted = KenBurnsModel.fittedSize(picture: model.pictureSize, sequence: sequence)
+        XCTAssertEqual(fitted.width, picture.width, accuracy: 1e-9, file: file, line: line)
+        XCTAssertEqual(fitted.height, picture.height, accuracy: 1e-9, file: file, line: line)
+        // The Start (identity) is the whole frame, bars included; the push in's End is 1 / 1.25 of it.
+        let middle = CGPoint(x: 960, y: 540)
+        assertBox(model.start, center: middle, size: sequence, "identity", file: file, line: line)
+        assertBox(model.end, center: middle, size: CGSize(width: 1536, height: 864), "the push in", file: file, line: line)
+
+        // A corner pulled out far: the whole frame at most (100 %, no offset), one undo step.
+        model.applyDrag(.corner(.end, .bottomRight), origin: model.end, translation: CGSize(width: 9000, height: 9000))
+        model.endDrag()
+        assertBox(model.end, center: middle, size: sequence, "the whole frame", file: file, line: line)
+        let whole = try edge(id, of: clip, atEnd: true)
+        XCTAssertEqual(whole.scale, 1, accuracy: 1e-9, "100 %", file: file, line: line)
+        XCTAssertEqual(whole.x, 0, accuracy: 1e-9, file: file, line: line)
+        XCTAssertEqual(whole.y, 0, accuracy: 1e-9, file: file, line: line)
+        XCTAssertEqual(try span(id).endValues.scale, 1, accuracy: 1e-9, file: file, line: line)
+
+        // Pulled in to half the frame (200 %) about its centre, then panned far up and left: it stops
+        // at the frame's top-left corner, showing the bars there as 100 % does.
+        model.applyDrag(.corner(.end, .topLeft), origin: model.end, translation: CGSize(width: 480, height: 270))
+        model.endDrag()
+        assertBox(model.end, center: middle, size: CGSize(width: 960, height: 540), "200 %", file: file, line: line)
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: -5000, height: -5000))
+        model.endDrag()
+        assertBox(model.end, center: CGPoint(x: 480, y: 270), size: CGSize(width: 960, height: 540), "top left",
+                  file: file, line: line)
+        XCTAssertFalse(picture.contains(model.end.corner(.topLeft)), "the corner is on a bar", file: file, line: line)
+        var shown = try edge(id, of: clip, atEnd: true)
+        XCTAssertEqual(shown.scale, 2, accuracy: 1e-9, file: file, line: line)
+        XCTAssertEqual(shown.x, 960, accuracy: 1e-9, file: file, line: line)
+        XCTAssertEqual(shown.y, 540, accuracy: 1e-9, file: file, line: line)
+        // And to the bottom-right corner.
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 9000, height: 9000))
+        model.endDrag()
+        assertBox(model.end, center: CGPoint(x: 1440, y: 810), size: CGSize(width: 960, height: 540), "bottom right",
+                  file: file, line: line)
+        XCTAssertFalse(picture.contains(model.end.corner(.bottomRight)), "the corner is on a bar", file: file, line: line)
+        shown = try edge(id, of: clip, atEnd: true)
+        XCTAssertEqual(shown.x, -960, accuracy: 1e-9, file: file, line: line)
+        XCTAssertEqual(shown.y, -540, accuracy: 1e-9, file: file, line: line)
+
+        // The Start, the whole frame already, neither moves nor grows.
+        model.applyDrag(.body(.start), origin: model.start, translation: CGSize(width: 300, height: -200))
+        model.endDrag()
+        model.applyDrag(.corner(.start, .topRight), origin: model.start, translation: CGSize(width: 400, height: -400))
+        model.endDrag()
+        assertBox(model.start, center: middle, size: sequence, "still identity", file: file, line: line)
+        let first = try edge(id, of: clip, atEnd: false)
+        XCTAssertEqual(first.scale, 1, accuracy: 1e-9, file: file, line: line)
+        XCTAssertEqual(first.x, 0, accuracy: 1e-9, file: file, line: line)
+        XCTAssertEqual(first.y, 0, accuracy: 1e-9, file: file, line: line)
+    }
+
+    /// Sintel's 2048x872 in a 1920x1080 sequence (the user's report: the End stopped at the picture's
+    /// height, about 132 %, and would not grow to the whole frame).
+    func testALetterboxedSourcesRectanglesReachTheWholeFrame() async throws {
+        let clip = try await letterboxedClip()
+        try checkRectanglesReachTheWholeFrame(of: clip, picture: CGRect(x: 0, y: 131.25, width: 1920, height: 817.5))
+    }
+
+    /// A 1080x1920 portrait still in a 1920x1080 sequence.
+    func testAPillarboxedStillsRectanglesReachTheWholeFrame() async throws {
+        let still = try await portraitStill()
+        try checkRectanglesReachTheWholeFrame(of: still, picture: CGRect(x: 656.25, y: 0, width: 607.5, height: 1080))
+    }
+
+    /// A second span chained after a push in, on a letterboxed source, zooms back out to 100 %: its
+    /// End pulled out to the whole frame stores 1 / 1.25 over the held 1.25x.
+    func testASecondSpanAfterAPushInZoomsBackOutToTheWholeFrame() async throws {
+        let clip = try await letterboxedClip()
+        let pushIn = store.engine.addSpan(kind: .motion, lane: 1, clip: clip, range: CMTimeRange(start: .zero, end: frames(15)))
+        let first = try XCTUnwrap(pushIn.span, pushIn.message).spanID
+        var zoomed = VESpanValuesUnchanged()
+        zoomed.scale = 1.25
+        XCTAssertTrue(store.engine.setSpanValues(first, start: VESpanValuesUnchanged(), end: zoomed).ok)
+        let chained = store.engine.addSpan(kind: .motion, lane: 1, clip: clip,
+                                           range: CMTimeRange(start: frames(15), end: frames(30)))
+        let second = try XCTUnwrap(chained.span, chained.message).spanID
+        store.refreshModel()
+        store.select(span: second)
+        let model = try XCTUnwrap(store.kenBurns)
+        model.setMode(.kenBurns)
+        let held = CGSize(width: 1536, height: 864)
+        assertBox(model.start, center: CGPoint(x: 960, y: 540), size: held, "the push in's held end")
+        assertBox(model.end, center: CGPoint(x: 960, y: 540), size: held)
+        model.applyDrag(.corner(.end, .topRight), origin: model.end, translation: CGSize(width: 2000, height: -2000))
+        model.endDrag()
+        assertBox(model.end, center: CGPoint(x: 960, y: 540), size: sequence, "the whole frame")
+        XCTAssertEqual(try span(second).endValues.scale, 0.8, accuracy: 1e-9, "1 / 1.25 over the held push in")
+        let shown = try edge(second, of: clip, atEnd: true)
+        XCTAssertEqual(shown.scale, 1, accuracy: 1e-9, "100 %")
+        XCTAssertEqual(shown.x, 0, accuracy: 1e-9)
+        XCTAssertEqual(shown.y, 0, accuracy: 1e-9)
     }
 
     // MARK: The mode per span, and the entry points
