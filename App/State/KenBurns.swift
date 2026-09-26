@@ -65,7 +65,7 @@ enum KenBurnsMode: String, CaseIterable, Identifiable {
 ///
 /// Bound to the span and live: it opens when a Motion span is selected (the store keeps it keyed by
 /// `spanID`, in the mode remembered for the span, else the automatic one: Ken Burns when the clip
-/// covers the frame at the span's start, `automaticMode`) and every drag of a box or a corner writes
+/// spans the frame at the span's start, `automaticMode`) and every drag of a box or a corner writes
 /// the span's values as it moves, inside one coalescing group (`beginDrag`, `applyDrag`, `endDrag`:
 /// one undo step per drag; Escape mid-drag cancels it through the group, `cancelDrag`, and the rest of
 /// that gesture writes nothing). There is no Apply or Cancel: Undo reverts a drag. The Start, End and
@@ -238,23 +238,59 @@ final class KenBurnsModel: ObservableObject {
 
     // MARK: Mode
 
+    /// How far short of the frame's edge a placement box may stop and still span the frame on that
+    /// axis (`automaticMode`), in sequence pixels.
+    static let automaticModeTolerance: CGFloat = 1
+
     /// The automatic mode of a span whose start shows the clip placed by `start` (its composed
-    /// Motion there): Ken Burns when the clip's placement box there contains the whole frame (a
-    /// full-frame clip, or one zoomed in on: the rectangle can frame it), Transform otherwise (a
-    /// picture in picture, an offset or scaled-down clip, a pillarboxed portrait).
+    /// Motion there): Ken Burns when the clip's placement box there spans the frame on at least one
+    /// axis, from its left edge to its right or from its top to its bottom, somewhere on the frame
+    /// (to within `automaticModeTolerance`): a full-frame clip, one zoomed in on, or a picture of
+    /// another aspect at identity, letterboxed or pillarboxed (the rectangle frames it; the bars are
+    /// what 100 % shows). Transform when it spans neither: a picture in picture, a clip scaled down,
+    /// or one moved or turned so that no line across the frame lies inside it.
     static func automaticMode(start: VEVideoParams, picture: CGSize, sequence: CGSize) -> KenBurnsMode {
         let placed = box(for: start, picture: picture, sequence: sequence)
-        let w = placed.size.width / 2
-        let h = placed.size.height / 2
-        guard w > 0, h > 0 else { return .transform }
-        let tolerance = 1e-6 * max(1, sequence.width, sequence.height)
-        let frame = [CGPoint(x: 0, y: 0), CGPoint(x: sequence.width, y: 0), CGPoint(x: sequence.width, y: sequence.height),
-                     CGPoint(x: 0, y: sequence.height)]
-        let covers = frame.allSatisfy { corner in
-            let p = placed.local(corner)
-            return abs(p.x) <= w + tolerance && abs(p.y) <= h + tolerance
+        guard placed.size.width > 0, placed.size.height > 0 else { return .transform }
+        let spans = spansFrame(placed, horizontally: true, sequence: sequence)
+            || spansFrame(placed, horizontally: false, sequence: sequence)
+        return spans ? .kenBurns : .transform
+    }
+
+    /// Whether `box` holds a whole line across the frame, from its left edge to its right
+    /// (`horizontally`) or from its top to its bottom, at some height (or left offset) within the
+    /// frame, with `automaticModeTolerance` of slack on each of the box's sides. The box is convex, so
+    /// it holds the line when it holds both of its ends; an end is inside when its coordinates in the
+    /// box's own axes are within the (slackened) half size, and those coordinates are affine in the
+    /// line's position t, so each end and axis limits t to an interval: the box spans the frame when
+    /// the intervals and the frame's extent meet.
+    private static func spansFrame(_ box: KenBurnsBox, horizontally: Bool, sequence: CGSize) -> Bool {
+        let half = CGSize(width: box.size.width / 2 + automaticModeTolerance,
+                          height: box.size.height / 2 + automaticModeTolerance)
+        // The line at position t runs from `ends.0` + t `step` to `ends.1` + t `step`, t in [0, extent].
+        let ends = horizontally
+            ? (CGPoint(x: 0, y: 0), CGPoint(x: sequence.width, y: 0))
+            : (CGPoint(x: 0, y: 0), CGPoint(x: 0, y: sequence.height))
+        let step = horizontally ? CGPoint(x: 0, y: 1) : CGPoint(x: 1, y: 0)
+        // One unit of t in the box's axes (`local` less its offset: the rotation alone).
+        let turned = box.local(CGPoint(x: box.center.x + step.x, y: box.center.y + step.y))
+        var low: CGFloat = 0
+        var high = horizontally ? sequence.height : sequence.width
+        for end in [ends.0, ends.1] {
+            let at = box.local(end)
+            for (offset, rate, limit) in [(at.x, turned.x, half.width), (at.y, turned.y, half.height)] {
+                // |offset + rate t| <= limit.
+                if abs(rate) < 1e-12 {
+                    guard abs(offset) <= limit else { return false }
+                    continue
+                }
+                let a = (-limit - offset) / rate
+                let b = (limit - offset) / rate
+                low = max(low, min(a, b))
+                high = min(high, max(a, b))
+            }
         }
-        return covers ? .kenBurns : .transform
+        return low <= high
     }
 
     /// Switches between Ken Burns and Transform: both edges are re-read in the other geometry from

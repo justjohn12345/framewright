@@ -1091,14 +1091,18 @@ so switching writes nothing. No model or schema change.
   it is set renders the program).
 - App: `KenBurnsMode` (.kenBurns, .transform; `title`, `caption`); `KenBurnsModel.mode`, `setMode(_:)` (refused
   mid-drag; re-reads the shapes and the outlines, calls `ProjectStore.kenBurnsModeDidChange`), `modeCaption`,
-  `automaticMode(start:picture:sequence:)` (Ken Burns when the Start placement box contains the frame's four corners),
-  `frameBox`, `fitsInFrame`, `maximumRectWidth`, `panned`, `zoomed`; `start` / `end` are the current mode's
-  shapes (`KenBurnsBox` either way, so `KenBurnsHit` and the overlay are shared); `outlines` are empty in Ken Burns mode.
-  `KenBurnsModel.init(... mode:)` (nil: automatic). The store: `kenBurnsModes` (span id -> mode), `kenBurnsMode` (the
-  open editor's, published for the layout), `rememberKenBurnsMode(_:for:)`, `syncProgramPreview()` (sets or clears the
-  engine's solo from the editor; run after every `syncKenBurns`, `closeKenBurns`, a mode switch and New/Open).
-  `ProgramMonitorLayout`: no margin in Ken Burns mode, `KenBurnsViewport.marginFraction` in Transform mode. The bar has
-  the mode's caption and the Ken Burns | Transform segmented control next to Smoothing.
+  `automaticMode(start:picture:sequence:)` (Ken Burns when the Start placement box spans the frame on at least one axis,
+  left edge to right or top to bottom somewhere on the frame, to within `automaticModeTolerance` (1 px): a full-frame or
+  zoomed-in clip, or a letterboxed or pillarboxed picture at identity; Transform when it spans neither, a picture in
+  picture, scaled down, or moved or turned off the frame; it used to require the frame's four corners, which sent a
+  letterboxed or pillarboxed clip to Transform), `frameBox`, `fitsInFrame`, `maximumRectWidth`, `panned`, `zoomed`;
+  `start` / `end` are the current mode's shapes (`KenBurnsBox` either way, so `KenBurnsHit` and the overlay are shared);
+  `outlines` are empty in Ken Burns mode. `KenBurnsModel.init(... mode:)` (nil: automatic). The store: `kenBurnsModes`
+  (span id -> mode), `kenBurnsMode` (the open editor's, published for the layout), `rememberKenBurnsMode(_:for:)`,
+  `syncProgramPreview()` (sets or clears the engine's solo from the editor; run after every `syncKenBurns`,
+  `closeKenBurns`, a mode switch and New/Open). `ProgramMonitorLayout`: no margin in Ken Burns mode,
+  `KenBurnsViewport.marginFraction` in Transform mode. The bar has the mode's caption and the Ken Burns | Transform
+  segmented control next to Smoothing.
 - Mode memory: the only persisted UI state is the app-wide window layout (`WindowLayoutModel` in the standard defaults,
   keyed by track kind and number, not per project), and span ids restart per project, so the map lives in the store for
   the session of the project (cleared on New and Open, kept across undo). An asked mode (an entry point) is remembered;

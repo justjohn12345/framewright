@@ -43,7 +43,7 @@ final class KeyboardController {
         case gainUp(big: Bool), gainDown(big: Bool)
         /// Control-K: a Motion span at the playhead on the selected clip (Final Cut Pro's Add Keyframe
         /// key; `ProjectStore.motionSpanTarget`), the push in, opened in the automatic mode (Ken Burns
-        /// on a clip that covers the frame, Transform otherwise).
+        /// on a clip that spans the frame across or down, Transform on a picture in picture).
         case addMotionSpan
 
         /// The keys the program output window takes: the transport (play, shuttle, step, start/end)

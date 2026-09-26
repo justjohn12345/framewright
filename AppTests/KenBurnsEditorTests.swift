@@ -552,14 +552,17 @@ final class KenBurnsEditorTests: XCTestCase {
         XCTAssertFalse(store.kenBurns?.leadsIntoNext ?? true)
     }
 
-    /// A portrait still is pillarboxed as the compositor fits it: its box is the fitted picture
-    /// (810x1080 for 240x320 in a 1920x1080 frame), and the push in grows that box.
+    /// A portrait still is pillarboxed as the compositor fits it: its box (Transform mode) is the
+    /// fitted picture (810x1080 for 240x320 in a 1920x1080 frame), and the push in grows that box.
+    /// Control-K opens it in Ken Burns mode (it spans the frame top to bottom, `automaticMode`).
     func testAPortraitStillsBoxIsItsFittedPicture() async throws {
         let still = try await portraitStill(at: 20)
         store.selection = [still]
         store.playheadTime = frames(600)
         store.addMotionSpanAtPlayhead()
         let model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.mode, .kenBurns)
+        model.setMode(.transform)
         XCTAssertEqual(model.pictureSize, CGSize(width: 240, height: 320))
         assertBox(model.start, center: CGPoint(x: 960, y: 540), size: CGSize(width: 810, height: 1080))
         assertBox(model.end, center: CGPoint(x: 960, y: 540), size: CGSize(width: 1012.5, height: 1350))

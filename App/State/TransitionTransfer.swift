@@ -42,7 +42,7 @@ enum EffectKind: String, CaseIterable, Identifiable, Codable {
 
     var detail: String {
         switch self {
-        case .kenBurns: return "Pan and zoom inside the picture"
+        case .kenBurns: return "Pan and zoom inside the frame"
         case .move: return "Move or scale the clip in the frame"
         case .fade: return "Video opacity span"
         case .gain: return "Audio level span"

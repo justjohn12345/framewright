@@ -58,8 +58,8 @@ audited the code line by line.
   one to zoom in); Transform shows the program, and its boxes are where the clip sits (a picture in picture moves
   and zooms where it is). Every drag edits the span live (one undo step per drag), with smoothing, swap and
   continuing a touching clip's framing; Ken Burns and Move in the Effects tab or the Clip menu open in their mode,
-  Control-K in Ken Burns mode when the clip covers the frame. The monitors shade the area around the frame so its
-  edge shows. Projects from earlier versions open with their keyframes and fades as spans and look and sound the
+  Control-K in Ken Burns mode when the clip spans the frame across or down (a letterboxed or pillarboxed picture
+  too). The monitors shade the area around the frame so its edge shows. Projects from earlier versions open with their keyframes and fades as spans and look and sound the
   same.
 - Inspector for the clips' position, scale, rotation, opacity, gain, fades and exact speed; transitions
   kept together with their linked partner (Delete removes both, Option-Delete one; a change also changes

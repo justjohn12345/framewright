@@ -170,9 +170,14 @@ final class KenBurnsModesTests: XCTestCase {
         XCTAssertNil(KenBurnsModel.motion(forRect: empty, sequence: sequence))
     }
 
-    /// The automatic mode: Ken Burns when the clip's placement at the span's start covers the frame.
+    /// The automatic mode: Ken Burns when the clip's placement at the span's start spans the frame on
+    /// at least one axis (left edge to right edge, or top to bottom, somewhere on the frame, to within a
+    /// pixel): a full-frame clip, one zoomed in on, a letterboxed or pillarboxed picture at identity;
+    /// Transform when it spans neither (a picture in picture, scaled down, moved off the frame).
     func testTheAutomaticModeFollowsWhetherTheClipCoversTheFrame() {
         let wide = CGSize(width: 320, height: 180)
+        let letterboxed = CGSize(width: 2048, height: 872)
+        let portrait = CGSize(width: 1080, height: 1920)
         func mode(_ x: Double, _ y: Double, _ scale: Double, _ rotation: Double = 0,
                   picture: CGSize = CGSize(width: 320, height: 180)) -> KenBurnsMode {
             KenBurnsModel.automaticMode(start: VEVideoParams(x: x, y: y, scale: scale, rotationDegrees: rotation, opacity: 1),
@@ -180,12 +185,24 @@ final class KenBurnsModesTests: XCTestCase {
         }
         XCTAssertEqual(mode(0, 0, 1), .kenBurns, "a full-frame clip")
         XCTAssertEqual(mode(100, -60, 1.25), .kenBurns, "zoomed in and offset, still over the whole frame")
-        XCTAssertEqual(mode(200, 0, 1), .transform, "moved: the frame's left shows past it")
+        XCTAssertEqual(mode(200, 0, 1), .kenBurns, "moved sideways: still top to bottom (a bar on the left)")
+        XCTAssertEqual(mode(2500, 0, 1), .transform, "moved off the frame: spans neither")
         XCTAssertEqual(mode(690, 324, 0.3), .transform, "a picture in picture")
         XCTAssertEqual(mode(0, 0, 0.9), .transform, "scaled down")
-        XCTAssertEqual(mode(0, 0, 1.5, 30), .transform, "turned: its corners leave the frame's uncovered")
+        XCTAssertEqual(mode(0, 0, 1.5, 30), .kenBurns, "turned, larger than the frame: spans it across")
         XCTAssertEqual(mode(0, 0, 2, 30), .kenBurns, "turned and zoomed enough to cover it")
-        XCTAssertEqual(mode(0, 0, 1, picture: CGSize(width: 240, height: 320)), .transform, "a pillarboxed portrait")
+        XCTAssertEqual(mode(0, 0, 1, picture: CGSize(width: 240, height: 320)), .kenBurns, "a pillarboxed portrait")
+        XCTAssertEqual(mode(0, 0, 1, picture: portrait), .kenBurns, "a pillarboxed 9:16 portrait")
+        XCTAssertEqual(mode(0, 0, 1, picture: letterboxed), .kenBurns, "a letterboxed 2.35:1 picture")
+        XCTAssertEqual(mode(0, 300, 1, picture: letterboxed), .kenBurns, "moved down: still across the frame")
+        XCTAssertEqual(mode(0, 1000, 1, picture: letterboxed), .transform, "moved below the frame: spans neither")
+        XCTAssertEqual(mode(0, 0, 1, 10, picture: letterboxed), .kenBurns, "tilted: a line still runs across it")
+        XCTAssertEqual(mode(0, 0, 1, 30, picture: letterboxed), .transform, "turned: no line runs across it")
+        // Within a pixel of the frame's edges.
+        XCTAssertEqual(mode(0.9, 0, 1, picture: letterboxed), .kenBurns, "0.9 px short on the left")
+        XCTAssertEqual(mode(1.5, 0, 1, picture: letterboxed), .transform, "1.5 px short on the left")
+        XCTAssertEqual(mode(0, 0, 0.9995), .kenBurns, "0.48 px short on each side")
+        XCTAssertEqual(mode(0, 0, 0.998), .transform, "1.92 px short on each side")
         XCTAssertEqual(mode(0, 0, 0), .transform, "invisible")
         XCTAssertEqual(mode(0, 0, 1, picture: wide), .kenBurns)
     }
@@ -196,9 +213,9 @@ final class KenBurnsModesTests: XCTestCase {
     /// preview, identity); the start rectangle is the whole picture, the push in's end 1 / 1.25 of
     /// the frame; a pan moves the clip the other way by the zoom; the rectangle stays inside the frame
     /// box (here the picture: it fills the frame) and at least a tenth of the frame wide; a zoom out
-    /// against the frame's edge moves it in; one undo step per drag. Switching to Transform and back writes nothing and gives the same
-    /// rectangles; the solo preview follows the mode and ends when the editor closes; the other
-    /// clips are outlined in Transform mode only.
+    /// against the frame's edge moves it in; one undo step per drag. Switching to Transform and back
+    /// writes nothing and gives the same rectangles; the solo preview follows the mode and ends when the
+    /// editor closes; the other clips are outlined in Transform mode only.
     func testKenBurnsModeFramesThePictureAloneAndSwitchesWithoutWriting() async throws {
         let clip = try await longClip()
         // A picture in picture over it on V2.
@@ -368,7 +385,7 @@ final class KenBurnsModesTests: XCTestCase {
         store.playheadTime = .zero
         store.addMotionSpanAtPlayhead(mode: .kenBurns)
         let model = try XCTUnwrap(store.kenBurns)
-        XCTAssertEqual(model.mode, .kenBurns, "asked for (the automatic mode would be Transform)")
+        XCTAssertEqual(model.mode, .kenBurns, "asked for (and the automatic mode: it spans the frame top to bottom)")
         XCTAssertEqual(model.frameBox, CGRect(origin: .zero, size: sequence))
         XCTAssertEqual(KenBurnsModel.fittedSize(picture: model.pictureSize, sequence: sequence),
                        CGSize(width: 810, height: 1080))
@@ -428,8 +445,8 @@ final class KenBurnsModesTests: XCTestCase {
     }
 
     /// A 1080x1920 portrait still (pillarboxed in the 1920x1080 frame: 607.5 px of picture across its
-    /// 1920) at 0 s on V1.
-    private func portraitStill() async throws -> VEClipID {
+    /// 1920) at `seconds` on V1.
+    private func portraitStill(at seconds: Double = 0) async throws -> VEClipID {
         let url = fixture.directory.appendingPathComponent("tall.heic")
         try TestMediaFactory.writeHEIC(to: url, width: 1080, height: 1920)
         let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
@@ -437,7 +454,7 @@ final class KenBurnsModesTests: XCTestCase {
         }
         let photo = try XCTUnwrap(imported.first)
         XCTAssertTrue(photo.isStill)
-        return try fixture.placeMovie(photo, at: 0)
+        return try fixture.placeMovie(photo, at: seconds)
     }
 
     /// Ken Burns mode on `clip`, whose fitted picture is `picture` (inside the frame, with bars): the
@@ -549,6 +566,31 @@ final class KenBurnsModesTests: XCTestCase {
     }
 
     // MARK: The mode per span, and the entry points
+
+    /// Control-K on a clip of another aspect at identity, a letterboxed 2048x872 movie and a
+    /// pillarboxed 1080x1920 still, opens in Ken Burns mode (the automatic mode: its placement spans the
+    /// frame on one axis; the bars are what 100 % shows): the clip alone, the Start the whole frame. A
+    /// picture in picture and a full-frame clip: `testControlKAndSelectionUseTheAutomaticMode...`.
+    func testControlKOpensALetterboxedOrPillarboxedClipInKenBurnsMode() async throws {
+        let movie = try await letterboxedClip()
+        let still = try await portraitStill(at: 2)
+        let keyboard = KeyboardController(store: store)
+        for (clip, time, label) in [(movie, frames(10), "letterboxed"), (still, frames(70), "pillarboxed")] {
+            store.selection = [clip]
+            store.playheadTime = time
+            keyboard.perform(.addMotionSpan, on: store)
+            let model = try XCTUnwrap(store.kenBurns, label)
+            XCTAssertEqual(model.mode, .kenBurns, label)
+            XCTAssertNil(store.kenBurnsModes[model.spanID], "the automatic mode is not a choice to remember")
+            XCTAssertEqual(store.engine.programPreviewSoloClipID, clip, label)
+            assertBox(model.start, center: CGPoint(x: 960, y: 540), size: sequence, label)
+            XCTAssertEqual(try span(model.spanID).endValues.scale, 1.25, accuracy: 1e-12, "the push in")
+            // Selected again with no remembered mode: the automatic one again.
+            store.selection = [clip]
+            store.select(span: model.spanID)
+            XCTAssertEqual(store.kenBurns?.mode, .kenBurns, label)
+        }
+    }
 
     /// Control-K opens in the automatic mode (Ken Burns on a clip covering the frame, Transform on a
     /// picture in picture, both with the push in); a span selected with no remembered mode opens in
