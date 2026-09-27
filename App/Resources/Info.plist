@@ -90,6 +90,56 @@
 				<string>public.data</string>
 			</array>
 			<key>UTTypeDescription</key>
+			<string>Framewright Wipe Left</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.transition.wipe-left</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Wipe Right</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.transition.wipe-right</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Wipe Up</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.transition.wipe-up</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Wipe Down</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.transition.wipe-down</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Iris</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.transition.iris</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
 			<string>Framewright Audio Crossfade</string>
 			<key>UTTypeIdentifier</key>
 			<string>com.justjohn12345.framewright.transition.audio-crossfade</string>

@@ -159,7 +159,7 @@ struct TimelineRenderer {
             inner.draw(icon, in: CGRect(x: x, y: rect.midY - side / 2, width: side, height: side))
             x += side + 3
         }
-        var title = span.title
+        var title = span.glyph.map { "\($0) " + span.title } ?? span.title
         if span.kind == .transition {
             let frames = Int64(((span.end - span.start) / max(model.frameSeconds, 1e-9)).rounded())
             title += "  " + formatFrames(frames)

@@ -233,9 +233,21 @@ final class InspectorModel: ObservableObject {
     /// Engine reads of the selected transition and its limit (diagnostics and tests).
     private(set) var engineTransitionReads = 0
 
+    /// What the selected transition does: its video kind (a dissolve, a wipe, the iris), or the
+    /// audio crossfade on an audio track.
     var transitionKind: TransitionKind? {
         guard let transition, let track = store.track(transition.trackID) else { return nil }
-        return TransitionKind.forTrack(track.kind)
+        return TransitionKind(engineKind: transition.kind, trackKind: track.kind)
+    }
+
+    /// The Kind popup: gives the selected video transition `kind` (one undo step). Nothing happens
+    /// when it already has it; a refusal shows in the status line and the inspector.
+    func setTransitionKind(_ kind: TransitionKind) {
+        guard let transition, transitionKind != kind, canEdit() else { return }
+        endNudgeBurst()
+        if !store.setTransitionKind(transition.transitionID, kind) {
+            message = store.statusMessage
+        }
     }
 
     /// The selected transition's linked transition (the crossfade under a dissolve), if any.

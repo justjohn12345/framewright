@@ -495,7 +495,9 @@ final class ProjectStore: ObservableObject {
         let cut = style == .fadeIn ? clip.timelineStart : clip.timelineEnd
         return TimelineViewModel.Span(id: span.spanID, clipID: clip.clipID, trackID: clip.trackID, lane: span.lane,
                                       kind: kind, start: span.start.secondsOrZero, end: span.end.secondsOrZero,
-                                      style: style, cut: cut.secondsOrZero, isAudio: clip.trackKind == .audio)
+                                      style: style, cut: cut.secondsOrZero, isAudio: clip.trackKind == .audio,
+                                      transitionKind: TransitionKind(engineKind: span.transitionKind,
+                                                                     trackKind: clip.trackKind))
     }
 
     /// Converts seconds to a CMTime on the sequence frame grid.
@@ -852,6 +854,19 @@ final class ProjectStore: ObservableObject {
         return true
     }
 
+    /// Sets what the video transition `id` does to the picture (the inspector's Kind popup): one undo
+    /// step; its range, its role and its linked audio crossfade stay as they are. A refusal (an audio
+    /// transition, a locked track) is reported.
+    @discardableResult
+    func setTransitionKind(_ id: VETransitionID, _ kind: TransitionKind) -> Bool {
+        guard !isGestureActive else { return false }
+        guard kind.trackKind == .video else {
+            statusMessage = "An audio transition is always a crossfade or a fade."
+            return false
+        }
+        return report(engine.setTransitionKind(kind.engineKind, for: id))
+    }
+
     /// Option-Delete (Clip > Delete Transition Only): removes the selected transition without its
     /// linked one. Ignored during a gesture.
     func deleteSelectedTransitionOnly() {
@@ -941,7 +956,7 @@ final class ProjectStore: ObservableObject {
         guard !isGestureActive else { return false }
         let length = frames ?? editingPreferences.transitionFrames(frameDuration: frameDuration)
         var includeLinked = false
-        if kind == .crossDissolve {
+        if kind.trackKind == .video {
             switch editingPreferences.linkedCrossfade {
             case .always: includeLinked = true
             case .never: includeLinked = false
@@ -980,7 +995,8 @@ final class ProjectStore: ObservableObject {
         guard !isGestureActive else { return false }
         var options: VETransitionOptions = [.fitToCut]
         if includeLinked { options.insert(.includeLinked) }
-        let result = engine.addTransition(fromClip: from, toClip: to, duration: time(frames: frames), options: options)
+        let result = engine.addTransition(fromClip: from, toClip: to, duration: time(frames: frames), options: options,
+                                          kind: kind.engineKind)
         if report(result), let id = result.createdIDs.first?.int64Value {
             selection = []
             selectedTransitionID = id

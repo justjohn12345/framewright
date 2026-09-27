@@ -135,10 +135,10 @@ final class TimelineGestureController: ObservableObject {
 
         /// The label of the preview on lane 0: the transition's name across a cut, "Fade" where a
         /// dissolve dropped on a free clip edge becomes a fade (drawn in the transitions' colour, so
-        /// the conversion shows).
+        /// the conversion shows); a wipe or the iris keeps its name (it wipes from or to black).
         var previewLabel: String {
             if case .cut = placement { return kind.title }
-            return "Fade"
+            return kind == .crossDissolve || kind == .audioCrossfade ? "Fade" : kind.title
         }
 
         /// What the drop adds ("Cross Dissolve", "Fade Out", ...).
@@ -1008,9 +1008,9 @@ final class TimelineGestureController: ObservableObject {
             }
             return store.pendingLinkedTransition != nil
         case let .fadeOut(clip):
-            return store.addFade(at: .end, of: clip)
+            return store.addFade(at: .end, of: clip, kind: kind)
         case let .fadeIn(clip):
-            return store.addFade(at: .start, of: clip)
+            return store.addFade(at: .start, of: clip, kind: kind)
         }
     }
 
@@ -1110,9 +1110,10 @@ final class TimelineGestureController: ObservableObject {
                 allowed = false
                 message = "“\(clip.name)” has no room for a fade."
             } else if allowed {
-                // The dissolve becomes a fade: say so.
-                message = fadeIn ? "No clip precedes: this adds a fade from \(silence)."
-                    : "No clip follows: this adds a fade to \(silence)."
+                // The dissolve becomes a fade (a wipe or the iris goes from or to black): say so.
+                let what = kind == .crossDissolve || kind == .audioCrossfade ? "a fade" : "a \(kind.title)"
+                message = fadeIn ? "No clip precedes: this adds \(what) from \(silence)."
+                    : "No clip follows: this adds \(what) to \(silence)."
                 if frames < wanted {
                     message += " Shortened to \(store.durationString(frames: frames)): what “\(clip.name)” has room for."
                 }

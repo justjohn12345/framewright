@@ -223,6 +223,26 @@ targets:
             UTTypeDescription: Framewright Cross Dissolve
             UTTypeConformsTo:
               - public.data
+          - UTTypeIdentifier: com.justjohn12345.framewright.transition.wipe-left
+            UTTypeDescription: Framewright Wipe Left
+            UTTypeConformsTo:
+              - public.data
+          - UTTypeIdentifier: com.justjohn12345.framewright.transition.wipe-right
+            UTTypeDescription: Framewright Wipe Right
+            UTTypeConformsTo:
+              - public.data
+          - UTTypeIdentifier: com.justjohn12345.framewright.transition.wipe-up
+            UTTypeDescription: Framewright Wipe Up
+            UTTypeConformsTo:
+              - public.data
+          - UTTypeIdentifier: com.justjohn12345.framewright.transition.wipe-down
+            UTTypeDescription: Framewright Wipe Down
+            UTTypeConformsTo:
+              - public.data
+          - UTTypeIdentifier: com.justjohn12345.framewright.transition.iris
+            UTTypeDescription: Framewright Iris
+            UTTypeConformsTo:
+              - public.data
           - UTTypeIdentifier: com.justjohn12345.framewright.transition.audio-crossfade
             UTTypeDescription: Framewright Audio Crossfade
             UTTypeConformsTo:

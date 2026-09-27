@@ -366,6 +366,75 @@ final class InspectorSpanTests: XCTestCase {
                        "the span's held 3x composes onto it")
     }
 
+    /// The Kind popup: a video transition's kind changes in one undo step (across a cut and at a free
+    /// edge); its range stays, and an audio transition has no kinds.
+    func testTheKindPopupChangesAVideoTransitionsKind() async throws {
+        let (movie, tone) = try await fixture.importMedia()
+        func place(_ at: Double, _ from: Double, _ to: Double) throws -> VEClipID {
+            XCTAssertTrue(store.place(asset: movie.assetID, at: store.frameTime(at), videoTrack: v1, audioTrack: 0,
+                                      sourceIn: store.frameTime(from), sourceOut: store.frameTime(to), overwrite: true))
+            return try XCTUnwrap(store.selection.first)
+        }
+        let a = try place(0, 0, 1)
+        let b = try place(1, 1, 2)
+        let added = store.engine.addTransition(fromClip: a, toClip: b, duration: frames(10))
+        let id = try XCTUnwrap(added.createdIDs.first?.int64Value)
+        store.selectedTransitionID = id
+        XCTAssertEqual(inspector.transitionKind, .crossDissolve)
+        for kind in TransitionKind.videoKinds.reversed() {
+            let before = try XCTUnwrap(store.engine.transitionInfo(id))
+            inspector.setTransitionKind(kind)
+            let after = try XCTUnwrap(store.engine.transitionInfo(id))
+            XCTAssertEqual(after.kind, kind.engineKind)
+            XCTAssertEqual(inspector.transitionKind, kind)
+            XCTAssertEqual(after.start, before.start)
+            XCTAssertEqual(after.end, before.end)
+            XCTAssertEqual(store.undoActionName, "Change Transition Kind")
+        }
+        // One undo step per change: back through Wipe Left to Wipe Right.
+        XCTAssertEqual(inspector.transitionKind, .crossDissolve)
+        store.undo()
+        XCTAssertEqual(inspector.transitionKind, .wipeLeft)
+        store.undo()
+        XCTAssertEqual(inspector.transitionKind, .wipeRight)
+        store.redo()
+        XCTAssertEqual(inspector.transitionKind, .wipeLeft)
+        // Choosing the kind it has changes nothing (no undo step).
+        let count = store.changeCount
+        inspector.setTransitionKind(.wipeLeft)
+        XCTAssertEqual(store.changeCount, count)
+
+        // At a free edge: the fade in of the first clip becomes an Iris from black.
+        XCTAssertTrue(store.addFade(at: .start, of: a, frames: 6))
+        let fade = try XCTUnwrap(store.selectedSpanID)
+        store.selectedTransitionID = fade
+        XCTAssertEqual(inspector.transition?.style, .fadeIn)
+        inspector.setTransitionKind(.iris)
+        XCTAssertEqual(store.engine.transitionInfo(fade)?.kind, .iris)
+        XCTAssertEqual(store.engine.transitionInfo(fade)?.style, .fadeIn)
+
+        // An audio crossfade has no kinds: refused with the reason, nothing changes.
+        func placeTone(_ at: Double, _ from: Double, _ to: Double) throws -> VEClipID {
+            XCTAssertTrue(store.place(asset: tone.assetID, at: store.frameTime(at), videoTrack: 0, audioTrack: a1,
+                                      sourceIn: store.frameTime(from), sourceOut: store.frameTime(to), overwrite: true))
+            return try XCTUnwrap(store.selection.first)
+        }
+        let ta = try placeTone(0, 0, 1)
+        let tb = try placeTone(1, 1, 2)
+        let crossfade = try XCTUnwrap(store.engine.addTransition(fromClip: ta, toClip: tb, duration: frames(8))
+            .createdIDs.first?.int64Value)
+        store.selection = []
+        store.selectedTransitionID = crossfade
+        XCTAssertEqual(inspector.transitionKind, .audioCrossfade)
+        let before = store.changeCount
+        XCTAssertFalse(store.setTransitionKind(crossfade, .wipeUp))
+        XCTAssertEqual(store.changeCount, before)
+        XCTAssertTrue(store.statusMessage?.contains("An audio transition is a crossfade or a fade") == true,
+                      store.statusMessage ?? "")
+        XCTAssertFalse(store.setTransitionKind(crossfade, .audioCrossfade), "not a video kind")
+        XCTAssertEqual(store.statusMessage, "An audio transition is always a crossfade or a fade.")
+    }
+
     /// Audio crossfades are lane-0 spans too: their shares of the cut are edited like a dissolve's.
     func testAnAudioCrossfadesSharesAreEditable() async throws {
         let (_, tone) = try await fixture.importMedia()

@@ -626,13 +626,17 @@ extension ProjectStore {
 
     /// Adds a fade from or to black / silence (a lane-0 transition span) at `edge` of `clip` with
     /// `frames` (the default transition duration when nil), shortened to what the clip allows, and
-    /// selects it. Only this clip (not its linked partner). One undo step.
+    /// selects it. On a video clip `kind` says how the picture comes from or goes to black (a dissolve,
+    /// a wipe or the iris); an audio fade is always a fade. Only this clip (not its linked partner).
+    /// One undo step.
     @discardableResult
-    func addFade(at edge: VEClipEdge, of clip: VEClipID, frames: Int64? = nil) -> Bool {
+    func addFade(at edge: VEClipEdge, of clip: VEClipID, frames: Int64? = nil,
+                 kind: TransitionKind = .crossDissolve) -> Bool {
         guard !isGestureActive else { return false }
         inspector.endNudgeBurst()
         let length = frames ?? editingPreferences.transitionFrames(frameDuration: frameDuration)
-        let result = engine.addTransition(at: edge, of: clip, duration: time(frames: length), options: [.fitToCut])
+        let result = engine.addTransition(at: edge, of: clip, duration: time(frames: length), options: [.fitToCut],
+                                          kind: kind.engineKind)
         guard report(result), let id = result.createdIDs.first?.int64Value else { return false }
         select(span: id)
         return true

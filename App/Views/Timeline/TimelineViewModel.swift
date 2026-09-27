@@ -96,20 +96,40 @@ struct TimelineViewModel: Equatable {
         var cut: Double = 0
         /// On an audio track (a crossfade rather than a dissolve).
         var isAudio = false
+        /// Transitions: what it does to the picture (`.audioCrossfade` on an audio track).
+        var transitionKind: TransitionKind = .crossDissolve
 
-        /// The name drawn on the bar (and used in the inspector).
+        /// Whether it is a wipe or the iris (a transition that reveals the picture by shape).
+        var isShaped: Bool {
+            kind == .transition && transitionKind.glyph != nil
+        }
+
+        /// The name drawn on the bar (and used in the inspector). A wipe or the iris is named for its
+        /// kind, with In or Out at a free edge (from or to black).
         var title: String {
             switch kind {
             case .motion: return "Motion"
             case .opacity: return "Fade"
             case .gain: return "Gain"
             case .transition:
+                if isShaped {
+                    switch style {
+                    case .crossDissolve: return transitionKind.title
+                    case .fadeIn: return transitionKind.title + " In"
+                    case .fadeOut: return transitionKind.title + " Out"
+                    }
+                }
                 switch style {
                 case .crossDissolve: return isAudio ? "Crossfade" : "Cross Dissolve"
                 case .fadeIn: return "Fade In"
                 case .fadeOut: return "Fade Out"
                 }
             }
+        }
+
+        /// The mark drawn before the name of a wipe or the iris (◁ ▷ △ ▽ ◯); nil otherwise.
+        var glyph: String? {
+            kind == .transition ? transitionKind.glyph : nil
         }
 
         /// The SF Symbol drawn on the bar.

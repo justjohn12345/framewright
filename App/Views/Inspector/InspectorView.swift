@@ -326,7 +326,14 @@ private struct TransitionInspector: View {
                     .controlSize(.small)
                     .help("Back to the default duration (Settings > Editing)")
             }
-            row("Kind", kindTitle)
+            if inspector.transitionKind == .audioCrossfade {
+                row("Kind", kindTitle)
+            } else {
+                kindPicker
+                if transition.style != .crossDissolve {
+                    row("Edge", edgeTitle)
+                }
+            }
             if let timing = inspector.transitionTiming {
                 HStack(alignment: .firstTextBaseline) {
                     Text(timing.cutText(frameDuration: store.frameDuration))
@@ -353,7 +360,7 @@ private struct TransitionInspector: View {
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
                     .help("A duration change here or by dragging a handle also changes the "
-                        + (inspector.transitionKind == .crossDissolve ? "linked audio crossfade" : "linked video dissolve"))
+                        + (inspector.transitionKind?.trackKind == .video ? "linked audio crossfade" : "linked video transition"))
                     .accessibilityIdentifier("ResizeLinkedTransition")
             }
             if let limit = inspector.transitionLimit {
@@ -384,6 +391,31 @@ private struct TransitionInspector: View {
     private var focusSerial: Int {
         guard let request = store.inspectorFocusRequest, request.field == .transitionDuration else { return 0 }
         return request.serial
+    }
+
+    /// The Kind popup of a video transition: the dissolve, the wipes and the iris.
+    private var kindPicker: some View {
+        HStack {
+            Text("Kind").foregroundStyle(.secondary)
+            Spacer()
+            Picker("Kind", selection: Binding(get: { inspector.transitionKind ?? .crossDissolve },
+                                              set: { inspector.setTransitionKind($0) })) {
+                ForEach(TransitionKind.videoKinds) { kind in
+                    Label(kind.title, systemImage: kind.systemImage).tag(kind)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+            .help("What the transition does to the picture; the linked audio keeps its crossfade or fade")
+            .accessibilityIdentifier("TransitionKind")
+        }
+        .font(.caption)
+    }
+
+    /// A video transition at a free edge: from or to black.
+    private var edgeTitle: String {
+        transition.style == .fadeIn ? "From black at the clip's start" : "To black at the clip's end"
     }
 
     private var kindTitle: String {

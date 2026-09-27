@@ -66,9 +66,10 @@ final class TimelineDropTests: XCTestCase {
             XCTAssertFalse(declared.isDynamic)
         }
         XCTAssertEqual(Set(TimelineDropDelegate.types),
-                       Set([.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade,
-                            .framewrightFadeEffect, .framewrightGainEffect, .framewrightKenBurnsEffect,
-                            .framewrightMoveEffect] + MediaDrop.types),
+                       Set([.framewrightAssetReference, .framewrightCrossDissolve, .framewrightWipeLeft,
+                            .framewrightWipeRight, .framewrightWipeUp, .framewrightWipeDown, .framewrightIris,
+                            .framewrightAudioCrossfade, .framewrightFadeEffect, .framewrightGainEffect,
+                            .framewrightKenBurnsEffect, .framewrightMoveEffect] + MediaDrop.types),
                        "in-app types, and media files and file promises (Photos)")
         for kind in EffectKind.allCases {
             let provider = NSItemProvider()
@@ -121,6 +122,64 @@ final class TimelineDropTests: XCTestCase {
         XCTAssertFalse(delegate.handleValidate(FakeDropInfo(location: atCut, providers: [text])))
         delegate.handleExited(dissolve)
         XCTAssertNil(gestures.transitionDrop)
+    }
+
+    /// Every video kind of the Effects tab drops on a cut (a transition of that kind across it) and on a
+    /// free clip start (the same kind from black), each through the delegate as a real drop arrives;
+    /// the timeline shows the kind's name and glyph on lane 0.
+    func testEveryVideoKindDropsOnACutAndOnAFreeEdgeWithItsKind() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let v1 = try XCTUnwrap(store.videoTracks.first).trackID
+        try fixture.placeMovie(movie, at: 0, track: v1)
+        XCTAssertTrue(store.place(asset: movie.assetID, at: store.frameTime(0.8), videoTrack: v1, audioTrack: 0,
+                                  sourceIn: store.frameTime(1.2), sourceOut: store.frameTime(2), overwrite: true))
+        let gestures = TimelineGestureController(store: store)
+        var targeted = false
+        let delegate = TimelineDropDelegate(gestures: gestures,
+                                            isAssetTargeted: Binding(get: { targeted }, set: { targeted = $0 }))
+        let model = store.timelineModel
+        let row = try XCTUnwrap(model.layout(forTrack: v1))
+        let atCut = CGPoint(x: model.x(forTime: 0.8) + 6, y: row.y + 30)
+        let atStart = CGPoint(x: model.x(forTime: 0) + 4, y: row.y + 30) // nothing before the first clip
+        XCTAssertEqual(TransitionKind.videoKinds, [.crossDissolve, .wipeLeft, .wipeRight, .wipeUp, .wipeDown, .iris])
+        for kind in TransitionKind.videoKinds {
+            let onCut = FakeDropInfo(location: atCut, providers: [transitionProvider(kind)])
+            XCTAssertEqual(TimelineDropDelegate.transitionKind(onCut), kind)
+            XCTAssertEqual(delegate.handleUpdated(onCut)?.operation, .copy)
+            XCTAssertEqual(gestures.transitionDrop?.kind, kind)
+            XCTAssertEqual(gestures.transitionDrop?.previewLabel, kind.title)
+            XCTAssertTrue(delegate.handlePerform(onCut), store.statusMessage ?? "")
+            let cut = try XCTUnwrap(store.sequence.transitions.first, "\(kind)")
+            XCTAssertEqual(cut.kind, kind.engineKind, "\(kind)")
+            XCTAssertEqual(cut.style, .crossDissolve)
+            let bar = try XCTUnwrap(store.timelineModel.spans.first { $0.id == cut.transitionID })
+            XCTAssertEqual(bar.transitionKind, kind)
+            XCTAssertEqual(bar.title, kind.title)
+            XCTAssertEqual(bar.glyph, kind.glyph)
+            store.undo()
+            XCTAssertTrue(store.sequence.transitions.isEmpty)
+
+            let onStart = FakeDropInfo(location: atStart, providers: [transitionProvider(kind)])
+            XCTAssertEqual(delegate.handleUpdated(onStart)?.operation, .copy)
+            XCTAssertEqual(gestures.transitionDrop?.previewLabel, kind == .crossDissolve ? "Fade" : kind.title)
+            XCTAssertTrue(delegate.handlePerform(onStart), store.statusMessage ?? "")
+            let fadeID = try XCTUnwrap(store.selectedSpanID, "the new fade is selected")
+            let fade = try XCTUnwrap(store.engine.spanInfo(fadeID))
+            XCTAssertEqual(fade.transitionStyle, .fadeIn)
+            XCTAssertEqual(fade.transitionKind, kind.engineKind, "\(kind)")
+            let fadeBar = try XCTUnwrap(store.timelineModel.spans.first { $0.id == fadeID })
+            XCTAssertEqual(fadeBar.title, kind == .crossDissolve ? "Fade In" : kind.title + " In")
+            XCTAssertEqual(fadeBar.glyph, kind.glyph)
+            store.undo()
+            XCTAssertNil(store.engine.spanInfo(fadeID))
+        }
+        XCTAssertEqual(TransitionKind.wipeLeft.glyph, "◁")
+        XCTAssertEqual(TransitionKind.wipeRight.glyph, "▷")
+        XCTAssertEqual(TransitionKind.wipeUp.glyph, "△")
+        XCTAssertEqual(TransitionKind.wipeDown.glyph, "▽")
+        XCTAssertEqual(TransitionKind.iris.glyph, "◯")
+        XCTAssertNil(TransitionKind.crossDissolve.glyph)
+        XCTAssertNil(TransitionKind.audioCrossfade.glyph)
     }
 
     /// The provider the Effects tab's `.draggable(EffectReference(kind:))` hands the drag.

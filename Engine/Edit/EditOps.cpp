@@ -1814,8 +1814,8 @@ EditResult SetTransitionKind::perform(const Project &project, Sequence &sequence
     }
     if (track->kind != TrackKind::Video) {
         return EditResult::failure(EditError::TrackKindMismatch,
-                                   std::string("an audio transition is a crossfade or a fade; it cannot be a ") +
-                                       displayNameOf(kind_));
+                                   std::string("An audio transition is a crossfade or a fade; it cannot be a ") +
+                                       displayNameOf(kind_) + ".");
     }
     span->transition = kind_;
     if (EditResult r = checkPlacedTransition(project, sequence, *track, *clip, *span); !r) {

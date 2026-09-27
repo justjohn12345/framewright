@@ -3,8 +3,10 @@ import FramewrightEngine
 
 /// The transitions (shown in the right panel's Effects tab, `EffectsPanel`), to drag onto a cut
 /// between two adjacent clips in the timeline, or onto a clip's start or end where nothing touches
-/// it (a fade from or to black / silence); either way a span on the track's lane 0:
-/// Cross Dissolve (video tracks) and Constant Power (audio crossfade). The "+" button next to a
+/// it (from or to black / silence); either way a span on the track's lane 0: Cross Dissolve, Wipe
+/// Left, Wipe Right, Wipe Up, Wipe Down and Iris (video tracks; at a free edge a dissolve becomes a
+/// fade and a wipe or the iris wipes from or to black) and Constant Power (audio crossfade, a fade
+/// at a free edge). The "+" button next to a
 /// transition (or its context menu) adds it at the cut nearest the playhead, like Shift+Cmd+D
 /// and Option+Shift+Cmd+D; so does a double-click on the row outside its label. New transitions
 /// get the default duration (Settings > Editing, shown below the list and re-formatted when the
@@ -57,7 +59,7 @@ struct TransitionsPanel: View {
                     .background(RoundedRectangle(cornerRadius: 5).fill(Color.purple.opacity(0.3)))
             }
             .help("Drag onto a cut between two clips on a \(kind.trackKind == .video ? "video" : "audio") track, "
-                + "or onto a clip's free start or end to fade")
+                + "or onto a clip's free start or end (from or to \(kind.trackKind == .video ? "black" : "silence"))")
             Spacer(minLength: 4)
             Button {
                 store.addTransitionAtPlayhead(kind)

@@ -425,9 +425,9 @@ extension DropInfo: TimelineDropInfo {}
 /// a UI test can perform).
 @MainActor
 struct TimelineDropDelegate: DropDelegate {
-    static let types: [UTType] = [.framewrightAssetReference, .framewrightCrossDissolve, .framewrightAudioCrossfade,
-                                  .framewrightFadeEffect, .framewrightGainEffect, .framewrightKenBurnsEffect,
-                                  .framewrightMoveEffect] + MediaDrop.types
+    static let types: [UTType] = [.framewrightAssetReference] + TransitionKind.allCases.map(\.contentType)
+        + [.framewrightFadeEffect, .framewrightGainEffect, .framewrightKenBurnsEffect, .framewrightMoveEffect]
+        + MediaDrop.types
 
     let gestures: TimelineGestureController
     @Binding var isAssetTargeted: Bool
