@@ -426,6 +426,18 @@ final class InspectorModel: ObservableObject {
     func commitText(_ parameter: InspectorParameter, _ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
+        if parameter == .speed {
+            // Outside the engine's 1 % to 10000 %: refused with the range, also when the typed speed is
+            // too small for a fraction the engine can store ("0.01" %).
+            let typed = SpeedRatio.typedMultiplier(trimmed)
+            let problem = typed.flatMap { Self.speedRangeProblem(multiplier: $0) }
+                ?? SpeedRatio.parse(trimmed).flatMap { Self.speedRangeProblem($0) }
+            if let problem {
+                message = problem
+                store.statusMessage = problem
+                return
+            }
+        }
         if parameter == .speed, let ratio = SpeedRatio.parse(trimmed) {
             // "33.33" cannot be stored exactly: say what was applied instead.
             let adjusted = SpeedRatio.typedMultiplier(trimmed).flatMap {
@@ -920,6 +932,41 @@ final class InspectorModel: ObservableObject {
         guard batch.count > 0 else { return }
         let note = clamped ? limitNote(parameter, range(parameter)) : nil
         handle(perform(mode) { self.engine.applyClipParams(batch) }, mode: mode, clampNote: note)
+    }
+
+    /// Why `ratio` is not a clip speed the engine takes (1 % to 10000 %, compared exactly), or nil.
+    static func speedRangeProblem(_ ratio: SpeedRatio) -> String? {
+        let n = ratio.numerator, d = max(ratio.denominator, 1)
+        // 1/100 <= n/d <= 100/1 as 100 n >= d and n <= 100 d (a product that overflows is far past
+        // the bound it is compared with).
+        let hundredN = n.multipliedReportingOverflow(by: 100)
+        let hundredD = d.multipliedReportingOverflow(by: 100)
+        let slow = n <= 0 || (!hundredN.overflow && hundredN.partialValue < d)
+        let fast = !hundredD.overflow && n > hundredD.partialValue
+        guard !slow, !fast else { return rangeRefusal(ratio.value) }
+        return nil
+    }
+
+    /// Why a typed multiplier (0.5 for "50 %") is not a speed the engine takes, or nil.
+    static func speedRangeProblem(multiplier: Double) -> String? {
+        guard multiplier.isFinite, multiplier > 0 else { return nil } // not a speed at all
+        return multiplier < 0.01 || multiplier > 100 ? rangeRefusal(multiplier) : nil
+    }
+
+    private static func rangeRefusal(_ multiplier: Double) -> String {
+        let percent = multiplier * 100
+        let shown = percent >= 1 ? String(format: "%g %%", percent) : String(format: "%.4g %%", percent)
+        return "The speed must be between 1% and 10000%: \(shown) is too \(multiplier > 1 ? "fast" : "slow")."
+    }
+
+    /// The Speed row's presets menu (percent).
+    static let speedPresets = [25, 50, 100, 200, 400, 800]
+
+    /// A preset from the Speed row's menu: the speed target gets `percent` (one undo step, rippled
+    /// like a typed speed; the linked audio follows).
+    func applySpeedPreset(_ percent: Int) {
+        guard canEdit(), speedTarget != nil else { return }
+        applySpeed(SpeedRatio(numerator: Int64(percent), denominator: 100).reduced, mode: .single)
     }
 
     private func applySpeed(_ ratio: SpeedRatio, mode: Mode, clampNote: String? = nil) {

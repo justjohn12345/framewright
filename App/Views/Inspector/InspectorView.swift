@@ -124,7 +124,16 @@ struct InspectorView: View {
         let movable = store.selectedClips.contains { !$0.isStill }
         if inspector.isAvailable(.speed) {
             ParameterSection(store: store, inspector: inspector, section: .speed, subtitle: nil) {
-                speedButton
+                HStack {
+                    speedPresets
+                    Spacer()
+                    speedButton
+                }
+                Text("Typed as a percentage (50), a multiplier (2x) or a fraction (1/3), 1% to 10000%; later clips "
+                    + "ripple as set in Settings. For the duration and the ripple choice: Speed/Duration… (⌘R).")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         } else if movable {
             VStack(alignment: .leading, spacing: 6) {
@@ -133,6 +142,19 @@ struct InspectorView: View {
             }
             Divider()
         }
+    }
+
+    /// The Speed row's presets (one undo step each, rippled like a typed speed).
+    private var speedPresets: some View {
+        Menu("Presets") {
+            ForEach(InspectorModel.speedPresets, id: \.self) { percent in
+                Button("\(percent) %") { inspector.applySpeedPreset(percent) }
+            }
+        }
+        .controlSize(.small)
+        .fixedSize()
+        .help("Set the clip's speed to a preset (its linked audio follows)")
+        .accessibilityIdentifier("SpeedPresets")
     }
 
     private var speedButton: some View {

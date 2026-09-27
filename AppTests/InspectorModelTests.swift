@@ -409,6 +409,92 @@ final class InspectorModelTests: XCTestCase {
         XCTAssertEqual(store.clips[ids[0]]?.speedDenominator, 2)
     }
 
+    /// The inspector's Speed row: a typed percentage or ratio, the presets, a refusal outside the
+    /// engine's 1 % to 10000 % with the range in the status line, the linked audio following, one
+    /// undo step each, and no row for a still.
+    func testTheSpeedRowAppliesPercentsRatiosAndPresetsAndRefusesOutsideTheRange() async throws {
+        let (movie, tone) = try await fixture.importMedia()
+        let v1 = try XCTUnwrap(store.videoTracks.first).trackID
+        let a1 = try XCTUnwrap(store.audioTracks.first).trackID
+        XCTAssertTrue(store.place(asset: movie.assetID, at: .zero, videoTrack: v1, audioTrack: 0,
+                                  sourceIn: .zero, sourceOut: store.frameTime(1), overwrite: true))
+        let clip = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.place(asset: tone.assetID, at: .zero, videoTrack: 0, audioTrack: a1,
+                                  sourceIn: .zero, sourceOut: store.frameTime(1), overwrite: true))
+        let sound = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.engine.linkClip(clip, withClip: sound).ok)
+        store.selection = [clip]
+        XCTAssertEqual(inspector.speedTarget?.clipID, clip)
+        func speed(_ id: VEClipID) -> String {
+            guard let info = store.clips[id] else { return "none" }
+            return "\(info.speedNumerator)/\(info.speedDenominator)"
+        }
+
+        inspector.commitText(.speed, "50")
+        XCTAssertEqual(speed(clip), "1/2")
+        XCTAssertEqual(speed(sound), "1/2", "the linked audio follows")
+        XCTAssertEqual(store.undoActionName, "Change Speed")
+        inspector.commitText(.speed, "50 %")
+        XCTAssertEqual(speed(clip), "1/2")
+        inspector.commitText(.speed, "1/2")
+        XCTAssertEqual(speed(clip), "1/2")
+        inspector.commitText(.speed, "2x")
+        XCTAssertEqual(speed(clip), "2/1")
+        XCTAssertEqual(speed(sound), "2/1")
+        store.undo()
+        XCTAssertEqual(speed(clip), "1/2", "one undo step")
+        XCTAssertEqual(speed(sound), "1/2")
+
+        // Outside 1 % to 10000 %: refused, nothing changes, the range in the status line; also speeds
+        // too small for a fraction with a denominator of at most 1000 ("0.01" %), which are speeds all
+        // the same, only out of range.
+        for text in ["0.5", "0.5 %", "1/200", "101x", "20000", "10001 %", "0.01", "0.0001x"] {
+            let before = store.changeCount
+            store.statusMessage = nil
+            inspector.commitText(.speed, text)
+            XCTAssertEqual(store.changeCount, before, "\(text) is refused")
+            XCTAssertEqual(speed(clip), "1/2")
+            XCTAssertTrue(store.statusMessage?.contains("between 1% and 10000%") == true,
+                          "\(text): \(store.statusMessage ?? "nil")")
+            XCTAssertEqual(inspector.message, store.statusMessage)
+        }
+        // The limits themselves are speeds.
+        XCTAssertNil(InspectorModel.speedRangeProblem(SpeedRatio(numerator: 100, denominator: 1)))
+        XCTAssertNil(InspectorModel.speedRangeProblem(SpeedRatio(numerator: 1, denominator: 100)))
+        XCTAssertNotNil(InspectorModel.speedRangeProblem(SpeedRatio(numerator: 1001, denominator: 10)))
+        XCTAssertNotNil(InspectorModel.speedRangeProblem(SpeedRatio(numerator: 9, denominator: 1000)))
+        inspector.commitText(.speed, "1 %")
+        XCTAssertEqual(speed(clip), "1/100")
+
+        // Presets: each one step, the linked audio following.
+        XCTAssertEqual(InspectorModel.speedPresets, [25, 50, 100, 200, 400, 800])
+        for preset in InspectorModel.speedPresets {
+            let before = store.changeCount
+            inspector.applySpeedPreset(preset)
+            let expected = SpeedRatio(numerator: Int64(preset), denominator: 100).reduced
+            XCTAssertEqual(speed(clip), "\(expected.numerator)/\(expected.denominator)", "\(preset) %")
+            XCTAssertEqual(speed(sound), speed(clip))
+            XCTAssertGreaterThan(store.changeCount, before)
+            XCTAssertEqual(store.undoActionName, "Change Speed")
+        }
+        store.undo()
+        XCTAssertEqual(speed(clip), "4/1", "a preset is one undo step")
+
+        // A still has no speed: no row.
+        let url = fixture.directory.appendingPathComponent("still.heic")
+        try TestMediaFactory.writeHEIC(to: url, width: 320, height: 180)
+        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([url]) { continuation.resume(returning: $0) }
+        }
+        let still = try fixture.placeMovie(try XCTUnwrap(imported.first), at: 20)
+        store.selection = [still]
+        XCTAssertNil(inspector.speedTarget)
+        XCTAssertFalse(inspector.isAvailable(.speed))
+        let before = store.changeCount
+        inspector.applySpeedPreset(200)
+        XCTAssertEqual(store.changeCount, before, "a preset does nothing without a speed target")
+    }
+
     func testDurationAndSpeedParsing() {
         let fd = CMTime(value: 1, timescale: 30)
         XCTAssertEqual(DurationFormat.parseFrames("12f", frameDuration: fd, display: .timecode), 12)
