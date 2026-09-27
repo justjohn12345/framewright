@@ -1569,6 +1569,190 @@ EditResult planMatchSpanEdge(const Sequence &sequence, SpanId spanId, ClipEdge e
     return EditResult::success();
 }
 
+// ----- Continuing a move on the next clip -----
+
+namespace {
+
+// “name” of the clip's media, for a sentence.
+std::string quotedClipName(const Project &project, const Clip &clip) {
+    const MediaAsset *asset = project.findAsset(clip.assetId);
+    return "“" + (asset != nullptr ? asset->name : "clip " + idString(clip.id.value())) + "”";
+}
+
+} // namespace
+
+EditResult planContinueMotion(const Project &project, const Sequence &sequence, SpanId spanId, ContinueMotionPlan &plan) {
+    plan = ContinueMotionPlan{};
+    const Clip *clip = nullptr;
+    const Track *track = nullptr;
+    const EffectSpan *span = sequence.findSpan(spanId, &clip, &track);
+    if (span == nullptr) {
+        return spanNotFound(spanId);
+    }
+    if (span->kind != SpanKind::Motion) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   "Continue on Next Clip carries a Motion span's move on to the next clip.");
+    }
+    const std::string name = quotedClipName(project, *clip);
+    for (const EffectSpan &other : clip->spans) {
+        if (other.kind == SpanKind::Motion && other.id != span->id && span->end < other.end) {
+            return EditResult::failure(EditError::InvalidArgument,
+                                       "Another move on " + name +
+                                           " ends after this one: continue the clip's last move instead.");
+        }
+    }
+    const Clip *next = touchingClip(*track, *clip, ClipEdge::Tail);
+    if (next == nullptr) {
+        return EditResult::failure(EditError::NotAdjacent,
+                                   "No clip touches the end of " + name + ", so there is nothing to continue the move on.");
+    }
+    if (EditResult r = requireEditableTrack(track, track->id); !r) {
+        return r;
+    }
+    const std::string nextName = quotedClipName(project, *next);
+    const CMTime fd = sequence.frameDuration;
+    const auto own = spanTimelineRange(*clip, *span, *track);
+    if (!own || !isPositive(fd)) {
+        return notRepresentable(clip->id, clip->timelineStart);
+    }
+    const double ownSeconds = CMTimeGetSeconds(own->duration());
+    if (!(ownSeconds > 0.0)) {
+        return EditResult::failure(EditError::InvalidArgument, "the move has no length to take a rate from");
+    }
+    // The lane: the span's own when it is free on N's first frame, else the first free one.
+    std::vector<int> lanes{span->lane};
+    for (int lane = kFirstEffectLane; lane <= kLastLane; ++lane) {
+        if (lane != span->lane) {
+            lanes.push_back(lane);
+        }
+    }
+    std::optional<TimeRange> room;
+    for (const int lane : lanes) {
+        for (const TimeRange &free : freeLaneRanges(*next, lane, fd)) {
+            if (free.start == next->timelineStart) {
+                room = free;
+                plan.lane = lane;
+                break;
+            }
+        }
+        if (room) {
+            break;
+        }
+    }
+    if (!room) {
+        return EditResult::failure(EditError::Overlap, "Every effect lane of " + nextName +
+                                                           " has a span on its first frame, so the move has no room "
+                                                           "there: remove one or move it to a free lane.");
+    }
+    const std::int64_t ownFrames = std::max<std::int64_t>(1, frameIndexAt(own->duration(), fd, SnapMode::Round));
+    const auto wanted = checkedTimeForFrame(frameIndexAt(next->timelineStart, fd, SnapMode::Round) + ownFrames, fd);
+    if (!wanted) {
+        return notRepresentable(next->id, next->timelineStart);
+    }
+    plan.clipId = next->id;
+    plan.timelineStart = next->timelineStart;
+    plan.timelineEnd = minTime(*wanted, room->end);
+    TimeRange frames;
+    if (EditResult r = spanSourceRange(sequence, *next, plan.timelineStart, plan.timelineEnd, plan.sourceStart,
+                                       plan.sourceEnd, frames);
+        !r) {
+        return r;
+    }
+    // The new span's first and last frames on N, and what the rest of N composes to there.
+    EffectSpan probe;
+    probe.kind = SpanKind::Motion;
+    probe.lane = plan.lane;
+    probe.start = plan.sourceStart;
+    probe.end = plan.sourceEnd;
+    const auto firstTime = spanEdgeFrameTime(*next, probe, fd, false);
+    const auto lastTime = spanEdgeFrameTime(*next, probe, fd, true);
+    if (!firstTime || !lastTime) {
+        return notRepresentable(next->id, next->timelineStart);
+    }
+    const VideoParams before = composeMotion(*next, *firstTime);
+    const VideoParams after = composeMotion(*next, *lastTime);
+    if (!(before.scale > 0.0) || !(after.scale > 0.0)) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   nextName + " has scale 0 where the move would go, so no span value can show it.");
+    }
+    // The rate of the move: its own start and end values over its length.
+    const double startScale = spanEdgeValue(*span, SpanParameter::Scale, false);
+    const double endScale = spanEdgeValue(*span, SpanParameter::Scale, true);
+    if (!(startScale > 0.0)) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   "The move starts at scale 0, so it has no zoom rate to continue.");
+    }
+    const double k = CMTimeGetSeconds(plan.timelineEnd - plan.timelineStart) / ownSeconds;
+    auto delta = [&](SpanParameter parameter) {
+        return (spanEdgeValue(*span, parameter, true) - spanEdgeValue(*span, parameter, false)) * k;
+    };
+    const VideoParams from = motionValuesAt(*clip, clip->timelineEnd());
+    VideoParams to = from;
+    to.x += delta(SpanParameter::X);
+    to.y += delta(SpanParameter::Y);
+    to.rotationDegrees += delta(SpanParameter::Rotation);
+    to.scale *= std::pow(endScale / startScale, k);
+    const std::pair<SpanParameter, std::pair<double, double>> values[] = {
+        {SpanParameter::X, {from.x - before.x, to.x - after.x}},
+        {SpanParameter::Y, {from.y - before.y, to.y - after.y}},
+        {SpanParameter::Scale, {from.scale / before.scale, to.scale / after.scale}},
+        {SpanParameter::Rotation, {from.rotationDegrees - before.rotationDegrees, to.rotationDegrees - after.rotationDegrees}},
+    };
+    for (const auto &[parameter, pair] : values) {
+        for (const double value : {pair.first, pair.second}) {
+            if (EditResult r = checkSpanValue(parameter, value); !r) {
+                return r;
+            }
+        }
+        plan.values.push_back(SpanValueChange{parameter, pair.first, pair.second});
+    }
+    const KeyframeInterpolation easing = spanInterpolation(*span);
+    plan.interpolation = easing == KeyframeInterpolation::Bezier ? KeyframeInterpolation::Linear : easing;
+    return EditResult::success();
+}
+
+ContinueMotionSpan::ContinueMotionSpan(SequenceId sequenceId, SpanId spanId)
+    : SequenceCommand(sequenceId), spanId_(spanId) {}
+
+EditResult ContinueMotionSpan::perform(const Project &project, Sequence &sequence, IdGenerator &ids) {
+    ContinueMotionPlan plan;
+    if (EditResult r = planContinueMotion(project, sequence, spanId_, plan); !r) {
+        return r;
+    }
+    Track *track = nullptr;
+    Clip *next = nullptr;
+    if (EditResult r = findEditableClip(sequence, plan.clipId, track, next); !r) {
+        return r;
+    }
+    const TimeRange frames{plan.timelineStart, plan.timelineEnd};
+    if (EditResult r = checkLaneFree(sequence, *next, plan.lane, plan.sourceStart, plan.sourceEnd, frames, SpanId{});
+        !r) {
+        return r;
+    }
+    const auto length = checkedSubtract(plan.sourceEnd, plan.sourceStart);
+    if (!length || !isExactModelTime(*length)) {
+        return notRepresentable(next->id, plan.timelineStart);
+    }
+    EffectSpan span;
+    span.id = ids.make<SpanId>();
+    span.lane = plan.lane;
+    span.kind = SpanKind::Motion;
+    span.start = plan.sourceStart;
+    span.end = plan.sourceEnd;
+    for (const SpanValueChange &change : plan.values) {
+        span.tracks.track(change.parameter) = {
+            keyframeAt(kCMTimeZero, change.start.value_or(neutralValue(change.parameter)), plan.interpolation),
+            keyframeAt(*length, change.end.value_or(neutralValue(change.parameter)), plan.interpolation)};
+    }
+    if (auto problem = spanTracksProblem(span)) {
+        return EditResult::failure(EditError::InvalidArgument, *problem);
+    }
+    created_ = span.id;
+    next->spans.push_back(std::move(span));
+    next->sortSpans();
+    return EditResult::success();
+}
+
 // ----- Audio fades -----
 
 CMTime clipFadeLength(const Clip &clip, ClipEdge edge) {

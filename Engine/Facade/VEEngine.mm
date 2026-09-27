@@ -2063,6 +2063,27 @@ static std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
                             note:[NSString stringWithFormat:@"Matched %@.", what]];
 }
 
+- (VEEditResult *)continueMotionSpanOnNextClip:(VESpanID)spanID {
+    VE_ASSERT_MAIN();
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    auto command = std::make_unique<ContinueMotionSpan>([self sequenceId], id);
+    ContinueMotionSpan *raw = command.get();
+    return [self pushSpanCommand:std::move(command)
+                          spanId:^SpanId {
+                              return raw->createdSpanId();
+                          }
+                         created:YES
+                            note:nil];
+}
+
+- (nullable NSString *)problemContinuingMotionSpanOnNextClip:(VESpanID)spanID {
+    VE_ASSERT_MAIN();
+    ContinueMotionPlan plan;
+    const EditResult planned = planContinueMotion(_project, [self activeSequence],
+                                                  SpanId(static_cast<SpanId::ValueType>(spanID)), plan);
+    return planned ? nil : toNS(planned.message);
+}
+
 - (VEEditResult *)applyKenBurnsToSpan:(VESpanID)spanID
                                 start:(VEMotionFraming)start
                                   end:(VEMotionFraming)end

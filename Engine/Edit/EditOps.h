@@ -567,6 +567,66 @@ EditResult planMatchSpanEdge(const Sequence &sequence, SpanId spanId, ClipEdge e
 // millionth of the larger magnitude (at least 1, so within a millionth of a pixel near the centre).
 bool spanValuesMatch(SpanParameter parameter, double a, double b);
 
+// ----- Continuing a move on the next clip -----
+
+// Where and how "Continue on Next Clip" carries the Motion span S of clip C on to N, the clip touching
+// C's end on its track (planContinueMotion): a new Motion span of N on `lane` over the timeline frames
+// [timelineStart, timelineEnd) (source times [sourceStart, sourceEnd)) with `values` (X, Y, Scale and
+// Rotation, start and end, relative) moving by `interpolation`.
+struct ContinueMotionPlan {
+    ClipId clipId;
+    int lane = 0;
+    CMTime timelineStart = kCMTimeInvalid;
+    CMTime timelineEnd = kCMTimeInvalid;
+    CMTime sourceStart = kCMTimeInvalid;
+    CMTime sourceEnd = kCMTimeInvalid;
+    std::vector<SpanValueChange> values;
+    KeyframeInterpolation interpolation = KeyframeInterpolation::Linear;
+};
+
+// The continuation of the Motion span `spanId` (S, on clip C) on the next clip N, as a plan:
+//   - S must be C's last move: no other Motion span of C ends after S (so from S's end to the cut C
+//     shows what its spans hold);
+//   - the new span starts on N's first frame and lasts as long as S on the timeline (whole frames),
+//     shortened to N and to the free part of its lane: S's lane when that lane of N is free from N's
+//     first frame, else the first such lane of 1-3;
+//   - Start, absolute: P0 = C's Motion at the cut, every span of C at its end value (motionValuesAt at
+//     C's end: S's end placement with the rest held). N's first frame shows it, so the picture goes on
+//     from C's last frame without a jump, and without a repeated framing when S runs to the cut (its
+//     end is reached there, a frame after C's last frame). This differs from matching N's start to
+//     C's last frame (planMatchSpanEdge), which repeats that frame's framing;
+//   - End, absolute: S's rate continued over the new span's length T (S lasting T_S on the timeline):
+//     x, y and rotation P0 + (S's end value - start value) * T / T_S, scale P0 * (end / start)^(T / T_S)
+//     (the same per-second zoom ratio);
+//   - the values are relative (Clip.h "Composition"): over what the rest of N composes to at the new
+//     span's first and last frames (spanEdgeFrameTime, as planKenBurns), so spanEdgeMotion reads P0 and
+//     the end placement back exactly; the interpolation is S's (Linear for a custom curve).
+// A still takes the span as any clip does. Refused (sentences naming the clips, `project` gives their
+// names): SpanNotFound; InvalidArgument (not a Motion span, not C's last move, S starting at scale 0
+// (no zoom rate), N at scale 0 there, a value out of range); NotAdjacent (no clip touches C's end);
+// Overlap (every effect lane of N has a span on its first frame); TrackLocked.
+EditResult planContinueMotion(const Project &project, const Sequence &sequence, SpanId spanId, ContinueMotionPlan &plan);
+
+// "Continue on Next Clip": adds the span planContinueMotion plans (one undo step); createdSpanId() is
+// the new span. Refusals as planContinueMotion's.
+class ContinueMotionSpan final : public SequenceCommand {
+  public:
+    ContinueMotionSpan(SequenceId sequenceId, SpanId spanId);
+    std::string name() const override {
+        return "Continue on Next Clip";
+    }
+    SpanId createdSpanId() const {
+        return created_;
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    SpanId spanId_;
+    SpanId created_;
+};
+
 // The clip on the same track that touches `clipId` at `edge`: the one ending exactly where it
 // starts (Head) or starting exactly where it ends (Tail); nullptr when there is none (a gap, the
 // track's end, or no such clip).

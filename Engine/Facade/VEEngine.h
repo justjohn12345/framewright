@@ -549,6 +549,21 @@ NS_SWIFT_UI_ACTOR
 /// a span that starts after that frame of its clip), and the span refusals.
 - (VEEditResult *)matchSpanEdge:(VESpanID)spanID
           toAdjacentClipAtEdge:(VEClipEdge)edge NS_SWIFT_NAME(matchSpanEdge(_:toAdjacentClipAt:));
+/// Continue on Next Clip: carries the Motion span's move on to the clip touching the end of its clip,
+/// as a new Motion span there (one undo step, "Continue on Next Clip"; createdIDs and `span` give the
+/// new span). It starts on the next clip's first frame with the placement this clip has at the cut (the
+/// span's end placement, the rest held), lasts as long as the span (shortened to the next clip and to
+/// the free part of a lane: the span's own lane when free from the first frame, else another), and
+/// ends where the same move at the same rate gets to (per-second changes of position and rotation,
+/// the per-second zoom ratio), with the same interpolation. EditOps.h planContinueMotion has the rule.
+/// Refused with a sentence naming the clips: not a Motion span, not its clip's last move
+/// (VEEditErrorInvalidArgument), no clip touching the end (VEEditErrorNotAdjacent), no lane of the next
+/// clip free on its first frame (VEEditErrorOverlap), a locked track, a value out of range.
+- (VEEditResult *)continueMotionSpanOnNextClip:(VESpanID)spanID NS_SWIFT_NAME(continueMotionSpanOnNextClip(_:));
+/// Why continueMotionSpanOnNextClip: would be refused for the span now (its sentence), or nil when it
+/// would go ahead. Changes nothing.
+- (nullable NSString *)problemContinuingMotionSpanOnNextClip:(VESpanID)spanID
+    NS_SWIFT_NAME(continueMotionProblem(forSpan:));
 /// The Ken Burns move on a Motion span: its Position X/Y and Scale start and end values set in one
 /// step so the picture shows the framing `start` on the span's first frame and `end` at its end
 /// (the framings as the monitor shows them: the clip's static values and its other lanes are taken
