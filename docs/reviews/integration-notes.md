@@ -1143,3 +1143,57 @@ so switching writes nothing. No model or schema change.
 - By hand: a window whose program monitor is not 16:9: the bands are a lighter grey than the frame's black, so a clip
   placed short of the frame's edge shows the black of the frame beside it; the source monitor with a portrait photo; the
   output window on a second display stays black outside the frame.
+
+## Wipe and iris transitions (2026-09-27; plan `docs/plans/2026-09-27-reverse-speed-wipes.md`, item 1)
+- Model: `TransitionKind` (Transition.h) is `CrossDissolve`, `WipeLeft`, `WipeRight`, `WipeUp`, `WipeDown`, `Iris`
+  (`kTransitionKinds`; names `crossDissolve` ... `iris`, `displayNameOf`, `transitionKindNamed`). A wipe is named for
+  the way the edge travels: Wipe Left brings the incoming picture in from the right edge. The kind is a video
+  property: a transition span on an audio track is always `CrossDissolve` (`checkTransitionSpan` refuses another, a
+  project file's is repaired to a cross dissolve with a warning). An unknown name keeps the existing path (a warning
+  naming it, a cross dissolve; forward compatible), not a load failure: the plan's "refused" is that warning.
+- Edit: `SetTransitionKind(sequence, span, kind)` ("Change Transition Kind"): refused `TransitionNotFound` (an effect
+  span or no span), `TrackKindMismatch` (audio), `TrackLocked`; the range, the role and the linked audio transition
+  are unchanged. `TransitionSpanRequest::kind` is honoured by `AddTransitionSpans` (and refused on audio).
+- Rendering: `LayerTransition::kind` reaches the compositor. `VEDrawUniforms.reserved` = (shape = the kind's value,
+  feather `kTransitionFeather` = 2 sequence pixels, 1 when a lone layer is the incoming side, 0); `mix.x` is the
+  progress (pair draws as before, lone shaped draws too). All zero for a dissolve, whose uniforms and shader branch are
+  unchanged (`CompositorTests.testDissolveMix` and the export parity tests hold as they were). The reveal (RenderGraph.h,
+  `Shaders.metal transitionReveal`): d = W - x, x, H - y, y or |p - centre|, L = W, W, H, H or half the diagonal,
+  r = p (L + 2f) - f, m = 1 - smoothstep(r - f, r + f, d). At p = 0 the soft band lies before every d >= 0 and at p = 1
+  past every d <= L, so the frames are exactly the outgoing and the incoming picture (the plan's unshifted edge would
+  leave a feathered strip at both ends; a run with it failed at 0 and 1 on every kind, 12 to 192 pixels). Pair draws
+  are mix(A, B, m) per pixel; a lone layer (a fade role, or a partner not decoded yet) is drawn times m (incoming /
+  fade in) or 1 - m (outgoing / fade out) instead of the uniform weight. At a free edge the other side is black: an
+  Iris fade out grows black from the centre, as its fade in grows the picture.
+- Facade: `VETransitionKind`; `VEEffectSpan.transitionKind`, `VETransitionInfo.kind`;
+  `addTransitionFromClip:toClip:duration:options:kind:`, `addTransitionAtEdge:ofClip:duration:options:kind:` (the kind
+  goes to video tracks only; a shaped fade's note is "Wipe Right from black."), `setKind:forTransition:`.
+- App: `TransitionKind` has the six video kinds and `audioCrossfade` (`videoKinds`, `engineKind`,
+  `init(engineKind:trackKind:)`, `glyph` ◁ ▷ △ ▽ ◯), each with its exported drag type (`...transition.wipe-left` etc.,
+  project.yml / Info.plist). The Effects tab lists them; a drop or "+" passes the kind (`ProjectStore.addTransition`,
+  `addFade(at:of:frames:kind:)`); a video transition's linked crossfade question is asked for every video kind. The
+  transition inspector has a Kind popup (`InspectorModel.setTransitionKind`, `ProjectStore.setTransitionKind`) and an
+  Edge row for a fade role; the lane-0 bar's title is the kind's ("Wipe Left", "Iris In" / "Iris Out" at a free edge)
+  after its glyph (`TimelineViewModel.Span.transitionKind`, `glyph`, `isShaped`). Deviation: the plan listed the
+  glyphs "▷ ◁ △ ▽ ◯" in kind order; the glyphs here point the way the edge travels (Wipe Left ◁).
+- Tests: `TransitionShapeTests` (every kind against the C++ reference at 0, 0.25, 0.5, 0.75, 1 on a cut and at a free
+  edge, a missing partner, opacity), `ProjectJSONTests` (the round trip of every kind; the unknown kind's warning; the
+  audio repair and validation), `TransitionFadeEditTests` (SetTransitionKind and its refusals),
+  `SchedulerTests` (the kind reaches the layers; the audio graph is identical for every kind),
+  `ExportParityTests.testAWipeAndAnIrisExportTheMonitorsPictures`, `VEEngineEffectsTests.testATransitionsKindIs
+  AddedAndChangedOnVideoOnly`, `TimelineDropTests.testEveryVideoKindDropsOnACutAndOnAFreeEdgeWithItsKind`,
+  `InspectorSpanTests.testTheKindPopupChangesAVideoTransitionsKind`.
+- By hand: each wipe and the iris dragged onto a cut and onto a clip's free start and end (the preview label, the
+  picture while playing and scrubbing), the Kind popup on a selected transition (one Cmd-Z back), a wipe exported.
+
+## Speed in the inspector (same plan, item 2)
+- The inspector already had a Speed section (a typed field and a slider for one non-still clip or the video clip of a
+  linked pair, ripple per Settings > Editing's ripple scope, the same parser as the sheet). Added: a Presets menu
+  (`InspectorModel.speedPresets` 25 ... 800 %, `applySpeedPreset`, one "Change Speed" step, the linked audio
+  following), a help line naming Speed/Duration… (⌘R) for the duration and the ripple choice, and the refusal of a
+  typed speed outside 1 % to 10000 % with the range in the status line (`speedRangeProblem(_:)` exact on the fraction,
+  `speedRangeProblem(multiplier:)` for a speed too small to store as a fraction: "0.01" was called "not a valid
+  speed"). The engine refused the others already with its own sentence, which has the range too. The row's ripple is
+  the ripple scope preference (all or synced tracks); "don't ripple" stays the sheet's.
+- Test: `InspectorModelTests.testTheSpeedRowAppliesPercentsRatiosAndPresetsAndRefusesOutsideTheRange`.
+- By hand: the presets menu and a typed "2x", "1/3" and "20000" on a clip with linked audio; a still shows no row.

@@ -42,9 +42,10 @@ audited the code line by line.
   Effects tab with the transitions (drag onto a cut, or "+" at the playhead) and the lane
   effects. View > Program Monitor on Second Display shows the program full screen on another
   display, mirrored and in sync with the in-window monitor.
-- Effect lanes: under each track its lanes hold spans. Lane 0 has the transitions (cross dissolves and
-  constant-power crossfades across a cut, with any split of the two sides such as 70/30, and fades to and from
-  black or silence); lanes 1-3 have Motion, Fade (opacity) and Gain spans, each with start and end values that
+- Effect lanes: under each track its lanes hold spans. Lane 0 has the transitions (cross dissolves, wipes left,
+  right, up and down and an iris on video, constant-power crossfades on audio, across a cut with any split of the
+  two sides such as 70/30, and fades or wipes to and from black or silence at a free edge; the inspector changes a
+  video transition's kind); lanes 1-3 have Motion, Fade (opacity) and Gain spans, each with start and end values that
   compose onto the clip's own (a pan on one lane, a zoom on another) and hold their end value until the clip ends.
   Drag across an empty lane to make a span (a Motion span on video, with Option a fade, a Gain span on audio), or
   press Control-K for a Motion span at the playhead; drag a span to move it and its edges to trim it (snapping to
@@ -61,7 +62,8 @@ audited the code line by line.
   Control-K in Ken Burns mode when the clip spans the frame across or down (a letterboxed or pillarboxed picture
   too). The monitors shade the area around the frame so its edge shows. Projects from earlier versions open with their keyframes and fades as spans and look and sound the
   same.
-- Inspector for the clips' position, scale, rotation, opacity, gain, fades and exact speed; transitions
+- Inspector for the clips' position, scale, rotation, opacity, gain, fades and exact speed (typed as a
+  percentage, a multiplier or a fraction, or from presets); transitions
   kept together with their linked partner (Delete removes both, Option-Delete one; a change also changes
   the linked one unless turned off); a note when a dissolve sits on a plain split (both sides show the
   same frames); the gain line on audio clips; Speed/Duration sheet.
