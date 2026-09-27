@@ -126,21 +126,31 @@ struct TimelineRenderer {
 
     /// The fill of a span's bar by kind.
     static func color(_ kind: TimelineViewModel.SpanKind) -> Color {
-        switch kind {
-        case .transition: return Color.purple
-        case .motion: return Color(red: 0.85, green: 0.52, blue: 0.16)
-        case .opacity: return Color(red: 0.2, green: 0.6, blue: 0.7)
-        case .gain: return Color(red: 0.55, green: 0.66, blue: 0.18)
-        }
+        TimelineItemStyle.baseFill(TimelineItemStyle.Kind(kind)).color
+    }
+
+    /// How a clip, span bar or transition bar of `kind` is drawn, selected or not (`TimelineItemStyle`).
+    static func style(for kind: TimelineItemStyle.Kind, selected: Bool) -> TimelineItemStyle {
+        TimelineItemStyle(kind: kind, selected: selected)
+    }
+
+    /// Strokes the item's outline: a selected item's accent border inside its shape (the stroke's path
+    /// is the shape inset by half the border's width, so the whole border lies within the item and its
+    /// hit area), an unselected item's hairline on its edge.
+    private func strokeOutline(of rect: CGRect, cornerRadius: CGFloat, style: TimelineItemStyle,
+                               in context: inout GraphicsContext) {
+        let inset = style.borderInset
+        let path = Path(roundedRect: rect.insetBy(dx: inset, dy: inset), cornerRadius: max(0, cornerRadius - inset))
+        context.stroke(path, with: .color(style.borderColor), lineWidth: style.borderWidth)
     }
 
     /// A span: a rounded bar on its lane with its kind's icon and name (and a transition's length),
-    /// a transition's cut marked by a line, a white outline when selected.
+    /// a transition's cut marked by a line; selected, a brighter fill and an accent border inside it.
     private func drawSpan(_ span: TimelineViewModel.Span, in context: inout GraphicsContext) {
         guard let rect = model.rect(forSpan: span) else { return }
-        let selected = span.id == selectedSpanID
+        let style = Self.style(for: TimelineItemStyle.Kind(span.kind), selected: span.id == selectedSpanID)
         let shape = Path(roundedRect: rect, cornerRadius: 3)
-        context.fill(shape, with: .color(Self.color(span.kind).opacity(selected ? 1 : 0.85)))
+        context.fill(shape, with: .color(style.fillColor))
         var inner = context
         inner.clip(to: shape)
         if span.kind == .transition {
@@ -154,7 +164,7 @@ struct TimelineRenderer {
         var x = visibleMinX + 3
         if rect.width >= 16 {
             var icon = inner.resolve(Image(systemName: span.systemImage))
-            icon.shading = .color(.white)
+            icon.shading = .color(style.labelColor)
             let side = rect.height - 3
             inner.draw(icon, in: CGRect(x: x, y: rect.midY - side / 2, width: side, height: side))
             x += side + 3
@@ -164,12 +174,12 @@ struct TimelineRenderer {
             let frames = Int64(((span.end - span.start) / max(model.frameSeconds, 1e-9)).rounded())
             title += "  " + formatFrames(frames)
         }
-        let label = inner.resolve(Text(title).font(.system(size: 9, weight: .semibold)).foregroundColor(.white))
+        let label = inner.resolve(Text(title).font(.system(size: 9, weight: .semibold)).foregroundColor(style.labelColor))
         let labelSize = label.measure(in: CGSize(width: 400, height: rect.height))
         if x + labelSize.width <= rect.maxX - 2 {
             inner.draw(label, at: CGPoint(x: x, y: rect.midY), anchor: .leading)
         }
-        context.stroke(shape, with: .color(selected ? .white : .black.opacity(0.35)), lineWidth: selected ? 1.5 : 0.5)
+        strokeOutline(of: rect, cornerRadius: 3, style: style, in: &context)
     }
 
     /// The span a range drag on an empty lane creates: its kind's colour, outlined, or red with the
@@ -217,13 +227,12 @@ struct TimelineRenderer {
         guard let rect = model.rect(forClip: clip), rect.maxY >= 0, rect.minY <= size.height,
               let layout = model.layout(forTrack: clip.trackID) else { return }
         let isAudio = layout.track.kind == .audio
-        let isSelected = selection.contains(clip.id)
         let asset = assets[clip.assetID]
+        let kind: TimelineItemStyle.Kind = asset?.isMissing == true ? .missingClip : (isAudio ? .audioClip : .videoClip)
+        let style = Self.style(for: kind, selected: selection.contains(clip.id))
         let body = rect.insetBy(dx: 0.5, dy: 1)
         let shape = Path(roundedRect: body, cornerRadius: 4)
-        var fill = isAudio ? Color(red: 0.18, green: 0.42, blue: 0.28) : Color(red: 0.22, green: 0.32, blue: 0.58)
-        if asset?.isMissing == true { fill = Color(red: 0.55, green: 0.18, blue: 0.18) }
-        context.fill(shape, with: .color(fill.opacity(isSelected ? 1 : 0.85)))
+        context.fill(shape, with: .color(style.fillColor))
 
         var inner = context
         inner.clip(to: shape)
@@ -248,11 +257,11 @@ struct TimelineRenderer {
         if isAudio, abs(clip.gainDb) > 1e-9 {
             label += "  " + TimelineGestureController.gainText(clip.gainDb)
         }
-        let text = Text(label).font(.system(size: 10, weight: .medium)).foregroundColor(.white)
+        let text = Text(label).font(.system(size: 10, weight: .medium)).foregroundColor(style.labelColor)
         let labelX = max(body.minX, 0) + 5
         inner.draw(text, at: CGPoint(x: labelX, y: body.minY + 2), anchor: .topLeading)
 
-        context.stroke(shape, with: .color(isSelected ? .white : Color.black.opacity(0.5)), lineWidth: isSelected ? 2 : 1)
+        strokeOutline(of: body, cornerRadius: 4, style: style, in: &context)
     }
 
     /// The volume envelope over an audio clip's waveform: the gain line (the clip's static gain,
@@ -436,4 +445,123 @@ enum SpeedFormat {
         guard let value = Double(trimmed), value.isFinite, value > 0 else { return nil }
         return .decimal(value)
     }
+}
+
+/// The look of a clip, a span bar or a transition bar in the timeline, selected or not (hands-on round,
+/// 2026-09-27: the selection was hard to see). Every kind follows the same rule: unselected, its fill at
+/// `unselectedOpacity` with a thin dark outline on its edge and a white label; selected, the fill made
+/// `selectionLightening` lighter (mixed that far towards white), opaque, with a `selectedBorderWidth` border
+/// in the system accent colour inside the item (it never reaches past the item, so the hit geometry is
+/// the same) and the label in white or black, whichever reads better on that fill (WCAG contrast).
+struct TimelineItemStyle: Equatable {
+    /// What is drawn.
+    enum Kind: CaseIterable, Hashable {
+        case videoClip, audioClip, missingClip, transition, motion, opacity, gain
+
+        init(_ span: TimelineViewModel.SpanKind) {
+            switch span {
+            case .transition: self = .transition
+            case .motion: self = .motion
+            case .opacity: self = .opacity
+            case .gain: self = .gain
+            }
+        }
+    }
+
+    /// An sRGB colour by its components (0...1), so styles compare and their contrast can be computed.
+    struct RGB: Equatable {
+        var red: Double
+        var green: Double
+        var blue: Double
+
+        /// Mixed `fraction` of the way towards white.
+        func lightened(_ fraction: Double) -> RGB {
+            RGB(red: red + (1 - red) * fraction, green: green + (1 - green) * fraction,
+                blue: blue + (1 - blue) * fraction)
+        }
+
+        /// WCAG relative luminance.
+        var luminance: Double {
+            func linear(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+            return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+        }
+
+        /// WCAG contrast ratio against `other` (1...21).
+        func contrast(with other: RGB) -> Double {
+            let (a, b) = (luminance + 0.05, other.luminance + 0.05)
+            return max(a, b) / min(a, b)
+        }
+
+        var color: Color { Color(red: red, green: green, blue: blue) }
+
+        static let white = RGB(red: 1, green: 1, blue: 1)
+        static let black = RGB(red: 0, green: 0, blue: 0)
+    }
+
+    enum Border: Equatable {
+        /// The system accent colour (`Color.accentColor`, `NSColor.controlAccentColor`).
+        case accent
+        /// Black at this opacity (the unselected hairline).
+        case shade(Double)
+    }
+
+    /// How much lighter a selected item's fill is than its unselected fill.
+    static let selectionLightening = 0.2
+    /// The selected border's width, points; it lies inside the item.
+    static let selectedBorderWidth: CGFloat = 2
+    /// The fill's opacity when not selected (over the lane).
+    static let unselectedOpacity = 0.85
+
+    let fill: RGB
+    let fillOpacity: Double
+    let border: Border
+    let borderWidth: CGFloat
+    /// Label and icon colour.
+    let label: RGB
+
+    /// The fill of `kind` before selection.
+    static func baseFill(_ kind: Kind) -> RGB {
+        switch kind {
+        case .videoClip: return RGB(red: 0.22, green: 0.32, blue: 0.58)
+        case .audioClip: return RGB(red: 0.18, green: 0.42, blue: 0.28)
+        case .missingClip: return RGB(red: 0.55, green: 0.18, blue: 0.18)
+        case .transition: return RGB(red: 0.58, green: 0.34, blue: 0.80)
+        case .motion: return RGB(red: 0.85, green: 0.52, blue: 0.16)
+        case .opacity: return RGB(red: 0.2, green: 0.6, blue: 0.7)
+        case .gain: return RGB(red: 0.55, green: 0.66, blue: 0.18)
+        }
+    }
+
+    init(kind: Kind, selected: Bool) {
+        let base = Self.baseFill(kind)
+        if selected {
+            fill = base.lightened(Self.selectionLightening)
+            fillOpacity = 1
+            border = .accent
+            borderWidth = Self.selectedBorderWidth
+            label = fill.contrast(with: .white) >= fill.contrast(with: .black) ? .white : .black
+        } else {
+            let clip = kind == .videoClip || kind == .audioClip || kind == .missingClip
+            fill = base
+            fillOpacity = Self.unselectedOpacity
+            border = .shade(clip ? 0.5 : 0.35)
+            borderWidth = clip ? 1 : 0.5
+            label = .white
+        }
+    }
+
+    /// How far the border's path is inside the item's edge: half its width for the selected border (so
+    /// all of it is inside), none for the unselected hairline (drawn on the edge, as before).
+    var borderInset: CGFloat { border == .accent ? borderWidth / 2 : 0 }
+
+    var fillColor: Color { fill.color.opacity(fillOpacity) }
+
+    var borderColor: Color {
+        switch border {
+        case .accent: return Color.accentColor
+        case let .shade(opacity): return Color.black.opacity(opacity)
+        }
+    }
+
+    var labelColor: Color { label.color }
 }
