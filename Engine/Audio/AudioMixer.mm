@@ -203,6 +203,13 @@ void AudioMixer::setGraph(const AudioGraph &graph, CMTime sequenceTime) {
             mapping.speed = Ratio{1, 1};
         }
         mapping.sourceAtZero = segment.sourceRange.start - scaleTime(segment.timelineRange.start, mapping.speed);
+        if (segment.reversed) {
+            if (!isPositive(segment.mediaEnd)) {
+                continue; // a reversed clip needs its media's end (validation guarantees one)
+            }
+            mapping.reversed = true;
+            mapping.mirror = segment.mediaEnd;
+        }
 
         PlanSegment ps;
         ps.start = start;

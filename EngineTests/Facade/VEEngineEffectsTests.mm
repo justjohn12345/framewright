@@ -325,6 +325,43 @@ CMTime frames30(int64_t n) {
 /// Review M3: a fade out leaves the crossfade coming into its clip its frames. B is 90 frames with
 /// 15 of them under a 30-frame crossfade from A: an 80-frame fade out is refused (75 is the most),
 /// fitted to 75 with FitToCut, and a fade's limit and range edits stop there too.
+// Reverse Clip through the facade: one undo step for a clip and its linked audio; VEClipInfo reports
+// the media range it shows (the forward range) and its clip times (counted from the media's end).
+- (void)testReversingAClipIsOneUndoStepWithItsLinkedAudio {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    const auto a = [self place:engine asset:asset at:0 from:30 to:90];
+    VEClipInfo *before = [engine clipInfo:a.first];
+    XCTAssertFalse(before.reversed);
+    XCTAssertEqual(CMTimeCompare(before.mediaIn, before.sourceIn), 0);
+    XCTAssertEqual(CMTimeCompare(before.mediaOut, before.sourceOut), 0);
+    VEEditResult *r = [engine setReversed:YES forClips:@[ @(a.first) ]];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(engine.undoActionName, @"Reverse Clip");
+    for (const VEClipID id : {a.first, a.second}) {
+        VEClipInfo *info = [engine clipInfo:id];
+        XCTAssertTrue(info.reversed);
+        XCTAssertEqual(CMTimeCompare(info.mediaIn, frames30(30)), 0, @"it shows the same media");
+        XCTAssertEqual(CMTimeCompare(info.mediaOut, frames30(90)), 0);
+        XCTAssertEqual(CMTimeCompare(info.sourceIn, CMTimeSubtract(info.mediaEnd, frames30(90))), 0,
+                       @"its clip times count back from the media's end");
+        XCTAssertEqual(CMTimeCompare(info.timelineStart, kCMTimeZero), 0);
+        XCTAssertEqual(CMTimeCompare(info.duration, frames30(60)), 0);
+    }
+    XCTAssertEqual(CMTimeCompare([engine clipInfo:a.first].mediaEnd, CMTimeMake(10, 1)), 0, @"the video's end");
+    XCTAssertTrue([engine undo]);
+    XCTAssertFalse([engine clipInfo:a.first].reversed);
+    XCTAssertFalse([engine clipInfo:a.second].reversed, @"one undo step for both");
+    XCTAssertTrue([engine redo]);
+    XCTAssertTrue([engine clipInfo:a.second].reversed);
+    VEEditResult *forward = [engine setReversed:NO forClips:@[ @(a.second) ]];
+    XCTAssertTrue(forward.ok, @"%@", forward.message);
+    XCTAssertEqualObjects(engine.undoActionName, @"Play Clip Forward");
+    XCTAssertFalse([engine clipInfo:a.first].reversed);
+    VEEditResult *missing = [engine setReversed:YES forClips:@[ @(123456) ]];
+    XCTAssertEqual(missing.errorCode, VEEditErrorClipNotFound);
+}
+
 // Wipes and the iris: added with a kind on a cut (the linked crossfade stays a crossfade) and at a
 // free edge, changed through setKind:forTransition: in one undo step, refused on audio.
 - (void)testATransitionsKindIsAddedAndChangedOnVideoOnly {

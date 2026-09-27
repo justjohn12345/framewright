@@ -1,14 +1,17 @@
 // Project file serialization (JSON via nlohmann/json).
 //
-// Format (schema version 5): a top-level object with "schemaVersion" (kProjectSchemaVersion),
+// Format (schema version 6): a top-level object with "schemaVersion" (kProjectSchemaVersion),
 // "name", "nextId", "activeSequenceId", "assets" and "sequences". CMTime is {"value",
 // "timescale"} plus "flags" when the flags are anything other than plain valid (e.g. infinite)
 // and "epoch" when non-zero; kCMTimeInvalid is null. A clip stores "timelineStart", "duration"
 // (whole sequence frames), "sourceIn" and "speed" as {"num", "den"}; its source out point is
-// derived. Its "video" object holds the static Motion values and "audio" its "gainDb"; "spans"
+// derived; "reversed": true (left out when false) marks a clip that plays its media backwards (its
+// times are clip times, Clip.h "Reverse"). Its "video" object holds the static Motion values and
+// "audio" its "gainDb"; "spans"
 // (left out when empty) lists its effect spans (EffectSpan.h): {"id", "lane", "kind": "transition"
 // | "motion" | "opacity" | "gain", "start", "end"} plus, for a transition, "edge": "head" | "tail"
-// and "transition": "crossDissolve", and for an effect span "tracks": {"x" | "y" | "scale" |
+// and "transition": "crossDissolve" | "wipeLeft" | "wipeRight" | "wipeUp" | "wipeDown" | "iris", and
+// for an effect span "tracks": {"x" | "y" | "scale" |
 // "rotation" | "opacity" | "gain": [{"time" (relative to the span's start), "value",
 // "interpolation": "hold" | "linear" | "easeOut" | "easeIn" | "easeInOut" | "bezier", "curve":
 // [x1, y1, x2, y2] (bezier only)}, ...]} (parameters without keyframes left out). Enums are
@@ -37,7 +40,7 @@
 
 namespace ve {
 
-inline constexpr int kProjectSchemaVersion = 5;
+inline constexpr int kProjectSchemaVersion = 6;
 
 nlohmann::json projectToJson(const Project &project);
 
@@ -85,6 +88,8 @@ ProjectLoadResult parseProject(std::string_view text);
 //           touches cannot be a span (the cut is the other clip's) and is dropped with a warning,
 //           as is the part of a fade in that would meet the clip's tail transition. Fades on
 //           clips of video tracks (never audible) are dropped. New span ids come from "nextId".
+//   5 -> 6: nothing to convert. Version 6 added "reversed" on clips (absent: forward) and the wipe
+//           and iris transition kinds; a version 5 file has neither.
 std::optional<std::string> migrateProjectJson(nlohmann::json &document, int fromVersion,
                                               std::vector<std::string> &warnings);
 

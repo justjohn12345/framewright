@@ -105,6 +105,9 @@ json clipToJson(const Clip &clip) {
                 {"linkedClipId", optionalIdToJson(clip.linkedClipId)},
                 {"video", videoParamsToJson(clip.video)},
                 {"audio", audioParamsToJson(clip.audio)}};
+    if (clip.reversed) {
+        j["reversed"] = true;
+    }
     if (!clip.spans.empty()) {
         json spans = json::array();
         for (const EffectSpan &span : clip.spans) {
@@ -503,6 +506,7 @@ Clip parseClip(const Node &node, Warnings &warnings) {
         clip.speed = Ratio{num, den};
     }
     clip.isStill = node.boolOr("isStill", false);
+    clip.reversed = node.boolOr("reversed", false);
     if (node.has("linkedClipId")) {
         clip.linkedClipId = node.field("linkedClipId").asId<ClipId>();
     }
@@ -1140,6 +1144,12 @@ void migrateV4ToV5(json &document, Warnings &warnings) {
     document["nextId"] = nextId;
 }
 
+// Version 6 added clips' "reversed" flag (absent means forward) and the wipe and iris transition
+// kinds: a version 5 file has neither, so only the version number changes.
+void migrateV5ToV6(json &document, Warnings &) {
+    Node(document, "").requireObject();
+}
+
 struct MigrationStep {
     int fromVersion;
     void (*apply)(json &document, Warnings &warnings);
@@ -1151,6 +1161,7 @@ constexpr MigrationStep kMigrations[] = {
     {2, migrateV2ToV3},
     {3, migrateV3ToV4},
     {4, migrateV4ToV5},
+    {5, migrateV5ToV6},
 };
 static_assert(sizeof(kMigrations) / sizeof(kMigrations[0]) == kProjectSchemaVersion - 1,
               "every schema version below the current one needs a migration step");

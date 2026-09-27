@@ -2255,6 +2255,44 @@ static std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
     return [self pushRipple:make scope:scope created:nil];
 }
 
+- (VEEditResult *)setReversed:(BOOL)reversed forClips:(NSArray<NSNumber *> *)clipIDs {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    std::vector<ClipId> targets;
+    std::set<ClipId> covered;
+    for (ClipId id : toClipIds(clipIDs)) {
+        const Clip *clip = sequence.findClip(id);
+        if (clip == nullptr) {
+            return [VEEditResult failureWithCode:VEEditErrorClipNotFound message:@"A selected clip no longer exists."];
+        }
+        if (clip->isStill) {
+            return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                         message:@"A still image has no motion to reverse."];
+        }
+        if (!covered.insert(id).second) {
+            continue;
+        }
+        if (clip->linkedClipId) {
+            covered.insert(*clip->linkedClipId); // SetClipReversed changes the partner too
+        }
+        targets.push_back(id);
+    }
+    if (targets.empty()) {
+        return [VEEditResult failureWithMessage:@"Nothing selected."];
+    }
+    const SequenceId sequenceId = [self sequenceId];
+    const bool on = reversed;
+    std::vector<std::unique_ptr<Command>> children;
+    for (ClipId id : targets) {
+        children.push_back(std::make_unique<SetClipReversed>(sequenceId, id, on));
+    }
+    if (children.size() == 1) {
+        return [self push:std::move(children.front()) created:nil];
+    }
+    return [self push:std::make_unique<CompositeCommand>(on ? "Reverse Clips" : "Play Clips Forward", std::move(children))
+              created:nil];
+}
+
 - (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID duration:(CMTime)duration {
     VE_ASSERT_MAIN();
     return [self addTransitionFromClip:fromClipID toClip:toClipID duration:duration options:VETransitionOptionNone];

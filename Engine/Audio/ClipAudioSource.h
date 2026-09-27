@@ -7,6 +7,15 @@
 // sourceAtZero on one track (for example the halves of a split) are the same continuous media
 // and share one source; the mixer applies each clip's gain envelope on top.
 //
+// Reverse (AudioSourceMapping::reversed; Clip.h "Reverse"). A reversed clip's sequence sample n reads
+// media at mirror - clip time of sample n + 1 (the mirror rule per sample: the mirror of the sample's
+// end), i.e. source position mirror * sr - (sourceAtZero * sr + (n + 1) * speed): the forward mapping of
+// sequence sample N - 1 - n for the clip's forward form, so the output is the forward output
+// sample-reversed. The producer reads the block of source samples that ends at the mirrored position
+// (a forward decode) and delivers it back to front; the resampler below runs on the mirrored
+// positions, so pitch follows speed as it does forward. Blocks of at least kReverseBlockSeconds are
+// decoded at a time (one seek each), since each block lies before the previous one in the file.
+//
 // Resampling (speed != 1). Constant-speed "tape" resampling by linear interpolation between the
 // two nearest decoded source samples, computed in double precision on the producer thread.
 // Chosen over AVAudioConverter because it is exactly sample-aligned (source position of every
@@ -76,10 +85,16 @@ struct AudioSourceMapping {
     std::optional<media::RoutedMediaInfo> routed;
     int trackIndex = -1; ///< Audio track of the routed info; -1 = first.
     Ratio speed{1, 1};
-    /// Source time played at sequence time zero (Clip::sourceTimeAt(0)); may be negative.
+    /// Clip time played at sequence time zero (Clip::sourceTimeAt(0)); may be negative. The media
+    /// time itself for a forward clip.
     CMTime sourceAtZero = kCMTimeZero;
+    /// Plays the media backwards: clip time u reads media time `mirror` - u, by the mirror rule
+    /// (see the header comment). `mirror` is the media's end (mediaEndFor) and only used when
+    /// reversed.
+    bool reversed = false;
+    CMTime mirror = kCMTimeInvalid;
 
-    /// Same media, track, speed and offset (numeric comparison).
+    /// Same media, track, speed, offset and direction (numeric comparison).
     bool sameAs(const AudioSourceMapping &other) const;
 };
 
@@ -148,6 +163,9 @@ class ClipAudioSource {
     /// the rest of `dst` is left untouched. Audio render thread only.
     int read(int64_t sequenceSample, float *dst, int frames) noexcept;
 
+    /// Shortest run of source audio a reversed source decodes at once (see the header comment).
+    static constexpr double kReverseBlockSeconds = 0.5;
+
   private:
     static constexpr uint64_t kSerialMask = 0xFFFF;
 
@@ -161,6 +179,11 @@ class ClipAudioSource {
     int64_t readSource(int64_t start, int64_t frames, float *out);
     /// Like readSource() into the resampler's window; returns its failed source sample or -1.
     int64_t ensureSourceWindow(int64_t first, int64_t lastInclusive);
+    /// A reversed source's window: holds [first, lastInclusive], read as one block of at least
+    /// kReverseBlockSeconds ending at lastInclusive when it does not; returns a failed source sample or -1.
+    int64_t ensureReverseWindow(int64_t first, int64_t lastInclusive);
+    /// produce() for a reversed mapping.
+    void produceReversed(int64_t pos, int frames, float *out);
     /// Records that sequence sample `at` was produced as silence because the decoder failed.
     void noteReadFailure(int64_t at) noexcept;
     /// Blocks until signalled (producer thread).
@@ -182,6 +205,10 @@ class ClipAudioSource {
     const int64_t unitOffset_; // source sample = sequence sample + unitOffset_ (speed 1)
     const double offsetSamples_;
     const double step_;
+    // Reverse mapping: source position of sequence sample n = mirrorSamples_ - (n + 1) * speed, and at
+    // speed 1 source sample unitMirror_ - 1 - n.
+    const double mirrorSamples_;
+    const int64_t unitMirror_;
 
     // capacity_ * channels_ floats. Slots are handed over through writeIndex_/readIndex_
     // (release/acquire), so producer writes and consumer reads never touch the same slot.

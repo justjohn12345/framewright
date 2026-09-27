@@ -1798,6 +1798,87 @@ EditResult SetTransitionRanges::perform(const Project &project, Sequence &sequen
     return EditResult::success();
 }
 
+namespace {
+
+// `t` as a CMTime on `timescale` when it is a whole number of its ticks (so a time keeps the timescale
+// it had when an edit moves it by a whole number of those ticks), else its exact form on the smallest
+// timescale; nullopt when neither exists.
+std::optional<CMTime> exactTimeOn(const ExactTime &t, std::int32_t timescale) {
+    if (timescale > 0) {
+        Int128 scaled = 0;
+        if (!__builtin_mul_overflow(t.numerator(), static_cast<Int128>(timescale), &scaled) &&
+            scaled % t.denominator() == 0) {
+            const Int128 value = scaled / t.denominator();
+            if (value >= std::numeric_limits<std::int64_t>::min() && value <= std::numeric_limits<std::int64_t>::max()) {
+                return CMTimeMake(static_cast<std::int64_t>(value), timescale);
+            }
+        }
+    }
+    return t.toTime();
+}
+
+} // namespace
+
+SetClipReversed::SetClipReversed(SequenceId sequenceId, ClipId clipId, bool reversed, bool includeLinked)
+    : SequenceCommand(sequenceId), clipId_(clipId), reversed_(reversed), includeLinked_(includeLinked) {}
+
+EditResult SetClipReversed::perform(const Project &project, Sequence &sequence, IdGenerator &) {
+    std::vector<ClipId> targets;
+    if (EditResult r = clipAndPartner(sequence, clipId_, includeLinked_, targets); !r) {
+        return r;
+    }
+    for (const ClipId clipId : targets) {
+        const Track &track = *sequence.trackOfClip(clipId);
+        Clip &clip = *sequence.findClip(clipId);
+        if (clip.isStill) {
+            return EditResult::failure(EditError::InvalidArgument, "a still image has no motion to reverse");
+        }
+        if (clip.reversed == reversed_) {
+            continue;
+        }
+        const MediaAsset *asset = project.findAsset(clip.assetId);
+        if (!asset) {
+            return EditResult::failure(EditError::AssetNotFound, "the clip's asset is missing");
+        }
+        const CMTime mediaEnd = mediaEndFor(*asset, track.kind);
+        if (!isPositive(mediaEnd)) {
+            return EditResult::failure(EditError::OutOfSourceRange,
+                                       "the length of the clip's media is unknown, so it cannot be reversed");
+        }
+        // The clip time the other side of the mirror gives the same media range: E - out.
+        const auto end = ExactTime::from(mediaEnd);
+        const auto out = clip.exactSourceOut();
+        const auto in = ExactTime::from(clip.sourceIn);
+        const auto flipped = end && out ? end->minus(*out) : std::nullopt;
+        const auto shift = flipped && in ? flipped->minus(*in) : std::nullopt;
+        const auto newIn = flipped ? exactTimeOn(*flipped, clip.sourceIn.timescale) : std::nullopt;
+        if (!shift || !newIn || !isExactModelTime(*newIn)) {
+            return notRepresentable(clip.id, clip.timelineStart);
+        }
+        // Effect spans keep their timeline frames: their clip times move with the in point.
+        for (EffectSpan &span : clip.spans) {
+            if (span.isTransition()) {
+                continue; // offsets from the clip's edges: unchanged
+            }
+            auto moved = [&](CMTime t) -> std::optional<CMTime> {
+                const auto exact = ExactTime::from(t);
+                const auto shifted = exact ? exact->plus(*shift) : std::nullopt;
+                return shifted ? exactTimeOn(*shifted, t.timescale) : std::nullopt;
+            };
+            const auto start = moved(span.start);
+            const auto spanEnd = moved(span.end);
+            if (!start || !spanEnd || !isExactModelTime(*start) || !isExactModelTime(*spanEnd)) {
+                return notRepresentable(clip.id, clip.timelineStart);
+            }
+            span.start = *start;
+            span.end = *spanEnd;
+        }
+        clip.sourceIn = *newIn;
+        clip.reversed = reversed_;
+    }
+    return EditResult::success();
+}
+
 SetTransitionKind::SetTransitionKind(SequenceId sequenceId, SpanId spanId, TransitionKind kind)
     : SequenceCommand(sequenceId), spanId_(spanId), kind_(kind) {}
 
@@ -1894,6 +1975,7 @@ bool isThroughEdit(const Sequence &sequence, ClipId fromClipId, ClipId toClipId)
     const Clip *to = sequence.findClip(toClipId);
     if (!from || !to || from->assetId != to->assetId || from->trackId != to->trackId ||
         CMTimeCompare(from->timelineEnd(), to->timelineStart) != 0 || from->isStill != to->isStill ||
+        from->reversed != to->reversed ||
         !(from->speedRatio() == to->speedRatio()) || !(from->video == to->video) ||
         !(from->audio.gainDb == to->audio.gainDb) || from->hasEffectSpans() || to->hasEffectSpans()) {
         return false;

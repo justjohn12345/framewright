@@ -350,6 +350,34 @@ class SetClipSpeed final : public SequenceCommand {
     SpeedOptions options_;
 };
 
+// Makes a clip play its media backwards (`reversed` true) or forwards again (Clip.h, "Reverse"). The
+// clip is re-expressed on the other side of the mirror: sourceIn' = E - source out (E the media end of
+// its track, mediaEndFor), its effect spans moved by the same amount of clip time. So it keeps its
+// place, length, speed, static values and the timeline frames of its spans and transitions, and shows
+// the same media in the other order: frame k of an n-frame clip shows what frame n - 1 - k showed.
+// Transitions whose media beyond their cut is not there on the new side (a dissolve's handles now come
+// from the other end of the range) are removed and reported (droppedTransitionIds; undo restores
+// them), as any edit does. With `includeLinked` its linked partner follows (on its own media end). A
+// clip already in the requested state is left alone, so asking for the state everything has succeeds
+// and changes nothing. Refused: ClipNotFound, TrackLocked, InvalidArgument (a still has no motion to
+// reverse), AssetNotFound, OutOfSourceRange (the media's length is unknown), NotRepresentable (an
+// in point with no exact CMTime form).
+class SetClipReversed final : public SequenceCommand {
+  public:
+    SetClipReversed(SequenceId sequenceId, ClipId clipId, bool reversed, bool includeLinked = true);
+    std::string name() const override {
+        return reversed_ ? "Reverse Clip" : "Play Clip Forward";
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    ClipId clipId_;
+    bool reversed_;
+    bool includeLinked_;
+};
+
 // ----- Effect spans (EffectSpan.h) -----
 //
 // Span edits take timeline times, rounded to the sequence frame grid, and store the source times

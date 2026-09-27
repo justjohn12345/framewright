@@ -141,11 +141,11 @@ TEST_CASE("videoDuration: the scheduler never shows a frame past the video's end
     clip.timelineDuration = f30(60);
     clip.sourceIn = f30(1480); // an old project: source up to 51.33 s of a 60 s asset
     // Unknown (a version 2 file migrated to the duration): the mapped frame.
-    CHECK(Scheduler::sourceFrameTime(clip, asset, f30(40)) == CMTimeMake(1520 * 20, 600));
+    CHECK(Scheduler::sourceFrameTime(clip, asset, f30(40), f30(1)) == CMTimeMake(1520 * 20, 600));
     // Known: held on the last frame of the video.
     asset.videoDuration = f30(kVideoEndFrame);
-    CHECK(Scheduler::sourceFrameTime(clip, asset, f30(40)) == CMTimeMake((kVideoEndFrame - 1) * 20, 600));
-    CHECK(Scheduler::sourceFrameTime(clip, asset, f30(10)) == CMTimeMake(1490 * 20, 600));
+    CHECK(Scheduler::sourceFrameTime(clip, asset, f30(40), f30(1)) == CMTimeMake((kVideoEndFrame - 1) * 20, 600));
+    CHECK(Scheduler::sourceFrameTime(clip, asset, f30(10), f30(1)) == CMTimeMake(1490 * 20, 600));
 }
 
 TEST_CASE("videoDuration: saved, loaded, and migrated from schema 2") {

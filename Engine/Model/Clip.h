@@ -12,6 +12,9 @@
 //   for rendering and display (exact when representable, else rounded and flagged).
 // - Still-image clips (isStill) have no source timing: sourceIn is zero, speed is 1 and the
 //   "source" is the offset into the still's timeline range.
+// - A reversed clip (reversed) plays its media backwards: its source times are counted from the
+//   end of the media, and the media is read through a mirror (see "Reverse" below). Everything
+//   above holds as written for it.
 // - Effect spans (EffectSpan.h) live in `spans`: lane-0 transitions (Transition.h) and lanes 1-3
 //   effects, which compose onto the static values (motionValuesAt, gainDbAt), each holding its end
 //   value from its end to the clip's end.
@@ -127,6 +130,8 @@ struct Clip {
     CMTime sourceIn = kCMTimeZero;
     Ratio speed{1, 1}; // > 0; 2/1 plays twice as fast
     bool isStill = false;
+    // Plays its media backwards (see "Reverse" below); never on a still.
+    bool reversed = false;
     std::optional<ClipId> linkedClipId; // symmetric: the partner links back
     VideoParams video;
     AudioParams audio;
@@ -238,6 +243,46 @@ std::optional<CMTime> spanTimeAt(const Clip &clip, CMTime t);
 // clip's nearest edge (a tail handle at the out bound, where every span holds its end value).
 // Nullopt only for a non-numeric time or on overflow.
 std::optional<ExactTime> spanEvaluationTime(const Clip &clip, CMTime t);
+
+// ----- Reverse -----
+// A reversed clip plays its media backwards. Its model is the forward model on the media read from
+// its end: the clip's source times (sourceIn, sourceTimeAt, spanBounds, its effect spans, what trims,
+// splits and speed changes do to them: everything above) are "clip times" u counted backwards from
+// E, the end of the media its track uses (mediaEndFor: the video's end on a video track, the asset's
+// duration on an audio track). Clip time u stands for media time E - u. So the invariants are the
+// forward ones (u within [0, E]), and the media a clip time's neighbourhood reads exists exactly when
+// it would for a forward clip at u (transition handles included: a reversed clip's handle after its
+// out point is media before the start of the range it shows). SetClipReversed (EditOps.h) re-expresses
+// a clip on the other side of the mirror (sourceIn' = E - source out, its effect spans moved by the
+// same amount so they keep their timeline frames), so it shows the same media in the other order.
+//
+// The mirror rule, by frame index. The picture of the sequence frame [F, F + fd) of a reversed clip is
+// the media frame the forward mapping picks for media time E - u(F + fd): the mirror of the frame's
+// END, not of its start. For a clip of n frames whose forward form had in point A and frame k at
+// clip time A + k d (d = fd * speed), reversing makes sourceIn' = E - (A + n d), and frame k reads
+// E - (sourceIn' + (k + 1) d) = A + (n - 1 - k) d: the same exact time forward frame n - 1 - k read.
+// That time then goes through the same asset frame grid (the frame containing it; none for a VFR
+// source) and the same clamps (inside the clip never at or past the media out point, E - sourceIn),
+// so frame k of the reversed clip shows exactly the picture forward frame n - 1 - k showed, at any
+// speed, on NTSC grids and on VFR sources. Audio follows the same rule per output sample (sample n
+// reads media time E - u(t of sample n + 1); ClipAudioSource), so the reversed sound is the forward
+// sound sample-reversed, with the speed's resampling (and pitch) applied after the mirror.
+//
+// Consequences: a head trim of a reversed clip removes media from the end of the range it shows (its
+// first frames showed the latest media), a tail trim from its start; the pieces of a split show the
+// pictures they showed; a speed change keeps where the clip starts in its media (the end of the range it
+// shows; forward clips keep its start) and reads it backwards at the new speed;
+// effect spans stay on their timeline frames and pictures.
+
+// The media time the sequence frame [frameStart, frameStart + frameDuration) of `clip` reads, before
+// any asset frame grid: its clip time at frameStart (forward), or mediaEnd minus its clip time at
+// frameStart + frameDuration (reversed; the mirror rule above). Valid outside the clip too (transition
+// handles). Nullopt for non-numeric times or on overflow.
+std::optional<ExactTime> mediaTimeOfFrame(const Clip &clip, CMTime frameStart, CMTime frameDuration, CMTime mediaEnd);
+
+// The media range [first, end) the clip's body uses: [sourceIn, source out) forward, [mediaEnd - source
+// out, mediaEnd - sourceIn) reversed (a still: [0, duration)). Nullopt on overflow or a non-numeric end.
+std::optional<std::pair<ExactTime, ExactTime>> mediaRangeOf(const Clip &clip, CMTime mediaEnd);
 
 // ----- Composition -----
 // At source time `time` (a spanEvaluationTime) every effect span that has started (spanActsAt:

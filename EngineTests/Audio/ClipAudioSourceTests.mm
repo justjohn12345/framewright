@@ -292,4 +292,67 @@ std::vector<float> readRange(ClipAudioSource &source, int64_t at, int64_t frames
     }
 }
 
+/// A reversed mapping (Clip.h "Reverse") is the forward mapping of the clip's forward form played
+/// backwards, sample for sample: sequence sample n of the reversed clip equals sample N0 + N1 - 1 - n
+/// of the forward one over the clip's samples [N0, N1): exactly at speed 1 (the same source samples,
+/// delivered back to front), within 1e-6 when resampled (3/2 and 1/3: the same interpolation at the
+/// mirrored positions, so pitch follows speed). Reading jumps backwards through the file a block at
+/// a time.
+- (void)testAReversedSourceIsTheForwardSourceSampleReversed {
+    if (_wav.empty()) {
+        return;
+    }
+    const CMTime mirror = CMTimeMake(10, 1); // the media's end (only its value matters here)
+    struct Case {
+        Ratio speed;
+        double tolerance;
+    };
+    for (const Case c : {Case{Ratio{1, 1}, 0.0}, Case{Ratio{3, 2}, 1e-6}, Case{Ratio{1, 3}, 1e-6}}) {
+        // The forward clip: timeline [1 s, 2.5 s) from source 0.5 s; reversed, its in point is
+        // mirror - its forward out point, so sourceAtZero = (mirror - out) - start * speed.
+        const CMTime start = CMTimeMake(1, 1);
+        const CMTime length = CMTimeMake(3, 2);
+        const CMTime in = CMTimeMake(1, 2);
+        const CMTime out = in + scaleTime(length, c.speed);
+        AudioSourceMapping forward = [self mappingSpeed:c.speed sourceAtZero:in - scaleTime(start, c.speed)];
+        AudioSourceMapping backward = [self mappingSpeed:c.speed sourceAtZero:(mirror - out) - scaleTime(start, c.speed)];
+        backward.reversed = true;
+        backward.mirror = mirror;
+        XCTAssertFalse(forward.sameAs(backward), @"a reversed source is another source");
+        ClipAudioSource f(_router, forward);
+        ClipAudioSource b(_router, backward);
+        const int64_t n0 = int64_t(1.0 * kSr);
+        const int64_t n1 = int64_t(2.5 * kSr);
+        const int64_t frames = n1 - n0;
+        f.seekTo(n0);
+        b.seekTo(n0);
+        const std::vector<float> fwd = readRange(f, n0, frames);
+        const std::vector<float> bwd = readRange(b, n0, frames);
+        double worst = 0;
+        double energy = 0;
+        int64_t worstAt = -1;
+        for (int64_t k = 0; k < frames; ++k) {
+            for (int ch = 0; ch < 2; ++ch) {
+                const double x = bwd[size_t(k) * 2 + ch];
+                const double y = fwd[size_t(frames - 1 - k) * 2 + ch];
+                energy += y * y;
+                if (std::fabs(x - y) > worst) {
+                    worst = std::fabs(x - y);
+                    worstAt = k;
+                }
+            }
+        }
+        NSLog(@"REVERSE audio at %lld/%lld: max |reversed - forward backwards| %.3g at sample %lld", c.speed.num,
+              c.speed.den, worst, worstAt);
+        XCTAssertGreaterThan(energy, 1.0, @"the clip has sound");
+        if (c.tolerance == 0.0) {
+            XCTAssertEqual(worst, 0.0, @"speed 1: the same samples, back to front");
+        } else {
+            XCTAssertLessThan(worst, c.tolerance, @"speed %lld/%lld", c.speed.num, c.speed.den);
+        }
+        XCTAssertFalse(b.stats().readFailed);
+        XCTAssertGreaterThanOrEqual(b.stats().repositions, 1u);
+    }
+}
+
 @end

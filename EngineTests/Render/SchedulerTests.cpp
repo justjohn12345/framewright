@@ -226,9 +226,9 @@ TEST_CASE("Scheduler: at slow speeds the last frame of a clip stays inside its s
     const ClipId c = fx.addClip(fx.v1, fx.video60, 0, 30, 0, 0.5); // source [0, 0.5 s) at 60 fps
     const MediaAsset &asset = *fx.project.findAsset(fx.video60);
     const Clip &clip = fx.clip(c);
-    CHECK(Scheduler::sourceFrameTime(clip, asset, f30(29)) == CMTimeMake(29, 60));
+    CHECK(Scheduler::sourceFrameTime(clip, asset, f30(29), f30(1)) == CMTimeMake(29, 60));
     // In a transition handle (outside the clip) the mapping may pass the out point.
-    CHECK(Scheduler::sourceFrameTime(clip, asset, f30(31)) == CMTimeMake(31, 60));
+    CHECK(Scheduler::sourceFrameTime(clip, asset, f30(31), f30(1)) == CMTimeMake(31, 60));
 }
 
 TEST_CASE("Scheduler: layers carry the asset's container rotation") {

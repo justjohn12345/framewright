@@ -271,9 +271,21 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 @property (nonatomic, readonly) CMTime timelineStart;
 @property (nonatomic, readonly) CMTime duration;
 @property (nonatomic, readonly) CMTime timelineEnd;
-/// Used source range (for stills measured in timeline time from zero).
+/// Used source range (for stills measured in timeline time from zero). For a reversed clip these are
+/// clip times counted back from the media's end (mediaEnd - media time; see `reversed`): edits,
+/// spans and limits all use them; mediaIn / mediaOut are the media the clip shows.
 @property (nonatomic, readonly) CMTime sourceIn;
 @property (nonatomic, readonly) CMTime sourceOut;
+/// Plays its media backwards (Clip > Reverse Clip): frame k of an n-frame clip shows what frame
+/// n - 1 - k shows forward, and its sound plays backwards.
+@property (nonatomic, readonly) BOOL reversed;
+/// The media range the clip shows: sourceIn / sourceOut forward, mediaEnd - sourceOut /
+/// mediaEnd - sourceIn reversed (a still: sourceIn / sourceOut).
+@property (nonatomic, readonly) CMTime mediaIn;
+@property (nonatomic, readonly) CMTime mediaOut;
+/// Where the media the clip's track uses ends (the video's end on a video track, the media's
+/// duration on an audio track): a reversed clip's media time is mediaEnd - its source time.
+@property (nonatomic, readonly) CMTime mediaEnd;
 /// Playback speed for display (1 = normal; stills: 1). The exact value is
 /// speedNumerator / speedDenominator (reduced, denominator 1...1000).
 @property (nonatomic, readonly) double speed;

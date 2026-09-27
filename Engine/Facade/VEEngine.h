@@ -383,6 +383,14 @@ NS_SWIFT_UI_ACTOR
                            forClips:(NSArray<NSNumber *> *)clipIDs
                              ripple:(BOOL)ripple
                               scope:(VERippleScope)scope;
+/// Makes the clips play their media backwards (`reversed` YES) or forwards again, their linked
+/// partners with them, as one undo step ("Reverse Clip" / "Play Clip Forward"; see
+/// VEClipInfo.reversed). A clip keeps its place, length, speed and spans and shows the same media in
+/// the other order; a dissolve whose media beyond its cut is not there on the new side is removed
+/// (droppedTransitionIDs). Clips already in that state are left alone. Refused: a still
+/// (VEEditErrorInvalidArgument, nothing changes), a missing clip, a locked track.
+- (VEEditResult *)setReversed:(BOOL)reversed forClips:(NSArray<NSNumber *> *)clipIDs
+    NS_SWIFT_NAME(setReversed(_:forClips:));
 // MARK: Transitions
 //
 // A transition is a lane-0 span of the clip that owns it (VEEffectSpan, VETransitionStyle): at a

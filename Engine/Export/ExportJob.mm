@@ -300,6 +300,8 @@ struct ExportJob::Run {
                 // The time the picture is looked up by (see playback::pictureTimeFor).
                 const MediaAsset *asset = project.findAsset(layer.assetId);
                 target.sourceTime = asset ? playback::pictureTimeFor(layer, *asset) : layer.sourceTime;
+                // A reversed clip needs its media backwards: decode windows before the picture.
+                target.direction = layer.reversed ? media::DecodeDirection::Backward : media::DecodeDirection::Forward;
                 target.priority = static_cast<int>(10000 - static_cast<int64_t>(k) * 10 + static_cast<int64_t>(i));
                 target.lane = layer.clipId.value();
                 targets.push_back(std::move(target));

@@ -23,7 +23,8 @@ CMTime sampleTime(int64_t sample, double rate) {
 
 bool AudioSourceMapping::sameAs(const AudioSourceMapping &other) const {
     return asset == other.asset && path == other.path && trackIndex == other.trackIndex && speed == other.speed &&
-           CMTimeCompare(sourceAtZero, other.sourceAtZero) == 0;
+           CMTimeCompare(sourceAtZero, other.sourceAtZero) == 0 && reversed == other.reversed &&
+           (!reversed || CMTimeCompare(mirror, other.mirror) == 0);
 }
 
 ClipAudioSource::ClipAudioSource(std::shared_ptr<media::BackendRouter> router, AudioSourceMapping mapping,
@@ -36,7 +37,11 @@ ClipAudioSource::ClipAudioSource(std::shared_ptr<media::BackendRouter> router, A
       unitSpeed_(mapping_.speed.num == mapping_.speed.den),
       unitOffset_(static_cast<int64_t>(std::llround(CMTimeGetSeconds(mapping_.sourceAtZero) * config.sampleRate))),
       offsetSamples_(CMTimeGetSeconds(mapping_.sourceAtZero) * config.sampleRate),
-      step_(mapping_.speed.toDouble()) {
+      step_(mapping_.speed.toDouble()),
+      mirrorSamples_(mapping_.reversed ? CMTimeGetSeconds(mapping_.mirror) * config.sampleRate - offsetSamples_ : 0.0),
+      unitMirror_(mapping_.reversed
+                      ? static_cast<int64_t>(std::llround(CMTimeGetSeconds(mapping_.mirror) * config.sampleRate)) - unitOffset_
+                      : 0) {
     ring_.assign(static_cast<size_t>(capacity_ * channels_), 0.0f);
     scratch_.assign(static_cast<size_t>(std::max(1, config_.chunkFrames) * channels_), 0.0f);
     if (semaphore_create(mach_task_self(), &wakeSemaphore_, SYNC_POLICY_FIFO, 0) != KERN_SUCCESS) {
@@ -347,7 +352,74 @@ int64_t ClipAudioSource::ensureSourceWindow(int64_t first, int64_t lastInclusive
     return -1;
 }
 
+int64_t ClipAudioSource::ensureReverseWindow(int64_t first, int64_t lastInclusive) {
+    const int64_t windowEnd = sourceWindowStart_ + sourceWindowFrames_;
+    if (sourceWindowFrames_ > 0 && first >= sourceWindowStart_ && lastInclusive < windowEnd) {
+        return -1;
+    }
+    // One forward decode of a block ending at lastInclusive, long enough for the next chunks too
+    // (they lie before this one).
+    const int64_t block = std::max<int64_t>(lastInclusive + 1 - first,
+                                            secondsToFrames(kReverseBlockSeconds, config_.sampleRate));
+    const int64_t start = lastInclusive + 1 - block;
+    const size_t size = static_cast<size_t>(block * channels_);
+    if (sourceWindow_.size() < size) {
+        sourceWindow_.resize(size);
+    }
+    sourceWindowStart_ = start;
+    sourceWindowFrames_ = block;
+    return readSource(start, block, sourceWindow_.data());
+}
+
+void ClipAudioSource::produceReversed(int64_t pos, int frames, float *out) {
+    if (unitSpeed_) {
+        // Output sample pos + k is source sample unitMirror_ - 1 - pos - k: the block
+        // [unitMirror_ - pos - frames, unitMirror_ - pos) back to front.
+        const int64_t last = unitMirror_ - 1 - pos;
+        const int64_t first = last - (frames - 1);
+        const int64_t failedAt = ensureReverseWindow(first, last);
+        if (failedAt >= 0 && failedAt <= last) {
+            // Silence from the failed sample to the block's end, which comes first in the output.
+            noteReadFailure(pos);
+        }
+        const float *window = sourceWindow_.data();
+        for (int k = 0; k < frames; ++k) {
+            const float *s = window + (last - k - sourceWindowStart_) * channels_;
+            std::memcpy(out + static_cast<size_t>(k) * channels_, s, sizeof(float) * static_cast<size_t>(channels_));
+        }
+        return;
+    }
+    const double num = static_cast<double>(mapping_.speed.num);
+    const double den = static_cast<double>(mapping_.speed.den);
+    // The mirror of sample n's end: mirror - (sourceAtZero + (n + 1) * speed), in samples.
+    auto sourceAt = [&](int64_t n) { return mirrorSamples_ - static_cast<double>(n + 1) * num / den; };
+    const double xFirst = sourceAt(pos + frames - 1); // the lowest position of the chunk
+    const double xLast = sourceAt(pos);
+    const int64_t first = static_cast<int64_t>(std::floor(xFirst));
+    const int64_t last = static_cast<int64_t>(std::floor(xLast)) + 1;
+    if (const int64_t failedAt = ensureReverseWindow(first, last); failedAt >= 0 && failedAt <= last) {
+        noteReadFailure(pos);
+    }
+    const float *window = sourceWindow_.data();
+    for (int k = 0; k < frames; ++k) {
+        const double x = sourceAt(pos + k);
+        const double base = std::floor(x);
+        const int64_t i = static_cast<int64_t>(base) - sourceWindowStart_;
+        const double f = x - base;
+        const float *a = window + i * channels_;
+        const float *b = a + channels_;
+        float *o = out + static_cast<size_t>(k) * channels_;
+        for (int c = 0; c < channels_; ++c) {
+            o[c] = static_cast<float>(a[c] + f * (b[c] - a[c]));
+        }
+    }
+}
+
 void ClipAudioSource::produce(int64_t pos, int frames, float *out) {
+    if (mapping_.reversed) {
+        produceReversed(pos, frames, out);
+        return;
+    }
     if (unitSpeed_) {
         if (const int64_t failedAt = readSource(pos + unitOffset_, frames, out); failedAt >= 0) {
             noteReadFailure(failedAt - unitOffset_);

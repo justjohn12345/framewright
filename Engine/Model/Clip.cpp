@@ -121,6 +121,7 @@ bool operator==(const Clip &a, const Clip &b) {
     return a.id == b.id && a.assetId == b.assetId && a.trackId == b.trackId &&
            identical(a.timelineStart, b.timelineStart) && identical(a.timelineDuration, b.timelineDuration) &&
            identical(a.sourceIn, b.sourceIn) && a.speed == b.speed && a.isStill == b.isStill &&
+           a.reversed == b.reversed &&
            a.linkedClipId == b.linkedClipId && a.video == b.video && a.audio == b.audio && a.spans == b.spans;
 }
 
@@ -156,6 +157,37 @@ std::optional<ExactTime> Clip::exactTimelineTimeAt(CMTime s) const {
     const auto offset = source->minus(*in);
     const auto scaled = offset ? offset->dividedBy(speedRatio()) : std::nullopt;
     return scaled ? start->plus(*scaled) : std::nullopt;
+}
+
+std::optional<ExactTime> mediaTimeOfFrame(const Clip &clip, CMTime frameStart, CMTime frameDuration, CMTime mediaEnd) {
+    if (!clip.reversed || clip.isStill) {
+        return clip.exactSourceTimeAt(frameStart);
+    }
+    // u(frameStart + frameDuration) = u(frameStart) + frameDuration * speed, in exact arithmetic.
+    const auto start = clip.exactSourceTimeAt(frameStart);
+    const auto length = ExactTime::from(frameDuration);
+    const auto step = length ? length->times(clip.speedRatio()) : std::nullopt;
+    const auto clipTime = start && step ? start->plus(*step) : std::nullopt;
+    const auto mirror = ExactTime::from(mediaEnd);
+    return mirror && clipTime ? mirror->minus(*clipTime) : std::nullopt;
+}
+
+std::optional<std::pair<ExactTime, ExactTime>> mediaRangeOf(const Clip &clip, CMTime mediaEnd) {
+    const auto in = ExactTime::from(clip.isStill ? kCMTimeZero : clip.sourceIn);
+    const auto out = clip.exactSourceOut();
+    if (!in || !out) {
+        return std::nullopt;
+    }
+    if (!clip.reversed || clip.isStill) {
+        return std::make_pair(*in, *out);
+    }
+    const auto mirror = ExactTime::from(mediaEnd);
+    const auto first = mirror ? mirror->minus(*out) : std::nullopt;
+    const auto last = mirror ? mirror->minus(*in) : std::nullopt;
+    if (!first || !last) {
+        return std::nullopt;
+    }
+    return std::make_pair(*first, *last);
 }
 
 CMTime Clip::sourceTimeAt(CMTime t) const {

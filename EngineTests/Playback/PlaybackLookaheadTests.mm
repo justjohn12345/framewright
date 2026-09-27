@@ -7,6 +7,8 @@
 
 #include "PlaybackTestSupport.h"
 
+#include "../../Engine/Edit/EditOps.h"
+
 #include "../Media/BurnIn.h"
 #include "../Media/FFmpegTestMedia.h"
 #include "../Media/TestMedia.h"
@@ -397,6 +399,81 @@ double secondsOf(CMTime t) {
     NSLog(@"PLAY START LATENCY (controller, VFR source): median %.1f ms, worst %.1f ms over %zu off-grid starts",
           latencies[latencies.size() / 2], latencies.back(), latencies.size());
     XCTAssertLessThan(latencies.back(), 50.0, @"no start waits for the pre-roll timeout");
+}
+
+/// A reversed clip (Clip.h "Reverse") while the playhead is still and while it plays forward: its
+/// lookahead window lies before the picture under the playhead in the media (the pool decodes
+/// backward windows for it: clip.reversed XOR the play direction), pre-roll finds the mirrored
+/// frames, and every presented frame shows timeline frame k's mirror, source frame 119 - k of the
+/// 120-frame clip. Its linked audio is reversed too and plays (no underrun).
+- (void)testAReversedClipsLookaheadRunsBackwardAndPlaysTheMirroredFrames {
+    PlaybackHarness h(PlaybackHarness::Mode::Realtime, 3.0);
+    const Rig r = buildRig(h);
+    if (!h.ok()) {
+        XCTFail(@"%s", h.error().c_str());
+        return;
+    }
+    SetClipReversed reverse(h.sequenceId, r.a, true);
+    const EditResult reversed = reverse.apply(h.project);
+    XCTAssertTrue(reversed.ok(), @"%s", reversed.message.c_str());
+    XCTAssertTrue(h.sequence().findClip(r.aa)->reversed, @"the linked audio follows");
+    h.load();
+    h.controller->seek(frames30(45));
+    const PlaybackHarness::Sample paused = h.presentExact();
+    XCTAssertEqual(paused.burnIns.front().value_or(-1), 74, @"timeline frame 45 shows source frame 119 - 45");
+    const CMTime target = frames30(74);
+    XCTAssertTrue(PlaybackHarness::waitUntil([&] {
+        const auto stream = streamOf(h, r.a);
+        return stream && CMTimeCompare(stream->target, target) == 0;
+    }),
+                  @"the pool targets the mirrored picture");
+    XCTAssertTrue(h.pool->waitUntilIdle(std::chrono::seconds(10)));
+    const auto stream = streamOf(h, r.a);
+    XCTAssertTrue(stream.has_value());
+    if (stream) {
+        const double window = secondsOf(stream->window);
+        XCTAssertGreaterThan(window, 0.4);
+        XCTAssertLessThanOrEqual(secondsOf(stream->rangeStart), 74.0 / 30 - window + 1.0 / 30 + 1e-6,
+                                 @"decoded back through the window: [%.3f, %.3f)", secondsOf(stream->rangeStart),
+                                 secondsOf(stream->rangeEnd));
+    }
+    for (int64_t f = 74; f > 74 - 12; --f) {
+        XCTAssertTrue(h.cache->contains(r.h264, f), @"source frame %lld (the frames coming next) is cached", f);
+    }
+
+    XCTAssertGreaterThanOrEqual(h.playAndWait(), 0.0);
+    int samples = 0;
+    int exact = 0;
+    std::vector<std::string> failures;
+    const auto start = SteadyClock::now();
+    auto next = start;
+    while (SteadyClock::now() - start < std::chrono::milliseconds(1200)) {
+        next += std::chrono::microseconds(16667);
+        std::this_thread::sleep_until(next);
+        const PlaybackHarness::Sample s = h.present();
+        const int64_t p = s.presented.frameIndex;
+        if (p < 0 || p >= 120 || s.burnIns.empty()) {
+            continue;
+        }
+        ++samples;
+        const int64_t expected = 119 - p;
+        if (!s.burnIns.front()) {
+            failures.push_back("no picture at frame " + std::to_string(p));
+            continue;
+        }
+        const int64_t error = std::llabs(*s.burnIns.front() - expected);
+        exact += error == 0 ? 1 : 0;
+        if (error > 1) {
+            failures.push_back("frame " + std::to_string(p) + " shows " + std::to_string(*s.burnIns.front()) +
+                               ", expected " + std::to_string(expected));
+        }
+    }
+    h.controller->pause();
+    XCTAssertGreaterThan(samples, 30);
+    XCTAssertTrue(failures.empty(), @"%zu failures, first: %s", failures.size(),
+                  failures.empty() ? "" : failures.front().c_str());
+    XCTAssertGreaterThan(exact, samples * 9 / 10, @"%d of %d samples exact", exact, samples);
+    XCTAssertEqual(h.controller->stats().audioUnderruns, 0u, @"the reversed audio kept up");
 }
 
 @end

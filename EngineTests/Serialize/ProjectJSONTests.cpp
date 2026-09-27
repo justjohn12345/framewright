@@ -67,6 +67,21 @@ Fixture richFixture() {
     return fx;
 }
 
+// The rich fixture with what version 6 added: a reversed clip (a 23.976 clip on V2, in clip times) and
+// shaped transitions (the 70/30 dissolve a Wipe Left, the still's fades an Iris in and a Wipe Down out).
+Fixture richFixtureV6() {
+    Fixture fx = richFixture();
+    const ClipId reversed = fx.addClip(fx.v2, fx.av24, 300, 30, 48, 0.5);
+    fx.sequence().findClip(reversed)->reversed = true;
+    Sequence &sequence = fx.sequence();
+    sequence.videoTracks[0].clips[0].transitionAt(ClipEdge::Tail)->transition = TransitionKind::WipeLeft;
+    Clip &still = sequence.videoTracks[1].clips[1];
+    still.transitionAt(ClipEdge::Head)->transition = TransitionKind::Iris;
+    still.transitionAt(ClipEdge::Tail)->transition = TransitionKind::WipeDown;
+    fx.requireValid();
+    return fx;
+}
+
 std::string loadError(const json &document) {
     const ProjectLoadResult result = projectFromJson(document);
     CHECK_FALSE(result.ok());
@@ -327,7 +342,7 @@ TEST_CASE("ProjectJSON: format details") {
     const Fixture fx = richFixture();
     const json j = projectToJson(fx.project);
     CHECK(j.at("schemaVersion") == kProjectSchemaVersion);
-    CHECK(kProjectSchemaVersion == 5);
+    CHECK(kProjectSchemaVersion == 6);
     CHECK(j.at("nextId") == fx.project.ids.nextValue());
     const json &clip = j.at("sequences")[0].at("videoTracks")[0].at("clips")[0];
     CHECK(clip.at("timelineStart") == json{{"value", 0}, {"timescale", 30}});
@@ -335,6 +350,7 @@ TEST_CASE("ProjectJSON: format details") {
     CHECK(clip.at("sourceIn") == json{{"value", 30}, {"timescale", 30}});
     CHECK(clip.at("speed") == json{{"num", 1}, {"den", 1}});
     CHECK_FALSE(clip.contains("sourceOut")); // derived, never stored
+    CHECK_FALSE(clip.contains("reversed"));  // written only when true
     CHECK_FALSE(clip.at("video").contains("keyframes"));
     CHECK(clip.at("audio") == json{{"gainDb", 0.0}});
     // Spans: lane 0 first, then lanes 1-3; a transition has an edge and a kind, an effect span
@@ -945,9 +961,39 @@ TEST_CASE("ProjectJSON: loading repairs what it safely can and refuses the rest 
     }
 }
 
-TEST_CASE("ProjectJSON: the checked-in version 5 project matches the current writer byte for byte") {
+TEST_CASE("ProjectJSON: the checked-in version 5 project loads with every clip forward") {
     const Fixture expected = richFixture();
-    const std::string path = goldenPath("project-v5.json");
+    const std::string text = readFile(goldenPath("project-v5.json"));
+    REQUIRE(json::parse(text).at("schemaVersion") == 5);
+    const ProjectLoadResult loaded = parseProject(text);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(loaded.warnings.empty());
+    CHECK(*loaded.project == expected.project);
+    std::size_t clips = 0;
+    for (const Sequence &sequence : loaded.project->sequences) {
+        for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
+            for (const Track &track : sequence.tracks(kind)) {
+                for (const Clip &clip : track.clips) {
+                    CHECK_FALSE(clip.reversed);
+                    ++clips;
+                }
+            }
+        }
+    }
+    CHECK(clips > 5);
+    // The migration changes nothing but the version.
+    json document = json::parse(text);
+    std::vector<std::string> warnings;
+    CHECK_FALSE(migrateProjectJson(document, 5, warnings).has_value());
+    CHECK(warnings.empty());
+    json expectedDocument = json::parse(text);
+    expectedDocument["schemaVersion"] = 6;
+    CHECK(document == expectedDocument);
+}
+
+TEST_CASE("ProjectJSON: the checked-in version 6 project matches the current writer byte for byte") {
+    const Fixture expected = richFixtureV6();
+    const std::string path = goldenPath("project-v6.json");
     const std::string written = serializeProject(expected.project) + "\n";
     // The golden file is checked in and never written by the test: a missing one is a failure
     // (readFile requires it), so a test run cannot bless its own output.
@@ -957,6 +1003,24 @@ TEST_CASE("ProjectJSON: the checked-in version 5 project matches the current wri
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
     CHECK(loaded.warnings.empty());
     CHECK(*loaded.project == expected.project);
+    CHECK(contains(text, "\"reversed\": true"));
+    CHECK(contains(text, "\"transition\": \"wipeLeft\""));
+}
+
+TEST_CASE("ProjectJSON: a reversed clip round trips; reversing a still fails validation") {
+    Fixture fx = richFixtureV6();
+    const ProjectLoadResult loaded = parseProject(serializeProject(fx.project));
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(*loaded.project == fx.project);
+    const Clip &reversed = loaded.project->sequences[0].videoTracks[1].clips.back();
+    CHECK(reversed.reversed);
+    json j = projectToJson(fx.project);
+    j["sequences"][0]["videoTracks"][1]["clips"][1]["reversed"] = true; // the still
+    CHECK(contains(loadError(j), "a still cannot be reversed"));
+    j["sequences"][0]["videoTracks"][1]["clips"][1]["reversed"] = false;
+    const ProjectLoadResult explicitFalse = projectFromJson(j);
+    REQUIRE(explicitFalse.ok());
+    CHECK(*explicitFalse.project == fx.project);
 }
 
 TEST_CASE("ProjectJSON: version 4 to 5 migration rules") {

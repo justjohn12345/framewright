@@ -4,6 +4,7 @@
 #include "../Media/MediaTypes.h"
 
 #include "../Edit/EditOps.h"
+#include "../Model/Validation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -89,6 +90,10 @@ VESpanValues VESpanValuesUnchanged(void) {
 @property (nonatomic, readwrite) CMTime timelineEnd;
 @property (nonatomic, readwrite) CMTime sourceIn;
 @property (nonatomic, readwrite) CMTime sourceOut;
+@property (nonatomic, readwrite) BOOL reversed;
+@property (nonatomic, readwrite) CMTime mediaIn;
+@property (nonatomic, readwrite) CMTime mediaOut;
+@property (nonatomic, readwrite) CMTime mediaEnd;
 @property (nonatomic, readwrite) double speed;
 @property (nonatomic, readwrite) int64_t speedNumerator;
 @property (nonatomic, readwrite) int64_t speedDenominator;
@@ -797,6 +802,16 @@ VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &pr
     info.timelineEnd = clip.timelineEnd();
     info.sourceIn = clip.sourceIn;
     info.sourceOut = clip.sourceOut();
+    info.reversed = clip.reversed;
+    const CMTime mediaEnd = asset ? mediaEndFor(*asset, track.kind) : kCMTimeInvalid;
+    info.mediaEnd = mediaEnd;
+    if (const auto range = mediaRangeOf(clip, mediaEnd)) {
+        info.mediaIn = range->first.toTimeRounded();
+        info.mediaOut = range->second.toTimeRounded();
+    } else {
+        info.mediaIn = info.sourceIn;
+        info.mediaOut = info.sourceOut;
+    }
     info.speed = clip.speedValue();
     info.speedNumerator = clip.speedRatio().num;
     info.speedDenominator = clip.speedRatio().den;

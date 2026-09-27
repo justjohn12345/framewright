@@ -11,7 +11,7 @@
 //   collectGarbage() on a background reaper queue, never on a control caller's thread and
 //   never under the mixer's mutex (destroying a source joins its producer, which may be inside
 //   a slow decoder call).
-// - Sources (ClipAudioSource) are keyed by (track, asset, speed, sourceAtZero) and survive
+// - Sources (ClipAudioSource) are keyed by (track, asset, speed, sourceAtZero, reversed and its mirror) and survive
 //   re-planning: a model edit that leaves a clip's media mapping unchanged (trimming another
 //   clip, changing gain, trimming this clip's far edge, moving it to another track) keeps its
 //   decoded audio and plays on without a glitch.

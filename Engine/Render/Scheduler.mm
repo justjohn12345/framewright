@@ -17,14 +17,15 @@ bool trackActive(const Track &track, bool soloActive) {
     return !track.muted && (!soloActive || track.solo);
 }
 
-VideoLayer makeLayer(const Clip &clip, const MediaAsset &asset, CMTime time) {
+VideoLayer makeLayer(const Clip &clip, const MediaAsset &asset, CMTime time, CMTime frameDuration) {
     VideoLayer layer;
     layer.clipId = clip.id;
     layer.assetId = clip.assetId;
     layer.trackId = clip.trackId;
     layer.isStill = clip.isStill;
+    layer.reversed = clip.reversed && !clip.isStill;
     layer.sourceRotationDegrees = asset.rotationDegrees;
-    layer.sourceTime = Scheduler::sourceFrameTime(clip, asset, time);
+    layer.sourceTime = Scheduler::sourceFrameTime(clip, asset, time, frameDuration);
     layer.transform = Scheduler::motionAt(clip, time);
     layer.opacity = layer.transform.opacity;
     return layer;
@@ -93,13 +94,17 @@ bool Scheduler::isTrackActive(const Sequence &sequence, const Track &track) {
     return trackActive(track, anySolo(sequence.tracks(track.kind)));
 }
 
-CMTime Scheduler::sourceFrameTime(const Clip &clip, const MediaAsset &asset, CMTime time) {
+CMTime Scheduler::sourceFrameTime(const Clip &clip, const MediaAsset &asset, CMTime time, CMTime frameDuration) {
     if (clip.isStill) {
         return kCMTimeZero;
     }
-    const auto source = clip.exactSourceTimeAt(time);
+    // A reversed clip mirrors about the end of the video (mediaEndFor on a video track).
+    const CMTime mediaEnd = asset.videoEnd();
+    const auto source = mediaTimeOfFrame(clip, time, frameDuration, mediaEnd);
+    const auto range = mediaRangeOf(clip, mediaEnd);
     if (!source) {
-        return clip.sourceIn; // only for a non-numeric time or 128-bit overflow
+        // Only for a non-numeric time or 128-bit overflow: the start of the media range.
+        return range ? range->first.toTimeRounded() : clip.sourceIn;
     }
     const bool inBody = clip.timelineStart <= time && time < clip.timelineEnd();
     const CMTime frame = asset.frameDuration;
@@ -107,10 +112,10 @@ CMTime Scheduler::sourceFrameTime(const Clip &clip, const MediaAsset &asset, CMT
         // The source frame on screen at `source` is the one that starts at or before it.
         std::int64_t index = source->frameIndex(frame, SnapMode::Floor).value_or(0);
         if (inBody) {
-            // Inside the clip, never a frame that starts at or after the out point (transition
-            // handles, outside the body, may go past it).
-            if (const auto out = clip.exactSourceOut()) {
-                if (const auto firstPast = out->frameIndex(frame, SnapMode::Ceil)) {
+            // Inside the clip, never a frame that starts at or after the out point of the media range
+            // it uses (transition handles, outside the body, may go past it).
+            if (range) {
+                if (const auto firstPast = range->second.frameIndex(frame, SnapMode::Ceil)) {
                     index = std::min(index, *firstPast - 1);
                 }
             }
@@ -161,8 +166,8 @@ RenderGraph Scheduler::renderGraphAt(const Sequence &sequence, const Project &pr
                 // value the audio crossfade's linear progress has at the middle of the frame.
                 const double mix = frameCentreFraction(transition->range, t, sequence.frameDuration);
                 const std::size_t outgoingIndex = graph.layers.size();
-                VideoLayer outgoing = makeLayer(from, *fromAsset, t);
-                VideoLayer incoming = makeLayer(to, *toAsset, t);
+                VideoLayer outgoing = makeLayer(from, *fromAsset, t, sequence.frameDuration);
+                VideoLayer incoming = makeLayer(to, *toAsset, t, sequence.frameDuration);
                 outgoing.transition = makeTransition(*transition, mix, false, to.id, outgoingIndex + 1);
                 incoming.transition = makeTransition(*transition, mix, true, from.id, outgoingIndex);
                 graph.layers.push_back(std::move(outgoing));
@@ -172,7 +177,7 @@ RenderGraph Scheduler::renderGraphAt(const Sequence &sequence, const Project &pr
         }
         if (const Clip *clip = track.clipAt(t)) {
             if (const MediaAsset *asset = project.findAsset(clip->assetId)) {
-                VideoLayer layer = makeLayer(*clip, *asset, t);
+                VideoLayer layer = makeLayer(*clip, *asset, t, sequence.frameDuration);
                 if (transition && transition->role != TransitionRole::CrossDissolve && transition->owner == clip) {
                     // A fade to or from black: this layer alone, weighted by the fade.
                     const double mix = frameCentreFraction(transition->range, t, sequence.frameDuration);
@@ -215,7 +220,7 @@ RenderGraph Scheduler::soloGraphAt(const Sequence &sequence, const Project &proj
     if (held < clip.timelineStart || held >= clip.timelineEnd()) {
         held = clip.timelineStart; // a clip shorter than a frame, off the grid
     }
-    VideoLayer layer = makeLayer(clip, *asset, held);
+    VideoLayer layer = makeLayer(clip, *asset, held, fd);
     if (identityMotion) {
         layer.transform = VideoParams{};
         layer.opacity = 1.0;
@@ -425,6 +430,10 @@ AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &pro
                 segment.sourceRange = TimeRange{clip.sourceTimeAt(piece.start), clip.sourceTimeAt(piece.end)};
                 segment.speed = clip.speedValue();
                 segment.speedRatio = clip.speedRatio();
+                if (clip.reversed && !clip.isStill) {
+                    segment.reversed = true;
+                    segment.mediaEnd = asset->duration; // mediaEndFor on an audio track
+                }
                 segment.level = levelOver(piece.start, piece.end);
                 segment.fade = GainRamp{fadeAt(piece.start), fadeAt(piece.end)};
                 if (head && head->range.contains(piece)) {

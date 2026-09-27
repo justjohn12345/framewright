@@ -32,6 +32,7 @@
 #import <XCTest/XCTest.h>
 
 #include "../../Engine/Audio/OfflineAudioRenderer.h"
+#include "../../Engine/Edit/EditOps.h"
 #include "../../Engine/Export/ExportJob.h"
 #include "../../Engine/Media/AssetImport.h"
 #include "../../Engine/Render/Compositor.h"
@@ -46,6 +47,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -1020,6 +1022,252 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
             }
         }
     }
+}
+
+/// Exports `h`'s sequence as ProRes 422 at `width` x `height` to `path` and decodes every frame to
+/// 32BGRA; empty on failure (reported).
+- (std::vector<media::PixelBuffer>)exportAndDecode:(PlaybackHarness &)h
+                                              path:(const std::string &)path
+                                            frames:(int64_t)frames {
+    ex::ExportRequest request;
+    request.project = std::make_shared<const Project>(h.project);
+    request.sequenceId = h.sequenceId;
+    request.encode.container = media::ContainerFormat::MOV;
+    media::VideoEncodeSettings v;
+    v.codec = media::VideoCodec::ProRes422;
+    v.width = 640;
+    v.height = 360;
+    request.encode.video = v;
+    request.outputPath = path;
+    ex::ExportServices services;
+    services.router = h.router;
+    services.cache = std::make_shared<media::FrameCache>();
+    services.routing = routingOf(h.project, *h.router);
+    std::string error;
+    auto result = runExport(request, services, error);
+    if (!result || !result->ok()) {
+        XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
+        return {};
+    }
+    auto routed = h.router->probe(path);
+    XCTAssertTrue(routed.ok());
+    if (!routed.ok()) {
+        return {};
+    }
+    media::DecodeOptions bgra;
+    bgra.pixelFormat = kCVPixelFormatType_32BGRA;
+    auto decoder = h.router->makeVideoDecoder(*routed, -1, bgra);
+    XCTAssertTrue(decoder.ok());
+    if (!decoder.ok()) {
+        return {};
+    }
+    std::vector<media::PixelBuffer> decoded;
+    XCTAssertTrue(decoder->decoder->seek(kCMTimeZero).ok());
+    for (int64_t f = 0; f < frames; ++f) {
+        auto next = decoder->decoder->next();
+        XCTAssertTrue(next.ok() && next.value(), @"exported frame %lld", f);
+        if (!next.ok() || !next.value()) {
+            return {};
+        }
+        decoded.push_back(next.value()->image);
+    }
+    return decoded;
+}
+
+/// A reversed clip (Clip.h "Reverse"): V1 is the movie from 1 s for 30 frames with its sound on A1,
+/// linked. Exported forward and then reversed (SetClipReversed on the same project): frame k of the
+/// reversed export is frame n - 1 - k of the forward export, pixel for pixel (and by the burn-in, the
+/// same source frame); every reversed frame shows the monitor's picture; the reversed export's sound
+/// is the forward export's sound sample-reversed over the clip, within 1e-6 (speed 1 here, and a
+/// second clip at 3/2 resampled after the mirror), and the playback mixer plays what the export
+/// writes.
+- (void)testAReversedClipExportsTheForwardExportBackwards {
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    h.sequence().width = 640;
+    h.sequence().height = 360;
+    const AssetId movie = h.importAsset("h264_1080p30.mp4");
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    const ClipId clip = h.addClip(h.v1, movie, 0, 30, CMTimeMake(1, 1));
+    const ClipId sound = h.addClip(h.a1, movie, 0, 30, CMTimeMake(1, 1));
+    h.link(clip, sound);
+    // A 3/2 clip after it on A1 (sound only): 45 frames of source from 4 s over 30 timeline frames.
+    const ClipId fast = h.addClip(h.a1, movie, 40, 30, CMTimeMake(4, 1));
+    h.sequence().findClip(fast)->speed = Ratio{3, 2};
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+    const Project forwardProject = h.project;
+    const int64_t n = 30;
+    const std::vector<media::PixelBuffer> forward = [self exportAndDecode:h path:_dir + "/forward.mov" frames:n];
+
+    for (const ClipId id : {clip, fast}) {
+        SetClipReversed reverse(h.sequenceId, id, true);
+        const EditResult r = reverse.apply(h.project);
+        XCTAssertTrue(r.ok(), @"%s", r.message.c_str());
+    }
+    XCTAssertTrue(h.sequence().findClip(sound)->reversed);
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+    const std::vector<media::PixelBuffer> backward = [self exportAndDecode:h path:_dir + "/reversed.mov" frames:n];
+    XCTAssertEqual(forward.size(), size_t(n));
+    XCTAssertEqual(backward.size(), size_t(n));
+    if (forward.size() != size_t(n) || backward.size() != size_t(n)) {
+        return;
+    }
+    auto samePixels = [](CVPixelBufferRef a, CVPixelBufferRef b) {
+        CVPixelBufferLockBaseAddress(a, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferLockBaseAddress(b, kCVPixelBufferLock_ReadOnly);
+        bool same = CVPixelBufferGetWidth(a) == CVPixelBufferGetWidth(b) &&
+                    CVPixelBufferGetHeight(a) == CVPixelBufferGetHeight(b);
+        const auto *pa = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddress(a));
+        const auto *pb = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddress(b));
+        for (size_t y = 0; same && y < CVPixelBufferGetHeight(a); ++y) {
+            same = std::memcmp(pa + y * CVPixelBufferGetBytesPerRow(a), pb + y * CVPixelBufferGetBytesPerRow(b),
+                               CVPixelBufferGetWidth(a) * 4) == 0;
+        }
+        CVPixelBufferUnlockBaseAddress(b, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferUnlockBaseAddress(a, kCVPixelBufferLock_ReadOnly);
+        return same;
+    };
+    for (int64_t k = 0; k < n; ++k) {
+        const media::PixelBuffer &mine = backward[size_t(k)];
+        const media::PixelBuffer &theirs = forward[size_t(n - 1 - k)];
+        XCTAssertTrue(samePixels(mine.get(), theirs.get()), @"reversed frame %lld == forward frame %lld", k, n - 1 - k);
+        const auto a = readBurnIn(mine.get());
+        const auto b = readBurnIn(theirs.get());
+        XCTAssertTrue(a.has_value() && b.has_value() && *a == *b && *a == 30 + (n - 1 - k),
+                      @"frame %lld shows source frame %d (forward frame %lld: %d)", k, a.value_or(-1), n - 1 - k,
+                      b.value_or(-1));
+    }
+    // The monitor shows what the reversed export wrote.
+    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
+    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, 640, 360);
+    XCTAssertTrue(created.ok() && pool.ok());
+    if (!created.ok() || !pool.ok()) {
+        return;
+    }
+    for (int64_t f : {0, 7, 15, 29}) {
+        h.controller->seek(frames30(f));
+        const PlaybackHarness::Sample sample = h.presentExact();
+        XCTAssertEqual(sample.presented.frameIndex, f);
+        XCTAssertEqual(sample.burnIns.front().value_or(-1), 30 + (n - 1 - f), @"monitor frame %lld", f);
+        const render::PreviewFrame &frame = h.frame();
+        auto buffer = pool->makeBuffer();
+        XCTAssertTrue(buffer.ok());
+        if (!buffer.ok()) {
+            continue;
+        }
+        auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &texture) {
+            if (index >= frame.textures.size() || !frame.textures[index]) {
+                return false;
+            }
+            texture = frame.textures[index];
+            return true;
+        };
+        auto rendered = created.value()->renderAndWait(frame.graph, lookup, render::PixelBufferTarget{buffer.value()});
+        XCTAssertTrue(rendered.ok() && rendered->status.ok() && rendered->skippedLayers.empty(), @"frame %lld", f);
+        const Difference d = compare(blockMeans(buffer.value().get()), blockMeans(backward[size_t(f)].get()));
+        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
+        XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
+    }
+
+    // Sound: the offline mixes (what an export writes) of both projects.
+    auto mixOf = [&](const Project &project) {
+        audio::OfflineAudioRenderer offline(h.router, std::make_shared<const Project>(project), h.sequenceId,
+                                            routingOf(project, *h.router), audio::OfflineAudioRenderer::Config{});
+        std::vector<float> mixed;
+        std::vector<float> block(1024 * 2);
+        for (;;) {
+            auto rendered = offline.render(block.data(), 1024, [] { return false; });
+            XCTAssertTrue(rendered.ok(), @"%s", rendered.ok() ? "" : rendered.error().description().c_str());
+            if (!rendered.ok() || rendered.value() == 0) {
+                break;
+            }
+            mixed.insert(mixed.end(), block.begin(), block.begin() + rendered.value() * 2);
+        }
+        return mixed;
+    };
+    const std::vector<float> forwardMix = mixOf(forwardProject);
+    const std::vector<float> reversedMix = mixOf(h.project);
+    XCTAssertEqual(forwardMix.size(), reversedMix.size());
+    for (const auto &[first, last] : {std::pair<int64_t, int64_t>{0, 30}, std::pair<int64_t, int64_t>{40, 70}}) {
+        const int64_t n0 = first * 1600;
+        const int64_t n1 = last * 1600;
+        double worst = 0;
+        double energy = 0;
+        for (int64_t i = n0; i < n1 && size_t(n1 * 2) <= forwardMix.size(); ++i) {
+            for (int ch = 0; ch < 2; ++ch) {
+                const double a = reversedMix[size_t(i * 2 + ch)];
+                const double b = forwardMix[size_t((n0 + n1 - 1 - i) * 2 + ch)];
+                worst = std::max(worst, std::fabs(a - b));
+                energy += b * b;
+            }
+        }
+        NSLog(@"PARITY reversed audio over frames [%lld, %lld): max |reversed - forward backwards| %.3g", first, last,
+              worst);
+        XCTAssertGreaterThan(energy, 1.0, @"frames [%lld, %lld) have sound", first, last);
+        XCTAssertLessThan(worst, 1e-6, @"frames [%lld, %lld): the reversed sound is the forward sound backwards",
+                          first, last);
+    }
+
+}
+
+/// The playback mixer plays a reversed clip's sound as the export writes it: A1 holds the movie from
+/// 1 s reversed at speed 1 for 2 s, then from 4 s reversed at 3/2 for 1.5 s; played in real time and
+/// captured, it equals the offline mix sample for sample (1e-5, as the forward parity test).
+- (void)testAReversedClipPlaysTheSoundTheExportWrites {
+    PlaybackHarness h(PlaybackHarness::Mode::Realtime, 5.0);
+    const AssetId movie = h.importAsset("h264_1080p30.mp4");
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    const ClipId plain = h.addClip(h.a1, movie, 0, 60, CMTimeMake(1, 1));
+    const ClipId fast = h.addClip(h.a1, movie, 60, 45, CMTimeMake(4, 1));
+    h.sequence().findClip(fast)->speed = Ratio{3, 2};
+    for (const ClipId id : {plain, fast}) {
+        SetClipReversed reverse(h.sequenceId, id, true);
+        const EditResult r = reverse.apply(h.project);
+        XCTAssertTrue(r.ok(), @"%s", r.message.c_str());
+    }
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+    h.controller->seek(kCMTimeZero);
+    XCTAssertGreaterThanOrEqual(h.playAndWait(), 0.0);
+    XCTAssertTrue(h.waitForState(playback::PlaybackState::Stopped, std::chrono::seconds(15)), @"played to the end");
+    const audio::NullAudioOutput::Capture capture = h.output->capture();
+    XCTAssertEqual(h.controller->stats().audioUnderruns, 0u, @"the reversed sources kept up");
+
+    audio::OfflineAudioRenderer offline(h.router, std::make_shared<const Project>(h.project), h.sequenceId,
+                                        routingOf(h.project, *h.router), audio::OfflineAudioRenderer::Config{});
+    std::vector<float> mixed;
+    std::vector<float> block(1024 * 2);
+    for (;;) {
+        auto n = offline.render(block.data(), 1024, [] { return false; });
+        XCTAssertTrue(n.ok(), @"%s", n.ok() ? "" : n.error().description().c_str());
+        if (!n.ok() || n.value() == 0) {
+            break;
+        }
+        mixed.insert(mixed.end(), block.begin(), block.begin() + n.value() * 2);
+    }
+    XCTAssertEqual(int64_t(mixed.size() / 2), int64_t(3.5 * 48000));
+    const int64_t from = std::max<int64_t>(0, capture.firstSequenceSample);
+    const int64_t count = std::min<int64_t>(int64_t(capture.samples.size() / 2), int64_t(mixed.size() / 2) - from);
+    XCTAssertGreaterThan(count, 3 * 48000, @"most of the sequence was captured");
+    double worst = 0;
+    int64_t worstAt = -1;
+    for (int64_t i = 0; i < count * 2; ++i) {
+        const double d = std::fabs(double(capture.samples[size_t(i)]) - mixed[size_t(from * 2 + i)]);
+        if (d > worst) {
+            worst = d;
+            worstAt = from + i / 2;
+        }
+    }
+    NSLog(@"PARITY reversed playback: %lld frames compared, max |playback - export| %.3g at sample %lld", count, worst,
+          worstAt);
+    XCTAssertLessThan(worst, 1e-5, @"the export's reversed mix differs from playback at sample %lld", worstAt);
 }
 
 /// The reference case of the hold-after rule: V1 is a 30 s clip (the 10 s movie at 1/4 speed, so

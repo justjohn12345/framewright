@@ -694,7 +694,10 @@ void PlaybackController::retargetLocked(CMTime at, double rate, CMTime window, d
             target.trackIndex = -1;
             const MediaAsset *asset = project_->findAsset(layer.assetId);
             target.sourceTime = asset ? pictureTimeFor(layer, *asset) : layer.sourceTime;
-            target.direction = backward ? media::DecodeDirection::Backward : media::DecodeDirection::Forward;
+            // A reversed clip's pictures run backwards in its media as the timeline advances: its
+            // lookahead goes the other way (reverse play of a reversed clip decodes forward).
+            target.direction = backward != layer.reversed ? media::DecodeDirection::Backward
+                                                          : media::DecodeDirection::Forward;
             // Visible now first (upper layers first), then by proximity.
             target.priority = static_cast<int>(10000 - k * 10 + static_cast<int64_t>(i));
             target.lane = layer.clipId.value();

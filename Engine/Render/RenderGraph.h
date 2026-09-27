@@ -72,11 +72,15 @@ struct VideoLayer {
     ClipId clipId;
     AssetId assetId;
     TrackId trackId;
-    // Source frame to show, mapped exactly through the clip's speed and snapped down to the
-    // start of the asset frame containing it (unsnapped for VFR sources; zero for stills); see
-    // Scheduler::sourceFrameTime.
+    // Source frame to show, mapped exactly through the clip's speed (and, for a reversed clip, the
+    // mirror: Clip.h "Reverse") and snapped down to the start of the asset frame containing it
+    // (unsnapped for VFR sources; zero for stills); see Scheduler::sourceFrameTime.
     CMTime sourceTime = kCMTimeZero;
     bool isStill = false;
+    // The clip plays its media backwards: as the timeline advances its sourceTime goes down, so
+    // decoding ahead of the playhead runs the other way (the decode direction is this XOR a
+    // reverse playback direction).
+    bool reversed = false;
     // The asset's container rotation (MediaAsset::rotationDegrees): degrees clockwise to rotate
     // the decoded storage-orientation frame before the clip transform is applied.
     std::int32_t sourceRotationDegrees = 0;
@@ -148,9 +152,13 @@ struct AudioSegment {
     AssetId assetId;
     TrackId trackId;
     TimeRange timelineRange; // part of the requested range this segment covers
-    // Matching source media (speed applied; may extend into handles). Exact when the exact
-    // source times have a CMTime form, otherwise rounded to kPreciseTimescale (flagged).
+    // Matching clip times (speed applied; may extend into handles). Exact when the exact clip times
+    // have a CMTime form, otherwise rounded to kPreciseTimescale (flagged). For a forward clip these
+    // are the source media times; for a reversed one (`reversed`) the media read for clip time u is
+    // mediaEnd - u, per output sample by the mirror rule (Clip.h "Reverse", ClipAudioSource).
     TimeRange sourceRange;
+    bool reversed = false;
+    CMTime mediaEnd = kCMTimeInvalid; // the clip's media end (mediaEndFor), set when reversed
     double speed = 1.0;     // speedRatio as a double
     Ratio speedRatio{1, 1}; // the clip's exact speed
     DecibelRamp level;      // the clip's gain plus its Gain spans, in dB

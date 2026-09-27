@@ -66,6 +66,9 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
         if (clip.sourceIn != kCMTimeZero) {
             return where + ": still clips must have sourceIn 0";
         }
+        if (clip.reversed) {
+            return where + ": a still cannot be reversed";
+        }
     } else {
         if (!isValidSpeed(clip.speed)) {
             return where + ": speed " + std::to_string(clip.speed.num) + "/" + std::to_string(clip.speed.den) +

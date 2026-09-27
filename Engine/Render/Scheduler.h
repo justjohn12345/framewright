@@ -35,7 +35,8 @@ class Scheduler {
                                                                               std::int64_t steps,
                                                                               const TimeRange &window);
 
-    // The layers visible at `time` (snapped down to the sequence frame containing it).
+    // The layers visible at `time` (snapped down to the sequence frame containing it). A reversed
+    // clip's layer shows the picture of the mirror rule (Clip.h "Reverse") and has `reversed` set.
     static RenderGraph renderGraphAt(const Sequence &sequence, const Project &project, CMTime time);
 
     // One clip alone (the program monitor's solo preview, PlaybackController::setPreviewSolo): the
@@ -69,12 +70,15 @@ class Scheduler {
     // transition handles). Playback, the output view and export all get it from here.
     static VideoParams motionAt(const Clip &clip, CMTime time);
 
-    // Source frame time for `clip` at sequence time `time`: exact speed mapping, then the start
-    // of the asset frame containing that time (Floor; skipped for VFR or unknown frame rate),
-    // clamped to the media. Inside the clip it never reaches the clip's out point: at 0.5x the
-    // last timeline frame shows the last source frame that starts before sourceOut. Outside the
-    // clip (transition handles) the mapping continues past the in and out points.
-    static CMTime sourceFrameTime(const Clip &clip, const MediaAsset &asset, CMTime time);
+    // Source frame time for `clip` at sequence time `time` (a frame of `frameDuration` starting
+    // there): the exact media time of the frame (mediaTimeOfFrame: the clip time at its start, or for
+    // a reversed clip the mirror of the clip time at its end, with the video's end as the mirror),
+    // then the start of the asset frame containing that time (Floor; skipped for VFR or unknown frame
+    // rate), clamped to the media. Inside the clip it never reaches the media out point of the range
+    // the clip uses: at 0.5x the last timeline frame shows the last source frame that starts before
+    // sourceOut (a reversed clip: before the mirror of sourceIn). Outside the clip (transition
+    // handles) the mapping continues past the in and out points.
+    static CMTime sourceFrameTime(const Clip &clip, const MediaAsset &asset, CMTime time, CMTime frameDuration);
 };
 
 } // namespace ve
