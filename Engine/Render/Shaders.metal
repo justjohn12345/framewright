@@ -6,7 +6,8 @@
 // (inverse affine), samples bilinearly, converts YCbCr to gamma-encoded R'G'B', applies an
 // anti-aliased edge coverage and the layer weight, and returns premultiplied colour for
 // ONE / ONE_MINUS_SOURCE_ALPHA blending. A dissolve pair is drawn in one pass as
-// mix(A, B, m) of the two premultiplied samples, so the crossfade is exact over transparency.
+// mix(A, B, m) of the two premultiplied samples, so the crossfade is exact over transparency; m is the
+// uniform mix for a cross dissolve and the per-pixel reveal for a wipe or the iris (transitionReveal).
 
 #include <metal_stdlib>
 #include "ShaderTypes.h"
@@ -88,6 +89,41 @@ static float4 sampleRGBA(texture2d<float> rgba, float2 uv, constant VESourceUnif
     return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
 }
 
+// The reveal m of a shaped transition (VETransitionShape, not None) at sequence position p of a
+// `frame`-sized frame at linear progress `progress`, with a soft edge `feather` pixels wide on each
+// side: the formula documented in RenderGraph.h (transitionReveal, kTransitionFeather). 0 shows none of
+// the incoming picture, 1 all of it; progress 0 and 1 give exactly 0 and 1 everywhere in the frame.
+static float transitionReveal(int shape, float progress, float feather, float2 p, float2 frame) {
+    float d;
+    float travel;
+    switch (shape) {
+    case VETransitionShapeWipeLeft:
+        d = frame.x - p.x;
+        travel = frame.x;
+        break;
+    case VETransitionShapeWipeRight:
+        d = p.x;
+        travel = frame.x;
+        break;
+    case VETransitionShapeWipeUp:
+        d = frame.y - p.y;
+        travel = frame.y;
+        break;
+    case VETransitionShapeWipeDown:
+        d = p.y;
+        travel = frame.y;
+        break;
+    default: // VETransitionShapeIris
+        d = length(p - 0.5 * frame);
+        travel = 0.5 * length(frame);
+        break;
+    }
+    const float f = max(feather, 1.0e-3);
+    const float r = progress * (travel + 2.0 * f) - f;
+    const float t = saturate((d - (r - f)) / (2.0 * f));
+    return 1.0 - t * t * (3.0 - 2.0 * t);
+}
+
 fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
                                   constant VEDrawUniforms &uniforms [[buffer(VEBufferIndexDraw)]],
                                   texture2d<float> a0 [[texture(VETextureIndexA0)]],
@@ -103,7 +139,13 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
         colorA = sampleRGBA(a0, uvA, uniforms.a);
     }
     colorA *= coverageA * uniforms.a.params.x;
+    const int shape = int(uniforms.reserved.x + 0.5);
     if (!kHasPartner) {
+        if (shape != VETransitionShapeNone) {
+            const float m = transitionReveal(shape, uniforms.mix.x, uniforms.reserved.y, in.framePosition,
+                                             uniforms.frameSize.xy);
+            colorA *= uniforms.reserved.z > 0.5 ? m : 1.0 - m;
+        }
         return colorA;
     }
 
@@ -116,7 +158,11 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
         colorB = sampleRGBA(b0, uvB, uniforms.b);
     }
     colorB *= coverageB * uniforms.b.params.x;
-    return mix(colorA, colorB, uniforms.mix.x);
+    if (shape == VETransitionShapeNone) {
+        return mix(colorA, colorB, uniforms.mix.x);
+    }
+    return mix(colorA, colorB,
+               transitionReveal(shape, uniforms.mix.x, uniforms.reserved.y, in.framePosition, uniforms.frameSize.xy));
 }
 
 // MARK: - Minification

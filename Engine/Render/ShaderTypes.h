@@ -41,6 +41,17 @@ enum VEFunctionConstant {
     VEFunctionConstantSourceBIsYCbCr = 2,
 };
 
+// The shape of a transition draw (VEDrawUniforms::reserved.x), TransitionKind's values
+// (Compositor.mm static_asserts them): None is the cross dissolve, the uniform mix.
+enum VETransitionShape {
+    VETransitionShapeNone = 0,
+    VETransitionShapeWipeLeft = 1,
+    VETransitionShapeWipeRight = 2,
+    VETransitionShapeWipeUp = 3,
+    VETransitionShapeWipeDown = 4,
+    VETransitionShapeIris = 5,
+};
+
 // How one source picture is sampled and placed.
 struct VESourceUniforms {
     // Maps the sampled (Y, Cb, Cr, 1) plane values (texture unorm, i.e. before range expansion)
@@ -64,7 +75,14 @@ struct VESourceUniforms {
 struct VEDrawUniforms {
     VEFloat4 quadRect;  // x0, y0, x1, y1 in sequence pixels
     VEFloat4 frameSize; // sequence width, height, 1/width, 1/height
-    VEFloat4 mix;       // x: dissolve mix toward source B (pair draws only)
+    // x: the transition's linear progress p (LayerTransition::mix): the dissolve mix toward source B
+    // of a pair draw, and the progress of a shaped transition drawn alone (0 otherwise).
+    VEFloat4 mix;
+    // A shaped transition (RenderGraph.h, transitionReveal); all zero for a cross dissolve and for a
+    // layer without a transition, whose draws are unchanged. x: the VETransitionShape (as a float);
+    // y: the soft edge's half width f in sequence pixels (kTransitionFeather); z: a single-layer draw
+    // is the incoming picture (1: drawn where the reveal m is, times m) or the outgoing one (0: times
+    // 1 - m); unused for pair draws, which show mix(A, B, m) per pixel. w: unused.
     VEFloat4 reserved;
     struct VESourceUniforms a;
     struct VESourceUniforms b;

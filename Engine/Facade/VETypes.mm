@@ -66,6 +66,7 @@ VESpanValues VESpanValuesUnchanged(void) {
 @property (nonatomic, readwrite) VESpanValues endValues;
 @property (nonatomic, readwrite) VEKeyframeInterpolation interpolation;
 @property (nonatomic, readwrite) VETransitionStyle transitionStyle;
+@property (nonatomic, readwrite) VETransitionKind transitionKind;
 @property (nonatomic, readwrite) CMTime duration;
 @property (nonatomic, readwrite) CMTime shareBeforeCut;
 @property (nonatomic, readwrite) CMTime shareAfterCut;
@@ -117,6 +118,7 @@ VESpanValues VESpanValuesUnchanged(void) {
 @property (nonatomic, readwrite) VEClipID fromClipID;
 @property (nonatomic, readwrite) VEClipID toClipID;
 @property (nonatomic, readwrite) VETransitionStyle style;
+@property (nonatomic, readwrite) VETransitionKind kind;
 @property (nonatomic, readwrite) CMTime duration;
 @property (nonatomic, readwrite) CMTime start;
 @property (nonatomic, readwrite) CMTime end;
@@ -673,6 +675,42 @@ std::optional<SpanKind> fromVE(VESpanKind kind) {
     return std::nullopt;
 }
 
+VETransitionKind toVE(TransitionKind kind) {
+    switch (kind) {
+    case TransitionKind::CrossDissolve:
+        return VETransitionKindCrossDissolve;
+    case TransitionKind::WipeLeft:
+        return VETransitionKindWipeLeft;
+    case TransitionKind::WipeRight:
+        return VETransitionKindWipeRight;
+    case TransitionKind::WipeUp:
+        return VETransitionKindWipeUp;
+    case TransitionKind::WipeDown:
+        return VETransitionKindWipeDown;
+    case TransitionKind::Iris:
+        return VETransitionKindIris;
+    }
+    return VETransitionKindCrossDissolve;
+}
+
+std::optional<TransitionKind> fromVE(VETransitionKind kind) {
+    switch (kind) {
+    case VETransitionKindCrossDissolve:
+        return TransitionKind::CrossDissolve;
+    case VETransitionKindWipeLeft:
+        return TransitionKind::WipeLeft;
+    case VETransitionKindWipeRight:
+        return TransitionKind::WipeRight;
+    case VETransitionKindWipeUp:
+        return TransitionKind::WipeUp;
+    case VETransitionKindWipeDown:
+        return TransitionKind::WipeDown;
+    case VETransitionKindIris:
+        return TransitionKind::Iris;
+    }
+    return std::nullopt;
+}
+
 VETransitionStyle toVE(TransitionRole role) {
     switch (role) {
     case TransitionRole::CrossDissolve:
@@ -798,6 +836,7 @@ VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Tra
     info.endValues = endValues;
     info.interpolation = span.isTransition() ? VEKeyframeInterpolationLinear : toVE(spanInterpolation(span));
     info.transitionStyle = VETransitionStyleCrossDissolve;
+    info.transitionKind = span.isTransition() ? toVE(span.transition) : VETransitionKindCrossDissolve;
     info.shareBeforeCut = kCMTimeZero;
     info.shareAfterCut = kCMTimeZero;
     if (span.isTransition()) {
@@ -837,6 +876,7 @@ VETransitionInfo *makeTransitionInfo(const TransitionPlacement &transition) {
     info.transitionID = static_cast<VETransitionID>(transition.span->id.value());
     info.trackID = static_cast<VETrackID>(transition.track->id.value());
     info.style = toVE(transition.role);
+    info.kind = toVE(transition.span->transition);
     switch (transition.role) {
     case TransitionRole::CrossDissolve:
         info.fromClipID = owner;

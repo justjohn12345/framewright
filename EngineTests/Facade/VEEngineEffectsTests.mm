@@ -325,6 +325,63 @@ CMTime frames30(int64_t n) {
 /// Review M3: a fade out leaves the crossfade coming into its clip its frames. B is 90 frames with
 /// 15 of them under a 30-frame crossfade from A: an 80-frame fade out is refused (75 is the most),
 /// fitted to 75 with FitToCut, and a fade's limit and range edits stop there too.
+// Wipes and the iris: added with a kind on a cut (the linked crossfade stays a crossfade) and at a
+// free edge, changed through setKind:forTransition: in one undo step, refused on audio.
+- (void)testATransitionsKindIsAddedAndChangedOnVideoOnly {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    const auto a = [self place:engine asset:asset at:0 from:0 to:60];
+    const auto b = [self place:engine asset:asset at:60 from:90 to:150];
+    VEEditResult *r = [engine addTransitionFromClip:a.first
+                                             toClip:b.first
+                                           duration:frames30(10)
+                                            options:VETransitionOptionIncludeLinked
+                                               kind:VETransitionKindWipeUp];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqual(r.createdIDs.count, 2u);
+    const VETransitionID video = r.createdIDs[0].longLongValue;
+    const VETransitionID audio = r.createdIDs[1].longLongValue;
+    XCTAssertEqual([engine transitionInfo:video].kind, VETransitionKindWipeUp);
+    XCTAssertEqual([engine transitionInfo:audio].kind, VETransitionKindCrossDissolve, @"audio has no kinds");
+    VEClipInfo *owner = [engine clipInfo:a.first];
+    XCTAssertEqual(owner.spans.firstObject.transitionKind, VETransitionKindWipeUp);
+
+    const uint64_t before = engine.changeCount;
+    VEEditResult *changed = [engine setKind:VETransitionKindIris forTransition:video];
+    XCTAssertTrue(changed.ok, @"%@", changed.message);
+    XCTAssertEqual([engine transitionInfo:video].kind, VETransitionKindIris);
+    XCTAssertEqual([engine transitionInfo:video].style, VETransitionStyleCrossDissolve);
+    XCTAssertEqual(CMTimeCompare([engine transitionInfo:video].duration, frames30(10)), 0);
+    XCTAssertEqualObjects(engine.undoActionName, @"Change Transition Kind");
+    XCTAssertTrue([engine undo]);
+    XCTAssertEqual([engine transitionInfo:video].kind, VETransitionKindWipeUp);
+    XCTAssertEqual(engine.changeCount, before + 2);
+    XCTAssertTrue([engine redo]);
+    XCTAssertEqual([engine transitionInfo:video].kind, VETransitionKindIris);
+
+    VEEditResult *onAudio = [engine setKind:VETransitionKindWipeLeft forTransition:audio];
+    XCTAssertFalse(onAudio.ok);
+    XCTAssertEqual(onAudio.errorCode, VEEditErrorTrackKindMismatch);
+    VEEditResult *notATransition = [engine setKind:VETransitionKindWipeLeft forTransition:123456];
+    XCTAssertEqual(notATransition.errorCode, VEEditErrorTransitionNotFound);
+    VEEditResult *outOfRange = [engine setKind:(VETransitionKind)42 forTransition:video];
+    XCTAssertEqual(outOfRange.errorCode, VEEditErrorInvalidArgument);
+
+    // A free edge: a Wipe Right from black on the video clip, a plain fade on its linked audio.
+    VEEditResult *edge = [engine addTransitionAtEdge:VEClipEdgeStart
+                                              ofClip:a.first
+                                            duration:frames30(8)
+                                             options:VETransitionOptionIncludeLinked
+                                                kind:VETransitionKindWipeRight];
+    XCTAssertTrue(edge.ok, @"%@", edge.message);
+    XCTAssertEqual(edge.createdIDs.count, 2u);
+    XCTAssertEqualObjects(edge.note, @"Wipe Right from black.");
+    VETransitionInfo *fadeIn = [engine transitionInfo:edge.createdIDs[0].longLongValue];
+    XCTAssertEqual(fadeIn.style, VETransitionStyleFadeIn);
+    XCTAssertEqual(fadeIn.kind, VETransitionKindWipeRight);
+    XCTAssertEqual([engine transitionInfo:edge.createdIDs[1].longLongValue].kind, VETransitionKindCrossDissolve);
+}
+
 - (void)testAFadeOutLeavesTheIncomingCrossfadeItsFrames {
     VEAssetInfo *asset = nil;
     VEEngine *engine = [self engineWithAsset:&asset];

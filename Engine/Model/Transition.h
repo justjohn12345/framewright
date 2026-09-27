@@ -16,18 +16,46 @@
 
 #pragma once
 
+#include <array>
+#include <optional>
+#include <string_view>
+
 namespace ve {
 
-// The kind of transition a lane-0 span makes. The only kind: a linear dissolve for video
-// (LayerTransition::mix) and a constant-power crossfade for audio (constantPowerGain, applied to
-// the linear progress), or a linear fade against black / silence where no clip is on the other
-// side.
+// The kind of transition a lane-0 span makes: how the picture changes over the linear progress p
+// (LayerTransition::mix, 0 at the start of the range, 1 at its end). The kind is a video property:
+// audio always uses a constant-power crossfade across a cut (constantPowerGain of the linear
+// progress) or a linear fade against silence at a free edge, and a transition span on an audio
+// track is always CrossDissolve (checkTransitionSpan). Where no clip is on the other side (a fade
+// role), the other picture is black, or the tracks below. The shaped kinds reveal the incoming
+// picture per pixel through a soft edge kTransitionFeather sequence pixels wide on each side
+// (RenderGraph.h, transitionReveal); p = 0 shows none of it and p = 1 all of it.
 enum class TransitionKind {
+    // Every pixel mixes linearly: (1 - p) of the outgoing picture and p of the incoming one.
     CrossDissolve,
+    // The incoming picture enters from the right edge; the edge between them travels left.
+    WipeLeft,
+    // The incoming picture enters from the left edge; the edge between them travels right.
+    WipeRight,
+    // The incoming picture enters from the bottom edge; the edge between them travels up.
+    WipeUp,
+    // The incoming picture enters from the top edge; the edge between them travels down.
+    WipeDown,
+    // The incoming picture shows inside a circle growing from the frame's centre until it covers
+    // the corners.
+    Iris,
 };
 
-// "crossDissolve".
+inline constexpr std::array<TransitionKind, 6> kTransitionKinds{
+    TransitionKind::CrossDissolve, TransitionKind::WipeLeft, TransitionKind::WipeRight,
+    TransitionKind::WipeUp,        TransitionKind::WipeDown, TransitionKind::Iris};
+
+// "crossDissolve", "wipeLeft", "wipeRight", "wipeUp", "wipeDown", "iris" (the project file's names).
 const char *nameOf(TransitionKind kind);
+// "Cross Dissolve", "Wipe Left", "Wipe Right", "Wipe Up", "Wipe Down", "Iris" (messages).
+const char *displayNameOf(TransitionKind kind);
+// The kind named `name` (nameOf), or nullopt.
+std::optional<TransitionKind> transitionKindNamed(std::string_view name);
 
 // What a transition span does where it sits (see the top of this file).
 enum class TransitionRole {

@@ -32,6 +32,13 @@ using media::Status;
 static_assert(sizeof(VESourceUniforms) == 128, "VESourceUniforms layout must match Shaders.metal");
 static_assert(sizeof(VEDrawUniforms) == 64 + 2 * 128, "VEDrawUniforms layout must match Shaders.metal");
 static_assert(sizeof(VEConvertUniforms) == 64, "VEConvertUniforms layout must match Shaders.metal");
+static_assert(int(VETransitionShapeNone) == int(TransitionKind::CrossDissolve) &&
+                  int(VETransitionShapeWipeLeft) == int(TransitionKind::WipeLeft) &&
+                  int(VETransitionShapeWipeRight) == int(TransitionKind::WipeRight) &&
+                  int(VETransitionShapeWipeUp) == int(TransitionKind::WipeUp) &&
+                  int(VETransitionShapeWipeDown) == int(TransitionKind::WipeDown) &&
+                  int(VETransitionShapeIris) == int(TransitionKind::Iris),
+              "VETransitionShape must follow TransitionKind");
 
 PixelRect fitRect(double sourceWidth, double sourceHeight, std::int32_t destWidth, std::int32_t destHeight) {
     if (!(sourceWidth > 0) || !(sourceHeight > 0) || destWidth <= 0 || destHeight <= 0) {
@@ -179,6 +186,21 @@ void fillSource(VESourceUniforms &u, const TextureSet &textures, const SourceBin
     u.uvFromFrameY = placement.uvFromFrameY;
     u.chromaTransform = textures.chromaTransform();
     u.params = simd_make_float4(float(std::clamp(weight, 0.0, 1.0)), binding.straightAlpha ? 1.0f : 0.0f, 0.0f, 0.0f);
+}
+
+// Whether the layer's transition is a shaped one (a wipe or the iris): drawn with the per-pixel
+// reveal instead of a uniform weight (RenderGraph.h).
+bool isShaped(const VideoLayer &layer) {
+    return layer.transition && layer.transition->kind != TransitionKind::CrossDissolve;
+}
+
+// The shape uniforms of a draw of `transition` (VEDrawUniforms::reserved); all zero for a dissolve.
+simd_float4 shapeUniforms(const LayerTransition &transition, bool drawnAlone) {
+    if (transition.kind == TransitionKind::CrossDissolve) {
+        return simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    return simd_make_float4(float(int(transition.kind)), float(kTransitionFeather),
+                            drawnAlone && transition.isIncoming ? 1.0f : 0.0f, 0.0f);
 }
 
 struct DrawItem {
@@ -535,8 +557,9 @@ struct Compositor::Impl {
             }
             DrawItem item{};
             if (partner == i) {
+                // A dissolve or a fade weighs the whole layer; a shape reveals it per pixel instead.
                 double weight = layer.opacity;
-                if (layer.transition) {
+                if (layer.transition && !isShaped(layer)) {
                     weight *= layer.transition->weight();
                 }
                 const TextureSet &t = resolved[i];
@@ -554,6 +577,11 @@ struct Compositor::Impl {
                 item.a = binding.value();
                 fillSource(item.uniforms.a, t, item.a, pl, weight);
                 item.uniforms.quadRect = simd_make_float4(float(pl.x0), float(pl.y0), float(pl.x1), float(pl.y1));
+                if (isShaped(layer)) {
+                    item.uniforms.mix =
+                        simd_make_float4(float(std::clamp(layer.transition->mix, 0.0, 1.0)), 0.0f, 0.0f, 0.0f);
+                    item.uniforms.reserved = shapeUniforms(*layer.transition, true);
+                }
                 item.layerA = item.layerB = i;
                 auto state = pipeline({t.sourceClass() == SourceClass::YCbCrBiPlanar, false, false, format});
                 if (!state.ok()) {
@@ -600,6 +628,7 @@ struct Compositor::Impl {
                 item.uniforms.quadRect = simd_make_float4(float(x0), float(y0), float(x1), float(y1));
                 item.uniforms.mix =
                     simd_make_float4(float(std::clamp(inLayer.transition->mix, 0.0, 1.0)), 0.0f, 0.0f, 0.0f);
+                item.uniforms.reserved = shapeUniforms(*inLayer.transition, false);
                 item.layerA = out;
                 item.layerB = in;
                 auto state = pipeline({ta.sourceClass() == SourceClass::YCbCrBiPlanar, true,

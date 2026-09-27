@@ -292,6 +292,10 @@ std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const
     if (!span.isTransition() || span.lane != kTransitionLane || !span.tracks.empty()) {
         return TransitionIssue{K::Structure, where + ": not a lane-0 transition span without keyframes"};
     }
+    if (track.kind == TrackKind::Audio && span.transition != TransitionKind::CrossDissolve) {
+        return TransitionIssue{K::Structure, where + ": an audio transition is a crossfade or a fade, not a " +
+                                                 nameOf(span.transition)};
+    }
     for (const auto &[time, what] : {std::pair{span.start, "start"}, std::pair{span.end, "end"}}) {
         if (auto problem = modelTimeProblem(time, what)) {
             return TransitionIssue{K::BadDuration, where + ": " + *problem};

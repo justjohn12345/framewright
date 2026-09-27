@@ -256,3 +256,75 @@ TEST_CASE("A fade out never removes the crossfade coming into its clip (review M
         CHECK(r.droppedTransitionIds == std::vector<SpanId>{out});
     }
 }
+
+TEST_CASE("SetTransitionKind changes a video transition's kind, undoably, and nothing else") {
+    DissolveFixture fx;
+    const auto [lv, la] = fx.addLinkedPair(200, 60);
+    const auto [rv, ra] = fx.addLinkedPair(260, 60, 300);
+    const SpanId videoCut = fx.addTransition(fx.v1, lv, rv, 10);
+    const SpanId audioCut = fx.addTransition(fx.a1, la, ra, 10);
+    const SpanId fade = fx.addFade(fx.b, ClipEdge::Tail, f30(15));
+    fx.requireValid();
+    REQUIRE(linkedTransition(fx.sequence(), videoCut) == audioCut);
+    for (const TransitionKind kind : kTransitionKinds) {
+        CAPTURE(nameOf(kind));
+        for (const SpanId id : {fx.t, videoCut, fade}) {
+            const EffectSpan before = *fx.span(id);
+            const EffectSpan audioBefore = *fx.span(audioCut);
+            const TransitionRole roleBefore = findTransition(fx.sequence(), id)->role;
+            SetTransitionKind edit(fx.seq, id, kind);
+            applyReversible(fx.project, edit);
+            const EffectSpan &after = *fx.span(id);
+            CHECK(after.transition == kind);
+            CHECK(identical(after.start, before.start));
+            CHECK(identical(after.end, before.end));
+            CHECK(after.edge == before.edge);
+            CHECK(*fx.span(audioCut) == audioBefore); // the crossfade has no kind
+            CHECK(findTransition(fx.sequence(), id)->role == roleBefore);
+        }
+    }
+    CHECK(fx.span(fx.t)->transition == TransitionKind::Iris);
+    CHECK(findTransition(fx.sequence(), fade)->role == TransitionRole::FadeOut);
+}
+
+TEST_CASE("SetTransitionKind refuses what is not a video transition") {
+    DissolveFixture fx;
+    const auto [lv, la] = fx.addLinkedPair(200, 60);
+    const auto [rv, ra] = fx.addLinkedPair(260, 60, 300);
+    const SpanId audioCut = fx.addTransition(fx.a1, la, ra, 10);
+    const SpanId motion = fx.addSpan(fx.a, SpanKind::Motion, 1, f30(30), f30(60));
+    fx.requireValid();
+    (void)lv;
+    (void)rv;
+    SUBCASE("an effect span") {
+        SetTransitionKind edit(fx.seq, motion, TransitionKind::WipeLeft);
+        const EditResult r = applyRefused(fx.project, edit, EditError::TransitionNotFound);
+        CHECK(r.message.find(std::to_string(motion.value())) != std::string::npos);
+    }
+    SUBCASE("an unknown id") {
+        SetTransitionKind edit(fx.seq, SpanId{9999}, TransitionKind::WipeLeft);
+        applyRefused(fx.project, edit, EditError::TransitionNotFound);
+    }
+    SUBCASE("an audio crossfade") {
+        SetTransitionKind edit(fx.seq, audioCut, TransitionKind::Iris);
+        const EditResult r = applyRefused(fx.project, edit, EditError::TrackKindMismatch);
+        CHECK(r.message.find("Iris") != std::string::npos);
+    }
+    SUBCASE("a locked track") {
+        fx.track(fx.v1).locked = true;
+        SetTransitionKind edit(fx.seq, fx.t, TransitionKind::WipeDown);
+        applyRefused(fx.project, edit, EditError::TrackLocked);
+    }
+    SUBCASE("adding a shaped audio transition is refused too") {
+        TransitionSpanRequest request;
+        request.clipId = ra;
+        request.edge = ClipEdge::Tail;
+        request.start = -f30(10);
+        request.end = kCMTimeZero;
+        request.kind = TransitionKind::WipeLeft;
+        AddTransitionSpans add(fx.seq, {request});
+        const EditResult r = add.apply(fx.project);
+        CHECK_FALSE(r.ok());
+        CHECK(r.message.find("wipeLeft") != std::string::npos);
+    }
+}

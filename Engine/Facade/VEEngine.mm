@@ -2279,6 +2279,37 @@ static std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
                                duration:(CMTime)duration
                                 options:(VETransitionOptions)options {
     VE_ASSERT_MAIN();
+    return [self addTransitionFromClip:fromClipID
+                                toClip:toClipID
+                              duration:duration
+                               options:options
+                                  kind:VETransitionKindCrossDissolve];
+}
+
+/// The refusal of a VETransitionKind value outside the enum (from Swift), or nil.
+static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
+    if (fromVE(kind)) {
+        return nil;
+    }
+    return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                 message:[NSString stringWithFormat:@"%ld is not a transition kind.", long(kind)]];
+}
+
+/// The kind a transition on `track` gets for the requested `kind`: audio transitions have none.
+static TransitionKind transitionKindOn(const Track &track, VETransitionKind kind) {
+    return track.kind == TrackKind::Video ? fromVE(kind).value_or(TransitionKind::CrossDissolve)
+                                          : TransitionKind::CrossDissolve;
+}
+
+- (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID
+                                 toClip:(VEClipID)toClipID
+                               duration:(CMTime)duration
+                                options:(VETransitionOptions)options
+                                   kind:(VETransitionKind)kind {
+    VE_ASSERT_MAIN();
+    if (VEEditResult *refusal = refuseTransitionKind(kind)) {
+        return refusal;
+    }
     const Sequence &sequence = [self activeSequence];
     const CMTime frameDuration = sequence.frameDuration;
     int64_t frames = 0;
@@ -2311,6 +2342,8 @@ static std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
         request.edge = ClipEdge::Tail;
         request.start = start;
         request.end = end;
+        const Track *ownerTrack = sequence.trackOfClip(owner);
+        request.kind = ownerTrack != nullptr ? transitionKindOn(*ownerTrack, kind) : TransitionKind::CrossDissolve;
         return request;
     };
     requests.push_back(centred(from, mainFrames));
@@ -2345,7 +2378,9 @@ static std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
         const Track *track = sequence.trackOfClip(from);
         [notes addObject:track != nullptr && track->kind == TrackKind::Audio
                              ? @"Both sides play the same audio here; trim or move one side to hear the crossfade."
-                             : @"Both sides show the same frames here; trim or move one side to see the dissolve."];
+                             : kind == VETransitionKindCrossDissolve
+                                   ? @"Both sides show the same frames here; trim or move one side to see the dissolve."
+                                   : @"Both sides show the same frames here; trim or move one side to see the transition."];
     }
     NSString *note = notes.count > 0 ? [notes componentsJoinedByString:@" "] : nil;
     auto command = std::make_unique<AddTransitionSpans>(sequenceId, std::move(requests));
@@ -2395,6 +2430,22 @@ static int64_t fadeLimitFrames(const Clip &clip, const Track &track, ClipEdge ed
                              duration:(CMTime)duration
                               options:(VETransitionOptions)options {
     VE_ASSERT_MAIN();
+    return [self addTransitionAtEdge:edge
+                              ofClip:clipID
+                            duration:duration
+                             options:options
+                                kind:VETransitionKindCrossDissolve];
+}
+
+- (VEEditResult *)addTransitionAtEdge:(VEClipEdge)edge
+                               ofClip:(VEClipID)clipID
+                             duration:(CMTime)duration
+                              options:(VETransitionOptions)options
+                                 kind:(VETransitionKind)kind {
+    VE_ASSERT_MAIN();
+    if (VEEditResult *refusal = refuseTransitionKind(kind)) {
+        return refusal;
+    }
     const Sequence &sequence = [self activeSequence];
     const CMTime frameDuration = sequence.frameDuration;
     const ClipId id(static_cast<ClipId::ValueType>(clipID));
@@ -2409,7 +2460,8 @@ static int64_t fadeLimitFrames(const Clip &clip, const Track &track, ClipEdge ed
             return [self addTransitionFromClip:clipID
                                         toClip:static_cast<VEClipID>(next->id.value())
                                       duration:duration
-                                       options:options];
+                                       options:options
+                                          kind:kind];
         }
     }
     int64_t frames = 0;
@@ -2450,6 +2502,7 @@ static int64_t fadeLimitFrames(const Clip &clip, const Track &track, ClipEdge ed
         TransitionSpanRequest request;
         request.clipId = owner.id;
         request.edge = side;
+        request.kind = transitionKindOn(ownerTrack, kind);
         const CMTime fade = timeForFrame(length, frameDuration);
         request.start = side == ClipEdge::Head ? kCMTimeZero : -fade;
         request.end = side == ClipEdge::Head ? fade : kCMTimeZero;
@@ -2474,9 +2527,16 @@ static int64_t fadeLimitFrames(const Clip &clip, const Track &track, ClipEdge ed
             }
         }
     }
-    [notes insertObject:[NSString stringWithFormat:side == ClipEdge::Head ? @"Fades in from %@." : @"Fades out to %@.",
-                                                   fadeTarget(*track)]
-                atIndex:0];
+    const TransitionKind shape = transitionKindOn(*track, kind);
+    if (shape == TransitionKind::CrossDissolve) {
+        [notes insertObject:[NSString stringWithFormat:side == ClipEdge::Head ? @"Fades in from %@." : @"Fades out to %@.",
+                                                       fadeTarget(*track)]
+                    atIndex:0];
+    } else {
+        [notes insertObject:[NSString stringWithFormat:side == ClipEdge::Head ? @"%@ from black." : @"%@ to black.",
+                                                       toNS(displayNameOf(shape))]
+                    atIndex:0];
+    }
     auto command = std::make_unique<AddTransitionSpans>([self sequenceId], std::move(requests));
     AddTransitionSpans *raw = command.get();
     return [self push:std::move(command)
@@ -2484,6 +2544,17 @@ static int64_t fadeLimitFrames(const Clip &clip, const Track &track, ClipEdge ed
                   return toNumbers(raw->createdSpanIds());
               }
                  note:[notes componentsJoinedByString:@" "]];
+}
+
+- (VEEditResult *)setKind:(VETransitionKind)kind forTransition:(VETransitionID)transitionID {
+    VE_ASSERT_MAIN();
+    const std::optional<TransitionKind> engineKind = fromVE(kind);
+    if (!engineKind) {
+        return refuseTransitionKind(kind);
+    }
+    return [self push:std::make_unique<SetTransitionKind>([self sequenceId],
+                                                          SpanId(static_cast<SpanId::ValueType>(transitionID)), *engineKind)
+              created:nil];
 }
 
 - (VETransitionLimit *)transitionLimitFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID {

@@ -625,6 +625,27 @@ class SetTransitionRanges final : public SequenceCommand {
     bool durationChange_ = false;
 };
 
+// Sets the kind of a video transition span (Transition.h: a cross dissolve, a wipe or the iris),
+// whatever its role: across a cut, or a fade to or from black at a free edge. Its range, its role and
+// its linked audio transition are unchanged (audio has no kinds: a crossfade or a fade). Refused:
+// TransitionNotFound (no transition span with that id, an effect span's id included),
+// TrackKindMismatch (a transition on an audio track), TrackLocked. Giving it the kind it has
+// succeeds and changes nothing.
+class SetTransitionKind final : public SequenceCommand {
+  public:
+    SetTransitionKind(SequenceId sequenceId, SpanId spanId, TransitionKind kind);
+    std::string name() const override {
+        return "Change Transition Kind";
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+
+  private:
+    SpanId spanId_;
+    TransitionKind kind_;
+};
+
 // The transition resolved with its role, owner and timeline range, or nullopt when `spanId` is not
 // a transition span of `sequence`.
 std::optional<TransitionPlacement> findTransition(const Sequence &sequence, SpanId spanId);

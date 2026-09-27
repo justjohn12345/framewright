@@ -122,6 +122,24 @@ typedef NS_ENUM(NSInteger, VETransitionStyle) {
     VETransitionStyleFadeIn = 2,
 };
 
+/// What a video transition does to the picture (ve::TransitionKind; the same at a cut and at a free
+/// edge, where the other side is black). Audio transitions are always CrossDissolve (a constant-power
+/// crossfade or a fade). The wipes are named for the direction the edge between the pictures travels.
+typedef NS_ENUM(NSInteger, VETransitionKind) {
+    /// Every pixel mixes linearly from the outgoing picture to the incoming one.
+    VETransitionKindCrossDissolve = 0,
+    /// The incoming picture enters from the right edge; the edge travels left.
+    VETransitionKindWipeLeft = 1,
+    /// The incoming picture enters from the left edge; the edge travels right.
+    VETransitionKindWipeRight = 2,
+    /// The incoming picture enters from the bottom edge; the edge travels up.
+    VETransitionKindWipeUp = 3,
+    /// The incoming picture enters from the top edge; the edge travels down.
+    VETransitionKindWipeDown = 4,
+    /// The incoming picture shows inside a circle growing from the frame's centre to its corners.
+    VETransitionKindIris = 5,
+};
+
 /// A framing of the picture for the Ken Burns helper: the position and scale that make a chosen
 /// rectangle of the picture fill the frame.
 typedef struct {
@@ -231,6 +249,9 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 /// of a cross dissolve (0 for a fade) and the linked transition (the dissolve's audio crossfade or
 /// the other way round; 0 when none).
 @property (nonatomic, readonly) VETransitionStyle transitionStyle;
+/// Transitions: what it does to the picture (CrossDissolve for an audio transition and for effect
+/// spans).
+@property (nonatomic, readonly) VETransitionKind transitionKind;
 @property (nonatomic, readonly) CMTime duration;
 @property (nonatomic, readonly) CMTime shareBeforeCut;
 @property (nonatomic, readonly) CMTime shareAfterCut;
@@ -330,6 +351,8 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 @property (nonatomic, readonly) VEClipID fromClipID;
 @property (nonatomic, readonly) VEClipID toClipID;
 @property (nonatomic, readonly) VETransitionStyle style;
+/// What it does to the picture (CrossDissolve for an audio transition).
+@property (nonatomic, readonly) VETransitionKind kind;
 @property (nonatomic, readonly) CMTime duration;
 /// Timeline range covered, and how much of it lies before and after the cut.
 @property (nonatomic, readonly) CMTime start;

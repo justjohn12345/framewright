@@ -664,3 +664,62 @@ TEST_CASE("Scheduler: a solo graph shows one clip alone, held inside it, at iden
     CHECK(solo(ClipId(987654), 10, true).isEmpty());
     CHECK(Scheduler::soloGraphAt(fx.sequence(), fx.project, pip, kCMTimeInvalid, true).isEmpty());
 }
+
+TEST_CASE("Scheduler: a shaped transition carries its kind to the layers; the sound never sees it") {
+    Fixture fx;
+    const auto [av, aa] = fx.addLinkedPair(0, 60, 30);
+    const auto [bv, ba] = fx.addLinkedPair(60, 60, 300);
+    const SpanId videoCut = fx.addTransition(fx.v1, av, bv, 10);
+    fx.addTransition(fx.a1, aa, ba, 10);
+    const SpanId fadeIn = fx.addFade(av, ClipEdge::Head, f30(12));
+    const SpanId fadeOut = fx.addFade(bv, ClipEdge::Tail, f30(12));
+    fx.requireValid();
+    const AudioGraph dissolveSound = audioFor(fx, 0, 120);
+    auto sameSound = [](const AudioGraph &a, const AudioGraph &b) {
+        REQUIRE(a.segments.size() == b.segments.size());
+        for (std::size_t i = 0; i < a.segments.size(); ++i) {
+            const AudioSegment &x = a.segments[i];
+            const AudioSegment &y = b.segments[i];
+            CHECK(x.clipId == y.clipId);
+            CHECK(identical(x.timelineRange.start, y.timelineRange.start));
+            CHECK(identical(x.timelineRange.end, y.timelineRange.end));
+            CHECK(identical(x.sourceRange.start, y.sourceRange.start));
+            CHECK(identical(x.sourceRange.end, y.sourceRange.end));
+            CHECK(x.speedRatio == y.speedRatio);
+            CHECK(x.level.start == y.level.start);
+            CHECK(x.level.end == y.level.end);
+            CHECK(x.fade.start == y.fade.start);
+            CHECK(x.fade.end == y.fade.end);
+            CHECK(x.crossfade.start == y.crossfade.start);
+            CHECK(x.crossfade.end == y.crossfade.end);
+            CHECK(x.transitionId == y.transitionId);
+            CHECK(x.crossfadePartner == y.crossfadePartner);
+        }
+    };
+    for (const TransitionKind kind : kTransitionKinds) {
+        CAPTURE(nameOf(kind));
+        for (const SpanId id : {videoCut, fadeIn, fadeOut}) {
+            fx.sequence().findSpan(id)->transition = kind;
+        }
+        fx.requireValid();
+        const RenderGraph cut = graphAt(fx, 57);
+        REQUIRE(cut.layers.size() == 2);
+        for (const VideoLayer &layer : cut.layers) {
+            REQUIRE(layer.transition.has_value());
+            CHECK(layer.transition->kind == kind);
+            CHECK(layer.transition->role == TransitionRole::CrossDissolve);
+            CHECK(layer.transition->mix == doctest::Approx(2.5 / 10.0)); // frame 2 of 10: (2 + 1/2) / 10
+        }
+        const RenderGraph in = graphAt(fx, 3);
+        REQUIRE(in.layers.size() == 1);
+        CHECK(in.layers[0].transition->kind == kind);
+        CHECK(in.layers[0].transition->role == TransitionRole::FadeIn);
+        CHECK(in.layers[0].transition->isIncoming);
+        const RenderGraph out = graphAt(fx, 115);
+        REQUIRE(out.layers.size() == 1);
+        CHECK(out.layers[0].transition->kind == kind);
+        CHECK(out.layers[0].transition->role == TransitionRole::FadeOut);
+        CHECK_FALSE(out.layers[0].transition->isIncoming);
+        sameSound(audioFor(fx, 0, 120), dissolveSound);
+    }
+}

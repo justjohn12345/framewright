@@ -403,6 +403,15 @@ NS_SWIFT_UI_ACTOR
                                  toClip:(VEClipID)toClipID
                                duration:(CMTime)duration
                                 options:(VETransitionOptions)options;
+/// The same with the kind of the video transition (VETransitionKind: a cross dissolve, a wipe or the
+/// iris). A transition added on an audio track (the cut's own, or the linked partners' crossfade) is
+/// always a constant-power crossfade whatever `kind` says. Refused with VEEditErrorInvalidArgument
+/// for a value outside VETransitionKind.
+- (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID
+                                 toClip:(VEClipID)toClipID
+                               duration:(CMTime)duration
+                                options:(VETransitionOptions)options
+                                   kind:(VETransitionKind)kind;
 /// Adds a transition at `edge` of `clipID` of `duration` (whole frames): at the clip's end a cross
 /// dissolve centred on the cut when a clip touches that end (as addTransitionFromClip:), else a
 /// fade out to black / silence over the clip's last `duration`; at its start a fade in from black /
@@ -414,6 +423,21 @@ NS_SWIFT_UI_ACTOR
                              duration:(CMTime)duration
                               options:(VETransitionOptions)options
     NS_SWIFT_NAME(addTransition(at:of:duration:options:));
+/// The same with the kind of the video transition: at a free edge a wipe or the iris reveals the
+/// picture from black (a fade in) or black over it (a fade out). An audio fade is always a fade.
+- (VEEditResult *)addTransitionAtEdge:(VEClipEdge)edge
+                               ofClip:(VEClipID)clipID
+                             duration:(CMTime)duration
+                              options:(VETransitionOptions)options
+                                 kind:(VETransitionKind)kind
+    NS_SWIFT_NAME(addTransition(at:of:duration:options:kind:));
+/// Sets what a video transition does to the picture (its range, its role and its linked audio
+/// crossfade or fade are unchanged): one undo step "Change Transition Kind". Refused:
+/// VEEditErrorTransitionNotFound (not a transition), VEEditErrorTrackKindMismatch (an audio
+/// transition, which is always a crossfade or a fade), VEEditErrorTrackLocked,
+/// VEEditErrorInvalidArgument (a value outside VETransitionKind).
+- (VEEditResult *)setKind:(VETransitionKind)kind
+            forTransition:(VETransitionID)transitionID NS_SWIFT_NAME(setTransitionKind(_:for:));
 /// The longest transition the cut between the two clips can take and what stops a longer one
 /// (maximumFrames 0 with the reason when none fits, e.g. the cut already has a transition).
 - (VETransitionLimit *)transitionLimitFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID;

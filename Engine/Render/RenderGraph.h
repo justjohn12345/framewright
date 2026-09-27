@@ -17,10 +17,33 @@
 
 namespace ve {
 
+// The half width, in sequence pixels, of the soft edge of a shaped transition (a wipe or the iris):
+// the reveal goes from 0 to 1 across 2 * kTransitionFeather pixels, so the edge is anti-aliased
+// without looking blurred at any frame size.
+inline constexpr double kTransitionFeather = 2.0;
+
+// The reveal m of a shaped transition (TransitionKind other than CrossDissolve) at the sequence
+// position (x, y) (pixels, origin top left, +y down) of a W x H frame at linear progress p: the share
+// of the incoming picture there (the compositor shows mix(outgoing, incoming, m), and a single layer
+// of a fade role times m fading in or 1 - m fading out). With f = kTransitionFeather:
+//   d = the distance from where the incoming picture enters: W - x (WipeLeft), x (WipeRight),
+//       H - y (WipeUp), y (WipeDown), |(x, y) - (W / 2, H / 2)| (Iris);
+//   L = the distance the edge travels across the frame: W, W, H, H, and half the frame's diagonal
+//       sqrt(W^2 + H^2) / 2 for the iris (so the circle reaches the corners);
+//   r = p (L + 2f) - f, the edge's distance from the entering side;
+//   m = 1 - smoothstep(r - f, r + f, d), smoothstep(a, b, v) = t^2 (3 - 2t), t = clamp((v - a) / (b - a), 0, 1).
+// At p = 0 the band [r - f, r + f] = [-2f, 0] lies before every d >= 0, so m = 0 everywhere (exactly
+// the outgoing picture); at p = 1 it is [L, L + 2f], past every d <= L in the frame, so m = 1
+// everywhere (exactly the incoming picture). Shaders.metal implements it (transitionReveal); the
+// compositor tests hold it to a C++ copy of this formula.
+
 // Transition state of a layer (a lane-0 span acting on this frame, Transition.h). The two clips
 // of a cross dissolve are emitted as consecutive layers (outgoing first) and point at each other
 // through `partnerLayerIndex`; a fade to or from black is a single layer whose `partnerLayerIndex`
-// is its own index (no partner), faded by weight() over the black (or the tracks below).
+// is its own index (no partner), faded by weight() over the black (or the tracks below). A shaped
+// kind (a wipe or the iris) replaces the uniform weight with the per-pixel reveal (see
+// kTransitionFeather): the incoming layer (or a fade in) is drawn times m, the outgoing layer (or a
+// fade out) times 1 - m.
 struct LayerTransition {
     SpanId transitionId;
     TransitionKind kind = TransitionKind::CrossDissolve;

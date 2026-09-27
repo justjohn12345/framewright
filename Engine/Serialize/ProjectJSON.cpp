@@ -333,8 +333,8 @@ using Warnings = std::vector<std::string>;
 // dissolve so the rest of the file still loads.
 TransitionKind parseTransitionKind(const Node &node, Warnings &warnings) {
     const std::string s = node.asString();
-    if (s == nameOf(TransitionKind::CrossDissolve)) {
-        return TransitionKind::CrossDissolve;
+    if (const auto kind = transitionKindNamed(s)) {
+        return *kind;
     }
     warnings.push_back(node.path() + ": unknown transition kind \"" + s + "\"; using a cross dissolve");
     return TransitionKind::CrossDissolve;
@@ -1321,6 +1321,11 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
                             warnings.push_back(spanWhere + ": a transition lies on lane 0, found lane " +
                                                std::to_string(span.lane) + "; moved to lane 0");
                             span.lane = kTransitionLane;
+                        }
+                        if (track.kind == TrackKind::Audio && span.transition != TransitionKind::CrossDissolve) {
+                            warnings.push_back(spanWhere + ": an audio transition is a crossfade or a fade, not \"" +
+                                               nameOf(span.transition) + "\"; using a cross dissolve");
+                            span.transition = TransitionKind::CrossDissolve;
                         }
                         continue;
                     }

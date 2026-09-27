@@ -851,6 +851,177 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
     XCTAssertLessThan(brightness[29], brightness[15] / 2);
 }
 
+/// Shaped transitions (wipes and the iris): V1 is the movie from 1 s for 30 frames, a Wipe Left over
+/// the 10 frames around the cut (5 before, 5 after) into the movie from 5 s, which ends in a 10-frame
+/// Iris fade out to black at the free end. Every sampled frame of the export shows the monitor's
+/// picture; mid-wipe the right of the frame shows the incoming picture and the left does not, and
+/// mid-iris black (the incoming side of a fade out) fills the centre while the corners keep the
+/// picture.
+- (void)testAWipeAndAnIrisExportTheMonitorsPictures {
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    h.sequence().width = 640;
+    h.sequence().height = 360;
+    const AssetId movie = h.importAsset("h264_1080p30.mp4");
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    const ClipId a = h.addClip(h.v1, movie, 0, 30, CMTimeMake(1, 1));
+    const ClipId b = h.addClip(h.v1, movie, 30, 30, CMTimeMake(5, 1));
+    const SpanId wipe = h.addTailTransition(a, 5, 5);
+    const SpanId iris = h.addFade(b, ClipEdge::Tail, 10);
+    h.sequence().findSpan(wipe)->transition = TransitionKind::WipeLeft;
+    h.sequence().findSpan(iris)->transition = TransitionKind::Iris;
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+
+    ex::ExportRequest request;
+    request.project = std::make_shared<const Project>(h.project);
+    request.sequenceId = h.sequenceId;
+    request.encode.container = media::ContainerFormat::MOV;
+    media::VideoEncodeSettings v;
+    v.codec = media::VideoCodec::ProRes422;
+    v.width = 640;
+    v.height = 360;
+    request.encode.video = v;
+    request.outputPath = _dir + "/shapes-parity.mov";
+    ex::ExportServices services;
+    services.router = h.router;
+    services.cache = std::make_shared<media::FrameCache>();
+    services.routing = routingOf(h.project, *h.router);
+    std::string error;
+    auto result = runExport(request, services, error);
+    XCTAssertTrue(result.has_value(), @"%s", error.c_str());
+    if (!result || !result->ok()) {
+        XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
+        return;
+    }
+    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
+    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, 640, 360);
+    auto routed = h.router->probe(request.outputPath);
+    XCTAssertTrue(created.ok() && pool.ok() && routed.ok());
+    if (!created.ok() || !pool.ok() || !routed.ok()) {
+        return;
+    }
+    media::DecodeOptions bgra;
+    bgra.pixelFormat = kCVPixelFormatType_32BGRA;
+    auto decoder = h.router->makeVideoDecoder(*routed, -1, bgra);
+    XCTAssertTrue(decoder.ok());
+    if (!decoder.ok()) {
+        return;
+    }
+    // The monitor's picture of `graph` (the frame the controller presents) as 16x16 block means.
+    auto monitorBlocks = [&](const render::PreviewFrame &frame) -> std::optional<std::vector<double>> {
+        auto buffer = pool->makeBuffer();
+        if (!buffer.ok()) {
+            return std::nullopt;
+        }
+        auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &texture) {
+            if (index >= frame.textures.size() || !frame.textures[index]) {
+                return false;
+            }
+            texture = frame.textures[index];
+            return true;
+        };
+        auto rendered = created.value()->renderAndWait(frame.graph, lookup, render::PixelBufferTarget{buffer.value()});
+        if (!rendered.ok() || !rendered->status.ok() || !rendered->skippedLayers.empty()) {
+            return std::nullopt;
+        }
+        return blockMeans(buffer.value().get());
+    };
+    std::map<int64_t, std::vector<double>> exported;
+    std::map<int64_t, std::vector<double>> monitor;
+    for (int64_t f : {20, 25, 27, 29, 30, 32, 34, 35, 45, 50, 52, 55, 57, 59}) {
+        h.controller->seek(frames30(f));
+        const PlaybackHarness::Sample sample = h.presentExact();
+        XCTAssertEqual(sample.presented.frameIndex, f);
+        const render::PreviewFrame &frame = h.frame();
+        const bool inWipe = f >= 25 && f < 35;
+        const bool inIris = f >= 50;
+        XCTAssertEqual(frame.graph.layers.size(), inWipe ? 2u : 1u, @"frame %lld", f);
+        for (const VideoLayer &layer : frame.graph.layers) {
+            if (inWipe) {
+                XCTAssertTrue(layer.transition && layer.transition->kind == TransitionKind::WipeLeft &&
+                                  layer.transition->transitionId == wipe,
+                              @"frame %lld", f);
+            } else if (inIris) {
+                XCTAssertTrue(layer.transition && layer.transition->kind == TransitionKind::Iris &&
+                                  layer.transition->role == TransitionRole::FadeOut,
+                              @"frame %lld", f);
+            } else {
+                XCTAssertFalse(layer.transition.has_value(), @"frame %lld", f);
+            }
+        }
+        const auto blocks = monitorBlocks(frame);
+        XCTAssertTrue(blocks.has_value(), @"frame %lld", f);
+        if (!blocks) {
+            continue;
+        }
+        monitor[f] = *blocks;
+        XCTAssertTrue(decoder->decoder->seek(frames30(f)).ok());
+        auto decoded = decoder->decoder->next();
+        XCTAssertTrue(decoded.ok() && decoded.value(), @"exported frame %lld", f);
+        if (!decoded.ok() || !decoded.value()) {
+            continue;
+        }
+        exported[f] = blockMeans(decoded.value()->image.get());
+        const Difference d = compare(monitor[f], exported[f]);
+        NSLog(@"PARITY shape frame %lld: blocks differ by at most %.2f, on average %.3f", f, d.maxBlock, d.meanBlock);
+        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
+        XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
+    }
+    // Mid-wipe (frame 30, progress 0.55: the edge about 288 px from the right): the right column of
+    // blocks is the incoming clip's picture exactly, the left one is not (it is the outgoing clip's
+    // handle, which no frame inside that clip shows, so it is compared with the incoming picture).
+    const size_t columns = 640 / kBlock;
+    auto column = [&](const std::vector<double> &blocks, size_t x) {
+        std::vector<double> c;
+        for (size_t row = 0; row < 360 / kBlock; ++row) {
+            for (int ch = 0; ch < 3; ++ch) {
+                c.push_back(blocks[(row * columns + x) * 3 + size_t(ch)]);
+            }
+        }
+        return c;
+    };
+    // `clip`'s picture alone at frame `f` (the solo preview, identity placement as the clip has).
+    auto alone = [&](ClipId clip, int64_t f) -> std::optional<std::vector<double>> {
+        h.controller->setPreviewSolo(playback::PlaybackController::PreviewSolo{clip, true});
+        h.controller->seek(frames30(f));
+        (void)h.presentExact();
+        auto blocks = monitorBlocks(h.frame());
+        h.controller->setPreviewSolo(std::nullopt);
+        return blocks;
+    };
+    if (monitor.count(30)) {
+        const auto bAlone = alone(b, 30);
+        XCTAssertTrue(bAlone.has_value());
+        if (bAlone) {
+            const Difference right = compare(column(monitor[30], columns - 1), column(*bAlone, columns - 1));
+            const Difference left = compare(column(monitor[30], 0), column(*bAlone, 0));
+            NSLog(@"PARITY mid-wipe: right column vs B alone %.2f, left column vs B alone %.2f", right.maxBlock,
+                  left.maxBlock);
+            XCTAssertLessThan(right.maxBlock, 1.0, @"the right of the frame shows the incoming picture");
+            XCTAssertGreaterThan(left.maxBlock, 20.0, @"the left of the frame still shows the outgoing picture");
+        }
+    }
+    if (monitor.count(55)) {
+        // Mid-iris (frame 55, progress 0.55 of a fade out): the incoming side is black, so black shows
+        // inside the growing circle; the corners keep the picture.
+        const auto bAlone = alone(b, 55);
+        XCTAssertTrue(bAlone.has_value());
+        if (bAlone) {
+            const size_t rows = 360 / kBlock;
+            const size_t centre = (rows / 2) * columns + columns / 2;
+            const size_t corner = 0;
+            for (int ch = 0; ch < 3; ++ch) {
+                XCTAssertLessThan(monitor[55][centre * 3 + size_t(ch)], 1.0, @"the centre is black");
+                XCTAssertEqualWithAccuracy(monitor[55][corner * 3 + size_t(ch)], (*bAlone)[corner * 3 + size_t(ch)], 1.0,
+                                           @"the corner shows the picture");
+            }
+        }
+    }
+}
+
 /// The reference case of the hold-after rule: V1 is a 30 s clip (the 10 s movie at 1/4 speed, so
 /// source [0, 7.5 s)) with a 5 s Ken Burns move from 5 s to 10 s on the timeline (source
 /// [1.25 s, 2.5 s)), from the clip's own framing to a push in at 160 %, 120 left and 50 down, easing

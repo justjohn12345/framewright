@@ -626,6 +626,64 @@ TEST_CASE("ProjectJSON: unknown kinds and keys of spans warn instead of failing"
     }
 }
 
+TEST_CASE("ProjectJSON: every transition kind round trips on a cut and on a free edge") {
+    for (const TransitionKind kind : kTransitionKinds) {
+        CAPTURE(nameOf(kind));
+        Fixture fx = richFixture();
+        Sequence &sequence = fx.sequence();
+        Clip &dissolveOwner = sequence.videoTracks[0].clips[0];
+        REQUIRE(dissolveOwner.transitionAt(ClipEdge::Tail) != nullptr);
+        dissolveOwner.transitionAt(ClipEdge::Tail)->transition = kind; // across the cut
+        Clip &still = sequence.videoTracks[1].clips[1];
+        REQUIRE(still.isStill);
+        still.transitionAt(ClipEdge::Head)->transition = kind; // a fade in
+        still.transitionAt(ClipEdge::Tail)->transition = kind; // a fade out
+        fx.requireValid();
+        const std::string text = serializeProject(fx.project);
+        CHECK(contains(text, std::string("\"transition\": \"") + nameOf(kind) + "\""));
+        const ProjectLoadResult loaded = parseProject(text);
+        REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+        CHECK(loaded.warnings.empty());
+        CHECK(*loaded.project == fx.project);
+        CHECK(serializeProject(*loaded.project) == text);
+        CHECK(transitionKindNamed(nameOf(kind)) == kind);
+    }
+    CHECK_FALSE(transitionKindNamed("wipe").has_value());
+    CHECK_FALSE(transitionKindNamed("").has_value());
+}
+
+TEST_CASE("ProjectJSON: an unknown transition kind is named in the warning and a shaped kind on audio is repaired") {
+    const Fixture fx = richFixture();
+    SUBCASE("unknown: a cross dissolve, the name in the warning") {
+        json j = projectToJson(fx.project);
+        j["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][0]["transition"] = "clockWipe";
+        const ProjectLoadResult loaded = projectFromJson(j);
+        REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+        CHECK(*loaded.project == fx.project);
+        REQUIRE(loaded.warnings.size() == 1);
+        CHECK(contains(loaded.warnings[0], "unknown transition kind \"clockWipe\"; using a cross dissolve"));
+    }
+    SUBCASE("a wipe on an audio track's fade becomes a cross dissolve (audio has no shapes)") {
+        json j = projectToJson(fx.project);
+        json &music = j["sequences"][0]["audioTracks"][1]["clips"][0];
+        REQUIRE(music["spans"][0]["kind"] == "transition");
+        music["spans"][0]["transition"] = "iris";
+        const ProjectLoadResult loaded = projectFromJson(j);
+        REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+        CHECK(*loaded.project == fx.project);
+        REQUIRE(loaded.warnings.size() == 1);
+        CHECK(contains(loaded.warnings[0], "an audio transition is a crossfade or a fade, not \"iris\"; using a cross dissolve"));
+    }
+    SUBCASE("validation refuses a shaped kind on an audio track") {
+        Fixture edited = richFixture();
+        Clip &music = edited.sequence().audioTracks[1].clips[0];
+        music.transitionAt(ClipEdge::Head)->transition = TransitionKind::WipeUp;
+        const auto problem = validateProject(edited.project);
+        REQUIRE(problem.has_value());
+        CHECK(contains(*problem, "wipeUp"));
+    }
+}
+
 TEST_CASE("ProjectJSON: a model keyframe that is not custom cannot carry a curve (it would not round trip)") {
     Fixture fx = richFixture();
     fx.sequence().videoTracks[0].clips[0].spans[1].tracks.y[0].curve = TimingCurve{0.1, 0.2, 0.3, 0.4};

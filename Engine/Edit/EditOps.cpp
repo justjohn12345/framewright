@@ -1798,6 +1798,32 @@ EditResult SetTransitionRanges::perform(const Project &project, Sequence &sequen
     return EditResult::success();
 }
 
+SetTransitionKind::SetTransitionKind(SequenceId sequenceId, SpanId spanId, TransitionKind kind)
+    : SequenceCommand(sequenceId), spanId_(spanId), kind_(kind) {}
+
+EditResult SetTransitionKind::perform(const Project &project, Sequence &sequence, IdGenerator &) {
+    Clip *clip = nullptr;
+    Track *track = nullptr;
+    EffectSpan *span = sequence.findSpan(spanId_, &clip, &track);
+    if (span == nullptr || !span->isTransition()) {
+        return EditResult::failure(EditError::TransitionNotFound,
+                                   "transition " + idString(spanId_.value()) + " does not exist");
+    }
+    if (EditResult r = requireEditableTrack(track, track->id); !r) {
+        return r;
+    }
+    if (track->kind != TrackKind::Video) {
+        return EditResult::failure(EditError::TrackKindMismatch,
+                                   std::string("an audio transition is a crossfade or a fade; it cannot be a ") +
+                                       displayNameOf(kind_));
+    }
+    span->transition = kind_;
+    if (EditResult r = checkPlacedTransition(project, sequence, *track, *clip, *span); !r) {
+        return r;
+    }
+    return EditResult::success();
+}
+
 namespace {
 
 // linkedTransition for the lane-0 `span` of `owner` on `track`, with `find` looking clips up by id.

@@ -41,6 +41,9 @@ VESpanKind toVE(SpanKind kind);
 /// Nullopt for a value outside the enumeration.
 std::optional<SpanKind> fromVE(VESpanKind kind);
 VETransitionStyle toVE(TransitionRole role);
+VETransitionKind toVE(TransitionKind kind);
+// nullopt for a value outside the enum (from Swift).
+std::optional<TransitionKind> fromVE(VETransitionKind kind);
 /// The value of `parameter` in `values`.
 double spanValueIn(const VESpanValues &values, SpanParameter parameter);
 
