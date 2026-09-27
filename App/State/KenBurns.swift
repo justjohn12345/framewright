@@ -799,6 +799,22 @@ final class KenBurnsModel: ObservableObject {
                                           end: edge == .end ? neutral : unchanged))
     }
 
+    /// Why Continue on Next Clip cannot carry this move on to the next clip (the engine's sentence), nil
+    /// when it can (`ProjectStore.continueMotionProblem`).
+    var continueOnNextClipProblem: String? {
+        store.continueMotionProblem(spanID)
+    }
+
+    /// Continue on Next Clip: a new Motion span on the clip after this one continues this move from where
+    /// it is at the cut, at the same rate (`ProjectStore.continueMotionOnNextClip`); the editor then moves
+    /// to it. One undo step; a refusal is the note.
+    func continueOnNextClip() {
+        guard mayEdit() else { return }
+        if !store.continueMotionOnNextClip(spanID) {
+            note = store.statusMessage
+        }
+    }
+
     /// Two framings the same within a millionth (the engine's `motionValuesMatch`).
     static func sameFraming(_ a: VEMotionFraming, _ b: VEMotionFraming) -> Bool {
         func same(_ u: Double, _ v: Double) -> Bool { abs(u - v) <= 1e-6 * max(1, abs(u), abs(v)) }

@@ -602,6 +602,54 @@ extension ProjectStore {
         return result
     }
 
+    // MARK: Continue on Next Clip
+
+    /// The Motion span Continue on Next Clip acts on: the selected span when it is a Motion span.
+    var continueMotionSpan: VEEffectSpan? {
+        selectedEffectSpan.flatMap { $0.kind == .motion ? $0 : nil }
+    }
+
+    /// Why Continue on Next Clip cannot carry the Motion span `id` on to the next clip now (the engine's
+    /// sentence: no clip touching its clip's end, not the clip's last move, no lane of the next clip free
+    /// on its first frame, a locked track), nil when it can.
+    func continueMotionProblem(_ id: VESpanID) -> String? {
+        engine.continueMotionProblem(forSpan: id)
+    }
+
+    /// Clip > Continue on Next Clip is enabled: no gesture, a selected Motion span that can be continued.
+    var canContinueMotionOnNextClip: Bool {
+        guard !isGestureActive, let span = continueMotionSpan else { return false }
+        return continueMotionProblem(span.spanID) == nil
+    }
+
+    /// Clip > Continue on Next Clip and the Ken Burns bar's button: carries the move of the Motion span
+    /// `id` (default: the selected one) on to the clip touching the end of its clip, as a new Motion span
+    /// from that clip's first frame (`VEEngine.continueMotionSpanOnNextClip`: it starts where the move is
+    /// at the cut and goes on at the same rate for as long, with the same easing). One undo step. The new
+    /// span is selected, so the editor moves to it, in the mode the move's editor was in. A refusal is
+    /// reported in the status line; returns whether it went ahead.
+    @discardableResult
+    func continueMotionOnNextClip(_ id: VESpanID? = nil) -> Bool {
+        guard !isGestureActive else {
+            statusMessage = "Finish the current drag first."
+            return false
+        }
+        guard let source = id ?? continueMotionSpan?.spanID else {
+            statusMessage = "Select a Motion span to continue its move on the next clip."
+            return false
+        }
+        inspector.endNudgeBurst()
+        let mode = kenBurns?.spanID == source ? kenBurns?.mode : kenBurnsModes[source]
+        let result = engine.continueMotionSpanOnNextClip(source)
+        guard report(result), let span = result.span else { return false }
+        if let mode { rememberKenBurnsMode(mode, for: span.spanID) } // before selecting: it opens in this mode
+        select(span: span.spanID)
+        if statusMessage == nil, let clip = clips[span.clipID] {
+            statusMessage = "The move continues on “\(clip.name)”."
+        }
+        return true
+    }
+
     /// Whether matching the span's `edge` applies: a clip touches that edge of its clip, and for the
     /// start the span starts on its clip's first frame (the engine refuses a later one).
     func canMatchSpan(_ span: VEEffectSpan, _ edge: VEClipEdge) -> Bool {

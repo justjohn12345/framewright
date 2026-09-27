@@ -313,6 +313,12 @@ struct KenBurnsControls: View {
             field("End", .end, help: "Where the move reaches its end placement, as a timeline time")
             field("Duration", .duration, help: "How long the move lasts: frames (45f), seconds (2.5s) or timecode")
             Spacer(minLength: 0)
+            let problem = model.continueOnNextClipProblem
+            Button("Continue on Next Clip") { model.continueOnNextClip() }
+                .disabled(problem != nil)
+                .help(problem ?? "Carry this move on to the next clip: it starts where the move is at the cut and "
+                    + "goes on at the same speed for as long")
+                .accessibilityIdentifier("KenBurnsContinueOnNext")
         }
     }
 

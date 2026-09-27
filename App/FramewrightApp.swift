@@ -151,6 +151,10 @@ struct AppCommands: Commands {
                 .disabled(!store.canAddMotionSpanAtPlayhead)
             Button("Add Motion Span") { store.addMotionSpanAtPlayhead(mode: .transform) }
                 .disabled(!store.canAddMotionSpanAtPlayhead)
+            // The selected Motion span's move carried on to the next clip (enabled when a clip touches its
+            // clip's end, it is the clip's last move and a lane of the next clip is free on its first frame).
+            Button("Continue on Next Clip") { store.continueMotionOnNextClip() }
+                .disabled(!store.canContinueMotionOnNextClip)
             Divider()
             Button("Raise Gain 1 dB  ]") { store.nudgeGain(1) }
                 .disabled(store.selection.isEmpty)
