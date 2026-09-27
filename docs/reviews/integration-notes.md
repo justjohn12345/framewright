@@ -1345,6 +1345,26 @@ From the user's hands-on testing of the reverse, speed and wipes round.
   1/64 (4 codes) off the box filter it approximates, so it cannot be held to 1/255. The test holds the shader to the
   exact box filter away from the feather and to the 32-sub-step average of the soft edge (which 32 sub-steps do
   integrate to well under 1/255 at these sweeps) everywhere.
+- F. Fades start and end on black; the iris closes at a clip's end (follow-up to E). A user's frame 0 of an iris
+  fade in showed a small circle of picture: its exposure was [0, 1/n]. The Scheduler (`exposureSteps`) now sets
+  the interval by role: across a cut [k / n, (k + 1) / n] as before; a fade in [(k - 1) / n, k / n] (frame 0 is
+  [0, 0], exactly black; the picture is whole on the frame after the fade); a fade out [(k + 1) / n, (k + 2) / n]
+  (the picture starts leaving one frame in; frame n - 1 is [1, 1], exactly black), the time mirror of the fade in.
+  `mix` stays the frame's centre in every role, so the cross dissolve kind (and a dissolve fade) is bit-identical.
+  The iris of a fade out now closes on the picture (Transition.h: "Iris opens on a cut or a fade-in and closes on
+  a fade-out"): the picture stays inside a disc of radius (1 - p) L that shrinks to the centre, black coming in
+  from the corners. The compositor draws it as the opening iris over the mirrored interval [1 - p1, 1 - p0], the
+  single layer times m (`isClosingIris`, `progressUniforms`, `shapeUniforms`), so the feather and the exposure
+  averaging are the same and no shader changed; wipes at a fade out keep their direction. The Effects tab's Iris
+  tile reads "Video: a circle opening from the centre; closes at a clip's end". Tests: `SchedulerTests` (the
+  interval per role, [0, 0] and [1, 1] at the ends), `TransitionShapeTests.testAScheduledFadeStartsAndEndsOnAWhollyBlackFrame`
+  (every shape, from a sequence through the Scheduler and the compositor over a white still: the first and last
+  frames black pixel for pixel, every fade frame against the reference for its role's interval, the frames between
+  untouched), `testAnIrisAtAFadeOutClosesOnThePicture` (centre the picture, corners black, pixel-identical to the
+  fade in's iris over the mirrored interval), the free-edge test (the closing iris against its mirror),
+  `ExportParityTests.testAWipeAndAnIrisExportTheMonitorsPictures` (now with a Wipe Right fade in at the start: its
+  frame 0 and the iris's last frame black on the monitor and in the export; mid-iris the centre keeps the picture
+  and the corners are black, where before black grew from the centre).
 - By hand: select a linked pair by a click, Link / Unlink (Cmd-L), drag the clip (its sound stays), Delete (the
   sound stays); the same from the inspector's button and the context menu on the sound. A | reversed A | A with a
   Control-K span on each: Continue from previous clip on the reversed clip; play across both cuts (the held picture
@@ -1352,4 +1372,5 @@ From the user's hands-on testing of the reverse, speed and wipes round.
   span, twice: one zoom through three clips; Cmd-Z removes one continuation at a time; the button disabled with its
   reason on the last clip. Clips, spans and transitions selected in light and dark appearance (accent border,
   brighter fill, readable label). A 10-frame wipe and iris played and stepped frame by frame: the edge moves
-  smoothly, the frame before and after are clean; export one.
+  smoothly, the frame before and after are clean; export one. An iris and a wipe fade in and fade out stepped
+  frame by frame: the fade in's first frame and the fade out's last are black; the iris closes at the clip's end.

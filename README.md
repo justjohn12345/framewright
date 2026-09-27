@@ -47,7 +47,8 @@ audited the code line by line.
   right, up and down and an iris on video, constant-power crossfades on audio, across a cut with any split of the
   two sides such as 70/30, and fades or wipes to and from black or silence at a free edge; the inspector changes a
   video transition's kind; a wipe's or the iris's edge is averaged over each frame's exposure, so it sweeps smoothly
-  instead of stepping from frame to frame); lanes 1-3 have Motion, Fade (opacity) and Gain spans, each with start and end values that
+  instead of stepping from frame to frame, a fade in starts and a fade out ends on a black frame, and the iris
+  closes on the picture at a clip's end); lanes 1-3 have Motion, Fade (opacity) and Gain spans, each with start and end values that
   compose onto the clip's own (a pan on one lane, a zoom on another) and hold their end value until the clip ends.
   Drag across an empty lane to make a span (a Motion span on video, with Option a fade, a Gain span on audio), or
   press Control-K for a Motion span at the playhead; drag a span to move it and its edges to trim it (snapping to
