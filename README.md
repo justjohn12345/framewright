@@ -62,6 +62,9 @@ audited the code line by line.
   Control-K in Ken Burns mode when the clip spans the frame across or down (a letterboxed or pillarboxed picture
   too). The monitors shade the area around the frame so its edge shows. Projects from earlier versions open with their keyframes and fades as spans and look and sound the
   same.
+- Reverse Clip (Option-Cmd-R, the clip's context menu, the inspector's Speed row or the Speed/Duration sheet):
+  a clip and its linked audio play their media backwards, frame for frame and sample for sample, in playback,
+  scrubbing, thumbnails and export; trims and splits keep the pictures where they are.
 - Inspector for the clips' position, scale, rotation, opacity, gain, fades and exact speed (typed as a
   percentage, a multiplier or a fraction, or from presets); transitions
   kept together with their linked partner (Delete removes both, Option-Delete one; a change also changes

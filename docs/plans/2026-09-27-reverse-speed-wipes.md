@@ -1,5 +1,9 @@
 # Reverse, speed in the inspector, wipe and iris transitions (plan, 2026-09-27)
 
+**Done (2026-09-27).** All three items are implemented; the notes, the tests and the deviations (the fixed mirror of
+reverse, the unknown-kind warning, the glyphs' direction, the speed row's existing parts) are in
+`docs/reviews/integration-notes.md`, sections "Wipe and iris transitions", "Speed in the inspector" and "Reverse".
+
 ## Goal
 Three user requests: reverse a clip; a quicker way to set playback speed; more transitions (wipe left, right,
 up, down; a circle expanding from the centre). Speed itself exists (Clip > Speed/Duration…, Cmd+R; the engine

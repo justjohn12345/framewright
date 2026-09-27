@@ -1197,3 +1197,57 @@ so switching writes nothing. No model or schema change.
   the ripple scope preference (all or synced tracks); "don't ripple" stays the sheet's.
 - Test: `InspectorModelTests.testTheSpeedRowAppliesPercentsRatiosAndPresetsAndRefusesOutsideTheRange`.
 - By hand: the presets menu and a typed "2x", "1/3" and "20000" on a clip with linked audio; a still shows no row.
+
+## Reverse (same plan, item 3)
+- Model (Clip.h "Reverse"; schema 6, `"reversed": true` written only when true, the 5 -> 6 migration changes only the
+  version; a still cannot be reversed). Deviation from the plan's wording, same intent: the plan mirrors clip time u
+  about the clip's own range (sourceIn + sourceOut - u). That mirror moves with every trim, so a head trim would keep
+  the first frame's picture and cut media from the start of the range, a split's pieces would each mirror inside
+  themselves (not "show the pictures they showed") and a Motion span would slide off its pictures, contrary to the
+  plan's own consequences and tests. Here the mirror is fixed: a reversed clip's times are counted back from E, the end
+  of the media its track uses (`mediaEndFor`: videoEnd on video, duration on audio), clip time u stands for media
+  E - u, and `SetClipReversed` re-expresses the clip (sourceIn' = E - source out; its effect spans moved by the same
+  amount so they keep their timeline frames). So trims, splits, speed changes, spans, validation and every media bound
+  stay the forward code, and the plan's consequences hold (a head trim removes media from the end of the range).
+  Relinking to a file of another length would move a reversed clip's pictures by the difference; the app has no
+  relink.
+- The mirror rule, by frame index: the picture of the sequence frame [F, F + fd) is the forward mapping's pick for media
+  time E - u(F + fd), the mirror of the frame's END (`mediaTimeOfFrame`, `mediaRangeOf`). Reversing an n-frame clip of
+  in point A makes frame k read A + (n - 1 - k) d exactly, then the same asset frame grid and clamps, so frame k shows
+  what forward frame n - 1 - k showed on NTSC grids and VFR sources too (`ReverseTests`: 30 fps, 2x, 1/3, 3/4, 23.976 at
+  999/1000 on 29.97 with an off-grid in point, VFR at 1/2, the media's last frame). The mirror of the frame's start was
+  one frame off everywhere (the before-fix run).
+- Edits: `SetClipReversed(sequence, clip, reversed, includeLinked = true)` ("Reverse Clip" / "Play Clip Forward"): the
+  linked partner follows on its own media end; a clip already in the state is left alone; refused: a still
+  (InvalidArgument), unknown media length (OutOfSourceRange), locked tracks, inexact times. A dissolve whose handles
+  are gone on the new side is dropped and reported as every edit does. Times moved by it keep their timescale where
+  they are whole ticks of it (`exactTimeOn`), so reversing twice gives the same numbers. `isThroughEdit` requires the
+  same direction on both sides.
+- Engine: `Scheduler::sourceFrameTime(clip, asset, time, frameDuration)` (the frame duration is new: the rule needs the
+  frame's end); `VideoLayer::reversed`; `AudioSegment::reversed` / `mediaEnd`. The decode direction of a layer's
+  target is `layer.reversed XOR (rate < 0)` in `PlaybackController::retargetLocked` (so the stopped lookahead and the
+  pre-roll decode the frames before the picture in the media), and Backward in export for a reversed layer.
+  `AudioSourceMapping::reversed` / `mirror`: sample n reads media at mirror - u(t of sample n + 1); the producer decodes
+  a forward block of at least `kReverseBlockSeconds` (0.5 s) ending at the mirrored position (one seek per block) and
+  delivers it back to front, at speed 1 bit-exactly the forward samples, resampled after the mirror otherwise (pitch
+  follows speed). Reverse playback stays silent as before; a reversed clip in forward playback sounds reversed.
+- Facade: `VEClipInfo.reversed`, `mediaIn` / `mediaOut` (the media shown), `mediaEnd`; `sourceIn` / `sourceOut` stay the
+  model's clip times. `setReversed:forClips:` (one undo step, linked partners follow; a still refused).
+- App: Clip > Reverse Clip (a checked toggle when every selected non-still clip plays backwards, ⌥⌘R;
+  `ProjectStore.toggleReverseSelection`, `setReversed(_:)`, `selectionIsReversed`, `reversibleSelection`), the clip
+  context menu's Reverse Clip (checked), the inspector Speed row's Reverse box (`InspectorModel.setReversed`) and the
+  Speed/Duration sheet's (speed and direction one undo step through an accumulate group). The timeline draws "◀" before
+  a reversed clip's name (`TimelineViewModel.Clip.title`), asks thumbnails for the mirrored media time
+  (`mediaTime(atClipTime:)`, cache keys stay media times) and draws a reversed audio clip's waveform tiles mirrored. The
+  inspector's Source In / Out show the media range with "(reversed)" (`InspectorModel.sourceRangeTexts`). There is no
+  copy and paste of clips in the app, so the plan's "survives copy" has nothing to act on.
+- Tests: `ReverseTests` (the mirror, SetClipReversed, spans and dissolves, split / trims / speed / move, a Motion span
+  across a trim, the audio graph), `ProjectJSONTests` (the v5 golden loads forward, the v6 golden byte for byte, the
+  round trip and the still refusal), `ClipAudioSourceTests.testAReversedSourceIsTheForwardSourceSampleReversed`,
+  `PlaybackLookaheadTests.testAReversedClipsLookaheadRunsBackwardAndPlaysTheMirroredFrames`,
+  `ExportParityTests.testAReversedClipExportsTheForwardExportBackwards` (pixel-exact frame k == forward n - 1 - k, burn-in,
+  the monitor, the sound sample-reversed within 1e-6 at speed 1 and 3/2) and `testAReversedClipPlaysTheSoundTheExport
+  Writes`, `VEEngineEffectsTests.testReversingAClipIsOneUndoStepWithItsLinkedAudio`, `ReverseClipTests` (app).
+- By hand: reverse a clip with sound (Option-Cmd-R) and play it (the picture runs backwards, the sound too; J plays it
+  forwards silently), scrub it, look at its thumbnails and waveform, split it and trim its head (the pictures stay on
+  their frames), check the inspector's Source rows and its Reverse box, the Speed/Duration sheet's box, export it.
