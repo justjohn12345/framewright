@@ -2,6 +2,7 @@
 #include "../../Engine/Render/Scheduler.h"
 #include "../Edit/EditTestSupport.h"
 
+#include <algorithm>
 #include <cmath>
 
 using namespace vetest;
@@ -725,12 +726,16 @@ TEST_CASE("Scheduler: a shaped transition carries its kind to the layers; the so
 }
 
 TEST_CASE("Scheduler: a transition's layers carry the frame's exposure interval with the mix at its centre") {
-    // A 10-frame cut [55, 65) and a 12-frame fade in [0, 12): frame k of n is exposed over [k / n, (k + 1) / n].
+    // A 10-frame cut [55, 65), a 12-frame fade in [0, 12) and an 8-frame fade out [112, 120). Across the cut
+    // frame k of n is exposed over [k / n, (k + 1) / n]; a fade in a frame later, [(k - 1) / n, k / n] (frame 0
+    // is [0, 0], exactly black); a fade out a frame earlier, [(k + 1) / n, (k + 2) / n] (frame n - 1 is [1, 1],
+    // exactly black). The mix stays the frame's centre in every role.
     Fixture fx;
     const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
     const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
     fx.addTransition(fx.v1, a, b, 10);
     fx.addFade(a, ClipEdge::Head, f30(12));
+    fx.addFade(b, ClipEdge::Tail, f30(8));
     fx.requireValid();
     for (std::int64_t k = 0; k < 10; ++k) {
         CAPTURE(k);
@@ -746,10 +751,29 @@ TEST_CASE("Scheduler: a transition's layers carry the frame's exposure interval 
     CHECK(graphAt(fx, 55).layers[0].transition->progressStart == 0.0);
     CHECK(graphAt(fx, 64).layers[1].transition->progressEnd == 1.0);
     for (std::int64_t k = 0; k < 12; ++k) {
+        CAPTURE(k);
         const RenderGraph g = graphAt(fx, k);
         REQUIRE(g.layers.size() == 1);
         REQUIRE(g.layers[0].transition.has_value());
-        CHECK(g.layers[0].transition->progressStart == doctest::Approx(k / 12.0));
-        CHECK(g.layers[0].transition->progressEnd == doctest::Approx((k + 1) / 12.0));
+        CHECK(g.layers[0].transition->role == TransitionRole::FadeIn);
+        CHECK(g.layers[0].transition->progressStart == doctest::Approx(std::max<std::int64_t>(k - 1, 0) / 12.0));
+        CHECK(g.layers[0].transition->progressEnd == doctest::Approx(k / 12.0));
+        CHECK(g.layers[0].transition->mix == doctest::Approx((k + 0.5) / 12.0));
     }
+    CHECK(graphAt(fx, 0).layers[0].transition->progressStart == 0.0);
+    CHECK(graphAt(fx, 0).layers[0].transition->progressEnd == 0.0);
+    CHECK_FALSE(graphAt(fx, 12).layers[0].transition.has_value());
+    for (std::int64_t k = 0; k < 8; ++k) {
+        CAPTURE(k);
+        const RenderGraph g = graphAt(fx, 112 + k);
+        REQUIRE(g.layers.size() == 1);
+        REQUIRE(g.layers[0].transition.has_value());
+        CHECK(g.layers[0].transition->role == TransitionRole::FadeOut);
+        CHECK(g.layers[0].transition->progressStart == doctest::Approx((k + 1) / 8.0));
+        CHECK(g.layers[0].transition->progressEnd == doctest::Approx(std::min<std::int64_t>(k + 2, 8) / 8.0));
+        CHECK(g.layers[0].transition->mix == doctest::Approx((k + 0.5) / 8.0));
+    }
+    CHECK(graphAt(fx, 119).layers[0].transition->progressStart == 1.0);
+    CHECK(graphAt(fx, 119).layers[0].transition->progressEnd == 1.0);
+    CHECK_FALSE(graphAt(fx, 111).layers[0].transition.has_value());
 }

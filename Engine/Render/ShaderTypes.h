@@ -77,14 +77,14 @@ struct VEDrawUniforms {
     VEFloat4 frameSize; // sequence width, height, 1/width, 1/height
     // x: the transition's linear progress at the frame's centre (LayerTransition::mix): the dissolve mix
     // toward source B of a pair draw. y, z: a shaped transition's exposure interval [p0, p1]
-    // (LayerTransition::progressStart / progressEnd), over which its edge is averaged (transitionReveal);
-    // zero for a dissolve. w: unused.
+    // (LayerTransition::progressStart / progressEnd; mirrored to [1 - p1, 1 - p0] for a closing iris),
+    // over which its edge is averaged (transitionReveal); zero for a dissolve. w: unused.
     VEFloat4 mix;
     // A shaped transition (RenderGraph.h, transitionReveal); all zero for a cross dissolve and for a
     // layer without a transition, whose draws are unchanged. x: the VETransitionShape (as a float);
     // y: the soft edge's half width f in sequence pixels (kTransitionFeather); z: a single-layer draw
-    // is the incoming picture (1: drawn where the reveal m is, times m) or the outgoing one (0: times
-    // 1 - m); unused for pair draws, which show mix(A, B, m) per pixel. w: unused.
+    // is the incoming picture (1: drawn where the reveal m is, times m; also a closing iris) or the
+    // outgoing one (0: times 1 - m); unused for pair draws, which show mix(A, B, m) per pixel. w: unused.
     VEFloat4 reserved;
     struct VESourceUniforms a;
     struct VESourceUniforms b;

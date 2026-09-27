@@ -42,7 +42,8 @@ enum class TransitionKind {
     // The incoming picture enters from the top edge; the edge between them travels down.
     WipeDown,
     // The incoming picture shows inside a circle growing from the frame's centre until it covers
-    // the corners.
+    // the corners. Iris opens on a cut or a fade-in and closes on a fade-out: at a clip's end the
+    // picture stays inside a circle shrinking to the centre, black coming in from the corners.
     Iris,
 };
 

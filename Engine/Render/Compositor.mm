@@ -194,9 +194,17 @@ bool isShaped(const VideoLayer &layer) {
     return layer.transition && layer.transition->kind != TransitionKind::CrossDissolve;
 }
 
+// Whether `transition` is an iris closing on the picture (the FadeOut role of the Iris kind): the picture
+// stays inside a disc shrinking to the centre, the opening iris run backwards (RenderGraph.h).
+bool isClosingIris(const LayerTransition &transition) {
+    return transition.kind == TransitionKind::Iris && transition.role == TransitionRole::FadeOut;
+}
+
 // The progress uniforms of a draw of `transition` (VEDrawUniforms::mix): x the mix (the frame's centre),
 // y and z the frame's exposure interval [progressStart, progressEnd] for a shape (the instant at the mix
-// when the interval is not set); y and z zero for a dissolve, whose uniforms are unchanged.
+// when the interval is not set), mirrored to [1 - progressEnd, 1 - progressStart] for a closing iris (the
+// opening iris's interval whose reveal is the picture's share); y and z zero for a dissolve, whose
+// uniforms are unchanged.
 simd_float4 progressUniforms(const LayerTransition &transition) {
     const double mix = std::clamp(transition.mix, 0.0, 1.0);
     if (transition.kind == TransitionKind::CrossDissolve) {
@@ -207,16 +215,26 @@ simd_float4 progressUniforms(const LayerTransition &transition) {
     if (!std::isfinite(start) || !std::isfinite(end) || end < start) {
         start = end = mix;
     }
-    return simd_make_float4(float(mix), float(std::clamp(start, 0.0, 1.0)), float(std::clamp(end, 0.0, 1.0)), 0.0f);
+    start = std::clamp(start, 0.0, 1.0);
+    end = std::clamp(end, 0.0, 1.0);
+    if (isClosingIris(transition)) {
+        const double mirroredStart = 1.0 - end;
+        end = 1.0 - start;
+        start = mirroredStart;
+    }
+    return simd_make_float4(float(mix), float(start), float(end), 0.0f);
 }
 
-// The shape uniforms of a draw of `transition` (VEDrawUniforms::reserved); all zero for a dissolve.
+// The shape uniforms of a draw of `transition` (VEDrawUniforms::reserved); all zero for a dissolve. A
+// layer drawn alone shows its picture times the reveal m where the picture is the incoming side (a fade in,
+// or a closing iris over its mirrored interval) and times 1 - m otherwise.
 simd_float4 shapeUniforms(const LayerTransition &transition, bool drawnAlone) {
     if (transition.kind == TransitionKind::CrossDissolve) {
         return simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
+    const bool pictureIsRevealed = transition.isIncoming || isClosingIris(transition);
     return simd_make_float4(float(int(transition.kind)), float(kTransitionFeather),
-                            drawnAlone && transition.isIncoming ? 1.0f : 0.0f, 0.0f);
+                            drawnAlone && pictureIsRevealed ? 1.0f : 0.0f, 0.0f);
 }
 
 struct DrawItem {

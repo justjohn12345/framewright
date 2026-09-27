@@ -133,7 +133,8 @@ enum TransitionKind: String, CaseIterable, Identifiable, Codable {
     case wipeUp
     /// Video: the incoming picture enters from the top edge; the edge travels down.
     case wipeDown
-    /// Video: the incoming picture shows inside a circle growing from the frame's centre.
+    /// Video: the incoming picture shows inside a circle growing from the frame's centre; at a clip's
+    /// end (a fade to black) the circle closes on the picture instead.
     case iris
     /// Audio: a constant-power crossfade (sin/cos gain curves).
     case audioCrossfade
@@ -162,7 +163,7 @@ enum TransitionKind: String, CaseIterable, Identifiable, Codable {
         case .wipeRight: return "Video: enters from the left"
         case .wipeUp: return "Video: enters from the bottom"
         case .wipeDown: return "Video: enters from the top"
-        case .iris: return "Video: a circle from the centre"
+        case .iris: return "Video: a circle opening from the centre; closes at a clip's end"
         case .audioCrossfade: return "Audio crossfade"
         }
     }

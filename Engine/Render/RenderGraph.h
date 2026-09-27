@@ -26,9 +26,17 @@ inline constexpr double kTransitionFeather = 2.0;
 // The reveal m of a shaped transition (TransitionKind other than CrossDissolve) at the sequence
 // position (x, y) (pixels, origin top left, +y down) of a W x H frame: the share of the incoming picture
 // there (the compositor shows mix(outgoing, incoming, m), and a single layer of a fade role times m
-// fading in or 1 - m fading out). It is the soft edge averaged over the frame's exposure: the frame
-// [k, k + 1) of an n-frame transition stands for the progress interval [p0, p1] = [k / n, (k + 1) / n]
-// (LayerTransition::progressStart / progressEnd), during which the edge sweeps on. With f = kTransitionFeather:
+// fading in or 1 - m fading out, except the closing iris below). It is the soft edge averaged over the
+// frame's exposure: the frame [k, k + 1) of an n-frame transition stands for a progress interval [p0, p1]
+// (LayerTransition::progressStart / progressEnd, clamped to [0, 1]) during which the edge sweeps on, set
+// by role so that a fade starts or ends on a wholly black frame:
+//   across a cut (TransitionRole::CrossDissolve): the frame's own [k / n, (k + 1) / n], centred on the mix;
+//   a fade in: [(k - 1) / n, k / n], the interval ending at the frame's start, so frame 0 is [0, 0], exactly
+//       black, and the reveal completes on the frame after the transition;
+//   a fade out: [(k + 1) / n, (k + 2) / n], so the picture starts leaving one frame in and frame n - 1 is
+//       [1, 1], exactly black.
+// The fade out is the fade in played backwards: its frame n - 1 - k is exposed over the mirror image,
+// 1 - [p0, p1], of the fade in's frame k. With f = kTransitionFeather:
 //   d = the distance from where the incoming picture enters: W - x (WipeLeft), x (WipeRight),
 //       H - y (WipeUp), y (WipeDown), |(x, y) - (W / 2, H / 2)| (Iris);
 //   L = the distance the edge travels across the frame: W, W, H, H, and half the frame's diagonal
@@ -46,9 +54,14 @@ inline constexpr double kTransitionFeather = 2.0;
 // and e1) m is exactly the box-filtered hard edge, clamp((e1 - d) / D, 0, 1). A sweep of tens of pixels
 // per frame no longer steps from frame to frame. The interval [0, 0] gives exactly the outgoing picture
 // (the band [-2f, 0] lies before every d >= 0) and [1, 1] exactly the incoming one (the band [L, L + 2f]
-// lies past every d <= L); the first and last frames of a transition ([0, 1/n] and [(n-1)/n, 1]) show the
+// lies past every d <= L); the first and last frames across a cut ([0, 1/n] and [(n-1)/n, 1]) show the
 // entering sliver partly revealed, as their exposure does. Shaders.metal implements it (transitionReveal);
 // the compositor tests hold it to a C++ reference that averages m_p over 32 sub-steps of the interval.
+// The closing iris (the FadeOut role of the Iris kind, Transition.h) keeps the picture inside a disc that
+// shrinks to the centre instead of letting black grow from it: the picture's share is the opening iris's
+// reveal over the mirrored interval [1 - p1, 1 - p0] (black's is 1 minus it), the disc of radius (1 - p) L
+// with the same feather, averaged over the frame's exposure in the same way. Wipes at a fade out keep their
+// direction (black enters from the kind's side, the picture's share 1 - m).
 
 // Transition state of a layer (a lane-0 span acting on this frame, Transition.h). The two clips
 // of a cross dissolve are emitted as consecutive layers (outgoing first) and point at each other
@@ -56,7 +69,7 @@ inline constexpr double kTransitionFeather = 2.0;
 // is its own index (no partner), faded by weight() over the black (or the tracks below). A shaped
 // kind (a wipe or the iris) replaces the uniform weight with the per-pixel reveal (see
 // kTransitionFeather): the incoming layer (or a fade in) is drawn times m, the outgoing layer (or a
-// fade out) times 1 - m.
+// fade out) times 1 - m, a closing iris times the opening iris's m over the mirrored interval.
 struct LayerTransition {
     SpanId transitionId;
     TransitionKind kind = TransitionKind::CrossDissolve;
@@ -68,9 +81,10 @@ struct LayerTransition {
     // crossfade's (or fade's) linear progress at the frame's midpoint, so picture and sound cross
     // over together. The cross dissolve's uniform mix; a shape uses the frame's interval below.
     double mix = 0.0;
-    // The fraction of the range at this frame's start and at its end (clamped to [0, 1]): k / n and
-    // (k + 1) / n for frame k of n. A shaped transition averages its edge over this interval (see
-    // kTransitionFeather); NaN (not set) makes it the instant `mix` ([mix, mix]).
+    // The frame's exposure interval as fractions of the range (clamped to [0, 1]), by role (see
+    // kTransitionFeather): k / n and (k + 1) / n for frame k of n across a cut, (k - 1) / n and k / n
+    // for a fade in, (k + 1) / n and (k + 2) / n for a fade out. A shaped transition averages its edge
+    // over this interval; NaN (not set) makes it the instant `mix` ([mix, mix]).
     double progressStart = std::numeric_limits<double>::quiet_NaN();
     double progressEnd = std::numeric_limits<double>::quiet_NaN();
     // Cross dissolve: whether this layer is the incoming clip. Fades: true for a fade in (the

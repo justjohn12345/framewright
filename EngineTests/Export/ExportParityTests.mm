@@ -853,12 +853,13 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
     XCTAssertLessThan(brightness[29], brightness[15] / 2);
 }
 
-/// Shaped transitions (wipes and the iris): V1 is the movie from 1 s for 30 frames, a Wipe Left over
-/// the 10 frames around the cut (5 before, 5 after) into the movie from 5 s, which ends in a 10-frame
-/// Iris fade out to black at the free end. Every sampled frame of the export shows the monitor's
-/// picture; mid-wipe the right of the frame shows the incoming picture and the left does not, and
-/// mid-iris black (the incoming side of a fade out) fills the centre while the corners keep the
-/// picture.
+/// Shaped transitions (wipes and the iris): V1 is the movie from 1 s for 30 frames, starting with a
+/// 10-frame Wipe Right fade in from black, a Wipe Left over the 10 frames around the cut (5 before, 5
+/// after) into the movie from 5 s, which ends in a 10-frame Iris fade out to black at the free end (a
+/// closing iris). Every sampled frame of the export shows the monitor's picture; the fade in's first frame
+/// and the iris's last are black; mid-wipe the right of the frame shows the incoming picture and the left
+/// does not, and mid-iris the picture stays inside a disc at the centre while black has come in at the
+/// corners.
 - (void)testAWipeAndAnIrisExportTheMonitorsPictures {
     PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
     h.sequence().width = 640;
@@ -870,8 +871,10 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
     }
     const ClipId a = h.addClip(h.v1, movie, 0, 30, CMTimeMake(1, 1));
     const ClipId b = h.addClip(h.v1, movie, 30, 30, CMTimeMake(5, 1));
+    const SpanId fadeIn = h.addFade(a, ClipEdge::Head, 10);
     const SpanId wipe = h.addTailTransition(a, 5, 5);
     const SpanId iris = h.addFade(b, ClipEdge::Tail, 10);
+    h.sequence().findSpan(fadeIn)->transition = TransitionKind::WipeRight;
     h.sequence().findSpan(wipe)->transition = TransitionKind::WipeLeft;
     h.sequence().findSpan(iris)->transition = TransitionKind::Iris;
     XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
@@ -933,16 +936,21 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
     };
     std::map<int64_t, std::vector<double>> exported;
     std::map<int64_t, std::vector<double>> monitor;
-    for (int64_t f : {20, 25, 27, 29, 30, 32, 34, 35, 45, 50, 52, 55, 57, 59}) {
+    for (int64_t f : {0, 4, 9, 20, 25, 27, 29, 30, 32, 34, 35, 45, 50, 52, 55, 57, 59}) {
         h.controller->seek(frames30(f));
         const PlaybackHarness::Sample sample = h.presentExact();
         XCTAssertEqual(sample.presented.frameIndex, f);
         const render::PreviewFrame &frame = h.frame();
+        const bool inFadeIn = f < 10;
         const bool inWipe = f >= 25 && f < 35;
         const bool inIris = f >= 50;
         XCTAssertEqual(frame.graph.layers.size(), inWipe ? 2u : 1u, @"frame %lld", f);
         for (const VideoLayer &layer : frame.graph.layers) {
-            if (inWipe) {
+            if (inFadeIn) {
+                XCTAssertTrue(layer.transition && layer.transition->kind == TransitionKind::WipeRight &&
+                                  layer.transition->role == TransitionRole::FadeIn,
+                              @"frame %lld", f);
+            } else if (inWipe) {
                 XCTAssertTrue(layer.transition && layer.transition->kind == TransitionKind::WipeLeft &&
                                   layer.transition->transitionId == wipe,
                               @"frame %lld", f);
@@ -1007,8 +1015,9 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
         }
     }
     if (monitor.count(55)) {
-        // Mid-iris (frame 55, progress 0.55 of a fade out): the incoming side is black, so black shows
-        // inside the growing circle; the corners keep the picture.
+        // Mid-iris (frame 55 of the closing iris, exposed over [0.6, 0.7] of the fade out): the picture
+        // stays inside the shrinking disc, a radius of 0.3 to 0.4 of the half diagonal, so the centre keeps
+        // the picture and the corners are black.
         const auto bAlone = alone(b, 55);
         XCTAssertTrue(bAlone.has_value());
         if (bAlone) {
@@ -1016,11 +1025,26 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
             const size_t centre = (rows / 2) * columns + columns / 2;
             const size_t corner = 0;
             for (int ch = 0; ch < 3; ++ch) {
-                XCTAssertLessThan(monitor[55][centre * 3 + size_t(ch)], 1.0, @"the centre is black");
-                XCTAssertEqualWithAccuracy(monitor[55][corner * 3 + size_t(ch)], (*bAlone)[corner * 3 + size_t(ch)], 1.0,
-                                           @"the corner shows the picture");
+                XCTAssertEqualWithAccuracy(monitor[55][centre * 3 + size_t(ch)], (*bAlone)[centre * 3 + size_t(ch)], 1.0,
+                                           @"the centre shows the picture");
+                XCTAssertLessThan(monitor[55][corner * 3 + size_t(ch)], 1.0, @"the corner is black");
+                if (exported.count(55)) {
+                    XCTAssertLessThan(exported[55][corner * 3 + size_t(ch)], 1.0, @"the exported corner is black");
+                }
             }
         }
+    }
+    // The fade in's first frame and the closing iris's last frame are wholly black, on the monitor and in
+    // the export.
+    for (const int64_t f : {int64_t(0), int64_t(59)}) {
+        XCTAssertTrue(monitor.count(f) && exported.count(f), @"frame %lld", f);
+        if (!monitor.count(f) || !exported.count(f)) {
+            continue;
+        }
+        const double brightestMonitor = *std::max_element(monitor[f].begin(), monitor[f].end());
+        const double brightestExport = *std::max_element(exported[f].begin(), exported[f].end());
+        XCTAssertEqual(brightestMonitor, 0.0, @"frame %lld: the monitor's picture is black", f);
+        XCTAssertLessThan(brightestExport, 1.0, @"frame %lld: the exported picture is black", f);
     }
 }
 

@@ -5,7 +5,8 @@ import FramewrightEngine
 /// between two adjacent clips in the timeline, or onto a clip's start or end where nothing touches
 /// it (from or to black / silence); either way a span on the track's lane 0: Cross Dissolve, Wipe
 /// Left, Wipe Right, Wipe Up, Wipe Down and Iris (video tracks; at a free edge a dissolve becomes a
-/// fade and a wipe or the iris wipes from or to black) and Constant Power (audio crossfade, a fade
+/// fade, a wipe wipes from or to black, and the iris opens from black at a clip's start and closes to
+/// black at its end) and Constant Power (audio crossfade, a fade
 /// at a free edge). The "+" button next to a
 /// transition (or its context menu) adds it at the cut nearest the playhead, like Shift+Cmd+D
 /// and Option+Shift+Cmd+D; so does a double-click on the row outside its label. New transitions

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace ve {
 
@@ -32,8 +33,8 @@ VideoLayer makeLayer(const Clip &clip, const MediaAsset &asset, CMTime time, CMT
 }
 
 // Fraction of `range` at the time `frame` + `step` * frameDuration (step 0: the frame's start, 1/2 its
-// centre, 1 its end), clamped to [0, 1], computed exactly and converted to a double once: (k + step) / n
-// for frame k of a range of n whole frames.
+// centre, 1 its end; -1 the previous frame's start, 2 the next frame's end), clamped to [0, 1], computed
+// exactly and converted to a double once: (k + step) / n for frame k of a range of n whole frames.
 double frameFraction(const TimeRange &range, CMTime frame, CMTime frameDuration, Ratio step) {
     const auto start = ExactTime::from(range.start);
     const auto end = ExactTime::from(range.end);
@@ -61,8 +62,25 @@ double frameFraction(const TimeRange &range, CMTime frame, CMTime frameDuration,
     return std::clamp(into->toDouble() / span->toDouble(), 0.0, 1.0);
 }
 
+// The exposure interval of frame k of an n-frame transition in `role`, as the steps (in frames from the
+// frame's start) of its two ends (LayerTransition::progressStart / progressEnd): across a cut the frame's
+// own [k / n, (k + 1) / n]; a fade in a frame later, [(k - 1) / n, k / n], so its first frame is exactly
+// black and the picture is whole on the frame after it; a fade out a frame earlier, [(k + 1) / n, (k + 2) / n],
+// so the picture starts leaving one frame in and its last frame is exactly black.
+std::pair<Ratio, Ratio> exposureSteps(TransitionRole role) {
+    switch (role) {
+    case TransitionRole::CrossDissolve:
+        break;
+    case TransitionRole::FadeIn:
+        return {Ratio{-1, 1}, Ratio{0, 1}};
+    case TransitionRole::FadeOut:
+        return {Ratio{1, 1}, Ratio{2, 1}};
+    }
+    return {Ratio{0, 1}, Ratio{1, 1}};
+}
+
 // The transition state of the frame starting at `t`: `mix` at the frame's centre ((k + 1/2) / n, the
-// audio's progress at the frame's midpoint), the exposure interval [k / n, (k + 1) / n] for a shape.
+// audio's progress at the frame's midpoint), the exposure interval of a shape by role (exposureSteps).
 LayerTransition makeTransition(const TransitionPlacement &placement, CMTime t, CMTime frameDuration, bool incoming,
                                ClipId partner, std::size_t partnerIndex) {
     LayerTransition transition;
@@ -70,8 +88,9 @@ LayerTransition makeTransition(const TransitionPlacement &placement, CMTime t, C
     transition.kind = placement.span->transition;
     transition.role = placement.role;
     transition.mix = frameFraction(placement.range, t, frameDuration, Ratio{1, 2});
-    transition.progressStart = frameFraction(placement.range, t, frameDuration, Ratio{0, 1});
-    transition.progressEnd = frameFraction(placement.range, t, frameDuration, Ratio{1, 1});
+    const auto [startStep, endStep] = exposureSteps(placement.role);
+    transition.progressStart = frameFraction(placement.range, t, frameDuration, startStep);
+    transition.progressEnd = frameFraction(placement.range, t, frameDuration, endStep);
     transition.isIncoming = incoming;
     transition.partnerClipId = partner;
     transition.partnerLayerIndex = partnerIndex;

@@ -3,12 +3,16 @@
 // interval [p0, p1]. The references: the instantaneous soft edge averaged over 32 sub-steps of the
 // interval (everywhere), and the hard edge box-filtered over the interval (a linear ramp between the
 // edge's two positions) away from the feather. Pair draws across a cut, single-layer draws of a fade role
-// against black, and the partner-missing fallback. The cross dissolve path is covered, unchanged, by
-// CompositorTests.testDissolveMix.
+// against black (the closing iris of a fade out included), the partner-missing fallback, and fades
+// scheduled from a sequence (their first and last frames wholly black). The cross dissolve path is
+// covered, unchanged, by CompositorTests.testDissolveMix.
 
 #import <XCTest/XCTest.h>
 
+#include "../../Engine/Model/Project.h"
+#include "../../Engine/Model/Validation.h"
 #include "../../Engine/Render/Compositor.h"
+#include "../../Engine/Render/Scheduler.h"
 #include "CompositorTestSupport.h"
 
 #include <algorithm>
@@ -103,6 +107,49 @@ LayerTransition makeTransition(TransitionKind kind, TransitionRole role, double 
 
 constexpr int32_t kWidth = 96;
 constexpr int32_t kHeight = 54;
+
+// The opening iris's interval whose reveal is a closing iris's share of the picture over [p0, p1]
+// (RenderGraph.h): the mirror image [1 - p1, 1 - p0].
+std::pair<double, double> mirrored(std::pair<double, double> interval) {
+    return {1.0 - interval.second, 1.0 - interval.first};
+}
+
+// A kWidth x kHeight, 30 fps project with one still clip of `frames` frames on V1, a `fadeFrames` fade in
+// at its start and a `fadeFrames` fade out at its end, both of `kind`.
+Project fadedStillProject(TransitionKind kind, int64_t frames, int64_t fadeFrames) {
+    Project project;
+    project.name = "Fades";
+    MediaAsset still;
+    still.name = "white.png";
+    still.url = "file:///media/white.png";
+    still.kind = AssetKind::Still;
+    still.width = kWidth;
+    still.height = kHeight;
+    const AssetId asset = project.addAsset(still);
+    const SequenceId sequenceId = project.addSequence("Main", CMTimeMake(1, 30), kWidth, kHeight, 1, 1);
+    Sequence &sequence = *project.findSequence(sequenceId);
+    Clip clip;
+    clip.id = project.ids.make<ClipId>();
+    clip.assetId = asset;
+    clip.trackId = sequence.videoTracks[0].id;
+    clip.isStill = true;
+    clip.timelineStart = kCMTimeZero;
+    clip.timelineDuration = CMTimeMake(frames, 30);
+    for (const ClipEdge edge : {ClipEdge::Head, ClipEdge::Tail}) {
+        EffectSpan span;
+        span.id = project.ids.make<SpanId>();
+        span.lane = kTransitionLane;
+        span.kind = SpanKind::Transition;
+        span.transition = kind;
+        span.edge = edge;
+        span.start = edge == ClipEdge::Head ? kCMTimeZero : CMTimeMake(-fadeFrames, 30);
+        span.end = edge == ClipEdge::Head ? CMTimeMake(fadeFrames, 30) : kCMTimeZero;
+        clip.spans.push_back(span);
+    }
+    clip.sortSpans();
+    sequence.videoTracks[0].clips.push_back(clip);
+    return project;
+}
 
 // Exposure intervals: the frame before a transition's first ([0, 0], exactly the outgoing picture),
 // frames of a 10-frame transition (its first and last, one in the middle), a frame of a 4-frame one (the
@@ -265,7 +312,8 @@ const std::vector<std::pair<double, double>> kIntervals = {{0.0, 0.0}, {0.0, 0.1
     }
 }
 
-// At a free edge: a fade in reveals the picture from black by m, a fade out hides it by m.
+// At a free edge: a fade in reveals the picture from black by m, a fade out hides it by m; the iris of a
+// fade out closes instead, showing the picture by the opening iris's m over the mirrored interval.
 - (void)testEveryShapeAtAFreeEdgeRevealsOrHidesThePictureOverBlack {
     media::PixelBuffer green = makeBuffer(kCVPixelFormatType_32BGRA, kWidth, kHeight);
     fillBGRA(green, {0, 200, 0, 255});
@@ -285,12 +333,131 @@ const std::vector<std::pair<double, double>> kIntervals = {{0.0, 0.0}, {0.0, 0.1
                                                   interval.first, interval.second, fadeIn, 0, ClipId{});
                 g.layers = {layer};
                 [self render:g textures:{t} out:out];
+                if (!fadeIn && kind == TransitionKind::Iris) {
+                    [self check:out kind:kind interval:mirrored(interval) from:black to:picture label:@"closing iris"];
+                    continue;
+                }
                 [self check:out
                        kind:kind
                    interval:interval
                        from:fadeIn ? black : picture
                          to:fadeIn ? picture : black
                       label:fadeIn ? @"fade in" : @"fade out"];
+            }
+        }
+    }
+}
+
+// The iris of a fade out closes on the picture: mid-way the picture shows inside a centred disc with black
+// outside it (the centre is the picture, the corners black): black comes in from the corners instead of
+// growing from the centre. Its frame over [p0, p1] is, pixel for pixel, the fade in's iris over
+// [1 - p1, 1 - p0]: the opening iris played backwards.
+- (void)testAnIrisAtAFadeOutClosesOnThePicture {
+    media::PixelBuffer green = makeBuffer(kCVPixelFormatType_32BGRA, kWidth, kHeight);
+    fillBGRA(green, {0, 200, 0, 255});
+    const TextureSet t = texturesFor(*_compositor, green);
+    media::PixelBuffer closing = makeBuffer(kCVPixelFormatType_32BGRA, kWidth, kHeight);
+    media::PixelBuffer opening = makeBuffer(kCVPixelFormatType_32BGRA, kWidth, kHeight);
+    for (const auto &interval : std::vector<std::pair<double, double>>{{0.5, 0.6}, {0.2, 0.3}, {0.7, 0.8}}) {
+        RenderGraph g = makeGraph(kWidth, kHeight);
+        VideoLayer layer = makeLayer(1);
+        layer.transition = makeTransition(TransitionKind::Iris, TransitionRole::FadeOut, interval.first,
+                                          interval.second, false, 0, ClipId{});
+        g.layers = {layer};
+        [self render:g textures:{t} out:closing];
+        const auto [q0, q1] = mirrored(interval);
+        layer.transition = makeTransition(TransitionKind::Iris, TransitionRole::FadeIn, q0, q1, true, 0, ClipId{});
+        g.layers = {layer};
+        [self render:g textures:{t} out:opening];
+
+        const RGBA8 centre = pixelAt(closing, kWidth / 2, kHeight / 2);
+        XCTAssertTrue(centre.r == 0 && centre.g == 200 && centre.b == 0,
+                      @"[%.1f, %.1f]: the centre shows the picture (got %d %d %d)", interval.first, interval.second,
+                      centre.r, centre.g, centre.b);
+        const std::vector<std::pair<size_t, size_t>> corners{
+            {0, 0}, {kWidth - 1, 0}, {0, kHeight - 1}, {kWidth - 1, kHeight - 1}};
+        for (const auto &[x, y] : corners) {
+            const RGBA8 corner = pixelAt(closing, x, y);
+            XCTAssertTrue(corner.r == 0 && corner.g == 0 && corner.b == 0,
+                          @"[%.1f, %.1f]: corner (%zu, %zu) is black (got %d %d %d)", interval.first,
+                          interval.second, x, y, corner.r, corner.g, corner.b);
+        }
+        int differing = 0;
+        for (int32_t y = 0; y < kHeight; ++y) {
+            for (int32_t x = 0; x < kWidth; ++x) {
+                const RGBA8 a = pixelAt(closing, size_t(x), size_t(y));
+                const RGBA8 b = pixelAt(opening, size_t(x), size_t(y));
+                differing += a.r != b.r || a.g != b.g || a.b != b.b ? 1 : 0;
+            }
+        }
+        XCTAssertEqual(differing, 0, @"[%.1f, %.1f]: the closing iris is the opening one over [%.1f, %.1f]",
+                       interval.first, interval.second, q0, q1);
+    }
+}
+
+// Fades scheduled from a sequence (Scheduler::renderGraphAt, then the compositor) over a bright white
+// still: a fade in's frame k is exposed over [(k - 1) / n, k / n] and a fade out's over
+// [(k + 1) / n, (k + 2) / n], so the fade in's first frame and the fade out's last one are wholly black,
+// pixel for pixel, and the frames between the fades are the picture untouched. Every frame of both fades
+// matches the reference for its interval (the closing iris by its mirror).
+- (void)testAScheduledFadeStartsAndEndsOnAWhollyBlackFrame {
+    constexpr int64_t kFrames = 30;
+    constexpr int64_t kFade = 10;
+    media::PixelBuffer white = makeBuffer(kCVPixelFormatType_32BGRA, kWidth, kHeight);
+    fillBGRA(white, {255, 255, 255, 255});
+    const TextureSet t = texturesFor(*_compositor, white);
+    media::PixelBuffer out = makeBuffer(kCVPixelFormatType_32BGRA, kWidth, kHeight);
+    const RGBA8 black{0, 0, 0, 255};
+    const RGBA8 picture{255, 255, 255, 255};
+    for (const TransitionKind kind : kTransitionKinds) {
+        if (kind == TransitionKind::CrossDissolve) {
+            continue;
+        }
+        const Project project = fadedStillProject(kind, kFrames, kFade);
+        const auto problem = validateProject(project);
+        XCTAssertFalse(problem.has_value(), @"%s", problem.value_or("").c_str());
+        const Sequence &sequence = *project.activeSequence();
+        for (int64_t f = 0; f < kFrames; ++f) {
+            const RenderGraph g = Scheduler::renderGraphAt(sequence, project, CMTimeMake(f, 30));
+            XCTAssertEqual(g.layers.size(), 1u, @"%s frame %lld", nameOf(kind), f);
+            if (g.layers.size() != 1) {
+                continue;
+            }
+            const bool fadingIn = f < kFade;
+            const bool fadingOut = f >= kFrames - kFade;
+            XCTAssertEqual(g.layers[0].transition.has_value(), fadingIn || fadingOut, @"%s frame %lld", nameOf(kind),
+                           f);
+            [self render:g textures:{t} out:out];
+            NSString *label = [NSString stringWithFormat:@"scheduled frame %lld", f];
+            if (fadingIn) {
+                const double k = double(f);
+                [self check:out
+                       kind:kind
+                   interval:{std::max(k - 1.0, 0.0) / kFade, k / kFade}
+                       from:black
+                         to:picture
+                      label:label];
+            } else if (fadingOut) {
+                const double k = double(f - (kFrames - kFade));
+                const std::pair<double, double> interval{(k + 1.0) / kFade, std::min(k + 2.0, double(kFade)) / kFade};
+                if (kind == TransitionKind::Iris) {
+                    [self check:out kind:kind interval:mirrored(interval) from:black to:picture label:label];
+                } else {
+                    [self check:out kind:kind interval:interval from:picture to:black label:label];
+                }
+            } else {
+                [self check:out kind:kind interval:{1.0, 1.0} from:black to:picture label:label];
+            }
+            if (f == 0 || f == kFrames - 1) {
+                int lit = 0;
+                for (int32_t y = 0; y < kHeight; ++y) {
+                    for (int32_t x = 0; x < kWidth; ++x) {
+                        const RGBA8 p = pixelAt(out, size_t(x), size_t(y));
+                        lit += p.r != 0 || p.g != 0 || p.b != 0 ? 1 : 0;
+                    }
+                }
+                XCTAssertEqual(lit, 0, @"%s frame %lld (%s): every pixel is black", nameOf(kind), f,
+                               f == 0 ? "the fade in's first" : "the fade out's last");
             }
         }
     }
