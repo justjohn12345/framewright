@@ -272,7 +272,7 @@ struct KenBurnsControls: View {
                     .help(text)
                     .accessibilityIdentifier("KenBurnsCaption")
             }
-            if model.canContinueFromPrevious || model.next != nil {
+            if model.previous != nil || model.next != nil {
                 neighbourRow
             }
         }
@@ -285,11 +285,13 @@ struct KenBurnsControls: View {
 
     private var neighbourRow: some View {
         HStack(spacing: 12) {
-            if model.canContinueFromPrevious {
+            if model.previous != nil {
                 Toggle("Continue from previous clip",
                        isOn: Binding(get: { model.continuesFromPrevious }, set: { model.setContinuesFromPrevious($0) }))
                     .toggleStyle(.checkbox)
-                    .help("Start where the previous clip ends: its last frame's position and size (the green box)")
+                    .disabled(!model.canContinueFromPrevious)
+                    .help(model.continueFromPreviousProblem
+                        ?? "Start where the previous clip ends: its last frame's position and size (the green box)")
                     .accessibilityIdentifier("KenBurnsContinuePrevious")
             }
             if model.next != nil {

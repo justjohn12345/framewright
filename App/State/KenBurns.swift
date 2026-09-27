@@ -744,6 +744,16 @@ final class KenBurnsModel: ObservableObject {
     /// the clip's first frame.
     var canContinueFromPrevious: Bool { previous != nil && span.start == clip.timelineStart }
 
+    /// Why "Continue from previous clip" does not apply although a clip touches this one's start: the
+    /// span starts after the clip's first frame (it has no value there to match). Nil when it applies
+    /// or no clip touches the start. The bar shows the toggle disabled with this as its help, so the
+    /// choice does not just vanish.
+    var continueFromPreviousProblem: String? {
+        guard previous != nil, !canContinueFromPrevious else { return nil }
+        return "The move starts after the clip's first frame, so it cannot continue the previous clip: set its Start "
+            + "to \(store.timelineTimeString(clip.timelineStart))."
+    }
+
     /// The start shows the placement the previous clip ends with.
     var continuesFromPrevious: Bool {
         guard canContinueFromPrevious, let previous else { return false }

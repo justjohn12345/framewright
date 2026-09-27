@@ -509,6 +509,7 @@ final class KenBurnsEditorTests: XCTestCase {
         XCTAssertEqual(model.previous?.clipID, a)
         XCTAssertEqual(model.next?.clipID, d)
         XCTAssertTrue(model.canContinueFromPrevious)
+        XCTAssertNil(model.continueFromPreviousProblem)
         XCTAssertFalse(model.continuesFromPrevious, "B shows its own placement")
         model.setContinuesFromPrevious(true)
         XCTAssertTrue(model.continuesFromPrevious)
@@ -545,6 +546,9 @@ final class KenBurnsEditorTests: XCTestCase {
         let later = try motionSpan(b, lane: 2, 70, 100)
         store.select(span: later)
         XCTAssertFalse(try XCTUnwrap(store.kenBurns).canContinueFromPrevious)
+        XCTAssertEqual(store.kenBurns?.continueFromPreviousProblem,
+                       "The move starts after the clip's first frame, so it cannot continue the previous clip: set its "
+                           + "Start to 00:00:02:00.", "the bar says why the toggle is off")
         // A neighbour that goes away goes from the editor.
         store.select(span: id)
         XCTAssertTrue(store.engine.removeClips([NSNumber(value: d)]).ok)

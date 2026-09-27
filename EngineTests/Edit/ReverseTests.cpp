@@ -363,3 +363,129 @@ TEST_CASE("Reverse: the audio graph marks a reversed clip's segments with the me
         CHECK(identical(segment.sourceRange.start, fx.clip(fx.a).sourceTimeAt(segment.timelineRange.start)));
     }
 }
+
+namespace {
+
+// Clip `clipId`'s Motion at timeline frame `frame` (30 fps).
+VideoParams motionAtFrame(const Fixture &fx, ClipId clipId, std::int64_t frame) {
+    return motionValuesAt(fx.clip(clipId), f30(frame));
+}
+
+void checkSameMotion(const VideoParams &a, const VideoParams &b) {
+    CHECK(a.x == doctest::Approx(b.x).epsilon(1e-9));
+    CHECK(a.y == doctest::Approx(b.y).epsilon(1e-9));
+    CHECK(a.scale == doctest::Approx(b.scale).epsilon(1e-9));
+    CHECK(a.rotationDegrees == doctest::Approx(b.rotationDegrees).epsilon(1e-9));
+}
+
+// A Motion span over the whole of `clipId` ([startFrame, endFrame)) moving x 0 -> 300, y 0 -> -60 and scale
+// 1 -> 1.5 (hands-on round: a pan/zoom on each clip of A | reversed A | A).
+SpanId movingSpan(Fixture &fx, ClipId clipId, std::int64_t startFrame, std::int64_t endFrame) {
+    AddSpan add(fx.seq, clipId, SpanKind::Motion, 1, f30(startFrame), f30(endFrame));
+    applyReversible(fx.project, add);
+    SetSpanValues values(fx.seq, add.createdSpanId(),
+                         {SpanValueChange{SpanParameter::X, 0.0, 300.0}, SpanValueChange{SpanParameter::Y, 0.0, -60.0},
+                          SpanValueChange{SpanParameter::Scale, 1.0, 1.5}});
+    applyReversible(fx.project, values);
+    return add.createdSpanId();
+}
+
+// Matches `spanId`'s `edge` to the touching clip, as Match Previous / Next Clip does.
+void match(Fixture &fx, SpanId spanId, ClipEdge edge) {
+    std::vector<SpanValueChange> changes;
+    const EditResult planned = planMatchSpanEdge(fx.sequence(), spanId, edge, changes);
+    REQUIRE_MESSAGE(planned.ok(), doctest::String(planned.message.c_str()));
+    REQUIRE_FALSE(changes.empty());
+    SetSpanValues values(fx.seq, spanId, changes);
+    applyReversible(fx.project, values);
+}
+
+} // namespace
+
+TEST_CASE("Reverse: a Motion span matches its neighbour across a cut between a forward and a reversed clip") {
+    // One source range three times: forward [0, 60), reversed [60, 120), forward [120, 180), touching.
+    Fixture fx;
+    const ClipId first = fx.addClip(fx.v1, fx.av30, 0, 60, 300);
+    const ClipId middle = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
+    const ClipId last = fx.addClip(fx.v1, fx.av30, 120, 60, 300);
+    fx.requireValid();
+    SetClipReversed reverse(fx.seq, middle, true);
+    applyReversible(fx.project, reverse);
+    REQUIRE(fx.clip(middle).reversed);
+    REQUIRE(adjacentClip(fx.sequence(), middle, ClipEdge::Head) == &fx.clip(first));
+    REQUIRE(adjacentClip(fx.sequence(), middle, ClipEdge::Tail) == &fx.clip(last));
+    movingSpan(fx, first, 0, 60);
+    const SpanId inMiddle = movingSpan(fx, middle, 60, 120);
+    const SpanId inLast = movingSpan(fx, last, 120, 180);
+
+    SUBCASE("the reversed clip's start continues the forward clip before it") {
+        match(fx, inMiddle, ClipEdge::Head);
+        checkSameMotion(motionAtFrame(fx, middle, 60), motionAtFrame(fx, first, 59));
+    }
+    SUBCASE("the reversed clip's end leads into the forward clip after it") {
+        match(fx, inMiddle, ClipEdge::Tail);
+        checkSameMotion(motionAtFrame(fx, middle, 119), motionAtFrame(fx, last, 120));
+    }
+    SUBCASE("the forward clip after it continues the reversed clip") {
+        match(fx, inLast, ClipEdge::Head);
+        checkSameMotion(motionAtFrame(fx, last, 120), motionAtFrame(fx, middle, 119));
+    }
+    SUBCASE("the reversed clip's span, split into two, continues on its second part") {
+        SplitClip split(fx.seq, middle, f30(90));
+        applyReversible(fx.project, split);
+        const ClipId second = split.createdClipIds().at(0);
+        REQUIRE(fx.clip(second).reversed);
+        AddSpan add(fx.seq, second, SpanKind::Motion, 2, f30(90), f30(120));
+        applyReversible(fx.project, add);
+        match(fx, add.createdSpanId(), ClipEdge::Head);
+        checkSameMotion(motionAtFrame(fx, second, 90), motionAtFrame(fx, middle, 89));
+    }
+}
+
+TEST_CASE("Reverse: matching across a reversed clip holds whatever the media's end and the order of the edits") {
+    // Media ends on odd timescales (FFmpeg's nanoseconds, 1/600 s, 90 kHz, a decimal grid, 1/44 s), 100 % and
+    // 50 %, spans added after the reverse or before it (SetClipReversed then moves them).
+    for (const CMTime end : {CMTimeMake(10010000000LL, 1000000000), CMTimeMake(2719, 600), CMTimeMake(1234567, 90000),
+                             CMTimeMake(100100, 10000), CMTimeMake(461, 44)}) {
+        for (const double speed : {1.0, 0.5}) {
+            for (const bool spansFirst : {false, true}) {
+                CAPTURE(describe(end));
+                CAPTURE(speed);
+                CAPTURE(spansFirst);
+                Fixture fx;
+                MediaAsset media = *fx.project.findAsset(fx.video60);
+                media.name = "odd.mkv";
+                media.duration = end;
+                media.frameDuration = CMTimeMake(1, 30);
+                const AssetId asset = fx.project.addAsset(media);
+                const ClipId first = fx.addClip(fx.v1, asset, 0, 45, 0, speed);
+                const ClipId middle = fx.addClip(fx.v1, asset, 45, 45, 0, speed);
+                const ClipId last = fx.addClip(fx.v1, asset, 90, 45, 0, speed);
+                fx.requireValid();
+                auto reverseMiddle = [&] {
+                    SetClipReversed reverse(fx.seq, middle, true);
+                    applyReversible(fx.project, reverse);
+                };
+                if (!spansFirst) {
+                    reverseMiddle();
+                }
+                movingSpan(fx, first, 0, 45);
+                const SpanId inMiddle = movingSpan(fx, middle, 45, 90);
+                const SpanId inLast = movingSpan(fx, last, 90, 135);
+                if (spansFirst) {
+                    reverseMiddle();
+                }
+                REQUIRE(fx.clip(middle).reversed);
+                Project unmatched = fx.project;
+                match(fx, inMiddle, ClipEdge::Head);
+                checkSameMotion(motionAtFrame(fx, middle, 45), motionAtFrame(fx, first, 44));
+                fx.project = unmatched;
+                match(fx, inLast, ClipEdge::Head);
+                checkSameMotion(motionAtFrame(fx, last, 90), motionAtFrame(fx, middle, 89));
+                fx.project = unmatched;
+                std::vector<SpanValueChange> changes;
+                CHECK(planMatchSpanEdge(fx.sequence(), inMiddle, ClipEdge::Tail, changes).ok());
+            }
+        }
+    }
+}

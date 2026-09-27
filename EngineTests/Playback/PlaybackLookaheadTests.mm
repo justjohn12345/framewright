@@ -476,4 +476,82 @@ double secondsOf(CMTime t) {
     XCTAssertEqual(h.controller->stats().audioUnderruns, 0u, @"the reversed audio kept up");
 }
 
+/// A cut from a forward clip into a reversed one while playing (hands-on round, 2026-09-27): the
+/// reversed clip's first picture is the END of a backward decode window, so its window must be decoded
+/// before the playhead reaches the cut or the first frames are late (the forward clip's last picture
+/// held). Measured on the long-GOP 1080p file (a keyframe every 5 s: the backward window starts at a
+/// keyframe up to 5 s before the picture) for the user's case (the same range reversed: its first
+/// picture is the forward clip's last, a held picture by construction) and for a reversed range the
+/// forward clip never decoded. Every presentation from the start to a second after the cut must show
+/// its own frame's picture (none late), and the controller must count no late frame.
+- (void)testAForwardToReversedCutPresentsEveryFrameOnTime {
+    struct Case {
+        const char *name;
+        int64_t reversedSourceFrame; // the reversed clip's range starts here in the media (90 frames)
+    };
+    // Paused a second before the cut (the stopped lookahead does not reach the reversed clip: play()
+    // starts its window) and a third of a second before it (the stopped lookahead has started it).
+    const std::pair<Case, int64_t> runs[] = {{Case{"the same range reversed", 150}, 60},
+                                            {Case{"the same range reversed", 150}, 80},
+                                            {Case{"another range reversed", 30}, 60},
+                                            {Case{"another range reversed", 30}, 80}};
+    for (const auto &[c, from] : runs) {
+        PlaybackHarness h(PlaybackHarness::Mode::Realtime, 1.0);
+        const AssetId gop = h.importAsset("gop5s_h264_1080p30.mp4");
+        if (!h.ok()) {
+            XCTFail(@"%s", h.error().c_str());
+            return;
+        }
+        // V1: forward [0, 90) from media frame 150; reversed [90, 180) from media frame c.reversedSourceFrame.
+        h.addClip(h.v1, gop, 0, 90, frames30(150));
+        const ClipId backward = h.addClip(h.v1, gop, 90, 90, frames30(c.reversedSourceFrame));
+        SetClipReversed reverse(h.sequenceId, backward, true);
+        const EditResult reversed = reverse.apply(h.project);
+        XCTAssertTrue(reversed.ok(), @"%s", reversed.message.c_str());
+        XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+        h.load();
+        XCTAssertTrue(PlaybackHarness::waitUntil([&] { return h.output->isRunning(); }), @"the output warms up");
+        h.controller->seek(frames30(from));
+        h.presentExact();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const uint64_t lateBefore = h.controller->stats().lateFrames;
+        XCTAssertGreaterThanOrEqual(h.playAndWait(), 0.0);
+        // Media frame expected at sequence frame p: forward 150 + p; reversed frame k shows the
+        // range's frame 89 - k.
+        auto expected = [&](int64_t p) {
+            return p < 90 ? 150 + p : c.reversedSourceFrame + 89 - (p - 90);
+        };
+        std::vector<std::string> late;
+        int samples = 0;
+        int64_t lastFrame = -1;
+        const auto start = SteadyClock::now();
+        auto next = start;
+        while (SteadyClock::now() - start < std::chrono::milliseconds(3000) && lastFrame < 125) {
+            next += std::chrono::microseconds(16667);
+            std::this_thread::sleep_until(next);
+            const PlaybackHarness::Sample s = h.present();
+            const int64_t p = s.presented.frameIndex;
+            lastFrame = std::max(lastFrame, p);
+            if (p < from + 3 || p > 120 || s.burnIns.empty()) {
+                continue;
+            }
+            ++samples;
+            if (s.burnIns.front().value_or(-1) != expected(p)) {
+                late.push_back("frame " + std::to_string(p) + " shows media frame " +
+                               std::to_string(s.burnIns.front().value_or(-1)) + ", expected " +
+                               std::to_string(expected(p)));
+            }
+        }
+        const uint64_t lateFrames = h.controller->stats().lateFrames - lateBefore;
+        h.controller->pause();
+        NSLog(@"FORWARD TO REVERSED CUT (%s, from %lld): %d samples around the cut, %zu showing another frame, %llu late "
+              @"presentations counted",
+              c.name, from, samples, late.size(), lateFrames);
+        XCTAssertGreaterThan(samples, 60, @"%s", c.name);
+        XCTAssertTrue(late.empty(), @"%s: %zu presentations late, first: %s", c.name, late.size(),
+                      late.empty() ? "" : late.front().c_str());
+        XCTAssertEqual(lateFrames, 0u, @"%s", c.name);
+    }
+}
+
 @end
