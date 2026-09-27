@@ -194,6 +194,22 @@ bool isShaped(const VideoLayer &layer) {
     return layer.transition && layer.transition->kind != TransitionKind::CrossDissolve;
 }
 
+// The progress uniforms of a draw of `transition` (VEDrawUniforms::mix): x the mix (the frame's centre),
+// y and z the frame's exposure interval [progressStart, progressEnd] for a shape (the instant at the mix
+// when the interval is not set); y and z zero for a dissolve, whose uniforms are unchanged.
+simd_float4 progressUniforms(const LayerTransition &transition) {
+    const double mix = std::clamp(transition.mix, 0.0, 1.0);
+    if (transition.kind == TransitionKind::CrossDissolve) {
+        return simd_make_float4(float(mix), 0.0f, 0.0f, 0.0f);
+    }
+    double start = transition.progressStart;
+    double end = transition.progressEnd;
+    if (!std::isfinite(start) || !std::isfinite(end) || end < start) {
+        start = end = mix;
+    }
+    return simd_make_float4(float(mix), float(std::clamp(start, 0.0, 1.0)), float(std::clamp(end, 0.0, 1.0)), 0.0f);
+}
+
 // The shape uniforms of a draw of `transition` (VEDrawUniforms::reserved); all zero for a dissolve.
 simd_float4 shapeUniforms(const LayerTransition &transition, bool drawnAlone) {
     if (transition.kind == TransitionKind::CrossDissolve) {
@@ -578,8 +594,7 @@ struct Compositor::Impl {
                 fillSource(item.uniforms.a, t, item.a, pl, weight);
                 item.uniforms.quadRect = simd_make_float4(float(pl.x0), float(pl.y0), float(pl.x1), float(pl.y1));
                 if (isShaped(layer)) {
-                    item.uniforms.mix =
-                        simd_make_float4(float(std::clamp(layer.transition->mix, 0.0, 1.0)), 0.0f, 0.0f, 0.0f);
+                    item.uniforms.mix = progressUniforms(*layer.transition);
                     item.uniforms.reserved = shapeUniforms(*layer.transition, true);
                 }
                 item.layerA = item.layerB = i;
@@ -626,8 +641,7 @@ struct Compositor::Impl {
                     y1 = std::max(pa.y1, pb.y1);
                 }
                 item.uniforms.quadRect = simd_make_float4(float(x0), float(y0), float(x1), float(y1));
-                item.uniforms.mix =
-                    simd_make_float4(float(std::clamp(inLayer.transition->mix, 0.0, 1.0)), 0.0f, 0.0f, 0.0f);
+                item.uniforms.mix = progressUniforms(*inLayer.transition);
                 item.uniforms.reserved = shapeUniforms(*inLayer.transition, false);
                 item.layerA = out;
                 item.layerB = in;

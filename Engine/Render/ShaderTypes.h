@@ -75,8 +75,10 @@ struct VESourceUniforms {
 struct VEDrawUniforms {
     VEFloat4 quadRect;  // x0, y0, x1, y1 in sequence pixels
     VEFloat4 frameSize; // sequence width, height, 1/width, 1/height
-    // x: the transition's linear progress p (LayerTransition::mix): the dissolve mix toward source B
-    // of a pair draw, and the progress of a shaped transition drawn alone (0 otherwise).
+    // x: the transition's linear progress at the frame's centre (LayerTransition::mix): the dissolve mix
+    // toward source B of a pair draw. y, z: a shaped transition's exposure interval [p0, p1]
+    // (LayerTransition::progressStart / progressEnd), over which its edge is averaged (transitionReveal);
+    // zero for a dissolve. w: unused.
     VEFloat4 mix;
     // A shaped transition (RenderGraph.h, transitionReveal); all zero for a cross dissolve and for a
     // layer without a transition, whose draws are unchanged. x: the VETransitionShape (as a float);

@@ -12,30 +12,43 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <vector>
 
 namespace ve {
 
 // The half width, in sequence pixels, of the soft edge of a shaped transition (a wipe or the iris):
-// the reveal goes from 0 to 1 across 2 * kTransitionFeather pixels, so the edge is anti-aliased
-// without looking blurred at any frame size.
+// at one instant the reveal goes from 0 to 1 across 2 * kTransitionFeather pixels, so the edge is
+// anti-aliased without looking blurred at any frame size.
 inline constexpr double kTransitionFeather = 2.0;
 
 // The reveal m of a shaped transition (TransitionKind other than CrossDissolve) at the sequence
-// position (x, y) (pixels, origin top left, +y down) of a W x H frame at linear progress p: the share
-// of the incoming picture there (the compositor shows mix(outgoing, incoming, m), and a single layer
-// of a fade role times m fading in or 1 - m fading out). With f = kTransitionFeather:
+// position (x, y) (pixels, origin top left, +y down) of a W x H frame: the share of the incoming picture
+// there (the compositor shows mix(outgoing, incoming, m), and a single layer of a fade role times m
+// fading in or 1 - m fading out). It is the soft edge averaged over the frame's exposure: the frame
+// [k, k + 1) of an n-frame transition stands for the progress interval [p0, p1] = [k / n, (k + 1) / n]
+// (LayerTransition::progressStart / progressEnd), during which the edge sweeps on. With f = kTransitionFeather:
 //   d = the distance from where the incoming picture enters: W - x (WipeLeft), x (WipeRight),
 //       H - y (WipeUp), y (WipeDown), |(x, y) - (W / 2, H / 2)| (Iris);
 //   L = the distance the edge travels across the frame: W, W, H, H, and half the frame's diagonal
 //       sqrt(W^2 + H^2) / 2 for the iris (so the circle reaches the corners);
-//   r = p (L + 2f) - f, the edge's distance from the entering side;
-//   m = 1 - smoothstep(r - f, r + f, d), smoothstep(a, b, v) = t^2 (3 - 2t), t = clamp((v - a) / (b - a), 0, 1).
-// At p = 0 the band [r - f, r + f] = [-2f, 0] lies before every d >= 0, so m = 0 everywhere (exactly
-// the outgoing picture); at p = 1 it is [L, L + 2f], past every d <= L in the frame, so m = 1
-// everywhere (exactly the incoming picture). Shaders.metal implements it (transitionReveal); the
-// compositor tests hold it to a C++ copy of this formula.
+//   e(p) = p (L + 2f) - f, the edge's distance from the entering side at progress p;
+//   the soft edge at one instant: m_p(d) = 1 - S(d - e(p)), S(x) = smoothstep(-f, f, x) = t^2 (3 - 2t),
+//       t = clamp((x + f) / (2f), 0, 1);
+//   the frame's reveal: m(d) = the mean of m_p(d) over p in [p0, p1]. With e0 = e(p0), e1 = e(p1),
+//       D = e1 - e0 and G(x) = the integral of S up to x (0 for x <= -f, 2f (t^3 - t^4 / 2) inside the
+//       band, x from f on):  m(d) = 1 - (G(d - e0) - G(d - e1)) / D;  for D below 1/1000 of a pixel (a
+//       frame without length) m = m_p at p = (p0 + p1) / 2.
+// So the edge is the hard edge box-filtered over the exposure (a linear ramp from 1 at e0 to 0 at e1:
+// the fraction of the frame's time during which the pixel is past the edge) with the 2 px feather
+// rounding its ends; the wider of the two dominates, and away from the feather (d more than f from e0
+// and e1) m is exactly the box-filtered hard edge, clamp((e1 - d) / D, 0, 1). A sweep of tens of pixels
+// per frame no longer steps from frame to frame. The interval [0, 0] gives exactly the outgoing picture
+// (the band [-2f, 0] lies before every d >= 0) and [1, 1] exactly the incoming one (the band [L, L + 2f]
+// lies past every d <= L); the first and last frames of a transition ([0, 1/n] and [(n-1)/n, 1]) show the
+// entering sliver partly revealed, as their exposure does. Shaders.metal implements it (transitionReveal);
+// the compositor tests hold it to a C++ reference that averages m_p over 32 sub-steps of the interval.
 
 // Transition state of a layer (a lane-0 span acting on this frame, Transition.h). The two clips
 // of a cross dissolve are emitted as consecutive layers (outgoing first) and point at each other
@@ -53,8 +66,13 @@ struct LayerTransition {
     // frame's centre), so the first frame already shows some of the incoming picture and the last
     // some of the outgoing one, and a 1-frame dissolve is an even mix. This equals the audio
     // crossfade's (or fade's) linear progress at the frame's midpoint, so picture and sound cross
-    // over together.
+    // over together. The cross dissolve's uniform mix; a shape uses the frame's interval below.
     double mix = 0.0;
+    // The fraction of the range at this frame's start and at its end (clamped to [0, 1]): k / n and
+    // (k + 1) / n for frame k of n. A shaped transition averages its edge over this interval (see
+    // kTransitionFeather); NaN (not set) makes it the instant `mix` ([mix, mix]).
+    double progressStart = std::numeric_limits<double>::quiet_NaN();
+    double progressEnd = std::numeric_limits<double>::quiet_NaN();
     // Cross dissolve: whether this layer is the incoming clip. Fades: true for a fade in (the
     // picture appears as mix grows), false for a fade out.
     bool isIncoming = false;

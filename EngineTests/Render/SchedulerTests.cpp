@@ -723,3 +723,33 @@ TEST_CASE("Scheduler: a shaped transition carries its kind to the layers; the so
         sameSound(audioFor(fx, 0, 120), dissolveSound);
     }
 }
+
+TEST_CASE("Scheduler: a transition's layers carry the frame's exposure interval with the mix at its centre") {
+    // A 10-frame cut [55, 65) and a 12-frame fade in [0, 12): frame k of n is exposed over [k / n, (k + 1) / n].
+    Fixture fx;
+    const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
+    const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
+    fx.addTransition(fx.v1, a, b, 10);
+    fx.addFade(a, ClipEdge::Head, f30(12));
+    fx.requireValid();
+    for (std::int64_t k = 0; k < 10; ++k) {
+        CAPTURE(k);
+        const RenderGraph g = graphAt(fx, 55 + k);
+        REQUIRE(g.layers.size() == 2);
+        for (const VideoLayer &layer : g.layers) {
+            REQUIRE(layer.transition.has_value());
+            CHECK(layer.transition->progressStart == doctest::Approx(k / 10.0));
+            CHECK(layer.transition->progressEnd == doctest::Approx((k + 1) / 10.0));
+            CHECK(layer.transition->mix == doctest::Approx((k + 0.5) / 10.0));
+        }
+    }
+    CHECK(graphAt(fx, 55).layers[0].transition->progressStart == 0.0);
+    CHECK(graphAt(fx, 64).layers[1].transition->progressEnd == 1.0);
+    for (std::int64_t k = 0; k < 12; ++k) {
+        const RenderGraph g = graphAt(fx, k);
+        REQUIRE(g.layers.size() == 1);
+        REQUIRE(g.layers[0].transition.has_value());
+        CHECK(g.layers[0].transition->progressStart == doctest::Approx(k / 12.0));
+        CHECK(g.layers[0].transition->progressEnd == doctest::Approx((k + 1) / 12.0));
+    }
+}

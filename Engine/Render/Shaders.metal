@@ -7,7 +7,8 @@
 // anti-aliased edge coverage and the layer weight, and returns premultiplied colour for
 // ONE / ONE_MINUS_SOURCE_ALPHA blending. A dissolve pair is drawn in one pass as
 // mix(A, B, m) of the two premultiplied samples, so the crossfade is exact over transparency; m is the
-// uniform mix for a cross dissolve and the per-pixel reveal for a wipe or the iris (transitionReveal).
+// uniform mix for a cross dissolve and the per-pixel reveal for a wipe or the iris (transitionReveal: the
+// soft edge averaged over the frame's exposure).
 
 #include <metal_stdlib>
 #include "ShaderTypes.h"
@@ -89,11 +90,23 @@ static float4 sampleRGBA(texture2d<float> rgba, float2 uv, constant VESourceUnif
     return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
 }
 
+// G(x) - max(x, 0), where G is the integral of the soft edge S(x) = smoothstep(-f, f, x) up to x: zero
+// outside the band |x| < f, where G(x) = 2f (t^3 - t^4 / 2), t = (x + f) / (2f). Split this way the
+// frame's reveal below is a difference of small numbers, not of two large G values.
+static float softEdgeIntegralExcess(float x, float f) {
+    if (x <= -f || x >= f) {
+        return 0.0;
+    }
+    const float t = (x + f) / (2.0 * f);
+    return 2.0 * f * t * t * t * (1.0 - 0.5 * t) - max(x, 0.0);
+}
+
 // The reveal m of a shaped transition (VETransitionShape, not None) at sequence position p of a
-// `frame`-sized frame at linear progress `progress`, with a soft edge `feather` pixels wide on each
-// side: the formula documented in RenderGraph.h (transitionReveal, kTransitionFeather). 0 shows none of
-// the incoming picture, 1 all of it; progress 0 and 1 give exactly 0 and 1 everywhere in the frame.
-static float transitionReveal(int shape, float progress, float feather, float2 p, float2 frame) {
+// `frame`-sized frame exposed over the progress interval [p0, p1], with a soft edge `feather` pixels wide
+// on each side: the formula documented in RenderGraph.h (transitionReveal, kTransitionFeather), the soft
+// edge averaged over the interval. 0 shows none of the incoming picture, 1 all of it; the intervals [0, 0]
+// and [1, 1] give exactly 0 and 1 everywhere in the frame.
+static float transitionReveal(int shape, float p0, float p1, float feather, float2 p, float2 frame) {
     float d;
     float travel;
     switch (shape) {
@@ -119,9 +132,20 @@ static float transitionReveal(int shape, float progress, float feather, float2 p
         break;
     }
     const float f = max(feather, 1.0e-3);
-    const float r = progress * (travel + 2.0 * f) - f;
-    const float t = saturate((d - (r - f)) / (2.0 * f));
-    return 1.0 - t * t * (3.0 - 2.0 * t);
+    const float e0 = p0 * (travel + 2.0 * f) - f;
+    const float e1 = p1 * (travel + 2.0 * f) - f;
+    const float sweep = e1 - e0;
+    if (sweep < 1.0e-3) {
+        // A frame without length: the soft edge at its instant.
+        const float r = 0.5 * (e0 + e1);
+        const float t = saturate((d - (r - f)) / (2.0 * f));
+        return 1.0 - t * t * (3.0 - 2.0 * t);
+    }
+    // 1 - (G(d - e0) - G(d - e1)) / sweep, with G(x) = max(x, 0) + excess(x) and
+    // max(d - e0, 0) - max(d - e1, 0) = clamp(d - e0, 0, sweep).
+    const float covered = clamp(d - e0, 0.0, sweep) + softEdgeIntegralExcess(d - e0, f) -
+                          softEdgeIntegralExcess(d - e1, f);
+    return saturate(1.0 - covered / sweep);
 }
 
 fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
@@ -142,8 +166,8 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     const int shape = int(uniforms.reserved.x + 0.5);
     if (!kHasPartner) {
         if (shape != VETransitionShapeNone) {
-            const float m = transitionReveal(shape, uniforms.mix.x, uniforms.reserved.y, in.framePosition,
-                                             uniforms.frameSize.xy);
+            const float m = transitionReveal(shape, uniforms.mix.y, uniforms.mix.z, uniforms.reserved.y,
+                                             in.framePosition, uniforms.frameSize.xy);
             colorA *= uniforms.reserved.z > 0.5 ? m : 1.0 - m;
         }
         return colorA;
@@ -161,8 +185,8 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     if (shape == VETransitionShapeNone) {
         return mix(colorA, colorB, uniforms.mix.x);
     }
-    return mix(colorA, colorB,
-               transitionReveal(shape, uniforms.mix.x, uniforms.reserved.y, in.framePosition, uniforms.frameSize.xy));
+    return mix(colorA, colorB, transitionReveal(shape, uniforms.mix.y, uniforms.mix.z, uniforms.reserved.y,
+                                                in.framePosition, uniforms.frameSize.xy));
 }
 
 // MARK: - Minification

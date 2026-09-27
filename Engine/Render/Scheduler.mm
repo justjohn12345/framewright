@@ -31,43 +31,47 @@ VideoLayer makeLayer(const Clip &clip, const MediaAsset &asset, CMTime time, CMT
     return layer;
 }
 
-// Fraction of `range` at the centre of the frame starting at `frame` (frameDuration long), clamped
-// to [0, 1], computed exactly and converted to a double once: (k + 1/2) / n for frame k of a range
-// of n whole frames.
-double frameCentreFraction(const TimeRange &range, CMTime frame, CMTime frameDuration) {
+// Fraction of `range` at the time `frame` + `step` * frameDuration (step 0: the frame's start, 1/2 its
+// centre, 1 its end), clamped to [0, 1], computed exactly and converted to a double once: (k + step) / n
+// for frame k of a range of n whole frames.
+double frameFraction(const TimeRange &range, CMTime frame, CMTime frameDuration, Ratio step) {
     const auto start = ExactTime::from(range.start);
     const auto end = ExactTime::from(range.end);
     const auto at = ExactTime::from(frame);
-    const auto half = ExactTime::from(frameDuration);
-    const auto halfFrame = half ? half->times(Ratio{1, 2}) : std::nullopt;
-    const auto centre = at && halfFrame ? at->plus(*halfFrame) : std::nullopt;
+    const auto length = ExactTime::from(frameDuration);
+    const auto offset = length ? length->times(step) : std::nullopt;
+    const auto centre = at && offset ? at->plus(*offset) : std::nullopt;
     const auto into = centre && start ? centre->minus(*start) : std::nullopt;
-    const auto length = start && end ? end->minus(*start) : std::nullopt;
-    if (!into || !length || length->numerator() <= 0) {
+    const auto span = start && end ? end->minus(*start) : std::nullopt;
+    if (!into || !span || span->numerator() <= 0) {
         return 0.5;
     }
     if (into->numerator() <= 0) {
         return 0.0;
     }
-    if (into->compare(*length) >= 0) {
+    if (into->compare(*span) >= 0) {
         return 1.0;
     }
     Int128 numerator = 0;
     Int128 denominator = 0;
-    if (!__builtin_mul_overflow(into->numerator(), length->denominator(), &numerator) &&
-        !__builtin_mul_overflow(into->denominator(), length->numerator(), &denominator) && denominator != 0) {
+    if (!__builtin_mul_overflow(into->numerator(), span->denominator(), &numerator) &&
+        !__builtin_mul_overflow(into->denominator(), span->numerator(), &denominator) && denominator != 0) {
         return std::clamp(static_cast<double>(numerator) / static_cast<double>(denominator), 0.0, 1.0);
     }
-    return std::clamp(into->toDouble() / length->toDouble(), 0.0, 1.0);
+    return std::clamp(into->toDouble() / span->toDouble(), 0.0, 1.0);
 }
 
-LayerTransition makeTransition(const TransitionPlacement &placement, double mix, bool incoming, ClipId partner,
-                               std::size_t partnerIndex) {
+// The transition state of the frame starting at `t`: `mix` at the frame's centre ((k + 1/2) / n, the
+// audio's progress at the frame's midpoint), the exposure interval [k / n, (k + 1) / n] for a shape.
+LayerTransition makeTransition(const TransitionPlacement &placement, CMTime t, CMTime frameDuration, bool incoming,
+                               ClipId partner, std::size_t partnerIndex) {
     LayerTransition transition;
     transition.transitionId = placement.span->id;
     transition.kind = placement.span->transition;
     transition.role = placement.role;
-    transition.mix = mix;
+    transition.mix = frameFraction(placement.range, t, frameDuration, Ratio{1, 2});
+    transition.progressStart = frameFraction(placement.range, t, frameDuration, Ratio{0, 1});
+    transition.progressEnd = frameFraction(placement.range, t, frameDuration, Ratio{1, 1});
     transition.isIncoming = incoming;
     transition.partnerClipId = partner;
     transition.partnerLayerIndex = partnerIndex;
@@ -163,13 +167,14 @@ RenderGraph Scheduler::renderGraphAt(const Sequence &sequence, const Project &pr
             const MediaAsset *toAsset = project.findAsset(to.assetId);
             if (fromAsset && toAsset) {
                 // Frame k of an n-frame transition shows the mix at its centre, (k + 1/2) / n: the
-                // value the audio crossfade's linear progress has at the middle of the frame.
-                const double mix = frameCentreFraction(transition->range, t, sequence.frameDuration);
+                // value the audio crossfade's linear progress has at the middle of the frame (a shape
+                // averages its edge over [k / n, (k + 1) / n]).
                 const std::size_t outgoingIndex = graph.layers.size();
                 VideoLayer outgoing = makeLayer(from, *fromAsset, t, sequence.frameDuration);
                 VideoLayer incoming = makeLayer(to, *toAsset, t, sequence.frameDuration);
-                outgoing.transition = makeTransition(*transition, mix, false, to.id, outgoingIndex + 1);
-                incoming.transition = makeTransition(*transition, mix, true, from.id, outgoingIndex);
+                outgoing.transition =
+                    makeTransition(*transition, t, sequence.frameDuration, false, to.id, outgoingIndex + 1);
+                incoming.transition = makeTransition(*transition, t, sequence.frameDuration, true, from.id, outgoingIndex);
                 graph.layers.push_back(std::move(outgoing));
                 graph.layers.push_back(std::move(incoming));
                 continue;
@@ -180,9 +185,9 @@ RenderGraph Scheduler::renderGraphAt(const Sequence &sequence, const Project &pr
                 VideoLayer layer = makeLayer(*clip, *asset, t, sequence.frameDuration);
                 if (transition && transition->role != TransitionRole::CrossDissolve && transition->owner == clip) {
                     // A fade to or from black: this layer alone, weighted by the fade.
-                    const double mix = frameCentreFraction(transition->range, t, sequence.frameDuration);
-                    layer.transition = makeTransition(*transition, mix, transition->role == TransitionRole::FadeIn,
-                                                      ClipId{}, graph.layers.size());
+                    layer.transition = makeTransition(*transition, t, sequence.frameDuration,
+                                                      transition->role == TransitionRole::FadeIn, ClipId{},
+                                                      graph.layers.size());
                 }
                 graph.layers.push_back(std::move(layer));
             }
