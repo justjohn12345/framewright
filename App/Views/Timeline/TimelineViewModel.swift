@@ -54,12 +54,28 @@ struct TimelineViewModel: Equatable {
         var speed: Double = 1
         var linkedClipID: Int64 = 0
         var isStill = false
+        /// Plays its media backwards (VEClipInfo.reversed): `sourceIn` is then a clip time counted
+        /// back from `mediaEnd`, and the media shown at clip time u is mediaEnd - u.
+        var reversed = false
+        /// Seconds where the media the clip's track uses ends (the mirror of a reversed clip).
+        var mediaEnd: Double = 0
         /// On an audio track: gain and fades are drawn and editable on the clip.
         var isAudio = false
         var gainDb: Double = 0
         /// Fade durations in seconds.
         var fadeIn: Double = 0
         var fadeOut: Double = 0
+
+        /// The name drawn on the clip: its media's, after a "◀" when it plays backwards.
+        var title: String {
+            reversed ? "◀ " + name : name
+        }
+
+        /// The media time (seconds) the clip shows at clip time `clipTime` (seconds of sourceIn's
+        /// kind): the same forward, mirrored about `mediaEnd` when reversed.
+        func mediaTime(atClipTime clipTime: Double) -> Double {
+            reversed ? mediaEnd - clipTime : clipTime
+        }
     }
 
     /// What a span changes (VESpanKind).

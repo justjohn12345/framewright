@@ -128,6 +128,12 @@ struct AppCommands: Commands {
             Button("Speed/Duration…") { store.showSpeedSheet() }
                 .keyboardShortcut("r")
                 .disabled(store.selection.isEmpty)
+            // Checked when every selected clip (not a still) plays backwards; toggles them with their
+            // linked partners.
+            Toggle("Reverse Clip", isOn: Binding(get: { store.selectionIsReversed },
+                                                 set: { store.setReversed($0) }))
+                .keyboardShortcut("r", modifiers: [.command, .option])
+                .disabled(store.reversibleSelection.isEmpty)
             Divider()
             Button("Add Cross Dissolve") { store.addTransitionAtPlayhead(.crossDissolve) }
                 .keyboardShortcut("d", modifiers: [.command, .shift])

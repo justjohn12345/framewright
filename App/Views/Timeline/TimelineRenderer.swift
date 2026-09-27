@@ -238,7 +238,7 @@ struct TimelineRenderer {
         if layout.track.muted {
             inner.fill(Path(body), with: .color(Color.black.opacity(0.35)))
         }
-        var label = clip.name
+        var label = clip.title
         if abs(clip.speed - 1) > 1e-6 {
             label += "  " + SpeedFormat.percent(clip.speed)
         }
@@ -309,7 +309,8 @@ struct TimelineRenderer {
             if x > min(rect.maxX, size.width) { break }
             let tileRect = CGRect(x: x, y: rect.minY, width: tileWidth, height: rect.height)
             let timelineTime = clip.start + Double(CGFloat(index) * tileWidth + tileWidth / 2) / model.pixelsPerSecond
-            var sourceTime = clip.isStill ? 0 : clip.sourceIn + (timelineTime - clip.start) * clip.speed
+            // The media the tile's middle shows (mirrored for a reversed clip; the cache is keyed by media time).
+            var sourceTime = clip.isStill ? 0 : clip.mediaTime(atClipTime: clip.sourceIn + (timelineTime - clip.start) * clip.speed)
             sourceTime = (sourceTime / quantum).rounded(.down) * quantum
             if let image = thumbnails.image(asset: clip.assetID, seconds: sourceTime, maxDimension: Self.thumbnailMaxDimension) {
                 context.draw(Image(decorative: image, scale: 1), in: tileRect)
@@ -335,17 +336,30 @@ struct TimelineRenderer {
         let speed = max(clip.speed, 1e-6)
         let level = WaveformCache.level(forPointsPerSecond: model.pixelsPerSecond / speed)
         let tileSeconds = WaveformCache.tileSeconds(level: level)
-        let sourceStart = clip.sourceIn + (model.time(forX: x0) - clip.start) * speed
-        let sourceEnd = clip.sourceIn + (model.time(forX: x1) - clip.start) * speed
-        let first = max(0, Int((sourceStart / tileSeconds).rounded(.down)))
-        let last = max(first, Int((sourceEnd / tileSeconds).rounded(.down)))
+        // The media times at the visible edges (a reversed clip runs from the later one).
+        let atLeft = clip.mediaTime(atClipTime: clip.sourceIn + (model.time(forX: x0) - clip.start) * speed)
+        let atRight = clip.mediaTime(atClipTime: clip.sourceIn + (model.time(forX: x1) - clip.start) * speed)
+        let first = max(0, Int((min(atLeft, atRight) / tileSeconds).rounded(.down)))
+        let last = max(first, Int((max(atLeft, atRight) / tileSeconds).rounded(.down)))
+        // The timeline x where media time `media` plays.
+        func x(ofMedia media: Double) -> CGFloat {
+            model.x(forTime: clip.start + (clip.mediaTime(atClipTime: media) - clip.sourceIn) / speed)
+        }
         for index in first ... min(last, first + 256) {
             guard let image = waveforms.strip(asset: clip.assetID, level: level, index: index) else { continue }
             let tileStart = Double(index) * tileSeconds
-            let left = model.x(forTime: clip.start + (tileStart - clip.sourceIn) / speed)
-            let right = model.x(forTime: clip.start + (tileStart + tileSeconds - clip.sourceIn) / speed)
-            context.draw(Image(decorative: image, scale: 1),
-                         in: CGRect(x: left, y: rect.minY, width: max(0.5, right - left), height: rect.height))
+            let a = x(ofMedia: tileStart)
+            let b = x(ofMedia: tileStart + tileSeconds)
+            let tile = CGRect(x: min(a, b), y: rect.minY, width: max(0.5, abs(b - a)), height: rect.height)
+            if clip.reversed {
+                // Played backwards: the strip drawn mirrored left to right.
+                var mirrored = context
+                mirrored.translateBy(x: tile.minX + tile.maxX, y: 0)
+                mirrored.scaleBy(x: -1, y: 1)
+                mirrored.draw(Image(decorative: image, scale: 1), in: tile)
+            } else {
+                context.draw(Image(decorative: image, scale: 1), in: tile)
+            }
         }
     }
 

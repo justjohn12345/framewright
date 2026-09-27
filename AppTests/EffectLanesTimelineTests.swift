@@ -981,7 +981,8 @@ final class EffectLanesTimelineTests: XCTestCase {
         let gestures = TimelineGestureController(store: store)
         let items = gestures.contextMenuItems(at: CGPoint(x: 20, y: 90))
         XCTAssertEqual(items.filter { !$0.isSeparator }.map(\.title),
-                       ["Delete", "Ripple Delete", "Link", "Speed/Duration…", "Add Ken Burns…", "Add Motion Span"])
+                       ["Delete", "Ripple Delete", "Link", "Speed/Duration…", "Reverse Clip", "Add Ken Burns…",
+                        "Add Motion Span"])
         try XCTUnwrap(items.first { $0.title == "Add Ken Burns…" }).action()
         XCTAssertEqual(store.selectedEffectSpan?.start, frames(220))
         XCTAssertEqual(store.selectedEffectSpan?.lane, 2, "lane 1 has the span added near the end")

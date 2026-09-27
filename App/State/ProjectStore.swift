@@ -468,6 +468,7 @@ final class ProjectStore: ObservableObject {
                                           start: $0.timelineStart.secondsOrZero, end: $0.timelineEnd.secondsOrZero,
                                           sourceIn: $0.sourceIn.secondsOrZero, speed: $0.speed,
                                           linkedClipID: $0.linkedClipID, isStill: $0.isStill,
+                                          reversed: $0.reversed, mediaEnd: $0.mediaEnd.secondsOrZero,
                                           isAudio: $0.trackKind == .audio, gainDb: audio.gainDb,
                                           fadeIn: audio.fadeInDuration.secondsOrZero,
                                           fadeOut: audio.fadeOutDuration.secondsOrZero)
@@ -1161,6 +1162,42 @@ final class ProjectStore: ObservableObject {
             return
         }
         speedSheetClipIDs = chosen.map(\.clipID)
+    }
+
+    // MARK: Reverse
+
+    /// The selected clips Reverse Clip acts on: every selected clip that is not a still.
+    var reversibleSelection: [VEClipInfo] {
+        selectedClips.filter { !$0.isStill }
+    }
+
+    /// Whether every clip Reverse Clip acts on plays backwards (the menu item's check mark).
+    var selectionIsReversed: Bool {
+        let clips = reversibleSelection
+        return !clips.isEmpty && clips.allSatisfy(\.reversed)
+    }
+
+    /// Clip > Reverse Clip (Option-Cmd-R), the clip context menu and the inspector's Reverse box:
+    /// the selected clips (not stills) and their linked partners play backwards, or forwards again
+    /// when all of them already play backwards. One undo step; a transition the change removes is
+    /// named in the status line.
+    func toggleReverseSelection() {
+        setReversed(!selectionIsReversed)
+    }
+
+    /// Makes the selected clips (not stills) and their linked partners play backwards (`reversed`) or
+    /// forwards. One undo step; refusals and removed transitions are reported.
+    @discardableResult
+    func setReversed(_ reversed: Bool) -> Bool {
+        guard !isGestureActive else { return false }
+        let clips = reversibleSelection
+        guard !clips.isEmpty else {
+            statusMessage = selection.isEmpty ? "Select the clips to reverse."
+                : "Still images have no motion to reverse."
+            return false
+        }
+        inspector.endNudgeBurst()
+        return report(engine.setReversed(reversed, forClips: clips.map { NSNumber(value: $0.clipID) }))
     }
 
     /// File > Export…: opens the Export sheet (not during a gesture).

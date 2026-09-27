@@ -126,6 +126,12 @@ struct InspectorView: View {
             ParameterSection(store: store, inspector: inspector, section: .speed, subtitle: nil) {
                 HStack {
                     speedPresets
+                    Toggle("Reverse", isOn: Binding(get: { inspector.speedTarget?.reversed ?? false },
+                                                    set: { inspector.setReversed($0) }))
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                        .help("Play the clip's media backwards, its linked audio too (⌥⌘R)")
+                        .accessibilityIdentifier("SpeedReverse")
                     Spacer()
                     speedButton
                 }
@@ -213,8 +219,9 @@ private struct ClipInfoSection: View {
             row("Start", Timecode.string(clip.timelineStart, frameDuration: store.frameDuration))
             row("Duration", store.durationString(frames: store.frames(clip.duration)))
             if !clip.isStill {
-                row("Source In", Timecode.duration(clip.sourceIn))
-                row("Source Out", Timecode.duration(clip.sourceOut))
+                let source = InspectorModel.sourceRangeTexts(of: clip)
+                row("Source In", source.in)
+                row("Source Out", source.out)
             }
             HStack {
                 Text(clip.linkedClipID != 0 ? "Linked" : "Not linked")

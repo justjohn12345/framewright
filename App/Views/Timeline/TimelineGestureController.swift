@@ -863,7 +863,8 @@ final class TimelineGestureController: ObservableObject {
     /// The right-click menu at `location` in the track area. What is under the pointer is
     /// selected first (as in Premiere): a transition offers Delete (with its linked transition),
     /// Delete This Transition Only and Transition Duration…; an effect span Set Interpolation, Move
-    /// to Lane and Remove; a clip Delete, Ripple Delete, Link/Unlink, Speed/Duration… and, for a
+    /// to Lane and Remove; a clip Delete, Ripple Delete, Link/Unlink, Speed/Duration…, Reverse Clip
+    /// (checked when the selection plays backwards) and, for a
     /// video clip, Add Ken Burns… and Add Motion Span (at the playhead, on the clicked clip). Nothing
     /// during a drag or over empty space.
     func contextMenuItems(at location: CGPoint) -> [ContextMenuItem] {
@@ -894,6 +895,10 @@ final class TimelineGestureController: ObservableObject {
                 },
                 ContextMenuItem(title: "Speed/Duration…", isEnabled: selected.contains { !$0.isStill }) {
                     store.showSpeedSheet()
+                },
+                ContextMenuItem(title: "Reverse Clip", isEnabled: !store.reversibleSelection.isEmpty,
+                                isChecked: store.selectionIsReversed) {
+                    store.toggleReverseSelection()
                 },
             ]
             if let clip = store.clips[id], clip.trackKind == .video {

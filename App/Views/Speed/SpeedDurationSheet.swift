@@ -49,6 +49,8 @@ final class SpeedDurationModel: ObservableObject {
 
     @Published var text: String
     @Published var ripple: SpeedRipple
+    /// The Reverse box: the clips play their media backwards (checked when all of them do).
+    @Published var reversed: Bool
     /// Why the last Apply was refused, or why the text is not a speed; after a successful
     /// Apply, how the typed speed was adjusted to one the engine can store (if it was).
     @Published private(set) var message: String?
@@ -65,6 +67,8 @@ final class SpeedDurationModel: ObservableObject {
         let initialEntry: Entry = exactPercent ? .percent : .ratio
         entry = initialEntry
         text = Self.text(for: speed, entry: initialEntry)
+        let chosen = clipIDs.compactMap { store.clips[$0] }
+        reversed = !chosen.isEmpty && chosen.allSatisfy(\.reversed)
         // The durations shown follow the duration display preference while the sheet is open.
         preferencesForwarding = store.preferences.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
@@ -133,8 +137,8 @@ final class SpeedDurationModel: ObservableObject {
         return "\(before) → \(after)\(others)"
     }
 
-    /// Applies the speed to every clip as one undo step. Returns true (and closes the sheet) on
-    /// success; a refusal stays in `message`.
+    /// Applies the speed (and the Reverse box, when it changes a clip) to every clip as one undo
+    /// step. Returns true (and closes the sheet) on success; a refusal stays in `message`.
     @discardableResult
     func apply() -> Bool {
         guard let speed = parsedSpeed else {
@@ -145,10 +149,31 @@ final class SpeedDurationModel: ObservableObject {
             message = "Finish the current drag first."
             return false
         }
+        let engine = store.engine
         let ids = clipIDs.map { NSNumber(value: $0) }
-        let result = store.engine.setSpeedNumerator(speed.numerator, denominator: speed.denominator, forClips: ids,
-                                                    ripple: ripple != .none,
-                                                    scope: ripple == .syncedTracks ? .syncedTracks : .allTracks)
+        let wantsReversed = reversed
+        let changesDirection = clips.contains { $0.reversed != wantsReversed }
+        // Speed and direction together are one undo step.
+        let group = "speedSheet.\(ObjectIdentifier(self).hashValue)"
+        if changesDirection {
+            engine.beginCoalescing(withKey: group, mode: .accumulate)
+        }
+        let setSpeed = {
+            engine.setSpeedNumerator(speed.numerator, denominator: speed.denominator, forClips: ids,
+                                     ripple: self.ripple != .none,
+                                     scope: self.ripple == .syncedTracks ? .syncedTracks : .allTracks)
+        }
+        var result = changesDirection ? engine.performInCoalescingGroup(group) { setSpeed() } : setSpeed()
+        if result.ok, changesDirection {
+            result = engine.performInCoalescingGroup(group) { engine.setReversed(wantsReversed, forClips: ids) }
+        }
+        if changesDirection {
+            if result.ok {
+                engine.endCoalescing()
+            } else {
+                engine.cancelCoalescing()
+            }
+        }
         guard store.report(result) else {
             message = result.message
             return false
@@ -197,6 +222,10 @@ struct SpeedDurationSheet: View {
                 Text(model.durationText).monospacedDigit()
             }
             .font(.callout)
+            Toggle("Reverse (play the media backwards)", isOn: $model.reversed)
+                .toggleStyle(.checkbox)
+                .help("Frame by frame from the end of each clip's media to its start; its sound too (⌥⌘R)")
+                .accessibilityIdentifier("SpeedSheetReverse")
             Picker("Later clips", selection: $model.ripple) {
                 ForEach(SpeedRipple.allCases) { Text($0.title).tag($0) }
             }

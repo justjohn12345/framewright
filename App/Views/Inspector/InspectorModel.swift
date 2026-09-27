@@ -959,6 +959,25 @@ final class InspectorModel: ObservableObject {
         return "The speed must be between 1% and 10000%: \(shown) is too \(multiplier > 1 ? "fast" : "slow")."
     }
 
+    /// The Speed row's Reverse box: the speed target (with its linked partner) plays backwards or
+    /// forwards. One undo step; a refusal shows in the inspector and the status line.
+    func setReversed(_ reversed: Bool) {
+        guard canEdit(), let clip = speedTarget, clip.reversed != reversed else { return }
+        endNudgeBurst()
+        if !store.setReversed(reversed) {
+            message = store.statusMessage
+        }
+    }
+
+    /// The Clip section's Source In and Source Out: the media range the clip shows, with
+    /// "(reversed)" after it when it plays backwards (its model times count back from the media's end).
+    static func sourceRangeTexts(of clip: VEClipInfo) -> (in: String, out: String) {
+        guard clip.reversed else {
+            return (Timecode.duration(clip.sourceIn), Timecode.duration(clip.sourceOut))
+        }
+        return (Timecode.duration(clip.mediaIn) + " (reversed)", Timecode.duration(clip.mediaOut) + " (reversed)")
+    }
+
     /// The Speed row's presets menu (percent).
     static let speedPresets = [25, 50, 100, 200, 400, 800]
 

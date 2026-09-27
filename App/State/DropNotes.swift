@@ -117,7 +117,8 @@ extension ProjectStore {
             if let after = touching(owner, atStart: false) {
                 if after.clipID != partnerID {
                     // The rest of the owner itself (a split inside the dissolve), or another clip.
-                    if after.assetID == owner.assetID, after.sourceIn == owner.sourceOut {
+                    if after.assetID == owner.assetID, after.reversed == owner.reversed,
+                       after.sourceIn == owner.sourceOut {
                         return between + ": “\(owner.name)” was split inside it."
                     }
                     return between + ": “\(after.name)” now follows “\(owner.name)”."
