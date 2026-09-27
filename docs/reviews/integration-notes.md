@@ -1251,3 +1251,105 @@ so switching writes nothing. No model or schema change.
 - By hand: reverse a clip with sound (Option-Cmd-R) and play it (the picture runs backwards, the sound too; J plays it
   forwards silently), scrub it, look at its thumbnails and waveform, split it and trim its head (the pictures stay on
   their frames), check the inspector's Source rows and its Reverse box, the Speed/Duration sheet's box, export it.
+
+## Hands-on round 2026-09-27 (Unlink, reversed neighbours, Continue on Next Clip, selection, smooth wipes)
+From the user's hands-on testing of the reverse, speed and wipes round.
+- A. Unlink left both clips selected. Root cause: `ProjectStore.select(clip:extend:)` expands a click to the linked
+  pair (so a pair moves, trims and deletes together) and `linkOrUnlinkSelection` unlinked without touching the
+  selection, so after Unlink the selection still held both clips: a drag moved both, Delete removed both, and the
+  undo of that delete brought them back as two unlinked clips, which read as "Unlink does nothing". Fix:
+  `linkOrUnlinkSelection(keeping:)` reduces the selection to the clip the action was invoked for (the inspector's
+  clip, the clicked clip of the context menu; for Clip > Link / Unlink the clip the selection was made for by a
+  click, `ProjectStore.selectionAnchor`, else the first selected clip) and says "Unlinked “a” from “b”." in the
+  status line. Links are expanded only when the user picks a clip (a click, a marquee); nothing re-expands them
+  later, and `refreshModel` drops clips that no longer exist (as before). `selectedClips` breaks start-time ties
+  video first, then track and id, so "the first selected clip" is stable. Deviation: the brief said the first
+  selected clip for the menu item; the clicked clip is used when there is one (a click on the sound of a pair then
+  keeps the sound), the first selected clip otherwise. Tests: `UnlinkSelectionTests` (a click, Unlink, one clip
+  selected; a drag through `TimelineGestureController` moves it alone; Delete removes it alone; the context menu
+  and the inspector keep their clip; no re-expansion).
+- B. Continue from previous clip on a reversed clip. Not reproduced: the specified reproduction (forward clip, the
+  same clip reversed and touching, Control-K on the reversed clip's first frame, `matchSpanEdge(.start)`) succeeds on
+  a3e656b and the first frame then shows the forward clip's last framing; so do Lead into next clip, the forward
+  clip after it, a reversed clip on either side, linked sound, 50 %, spans added before the reverse, a split
+  reversed clip and media ends on odd timescales (FFmpeg nanoseconds, 1/600, 90 kHz, 1/44 s). Why it holds by
+  construction: the reverse round's fixed mirror keeps spans in clip time (`sourceIn + (t - start) * speed`), and
+  the mirror is applied only where media is read, so `spanEvaluationTime`, `spanActsAt`, `touchingClip` and the
+  facade's timeline span range are the forward code for a reversed clip; the candidates in the brief do not differ
+  for it. What the app did hide: Continue from previous clip vanished from the Ken Burns bar whenever the move
+  started after the clip's first frame (a span added with the playhead a frame in, or dragged there), with no
+  word why. It is now shown disabled with the reason and the time to set as Start
+  (`KenBurnsModel.continueFromPreviousProblem`). Tests: `ReverseTests` ("a Motion span matches its neighbour across a
+  cut between a forward and a reversed clip", "... whatever the media's end and the order of the edits"),
+  `ReversedNeighbourMotionTests` (app, Control-K and the toggles), `KenBurnsEditorTests` (the reason).
+- B. The first frame at a forward -> reversed cut. Measured
+  (`PlaybackLookaheadTests.testAForwardToReversedCutPresentsEveryFrameOnTime`, the long-GOP 1080p file, a keyframe
+  every 5 s, paused 1 s and 1/3 s before the cut, the same range reversed and another range): every presentation
+  from the start to a second past the cut shows its own frame, and the controller counts no late frame. The
+  lookahead already starts the reversed clip's backward window a second ahead (`retargetLocked`, direction
+  `reversed XOR rate < 0`), and in the user's case the first reversed frames are the forward clip's last ones,
+  already in the cache. So the jank is not a late frame: when the reversed clip shows the same range, the last
+  frame of A and the first of reversed A are the same picture by construction (the motion turns round on a held
+  frame, two frame times of one picture), and Continue from previous clip adds the same framing on both frames
+  (matching makes the first frame show what the last frame shows). Continue on Next Clip (below) avoids the second
+  part: its first frame is a frame further along the move.
+- C. Continue on Next Clip (Ken Burns bar button, Clip menu). The rule (EditOps.h `planContinueMotion`,
+  `ContinueMotionSpan`, one undo step "Continue on Next Clip"): S the selected Motion span of clip C, N the clip
+  touching C's end on its track. S must be C's last move (no other Motion span of C ends after it). The new span
+  starts on N's first frame and lasts as long as S on the timeline, shortened to N and to the free part of a lane
+  (S's lane when that lane of N is free from its first frame, else the first such lane). Start = C's Motion at the
+  cut (`motionValuesAt(C, end of C)`: S's end placement with the rest held), so the picture goes on without a jump.
+  End = S's own rate over the new length T (S lasting T_S): x, y, rotation + (end - start) T / T_S, scale
+  x (end / start)^(T / T_S) (1.0 -> 1.5 over 2 s continued over 2 s ends at 2.25). The values are relative, over
+  what the rest of N composes to at the new span's first and last frames (as `planKenBurns`), so N's own placement
+  and other spans are respected; the interpolation is S's (Linear for a custom curve); a still takes it; the editor
+  opens on the new span in the mode S's editor was in. Refusals (sentences naming the clips): not a Motion span, not
+  the clip's last move, no clip touching the end, every lane of N taken on its first frame, S starting at scale 0,
+  N at scale 0, a locked track. Facade: `continueMotionSpanOnNextClip:`, `problemContinuingMotionSpanOnNextClip:`
+  (the menu's and the button's enabled state and help). Deviation: the brief put Start at "the same values
+  matchSpanEdge would give"; that is the last frame's framing, a frame short of the end placement while S still
+  moves on it, which would hold the framing for two frames at the cut. Start is the placement at the cut instead (the
+  same as matching when S ended before the clip's last frame), which is what the brief's own tests describe (the
+  continued start equals the previous end on screen; 1.5 continued to 2.25). Tests: `ContinueMotionTests` (engine:
+  the rate, relative values over N's placement, shortening to N and to a lane, another lane, a move that ended
+  before the cut, undo, every refusal, a still, A | reversed A | A with the scale growing every frame across both
+  cuts), `ContinueOnNextClipTests` (app: one undo step, selection and mode, refusals in the status line and the
+  bar's note, a still, the reversed middle clip).
+- D. Selection style. `TimelineItemStyle` (TimelineRenderer.swift), one rule for clips, span bars and transition
+  bars: unselected, the kind's fill at 0.85 with the thin dark outline on the edge and a white label (as before);
+  selected, the fill 20 % lighter (mixed a fifth of the way to white), opaque, a 2 pt border in `Color.accentColor`
+  inset by 1 pt so it lies wholly inside the item (the hit geometry is unchanged), and the label and icon in white or
+  black, whichever has the better WCAG contrast on that fill (at least 4.5:1 for every kind). The transition fill
+  is now a fixed purple (0.58, 0.34, 0.80) instead of the system purple, so it has components to lighten.
+  `TimelineRenderer.style(for:selected:)` is the lookup. Test: `TimelineSelectionStyleTests`.
+- E. Smooth wipes and iris (RenderGraph.h `kTransitionFeather`, Shaders.metal `transitionReveal`). The edge
+  moved tens of pixels per frame with a 2 px feather, so it stepped. Now the reveal is the soft edge averaged over
+  the frame's exposure: frame k of n stands for the progress interval [p0, p1] = [k / n, (k + 1) / n]
+  (`LayerTransition::progressStart` / `progressEnd`, set by the Scheduler; `mix` stays the frame's centre for the
+  dissolve and the audio law), the edge at progress p is e(p) = p (L + 2f) - f, and with e0 = e(p0), e1 = e(p1),
+  D = e1 - e0 and G the integral of the soft edge S(x) = smoothstep(-f, f, x),
+  m(d) = 1 - (G(d - e0) - G(d - e1)) / D (G(x) = 0 below -f, 2f (t^3 - t^4 / 2) in the band, x above f); for D
+  under 1/1000 px the instant at the interval's middle. Away from the feather this is exactly the hard edge
+  box-filtered over the exposure, clamp((e1 - d) / D, 0, 1); the feather rounds its ends and the wider of the two
+  dominates. The shader computes G(x) as max(x, 0) plus a band-limited excess so the difference stays small in
+  float. Uniforms: `VEDrawUniforms.mix` = (mix, p0, p1, 0) for a shape; a dissolve's uniforms and shader branch are
+  unchanged (bit-identical, `CompositorTests.testDissolveMix` and the export parity tests hold). [0, 0] (the frame
+  before) is exactly A and [1, 1] (the frame after) exactly B; the first and last frames show the entering sliver
+  partly revealed. A transition built without its interval (NaN) is the instant at its mix, as before. Tests:
+  `TransitionShapeTests` (every shape across a cut and at a free edge against the 32-sub-step average of the soft
+  edge everywhere and against the box-filtered hard edge away from the feather, both within 1/255 of the reveal
+  plus the output's rounding, 1.5 codes; exactness at [0, 0] and [1, 1]; a 4-frame wipe ramps across its 25 px
+  sweep with no pixel-to-pixel jump beyond 1/25; the unset interval), `SchedulerTests` (the interval per frame),
+  `ExportParityTests.testAWipeAndAnIrisExportTheMonitorsPictures` (unchanged, passes). Deviation: the brief's
+  reference integrates the hard edge over 32 sub-steps; a 32-sample average of a hard edge is a staircase up to
+  1/64 (4 codes) off the box filter it approximates, so it cannot be held to 1/255. The test holds the shader to the
+  exact box filter away from the feather and to the 32-sub-step average of the soft edge (which 32 sub-steps do
+  integrate to well under 1/255 at these sweeps) everywhere.
+- By hand: select a linked pair by a click, Link / Unlink (Cmd-L), drag the clip (its sound stays), Delete (the
+  sound stays); the same from the inspector's button and the context menu on the sound. A | reversed A | A with a
+  Control-K span on each: Continue from previous clip on the reversed clip; play across both cuts (the held picture
+  at the forward -> reversed cut is the content, not a late frame). Continue on Next Clip from the first clip's
+  span, twice: one zoom through three clips; Cmd-Z removes one continuation at a time; the button disabled with its
+  reason on the last clip. Clips, spans and transitions selected in light and dark appearance (accent border,
+  brighter fill, readable label). A 10-frame wipe and iris played and stepped frame by frame: the edge moves
+  smoothly, the frame before and after are clean; export one.

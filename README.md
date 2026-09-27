@@ -28,8 +28,9 @@ audited the code line by line.
 - Import MP4, MOV, MKV, WebM, ProRes, AV1, stills and audio; a router picks Apple's
   AVFoundation/VideoToolbox path when it can decode the file in hardware and an FFmpeg path
   (with the VideoToolbox hwaccel) otherwise. Both backends pass one conformance suite.
-- Multi-track timeline with move, trim, split, ripple, linked audio/video, snapping, marquee,
-  undo/redo of every edit, and exact rational time math (29.97 fps and 44.1 kHz audio do not
+- Multi-track timeline with move, trim, split, ripple, linked audio/video (Unlink keeps the clip you
+  acted on selected, alone), snapping, marquee, a clearly marked selection (a brighter fill and an accent
+  border on clips, spans and transitions), undo/redo of every edit, and exact rational time math (29.97 fps and 44.1 kHz audio do not
   accumulate rounding).
 - Real-time playback with an audio-clocked Metal compositor, JKL shuttle, frame stepping and
   scrubbing; measured A/V offset on the real output device is zero within a sample. A still
@@ -45,7 +46,8 @@ audited the code line by line.
 - Effect lanes: under each track its lanes hold spans. Lane 0 has the transitions (cross dissolves, wipes left,
   right, up and down and an iris on video, constant-power crossfades on audio, across a cut with any split of the
   two sides such as 70/30, and fades or wipes to and from black or silence at a free edge; the inspector changes a
-  video transition's kind); lanes 1-3 have Motion, Fade (opacity) and Gain spans, each with start and end values that
+  video transition's kind; a wipe's or the iris's edge is averaged over each frame's exposure, so it sweeps smoothly
+  instead of stepping from frame to frame); lanes 1-3 have Motion, Fade (opacity) and Gain spans, each with start and end values that
   compose onto the clip's own (a pan on one lane, a zoom on another) and hold their end value until the clip ends.
   Drag across an empty lane to make a span (a Motion span on video, with Option a fade, a Gain span on audio), or
   press Control-K for a Motion span at the playhead; drag a span to move it and its edges to trim it (snapping to
@@ -58,7 +60,9 @@ audited the code line by line.
   unplaced, and its green start and red end rectangles are the part of the picture that fills the frame (shrink
   one to zoom in); Transform shows the program, and its boxes are where the clip sits (a picture in picture moves
   and zooms where it is). Every drag edits the span live (one undo step per drag), with smoothing, swap and
-  continuing a touching clip's framing; Ken Burns and Move in the Effects tab or the Clip menu open in their mode,
+  continuing a touching clip's framing. Continue on Next Clip (the editor's bar, the Clip menu) carries a move on
+  down the timeline: a Motion span on the next clip starts where the move is at the cut and goes on at the same
+  speed for as long, one undo step, and the editor follows it. Ken Burns and Move in the Effects tab or the Clip menu open in their mode,
   Control-K in Ken Burns mode when the clip spans the frame across or down (a letterboxed or pillarboxed picture
   too). The monitors shade the area around the frame so its edge shows. Projects from earlier versions open with their keyframes and fades as spans and look and sound the
   same.
