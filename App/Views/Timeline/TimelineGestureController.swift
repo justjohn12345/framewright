@@ -891,7 +891,8 @@ final class TimelineGestureController: ObservableObject {
                 ContextMenuItem(title: "Ripple Delete") { store.deleteSelection(ripple: true) },
                 .separator,
                 ContextMenuItem(title: canUnlink ? "Unlink" : "Link", isEnabled: canUnlink || selected.count == 2) {
-                    store.linkOrUnlinkSelection()
+                    // Unlink keeps the clicked clip selected, alone.
+                    store.linkOrUnlinkSelection(keeping: id)
                 },
                 ContextMenuItem(title: "Speed/Duration…", isEnabled: selected.contains { !$0.isStill }) {
                     store.showSpeedSheet()

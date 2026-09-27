@@ -109,6 +109,10 @@ final class ProjectStore: ObservableObject {
             syncKenBurns()
         }
     }
+    /// The clip the clip selection was last made for by a click (`select(clip:extend:)`), which the
+    /// selection may hold with its linked partner; Unlink keeps it (`linkOrUnlinkSelection`). Not
+    /// published: nothing is drawn from it.
+    private(set) var selectionAnchor: VEClipID?
     @Published var selectedAssetID: VEAssetID?
     /// The selected transition: the selected span when it is a transition (lane 0). Setting it
     /// selects that span; setting nil deselects a selected transition (an effect span stays).
@@ -383,9 +387,15 @@ final class ProjectStore: ObservableObject {
     var audioTracks: [VETrackInfo] { tracks.filter { $0.kind == .audio } }
     var frameDuration: CMTime { sequence.frameDuration }
 
-    /// The selected clips, sorted by start.
+    /// The selected clips, sorted by start; clips starting together video first, then by track and id
+    /// (so "the first selected clip" is the same on every call).
     var selectedClips: [VEClipInfo] {
-        selection.compactMap { clips[$0] }.sorted { $0.timelineStart < $1.timelineStart }
+        selection.compactMap { clips[$0] }.sorted { a, b in
+            if a.timelineStart != b.timelineStart { return a.timelineStart < b.timelineStart }
+            if a.trackKind != b.trackKind { return a.trackKind == .video }
+            if a.trackID != b.trackID { return a.trackID < b.trackID }
+            return a.clipID < b.clipID
+        }
     }
 
     /// The geometry model for the timeline at the current zoom, scroll and playhead. Its content
@@ -763,6 +773,11 @@ final class ProjectStore: ObservableObject {
 
     // MARK: Selection
 
+    /// A click on a clip: selects it with its linked partner (the pair moves, trims and deletes
+    /// together), or with `extend` adds the pair to the selection or takes it out. Links are expanded
+    /// here, when the user picks a clip, and nowhere else: the selection is never grown to a partner
+    /// later (after Unlink it holds what Unlink left, `linkOrUnlinkSelection`). The clicked clip is
+    /// remembered as the one the selection was made for (`selectionAnchor`).
     func select(clip id: VEClipID, extend: Bool) {
         let group = timelineModel.expandingLinks([id])
         if extend {
@@ -770,9 +785,11 @@ final class ProjectStore: ObservableObject {
                 selection.subtract(group)
             } else {
                 selection.formUnion(group)
+                selectionAnchor = id
             }
         } else {
             selection = group
+            selectionAnchor = id
         }
         focusArea = .timeline
     }
@@ -1216,11 +1233,25 @@ final class ProjectStore: ObservableObject {
         isExporting = engine.isExporting
     }
 
-    func linkOrUnlinkSelection() {
+    /// Clip > Link / Unlink (⌘L), the clip context menu and the inspector's button. When every selected
+    /// clip is linked, unlinks the pair of `keeping` (the clip the action was invoked for: the clicked
+    /// clip of the context menu, the inspector's clip) or, without one, of the clip the selection was
+    /// made for by a click (`selectionAnchor`) or the first selected clip; the selection is then that
+    /// one clip alone, so a drag or Delete acts on it and not on its former partner, and the status line
+    /// names both. With two unlinked clips selected, links them. One undo step either way.
+    func linkOrUnlinkSelection(keeping preferred: VEClipID? = nil) {
         guard !isGestureActive else { return }
         let chosen = selectedClips
-        if let clip = chosen.first, chosen.allSatisfy({ $0.linkedClipID != 0 }) {
-            report(engine.unlinkClip(clip.clipID))
+        if let first = chosen.first, chosen.allSatisfy({ $0.linkedClipID != 0 }) {
+            let wanted = preferred ?? selectionAnchor
+            let clip = chosen.first { $0.clipID == wanted } ?? first
+            let partner = clips[clip.linkedClipID]
+            let result = engine.unlinkClip(clip.clipID)
+            guard report(result) else { return }
+            selection = [clip.clipID]
+            selectionAnchor = clip.clipID
+            let unlinked = "Unlinked “\(clip.name)” from “\(partner?.name ?? "its partner")”."
+            statusMessage = [unlinked, statusMessage].compactMap { $0 }.joined(separator: " ")
         } else if chosen.count == 2 {
             report(engine.linkClip(chosen[0].clipID, withClip: chosen[1].clipID))
         } else {

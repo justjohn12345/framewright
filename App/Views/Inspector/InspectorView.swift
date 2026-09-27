@@ -228,7 +228,8 @@ private struct ClipInfoSection: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button(clip.linkedClipID != 0 ? "Unlink" : "Link Selected") {
-                    store.linkOrUnlinkSelection()
+                    // Unlink keeps this clip selected, alone.
+                    store.linkOrUnlinkSelection(keeping: clip.clipID)
                 }
                 .controlSize(.small)
             }
