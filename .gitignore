@@ -19,3 +19,6 @@ ThirdParty/ffmpeg-src/
 
 # Local signing overrides (Config/Distribution.xcconfig)
 Config/Signing.local.xcconfig
+
+# Demo-making scripts and notes kept local (machine-specific paths); the tracked ones stay
+docs/demo/
