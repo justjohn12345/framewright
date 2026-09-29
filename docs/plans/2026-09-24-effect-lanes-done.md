@@ -1,5 +1,12 @@
 # Effect lanes and spans (plan, 2026-09-24, agreed)
 
+**Done (2026-09-24 to 2026-09-25).** Round 1 (engine, schema v5), round 1b (hold after), round 2 (app) landed
+4807ed3..55525d8; the review (in git history at fea82c0) and its fix round 666143e..32351bc closed every finding but
+the two design items D1 and D3 (still in `docs/reviews/open-findings.md`). The Ken Burns editor rounds that followed
+(placement boxes, then Ken Burns | Transform modes) replaced the crop-only editor this plan described.
+
+---
+
 ## Goal
 Every track gets effect lanes beneath it. An effect is a span: a visible time range on a lane, attached to a
 clip, with start and end values for what it changes. Selecting a range on an empty lane creates a span; for a

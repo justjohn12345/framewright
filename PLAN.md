@@ -216,43 +216,9 @@ Each phase ends with something runnable and its tests green. Playback and A/V sy
 - Preferences: hardware capability table, backend preference, cache size.
 - Instruments profiling pass; HUD kept behind a debug menu.
 
-### Effect lanes (2026-09-24; plan in `docs/plans/2026-09-24-effect-lanes.md`)
-- Effects become spans on lanes under each clip: lane 0 holds transitions (cross dissolve / crossfade across a
-  cut with any split of its sides, fades to and from black or silence), lanes 1-3 Motion, Opacity and Gain spans
-  with start and end values that compose onto the clip's static values; a span holds its end value from its end
-  to the clip's end, and a later span on its lane applies on top (hold after). Replaces per-parameter keyframes.
-- Round 1 (engine): schema v5 with the v4 migration (v4 files render identically), Scheduler and mixer on spans,
-  span edit ops and facade, parity tests. The app keeps working with its keyframe controls inert.
-- Round 1b (engine): hold after: composition, audio levels, Ken Burns edges, matching, and trims/splits past a
-  span keep the held value; the migration still renders identically.
-- Round 2 (app): lanes in the timeline, the inspector's span section, the Ken Burns editor on a lane range,
-  transitions dragged on lane 0. Done (2026-09-24): lanes under each track (lane 0 with a transition, the effect
-  lanes in use plus an empty one, collapsible per track), span selection, move, trim and range-drag creation with
-  their defaults, transitions with asymmetric edges and fades on lane 0, Control-K, Fade and Gain in the Effects
-  tab; the inspector's span section shows absolute values (converted through the facade's `getBaseValues`); the Ken
-  Burns editor opens on a selected Motion span and edits it live, one undo step per drag. Next: the review round.
-
-### Planned features (not yet scheduled)
-- **Nested sequences** (asked 2026-09-29): a sequence used as a clip in another sequence, live (an edit inside
-  the nest shows in the parent; nothing is exported), trimmed, sped up, transitioned, stacked and given spans
-  like any clip. Engine: a clip whose asset is a sequence; the scheduler renders the nested sequence's frame at
-  the mapped time as one layer (the solo-preview path already renders "a sequence, but different" into the
-  monitor) and the mixer its sound; a cycle is refused. Model: the project's sequences array in use, a
-  sequence-typed asset in the bin, "Nest" on a selection (replaces the selected clips with a new sequence and a
-  clip of it, one undo step) and "Open Nested Sequence". Across projects: File > Import Sequences from a
-  Framewright project (its sequences and media references come in as bin items). Ordered after D1 (compact
-  rows) and D3 (window frame restore) unless the user moves it up.
-- **Colour correction and grading** (asked 2026-09-29): a Colour span kind on the effect lanes with start and
-  end values, applied per clip in the fragment shader after the source conversion (the per-source colour matrix)
-  and before compositing, in a linear-light working space so 8-bit and 10-bit sources grade alike and export stays
-  identical to the monitor (the parity tests enforce it). Slice 1: exposure, contrast, temperature, tint,
-  saturation, and a waveform scope (a compute pass over the composited frame, drawn in a panel). Slice 2: lift /
-  gamma / gain colour wheels, luma and per-channel curves, a hue-versus-saturation secondary, LUT files (.cube)
-  as an input conversion or a look, plus vectorscope and histogram. Inspector rows and a live editor on the
-  program monitor as the Ken Burns editor is; the audio side is untouched.
-- **D1 compact rows and D3 window frame restore**: see `docs/reviews/open-findings.md`.
-- **Per-project Ken Burns mode memory** (the mode is remembered per session today), **notarization** once a
-  Developer ID identity exists.
+### Later work
+The phases above are the original plan and are done. Work after them is planned per feature in `docs/plans/`
+(one file per plan, renamed `-done` when complete) with the roadmap in `docs/plans/README.md`.
 
 ## Key risks and mitigations
 - **A/V drift**: audio clock is master; video never blocks; burn-in media tests in phase 4.
