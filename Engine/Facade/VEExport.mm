@@ -17,6 +17,9 @@ using namespace ve::facade;
 namespace {
 
 constexpr NSInteger kMaxSide = 16384;
+/// The default constant quality: the export sheet's High. 0.7 (the earlier default) visibly blurs
+/// fine text with the hardware H.264 encoder.
+constexpr double kDefaultExportQuality = 0.8;
 
 NSInteger roundToEven(double value) {
     return static_cast<NSInteger>(std::lround(value / 2.0)) * 2;
@@ -56,18 +59,43 @@ NSArray<NSNumber *> *allPresets() {
     ];
 }
 
-/// Approximate bits per pixel per frame at `quality` (0...1) for the constant-quality modes, from
-/// typical camera footage: H.264 about 0.15 at 0.7, HEVC 60 % of that, AV1 50 %.
+/// Bits per pixel per frame the constant-quality modes produce at `quality` (0...1), for the size
+/// estimate. Measured 2026-09-29 on this Mac (Apple silicon, the hardware VideoToolbox encoders with
+/// the writer's settings; SVT-AV1 preset 8 at the CRF av1Crf gives) on two ten-second 1080p scenes of
+/// Sintel (film content: the mean of both), at the qualities the export sheet offers plus the old
+/// default 0.7. Between the measured qualities the figure is interpolated linearly in log space and
+/// beyond them extrapolated along the end segments. Screen recordings with long static stretches
+/// come out 3 to 6 times smaller (measured on a 4K screen recording exported at 1080p: H.264 0.032
+/// at 0.8), noisy camera footage larger: it is an estimate.
+struct QualityPoint {
+    double quality;
+    double bitsPerPixel;
+};
+constexpr QualityPoint kH264Points[] = {{0.45, 0.0273}, {0.65, 0.0652}, {0.70, 0.0917}, {0.80, 0.1664}, {0.95, 0.844}};
+constexpr QualityPoint kHEVCPoints[] = {{0.45, 0.0173}, {0.65, 0.0462}, {0.70, 0.0673}, {0.80, 0.1260}, {0.95, 0.793}};
+constexpr QualityPoint kAV1Points[] = {{0.45, 0.0262}, {0.65, 0.0504}, {0.70, 0.0620}, {0.80, 0.0835}, {0.95, 0.1459}};
+
+template <std::size_t N> double interpolateBitsPerPixel(const QualityPoint (&points)[N], double quality) {
+    const double q = std::clamp(quality, 0.0, 1.0);
+    std::size_t i = 0; // the segment [points[i], points[i + 1]] used (the end ones extrapolate)
+    while (i + 2 < N && q > points[i + 1].quality) {
+        ++i;
+    }
+    const QualityPoint &a = points[i];
+    const QualityPoint &b = points[i + 1];
+    const double t = (q - a.quality) / (b.quality - a.quality);
+    return std::exp(std::log(a.bitsPerPixel) + t * (std::log(b.bitsPerPixel) - std::log(a.bitsPerPixel)));
+}
+
 double bitsPerPixel(VEExportPreset preset, double quality) {
-    const double h264 = 0.15 * std::exp(4.0 * (std::clamp(quality, 0.0, 1.0) - 0.7));
     switch (preset) {
     case VEExportPresetH264:
-        return h264;
+        return interpolateBitsPerPixel(kH264Points, quality);
     case VEExportPresetHEVC:
     case VEExportPresetHEVC10Bit:
-        return 0.6 * h264;
+        return interpolateBitsPerPixel(kHEVCPoints, quality);
     case VEExportPresetAV1:
-        return 0.5 * h264;
+        return interpolateBitsPerPixel(kAV1Points, quality);
     case VEExportPresetProRes422:
         break;
     }
@@ -119,7 +147,7 @@ double bitsPerPixel(VEExportPreset preset, double quality) {
                                          resolution:VEExportResolutionSequence
                                         customWidth:1280
                                         rateControl:VEExportRateControlQuality
-                                            quality:0.7
+                                            quality:kDefaultExportQuality
                                        videoBitRate:bitRate
                                          audioCodec:prores ? VEExportAudioCodecPCM : VEExportAudioCodecAAC
                                        audioBitRate:256'000];

@@ -117,6 +117,8 @@ CMTime seconds(double s) {
 
 - (void)testPresetsSizesAndValidation {
     VEExportSettings *h264 = [VEExportSettings defaultSettingsForPreset:VEExportPresetH264];
+    XCTAssertEqual(h264.rateControl, VEExportRateControlQuality);
+    XCTAssertEqual(h264.quality, 0.8, @"the default is High");
     XCTAssertEqual(h264.container, VEExportContainerMP4);
     XCTAssertEqual(h264.audioCodec, VEExportAudioCodecAAC);
     XCTAssertEqualObjects(h264.fileExtension, @"mp4");
@@ -220,7 +222,34 @@ CMTime seconds(double s) {
     const int64_t bytes = [engine estimatedFileSizeForSettings:rate10];
     // (10 Mb/s + 256 kb/s) x 5 s / 8 = 6.41 MB, plus about 1 %.
     XCTAssertEqualWithAccuracy(double(bytes), 6.41e6 * 1.01, 0.1e6);
-    XCTAssertGreaterThan([engine estimatedFileSizeForSettings:h264], 0);
+    // Quality mode: the measured bits per pixel at 0.8 (H.264 0.1664, HEVC 0.126 per 1080p frame of
+    // film content), x 1920 x 1080 x 30 fps x 5 s, the audio, 1 % and the header.
+    const double h264Bytes = (0.1664 * 1920 * 1080 * 30 + 256'000) * 5 / 8 * 1.01 + 32 * 1024;
+    XCTAssertEqualWithAccuracy(static_cast<double>([engine estimatedFileSizeForSettings:h264]), h264Bytes, h264Bytes * 0.001);
+    VEExportSettings *hevc = [VEExportSettings defaultSettingsForPreset:VEExportPresetHEVC];
+    const double hevcBytes = (0.126 * 1920 * 1080 * 30 + 256'000) * 5 / 8 * 1.01 + 32 * 1024;
+    XCTAssertEqualWithAccuracy(static_cast<double>([engine estimatedFileSizeForSettings:hevc]), hevcBytes, hevcBytes * 0.001);
+    // Higher quality, bigger file; Maximum about five times High (measured 0.844 / 0.1664).
+    auto withQuality = ^(double quality) {
+        return [[VEExportSettings alloc] initWithPreset:VEExportPresetH264
+                                              container:VEExportContainerMP4
+                                             resolution:VEExportResolutionSequence
+                                            customWidth:0
+                                            rateControl:VEExportRateControlQuality
+                                                quality:quality
+                                           videoBitRate:0
+                                             audioCodec:VEExportAudioCodecNone
+                                           audioBitRate:0];
+    };
+    int64_t previous = 0;
+    for (double quality : {0.0, 0.3, 0.45, 0.6, 0.65, 0.7, 0.8, 0.9, 0.95, 1.0}) {
+        const int64_t estimate = [engine estimatedFileSizeForSettings:withQuality(quality)];
+        XCTAssertGreaterThan(estimate, previous, @"quality %.2f", quality);
+        previous = estimate;
+    }
+    const double ratio = double([engine estimatedFileSizeForSettings:withQuality(0.95)] - 32 * 1024) /
+                         double([engine estimatedFileSizeForSettings:withQuality(0.8)] - 32 * 1024);
+    XCTAssertEqualWithAccuracy(ratio, 0.844 / 0.1664, 0.01);
 }
 
 // MARK: - Export

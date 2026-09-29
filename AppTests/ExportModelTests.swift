@@ -41,7 +41,7 @@ final class ExportModelTests: XCTestCase {
         var settings = try XCTUnwrap(model.settings)
         XCTAssertEqual(settings.preset, .h264)
         XCTAssertEqual(settings.rateControl, .quality)
-        XCTAssertEqual(settings.quality, 0.7, accuracy: 1e-9)
+        XCTAssertEqual(settings.quality, 0.8, accuracy: 1e-9, "High is the default")
         XCTAssertEqual(settings.audioBitRate, 256_000)
 
         // ProRes: MOV only, PCM audio, no rate control.
@@ -263,5 +263,114 @@ final class ExportModelTests: XCTestCase {
         XCTAssertNil(model.outcome, "a cancelled export shows no alert")
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "the unfinished file is deleted")
         XCTAssertEqual(fixture.store.statusMessage, "Export cancelled.")
+    }
+
+    // MARK: Quality
+
+    func testTheDefaultQualityIsHighEverywhere() throws {
+        for preset in [VEExportPreset.h264, .hevc, .hevc10Bit, .av1, .proRes422] {
+            XCTAssertEqual(VEExportSettings.defaultSettings(for: preset).quality, 0.8, accuracy: 1e-12,
+                           ExportModel.name(of: preset))
+        }
+        let model = makeModel()
+        XCTAssertEqual(model.quality, 0.8, accuracy: 1e-12)
+        XCTAssertEqual(ExportModel.qualityChoices.first { ExportModel.sameQuality($0.value, model.quality) }?.title,
+                       "High")
+        // A preset change keeps the chosen quality (only containers, audio and bit rate follow the preset).
+        model.quality = 0.95
+        model.preset = .hevc
+        XCTAssertEqual(model.quality, 0.95, accuracy: 1e-12)
+    }
+
+    func testThePickerAlwaysShowsTheQualityInEffect() throws {
+        let model = makeModel()
+        let standard = ExportModel.qualityChoices.map(\.title)
+        XCTAssertEqual(standard, ["Maximum", "High", "Medium", "Low"])
+        XCTAssertEqual(model.qualityPickerChoices.map(\.title), standard, "High is a choice: no custom entry")
+        // A quality that is not a choice (the old default, remembered or set elsewhere) is shown as
+        // "Custom 70 %", and it is the entry the picker's selection matches.
+        model.quality = 0.7
+        XCTAssertEqual(model.qualityPickerChoices.map(\.title), standard + ["Custom 70 %"])
+        let selected = model.qualityPickerChoices.filter { $0.value == model.quality }
+        XCTAssertEqual(selected.map(\.title), ["Custom 70 %"], "exactly one entry is selected")
+        XCTAssertEqual(try XCTUnwrap(model.settings).quality, 0.7, accuracy: 1e-12, "and it is what is exported")
+        // It stays while it is the quality in effect (other changes do not reset it).
+        model.resolution = .hd720
+        model.preset = .hevc
+        XCTAssertEqual(model.qualityPickerChoices.last?.title, "Custom 70 %")
+        // Rounded to a whole percentage in the title only.
+        model.quality = 0.873
+        XCTAssertEqual(model.qualityPickerChoices.last?.title, "Custom 87 %")
+        XCTAssertEqual(ExportModel.customQualityTitle(0.005), "Custom 1 %")
+        XCTAssertEqual(ExportModel.customQualityTitle(1), "Custom 100 %")
+        // Picking a choice removes the custom entry.
+        model.quality = 0.95
+        XCTAssertEqual(model.qualityPickerChoices.map(\.title), standard)
+        XCTAssertEqual(model.qualityPickerChoices.filter { $0.value == model.quality }.map(\.title), ["Maximum"])
+    }
+
+    /// The note "Maximum keeps fine text sharp": shown with the Quality picker when a video clip of the
+    /// sequence shows a source larger than the output on either axis (its displayed size, after the
+    /// container's rotation); stills and sound never count.
+    func testTheSharpTextNoteNamesSourcesLargerThanTheOutput() async throws {
+        let store = fixture.store
+        let (movie, tone) = try await fixture.importMedia()
+        XCTAssertFalse(ExportModel.hasSource(in: store, largerThan: CGSize(width: 160, height: 90)),
+                       "nothing on the timeline")
+        // The 320x180 movie on V1 and the tone on A1.
+        let clip = try fixture.placeMovie(movie, at: 0)
+        let a1 = try XCTUnwrap(store.audioTracks.first).trackID
+        XCTAssertTrue(store.place(asset: tone.assetID, at: store.frameTime(3), videoTrack: 0, audioTrack: a1,
+                                  overwrite: true), store.statusMessage ?? "")
+        XCTAssertTrue(ExportModel.hasSource(in: store, largerThan: CGSize(width: 160, height: 90)))
+        XCTAssertTrue(ExportModel.hasSource(in: store, largerThan: CGSize(width: 480, height: 170)), "taller")
+        XCTAssertTrue(ExportModel.hasSource(in: store, largerThan: CGSize(width: 300, height: 270)), "wider")
+        XCTAssertFalse(ExportModel.hasSource(in: store, largerThan: CGSize(width: 320, height: 180)), "the same")
+        XCTAssertFalse(ExportModel.hasSource(in: store, largerThan: CGSize(width: 480, height: 270)))
+
+        // The model: shown in quality mode only, for the output size the settings give.
+        let model = makeModel()
+        model.resolution = .custom
+        model.customWidthText = "160"
+        XCTAssertLessThan(model.outputSize.width, 320)
+        XCTAssertEqual(model.qualityNote, "Maximum keeps fine text sharp")
+        model.rateControl = .bitRate
+        XCTAssertNil(model.qualityNote, "no Quality picker in bit-rate mode")
+        model.rateControl = .quality
+        model.preset = .proRes422
+        XCTAssertNil(model.qualityNote, "ProRes has no quality setting")
+        model.preset = .h264
+        model.customWidthText = "1920"
+        XCTAssertNil(model.qualityNote, "the output is larger than every source")
+
+        // After the rotation: a 320x180 movie turned a quarter turn shows 180x320, taller than 270.
+        let rotatedURL = fixture.directory.appendingPathComponent("portrait.mov")
+        try TestMediaFactory.writeMovie(to: rotatedURL, frames: 30,
+                                        transform: CGAffineTransform(rotationAngle: .pi / 2))
+        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([rotatedURL]) { continuation.resume(returning: $0) }
+        }
+        let portrait = try XCTUnwrap(imported.first)
+        XCTAssertEqual(portrait.rotationDegrees, 90)
+        XCTAssertEqual([portrait.width, portrait.height], [180, 320])
+        XCTAssertTrue(store.engine.removeClips([NSNumber(value: clip)]).ok)
+        XCTAssertFalse(ExportModel.hasSource(in: store, largerThan: CGSize(width: 160, height: 90)),
+                       "the tone alone does not count")
+        try fixture.placeMovie(portrait, at: 0)
+        XCTAssertTrue(ExportModel.hasSource(in: store, largerThan: CGSize(width: 480, height: 270)))
+        XCTAssertFalse(ExportModel.hasSource(in: store, largerThan: CGSize(width: 180, height: 320)))
+
+        // A still larger than the output does not count (it is not a video source).
+        let stillURL = fixture.directory.appendingPathComponent("photo.heic")
+        try TestMediaFactory.writeHEIC(to: stillURL, width: 640, height: 480)
+        let stills: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([stillURL]) { continuation.resume(returning: $0) }
+        }
+        let still = try XCTUnwrap(stills.first)
+        XCTAssertTrue(still.isStill)
+        let v2 = try XCTUnwrap(store.videoTracks.dropFirst().first).trackID
+        try fixture.placeMovie(still, at: 5, track: v2)
+        XCTAssertFalse(ExportModel.hasSource(in: store, largerThan: CGSize(width: 480, height: 400)),
+                       "the 640x480 still is larger but not a video source; the portrait movie is not larger")
     }
 }

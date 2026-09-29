@@ -84,6 +84,8 @@ final class ExportModel: ObservableObject {
     static let qualityChoices: [(title: String, value: Double)] = [
         ("Maximum", 0.95), ("High", 0.8), ("Medium", 0.65), ("Low", 0.45),
     ]
+    /// Shown under the Quality picker when a source is larger than the output.
+    static let sharpTextNote = "Maximum keeps fine text sharp"
     static let audioBitRates = [128_000, 192_000, 256_000, 320_000]
 
     private unowned let store: ProjectStore
@@ -237,6 +239,45 @@ final class ExportModel: ObservableObject {
     }
 
     var sequenceFrames: Int64 { store.frames(store.sequence.duration) }
+
+    /// The Quality picker's entries: the standard choices, plus the current quality as "Custom n %"
+    /// when it is none of them (a value set elsewhere), so the picker always shows a selection.
+    var qualityPickerChoices: [(title: String, value: Double)] {
+        var choices = Self.qualityChoices
+        if !choices.contains(where: { Self.sameQuality($0.value, quality) }) {
+            choices.append((Self.customQualityTitle(quality), quality))
+        }
+        return choices
+    }
+
+    /// "Custom 70 %": a quality that is not one of the choices, as a whole percentage.
+    static func customQualityTitle(_ quality: Double) -> String {
+        "Custom \(Int((quality * 100).rounded())) %"
+    }
+
+    static func sameQuality(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 1e-9 }
+
+    /// Whether a video clip of the sequence shows a source larger than the output frame on either
+    /// axis (its displayed size, after its rotation): the encoder then has fine detail to keep, and
+    /// the sheet notes that Maximum keeps fine text sharp.
+    var sequenceHasSourceLargerThanOutput: Bool {
+        Self.hasSource(in: store, largerThan: outputSize)
+    }
+
+    static func hasSource(in store: ProjectStore, largerThan size: CGSize) -> Bool {
+        guard size.width > 0, size.height > 0 else { return false }
+        let videoTracks = Set(store.sequence.videoTrackIDs.map { VETrackID($0.int64Value) })
+        return store.clips.values.contains { clip in
+            guard videoTracks.contains(clip.trackID), let asset = store.assetsByID[clip.assetID],
+                  asset.hasVideo, !asset.isStill else { return false }
+            return CGFloat(asset.width) > size.width || CGFloat(asset.height) > size.height
+        }
+    }
+
+    /// The note under the Quality picker, or nil.
+    var qualityNote: String? {
+        !isProRes && rateControl == .quality && sequenceHasSourceLargerThanOutput ? Self.sharpTextNote : nil
+    }
 
     /// Why the current settings cannot be exported, or nil.
     var validationMessage: String? {
@@ -465,7 +506,14 @@ struct ExportSheet: View {
                     .pickerStyle(.segmented)
                     if model.rateControl == .quality {
                         Picker("Quality", selection: $model.quality) {
-                            ForEach(ExportModel.qualityChoices, id: \.value) { Text($0.title).tag($0.value) }
+                            ForEach(model.qualityPickerChoices, id: \.value) { Text($0.title).tag($0.value) }
+                        }
+                        .accessibilityIdentifier("ExportQuality")
+                        if let note = model.qualityNote {
+                            Label(note, systemImage: "textformat.size")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("ExportQualityNote")
                         }
                     } else {
                         HStack {

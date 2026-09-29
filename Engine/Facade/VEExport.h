@@ -89,8 +89,8 @@ typedef NS_ENUM(NSInteger, VEExportAudioCodec) {
                   audioBitRate:(NSInteger)audioBitRate NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 
-/// The recommended settings of a preset: its first container, the sequence's size, quality 0.7
-/// (ProRes: fixed), a bit rate suggestion of 20 Mb/s (H.264), 12 Mb/s (HEVC), 8 Mb/s (AV1), and
+/// The recommended settings of a preset: its first container, the sequence's size, quality 0.8
+/// (the export sheet's High; ProRes: fixed), a bit rate suggestion of 20 Mb/s (H.264), 12 Mb/s (HEVC), 8 Mb/s (AV1), and
 /// AAC at 256 kb/s (ProRes: PCM).
 + (instancetype)defaultSettingsForPreset:(VEExportPreset)preset;
 

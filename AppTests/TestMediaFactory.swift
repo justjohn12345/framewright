@@ -44,8 +44,10 @@ enum TestMediaFactory {
         try data.write(to: url)
     }
 
-    /// An H.264 .mov of `frames` solid-colour frames at 30 fps.
-    static func writeMovie(to url: URL, frames: Int = 60, width: Int = 320, height: Int = 180) throws {
+    /// An H.264 .mov of `frames` solid-colour frames at 30 fps, `width` x `height` as stored; the
+    /// track's `transform` is the container's display rotation (a quarter turn shows it on its side).
+    static func writeMovie(to url: URL, frames: Int = 60, width: Int = 320, height: Int = 180,
+                           transform: CGAffineTransform = .identity) throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
@@ -53,6 +55,7 @@ enum TestMediaFactory {
             AVVideoHeightKey: height,
         ])
         input.expectsMediaDataInRealTime = false
+        input.transform = transform
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferWidthKey as String: width,
