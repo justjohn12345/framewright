@@ -7,6 +7,12 @@ footage, arrange clips on a multi-track timeline, trim, split and move them, dis
 them, adjust motion and sound in an inspector, play it back with synced audio, and export.
 It runs on Apple silicon and uses the hardware wherever there is hardware to use.
 
+**Demo video** (2 min 24 s, cut and exported in Framewright):
+
+<p>
+<a href="https://youtu.be/XM2IKm4GZXw"><img src="https://img.youtube.com/vi/XM2IKm4GZXw/maxresdefault.jpg" alt="Framewright demo on YouTube: Framewright cutting its own demo" width="100%"></a>
+</p>
+
 <p>
 <img src="docs/screenshots/transform-editor.png" alt="The Motion span editor in Transform mode: a picture-in-picture still on V2 with its Start and End boxes over the program, a dashed outline of the V1 clip beneath, and the effect lanes under each track" width="100%">
 </p>
