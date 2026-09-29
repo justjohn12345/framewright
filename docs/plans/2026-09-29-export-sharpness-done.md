@@ -1,5 +1,11 @@
 # Export sharpness for high-resolution sources (plan, 2026-09-29, agreed in outline)
 
+Status: done 2026-09-29 (a7a161f quality, da3ea48 sequence settings, a1a4b3d sharpening). Deviations and the
+measured numbers are in `docs/reviews/integration-notes.md` ("Export sharpness"): the first video clip placed (not
+imported) sets a new sequence; transitions keep their frame counts but effect spans keep their times; amount 0.6
+(ffmpeg's) instead of 0.5; exports now pre-scale to the drawn size (the pooled 1088-row plane softened 1080p text);
+no "Source size" resolution.
+
 ## Why
 The user cut a demo from 3832x2154 macOS screen recordings and the 1080p export's text was soft. Measured
 (the lead, 2026-09-29, same frame from the source and the export, the Effects panel cropped and compared):

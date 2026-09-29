@@ -1540,3 +1540,111 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
 - By hand in the demo project: click around the ruler (especially back into earlier clips, into the 1/10 clip on V2
   and the 3/2 and 5/4 clips, and into long static stretches) with the monitor visible: each click shows its frame at
   once; also right after an edit and while clicking quickly.
+
+## Export sharpness (plan `docs/plans/2026-09-29-export-sharpness-done.md`; items 3, 2, 1)
+- Item 3, export quality (a7a161f). The default constant quality of every preset is 0.8 (High): `VEExport.mm`
+  `kDefaultExportQuality` is the only default site (the export sheet takes `defaultSettingsForPreset:`; nothing
+  remembers a quality). The Quality picker lists the quality in effect as "Custom n %" (rounded) when it is none
+  of `ExportModel.qualityChoices`, so it always shows a selection; the entry goes when a choice is picked. With a
+  video clip (not a still, not sound) whose asset's displayed size (after its rotation) is larger than the output
+  on either axis, quality mode shows "Maximum keeps fine text sharp" (`ExportModel.hasSource(in:largerThan:)`).
+  The size estimate's bits per pixel were anchored at 0.7 (0.15, exp(4 (q - 0.7))) and put Maximum at half its
+  real rate: now measured tables, interpolated in log space (per 1080p frame, the mean of two ten-second Sintel
+  scenes; hardware H.264 and HEVC with the writer's settings, SVT-AV1 preset 8 at `av1Crf`):
+  H.264 0.45 0.027, 0.65 0.065, 0.7 0.092, 0.8 0.166, 0.95 0.844; HEVC 0.017, 0.046, 0.067, 0.126, 0.793;
+  AV1 0.026, 0.050, 0.062, 0.084, 0.146. A 4K screen recording exported at 1080p makes about a fifth of that
+  (H.264 0.032 at 0.8): it is an estimate for camera-like content.
+- Item 2, sequence settings (da3ea48). Rule chosen: the first video clip PLACED on the timeline (an insert or an
+  overwrite with a picture track) sets an unconfigured sequence, not the first import: the sequence takes what it
+  shows (a clip imported and never used, or the order a multi-file import happens to probe in, never decides),
+  as Premiere's "new sequence from clip" and FCP's automatic project settings do; placing a still, a sound file or
+  only a movie's sound never counts; with stills or sound already on it they are conformed like a settings
+  change. The facade wraps `SetSequenceFormat` and the placement in one `CompositeCommand` (the settings first,
+  so the placement lands on the new frame grid); the edit's note (and the status line) says "The sequence takes
+  “x.mov”'s settings: 3840×2160 at 29.97 fps." Rates (`standardFrameDurationFor`): the nearest of the eight
+  standard rates on a log scale; a VFR source's rate is the one of its shortest frame interval (the prober's
+  frameDuration: AVAssetTrack minFrameDuration / FFmpeg r_frame_rate), not its average (a screen recording that
+  averages 11 fps is captured at 60); above 60 fps the standard rate it is a whole multiple of (100 -> 50,
+  119.88 -> 59.94, 120 and 240 -> 60), else 60 (monitors and export are paced for 60); below 23.976 the slowest
+  standard rate that shows each frame a whole number of times (15 -> 30, 12.5 -> 25, else 30). Sizes: displayed
+  size, odd sides rounded up to even; a size out of 16...16384 keeps the current one. A new project's sequence is
+  `configured: false`; loading never changes a sequence; version 6 files migrate as configured (and sharpening
+  on); a version 7 file saved while still unconfigured (only a still on it) keeps that state, and its first video
+  clip then sets it, as in a new project.
+  `SetSequenceFormat` (EditOps.h) conforms clips: positions (static x/y and Motion span X/Y keyframes) scale by
+  k = min(W'/W, H'/H) and a clip's static scale by k x fit_old / fit_new, so every picture keeps its place and
+  size in the old frame fitted into the new one (the whole frame for the same shape); scale/rotation/opacity spans
+  are factors and degrees: unchanged. Grepped for other sequence-pixel state: the Ken Burns/Transform boxes are
+  derived from those values (the app's `KenBurnsModel` holds the sequence size, so an open editor now reopens
+  after a size or rate change); `kTransitionFeather` is a constant 2 sequence pixels (thinner relative to a 4K
+  frame; left, it only anti-aliases). Frame rate: each clip edge to the nearest new frame (touching clips stay
+  touching), inward where the media ends there, a clip shorter than a frame keeps one frame or the change is
+  refused (no room); media in points move with the starts; effect spans stay on their pictures (source time; a
+  still's spans keep their timeline frames, as for any head trim of a still); transitions keep their frame counts
+  on each side, cross dissolves fitted with `transitionSideLimits` (now also over a working sequence), fades
+  shortened while too long, a transition with not one frame left removed; each shortening/removal is a sentence
+  in `SequenceConformReport` and in the sheet. Locked tracks are conformed too (refusing would leave no way to
+  change the settings). `SequencePatch` carries the settings (`formatBefore/After`), so any command's undo and
+  coalescing restore them. The sequence's audio sample rate is what the export writes (`makeEncodeSettings`
+  takes it; `VEExportSettings.audioSampleRate` is gone). Sheet: Sequence > Sequence Settings… (and the size/fps
+  label under the program monitor): six size presets or a custom even size, the eight rates (a sequence's own
+  non-standard rate shown as "Custom n fps"), 44.1/48 kHz (plus the sequence's own), the preview's sentences
+  live, a confirmation alert before a size or rate change reaches clips; one undo step "Sequence Settings".
+  Applying unchanged values to an unconfigured sequence configures it ("the first video clip placed on it will
+  not change them"). "Source size" was not added: with the sequence adopting its first clip, Sequence size is it
+  for the common case, and "the source" of a multi-clip sequence has no single answer.
+  Schema 7: sequence "configured", project "sharpenScaledDownSources" (always written; missing reads as true);
+  golden `project-v7.json`; the v5 -> v6 warning now names the version saved ("saved as version 7").
+  Existing tests that measure in a 1080p30 sequence configure it first (`StoreFixture.configureSequence`, the
+  Ken Burns suites; the VFR dissolve test in VEEnginePlaybackTests); two App tests now expect the adopted 320x180.
+- Item 1, sharpen after downscale (a1a4b3d). `RenderGraph::sharpenMinified` (the Scheduler copies
+  `Project::sharpenScaledDownSources` into every graph: `renderGraphAt`, `soloGraphAt`); the source monitor's
+  private project follows the setting (`syncSourceSharpening`, and its still path). So the program monitor, its
+  solo preview, the output display, the source monitor and the export all sharpen; thumbnails are not compositor
+  renders (VTPixelTransferSession) and are not sharpened. Compositor: after the Lanczos pre-scale of the luma
+  plane (YCbCr; chroma is never sharpened) or the premultiplied RGBA plane, `ve_unsharp` writes a second pooled
+  texture which the draw samples: out = c + 0.6 g(c - blur), blur the binomial [1 4 6 4 1]/16 in both directions
+  (sigma 1 texel, the kernel of ffmpeg's unsharp=5:5), g(d) = d smoothstep(t, 2t, |d|), t = 2/255; the luma result
+  within the nominal range or the texel's own value; RGBA colour within
+  [0, alpha], alpha untouched. `RenderResult::sharpenedPlanes`. No per-frame allocation after warm-up (two pooled
+  textures per sharpened plane). Amount: 0.5 measured x1.186 on the export crop against ffmpeg's x1.217 (before the
+  exact export pre-scale below), 0.6 (ffmpeg's own amount) x1.206, 0.7 x1.227; chose 0.6: with the exact pre-scale it
+  gives x1.214. An earlier version read the luma taps clamped to the nominal range to keep Lanczos overshoot from
+  making halos; measured at 1:1 it made no halo difference (0 codes either way) and cost some sharpness (x1.238 vs
+  x1.246 on 420v), so it was dropped.
+  Found while measuring and fixed (deviation from "the downscale is not the problem"): a pixel-buffer target (an
+  export) pre-scaled to the monitor's pooled 1/32 steps, e.g. 1920x1088 for 1080 rows, then bilinear-resampled
+  onto 1080, softening fine text in bands (the edge measure 0.140 against ffmpeg lanczos's 0.151). Exports now
+  pre-scale to the drawn size (`quantizeScratchSize(..., quantize: false)` for pixel-buffer targets); monitors
+  keep the pooled steps for live resizing.
+  Numbers (edge measure = mean gradient magnitude of the grey levels, central differences, 0...1; the 1080p export
+  of a generated 3840x2160 screen-like text clip, 22 px Helvetica, crop 1200x600 at (200, 200), frame 15, decoded by
+  ffmpeg to grey, mean of its 30 frames): app plain 0.1515, app sharpened 0.1839 (H.264 at quality 0.95); ffmpeg
+  `scale=1920:1080:flags=lanczos` 0.1514, `...,unsharp=5:5:0.6` 0.1843 (x264 crf 16; ffv1 lossless gives the same to 4
+  digits). Before the exact pre-scale sizes the app gave 0.140 plain and 0.166 sharpened (amount 0.5). The plan's
+  0.022 / 0.011-0.015 were measured on the demo's real recording with another crop and measure, so only the ratios
+  compare: ffmpeg x1.22, the app x1.21.
+  Redraw budget (`testPreviewOf4KSourceTiming`, a 4K 4:2:0 frame in a 1080p preview): 0.61 ms GPU per frame
+  without sharpening, 0.88 ms with it, inside the existing 4 ms / 5 ms / 6 ms bounds.
+  Tests: `CompositorSharpenTests` (text at half size black on white and white on black, BGRA and 420v: edge measure
+  x1.24, measured at 960x512, where the monitor's pooled pre-scale is exactly 1:1 (at 960x540 its 544-row plane
+  resampled onto 540 rows put 8 to 9 codes of grey beside strokes: the same banding as the export's, see above);
+  no pixel beyond the local extremes by more than amount x (1 - 36/256) of the local contrast, the range kept,
+  no halo (0 codes); flat grey, a slow ramp and +-1 code noise changed by 0; 1:1, 0.8, 0.76 and magnified pictures
+  bit-identical with the setting on and off; straight alpha: colour within alpha, alpha unchanged; the pool stops
+  growing; exports pre-scale to the drawn size), `VEEngineSharpenTests` (program monitor, output display, source
+  monitor and solo preview each sharper with the setting, the same picture again after off/undo; the 4K recording
+  exported at 1080p at quality 0.95 x1.21 sharper, files kept in the test's scratch directory for the ffmpeg
+  comparison), `ExportParityTests.testAMinifiedSharpenedSourceExportsTheMonitorsPictures` (luma block means within
+  0.74 on average, 2.1 at most; 4.9 against the unsharpened export), the Scheduler carrying the setting
+  (SequenceFormatTests), the export sheet's toggle and the Sequence Settings toggle (AppTests).
+  Observation, not changed: decoded to 32BGRA by VideoToolbox, the ProRes export's mid-greys come out about 3 codes
+  darker than the compositor's own RGB of the same luma (white and black match), so the new parity case compares
+  luma codes; the other parity tests' pictures are mostly saturated and do not show it.
+- By hand: a new project, drag a 4K screen recording to the timeline: the label under the program monitor reads
+  3840×2160 · 60 fps (or its rate), the status line names it, Cmd-Z takes clip and settings back. Sequence >
+  Sequence Settings… on a sequence with clips: change 4K -> 1080p and 60 -> 30: the confirmation lists the rescale,
+  the moved edges and any transition that changes; Apply, the pictures look the same; one Cmd-Z. Export the demo at
+  1080p Maximum with sharpening on and off and compare the Effects panel crop against the source (the plan's
+  check); open the export sheet on the demo project: the Quality picker shows High, and "Maximum keeps fine text
+  sharp" shows at 1080p; the sharpening toggle there and in Sequence Settings is one setting (Cmd-Z undoes it).
