@@ -1,66 +1,66 @@
 {
-  "voice": "Charon",
+  "voice": "Leda",
   "model": "gemini-3.1-flash-tts-preview",
   "style": "Read this as a calm, confident product narrator. Natural pace, warm, no hype. Short pauses at commas and full stops.",
   "segments": [
     {
       "id": "01-intro",
-      "seconds": 12,
-      "narration": "This is Framewright, a free, native video editor for the Mac. Everything you're watching was cut in Framewright. Including this.",
+      "seconds": 14,
+      "narration": "This is Framewright, a free, native video editor for the Mac. Everything you're watching was cut in Framewright. Including this demonstration.",
       "action": "Framewright open, an empty project, the window filling the screen. Hover the empty media bin. Do nothing else."
     },
     {
       "id": "02-import",
-      "seconds": 12,
-      "narration": "Drag clips in from the Finder, or straight from Photos. Each one shows its codec, and whether this Mac decodes it in hardware.",
+      "seconds": 16,
+      "narration": "Drag clips in from the Finder, or straight from Photos. Each one shows its codec, and whether this Mac can decode it in hardware. If two video channels isn't enough you can add more in the timeline.",
       "action": "Drag the five Sintel clips and two stills from the Finder window into the media bin. Let the tiles land; hover one so the codec line is visible."
     },
     {
       "id": "03-assemble",
-      "seconds": 17,
-      "narration": "Lay them on the timeline. Trim, split, move. Every edit is one undo step, and the time math is exact, so twenty-nine ninety-seven never drifts.",
+      "seconds": 19,
+      "narration": "Lay clips on the timeline. You can trim, split, and move clips. Every edit is one undo step. Playback is clocked by the audio, so picture and sound stay locked, even at twenty-nine ninety-seven.",
       "action": "Drag snow-fight, baby-dragon and desert onto V1 in a row. Trim the tail of the first by dragging its edge. Put the playhead in the second and press Cmd-K. Drag the last piece left to close the gap."
     },
     {
       "id": "04-source",
-      "seconds": 13,
-      "narration": "Or open a clip in the source monitor, mark an in and an out, and insert. Three points, and nothing to trim afterwards.",
+      "seconds": 15,
+      "narration": "You can also open a clip in the source monitor, mark an in and an out, and insert or overwrite at the current playhead. Three points, and nothing to trim afterwards.",
       "action": "Double-click shaman-tent in the bin. Scrub the source monitor, press I, scrub, press O, click Insert with the playhead at the end of the timeline."
     },
     {
       "id": "05-transitions",
-      "seconds": 15,
-      "narration": "Drop a cross dissolve on a cut. Or a wipe. Or an iris. The edge is averaged over every frame's exposure, so it sweeps instead of stepping.",
+      "seconds": 17,
+      "narration": "Drop a cross dissolve on a cut. Or a wipe. Or an iris. The edge of the transitions are averaged over every frame's exposure, so it is buttery smooth instead of having discrete steps.",
       "action": "Effects tab. Drag Cross Dissolve onto the first cut, Wipe Left onto the second, Iris onto the last clip's end. Scrub through the iris slowly."
     },
     {
       "id": "06-kenburns",
-      "seconds": 19,
-      "narration": "Photos get Ken Burns. Draw where the picture starts, and where it ends. Overlays get Transform: place the box, then drag it across the frame. Continue on Next Clip carries the move on.",
-      "action": "Drag the closeup still onto V2 above the second clip. Drag the Ken Burns tile onto it; shrink the red End rectangle by a corner. Then drag the baby-dragon still onto V2 further right, set Scale to 30 % in the inspector, drag the Move tile on, and drag the End box to the top-left. Click Continue on Next Clip."
+      "seconds": 22,
+      "narration": "Photos and video clips can have Ken Burns effects. Draw where the framing starts, and where it ends and the engine produces smooth motion. Overlay tracks can be Transformed in position, scale and rotation: place the box, then drag it across the frame.",
+      "action": "Drag the closeup still onto V2 above the second clip. Drag the Ken Burns tile onto it; shrink the red End rectangle by a corner. Then drag the baby-dragon still onto V2 further right, set Scale to 30 % in the inspector, drag the Move tile on, and drag the End box to the top-left."
     },
     {
       "id": "07-speed",
-      "seconds": 12,
-      "narration": "Speed is a number in the inspector, with presets. Reverse is a checkbox. Sound follows, backwards included.",
-      "action": "Select the desert clip. In the inspector's Speed row pick 50 %. Tick Reverse. Play two seconds of it."
+      "seconds": 14,
+      "narration": "Playback Speed is a number: type it, or pick a preset. Reversing a clip is just a checkbox. Sound follows the clip unless you unlink.",
+      "action": "Select the second clip, press Cmd-R, type 50, tick Reverse, OK. Play two seconds of it."
     },
     {
       "id": "08-playback",
-      "seconds": 16,
-      "narration": "Playback is clocked by the audio, so picture and sound stay locked. J, K and L shuttle. A second display can show the program full screen.",
+      "seconds": 9,
+      "narration": "J, K and L shuttle. A second display can show the program full screen.",
       "action": "Press Home, then Space. Let it play. Press L twice for 2x and 4x, K to stop, J to run backwards a moment."
     },
     {
       "id": "09-export",
-      "seconds": 15,
-      "narration": "Export to H.264, HEVC, ProRes or AV1, in hardware wherever this Mac has it. The file you're watching is that export.",
+      "seconds": 18,
+      "narration": "You can Export to H.264, HEVC, ProRes or AV1, in hardware, if your Mac has it. This video was exported using the hardware accelerated H.264 encoder.",
       "action": "File > Export. Show the preset menu, pick H.264, show the hardware badge, click Export, let the progress bar run."
     },
     {
       "id": "10-close",
       "seconds": 16,
-      "narration": "Framewright is open source, and every line of it was written by an AI. No human has read the code. The link is below. Try it, break it, and tell me what's missing.",
+      "narration": "Framewright is open source, and every line of it was written by an AI. The link is below. Try it, break it, and tell me what you'd like added or what doesn't work quite right.",
       "action": "Switch to the browser showing the GitHub README with the screenshots. Hold on the Download section."
     }
   ]
