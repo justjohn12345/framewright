@@ -9,6 +9,32 @@ std::unique_ptr<Command> moveTo(const Fixture &fx, ClipId clip, TrackId track, s
     return std::make_unique<MoveClip>(fx.seq, clip, track, f30(frame));
 }
 
+// A command that never merges (as the facade's composites do not), forwarding to `inner`.
+class Unmergeable final : public Command {
+  public:
+    explicit Unmergeable(std::unique_ptr<Command> inner, std::string key) : inner_(std::move(inner)) {
+        setCoalescingKey(std::move(key));
+    }
+    EditResult apply(Project &project) override {
+        return inner_->apply(project);
+    }
+    void revert(Project &project) override {
+        inner_->revert(project);
+    }
+    bool canRevert(const Project &project) const override {
+        return inner_->canRevert(project);
+    }
+    bool isNoOp() const override {
+        return inner_->isNoOp();
+    }
+    std::string name() const override {
+        return "Unmergeable " + inner_->name();
+    }
+
+  private:
+    std::unique_ptr<Command> inner_;
+};
+
 } // namespace
 
 TEST_CASE("UndoStack: push, undo and redo restore each state exactly") {
@@ -120,6 +146,47 @@ TEST_CASE("UndoStack: accumulate mode merges consecutive changes") {
     CHECK(fx.project == start);
     REQUIRE(stack.redo(fx.project));
     CHECK(fx.project == end);
+}
+
+TEST_CASE("UndoStack: accumulate mode keeps commands that cannot merge in one step (post-lanes review M1)") {
+    // The Speed/Duration sheet on two clips: a composite speed change, then the direction; one step.
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 0, 30);
+    const ClipId d = fx.addClip(fx.v2, fx.av30, 0, 30);
+    const Project start = fx.project;
+    UndoStack stack;
+    const std::string key = "sheet";
+    stack.beginCoalescing(key, CoalesceMode::Accumulate);
+    auto params = [&](ClipId clip, double x) {
+        auto command = std::make_unique<SetVideoParams>(fx.seq, clip, VideoParams{x, 0, 1, 0, 1});
+        command->setCoalescingKey(key);
+        return command;
+    };
+    REQUIRE(stack.push(fx.project, std::make_unique<Unmergeable>(params(c, 10), key)).ok());
+    REQUIRE(stack.push(fx.project, params(d, 20)).ok());                                    // cannot merge into it
+    REQUIRE(stack.push(fx.project, std::make_unique<Unmergeable>(params(c, 30), key)).ok()); // nor this
+    REQUIRE(stack.push(fx.project, params(d, 40)).ok());
+    stack.endCoalescing();
+    CHECK(stack.undoCount() == 1);
+    CHECK(stack.undoName() == "Unmergeable Change Video Settings");
+    CHECK(fx.clip(c).video.x == 30.0);
+    CHECK(fx.clip(d).video.x == 40.0);
+    const Project end = fx.project;
+    REQUIRE(stack.undo(fx.project));
+    CHECK(fx.project == start);
+    REQUIRE(stack.redo(fx.project));
+    CHECK(fx.project == end);
+    REQUIRE(stack.undo(fx.project));
+    CHECK(fx.project == start);
+
+    SUBCASE("cancelling the group reverts every command of it") {
+        stack.beginCoalescing(key, CoalesceMode::Accumulate);
+        REQUIRE(stack.push(fx.project, std::make_unique<Unmergeable>(params(c, 5), key)).ok());
+        REQUIRE(stack.push(fx.project, params(d, 6)).ok());
+        CHECK(stack.cancelCoalescing(fx.project));
+        CHECK(fx.project == start);
+        CHECK(stack.undoCount() == 0);
+    }
 }
 
 TEST_CASE("UndoStack: accumulate mode merges edits that create ids") {

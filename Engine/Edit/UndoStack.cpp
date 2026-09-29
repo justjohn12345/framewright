@@ -1,8 +1,67 @@
 #include "UndoStack.h"
 
+#include <algorithm>
 #include <utility>
 
 namespace ve {
+
+namespace {
+
+// The step of an Accumulate group whose commands cannot merge into one (a facade composite of
+// several clips' edits followed by another edit, say a speed change of two clips and then their
+// direction): the commands in order, already applied, undone backwards and redone forwards as one
+// step. A command that can merge into the last one does.
+class AccumulatedSteps final : public Command {
+  public:
+    explicit AccumulatedSteps(std::unique_ptr<Command> first) {
+        setCoalescingKey(first->coalescingKey());
+        steps_.push_back(std::move(first));
+    }
+
+    void append(std::unique_ptr<Command> next) {
+        steps_.push_back(std::move(next));
+    }
+
+    EditResult apply(Project &project) override {
+        for (std::size_t i = 0; i < steps_.size(); ++i) {
+            EditResult result = steps_[i]->apply(project);
+            if (!result) {
+                for (std::size_t j = i; j-- > 0;) {
+                    steps_[j]->revert(project);
+                }
+                return result;
+            }
+        }
+        return EditResult::success();
+    }
+
+    void revert(Project &project) override {
+        for (std::size_t i = steps_.size(); i-- > 0;) {
+            steps_[i]->revert(project);
+        }
+    }
+
+    bool canRevert(const Project &project) const override {
+        return steps_.back()->canRevert(project);
+    }
+
+    bool isNoOp() const override {
+        return std::all_of(steps_.begin(), steps_.end(), [](const auto &step) { return step->isNoOp(); });
+    }
+
+    std::string name() const override {
+        return steps_.front()->name();
+    }
+
+    bool mergeWith(const Command &next) override {
+        return steps_.back()->mergeWith(next);
+    }
+
+  private:
+    std::vector<std::unique_ptr<Command>> steps_;
+};
+
+} // namespace
 
 UndoStack::UndoStack(std::size_t maxDepth) : maxDepth_(maxDepth == 0 ? 1 : maxDepth) {}
 
@@ -42,7 +101,15 @@ EditResult UndoStack::push(Project &project, std::unique_ptr<Command> command) {
                 return result;
             }
             if (!previous.mergeWith(*command)) {
-                record(std::move(command));
+                // Commands that cannot merge (a composite, another kind of edit) still make one
+                // step: the group's step becomes both, in order.
+                auto *steps = dynamic_cast<AccumulatedSteps *>(&previous);
+                if (steps == nullptr) {
+                    auto grouped = std::make_unique<AccumulatedSteps>(std::move(commands_[index_ - 1]));
+                    steps = grouped.get();
+                    commands_[index_ - 1] = std::move(grouped);
+                }
+                steps->append(std::move(command));
             } else if (previous.isNoOp()) {
                 // The accumulated changes cancel out.
                 commands_.erase(commands_.begin() + static_cast<std::ptrdiff_t>(index_ - 1));

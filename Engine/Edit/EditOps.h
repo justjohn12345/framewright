@@ -357,11 +357,16 @@ class SetClipSpeed final : public SequenceCommand {
 // the same media in the other order: frame k of an n-frame clip shows what frame n - 1 - k showed.
 // Transitions whose media beyond their cut is not there on the new side (a dissolve's handles now come
 // from the other end of the range) are removed and reported (droppedTransitionIds; undo restores
-// them), as any edit does. With `includeLinked` its linked partner follows (on its own media end). A
-// clip already in the requested state is left alone, so asking for the state everything has succeeds
-// and changes nothing. Refused: ClipNotFound, TrackLocked, InvalidArgument (a still has no motion to
-// reverse), AssetNotFound, OutOfSourceRange (the media's length is unknown), NotRepresentable (an
-// in point with no exact CMTime form).
+// them), as any edit does. With `includeLinked` its linked partner follows (on its own media end); a
+// linked still has no direction and is skipped (review L2). A clip already in the requested state is
+// left alone, so asking for the state everything has succeeds and changes nothing. The new in point
+// keeps the old one's timescale when it is whole ticks of it, else goes on the sequence's frame grid
+// or the media end's timescale, else on its smallest exact timescale. Refused: ClipNotFound,
+// TrackLocked, InvalidArgument (the clip asked for is a still: no motion to reverse), AssetNotFound,
+// OutOfSourceRange (the media's length is unknown), NotRepresentable (an in point with no exact CMTime
+// form: a media end stated to the nanosecond, from a Matroska DURATION tag imported before the prober
+// put those on a grid, against a clip end on a frame that is not whole nanoseconds; the message says
+// so in words and names the trim of the clip's end that makes it reversible, review L1).
 class SetClipReversed final : public SequenceCommand {
   public:
     SetClipReversed(SequenceId sequenceId, ClipId clipId, bool reversed, bool includeLinked = true);

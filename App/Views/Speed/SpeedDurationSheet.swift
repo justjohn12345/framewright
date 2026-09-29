@@ -49,8 +49,11 @@ final class SpeedDurationModel: ObservableObject {
 
     @Published var text: String
     @Published var ripple: SpeedRipple
-    /// The Reverse box: the clips play their media backwards (checked when all of them do).
-    @Published var reversed: Bool
+    /// The Reverse box, three-state: true (checked) or false when every chosen clip plays that way
+    /// or the user set the box, nil (the mixed state) while the clips differ and the box has not
+    /// been touched. Apply changes a clip's direction only when the box says one that differs from
+    /// the clip's: a mixed box left alone keeps each clip's own (post-lanes review M1).
+    @Published var reversed: Bool?
     /// Why the last Apply was refused, or why the text is not a speed; after a successful
     /// Apply, how the typed speed was adjusted to one the engine can store (if it was).
     @Published private(set) var message: String?
@@ -68,7 +71,7 @@ final class SpeedDurationModel: ObservableObject {
         entry = initialEntry
         text = Self.text(for: speed, entry: initialEntry)
         let chosen = clipIDs.compactMap { store.clips[$0] }
-        reversed = !chosen.isEmpty && chosen.allSatisfy(\.reversed)
+        reversed = Self.direction(of: chosen)
         // The durations shown follow the duration display preference while the sheet is open.
         preferencesForwarding = store.preferences.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
@@ -76,6 +79,22 @@ final class SpeedDurationModel: ObservableObject {
     }
 
     var clips: [VEClipInfo] { clipIDs.compactMap { store.clips[$0] } }
+
+    /// The direction every clip of `clips` plays in (true: backwards), nil when they differ.
+    static func direction(of clips: [VEClipInfo]) -> Bool? {
+        guard let first = clips.first else { return false }
+        return clips.allSatisfy { $0.reversed == first.reversed } ? first.reversed : nil
+    }
+
+    /// The Reverse box's sources, one per chosen clip, for a checkbox that shows the mixed state
+    /// (`Toggle(sources:isOn:)`): each reads the direction the clip will have (its own while the box
+    /// is mixed) and setting any sets the box for all of them.
+    var reverseSources: [Binding<Bool>] {
+        clips.map { clip in
+            Binding(get: { [weak self] in self?.reversed ?? clip.reversed },
+                    set: { [weak self] in self?.reversed = $0 })
+        }
+    }
 
     private var firstSpeed: SpeedRatio {
         clips.first.map { SpeedRatio(numerator: $0.speedNumerator, denominator: $0.speedDenominator) }
@@ -151,8 +170,11 @@ final class SpeedDurationModel: ObservableObject {
         }
         let engine = store.engine
         let ids = clipIDs.map { NSNumber(value: $0) }
-        let wantsReversed = reversed
-        let changesDirection = clips.contains { $0.reversed != wantsReversed }
+        // The direction changes only where the box says one the clip does not have: a mixed box
+        // (nil) keeps every clip's own.
+        let turned = reversed.map { wanted in clips.filter { $0.reversed != wanted } } ?? []
+        let changesDirection = !turned.isEmpty
+        let wantsReversed = reversed ?? false
         // Speed and direction together are one undo step.
         let group = "speedSheet.\(ObjectIdentifier(self).hashValue)"
         if changesDirection {
@@ -163,10 +185,14 @@ final class SpeedDurationModel: ObservableObject {
                                      ripple: self.ripple != .none,
                                      scope: self.ripple == .syncedTracks ? .syncedTracks : .allTracks)
         }
-        var result = changesDirection ? engine.performInCoalescingGroup(group) { setSpeed() } : setSpeed()
-        if result.ok, changesDirection {
-            result = engine.performInCoalescingGroup(group) { engine.setReversed(wantsReversed, forClips: ids) }
+        let speedResult = changesDirection ? engine.performInCoalescingGroup(group) { setSpeed() } : setSpeed()
+        var directionResult: VEEditResult?
+        if speedResult.ok, changesDirection {
+            directionResult = engine.performInCoalescingGroup(group) {
+                engine.setReversed(wantsReversed, forClips: turned.map { NSNumber(value: $0.clipID) })
+            }
         }
+        let result = directionResult ?? speedResult
         if changesDirection {
             if result.ok {
                 engine.endCoalescing()
@@ -183,11 +209,20 @@ final class SpeedDurationModel: ObservableObject {
             SpeedRatio.adjustmentNote(typed: $0, applied: speed)
         }
         message = adjusted
-        if let adjusted {
-            store.statusMessage = [adjusted, store.notes(of: result)].compactMap { $0 }.joined(separator: " ")
-        }
+        // The direction is named when it changed (the timeline's "◀" is easy to miss), with what the
+        // speed change and the reverse removed.
+        let direction = changesDirection ? Self.directionNote(reversed: wantsReversed, clips: turned.count) : nil
+        let parts = [adjusted, direction, store.notes(of: speedResult), directionResult.flatMap { store.notes(of: $0) }]
+        let status = parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
+        store.statusMessage = status.isEmpty ? nil : status
         store.speedSheetClipIDs = nil
         return true
+    }
+
+    /// "Reversed 2 clips." / "Played 1 clip forward." (their linked partners follow, unnamed).
+    static func directionNote(reversed: Bool, clips count: Int) -> String {
+        let clips = count == 1 ? "1 clip" : "\(count) clips"
+        return reversed ? "Reversed \(clips)." : "Played \(clips) forward."
     }
 
     func cancel() {
@@ -222,7 +257,8 @@ struct SpeedDurationSheet: View {
                 Text(model.durationText).monospacedDigit()
             }
             .font(.callout)
-            Toggle("Reverse (play the media backwards)", isOn: $model.reversed)
+            // Three-state: mixed while the chosen clips play both ways and the box is untouched.
+            Toggle("Reverse (play the media backwards)", sources: model.reverseSources, isOn: \.self)
                 .toggleStyle(.checkbox)
                 .help("Frame by frame from the end of each clip's media to its start; its sound too (⌥⌘R)")
                 .accessibilityIdentifier("SpeedSheetReverse")

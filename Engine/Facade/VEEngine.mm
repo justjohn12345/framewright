@@ -2303,15 +2303,33 @@ static std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
     }
     const SequenceId sequenceId = [self sequenceId];
     const bool on = reversed;
+    // A still linked to a clip being turned stays as it is (it has no direction; review L2): say so.
+    NSMutableArray<NSString *> *notes = [NSMutableArray array];
+    for (ClipId id : targets) {
+        const Clip *clip = sequence.findClip(id);
+        const Clip *partner = clip->linkedClipId ? sequence.findClip(*clip->linkedClipId) : nullptr;
+        if (partner == nullptr || !partner->isStill || clip->reversed == on) {
+            continue;
+        }
+        const MediaAsset *clipAsset = _project.findAsset(clip->assetId);
+        const MediaAsset *stillAsset = _project.findAsset(partner->assetId);
+        NSString *clipName = clipAsset ? toNS(clipAsset->name) : @"the clip";
+        NSString *stillName = stillAsset ? toNS(stillAsset->name) : @"its picture";
+        [notes addObject:[NSString stringWithFormat:@"“%@” is a still image, which has no direction: its linked "
+                                                    @"“%@” was %@ on its own.",
+                                                    stillName, clipName, on ? @"reversed" : @"played forward"]];
+    }
+    NSString *note = notes.count > 0 ? [notes componentsJoinedByString:@" "] : nil;
     std::vector<std::unique_ptr<Command>> children;
     for (ClipId id : targets) {
         children.push_back(std::make_unique<SetClipReversed>(sequenceId, id, on));
     }
     if (children.size() == 1) {
-        return [self push:std::move(children.front()) created:nil];
+        return [self push:std::move(children.front()) created:nil note:note];
     }
     return [self push:std::make_unique<CompositeCommand>(on ? "Reverse Clips" : "Play Clips Forward", std::move(children))
-              created:nil];
+              created:nil
+                 note:note];
 }
 
 - (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID duration:(CMTime)duration {

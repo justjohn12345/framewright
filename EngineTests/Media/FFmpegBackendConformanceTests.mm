@@ -723,6 +723,25 @@ double meanDifference(CVPixelBufferRef a, CVPixelBufferRef b) {
     XCTAssertEqual(info->container, "mkv");
     const TrackInfo *t = info->firstTrack(TrackKind::Video);
     XCTAssertTrue(t && CMTimeCompare(t->frameDuration, fd) == 0);
+    // Post-lanes review L1: the lengths come from the DURATION tags (nanoseconds) put on each track's
+    // grid, so a clip end on a frame (31/30 s here) combines with them exactly: the video is a whole
+    // number of frames, the sound a whole number of 48 kHz samples.
+    if (t) {
+        XCTAssertEqual(CMTimeCompare(t->duration, CMTimeMultiply(fd, kFrames)), 0, @"video %lld/%d", t->duration.value,
+                       t->duration.timescale);
+        XCTAssertEqual((t->duration.value * fd.timescale) % (static_cast<int64_t>(fd.value) * t->duration.timescale), 0,
+                       @"a whole number of frames: %lld/%d", t->duration.value, t->duration.timescale);
+        const CMTime mirrored = CMTimeSubtract(t->duration, CMTimeMake(31, 30));
+        XCTAssertFalse((mirrored.flags & kCMTimeFlags_HasBeenRounded) != 0, @"the video's end less 31/30 s is exact");
+    }
+    const TrackInfo *sound = info->firstTrack(TrackKind::Audio);
+    XCTAssertTrue(sound != nullptr);
+    if (sound) {
+        XCTAssertEqual((sound->duration.value * 48000) % sound->duration.timescale, 0,
+                       @"a whole number of samples: %lld/%d", sound->duration.value, sound->duration.timescale);
+        const CMTime mirrored = CMTimeSubtract(sound->duration, CMTimeMake(31, 30));
+        XCTAssertFalse((mirrored.flags & kCMTimeFlags_HasBeenRounded) != 0, @"the sound's end less 31/30 s is exact");
+    }
     auto decoder = self.backendUnderTest->makeVideoDecoder();
     XCTAssertTrue(decoder->open(path, -1, {}).ok());
     for (int i = 0; i < kFrames; ++i) {

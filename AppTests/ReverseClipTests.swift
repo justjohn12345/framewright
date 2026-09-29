@@ -103,7 +103,7 @@ final class ReverseClipTests: XCTestCase {
     func testTheSpeedSheetsReverseBoxIsOneUndoStepWithTheSpeed() async throws {
         let (video, audio) = try await linkedPair()
         let sheet = SpeedDurationModel(store: store, clipIDs: [video])
-        XCTAssertFalse(sheet.reversed)
+        XCTAssertEqual(sheet.reversed, false)
         sheet.entry = .percent
         sheet.text = "50"
         sheet.reversed = true
@@ -120,11 +120,100 @@ final class ReverseClipTests: XCTestCase {
         // A reversed clip's sheet opens checked; unchecking plays it forward.
         store.redo()
         let again = SpeedDurationModel(store: store, clipIDs: [video])
-        XCTAssertTrue(again.reversed)
+        XCTAssertEqual(again.reversed, true)
         again.reversed = false
         XCTAssertTrue(again.apply())
         XCTAssertFalse(store.clips[video]?.reversed == true)
         XCTAssertEqual(store.clips[video]?.speedDenominator, 2, "the speed stays")
+    }
+
+    /// M1 of the post-lanes review: on a selection mixing a reversed and a forward clip the sheet's
+    /// Reverse box starts mixed; a new speed alone keeps each clip's direction, and setting the box
+    /// reverses every clip in the same undo step as the speed, the status line saying so.
+    func testTheSpeedSheetOnAMixedSelectionChangesDirectionOnlyWhenTheBoxIsSet() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let a = try fixture.placeMovie(movie, at: 0)
+        let b = try fixture.placeMovie(movie, at: 4)
+        store.selection = [a]
+        XCTAssertTrue(store.setReversed(true))
+        store.selection = [a, b]
+        store.showSpeedSheet()
+        let ids = try XCTUnwrap(store.speedSheetClipIDs)
+        let sheet = SpeedDurationModel(store: store, clipIDs: ids)
+        XCTAssertNil(sheet.reversed, "the box starts in the mixed state")
+        XCTAssertEqual(sheet.reverseSources.map(\.wrappedValue), [true, false],
+                       "the checkbox's sources: each clip's own direction")
+        sheet.entry = .percent
+        sheet.text = "50"
+        XCTAssertTrue(sheet.apply(), sheet.message ?? "")
+        XCTAssertEqual(store.clips[a]?.speedDenominator, 2)
+        XCTAssertEqual(store.clips[b]?.speedDenominator, 2)
+        XCTAssertTrue(store.clips[a]?.reversed == true, "only the speed was asked for: a stays reversed")
+        XCTAssertFalse(store.clips[b]?.reversed == true, "and b stays forward")
+        XCTAssertEqual(store.undoActionName, "Change Speed")
+        store.undo()
+        XCTAssertEqual(store.clips[a]?.speedDenominator, 1)
+        XCTAssertTrue(store.clips[a]?.reversed == true)
+
+        // The box set on: both clips play backwards, in the same undo step as the speed.
+        let touched = SpeedDurationModel(store: store, clipIDs: ids)
+        touched.entry = .percent
+        touched.text = "50"
+        // A click on the mixed checkbox sets every source (SwiftUI's mixed Toggle turns them all on).
+        for source in touched.reverseSources { source.wrappedValue = true }
+        XCTAssertEqual(touched.reversed, true)
+        XCTAssertEqual(touched.reverseSources.map(\.wrappedValue), [true, true])
+        XCTAssertTrue(touched.apply(), touched.message ?? "")
+        XCTAssertTrue(store.clips[a]?.reversed == true)
+        XCTAssertTrue(store.clips[b]?.reversed == true)
+        XCTAssertEqual(store.clips[b]?.speedDenominator, 2)
+        XCTAssertEqual(store.statusMessage, "Reversed 1 clip.")
+        store.undo()
+        XCTAssertEqual(store.clips[a]?.speedDenominator, 1, "one undo step")
+        XCTAssertEqual(store.clips[b]?.speedDenominator, 1)
+        XCTAssertTrue(store.clips[a]?.reversed == true)
+        XCTAssertFalse(store.clips[b]?.reversed == true)
+
+        // The box set off: both play forward.
+        let off = SpeedDurationModel(store: store, clipIDs: ids)
+        off.reversed = false
+        XCTAssertTrue(off.apply(), off.message ?? "")
+        XCTAssertFalse(store.clips[a]?.reversed == true)
+        XCTAssertFalse(store.clips[b]?.reversed == true)
+        XCTAssertEqual(store.statusMessage, "Played 1 clip forward.")
+    }
+
+    /// Review L2: a still linked to music, the pair selected by a click, Option-Cmd-R: the music is
+    /// reversed on its own (a still has no direction) and the status line says so.
+    func testReversingSoundLinkedToAStillReversesTheSoundAlone() async throws {
+        let (_, tone) = try await fixture.importMedia()
+        let photoURL = fixture.directory.appendingPathComponent("photo.heic")
+        try TestMediaFactory.writeHEIC(to: photoURL)
+        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([photoURL]) { continuation.resume(returning: $0) }
+        }
+        let photo = try XCTUnwrap(imported.first)
+        let v1 = try XCTUnwrap(store.videoTracks.first).trackID
+        let a1 = try XCTUnwrap(store.audioTracks.first).trackID
+        XCTAssertTrue(store.place(asset: photo.assetID, at: .zero, videoTrack: v1, audioTrack: 0, overwrite: true))
+        let still = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.place(asset: tone.assetID, at: .zero, videoTrack: 0, audioTrack: a1,
+                                  sourceIn: store.frameTime(0.5), sourceOut: store.frameTime(1.5), overwrite: true))
+        let music = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.engine.linkClip(still, withClip: music).ok)
+        store.select(clip: still, extend: false)
+        XCTAssertEqual(store.selection, [still, music])
+        XCTAssertEqual(store.reversibleSelection.map(\.clipID), [music])
+        store.toggleReverseSelection()
+        XCTAssertTrue(store.clips[music]?.reversed == true, "the music is reversed")
+        XCTAssertFalse(store.clips[still]?.reversed == true)
+        XCTAssertEqual(store.statusMessage, "“photo.heic” is a still image, which has no direction: its linked "
+            + "“tone.wav” was reversed on its own.")
+        XCTAssertEqual(store.undoActionName, "Reverse Clip")
+        store.toggleReverseSelection()
+        XCTAssertFalse(store.clips[music]?.reversed == true)
+        XCTAssertEqual(store.statusMessage, "“photo.heic” is a still image, which has no direction: its linked "
+            + "“tone.wav” was played forward on its own.")
     }
 
     func testTheTimelineShowsABadgeAndMirroredMediaTimes() async throws {

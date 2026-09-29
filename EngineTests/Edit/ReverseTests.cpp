@@ -489,3 +489,84 @@ TEST_CASE("Reverse: matching across a reversed clip holds whatever the media's e
         }
     }
 }
+
+namespace {
+
+// A video-only asset whose end is on a nanosecond timescale, as Matroska media probed from its
+// DURATION tag ("00:00:10.123456789") was stored before the import snapped such ends to a grid.
+AssetId addNanosecondMedia(Fixture &fx, CMTime end) {
+    MediaAsset media = *fx.project.findAsset(fx.video60);
+    media.name = "odd.mkv";
+    media.url = "file:///media/odd.mkv";
+    media.duration = end;
+    media.frameDuration = CMTimeMake(1, 30);
+    return fx.project.addAsset(media);
+}
+
+bool mentions(const std::string &text, const std::string &needle) {
+    return text.find(needle) != std::string::npos;
+}
+
+} // namespace
+
+TEST_CASE("Reverse: a media end on a nanosecond timescale (review L1)") {
+    Fixture fx;
+    const CMTime end = CMTimeMake(10123456789LL, 1000000000); // reduced, the denominator stays 10^9
+    const AssetId media = addNanosecondMedia(fx, end);
+    SUBCASE("the flipped in point is exact on the media's timescale: reversed frame for frame") {
+        const ClipId clip = fx.addClip(fx.v1, media, 0, 30, 0); // clip time [0, 1 s)
+        fx.requireValid();
+        checkMirror(fx, clip, "a nanosecond media end");
+        SetClipReversed reverse(fx.seq, clip, true);
+        applyReversible(fx.project, reverse);
+        // E - 1 s: exact on the media end's own timescale (not on the in point's, 30).
+        CHECK(identical(fx.clip(clip).sourceIn, CMTimeMake(9123456789LL, 1000000000)));
+    }
+    SUBCASE("no exact in point: refused with a sentence naming the trim that makes it reversible") {
+        // 31 frames: E - 31/30 s needs the timescale 3 x 10^9, which a CMTime cannot hold.
+        const ClipId clip = fx.addClip(fx.v1, media, 0, 31, 0);
+        fx.requireValid();
+        SetClipReversed reverse(fx.seq, clip, true);
+        const EditResult r = applyRefused(fx.project, reverse, EditError::NotRepresentable);
+        CAPTURE(r.message);
+        CHECK(mentions(r.message, "\xE2\x80\x9Codd.mkv\xE2\x80\x9D cannot be reversed"));
+        CHECK(mentions(r.message, "10.123456789 s"));
+        CHECK(mentions(r.message, "Trimming 1 frame off its end makes it reversible."));
+        CHECK_FALSE(mentions(r.message, "timescale"));
+        CHECK_FALSE(mentions(r.message, "CMTime"));
+        TrimClipTail trim(fx.seq, clip, f30(30));
+        applyReversible(fx.project, trim);
+        checkMirror(fx, clip, "trimmed as the refusal said");
+    }
+    SUBCASE("two frames to trim: the sentence says two") {
+        const ClipId clip = fx.addClip(fx.v1, media, 0, 32, 0);
+        fx.requireValid();
+        SetClipReversed reverse(fx.seq, clip, true);
+        const EditResult r = applyRefused(fx.project, reverse, EditError::NotRepresentable);
+        CAPTURE(r.message);
+        CHECK(mentions(r.message, "Trimming 2 frames off its end makes it reversible."));
+    }
+}
+
+TEST_CASE("Reverse: the sound linked to a still is reversed on its own (review L2)") {
+    Fixture fx;
+    const ClipId still = fx.addClip(fx.v1, fx.still, 0, 90);
+    const ClipId music = fx.addClip(fx.a1, fx.audioOnly, 0, 90, 30);
+    LinkClips link(fx.seq, still, music);
+    applyReversible(fx.project, link);
+    fx.requireValid();
+    SUBCASE("the sound asked for: reversed, the still skipped") {
+        SetClipReversed reverse(fx.seq, music, true);
+        applyReversible(fx.project, reverse);
+        CHECK(fx.clip(music).reversed);
+        CHECK_FALSE(fx.clip(still).reversed);
+        CHECK(fx.clip(still).linkedClipId == music);
+        SetClipReversed forward(fx.seq, music, false);
+        applyReversible(fx.project, forward);
+        CHECK_FALSE(fx.clip(music).reversed);
+    }
+    SUBCASE("the still asked for: refused, it has no motion to reverse") {
+        SetClipReversed reverse(fx.seq, still, true);
+        applyRefused(fx.project, reverse, EditError::InvalidArgument);
+    }
+}

@@ -12,7 +12,9 @@ extern "C" {
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <map>
+#include <optional>
 #include <vector>
 
 namespace ve::media::ffmpeg {
@@ -24,19 +26,83 @@ os_log_t proberLog() {
     return log;
 }
 
-/// Parses Matroska's per-track "DURATION" tag ("HH:MM:SS.nnnnnnnnn").
-CMTime durationTag(const AVStream *stream) {
+/// Matroska's per-track "DURATION" tag ("HH:MM:SS.nnnnnnnnn") in whole nanoseconds, read exactly
+/// (digits past the ninth are dropped); nullopt when there is none or it is malformed.
+std::optional<int64_t> durationTagNanoseconds(const AVStream *stream) {
     const auto value = metadataValue(stream->metadata, "DURATION");
     if (!value) {
-        return kCMTimeInvalid;
+        return std::nullopt;
     }
     unsigned hours = 0;
     unsigned minutes = 0;
-    double seconds = 0;
-    if (sscanf(value->c_str(), "%u:%u:%lf", &hours, &minutes, &seconds) != 3) {
-        return kCMTimeInvalid;
+    unsigned seconds = 0;
+    int consumed = 0;
+    if (sscanf(value->c_str(), "%u:%u:%u%n", &hours, &minutes, &seconds, &consumed) != 3 || minutes >= 60 ||
+        seconds >= 60 || hours > 1000000) {
+        return std::nullopt;
     }
-    return CMTimeMakeWithSeconds(hours * 3600.0 + minutes * 60.0 + seconds, 1000000000);
+    int64_t fraction = 0;
+    const char *rest = value->c_str() + consumed;
+    if (*rest == '.') {
+        int digits = 0;
+        for (++rest; *rest >= '0' && *rest <= '9'; ++rest) {
+            if (digits < 9) {
+                fraction = fraction * 10 + (*rest - '0');
+                ++digits;
+            }
+        }
+        for (; digits < 9; ++digits) {
+            fraction *= 10;
+        }
+    }
+    if (*rest != '\0') {
+        return std::nullopt;
+    }
+    return (int64_t(hours) * 3600 + int64_t(minutes) * 60 + int64_t(seconds)) * 1000000000 + fraction;
+}
+
+/// A track's length from its DURATION tag, put on the track's own grid. The tag is the length
+/// rounded to the nanosecond, a timescale on which few clip ends combine exactly (a third of a
+/// second is not a whole number of nanoseconds), so a clip on such media could not be reversed
+/// (its mirrored in point, the media's end less the clip's out point, had no CMTime form; post-lanes
+/// review L1). The true length lies on the track's grid, within the container's timestamp
+/// resolution (`timeBase`, 1 ms in Matroska): an audio track's is a whole number of samples (the
+/// nearest one to the tag); a constant-rate video track's a whole number of frames when the tag is
+/// within that resolution of one, else it is rounded up to the resolution (nothing of the last
+/// frame is cut; the decoders hold the last frame past the pictures' end).
+CMTime tagDurationOnGrid(int64_t nanoseconds, const TrackInfo &info, AVRational timeBase) {
+    constexpr int64_t kNano = 1000000000;
+    if (info.kind == TrackKind::Audio && info.sampleRate >= 1 && info.sampleRate <= INT32_MAX &&
+        info.sampleRate == std::floor(info.sampleRate)) {
+        const auto rate = static_cast<int64_t>(info.sampleRate);
+        const __int128 samples = (static_cast<__int128>(nanoseconds) * rate + kNano / 2) / kNano;
+        return CMTimeMake(static_cast<int64_t>(samples), static_cast<int32_t>(rate));
+    }
+    const __int128 resolution =
+        timeBase.num > 0 && timeBase.den > 0
+            ? std::max<__int128>(1, static_cast<__int128>(timeBase.num) * kNano / timeBase.den)
+            : 1;
+    if (info.kind == TrackKind::Video && !info.isVFR && CMTIME_IS_NUMERIC(info.frameDuration) &&
+        info.frameDuration.value > 0 && info.frameDuration.timescale > 0) {
+        const __int128 unit = static_cast<__int128>(info.frameDuration.value) * kNano; // one frame, x timescale
+        const __int128 scaled = static_cast<__int128>(nanoseconds) * info.frameDuration.timescale;
+        const __int128 frames = (scaled + unit / 2) / unit;
+        const __int128 off = frames * unit - scaled; // (candidate - tag) x timescale, in nanoseconds
+        if (frames > 0 && (off < 0 ? -off : off) <= resolution * info.frameDuration.timescale &&
+            frames * info.frameDuration.value <= std::numeric_limits<int64_t>::max()) {
+            return CMTimeMake(static_cast<int64_t>(frames * info.frameDuration.value), info.frameDuration.timescale);
+        }
+    }
+    if (timeBase.num > 0 && timeBase.den > 0 && timeBase.den <= INT32_MAX) {
+        const __int128 tickNanos = static_cast<__int128>(timeBase.num) * kNano; // one tick, x den
+        const __int128 scaled = static_cast<__int128>(nanoseconds) * timeBase.den;
+        const __int128 ticks = (scaled + tickNanos - 1) / tickNanos;
+        const __int128 value = ticks * timeBase.num;
+        if (value <= std::numeric_limits<int64_t>::max()) {
+            return CMTimeMake(static_cast<int64_t>(value), timeBase.den);
+        }
+    }
+    return CMTimeMake(nanoseconds, static_cast<int32_t>(kNano));
 }
 
 ChromaSubsampling chroma(const AVPixFmtDescriptor *d) {
@@ -175,7 +241,9 @@ TrackInfo describeStream(const AVFormatContext *ctx, const AVStream *stream, con
         duration = toCMTime(stream->duration, stream->time_base);
     }
     if (!CMTIME_IS_VALID(duration)) {
-        duration = durationTag(stream);
+        if (const auto nanoseconds = durationTagNanoseconds(stream); nanoseconds && *nanoseconds > 0) {
+            duration = tagDurationOnGrid(*nanoseconds, info, stream->time_base);
+        }
     }
     if (!CMTIME_IS_VALID(duration) && ctx->duration != AV_NOPTS_VALUE && ctx->duration > 0) {
         const CMTime total = CMTimeMake(ctx->duration, AV_TIME_BASE);

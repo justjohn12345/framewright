@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <initializer_list>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -2001,6 +2003,74 @@ std::optional<CMTime> exactTimeOn(const ExactTime &t, std::int32_t timescale) {
     return t.toTime();
 }
 
+// `t` as a CMTime on the first of `timescales` it is a whole number of ticks of, else its exact form
+// on the smallest timescale; nullopt when it has none (its reduced denominator exceeds 2^31 - 1, so
+// no CMTime holds it exactly on any timescale).
+std::optional<CMTime> exactTimeOnFirstOf(const ExactTime &t, std::initializer_list<std::int32_t> timescales) {
+    for (const std::int32_t timescale : timescales) {
+        if (timescale <= 0) {
+            continue;
+        }
+        Int128 scaled = 0;
+        if (!__builtin_mul_overflow(t.numerator(), static_cast<Int128>(timescale), &scaled) &&
+            scaled % t.denominator() == 0) {
+            const Int128 value = scaled / t.denominator();
+            if (value >= std::numeric_limits<std::int64_t>::min() && value <= std::numeric_limits<std::int64_t>::max()) {
+                return CMTimeMake(static_cast<std::int64_t>(value), timescale);
+            }
+        }
+    }
+    return t.toTime();
+}
+
+// `t` in seconds with as many decimals as it needs, up to nine ("10.123456789", "2.5", "3").
+std::string secondsText(CMTime t) {
+    char text[64];
+    std::snprintf(text, sizeof text, "%.9f", CMTimeGetSeconds(t));
+    std::string result = text;
+    while (!result.empty() && result.back() == '0') {
+        result.pop_back();
+    }
+    if (!result.empty() && result.back() == '.') {
+        result.pop_back();
+    }
+    return result;
+}
+
+// Why `clip` (of `asset`, whose media on its track ends at `mediaEnd`) cannot be reversed when the
+// in point on the other side of the mirror, E - source out, has no CMTime form: a media end stated to
+// the nanosecond (a Matroska DURATION tag of a file imported before those were put on a grid) and a
+// clip ending on a frame whose time does not divide into nanoseconds (a third of a second...). The
+// sentence names the smallest trim of the clip's end (up to kMaxReverseTrimHint sequence frames)
+// after which the in point exists, when one does.
+constexpr std::int64_t kMaxReverseTrimHint = 30;
+std::string irreversibleMessage(const Clip &clip, const MediaAsset &asset, CMTime mediaEnd, CMTime frameDuration) {
+    std::string message = "\xE2\x80\x9C" + asset.name + "\xE2\x80\x9D cannot be reversed: its media's length as the file "
+                          "states it (" + secondsText(mediaEnd) + " s) does not line up exactly with this clip's frames, "
+                          "so they cannot be mirrored frame for frame.";
+    const auto end = ExactTime::from(mediaEnd);
+    const auto in = ExactTime::from(clip.sourceIn);
+    const auto length = ExactTime::from(clip.timelineDuration);
+    const auto frame = ExactTime::from(frameDuration);
+    if (end && in && length && frame) {
+        for (std::int64_t k = 1; k <= kMaxReverseTrimHint; ++k) {
+            const auto cut = frame->times(Ratio{k, 1});
+            const auto kept = cut ? length->minus(*cut) : std::nullopt;
+            if (!kept || kept->compare(*frame) < 0) {
+                break; // at least a frame must stay
+            }
+            const auto clipTime = kept->times(clip.speedRatio());
+            const auto out = clipTime ? in->plus(*clipTime) : std::nullopt;
+            const auto flipped = out ? end->minus(*out) : std::nullopt;
+            if (flipped && flipped->toTime()) {
+                return message + " Trimming " + std::to_string(k) + (k == 1 ? " frame" : " frames") +
+                       " off its end makes it reversible.";
+            }
+        }
+    }
+    return message + " Trimming a few frames off its end may make it reversible.";
+}
+
 } // namespace
 
 SetClipReversed::SetClipReversed(SequenceId sequenceId, ClipId clipId, bool reversed, bool includeLinked)
@@ -2015,6 +2085,9 @@ EditResult SetClipReversed::perform(const Project &project, Sequence &sequence, 
         const Track &track = *sequence.trackOfClip(clipId);
         Clip &clip = *sequence.findClip(clipId);
         if (clip.isStill) {
+            if (clipId != clipId_) {
+                continue; // a still linked to the clip asked for has no direction: the clip goes alone
+            }
             return EditResult::failure(EditError::InvalidArgument, "a still image has no motion to reverse");
         }
         if (clip.reversed == reversed_) {
@@ -2035,7 +2108,16 @@ EditResult SetClipReversed::perform(const Project &project, Sequence &sequence, 
         const auto in = ExactTime::from(clip.sourceIn);
         const auto flipped = end && out ? end->minus(*out) : std::nullopt;
         const auto shift = flipped && in ? flipped->minus(*in) : std::nullopt;
-        const auto newIn = flipped ? exactTimeOn(*flipped, clip.sourceIn.timescale) : std::nullopt;
+        // Kept on the in point's timescale when it is whole ticks of it, else on the sequence's frame
+        // grid or the media end's own timescale, else on the smallest exact one.
+        const auto newIn = flipped ? exactTimeOnFirstOf(*flipped, {clip.sourceIn.timescale,
+                                                                   sequence.frameDuration.timescale,
+                                                                   mediaEnd.timescale})
+                                   : std::nullopt;
+        if (flipped && in && !newIn) {
+            return EditResult::failure(EditError::NotRepresentable,
+                                       irreversibleMessage(clip, *asset, mediaEnd, sequence.frameDuration));
+        }
         if (!shift || !newIn || !isExactModelTime(*newIn)) {
             return notRepresentable(clip.id, clip.timelineStart);
         }

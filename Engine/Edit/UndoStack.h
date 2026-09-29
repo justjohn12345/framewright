@@ -11,7 +11,9 @@
 //     expressed against the state before the gesture (e.g. "move clip 7 to 12 s"). A drag that
 //     returns to where it started leaves no undo step.
 //   - CoalesceMode::Accumulate (for repeated nudges): each command applies on top of the last
-//     and their changes are merged; changes that cancel out leave no undo step.
+//     and their changes are merged; changes that cancel out leave no undo step. Commands that
+//     cannot merge (Command::mergeWith false: a composite of several edits, say) still make one
+//     step, undone backwards and redone forwards in order.
 // A command with a different key ends the group and is pushed normally.
 //
 // History that no longer matches the project (only possible if the project is modified outside
