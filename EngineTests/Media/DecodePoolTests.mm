@@ -627,6 +627,66 @@ struct ScrubLog {
     XCTAssertEqual(pool.stats().scrubFailed, uint64_t(1));
 }
 
+/// The frame a scrub request delivers is pinned in the cache (ScrubFrame::pin) until its receiver lets
+/// go: the program monitor looks it up after the callback (a redraw later), and the eviction order,
+/// which follows the streams' playheads, would otherwise take a frame far behind them first, as it is
+/// put even (the paused seek report).
+- (void)testAScrubbedFrameStaysCachedWhileItsReceiverHoldsIt {
+    ScrubLog log;
+    DecodePool pool(_fakeRouter, _cache);
+    pool.setTargets({DecodeTarget{AssetId(1), "/fake/a.mov", -1, CMTimeMake(5, 1)}});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    _cache->setBudget(_cache->stats().bytes); // full: every put from now on evicts
+    auto flood = [&](int from, int count) {
+        for (int i = from; i < from + count; ++i) {
+            CVPixelBufferRef buffer = nullptr;
+            NSDictionary *attributes = @{(id)kCVPixelBufferIOSurfacePropertiesKey : @{}};
+            XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, size_t(_fake->width), size_t(_fake->height),
+                                               kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)attributes,
+                                               &buffer),
+                           kCVReturnSuccess);
+            XCTAssertTrue(_cache->put(AssetId(3), PixelBuffer::adopt(buffer), CMTimeMake(i, 30), CMTimeMake(1, 30),
+                                      CMTimeMake(1, 30)));
+        }
+    };
+    const CMTime behind = CMTimeMake(1, 10); // far behind the stream's playhead (5 s)
+    pool.requestFrame(AssetId(1), behind, log.callback(1));
+    XCTAssertTrue(log.waitFor(1, std::chrono::seconds(10)));
+    {
+        std::lock_guard<std::mutex> lock(log.mutex);
+        const Result<ScrubFrame> &r = log.results[1].at(0);
+        XCTAssertTrue(r.ok());
+        if (r.ok()) {
+            XCTAssertFalse(r.value().fromCache);
+            XCTAssertTrue(r.value().pin, @"delivered pinned");
+            XCTAssertTrue(r.value().pin.image() == r.value().image);
+        }
+    }
+    XCTAssertTrue(_cache->contains(AssetId(1), behind), @"the delivered frame is in the cache");
+    XCTAssertEqual(_cache->stats().pinnedCount, size_t(1));
+    flood(0, 10);
+    XCTAssertTrue(_cache->contains(AssetId(1), behind), @"pinned: the frames of another asset went instead");
+
+    // Found in the cache: delivered pinned as well (the same entry, pinned twice).
+    pool.requestFrame(AssetId(1), behind, log.callback(2));
+    XCTAssertTrue(log.waitFor(2, std::chrono::seconds(10)));
+    {
+        std::lock_guard<std::mutex> lock(log.mutex);
+        const Result<ScrubFrame> &r = log.results[2].at(0);
+        XCTAssertTrue(r.ok() && r.value().fromCache && r.value().pin);
+    }
+    XCTAssertEqual(_cache->stats().pinnedCount, size_t(1));
+
+    // Released by its receivers: an ordinary entry again, and the first to go (behind the playhead).
+    {
+        std::lock_guard<std::mutex> lock(log.mutex);
+        log.results.clear();
+    }
+    XCTAssertEqual(_cache->stats().pinnedCount, size_t(0));
+    flood(10, 1);
+    XCTAssertFalse(_cache->contains(AssetId(1), behind));
+}
+
 - (void)testScrubWithRealMediaIncludingPastTheEnd {
     const std::string hevc = [self mediaPath:"hevc_720p2997.mov"];
     if (hevc.empty()) {

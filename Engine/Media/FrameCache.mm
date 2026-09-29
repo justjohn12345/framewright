@@ -212,21 +212,26 @@ struct FrameCache::State {
     }
 
     PinnedFrame pin(const std::shared_ptr<State> &self, AssetId asset, Entry *e) {
-        PinnedFrame pinned;
         if (e == nullptr) {
             ++stats.misses;
-            return pinned;
+            return PinnedFrame{};
         }
         ++stats.hits;
-        touch(*e);
-        if (e->pins++ == 0) {
-            stats.pinnedBytes += e->frame.bytes;
+        return pinEntry(self, asset, *e);
+    }
+
+    /// Pins `entry` (marked recently used; no hit or miss counted).
+    PinnedFrame pinEntry(const std::shared_ptr<State> &self, AssetId asset, Entry &e) {
+        PinnedFrame pinned;
+        touch(e);
+        if (e.pins++ == 0) {
+            stats.pinnedBytes += e.frame.bytes;
             ++stats.pinnedCount;
         }
         pinned.state_ = self;
         pinned.asset_ = asset;
-        pinned.serial_ = e->serial;
-        pinned.frame_ = e->frame;
+        pinned.serial_ = e.serial;
+        pinned.frame_ = e.frame;
         return pinned;
     }
 
@@ -346,8 +351,15 @@ bool FrameCache::put(Epoch epoch, AssetId asset, const VideoFrame &frame, CMTime
     return insert(epoch, asset, frame.image, frame.pts, frame.duration, frameDuration, coverFrom);
 }
 
+FrameCache::PinnedFrame FrameCache::putPinned(Epoch epoch, AssetId asset, const VideoFrame &frame,
+                                              CMTime frameDuration, CMTime coverFrom) {
+    PinnedFrame pinned;
+    insert(epoch, asset, frame.image, frame.pts, frame.duration, frameDuration, coverFrom, &pinned);
+    return pinned;
+}
+
 bool FrameCache::insert(std::optional<Epoch> epoch, AssetId asset, PixelBuffer image, CMTime pts, CMTime duration,
-                        CMTime frameDuration, CMTime coverFrom) {
+                        CMTime frameDuration, CMTime coverFrom, PinnedFrame *pinned) {
     if (!image || !isNumeric(pts)) {
         return false;
     }
@@ -387,6 +399,9 @@ bool FrameCache::insert(std::optional<Epoch> epoch, AssetId asset, PixelBuffer i
                 existing.frame.duration = duration;
                 existing.frame.span = frameSpan(pts, duration, frameDuration);
             }
+            if (pinned != nullptr) {
+                *pinned = s.pinEntry(state_, asset, existing);
+            }
             return true;
         }
         s.erase(asset, it);
@@ -404,10 +419,13 @@ bool FrameCache::insert(std::optional<Epoch> epoch, AssetId asset, PixelBuffer i
     entry.end = end;
     entry.serial = s.nextSerial++;
     entry.lastUse = ++s.useTick;
-    target.entries.emplace(TimeKey{pts}, std::move(entry));
+    State::Entry &inserted = target.entries.emplace(TimeKey{pts}, std::move(entry)).first->second;
     s.stats.bytes += bytes;
     ++s.stats.count;
     ++s.stats.insertions;
+    if (pinned != nullptr) {
+        *pinned = s.pinEntry(state_, asset, inserted); // before eviction: it may rank first to go
+    }
     s.evictTo(s.budget);
     return true;
 }

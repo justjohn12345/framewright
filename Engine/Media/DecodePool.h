@@ -119,13 +119,19 @@ struct DecodeTarget {
     uint64_t lane = 0;                  ///< Distinguishes simultaneous targets on one asset.
 };
 
-/// A frame delivered by requestFrame().
+/// A frame delivered by requestFrame(). Move-only (it holds a pin).
 struct ScrubFrame {
     PixelBuffer image;
     CMTime pts = kCMTimeInvalid;
     CMTime duration = kCMTimeInvalid;
     int64_t frameIndex = 0; ///< FrameCache slot.
     bool fromCache = false;
+    /// The frame's FrameCache entry, pinned from the moment it was put (or found) until this pin is
+    /// released: a caller that shows the picture through the cache (the playback controller's
+    /// paused picture) keeps it until the picture is presented, so eviction cannot drop it between
+    /// the decode and the lookup. Empty when the frame could not be cached (larger than the budget,
+    /// or an earlier media epoch).
+    FrameCache::PinnedFrame pin;
 };
 using ScrubCallback = std::function<void(Result<ScrubFrame>)>;
 
@@ -212,7 +218,8 @@ class DecodePool {
     /// independent clients (the program monitor's layers, the source monitor) different lanes
     /// so they do not supersede each other. The asset's path must be known from registerAsset()
     /// or a target (else the callback receives InvalidArgument). Uses the asset's first
-    /// video/still track.
+    /// video/still track. The frame delivered is in the cache, pinned by ScrubFrame::pin (released
+    /// when the ScrubFrame is destroyed, e.g. right after a callback that ignores it).
     void requestFrame(AssetId asset, CMTime time, ScrubCallback callback, uint64_t lane = 0);
 
     /// Blocks until every stream is idle (window covered, end of stream or failed), no step is

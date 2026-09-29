@@ -172,6 +172,14 @@ class FrameCache {
     /// `epoch` is the current epoch. The check and the insertion are atomic with beginEpoch().
     bool put(Epoch epoch, AssetId asset, const VideoFrame &frame, CMTime frameDuration,
              CMTime coverFrom = kCMTimeInvalid);
+    /// Like put(epoch, ...), and pins the entry that holds the frame from now on (the one inserted,
+    /// or the pinned entry kept at its pts) before the budget is enforced: a frame decoded because
+    /// someone is about to show it (DecodePool::requestFrame) cannot be evicted before it is looked
+    /// up, whatever the eviction order thinks of its place (the focus can still name where the
+    /// playhead was before a jump). Not counted as a hit. An empty PinnedFrame when the frame was
+    /// not retained (as put() returning false).
+    PinnedFrame putPinned(Epoch epoch, AssetId asset, const VideoFrame &frame, CMTime frameDuration,
+                          CMTime coverFrom = kCMTimeInvalid);
 
     /// The entry showing at time `t` (marked recently used; counted as hit or miss).
     std::optional<Frame> get(AssetId asset, CMTime t);
@@ -213,8 +221,10 @@ class FrameCache {
     struct State;
 
   private:
+    /// `pinned`: when not null (and empty), receives a pin of the entry holding the frame, taken before
+    /// eviction.
     bool insert(std::optional<Epoch> epoch, AssetId asset, PixelBuffer image, CMTime pts, CMTime duration,
-                CMTime frameDuration, CMTime coverFrom);
+                CMTime frameDuration, CMTime coverFrom, PinnedFrame *pinned = nullptr);
 
     std::shared_ptr<State> state_;
 };

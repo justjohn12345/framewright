@@ -989,8 +989,10 @@ Result<ScrubFrame> DecodePool::serviceScrub(const ScrubKey &key, const std::shar
     }
     const CMTime fd = track->kind == TrackKind::Still ? kCMTimeInvalid : track->frameDuration;
 
-    if (auto cached = cache_->get(key.asset, track->kind == TrackKind::Still ? kCMTimeZero : time)) {
-        return ScrubFrame{cached->image, cached->pts, cached->duration, cached->index, true};
+    if (FrameCache::PinnedFrame cached =
+            cache_->acquire(key.asset, track->kind == TrackKind::Still ? kCMTimeZero : time)) {
+        const FrameCache::Frame &hit = cached.frame();
+        return ScrubFrame{hit.image, hit.pts, hit.duration, hit.index, true, std::move(cached)};
     }
 
     // The interrupt the scrub thread armed for this request (requestFrame() requests it when a
@@ -1077,9 +1079,11 @@ Result<ScrubFrame> DecodePool::serviceScrub(const ScrubKey &key, const std::shar
         return makeError(MediaErrorCode::InvalidArgument, "no frame at or after the requested time in " + slot->url);
     }
     const VideoFrame &f = *frame.value();
+    FrameCache::PinnedFrame pin;
     {
         // Checked and put under mutex_ (see publishStreamFrame): a frame of a file the asset no
-        // longer names is neither cached nor delivered.
+        // longer names is neither cached nor delivered. Put pinned: the requester is about to show
+        // it, and the eviction order (the streams' focus) may still name where the playhead was.
         std::lock_guard<std::mutex> lock(mutex_);
         if (slot->retired || slot->epoch != epoch_) {
             return cancelledError();
@@ -1088,12 +1092,12 @@ Result<ScrubFrame> DecodePool::serviceScrub(const ScrubKey &key, const std::shar
             // The last frame holds for every later time (as the streams hold it at the end).
             VideoFrame held = f;
             held.duration = kCMTimePositiveInfinity;
-            cache_->put(slot->epoch, key.asset, held, fd, held.pts);
+            pin = cache_->putPinned(slot->epoch, key.asset, held, fd, held.pts);
         } else {
-            cache_->put(slot->epoch, key.asset, f, fd, time < f.pts ? time : f.pts);
+            pin = cache_->putPinned(slot->epoch, key.asset, f, fd, time < f.pts ? time : f.pts);
         }
     }
-    return ScrubFrame{f.image, f.pts, f.duration, FrameCache::frameIndex(f.pts, fd), false};
+    return ScrubFrame{f.image, f.pts, f.duration, FrameCache::frameIndex(f.pts, fd), false, std::move(pin)};
 }
 
 // MARK: - Observation

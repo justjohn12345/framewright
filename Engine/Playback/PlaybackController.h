@@ -231,6 +231,9 @@ struct PresentedLayer {
     /// Slot containing the start of the frame actually shown (-1: nothing). For a variable-frame-rate
     /// source the exact picture can start in an earlier slot than wantedIndex.
     int64_t shownIndex = -1;
+    /// Presentation time of the frame actually shown (kCMTimeInvalid: nothing), for diagnostics: on a
+    /// variable-frame-rate source it names the picture exactly where slots cannot.
+    CMTime shownPts = kCMTimeInvalid;
     bool exact = false;
 };
 struct PresentedFrame {
@@ -399,10 +402,15 @@ class PlaybackController {
     /// Not playing (paused, stepping, scrubbing, pre-rolling): a frame with a layer whose picture
     /// is not decoded yet is not presented while the decode requested for it is in flight; the
     /// source reports "unchanged", so the view keeps showing the previous complete picture, and
-    /// the request's completion asks for a redraw (needsDisplay). Without a previous complete
-    /// picture (the first frame after setSequence), or once the request failed, the frame is
-    /// presented with what is available (a layer keeps its clip's previous picture, else it is
-    /// drawn without one). While playing, a late layer keeps its clip's previous picture.
+    /// the request's completion asks for a redraw (needsDisplay). The pictures of that frame are
+    /// pinned in the FrameCache from the moment they are decoded (DecodePool::requestFrame puts them
+    /// pinned) or found until the playhead moves on, so the redraw always finds them: the eviction
+    /// order follows the decode pool's streams, which stay where the playhead was until the stopped
+    /// lookahead follows, and would otherwise drop a picture far from there first. Without a
+    /// previous complete picture (the first frame after setSequence), or once the request failed,
+    /// the frame is presented with what is available (a layer keeps its clip's previous picture,
+    /// else it is drawn without one). While playing, a late layer keeps its clip's previous
+    /// picture.
     render::PreviewFrameSource frameSource(SourceRole role = SourceRole::Primary);
 
     // MARK: Components (tests, HUD)

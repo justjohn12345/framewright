@@ -103,11 +103,16 @@ struct PlaybackController::Core {
         CMTime guardTime = kCMTimeInvalid;
         std::vector<ClipId> lastClips;
         std::vector<render::TextureSet> lastTextures;
-        std::vector<int64_t> lastShown;
+        /// The picture shown per layer: its slot (PresentedLayer::shownIndex) and pts (shownPts).
+        struct Shown {
+            int64_t index = -1;
+            CMTime pts = kCMTimeInvalid;
+        };
+        std::vector<Shown> lastShown;
         std::vector<FrameCache::PinnedFrame> pins; // index-aligned with lastClips
 
         std::vector<ClipId> nextClips;
-        std::vector<int64_t> nextShown;
+        std::vector<Shown> nextShown;
         std::vector<FrameCache::PinnedFrame> nextPins;
         std::vector<render::TextureSet> nextTextures;
         std::vector<size_t> nextMissing; // layers of the next frame without their exact picture
@@ -143,17 +148,36 @@ struct PlaybackController::Core {
     // Scrub requests for the paused/scrubbed picture (requestDisplayFramesLocked). While a
     // request of the current display is in flight, the frame source keeps presenting the
     // previous complete picture rather than a frame with a layer drawn without its picture.
-    // Held only for a few integer operations (the render thread takes it too).
+    // Held only for a few integer operations and vector moves (the render thread takes it too).
     std::mutex displayRequestMutex;
     uint64_t displayRequestGeneration = 0; // displayRequestMutex
     int displayRequestsInFlight = 0;       // displayRequestMutex
+    // The current target's pictures, pinned in the cache from the moment they were found or decoded
+    // (DecodePool puts a requested frame pinned, ScrubFrame::pin) until the next target: the frame
+    // source looks them up after the request completed (a redraw later), and without the pins the
+    // eviction order could drop them first, at their insertion even. The pool's focus names its
+    // streams' targets, which a click leaves at the previous place until the stopped lookahead
+    // follows, so a picture far from there ranks first to go; the frame source then found nothing,
+    // nothing was in flight any more, and it presented the frame without the picture for good.
+    std::vector<FrameCache::PinnedFrame> displayPins; // displayRequestMutex
 
     /// A new display target: forgets the previous target's requests (they no longer hold the
-    /// picture). Returns the generation to tag this target's requests with.
+    /// picture) and releases its pins (what the frame sources present, they pin themselves).
+    /// Returns the generation to tag this target's requests with.
     uint64_t beginDisplayRequests() {
+        std::vector<FrameCache::PinnedFrame> released; // unpinned after the lock is dropped
         std::lock_guard<std::mutex> lock(displayRequestMutex);
         displayRequestsInFlight = 0;
+        released.swap(displayPins);
         return ++displayRequestGeneration;
+    }
+    /// Keeps `pin` (a picture of target `generation`) until the next target; dropped if a newer target
+    /// began meanwhile.
+    void holdDisplayPin(uint64_t generation, FrameCache::PinnedFrame pin) {
+        std::lock_guard<std::mutex> lock(displayRequestMutex);
+        if (generation == displayRequestGeneration && pin) {
+            displayPins.push_back(std::move(pin));
+        }
     }
     /// Called before each request of `generation` is issued (so its completion never precedes it).
     void displayRequestIssued(uint64_t generation) {
@@ -162,15 +186,18 @@ struct PlaybackController::Core {
             ++displayRequestsInFlight;
         }
     }
-    /// A request of `generation` completed (with a frame, an error or Cancelled). Returns
-    /// whether it belonged to the current display target.
-    bool displayRequestDone(uint64_t generation) {
+    /// A request of `generation` completed (with a frame, whose pin is kept for the current target,
+    /// an error or Cancelled). Returns whether it belonged to the current display target.
+    bool displayRequestDone(uint64_t generation, FrameCache::PinnedFrame pin) {
         std::lock_guard<std::mutex> lock(displayRequestMutex);
         if (generation != displayRequestGeneration) {
-            return false;
+            return false; // `pin` is released on return (a superseded target's picture)
         }
         if (displayRequestsInFlight > 0) {
             --displayRequestsInFlight;
+        }
+        if (pin) {
+            displayPins.push_back(std::move(pin));
         }
         return true;
     }
@@ -310,7 +337,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
         shown.clip = layer.clipId;
         shown.asset = layer.assetId;
         FrameCache::PinnedFrame pin;
-        int64_t shownIndex = -1;
+        RenderState::Shown shownPicture;
         if (const MediaAsset *asset = rs.project->findAsset(layer.assetId)) {
             const CMTime pictureTime = pictureTimeFor(layer, *asset);
             shown.wantedIndex = asset->isStill() ? 0 : FrameCache::frameIndex(pictureTime, asset->frameDuration);
@@ -335,7 +362,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
                 if (rs.primary) {
                     hits.fetch_add(1, std::memory_order_relaxed);
                 }
-                shownIndex = pin.frame().index;
+                shownPicture = RenderState::Shown{pin.frame().index, pin.frame().pts};
                 shown.exact = true;
             } else {
                 if (!pin && rs.primary) {
@@ -345,9 +372,10 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
                 rs.nextMissing.push_back(i);
             }
         }
-        shown.shownIndex = shownIndex;
+        shown.shownIndex = shownPicture.index;
+        shown.shownPts = shownPicture.pts;
         rs.nextClips.push_back(layer.clipId);
-        rs.nextShown.push_back(shownIndex);
+        rs.nextShown.push_back(shownPicture);
         rs.nextPins.push_back(std::move(pin));
         rs.info.layers.push_back(shown);
     }
@@ -374,7 +402,8 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
                 rs.nextTextures[i] = rs.lastTextures[j];
                 rs.nextPins[i] = std::move(rs.pins[j]);
                 rs.nextShown[i] = rs.lastShown[j];
-                rs.info.layers[i].shownIndex = rs.lastShown[j];
+                rs.info.layers[i].shownIndex = rs.lastShown[j].index;
+                rs.info.layers[i].shownPts = rs.lastShown[j].pts;
                 rs.lastClips[j] = ClipId{};
                 break;
             }
@@ -730,6 +759,8 @@ void PlaybackController::planAudioLocked(CMTime at) {
 }
 
 void PlaybackController::requestDisplayFramesLocked(CMTime at) {
+    // A new target: the previous one's requests and pinned pictures no longer matter.
+    const uint64_t generation = core_->beginDisplayRequests();
     const Sequence *sequence = sequenceLocked();
     if (!pool_ || !sequence) {
         return;
@@ -737,24 +768,31 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
     const std::vector<VideoLayer> layers = layersToDecodeLocked(*sequence, at);
     std::weak_ptr<Core> weakCore = core_;
     std::weak_ptr<ObserverHub> weakHub = hub_;
-    const uint64_t generation = core_->beginDisplayRequests();
     for (size_t i = 0; i < layers.size(); ++i) {
         const VideoLayer &layer = layers[i];
         const MediaAsset *asset = project_->findAsset(layer.assetId);
-        if (!asset || cache_->contains(layer.assetId, pictureTimeFor(layer, *asset))) {
+        if (!asset) {
+            continue;
+        }
+        // The picture the frame source looks up (see pictureTimeFor). Already decoded: pinned until
+        // the next target, so it is still there when the redraw below looks it up.
+        const CMTime pictureTime = pictureTimeFor(layer, *asset);
+        if (FrameCache::PinnedFrame cached = cache_->acquire(layer.assetId, pictureTime)) {
+            core_->holdDisplayPin(generation, std::move(cached));
             continue;
         }
         const uint64_t lane = config_.scrubLaneBase + i;
         core_->displayRequestIssued(generation);
-        // The picture the frame source looks up (see pictureTimeFor).
-        pool_->requestFrame(layer.assetId, pictureTimeFor(layer, *asset),
+        pool_->requestFrame(layer.assetId, pictureTime,
                             [weakCore, weakHub, generation](media::Result<media::ScrubFrame> r) {
                                 auto core = weakCore.lock();
                                 if (!core) {
                                     return;
                                 }
-                                const bool current = core->displayRequestDone(generation);
-                                if (!r.ok() && !current) {
+                                const bool ok = r.ok();
+                                const bool current = core->displayRequestDone(
+                                    generation, ok ? std::move(r).value().pin : FrameCache::PinnedFrame{});
+                                if (!ok && !current) {
                                     return; // superseded by a newer display target
                                 }
                                 // A picture landed, or the current target's request ended

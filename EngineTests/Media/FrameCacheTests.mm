@@ -337,6 +337,71 @@ bool putSlot(FrameCache &cache, AssetId asset, int64_t index, PixelBuffer image 
     XCTAssertFalse(cache.acquire(a, int64_t(0)));
 }
 
+/// A frame put for someone about to show it (DecodePool::requestFrame) may rank first to go: here it
+/// lies far behind the only focus (the playhead was elsewhere before a jump). put() evicts it as it
+/// is inserted; putPinned() keeps it until the pin is released, without counting a hit.
+- (void)testPutPinnedKeepsAFrameTheEvictionOrderWouldDropAtOnce {
+    FrameCache cache(3 * _unit);
+    const AssetId a(1);
+    cache.setFocus({FrameCache::Focus{a, timeForFrame(100, kFd), true}});
+    for (int64_t i : {100, 101, 102}) {
+        XCTAssertTrue(putSlot(cache, a, i));
+    }
+    auto frameAt = [&](int64_t index) {
+        VideoFrame f;
+        f.pts = timeForFrame(index, kFd);
+        f.duration = kFd;
+        f.image = makeBuffer();
+        return f;
+    };
+    // The plain put of a frame behind the focus: gone before anyone could look it up.
+    XCTAssertTrue(cache.put(cache.epoch(), a, frameAt(5), kFd));
+    XCTAssertFalse(cache.contains(a, int64_t(5)), @"evicted as it was put: farthest behind the focus");
+
+    const FrameCache::Stats before = cache.stats();
+    FrameCache::PinnedFrame pin = cache.putPinned(cache.epoch(), a, frameAt(6), kFd);
+    XCTAssertTrue(pin);
+    XCTAssertEqual(pin.frame().index, 6);
+    XCTAssertTrue(cache.contains(a, int64_t(6)), @"pinned before the budget was enforced");
+    XCTAssertEqual(cache.indices(a), (std::vector<int64_t>{6, 100, 101}), @"the farthest ahead went instead");
+    XCTAssertEqual(cache.stats().pinnedCount, size_t(1));
+    XCTAssertEqual(cache.stats().hits, before.hits, @"a put is not a hit");
+    XCTAssertEqual(cache.stats().misses, before.misses);
+    XCTAssertEqual(cache.stats().insertions, before.insertions + 1);
+    // More frames around the focus do not displace it while it is pinned.
+    for (int64_t i : {103, 104, 105}) {
+        XCTAssertTrue(putSlot(cache, a, i));
+    }
+    XCTAssertTrue(cache.contains(a, int64_t(6)));
+    // Looked up (the monitor pins what it shows), then released: an ordinary entry again.
+    FrameCache::PinnedFrame shown = cache.acquire(a, timeForFrame(6, kFd));
+    XCTAssertTrue(shown && shown.image() == pin.image());
+    pin.release();
+    XCTAssertTrue(cache.contains(a, int64_t(6)), @"still pinned by the lookup");
+    shown.release();
+    XCTAssertTrue(putSlot(cache, a, 106));
+    XCTAssertFalse(cache.contains(a, int64_t(6)), @"unpinned, it is the first to go again");
+
+    // Putting a frame again at the pts of a pinned entry pins that (kept) entry.
+    XCTAssertTrue(putSlot(cache, a, 104));
+    FrameCache::PinnedFrame first = cache.acquire(a, int64_t(104));
+    VideoFrame again = frameAt(104);
+    FrameCache::PinnedFrame second = cache.putPinned(cache.epoch(), a, again, kFd);
+    XCTAssertTrue(second && second.image() == first.image(), @"the pinned buffer stays and is pinned again");
+    XCTAssertEqual(cache.stats().pinnedCount, size_t(1), @"one entry, pinned twice");
+    first.release();
+    XCTAssertEqual(cache.stats().pinnedCount, size_t(1));
+    second.release();
+    XCTAssertEqual(cache.stats().pinnedCount, size_t(0));
+
+    // Not retained: an earlier epoch, or larger than the whole budget.
+    XCTAssertFalse(cache.putPinned(cache.epoch() + 1, a, frameAt(7), kFd));
+    VideoFrame huge = frameAt(8);
+    huge.image = makeBuffer(512, 512);
+    XCTAssertFalse(cache.putPinned(cache.epoch(), a, huge, kFd));
+    XCTAssertEqual(cache.stats().pinnedCount, size_t(0));
+}
+
 - (void)testPurgeWhilePinnedAndPinsOutlivingTheCache {
     FrameCache::PinnedFrame survivor;
     {
