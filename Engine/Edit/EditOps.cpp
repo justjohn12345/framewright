@@ -2293,7 +2293,17 @@ std::int64_t wholeFrames(const std::optional<ExactTime> &length, CMTime frameDur
 std::optional<TransitionSideLimits> transitionSideLimits(const Project &project, SequenceId sequenceId, ClipId ownerId,
                                                          SpanId existing, EditResult &why) {
     const Sequence *sequence = project.findSequence(sequenceId);
-    if (!sequence || !isPositive(sequence->frameDuration)) {
+    if (!sequence) {
+        why = EditResult::failure(EditError::SequenceNotFound, "The sequence no longer exists.");
+        return std::nullopt;
+    }
+    return transitionSideLimits(project, *sequence, ownerId, existing, why);
+}
+
+std::optional<TransitionSideLimits> transitionSideLimits(const Project &project, const Sequence &sequenceRef,
+                                                         ClipId ownerId, SpanId existing, EditResult &why) {
+    const Sequence *sequence = &sequenceRef;
+    if (!isPositive(sequence->frameDuration)) {
         why = EditResult::failure(EditError::SequenceNotFound, "The sequence no longer exists.");
         return std::nullopt;
     }
@@ -2553,6 +2563,414 @@ EditResult SetTrackFlags::perform(const Project &, Sequence &sequence, IdGenerat
         track->name = *update_.name;
     }
     return EditResult::success();
+}
+
+// ----- Sequence settings -----
+
+namespace {
+
+// The scale that fits a picture of the asset's displayed size into a width x height frame (the
+// compositor's fit, Compositor.h).
+double fitScale(const MediaAsset &asset, double width, double height) {
+    return std::min(width / double(asset.width), height / double(asset.height));
+}
+
+std::string sizeName(std::int32_t width, std::int32_t height) {
+    return std::to_string(width) + "×" + std::to_string(height);
+}
+
+// "0.5 s", "0.042 s" (at most 3 decimals, trailing zeros dropped).
+std::string secondsName(CMTime t) {
+    char buffer[48];
+    std::snprintf(buffer, sizeof buffer, "%.3f", toSeconds(t));
+    std::string text = buffer;
+    while (text.size() > 1 && text.back() == '0') {
+        text.pop_back();
+    }
+    if (text.back() == '.') {
+        text.pop_back();
+    }
+    return text + " s";
+}
+
+std::string framesName(std::int64_t frames) {
+    return std::to_string(frames) + (frames == 1 ? " frame" : " frames");
+}
+
+// "1 clip", "3 clips".
+std::string countName(std::size_t count, const char *one, const char *many) {
+    return std::to_string(count) + " " + (count == 1 ? one : many);
+}
+
+// "the cross dissolve between “a.mov” and “b.mov”", "the crossfade between ...", "the fade in at the
+// start of “a.mov”", "the Wipe Left fade out at the end of “a.mov”".
+std::string transitionName(const Project &project, const Track &track, const Clip &owner, const EffectSpan &span) {
+    const auto placement = placeTransition(track, owner, span);
+    const bool audio = track.kind == TrackKind::Audio;
+    std::string kind;
+    if (!audio && span.transition != TransitionKind::CrossDissolve) {
+        kind = std::string(displayNameOf(span.transition)) + " ";
+    }
+    if (placement && placement->role == TransitionRole::CrossDissolve && placement->partner != nullptr) {
+        const std::string what = audio ? "crossfade" : (kind.empty() ? "cross dissolve" : kind + "transition");
+        return "the " + what + " between " + quotedMediaName(project, owner) + " and " +
+               quotedMediaName(project, *placement->partner);
+    }
+    if (span.edge == ClipEdge::Head) {
+        return "the " + kind + "fade in at the start of " + quotedMediaName(project, owner);
+    }
+    return "the " + kind + "fade out at the end of " + quotedMediaName(project, owner);
+}
+
+// Whole frames of `offset` (a transition offset, >= 0) on the grid, rounded to the nearest.
+std::int64_t roundedFrames(CMTime offset, CMTime frameDuration) {
+    const auto exact = ExactTime::from(offset);
+    return exact ? std::max<std::int64_t>(0, exact->frameIndex(frameDuration, SnapMode::Round).value_or(0)) : 0;
+}
+
+struct TransitionFrames {
+    std::int64_t before = 0; // frames before the cut (a tail span's inside part)
+    std::int64_t after = 0;  // frames after the cut, or a fade in's length
+};
+
+// Sets the lane-0 span's offsets to `frames` on the grid.
+void setTransitionFrames(EffectSpan &span, TransitionFrames frames, CMTime frameDuration) {
+    if (span.edge == ClipEdge::Head) {
+        span.start = kCMTimeZero;
+        span.end = timeForFrame(frames.after, frameDuration);
+    } else {
+        span.start = negateTime(timeForFrame(frames.before, frameDuration));
+        span.end = timeForFrame(frames.after, frameDuration);
+    }
+}
+
+} // namespace
+
+SetSequenceFormat::SetSequenceFormat(SequenceId sequenceId, SequenceFormat format, std::string name)
+    : SequenceCommand(sequenceId), format_(format), name_(std::move(name)) {}
+
+EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence, IdGenerator &) {
+    if (auto problem = sequenceFormatProblem(format_)) {
+        return EditResult::failure(EditError::InvalidArgument, *problem);
+    }
+    report_ = SequenceConformReport{};
+    const SequenceFormat old = sequence.format();
+    SequenceFormat target = format_;
+    target.configured = true;
+    report_.before = old;
+    report_.after = target;
+    std::vector<std::string> &sentences = report_.sentences;
+
+    // Size: positions are sequence pixels.
+    if (target.width != old.width || target.height != old.height) {
+        const double k = std::min(double(target.width) / double(old.width), double(target.height) / double(old.height));
+        report_.placementScale = k;
+        for (Track &track : sequence.videoTracks) {
+            for (Clip &clip : track.clips) {
+                const MediaAsset *asset = project.findAsset(clip.assetId);
+                if (asset == nullptr || asset->width <= 0 || asset->height <= 0) {
+                    continue;
+                }
+                double factor = k * fitScale(*asset, old.width, old.height) /
+                                fitScale(*asset, target.width, target.height);
+                if (std::fabs(factor - 1.0) < 1e-12) {
+                    factor = 1.0; // the same aspect ratio: the fitted size scales with the frame
+                }
+                clip.video.x *= k;
+                clip.video.y *= k;
+                clip.video.scale *= factor;
+                for (EffectSpan &span : clip.spans) {
+                    if (span.kind != SpanKind::Motion) {
+                        continue;
+                    }
+                    for (Keyframe &keyframe : span.tracks.x) {
+                        keyframe.value *= k;
+                    }
+                    for (Keyframe &keyframe : span.tracks.y) {
+                        keyframe.value *= k;
+                    }
+                }
+                ++report_.clipsRescaled;
+            }
+        }
+        const bool sameShape = std::int64_t(old.width) * target.height == std::int64_t(old.height) * target.width;
+        char scale[32];
+        std::snprintf(scale, sizeof scale, "%.4g", k);
+        if (sameShape) {
+            sentences.push_back("The frame becomes " + sizeName(target.width, target.height) + " (from " +
+                                sizeName(old.width, old.height) + ")" +
+                                (report_.clipsRescaled > 0
+                                     ? ": positions, sizes and Motion spans are scaled ×" + std::string(scale) +
+                                           " with it, so every picture stays the same."
+                                     : "."));
+        } else {
+            sentences.push_back("The frame becomes " + sizeName(target.width, target.height) + " (from " +
+                                sizeName(old.width, old.height) + "), another shape: the old frame is fitted inside " +
+                                "the new one" +
+                                (report_.clipsRescaled > 0
+                                     ? " (×" + std::string(scale) + ") and every picture keeps its place and size in "
+                                           "it; picture outside the old frame may now show."
+                                     : "."));
+        }
+    }
+
+    // Frame rate: clips, then transitions, on the new grid.
+    const CMTime fd = old.frameDuration;
+    const CMTime newFd = target.frameDuration;
+    const bool rateChanged = !(fd == newFd);
+    std::unordered_map<SpanId, TransitionFrames> wanted;
+    bool hasEffectSpans = false;
+    if (rateChanged) {
+        for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+            for (const Track &track : *list) {
+                for (const Clip &clip : track.clips) {
+                    hasEffectSpans = hasEffectSpans || clip.hasEffectSpans();
+                    for (const EffectSpan &span : clip.spans) {
+                        if (!span.isTransition()) {
+                            continue;
+                        }
+                        TransitionFrames frames;
+                        frames.after = roundedFrames(span.end, fd);
+                        if (span.edge == ClipEdge::Tail) {
+                            frames.before = roundedFrames(negateTime(span.start), fd);
+                        }
+                        if (frames.before + frames.after == 0) {
+                            frames.after = 1; // a fade shorter than half a frame keeps one
+                        }
+                        wanted[span.id] = frames;
+                    }
+                }
+            }
+        }
+        for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+            for (Track &track : *list) {
+                for (Clip &clip : track.clips) {
+                    const CMTime start = clip.timelineStart;
+                    const CMTime end = clip.timelineEnd();
+                    CMTime newStart = snapToFrame(start, newFd, SnapMode::Round);
+                    CMTime newEnd = snapToFrame(end, newFd, SnapMode::Round);
+                    const MediaAsset *asset = project.findAsset(clip.assetId);
+                    const CMTime mediaEnd = asset && !clip.isStill ? mediaEndFor(*asset, track.kind) : kCMTimeInvalid;
+                    auto beforeMedia = [&](CMTime t) {
+                        const auto source = clip.exactSourceTimeAt(t);
+                        return !source || source->compare(kCMTimeZero) < 0;
+                    };
+                    auto pastMedia = [&](CMTime t) {
+                        const auto source = clip.exactSourceTimeAt(t);
+                        return !source || source->compare(mediaEnd) > 0;
+                    };
+                    if (!clip.isStill) {
+                        if (beforeMedia(newStart)) {
+                            newStart = snapToFrame(start, newFd, SnapMode::Ceil);
+                        }
+                        if (isNumeric(mediaEnd) && pastMedia(newEnd)) {
+                            newEnd = snapToFrame(end, newFd, SnapMode::Floor);
+                        }
+                    }
+                    if (!(newStart < newEnd)) {
+                        newEnd = newStart + newFd;
+                        if (!clip.isStill && (beforeMedia(newStart) || (isNumeric(mediaEnd) && pastMedia(newEnd)))) {
+                            return EditResult::failure(EditError::OutOfSourceRange,
+                                                       quotedMediaName(project, clip) + " is shorter than a frame at " +
+                                                           frameRateName(newFd) +
+                                                           " fps and has no media to fill one; trim or remove it first.");
+                        }
+                    }
+                    if (newStart == start && newEnd == end) {
+                        continue;
+                    }
+                    RetimeResult retimed = RetimeResult::Ok;
+                    if (newEnd > end) {
+                        retimed = clip.setTimelineEnd(newEnd);
+                        if (retimed == RetimeResult::Ok && !(newStart == start)) {
+                            retimed = clip.setTimelineStartKeepingEnd(newStart);
+                        }
+                    } else {
+                        if (!(newStart == start)) {
+                            retimed = clip.setTimelineStartKeepingEnd(newStart);
+                        }
+                        if (retimed == RetimeResult::Ok && !(newEnd == end)) {
+                            retimed = clip.setTimelineEnd(newEnd);
+                        }
+                    }
+                    if (retimed != RetimeResult::Ok) {
+                        return retimeRefusal(retimed, clip.id, newStart);
+                    }
+                    ++report_.clipsRetimed;
+                    for (const CMTime shift : {newStart - start, newEnd - end}) {
+                        report_.largestShift = maxTime(report_.largestShift, shift < kCMTimeZero ? -shift : shift);
+                    }
+                }
+                for (std::size_t i = 0; i + 1 < track.clips.size(); ++i) {
+                    if (track.clips[i + 1].timelineStart < track.clips[i].timelineEnd()) {
+                        return EditResult::failure(EditError::Overlap,
+                                                   quotedMediaName(project, track.clips[i]) + " is shorter than a frame at " +
+                                                       frameRateName(newFd) + " fps and the next clip leaves no room "
+                                                       "for one; trim or remove it first.");
+                    }
+                }
+            }
+        }
+    }
+    sequence.setFormat(target);
+
+    if (rateChanged) {
+        std::optional<std::pair<TransitionFrames, SpanId>> example;
+        for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+            for (Track &track : *list) {
+                for (Clip &clip : track.clips) {
+                    for (EffectSpan &span : clip.spans) {
+                        if (span.isTransition()) {
+                            setTransitionFrames(span, wanted[span.id], newFd);
+                        }
+                    }
+                }
+            }
+        }
+        for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+            for (Track &track : *list) {
+                for (Clip &clip : track.clips) {
+                    for (const ClipEdge edge : {ClipEdge::Head, ClipEdge::Tail}) {
+                        EffectSpan *span = clip.transitionAt(edge);
+                        if (span == nullptr) {
+                            continue;
+                        }
+                        const TransitionFrames goal = wanted[span->id];
+                        const std::string name = transitionName(project, track, clip, *span);
+                        const auto placement = placeTransition(track, clip, *span);
+                        const bool dissolve = placement && placement->role == TransitionRole::CrossDissolve &&
+                                              placement->partner != nullptr;
+                        TransitionFrames fitted = goal;
+                        std::string reason;
+                        if (dissolve) {
+                            EditResult why = EditResult::success();
+                            const auto limits = transitionSideLimits(project, sequence, clip.id, span->id, why);
+                            if (!limits) {
+                                continue; // not a transition the limits understand: validation decides
+                            }
+                            fitted.before = std::min(goal.before, limits->maxBeforeFrames);
+                            fitted.after = std::min(goal.after, limits->maxAfterFrames);
+                            reason = fitted.after < goal.after ? limits->afterReason : limits->beforeReason;
+                            if (fitted.after < 1) {
+                                fitted = TransitionFrames{};
+                            }
+                        } else {
+                            // A fade: shorter while it is too long for its clip or meets its other transition.
+                            std::int64_t &frames = edge == ClipEdge::Head ? fitted.after : fitted.before;
+                            auto issue = checkTransitionSpan(project, track, clip, *span, newFd);
+                            auto lengthIssue = [&issue] {
+                                return issue && (issue->kind == TransitionIssueKind::TooLong ||
+                                                 issue->kind == TransitionIssueKind::Overlap);
+                            };
+                            reason = "the clip is too short for it at this frame rate, with its other transition.";
+                            while (frames > 0 && lengthIssue()) {
+                                --frames;
+                                if (frames > 0) {
+                                    setTransitionFrames(*span, fitted, newFd);
+                                    issue = checkTransitionSpan(project, track, clip, *span, newFd);
+                                }
+                            }
+                            if (frames > 0 && issue) {
+                                reason = issue->kind == TransitionIssueKind::Touching
+                                             ? "another clip now touches the clip's start."
+                                             : "it is no longer a valid transition.";
+                                frames = 0;
+                            }
+                            if (fitted.before + fitted.after == 0) {
+                                fitted = TransitionFrames{};
+                            }
+                        }
+                        if (dissolve && fitted.before + fitted.after > 0) {
+                            setTransitionFrames(*span, fitted, newFd);
+                            if (auto issue = checkTransitionSpan(project, track, clip, *span, newFd)) {
+                                reason = issue->kind == TransitionIssueKind::NotAdjacent
+                                             ? "the clips no longer meet at a cut."
+                                             : "it is no longer a valid transition.";
+                                fitted = TransitionFrames{};
+                            }
+                        }
+                        const std::int64_t wantedTotal = goal.before + goal.after;
+                        const std::int64_t fittedTotal = fitted.before + fitted.after;
+                        if (fittedTotal == 0) {
+                            report_.transitionsRemoved.push_back(span->id);
+                            std::string sentence = name + " is removed: not one frame of it fits at " +
+                                                   frameRateName(newFd) + " fps";
+                            sentence += reason.empty() ? "." : " (" + reason.substr(0, reason.size() - 1) + ").";
+                            sentence[0] = 'T';
+                            sentences.push_back(sentence);
+                            const SpanId id = span->id;
+                            markRemovedOnPurpose(id);
+                            std::erase_if(clip.spans, [id](const EffectSpan &s) { return s.id == id; });
+                            continue;
+                        }
+                        setTransitionFrames(*span, fitted, newFd);
+                        if (fittedTotal < wantedTotal) {
+                            report_.transitionsShortened.push_back(span->id);
+                            std::string sentence = name + " is shortened from " + framesName(wantedTotal) + " to " +
+                                                   framesName(fittedTotal) + ": " + reason;
+                            sentence[0] = 'T';
+                            sentences.push_back(sentence);
+                        } else {
+                            ++report_.transitionsKept;
+                            if (!example) {
+                                example = std::make_pair(goal, span->id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::string rate = "The frame rate becomes " + frameRateName(newFd) + " fps (from " + frameRateName(fd) + ")";
+        if (report_.clipsRetimed > 0) {
+            rate += ": " + countName(report_.clipsRetimed, "clip moves its", "clips move their") +
+                    " start or end to the nearest frame, by at most " + secondsName(report_.largestShift) + ".";
+        } else if (!sequence.isEmpty()) {
+            rate += "; every clip already starts and ends on a frame.";
+        } else {
+            rate += ".";
+        }
+        // The frame-grid sentence goes before the transitions'.
+        sentences.insert(sentences.begin() + (target.width != old.width || target.height != old.height ? 1 : 0), rate);
+        if (report_.transitionsKept > 0 && example) {
+            const std::int64_t frames = example->first.before + example->first.after;
+            sentences.push_back(countName(report_.transitionsKept, "transition keeps its", "transitions keep their") +
+                                " frame count" + (report_.transitionsKept == 1 ? "" : "s") + ", so " +
+                                (report_.transitionsKept == 1 ? "its" : "their") + " length in seconds changes (" +
+                                framesName(frames) + ": " + secondsName(timeForFrame(frames, fd)) + " before, " +
+                                secondsName(timeForFrame(frames, newFd)) + " now).");
+        }
+        if (hasEffectSpans) {
+            sentences.push_back("Motion, Opacity and Gain spans stay on their pictures (their times do not change).");
+        }
+    }
+    if (target.audioSampleRate != old.audioSampleRate) {
+        char rate[64];
+        std::snprintf(rate, sizeof rate, "Audio is mixed and exported at %g kHz (from %g kHz).",
+                      target.audioSampleRate / 1000.0, old.audioSampleRate / 1000.0);
+        sentences.push_back(rate);
+    }
+    return EditResult::success();
+}
+
+EditResult SetSharpenScaledDownSources::apply(Project &project) {
+    if (!applied_) {
+        before_ = project.sharpenScaledDownSources;
+        applied_ = true;
+    }
+    project.sharpenScaledDownSources = sharpen_;
+    return EditResult::success();
+}
+
+void SetSharpenScaledDownSources::revert(Project &project) {
+    project.sharpenScaledDownSources = before_;
+}
+
+bool SetSharpenScaledDownSources::canRevert(const Project &project) const {
+    return applied_ && project.sharpenScaledDownSources == sharpen_;
+}
+
+bool SetSharpenScaledDownSources::isNoOp() const {
+    return applied_ && before_ == sharpen_;
 }
 
 } // namespace ve

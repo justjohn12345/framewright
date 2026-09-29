@@ -204,7 +204,9 @@ NS_SWIFT_UI_ACTOR
 
 // MARK: Project
 
-/// Replaces the project with an empty one (one 1080p30 sequence, tracks V1 V2 / A1 A2).
+/// Replaces the project with an empty one: one sequence (tracks V1 V2 / A1 A2) at 1920x1080, 30 fps,
+/// 48 kHz, not configured (VESequenceInfo.configured): the first video clip placed on it sets its
+/// size and frame rate (see insertAsset:...).
 - (void)newProjectWithName:(NSString *)name;
 /// Loads a .framewright file. Asset paths are resolved through their stored security-scoped
 /// bookmarks (a moved file is followed; resolution runs off the main thread, never mounts a
@@ -257,6 +259,31 @@ NS_SWIFT_UI_ACTOR
 @property (nonatomic, readonly, copy) NSArray<VEClipInfo *> *allClips;
 /// Clips covering `time` (video bottom to top, then audio).
 - (NSArray<NSNumber *> *)clipIDsAtTime:(CMTime)time;
+
+// MARK: Sequence settings
+
+/// The active sequence's size, frame rate and audio sample rate, and the project's sharpening.
+@property (nonatomic, readonly) VESequenceSettings *sequenceSettings;
+/// The frame rates a sequence is offered and adopts, slowest first (NSValue CMTime frame durations):
+/// 23.976, 24, 25, 29.97, 30, 50, 59.94 and 60 fps.
+@property (class, nonatomic, readonly, copy) NSArray<NSValue *> *standardSequenceFrameDurations NS_SWIFT_NONISOLATED;
+/// "29.97", "25", "23.976" (another rate to 3 decimals).
++ (NSString *)nameForFrameDuration:(CMTime)frameDuration NS_SWIFT_NONISOLATED NS_SWIFT_NAME(name(for:));
+/// What -applySequenceSettings: would do with `settings`, without changing anything: the sentences
+/// naming what changes for the clips (a size change rescales every placement so the pictures stay
+/// the same; a frame-rate change moves clip edges to the new frame grid and keeps transitions'
+/// frame counts, shortening or removing the ones that no longer fit), whether a confirmation is due
+/// (the size or frame rate changes and the sequence has clips), or why they are refused.
+- (VESequenceSettingsPreview *)previewSequenceSettings:(VESequenceSettings *)settings;
+/// Applies `settings` to the active sequence and the project as one undo step ("Sequence Settings"):
+/// SetSequenceFormat's conform (EditOps.h) and the sharpening; the sequence is configured afterwards
+/// (it no longer adopts its first video clip's settings). Refused like the preview says.
+- (VEEditResult *)applySequenceSettings:(VESequenceSettings *)settings;
+/// "Sharpen scaled-down sources" (default YES): a picture drawn smaller than 3/4 of its size gets an
+/// unsharp mask after its Lanczos pre-scale, in the monitors, the output display and the export.
+@property (nonatomic, readonly) BOOL sharpenScaledDownSources;
+/// Sets it as an undo step.
+- (VEEditResult *)setSharpenScaledDownSources:(BOOL)sharpen;
 
 // MARK: Media
 
@@ -311,6 +338,12 @@ NS_SWIFT_UI_ACTOR
 /// Inserts the asset at `time`, rippling later clips right. The video part goes on
 /// `videoTrackID` and the audio part on `audioTrackID` (linked); pass 0 to skip a part.
 /// `sourceIn`/`sourceOut` select the used range (kCMTimeInvalid: the whole media).
+/// The first video clip placed on a sequence that is not configured (a new project's) sets the
+/// sequence's size (the picture's displayed size, after its rotation) and frame rate (the nearest
+/// standard rate, see Sequence.h standardFrameDurationFor) in the same undo step, and configures it;
+/// clips already on it (stills, sound) are conformed as -applySequenceSettings: does, and `time` is
+/// taken on the new frame grid. Placing a still or only the sound never does. The result's note
+/// names the settings taken.
 - (VEEditResult *)insertAsset:(VEAssetID)assetID
                        atTime:(CMTime)time
                    videoTrack:(VETrackID)videoTrackID

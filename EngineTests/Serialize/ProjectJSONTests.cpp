@@ -342,7 +342,10 @@ TEST_CASE("ProjectJSON: format details") {
     const Fixture fx = richFixture();
     const json j = projectToJson(fx.project);
     CHECK(j.at("schemaVersion") == kProjectSchemaVersion);
-    CHECK(kProjectSchemaVersion == 6);
+    CHECK(kProjectSchemaVersion == 7);
+    // Version 7: the sequence's "configured" and the project's "sharpenScaledDownSources", always written.
+    CHECK(j.at("sharpenScaledDownSources") == true);
+    CHECK(j.at("sequences")[0].at("configured") == true);
     CHECK(j.at("nextId") == fx.project.ids.nextValue());
     const json &clip = j.at("sequences")[0].at("videoTracks")[0].at("clips")[0];
     CHECK(clip.at("timelineStart") == json{{"value", 0}, {"timescale", 30}});
@@ -1049,19 +1052,63 @@ TEST_CASE("ProjectJSON: the checked-in version 5 project loads with every clip f
         }
     }
     CHECK(clips > 5);
-    // The migration changes nothing but the version.
+    // The migrations change nothing but the version and add what version 7 writes (configured
+    // sequences, sharpening on).
     json document = json::parse(text);
     std::vector<std::string> warnings;
     CHECK_FALSE(migrateProjectJson(document, 5, warnings).has_value());
     CHECK(warnings.empty());
     json expectedDocument = json::parse(text);
-    expectedDocument["schemaVersion"] = 6;
+    expectedDocument["schemaVersion"] = 7;
+    expectedDocument["sharpenScaledDownSources"] = true;
+    for (json &sequence : expectedDocument.at("sequences")) {
+        sequence["configured"] = true;
+    }
     CHECK(document == expectedDocument);
 }
 
-TEST_CASE("ProjectJSON: the checked-in version 6 project matches the current writer byte for byte") {
+TEST_CASE("ProjectJSON: the checked-in version 6 project opens configured, with sharpening on") {
     const Fixture expected = richFixtureV6();
-    const std::string path = goldenPath("project-v6.json");
+    const std::string text = readFile(goldenPath("project-v6.json"));
+    REQUIRE(json::parse(text).at("schemaVersion") == 6);
+    CHECK_FALSE(contains(text, "configured"));
+    CHECK_FALSE(contains(text, "sharpenScaledDownSources"));
+    const ProjectLoadResult loaded = parseProject(text);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(loaded.warnings.empty());
+    CHECK(*loaded.project == expected.project);
+    // An existing project's settings are chosen: its sequences never adopt a clip's.
+    REQUIRE(loaded.project->sequences.size() == 2);
+    for (const Sequence &sequence : loaded.project->sequences) {
+        CHECK(sequence.configured);
+    }
+    CHECK(loaded.project->sharpenScaledDownSources);
+    // The 6 -> 7 step adds exactly those two, as true.
+    json document = json::parse(text);
+    std::vector<std::string> warnings;
+    CHECK_FALSE(migrateProjectJson(document, 6, warnings).has_value());
+    CHECK(warnings.empty());
+    json expectedDocument = json::parse(text);
+    expectedDocument["schemaVersion"] = 7;
+    expectedDocument["sharpenScaledDownSources"] = true;
+    for (json &sequence : expectedDocument.at("sequences")) {
+        sequence["configured"] = true;
+    }
+    CHECK(document == expectedDocument);
+}
+
+// The version 6 fixture with what version 7 added set away from its defaults where the golden file
+// can show it: sharpening off (the sequence is configured, as every saved sequence with clips is).
+Fixture richFixtureV7() {
+    Fixture fx = richFixtureV6();
+    fx.project.sharpenScaledDownSources = false;
+    fx.requireValid();
+    return fx;
+}
+
+TEST_CASE("ProjectJSON: the checked-in version 7 project matches the current writer byte for byte") {
+    const Fixture expected = richFixtureV7();
+    const std::string path = goldenPath("project-v7.json");
     const std::string written = serializeProject(expected.project) + "\n";
     // The golden file is checked in and never written by the test: a missing one is a failure
     // (readFile requires it), so a test run cannot bless its own output.
@@ -1073,6 +1120,38 @@ TEST_CASE("ProjectJSON: the checked-in version 6 project matches the current wri
     CHECK(*loaded.project == expected.project);
     CHECK(contains(text, "\"reversed\": true"));
     CHECK(contains(text, "\"transition\": \"wipeLeft\""));
+    CHECK(contains(text, "\"configured\": true"));
+    CHECK(contains(text, "\"sharpenScaledDownSources\": false"));
+}
+
+TEST_CASE("ProjectJSON: the sequence settings' configured flag and the sharpen setting round trip") {
+    Fixture fx = richFixtureV7();
+    for (const bool configured : {false, true}) {
+        for (const bool sharpen : {false, true}) {
+            Project project = fx.project;
+            project.sequences[0].configured = configured;
+            project.sharpenScaledDownSources = sharpen;
+            const ProjectLoadResult loaded = parseProject(serializeProject(project));
+            REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+            CHECK(loaded.warnings.empty());
+            CHECK(*loaded.project == project);
+            CHECK(loaded.project->sequences[0].configured == configured);
+            CHECK(loaded.project->sharpenScaledDownSources == sharpen);
+        }
+    }
+    // Written by hand without them: both read as true (configured: opening never changes a sequence).
+    json j = projectToJson(fx.project);
+    j.erase("sharpenScaledDownSources");
+    j["sequences"][0].erase("configured");
+    const ProjectLoadResult loaded = projectFromJson(j);
+    REQUIRE(loaded.ok());
+    CHECK(loaded.project->sequences[0].configured);
+    CHECK(loaded.project->sharpenScaledDownSources);
+    // A value of the wrong type names its path.
+    j["sequences"][0]["configured"] = "yes";
+    const ProjectLoadResult wrong = projectFromJson(j);
+    CHECK_FALSE(wrong.ok());
+    CHECK(contains(wrong.error, "configured"));
 }
 
 TEST_CASE("ProjectJSON: a reversed clip round trips; an explicit false reads as forward") {
@@ -1139,15 +1218,15 @@ TEST_CASE("ProjectJSON: a version 5 file with version 6 content opens with a war
     }
     REQUIRE(loaded.warnings.size() == 2);
     CHECK(anyContains(loaded.warnings, "\"reversed\" is a version 6 feature in a project of an earlier version: "
-                                       "kept, and the project is saved as version 6"));
+                                       "kept, and the project is saved as version 7"));
     CHECK(anyContains(loaded.warnings, "a Wipe Left transition is a version 6 feature in a project of an earlier "
-                                       "version: kept, and the project is saved as version 6"));
+                                       "version: kept, and the project is saved as version 7"));
     const Sequence &sequence = loaded.project->sequences[0];
     CHECK(sequence.findClip(ClipId{15})->reversed);
     CHECK(sequence.findSpan(SpanId{14})->transition == TransitionKind::WipeLeft);
-    // Saved as version 6, with both.
+    // Saved in the current version, with both.
     const json saved = projectToJson(*loaded.project);
-    CHECK(saved.at("schemaVersion") == 6);
+    CHECK(saved.at("schemaVersion") == kProjectSchemaVersion);
     const ProjectLoadResult again = projectFromJson(saved);
     REQUIRE(again.ok());
     CHECK(again.warnings.empty());

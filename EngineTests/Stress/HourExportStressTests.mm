@@ -404,7 +404,12 @@ struct Measured {
     request.sequenceId = h.sequenceId;
     int bitDepth = 8;
     const CGSize size = [settings outputSizeForSequenceWidth:640 height:360];
-    request.encode = ve::facade::makeEncodeSettings(settings, size, bitDepth);
+    const Sequence *hourSequence = h.project.findSequence(h.sequenceId);
+    XCTAssertTrue(hourSequence != nullptr);
+    if (hourSequence == nullptr) {
+        return;
+    }
+    request.encode = ve::facade::makeEncodeSettings(settings, size, hourSequence->audioSampleRate, bitDepth);
     request.videoBitDepth = bitDepth;
     XCTAssertTrue(request.encode.audio.has_value());
     if (!request.encode.audio) {

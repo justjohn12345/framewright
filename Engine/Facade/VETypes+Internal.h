@@ -56,6 +56,11 @@ VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Tra
                              const ClipIndex *index = nullptr);
 VETransitionInfo *makeTransitionInfo(const TransitionPlacement &transition);
 VESequenceInfo *makeSequenceInfo(const Sequence &sequence);
+/// The preview of new sequence settings: `report` (nil when refused or nothing was conformed) gives
+/// the counts; `changes` the sentences.
+VESequenceSettingsPreview *makeSequenceSettingsPreview(const SequenceConformReport *report, NSString *refusal,
+                                                       BOOL changesSettings, BOOL needsConfirmation,
+                                                       NSArray<NSString *> *changes);
 VEHardwareCaps *makeHardwareCaps();
 VEWaveform *makeWaveform(AssetId asset, const std::shared_ptr<const thumbs::WaveformPeaks> &peaks);
 
@@ -71,6 +76,10 @@ VETransitionLimit *makeTransitionLimit(const TransitionLimit &limit);
 VEPlaybackState playbackStateToVE(playback::PlaybackState state);
 VEPlaybackStatus *makePlaybackStatus(const playback::PlaybackStatus &status);
 VEPlaybackStats *makePlaybackStats(const playback::PlaybackStats &stats, const playback::PresentedFrame &presented);
+
+/// The durations as NSValue CMTimes (AVFoundation's valueWithCMTime:; this file's users include FFmpeg,
+/// whose AVMediaType clashes with AVFoundation's).
+NSArray<NSValue *> *makeFrameDurationValues(const std::vector<CMTime> &durations);
 
 /// "29.97", "25", "23.976" for a frame duration; "" when not positive.
 NSString *fpsString(CMTime frameDuration);

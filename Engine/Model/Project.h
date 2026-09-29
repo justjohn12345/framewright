@@ -22,6 +22,11 @@ struct Project {
     std::vector<Sequence> sequences;
     SequenceId activeSequenceId; // invalid only when there are no sequences
     IdGenerator ids;
+    // "Sharpen scaled-down sources" (the Sequence Settings sheet, shown in the export sheet): a
+    // picture the compositor draws smaller than 3/4 of its size (Lanczos pre-scaled) gets an unsharp
+    // mask after the pre-scale (Compositor.h), in every render of the project: the program monitor,
+    // its solo preview, the output display, the source monitor and the export.
+    bool sharpenScaledDownSources = true;
 
     const MediaAsset *findAsset(AssetId assetId) const;
     MediaAsset *findAsset(AssetId assetId);

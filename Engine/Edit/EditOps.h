@@ -798,6 +798,9 @@ struct TransitionSideLimits {
 // lane-0 tail span other than `existing`, the track is locked or a clip is missing.
 std::optional<TransitionSideLimits> transitionSideLimits(const Project &project, SequenceId sequenceId,
                                                          ClipId owner, SpanId existing, EditResult &why);
+// The same for `sequence` (a working copy that need not be in `project`; its assets are).
+std::optional<TransitionSideLimits> transitionSideLimits(const Project &project, const Sequence &sequence,
+                                                         ClipId owner, SpanId existing, EditResult &why);
 
 // The longest transition a cut can take, and what stops a longer one.
 struct TransitionLimit {
@@ -921,6 +924,92 @@ class SetTrackFlags final : public SequenceCommand {
   private:
     TrackId trackId_;
     TrackFlagsUpdate update_;
+};
+
+// ----- Sequence settings -----
+
+// What SetSequenceFormat did to a sequence's clips, for the Sequence Settings confirmation (its
+// sentences) and tests (its counts).
+struct SequenceConformReport {
+    SequenceFormat before;
+    SequenceFormat after;
+    // A size change: the old frame fitted into the new one (min(W'/W, H'/H)); positions (static and
+    // the Motion spans' X/Y) are multiplied by it and each clip's static scale by it times the ratio
+    // of its picture's fitted sizes in the old and the new frame, so every picture keeps its place
+    // and size within the fitted old frame (the whole new frame when the aspect ratio is the same).
+    double placementScale = 1.0;
+    std::size_t clipsRescaled = 0;
+    // A frame-rate change: clips whose start or end moved to the new frame grid, and the largest
+    // move of an edge.
+    std::size_t clipsRetimed = 0;
+    CMTime largestShift = kCMTimeZero;
+    // Transitions (lane-0 spans) that kept their frame counts on each side of their edge (their
+    // length in seconds follows the frame rate), shortened to fit, or removed because not one frame
+    // of them fits; with a sentence each for those that changed.
+    std::size_t transitionsKept = 0;
+    std::vector<SpanId> transitionsShortened;
+    std::vector<SpanId> transitionsRemoved;
+    // Sentences for the user, in the order: size, frame grid, transitions, effect spans, sample rate.
+    std::vector<std::string> sentences;
+};
+
+// Sets a sequence's settings (SequenceFormat) and conforms its clips so the picture and the edit
+// stay what they were:
+// - Size (sequenceFormatProblem: even sides, 16 to 16384 pixels): positions are sequence pixels, so they scale with the
+//   frame (SequenceConformReport::placementScale), Motion spans' X/Y values with them; a clip's
+//   static scale keeps its picture's size within the fitted old frame. Scale, rotation and opacity
+//   spans are factors and offsets in degrees: unchanged.
+// - Frame rate (1 to 240 fps): each clip's start and end move to the nearest frame
+//   of the new grid (touching clips stay touching), inward where the media ends there; a clip shorter
+//   than a new frame keeps one frame. Its media in point moves with its start. Effect spans stay on
+//   their pictures (source time: their times do not change; a clip that got shorter clips them as a
+//   trim does). Transitions keep their frame counts on each side of their cut or edge; one the clips'
+//   lengths or media no longer allow is shortened to the most that fits, and removed when no frame
+//   fits (the report says which).
+// - The audio sample rate (8 to 192 kHz) is what the sequence is mixed and exported at.
+// The sequence is configured afterwards. One undo step; allowed on locked tracks (the conform keeps
+// their pictures and timing; refusing would leave no way to change the settings). Refused
+// (InvalidArgument) for settings out of range, and when a clip could not be conformed (a clip
+// shorter than a frame with no room or media for one, a media time with no exact form).
+class SetSequenceFormat final : public SequenceCommand {
+  public:
+    SetSequenceFormat(SequenceId sequenceId, SequenceFormat format, std::string name = "Sequence Settings");
+    std::string name() const override {
+        return name_;
+    }
+    // Valid after the first successful apply().
+    const SequenceConformReport &report() const {
+        return report_;
+    }
+
+  protected:
+    EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
+    bool mayEditLockedTracks() const override {
+        return true;
+    }
+
+  private:
+    SequenceFormat format_;
+    std::string name_;
+    SequenceConformReport report_;
+};
+
+// Sets Project::sharpenScaledDownSources. Undo restores the previous value.
+class SetSharpenScaledDownSources final : public Command {
+  public:
+    explicit SetSharpenScaledDownSources(bool sharpen) : sharpen_(sharpen) {}
+    EditResult apply(Project &project) override;
+    void revert(Project &project) override;
+    bool canRevert(const Project &project) const override;
+    bool isNoOp() const override;
+    std::string name() const override {
+        return sharpen_ ? "Sharpen Scaled-Down Sources" : "Don't Sharpen Scaled-Down Sources";
+    }
+
+  private:
+    bool sharpen_;
+    bool before_ = true;
+    bool applied_ = false;
 };
 
 } // namespace ve

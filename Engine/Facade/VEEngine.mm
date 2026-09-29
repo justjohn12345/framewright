@@ -720,7 +720,9 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 - (void)resetToEmptyProjectNamed:(NSString *)name {
     Project project;
     project.name = toStd(name);
-    project.addSequence("Sequence 1", CMTimeMake(1, 30), 1920, 1080, 2, 2);
+    const SequenceId sequenceId = project.addSequence("Sequence 1", CMTimeMake(1, 30), 1920, 1080, 2, 2);
+    // Not configured: the first video clip placed on it sets its size and frame rate (Sequence.h).
+    project.findSequence(sequenceId)->configured = false;
     [self installProject:std::move(project) url:nil];
 }
 
@@ -1013,6 +1015,105 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 - (VESequenceInfo *)sequence {
     VE_ASSERT_MAIN();
     return makeSequenceInfo([self activeSequence]);
+}
+
+// MARK: - Sequence settings
+
++ (NSArray<NSValue *> *)standardSequenceFrameDurations {
+    return makeFrameDurationValues(standardFrameDurations());
+}
+
++ (NSString *)nameForFrameDuration:(CMTime)frameDuration {
+    return toNS(frameRateName(frameDuration));
+}
+
+- (VESequenceSettings *)sequenceSettings {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    return [[VESequenceSettings alloc] initWithWidth:sequence.width
+                                              height:sequence.height
+                                       frameDuration:sequence.frameDuration
+                                     audioSampleRate:sequence.audioSampleRate
+                            sharpenScaledDownSources:_project.sharpenScaledDownSources];
+}
+
+/// The model settings `settings` ask for (configured). Values that do not fit the model's integers
+/// are left out of range, so sequenceFormatProblem refuses them.
+static SequenceFormat sequenceFormatFrom(VESequenceSettings *settings) {
+    auto side = [](NSInteger value) {
+        return static_cast<int32_t>(std::clamp<NSInteger>(value, 0, INT32_MAX));
+    };
+    SequenceFormat format;
+    format.width = side(settings.width);
+    format.height = side(settings.height);
+    format.frameDuration = settings.frameDuration;
+    format.audioSampleRate = side(settings.audioSampleRate);
+    format.configured = true;
+    return format;
+}
+
+- (VESequenceSettingsPreview *)previewSequenceSettings:(VESequenceSettings *)settings {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    const SequenceFormat format = sequenceFormatFrom(settings);
+    const SequenceFormat current = sequence.format();
+    const bool sizeOrRate = format.width != current.width || format.height != current.height ||
+                            !(format.frameDuration == current.frameDuration);
+    const bool sharpenChanges = bool(settings.sharpenScaledDownSources) != _project.sharpenScaledDownSources;
+    const bool changes = !(format == current) || sharpenChanges;
+    if (auto problem = sequenceFormatProblem(format)) {
+        return makeSequenceSettingsPreview(nullptr, toNS(*problem), changes, NO, @[]);
+    }
+    // A dry run of the command on a copy of the project.
+    Project scratch = _project;
+    SetSequenceFormat command(sequence.id, format);
+    const EditResult result = command.apply(scratch);
+    if (!result) {
+        return makeSequenceSettingsPreview(nullptr, toNS(result.message), changes, NO, @[]);
+    }
+    NSMutableArray<NSString *> *sentences = [NSMutableArray array];
+    for (const std::string &sentence : command.report().sentences) {
+        [sentences addObject:toNS(sentence)];
+    }
+    if (!result.droppedTransitionIds.empty()) {
+        const size_t n = result.droppedTransitionIds.size();
+        [sentences addObject:[NSString stringWithFormat:@"%zu more transition%@ %@ removed: %@ no longer valid at "
+                                                        @"these settings.",
+                                                        n, n == 1 ? @"" : @"s", n == 1 ? @"is" : @"are",
+                                                        n == 1 ? @"it is" : @"they are"]];
+    }
+    if (!current.configured) {
+        [sentences addObject:@"The sequence keeps these settings: the first video clip placed on it will not change "
+                             @"them."];
+    }
+    if (sharpenChanges) {
+        [sentences addObject:settings.sharpenScaledDownSources ? @"Scaled-down sources are sharpened."
+                                                               : @"Scaled-down sources are no longer sharpened."];
+    }
+    return makeSequenceSettingsPreview(&command.report(), nil, changes, sizeOrRate && !sequence.isEmpty(), sentences);
+}
+
+- (VEEditResult *)applySequenceSettings:(VESequenceSettings *)settings {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    const SequenceFormat format = sequenceFormatFrom(settings);
+    if (auto problem = sequenceFormatProblem(format)) {
+        return [VEEditResult failureWithMessage:toNS(*problem)];
+    }
+    std::vector<std::unique_ptr<Command>> children;
+    children.push_back(std::make_unique<SetSequenceFormat>(sequence.id, format));
+    children.push_back(std::make_unique<SetSharpenScaledDownSources>(settings.sharpenScaledDownSources));
+    return [self push:std::make_unique<CompositeCommand>("Sequence Settings", std::move(children)) created:nil];
+}
+
+- (BOOL)sharpenScaledDownSources {
+    VE_ASSERT_MAIN();
+    return _project.sharpenScaledDownSources;
+}
+
+- (VEEditResult *)setSharpenScaledDownSources:(BOOL)sharpen {
+    VE_ASSERT_MAIN();
+    return [self push:std::make_unique<SetSharpenScaledDownSources>(sharpen) created:nil];
 }
 
 - (nullable VEClipInfo *)clipInfo:(VEClipID)clipID {
@@ -1614,24 +1715,46 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
                                           @"ends there.",
                                           toNS(asset->name), CMTimeGetSeconds(videoEnd)];
     }
+    // The first video clip on a sequence that is not configured sets its settings, in the same undo
+    // step (a composite: the settings first, so the placement lands on the new frame grid).
+    const Sequence &sequence = [self activeSequence];
+    std::optional<SequenceFormat> adopted;
+    if (!sequence.configured && videoTrackID != 0) {
+        adopted = formatAdoptedFrom(*asset, sequence.format());
+    }
+    if (adopted) {
+        NSString *taken = [NSString stringWithFormat:@"The sequence takes “%@”'s settings: %d×%d at %@ fps.",
+                                                     toNS(asset->name), adopted->width, adopted->height,
+                                                     toNS(frameRateName(adopted->frameDuration))];
+        note = note.length > 0 ? [NSString stringWithFormat:@"%@ %@", taken, note] : taken;
+    }
+    const SequenceId sequenceId = [self sequenceId];
+    auto withAdoption = [adopted, sequenceId](std::unique_ptr<Command> placement, const char *name) {
+        if (!adopted) {
+            return placement;
+        }
+        std::vector<std::unique_ptr<Command>> children;
+        children.push_back(std::make_unique<SetSequenceFormat>(sequenceId, *adopted, name));
+        children.push_back(std::move(placement));
+        return std::unique_ptr<Command>(std::make_unique<CompositeCommand>(name, std::move(children)));
+    };
     if (overwrite) {
-        auto command = std::make_unique<OverwriteClip>([self sequenceId], time, std::move(placements), link);
+        auto command = std::make_unique<OverwriteClip>(sequenceId, time, std::move(placements), link);
         OverwriteClip *raw = command.get();
-        return [self push:std::move(command)
+        return [self push:withAdoption(std::move(command), "Overwrite")
                   created:^NSArray<NSNumber *> * {
                       return toNumbers(raw->createdClipIds());
                   }
                      note:note];
     }
     __block InsertClip *raw = nullptr;
-    const SequenceId sequenceId = [self sequenceId];
     return [self pushRipple:^std::unique_ptr<Command>(RippleScope scope) {
         InsertOptions options;
         options.linkPair = link;
         options.ripple = scope;
         auto command = std::make_unique<InsertClip>(sequenceId, time, placements, options);
         raw = command.get();
-        return command;
+        return withAdoption(std::move(command), "Insert");
     }
                       scope:_rippleScope
                     created:^NSArray<NSNumber *> * {
@@ -3756,7 +3879,7 @@ static bool isRunning(playback::PlaybackState state) {
     }
     const CGSize size = [settings outputSizeForSequenceWidth:sequence.width height:sequence.height];
     return estimatedExportBytes(settings, size, 1.0 / CMTimeGetSeconds(sequence.frameDuration),
-                                CMTimeGetSeconds(duration));
+                                CMTimeGetSeconds(duration), sequence.audioSampleRate);
 }
 
 - (nullable VEExportHandle *)activeExport {
@@ -3807,7 +3930,7 @@ static bool isRunning(playback::PlaybackState state) {
     exporting::ExportRequest request;
     request.project = std::make_shared<const Project>(_project);
     request.sequenceId = _project.activeSequenceId;
-    request.encode = makeEncodeSettings(settings, size, request.videoBitDepth);
+    request.encode = makeEncodeSettings(settings, size, sequence.audioSampleRate, request.videoBitDepth);
     request.outputPath = outputURL.path.fileSystemRepresentation ?: "";
     exporting::ExportServices services;
     services.router = _router;

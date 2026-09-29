@@ -73,9 +73,7 @@ typedef NS_ENUM(NSInteger, VEExportAudioCodec) {
 @property (nonatomic, readonly) VEExportAudioCodec audioCodec;
 /// Bits per second (AAC).
 @property (nonatomic, readonly) NSInteger audioBitRate;
-/// 48000.
-@property (nonatomic, readonly) NSInteger audioSampleRate;
-/// 2.
+/// 2. (The sample rate is the sequence's, VESequenceInfo.audioSampleRate.)
 @property (nonatomic, readonly) NSInteger audioChannels;
 
 - (instancetype)initWithPreset:(VEExportPreset)preset

@@ -64,7 +64,8 @@ final class ProjectStoreTests: XCTestCase {
         store.sourceTime = CMTime(value: 45, timescale: 30)
         store.markSourceOut()
         store.placeSource(overwrite: false)
-        XCTAssertNil(store.statusMessage)
+        // The first movie sets the new project's sequence, and the status line says so.
+        XCTAssertEqual(store.statusMessage, "The sequence takes “clip.mov”'s settings: 320×180 at 30 fps.")
         XCTAssertEqual(store.clips.count, 1)
         let clip = try XCTUnwrap(store.clips.values.first)
         XCTAssertEqual(clip.trackID, store.targetVideoTrackID)

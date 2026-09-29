@@ -140,6 +140,7 @@ json sequenceToJson(const Sequence &sequence) {
     }
     return json{{"id", idToJson(sequence.id)},
                 {"name", sequence.name},
+                {"configured", sequence.configured},
                 {"frameDuration", timeToJson(sequence.frameDuration)},
                 {"width", sequence.width},
                 {"height", sequence.height},
@@ -570,6 +571,8 @@ Sequence parseSequence(const Node &node, Warnings &warnings) {
     sequence.width = node.field("width").asInt32();
     sequence.height = node.field("height").asInt32();
     sequence.audioSampleRate = node.int32Or("audioSampleRate", 48000);
+    // Absent (a hand-written file): configured, so opening it never changes its settings.
+    sequence.configured = node.boolOr("configured", true);
     for (const char *key : {"videoTracks", "audioTracks"}) {
         if (!node.has(key)) {
             continue;
@@ -1163,7 +1166,7 @@ void migrateV4ToV5(json &document, Warnings &warnings) {
 // Version 6 added clips' "reversed" flag (absent means forward) and the wipe and iris transition
 // kinds: a version 5 file has neither, so only the version number changes. One that has them anyway
 // (written by hand, or by a build between the two) keeps them, with a warning naming each (review
-// L8); the project is then saved as version 6, as every project is.
+// L8); the project is then saved in the current version, as every project is.
 void migrateV5ToV6(json &document, Warnings &warnings) {
     Node(document, "").requireObject();
     const auto sequences = document.find("sequences");
@@ -1171,7 +1174,8 @@ void migrateV5ToV6(json &document, Warnings &warnings) {
         return; // the parser reports what is missing
     }
     const std::string feature = " is a version 6 feature in a project of an earlier version: kept, and the "
-                                "project is saved as version 6";
+                                "project is saved as version " +
+                                std::to_string(kProjectSchemaVersion);
     for (std::size_t s = 0; s < sequences->size(); ++s) {
         const json &sequence = (*sequences)[s];
         if (!sequence.is_object()) {
@@ -1223,6 +1227,25 @@ void migrateV5ToV6(json &document, Warnings &warnings) {
     }
 }
 
+// Version 7 added the sequence settings' "configured" flag (a new project's sequence takes its first
+// video clip's size and frame rate until it is configured) and the project's
+// "sharpenScaledDownSources". A version 6 project was made before either existed: its sequences
+// keep the settings they have (configured) and scaled-down sources are sharpened (the default). The
+// step writes both explicitly; nothing else changes.
+void migrateV6ToV7(json &document, Warnings &) {
+    Node(document, "").requireObject();
+    document["sharpenScaledDownSources"] = true;
+    const auto sequences = document.find("sequences");
+    if (sequences == document.end() || !sequences->is_array()) {
+        return; // the parser reports what is missing
+    }
+    for (json &sequence : *sequences) {
+        if (sequence.is_object()) {
+            sequence["configured"] = true;
+        }
+    }
+}
+
 struct MigrationStep {
     int fromVersion;
     void (*apply)(json &document, Warnings &warnings);
@@ -1235,6 +1258,7 @@ constexpr MigrationStep kMigrations[] = {
     {3, migrateV3ToV4},
     {4, migrateV4ToV5},
     {5, migrateV5ToV6},
+    {6, migrateV6ToV7},
 };
 static_assert(sizeof(kMigrations) / sizeof(kMigrations[0]) == kProjectSchemaVersion - 1,
               "every schema version below the current one needs a migration step");
@@ -1268,6 +1292,7 @@ Project parseProjectNode(const Node &root, Warnings &warnings) {
         project.activeSequenceId = root.field("activeSequenceId").asId<SequenceId>();
     }
     project.ids = IdGenerator(root.field("nextId").asUInt64());
+    project.sharpenScaledDownSources = root.boolOr("sharpenScaledDownSources", true);
     return project;
 }
 
@@ -1320,7 +1345,8 @@ json projectToJson(const Project &project) {
                 {"nextId", idToJson(project.ids.nextValue())},
                 {"activeSequenceId", idToJson(project.activeSequenceId)},
                 {"assets", std::move(assets)},
-                {"sequences", std::move(sequences)}};
+                {"sequences", std::move(sequences)},
+                {"sharpenScaledDownSources", project.sharpenScaledDownSources}};
 }
 
 std::string serializeProject(const Project &project, int indent) {

@@ -6,7 +6,8 @@ namespace ve {
 
 bool operator==(const Project &a, const Project &b) {
     return a.name == b.name && a.assets == b.assets && a.sequences == b.sequences &&
-           a.activeSequenceId == b.activeSequenceId && a.ids == b.ids;
+           a.activeSequenceId == b.activeSequenceId && a.ids == b.ids &&
+           a.sharpenScaledDownSources == b.sharpenScaledDownSources;
 }
 
 const MediaAsset *Project::findAsset(AssetId assetId) const {

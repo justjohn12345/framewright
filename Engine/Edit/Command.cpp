@@ -55,6 +55,10 @@ SequencePatch diffSequences(const Sequence &before, const Sequence &after, const
     patch.videoOrderAfter = trackOrder(after.videoTracks);
     patch.audioOrderBefore = trackOrder(before.audioTracks);
     patch.audioOrderAfter = trackOrder(after.audioTracks);
+    if (!(before.format() == after.format())) {
+        patch.formatBefore = before.format();
+        patch.formatAfter = after.format();
+    }
     patch.trackOrderChanged =
         patch.videoOrderBefore != patch.videoOrderAfter || patch.audioOrderBefore != patch.audioOrderAfter;
     if (!patch.trackOrderChanged) {
@@ -85,6 +89,9 @@ bool patchApplies(const Sequence &sequence, const IdGenerator &ids, const Sequen
             trackOrder(sequence.audioTracks) != (forward ? patch.audioOrderBefore : patch.audioOrderAfter)) {
             return false;
         }
+    }
+    if (patch.formatBefore && !(sequence.format() == *(forward ? patch.formatBefore : patch.formatAfter))) {
+        return false;
     }
     return true;
 }
@@ -132,6 +139,9 @@ bool applyPatch(Sequence &sequence, IdGenerator &ids, const SequencePatch &patch
         }
     }
 
+    if (patch.formatBefore) {
+        sequence.setFormat(*(forward ? patch.formatAfter : patch.formatBefore));
+    }
     ids = forward ? patch.idsAfter : patch.idsBefore;
     return true;
 }
@@ -167,6 +177,14 @@ SequencePatch composePatches(const SequencePatch &first, const SequencePatch &se
         }
     }
 
+    if (first.formatBefore || second.formatBefore) {
+        const SequencePatch &from = first.formatBefore ? first : second;
+        const SequencePatch &to = second.formatBefore ? second : first;
+        if (!(*from.formatBefore == *to.formatAfter)) { // settings changed and changed back are not in the patch
+            result.formatBefore = from.formatBefore;
+            result.formatAfter = to.formatAfter;
+        }
+    }
     if (first.trackOrderChanged || second.trackOrderChanged) {
         result.trackOrderChanged = true;
         const SequencePatch &from = first.trackOrderChanged ? first : second;

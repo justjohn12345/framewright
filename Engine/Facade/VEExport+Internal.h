@@ -14,13 +14,17 @@ namespace ve::facade {
 
 /// Encoder settings for `settings` at the output size `size` (see VEExportSettings); the bit
 /// depth the job renders at goes to `bitDepth`.
-media::EncodeSettings makeEncodeSettings(VEExportSettings *settings, CGSize size, int &bitDepth);
+/// The encoder settings for `settings` at `size`, the audio at the sequence's `audioSampleRate`.
+media::EncodeSettings makeEncodeSettings(VEExportSettings *settings, CGSize size, NSInteger audioSampleRate,
+                                         int &bitDepth);
 
 /// Availability of every preset at `width` x `height` (probes VideoToolbox; cached per size).
 NSArray<VEExportFormat *> *makeExportFormats(NSInteger width, NSInteger height);
 
-/// Approximate output size in bytes for `settings` at `size`, `frameRate` and `seconds`.
-int64_t estimatedExportBytes(VEExportSettings *settings, CGSize size, double frameRate, double seconds);
+/// Approximate output size in bytes for `settings` at `size`, `frameRate` and `seconds` (PCM audio at
+/// `audioSampleRate`).
+int64_t estimatedExportBytes(VEExportSettings *settings, CGSize size, double frameRate, double seconds,
+                             NSInteger audioSampleRate);
 
 VEExportProgress *makeExportProgress(const exporting::ExportProgress &progress);
 VEExportSummary *makeExportSummary(const exporting::ExportSummary &summary);

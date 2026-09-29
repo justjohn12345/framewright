@@ -152,6 +152,8 @@ final class ProjectStore: ObservableObject {
     @Published var speedSheetClipIDs: [VEClipID]?
     /// The Export sheet's model while the sheet is open (File > Export…).
     @Published var exportModel: ExportModel?
+    /// The Sequence Settings sheet's model while it is open.
+    @Published var sequenceSettingsModel: SequenceSettingsModel?
     /// An export is running (the engine's `isExporting`, republished).
     @Published private(set) var isExporting = false
     /// The Ken Burns editor drawn on the program monitor while a Motion span is selected (nil
@@ -1108,8 +1110,15 @@ final class ProjectStore: ObservableObject {
         let previous = adjacentClip(to: clip.clipID, at: .start)
         let next = adjacentClip(to: clip.clipID, at: .end)
         if let kenBurns, kenBurns.spanID == id {
-            kenBurns.update(span: span, clip: clip, previous: previous, next: next)
-            return
+            if kenBurns.sequenceSize == CGSize(width: sequence.width, height: sequence.height),
+               CMTimeCompare(kenBurns.frameDuration, sequence.frameDuration) == 0 {
+                kenBurns.update(span: span, clip: clip, previous: previous, next: next)
+                return
+            }
+            // Sequence Settings changed the frame size or rate under the open editor: it opens afresh
+            // (in the mode chosen for the span), its boxes in the new sequence pixels.
+            kenBurns.cancelDrag()
+            self.kenBurns = nil
         }
         kenBurns?.cancelDrag()
         // It could not open for this span: said once, not retried on every model change.
@@ -1264,6 +1273,17 @@ final class ProjectStore: ObservableObject {
         }
         if exportModel == nil {
             exportModel = ExportModel(store: self)
+        }
+    }
+
+    /// Sequence > Sequence Settings…: opens the sheet (not during a gesture).
+    func showSequenceSettings() {
+        guard !isGestureActive else {
+            statusMessage = "Finish the current drag first."
+            return
+        }
+        if sequenceSettingsModel == nil {
+            sequenceSettingsModel = SequenceSettingsModel(store: self)
         }
     }
 

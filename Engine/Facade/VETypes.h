@@ -381,7 +381,12 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 @property (nonatomic, readonly) CMTime frameDuration;
 @property (nonatomic, readonly) NSInteger width;
 @property (nonatomic, readonly) NSInteger height;
+/// The rate the sequence is mixed and exported at (Hz).
 @property (nonatomic, readonly) NSInteger audioSampleRate;
+/// Whether the settings were chosen: NO only for a new project's sequence until its first video clip
+/// is placed (which sets its size and frame rate, see VEEngine insertAsset:...) or the Sequence
+/// Settings are applied (-applySequenceSettings:).
+@property (nonatomic, readonly, getter=isConfigured) BOOL configured;
 /// End of the last clip.
 @property (nonatomic, readonly) CMTime duration;
 /// Video track ids, bottom to top.
@@ -391,6 +396,46 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 /// The cross dissolves / crossfades (transitions across a cut), in track order then time order.
 /// Fades are spans of their clips (VEClipInfo.spans; for audio also VEAudioParams).
 @property (nonatomic, readonly, copy) NSArray<VETransitionInfo *> *transitions;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+/// The active sequence's settings as the Sequence Settings sheet edits them (an immutable value).
+@interface VESequenceSettings : NSObject <NSCopying>
+/// Even, 16...16384 pixels.
+@property (nonatomic, readonly) NSInteger width;
+@property (nonatomic, readonly) NSInteger height;
+/// One of VEEngine.standardSequenceFrameDurations (the engine accepts any rate from 1 to 240 fps).
+@property (nonatomic, readonly) CMTime frameDuration;
+/// Hz, 8000...192000 (the sheet offers 44100 and 48000).
+@property (nonatomic, readonly) NSInteger audioSampleRate;
+/// The project's "Sharpen scaled-down sources" (VEEngine.sharpenScaledDownSources).
+@property (nonatomic, readonly) BOOL sharpenScaledDownSources;
+- (instancetype)initWithWidth:(NSInteger)width
+                       height:(NSInteger)height
+                frameDuration:(CMTime)frameDuration
+              audioSampleRate:(NSInteger)audioSampleRate
+     sharpenScaledDownSources:(BOOL)sharpenScaledDownSources NS_DESIGNATED_INITIALIZER;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+/// What applying VESequenceSettings would do (-[VEEngine previewSequenceSettings:]).
+@interface VESequenceSettingsPreview : NSObject
+/// Why the settings cannot be applied (a value out of range, a clip that cannot be conformed), or nil.
+@property (nonatomic, readonly, copy, nullable) NSString *refusal;
+/// Any setting differs from the current one.
+@property (nonatomic, readonly) BOOL changesSettings;
+/// The size, frame rate or sample rate differ and the sequence has clips: the sheet confirms first.
+@property (nonatomic, readonly) BOOL needsConfirmation;
+/// Sentences naming what changes, in order: the frame size and what it does to placements, the frame
+/// grid and the clips' edges, transitions kept, shortened or removed, effect spans, the sample rate,
+/// the sharpening. Empty when nothing changes.
+@property (nonatomic, readonly, copy) NSArray<NSString *> *changes;
+/// Clips whose placement is rescaled (a size change), clips whose start or end moves (a frame-rate
+/// change), transitions shortened or removed to fit.
+@property (nonatomic, readonly) NSInteger clipsRescaled;
+@property (nonatomic, readonly) NSInteger clipsRetimed;
+@property (nonatomic, readonly) NSInteger transitionsShortened;
+@property (nonatomic, readonly) NSInteger transitionsRemoved;
 - (instancetype)init NS_UNAVAILABLE;
 @end
 

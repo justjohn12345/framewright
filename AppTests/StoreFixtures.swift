@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 import FramewrightEngine
 import XCTest
@@ -19,6 +20,17 @@ final class StoreFixture {
         try TestMediaFactory.writeMovie(to: movieURL, frames: 60)
         try TestMediaFactory.writeWAV(to: toneURL, seconds: 3)
         store = ProjectStore(engine: VEEngine(cacheDirectory: directory.appendingPathComponent("Caches")))
+    }
+
+    /// Sets the sequence to `width` x `height` at 30 fps (48 kHz), configured, so the first movie placed
+    /// keeps it: for tests that measure in a sequence of a known size rather than the one the fixture
+    /// movie (320x180) would give a new project's sequence.
+    func configureSequence(width: Int = 1920, height: Int = 1080) throws {
+        let result = store.engine.applySequenceSettings(VESequenceSettings(
+            width: width, height: height, frameDuration: CMTime(value: 1, timescale: 30), audioSampleRate: 48000,
+            sharpenScaledDownSources: store.engine.sharpenScaledDownSources))
+        XCTAssertTrue(result.ok, result.message)
+        XCTAssertTrue(store.engine.sequence.isConfigured)
     }
 
     func cleanUp() {

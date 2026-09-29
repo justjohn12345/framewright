@@ -959,6 +959,14 @@ static std::pair<std::string, bool> defaultOutputDevice() {
         return;
     }
     VEEngine *engine = [self makeEngine];
+    // A 30 fps sequence (the frame numbers below are 30 fps frames): configured before the first clip,
+    // which would otherwise set it to the VFR source's 60 fps.
+    VEEditResult *configured = [engine applySequenceSettings:[[VESequenceSettings alloc] initWithWidth:1920
+                                                                                                height:1080
+                                                                                         frameDuration:CMTimeMake(1, 30)
+                                                                                       audioSampleRate:48000
+                                                                              sharpenScaledDownSources:YES]];
+    XCTAssertTrue(configured.ok, @"%@", configured.message);
     VEAssetInfo *first = [self importOne:"vfr_h264.mp4" into:engine];
     XCTestExpectation *done = [self expectationWithDescription:@"import mkv"];
     __block VEAssetInfo *second = nil;

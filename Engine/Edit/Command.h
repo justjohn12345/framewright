@@ -87,9 +87,12 @@ struct SequencePatch {
     std::vector<TrackId> videoOrderBefore, videoOrderAfter;
     std::vector<TrackId> audioOrderBefore, audioOrderAfter;
     IdGenerator idsBefore, idsAfter;
+    // The sequence's settings (frame grid, size, sample rate, configured), when the edit changed them
+    // (SetSequenceFormat, and a placement that configured the sequence from its first video clip).
+    std::optional<SequenceFormat> formatBefore, formatAfter;
 
     bool isEmpty() const {
-        return tracks.empty() && !trackOrderChanged && idsBefore == idsAfter;
+        return tracks.empty() && !trackOrderChanged && idsBefore == idsAfter && !formatBefore;
     }
 };
 

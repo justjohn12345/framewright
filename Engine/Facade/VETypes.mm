@@ -1,5 +1,7 @@
 #import "VETypes+Internal.h"
 
+#import <AVFoundation/AVFoundation.h>
+
 #include "../Media/HardwareCaps.h"
 #include "../Media/MediaTypes.h"
 
@@ -132,6 +134,18 @@ VESpanValues VESpanValuesUnchanged(void) {
 - (instancetype)initInternal;
 @end
 
+@interface VESequenceSettingsPreview ()
+@property (nonatomic, readwrite, copy, nullable) NSString *refusal;
+@property (nonatomic, readwrite) BOOL changesSettings;
+@property (nonatomic, readwrite) BOOL needsConfirmation;
+@property (nonatomic, readwrite, copy) NSArray<NSString *> *changes;
+@property (nonatomic, readwrite) NSInteger clipsRescaled;
+@property (nonatomic, readwrite) NSInteger clipsRetimed;
+@property (nonatomic, readwrite) NSInteger transitionsShortened;
+@property (nonatomic, readwrite) NSInteger transitionsRemoved;
+- (instancetype)initInternal;
+@end
+
 @interface VESequenceInfo ()
 @property (nonatomic, readwrite) VESequenceID sequenceID;
 @property (nonatomic, readwrite, copy) NSString *name;
@@ -139,6 +153,7 @@ VESpanValues VESpanValuesUnchanged(void) {
 @property (nonatomic, readwrite) NSInteger width;
 @property (nonatomic, readwrite) NSInteger height;
 @property (nonatomic, readwrite) NSInteger audioSampleRate;
+@property (nonatomic, readwrite, getter=isConfigured) BOOL configured;
 @property (nonatomic, readwrite) CMTime duration;
 @property (nonatomic, readwrite, copy) NSArray<NSNumber *> *videoTrackIDs;
 @property (nonatomic, readwrite, copy) NSArray<NSNumber *> *audioTrackIDs;
@@ -375,6 +390,57 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
 @implementation VETransitionInfo
 - (instancetype)initInternal {
     return [super init];
+}
+@end
+
+@implementation VESequenceSettings
+- (instancetype)initWithWidth:(NSInteger)width
+                       height:(NSInteger)height
+                frameDuration:(CMTime)frameDuration
+              audioSampleRate:(NSInteger)audioSampleRate
+     sharpenScaledDownSources:(BOOL)sharpenScaledDownSources {
+    if ((self = [super init])) {
+        _width = width;
+        _height = height;
+        _frameDuration = frameDuration;
+        _audioSampleRate = audioSampleRate;
+        _sharpenScaledDownSources = sharpenScaledDownSources;
+    }
+    return self;
+}
+
+- (id)copyWithZone:(nullable NSZone *)zone {
+    (void)zone;
+    return self; // immutable
+}
+
+- (BOOL)isEqual:(id)object {
+    if (![object isKindOfClass:[VESequenceSettings class]]) {
+        return NO;
+    }
+    VESequenceSettings *o = object;
+    return o.width == _width && o.height == _height && CMTimeCompare(o.frameDuration, _frameDuration) == 0 &&
+           o.audioSampleRate == _audioSampleRate && o.sharpenScaledDownSources == _sharpenScaledDownSources;
+}
+
+- (NSUInteger)hash {
+    return NSUInteger(_width) * 31 + NSUInteger(_height) * 7 + NSUInteger(_audioSampleRate) +
+           (_sharpenScaledDownSources ? 1u : 0u);
+}
+
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<VESequenceSettings %ldx%ld %@ fps %ld Hz sharpen=%d>", long(_width),
+                                      long(_height), ve::facade::fpsString(_frameDuration), long(_audioSampleRate),
+                                      int(_sharpenScaledDownSources)];
+}
+@end
+
+@implementation VESequenceSettingsPreview
+- (instancetype)initInternal {
+    if ((self = [super init])) {
+        _changes = @[];
+    }
+    return self;
 }
 @end
 
@@ -916,6 +982,31 @@ VETransitionInfo *makeTransitionInfo(const TransitionPlacement &transition) {
     return info;
 }
 
+NSArray<NSValue *> *makeFrameDurationValues(const std::vector<CMTime> &durations) {
+    NSMutableArray<NSValue *> *values = [NSMutableArray arrayWithCapacity:durations.size()];
+    for (const CMTime duration : durations) {
+        [values addObject:[NSValue valueWithCMTime:duration]];
+    }
+    return values;
+}
+
+VESequenceSettingsPreview *makeSequenceSettingsPreview(const SequenceConformReport *report, NSString *refusal,
+                                                       BOOL changesSettings, BOOL needsConfirmation,
+                                                       NSArray<NSString *> *changes) {
+    VESequenceSettingsPreview *preview = [[VESequenceSettingsPreview alloc] initInternal];
+    preview.refusal = refusal;
+    preview.changesSettings = changesSettings;
+    preview.needsConfirmation = needsConfirmation;
+    preview.changes = changes;
+    if (report != nullptr) {
+        preview.clipsRescaled = NSInteger(report->clipsRescaled);
+        preview.clipsRetimed = NSInteger(report->clipsRetimed);
+        preview.transitionsShortened = NSInteger(report->transitionsShortened.size());
+        preview.transitionsRemoved = NSInteger(report->transitionsRemoved.size());
+    }
+    return preview;
+}
+
 VESequenceInfo *makeSequenceInfo(const Sequence &sequence) {
     VESequenceInfo *info = [[VESequenceInfo alloc] initInternal];
     info.sequenceID = static_cast<VESequenceID>(sequence.id.value());
@@ -924,6 +1015,7 @@ VESequenceInfo *makeSequenceInfo(const Sequence &sequence) {
     info.width = sequence.width;
     info.height = sequence.height;
     info.audioSampleRate = sequence.audioSampleRate;
+    info.configured = sequence.configured;
     info.duration = sequence.duration();
     NSMutableArray<NSNumber *> *video = [NSMutableArray array];
     for (const Track &t : sequence.videoTracks) {

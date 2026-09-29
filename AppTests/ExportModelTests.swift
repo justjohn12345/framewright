@@ -222,7 +222,7 @@ final class ExportModelTests: XCTestCase {
         }
         XCTAssertEqual(outputURL.standardizedFileURL.path, url.standardizedFileURL.path)
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
-        XCTAssertTrue(message.contains("1920×1080"), message) // the sequence size (the clip is fitted into it)
+        XCTAssertTrue(message.contains("320×180"), message) // the sequence size, which the first movie set
         XCTAssertTrue(store.statusMessage?.hasPrefix("Exported export.mp4") ?? false, store.statusMessage ?? "")
         model.reveal()
         XCTAssertEqual(revealed, outputURL)

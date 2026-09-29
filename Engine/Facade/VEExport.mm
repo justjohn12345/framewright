@@ -128,7 +128,6 @@ double bitsPerPixel(VEExportPreset preset, double quality) {
         _videoBitRate = videoBitRate;
         _audioCodec = audioCodec;
         _audioBitRate = audioBitRate;
-        _audioSampleRate = 48000;
         _audioChannels = 2;
     }
     return self;
@@ -447,7 +446,8 @@ double bitsPerPixel(VEExportPreset preset, double quality) {
 
 namespace ve::facade {
 
-media::EncodeSettings makeEncodeSettings(VEExportSettings *settings, CGSize size, int &bitDepth) {
+media::EncodeSettings makeEncodeSettings(VEExportSettings *settings, CGSize size, NSInteger audioSampleRate,
+                                         int &bitDepth) {
     media::EncodeSettings encode;
     encode.container = containerOf(settings.container);
     media::VideoEncodeSettings video;
@@ -467,7 +467,7 @@ media::EncodeSettings makeEncodeSettings(VEExportSettings *settings, CGSize size
     if (settings.audioCodec != VEExportAudioCodecNone) {
         media::AudioEncodeSettings audio;
         audio.codec = settings.audioCodec == VEExportAudioCodecPCM ? media::AudioCodec::LinearPCM : media::AudioCodec::AAC;
-        audio.sampleRate = double(settings.audioSampleRate);
+        audio.sampleRate = double(audioSampleRate);
         audio.channels = int(settings.audioChannels);
         audio.bitRate = int(settings.audioBitRate);
         audio.pcmBitDepth = 16;
@@ -511,7 +511,8 @@ NSArray<VEExportFormat *> *makeExportFormats(NSInteger width, NSInteger height) 
     return formats;
 }
 
-int64_t estimatedExportBytes(VEExportSettings *settings, CGSize size, double frameRate, double seconds) {
+int64_t estimatedExportBytes(VEExportSettings *settings, CGSize size, double frameRate, double seconds,
+                             NSInteger audioSampleRate) {
     if (seconds <= 0 || size.width <= 0 || size.height <= 0 || frameRate <= 0) {
         return 0;
     }
@@ -525,7 +526,7 @@ int64_t estimatedExportBytes(VEExportSettings *settings, CGSize size, double fra
     if (settings.audioCodec == VEExportAudioCodecAAC) {
         audioBits = double(settings.audioBitRate);
     } else if (settings.audioCodec == VEExportAudioCodecPCM) {
-        audioBits = double(settings.audioSampleRate) * double(settings.audioChannels) * 16.0;
+        audioBits = double(audioSampleRate) * double(settings.audioChannels) * 16.0;
     }
     // About 1 % container overhead plus the header.
     return static_cast<int64_t>((videoBits + audioBits) * seconds / 8.0 * 1.01) + 32 * 1024;

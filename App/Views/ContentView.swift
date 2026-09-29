@@ -69,6 +69,12 @@ struct ContentView: View {
                 SpeedDurationSheet(model: SpeedDurationModel(store: store, clipIDs: ids))
             }
         }
+        .sheet(isPresented: Binding(get: { store.sequenceSettingsModel != nil },
+                                    set: { if !$0 { store.sequenceSettingsModel = nil } })) {
+            if let model = store.sequenceSettingsModel {
+                SequenceSettingsSheet(model: model)
+            }
+        }
         .sheet(isPresented: Binding(get: { store.exportModel != nil },
                                     set: { presented in
                                         // The sheet only goes away when its model allows it (not
@@ -181,9 +187,17 @@ struct ContentView: View {
                     .help("Show the source monitor (⇧⌘2)")
                     .accessibilityIdentifier("ShowSourceMonitor")
                 }
-                Text("\(store.sequence.width)×\(store.sequence.height)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Button {
+                    store.showSequenceSettings()
+                } label: {
+                    Text("\(store.sequence.width)×\(store.sequence.height) · "
+                        + "\(VEEngine.name(for: store.sequence.frameDuration)) fps")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Sequence Settings…")
+                .accessibilityIdentifier("SequenceSettingsButton")
             }
             ProgramMonitorHost(store: store, playhead: store.playhead)
                 .clipShape(RoundedRectangle(cornerRadius: 3))

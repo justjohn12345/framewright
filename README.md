@@ -93,6 +93,14 @@ audited the code line by line.
   Live Photos as the part you choose (Settings > Media > Live Photos: ask, or always the video or
   the still). Media that arrives after you edited the timeline stays in the bin instead of being
   placed over your edits; quitting or opening another project while media arrives asks first.
+- Sequence settings: a new project's sequence takes the frame size (as shown, after the clip's rotation) and
+  frame rate of the first video clip placed on it, in the same undo step (stills and sound never do; a
+  variable-rate screen recording takes the rate of its fastest frames, rounded to the nearest of 23.976, 24,
+  25, 29.97, 30, 50, 59.94 and 60 fps; 120 and 240 fps slow motion gives 60). Sequence > Sequence Settings…
+  (or the size under the program monitor) changes the size, frame rate and audio sample rate: every clip's
+  position, size and Motion spans are rescaled so the pictures stay the same, clip edges move to the new frame
+  grid and transitions keep their frame counts (one that no longer fits is shortened or removed, and the
+  confirmation says so). Export's "Sequence size" then is the sequence's own, 4K from a 4K recording.
 - Project files in JSON with schema migration; security-scoped bookmarks for media.
 - Export (File > Export…): H.264, HEVC (8-bit and 10-bit Main10) and ProRes 422 on
   VideoToolbox (hardware where the Mac has it for the frame size) and software AV1 (SVT-AV1) to

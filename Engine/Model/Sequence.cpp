@@ -1,11 +1,161 @@
 #include "Sequence.h"
 
+#include "MediaAsset.h"
+
+#include <array>
+#include <cmath>
+#include <cstdio>
+
 namespace ve {
+
+const std::vector<CMTime> &standardFrameDurations() {
+    static const std::vector<CMTime> durations{CMTimeMake(1001, 24000), CMTimeMake(1, 24),    CMTimeMake(1, 25),
+                                               CMTimeMake(1001, 30000), CMTimeMake(1, 30),    CMTimeMake(1, 50),
+                                               CMTimeMake(1001, 60000), CMTimeMake(1, 60)};
+    return durations;
+}
+
+namespace {
+
+double ratePerSecond(CMTime frameDuration) {
+    return static_cast<double>(frameDuration.timescale) / static_cast<double>(frameDuration.value);
+}
+
+// Whether `rate` is within `tolerance` (relative) of a whole multiple (>= 1) of `base`.
+bool isWholeMultiple(double rate, double base, double tolerance) {
+    const double multiple = std::round(rate / base);
+    return multiple >= 1 && std::fabs(rate - multiple * base) <= tolerance * rate;
+}
+
+} // namespace
+
+std::optional<CMTime> standardFrameDurationFor(double framesPerSecond) {
+    if (!std::isfinite(framesPerSecond) || !(framesPerSecond > 0)) {
+        return std::nullopt;
+    }
+    const std::vector<CMTime> &standard = standardFrameDurations();
+    const double fastest = ratePerSecond(standard.back());
+    if (framesPerSecond > fastest * 1.001) {
+        // High frame rate: the standard rate it is a whole multiple of, the faster first.
+        for (const CMTime base : {CMTimeMake(1, 60), CMTimeMake(1001, 60000), CMTimeMake(1, 50)}) {
+            if (isWholeMultiple(framesPerSecond, ratePerSecond(base), 0.0005)) {
+                return base;
+            }
+        }
+        return CMTimeMake(1, 60);
+    }
+    const double slowest = ratePerSecond(standard.front());
+    if (framesPerSecond < slowest * 0.995) {
+        // A slow rate: the slowest standard rate showing each of its frames a whole number of times.
+        for (const CMTime candidate : standard) {
+            if (isWholeMultiple(ratePerSecond(candidate), framesPerSecond, 0.0005)) {
+                return candidate;
+            }
+        }
+        return CMTimeMake(1, 30);
+    }
+    CMTime best = standard.front();
+    double bestDistance = INFINITY;
+    for (const CMTime candidate : standard) {
+        const double distance = std::fabs(std::log(framesPerSecond / ratePerSecond(candidate)));
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = candidate;
+        }
+    }
+    return best;
+}
+
+std::string frameRateName(CMTime frameDuration) {
+    if (!isPositive(frameDuration)) {
+        return "?";
+    }
+    static constexpr std::array<const char *, 8> names{"23.976", "24", "25", "29.97", "30", "50", "59.94", "60"};
+    const std::vector<CMTime> &standard = standardFrameDurations();
+    for (std::size_t i = 0; i < standard.size(); ++i) {
+        if (frameDuration == standard[i]) {
+            return names[i];
+        }
+    }
+    char buffer[32];
+    std::snprintf(buffer, sizeof buffer, "%.3f", ratePerSecond(frameDuration));
+    std::string text = buffer;
+    while (!text.empty() && text.back() == '0') {
+        text.pop_back();
+    }
+    if (!text.empty() && text.back() == '.') {
+        text.pop_back();
+    }
+    return text;
+}
+
+std::optional<std::string> sequenceFormatProblem(const SequenceFormat &format) {
+    const CMTime fd = format.frameDuration;
+    if (!isExactModelTime(fd) || !isPositive(fd) || CMTimeCompare(fd, CMTimeMake(1, 240)) < 0 ||
+        CMTimeCompare(fd, CMTimeMake(1, 1)) > 0) {
+        return std::string("The frame rate must be between 1 and 240 frames per second.");
+    }
+    if (format.width < kMinSequenceSide || format.height < kMinSequenceSide || format.width > kMaxSequenceSide ||
+        format.height > kMaxSequenceSide) {
+        return "The frame size must be between " + std::to_string(kMinSequenceSide) + " and " +
+               std::to_string(kMaxSequenceSide) + " pixels on each side.";
+    }
+    if (format.width % 2 != 0 || format.height % 2 != 0) {
+        return std::string("The frame width and height must be even numbers (video encoders need them).");
+    }
+    if (format.audioSampleRate < kMinSequenceSampleRate || format.audioSampleRate > kMaxSequenceSampleRate) {
+        return std::string("The audio sample rate must be between 8 and 192 kHz.");
+    }
+    return std::nullopt;
+}
+
+std::optional<SequenceFormat> formatAdoptedFrom(const MediaAsset &asset, const SequenceFormat &current) {
+    if (!asset.hasVideo() || asset.isStill() || asset.width <= 0 || asset.height <= 0) {
+        return std::nullopt;
+    }
+    SequenceFormat format = current;
+    if (isPositive(asset.frameDuration)) {
+        if (const auto standard = standardFrameDurationFor(ratePerSecond(asset.frameDuration))) {
+            format.frameDuration = *standard;
+        }
+    }
+    format.width = asset.width + (asset.width & 1);
+    format.height = asset.height + (asset.height & 1);
+    format.configured = true;
+    if (sequenceFormatProblem(format)) {
+        format.width = current.width;
+        format.height = current.height;
+    }
+    return format;
+}
 
 bool operator==(const Sequence &a, const Sequence &b) {
     return a.id == b.id && a.name == b.name && identical(a.frameDuration, b.frameDuration) && a.width == b.width &&
-           a.height == b.height && a.audioSampleRate == b.audioSampleRate && a.videoTracks == b.videoTracks &&
-           a.audioTracks == b.audioTracks;
+           a.height == b.height && a.audioSampleRate == b.audioSampleRate && a.configured == b.configured &&
+           a.videoTracks == b.videoTracks && a.audioTracks == b.audioTracks;
+}
+
+SequenceFormat Sequence::format() const {
+    return SequenceFormat{frameDuration, width, height, audioSampleRate, configured};
+}
+
+void Sequence::setFormat(const SequenceFormat &format) {
+    frameDuration = format.frameDuration;
+    width = format.width;
+    height = format.height;
+    audioSampleRate = format.audioSampleRate;
+    configured = format.configured;
+}
+
+bool Sequence::isEmpty() const {
+    for (const std::vector<Track> *list : {&videoTracks, &audioTracks}) {
+        for (const Track &track : *list) {
+            if (!track.clips.empty()) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 CMTime Sequence::duration() const {

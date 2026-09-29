@@ -1,7 +1,11 @@
 // Project file serialization (JSON via nlohmann/json).
 //
-// Format (schema version 6): a top-level object with "schemaVersion" (kProjectSchemaVersion),
-// "name", "nextId", "activeSequenceId", "assets" and "sequences". CMTime is {"value",
+// Format (schema version 7): a top-level object with "schemaVersion" (kProjectSchemaVersion),
+// "name", "nextId", "activeSequenceId", "assets", "sequences" and "sharpenScaledDownSources"
+// (Project.h). A sequence holds its settings ("frameDuration", "width", "height",
+// "audioSampleRate", and "configured": false while a new project's sequence waits for its first
+// video clip, Sequence.h) and its tracks. A missing "configured" or "sharpenScaledDownSources"
+// reads as true. CMTime is {"value",
 // "timescale"} plus "flags" when the flags are anything other than plain valid (e.g. infinite)
 // and "epoch" when non-zero; kCMTimeInvalid is null. A clip stores "timelineStart", "duration"
 // (whole sequence frames), "sourceIn" and "speed" as {"num", "den"}; its source out point is
@@ -40,7 +44,7 @@
 
 namespace ve {
 
-inline constexpr int kProjectSchemaVersion = 6;
+inline constexpr int kProjectSchemaVersion = 7;
 
 nlohmann::json projectToJson(const Project &project);
 
@@ -90,6 +94,8 @@ ProjectLoadResult parseProject(std::string_view text);
 //           clips of video tracks (never audible) are dropped. New span ids come from "nextId".
 //   5 -> 6: nothing to convert. Version 6 added "reversed" on clips (absent: forward) and the wipe
 //           and iris transition kinds; a version 5 file has neither.
+//   6 -> 7: every sequence gets "configured": true (an existing project's settings are chosen: it
+//           never adopts a clip's) and the project "sharpenScaledDownSources": true (the default).
 std::optional<std::string> migrateProjectJson(nlohmann::json &document, int fromVersion,
                                               std::vector<std::string> &warnings);
 

@@ -40,6 +40,7 @@
 #include "../Media/BurnIn.h"
 #include "../Media/FFmpegTestMedia.h"
 #include "../Media/TestMedia.h"
+#include "../Media/TextCard.h"
 #include "../Playback/PlaybackTestSupport.h"
 
 #import <CoreGraphics/CoreGraphics.h>
@@ -190,6 +191,56 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
     return *result;
 }
 
+/// Renders the harness's current frame (the program monitor's graph and textures) into a 32BGRA buffer of
+/// the pool's size, as the preview view composites it; false when a layer has no picture.
+bool renderMonitorFrame(PlaybackHarness &h, render::Compositor &compositor, media::PixelBufferPool &pool,
+                        media::PixelBuffer &out) {
+    const render::PreviewFrame &frame = h.frame();
+    auto buffer = pool.makeBuffer();
+    if (!buffer.ok()) {
+        return false;
+    }
+    auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &texture) {
+        if (index >= frame.textures.size() || !frame.textures[index]) {
+            return false;
+        }
+        texture = frame.textures[index];
+        return true;
+    };
+    auto rendered = compositor.renderAndWait(frame.graph, lookup, render::PixelBufferTarget{buffer.value()});
+    if (!rendered.ok() || !rendered->status.ok() || !rendered->skippedLayers.empty()) {
+        return false;
+    }
+    out = std::move(buffer).value();
+    return true;
+}
+
+/// The first `frames` frames of the movie at `path` decoded to 32BGRA, keyed by frame index (at `fps`).
+std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &router, const std::string &path,
+                                                   const std::vector<int64_t> &frames, int32_t fps) {
+    std::map<int64_t, media::PixelBuffer> decoded;
+    auto routed = router.probe(path);
+    if (!routed.ok()) {
+        return decoded;
+    }
+    media::DecodeOptions bgra;
+    bgra.pixelFormat = kCVPixelFormatType_32BGRA;
+    auto decoder = router.makeVideoDecoder(*routed, -1, bgra);
+    if (!decoder.ok()) {
+        return decoded;
+    }
+    for (int64_t f : frames) {
+        if (!decoder->decoder->seek(CMTimeMake(f, fps)).ok()) {
+            continue;
+        }
+        auto next = decoder->decoder->next();
+        if (next.ok() && next.value()) {
+            decoded[f] = next.value()->image;
+        }
+    }
+    return decoded;
+}
+
 } // namespace
 
 @interface ExportParityTests : XCTestCase
@@ -331,6 +382,98 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
         }
     }
     NSLog(@"PARITY worst block difference %.2f over %zu frames", worst, monitor.size());
+}
+
+/// A 4K sequence made the way a new project makes it (the settings adopted from its first video clip, a
+/// 3840x2160 screen recording with small text) exported at its own size, 3840x2160 (ProRes 422), shows
+/// the program monitor's pictures: 16x16 block means within the codec's error on every frame compared,
+/// and another frame (the text cursor moved) is told apart.
+- (void)testA4KSequenceExportsTheMonitorsPicturesAtItsOwnSize {
+    const std::string moviePath = _dir + "/text4k.mov";
+    const std::string written = writeTextCardMovie(moviePath, 3840, 2160, 12, 30, 60'000'000, 22, false, 4);
+    XCTAssertTrue(written.empty(), @"%s", written.c_str());
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    const AssetId movie = h.importAssetAtPath(moviePath);
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    // The settings a new project's sequence takes from it: 3840x2160 at 30 fps.
+    SequenceFormat unconfigured = h.sequence().format();
+    unconfigured.configured = false;
+    h.sequence().setFormat(unconfigured);
+    const auto adopted = formatAdoptedFrom(*h.project.findAsset(movie), unconfigured);
+    XCTAssertTrue(adopted.has_value());
+    if (!adopted) {
+        return;
+    }
+    SetSequenceFormat adopt(h.sequenceId, *adopted);
+    XCTAssertTrue(adopt.apply(h.project).ok());
+    XCTAssertEqual(h.sequence().width, 3840);
+    XCTAssertEqual(h.sequence().height, 2160);
+    h.addClip(h.v1, movie, 0, 12, kCMTimeZero);
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+
+    const int width = h.sequence().width, height = h.sequence().height;
+    ex::ExportRequest request;
+    request.project = std::make_shared<const Project>(h.project);
+    request.sequenceId = h.sequenceId;
+    request.encode.container = media::ContainerFormat::MOV;
+    media::VideoEncodeSettings v;
+    v.codec = media::VideoCodec::ProRes422;
+    v.width = width;
+    v.height = height;
+    request.encode.video = v;
+    request.outputPath = _dir + "/parity4k.mov";
+    ex::ExportServices services;
+    services.router = h.router;
+    services.cache = std::make_shared<media::FrameCache>();
+    services.routing = routingOf(h.project, *h.router);
+    std::string error;
+    auto result = runExport(request, services, error);
+    if (!result || !result->ok()) {
+        XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
+        return;
+    }
+    XCTAssertEqual(result->value().width, 3840);
+    XCTAssertEqual(result->value().height, 2160);
+
+    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
+    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, size_t(width), size_t(height));
+    XCTAssertTrue(created.ok() && pool.ok());
+    if (!created.ok() || !pool.ok()) {
+        return;
+    }
+    const std::vector<int64_t> frames{0, 3, 4, 8, 11};
+    std::map<int64_t, std::vector<double>> monitor;
+    for (int64_t f : frames) {
+        h.controller->seek(frames30(f));
+        h.presentExact();
+        media::PixelBuffer picture;
+        XCTAssertTrue(renderMonitorFrame(h, *created.value(), *pool, picture), @"frame %lld", f);
+        if (picture) {
+            monitor[f] = blockMeans(picture.get());
+        }
+    }
+    const auto exported = decodeFrames(*h.router, request.outputPath, frames, 30);
+    XCTAssertEqual(exported.size(), frames.size());
+    for (const auto &[f, buffer] : exported) {
+        XCTAssertEqual(CVPixelBufferGetWidth(buffer.get()), 3840u);
+        if (!monitor.count(f)) {
+            continue;
+        }
+        const Difference d = compare(monitor[f], blockMeans(buffer.get()));
+        NSLog(@"PARITY 4K frame %lld: blocks differ by at most %.2f, on average %.3f", f, d.maxBlock, d.meanBlock);
+        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld", f);
+        XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
+    }
+    // Frame 3 and frame 4 differ only by the cursor and a word: the measure still tells them apart.
+    if (monitor.count(3) && exported.count(4)) {
+        const Difference other = compare(monitor[3], blockMeans(exported.at(4).get()));
+        NSLog(@"PARITY 4K monitor frame 3 vs exported frame 4: %.1f", other.maxBlock);
+        XCTAssertGreaterThan(other.maxBlock, 40.0);
+    }
 }
 
 /// V1: vfr_h264.mp4 (the Apple backend) for sequence frames [0, 45) from 67/600 s, then its Matroska

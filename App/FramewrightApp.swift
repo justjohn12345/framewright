@@ -165,6 +165,9 @@ struct AppCommands: Commands {
             Button("Insert from Source") { store.placeSource(overwrite: false) }
             Button("Overwrite from Source") { store.placeSource(overwrite: true) }
         }
+        CommandMenu("Sequence") {
+            Button("Sequence Settings…") { store.showSequenceSettings() }
+        }
         CommandMenu("Playback") {
             // Playback does not start while an export runs (the engine refuses it too).
             Button("Play / Pause  Space") { store.playbackActions.togglePlay() }
