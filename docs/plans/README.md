@@ -9,6 +9,7 @@ and keeps a status line at its top saying what landed and where the deviations a
 | Plan | Status |
 |---|---|
 | `2026-09-24-effect-lanes-done.md` | Done. Spans on lanes, transitions on lane 0, hold after, schema v5; reviewed and fixed (see `docs/reviews`). D1 compact rows and D3 window frame restore remain open. |
+| `2026-09-29-export-sharpness.md` | Agreed in outline, next up: sharpen after downscale, sequence size/fps from the first clip + settings sheet, export quality default and picker. |
 | `2026-09-29-mcp-server.md` | Proposed, not scheduled: driving the app from an AI agent over MCP. |
 | `2026-09-27-reverse-speed-wipes-done.md` | Done. Reverse (schema 6), speed in the inspector, wipe and iris transitions; reviewed 2026-09-29 (`docs/reviews/2026-09-29-post-lanes-review.md`), fix round in progress. |
 
@@ -19,6 +20,7 @@ exposure-integrated transition edges) and the iris fades on black.
 
 ## Planned (not yet scheduled, in the intended order)
 
+0. **Export sharpness** (`2026-09-29-export-sharpness.md`): next round.
 1. **D1 compact rows** and **D3 window frame restore**: design items from the effect lanes review, specified in
    `docs/reviews/open-findings.md`.
 2. **Nested sequences** (asked 2026-09-29): a sequence used as a clip in another sequence, live (an edit inside
