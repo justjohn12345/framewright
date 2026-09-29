@@ -44,6 +44,9 @@ const TestClip &testClip(const std::string &file);
 //   rotated90_h264.mp4      640x360 stored, displayed rotated 90 degrees clockwise; 30 frames 30 fps.
 //   gop5s_h264_1080p30.mp4  1920x1080 H.264, 300 frames, keyframe every 150 frames (5 s).
 //   leading_gap_h264.mov    640x360 H.264, 60 frames at 30 fps, the first presented at 0.5 s.
+//   screencast_vfr_h264.mov 1280x720 H.264 with B-frames, a screen recording: 574 frames in bursts 1/60 s
+//                           apart between static gaps of up to 5.9 s (80.47 s), a keyframe every 120 frames
+//                           (up to 21 s apart).
 //   prores4444_alpha.mov    576x324 ProRes 4444, 10 frames at 25 fps; the left half has alpha 128
 //                           with straight colour.
 //   slowmo_hevc_portrait.mov 640x360 HEVC stored, displayed rotated 90 degrees clockwise; 180 frames:

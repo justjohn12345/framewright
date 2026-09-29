@@ -160,6 +160,8 @@ targets:
       - sdk: IOKit.framework
       # The playback latency test asks CoreAudio what the default output device is (Bluetooth?).
       - sdk: CoreAudio.framework
+      # The paused seek tests read a file's sample table (timing and sync flags) without decoding.
+      - sdk: AVFoundation.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.justjohn12345.framewright.EngineTests

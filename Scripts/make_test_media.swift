@@ -265,6 +265,27 @@ func vfrTimes(frames: Int) -> (times: [CMTime], end: CMTime) {
     return (times, CMTime(value: t, timescale: 600))
 }
 
+/// Frame times of the screen-recording clip: bursts of frames 1/60 s apart (the screen changing)
+/// separated by static gaps without frames, as macOS screen recordings are. One cycle is 287 frames
+/// over 40.23 s; gaps up to 5.9 s.
+let screencastBursts: [Int] = [24, 3, 60, 1, 12, 40, 2, 30, 6, 90, 1, 18]
+let screencastGaps600: [Int64] = [3540, 600, 1650, 2400, 480, 1200, 3000, 900, 2100, 720, 3300, 1500]
+
+func screencastTimes(cycles: Int) -> (times: [CMTime], end: CMTime) {
+    var t: Int64 = 0
+    var times: [CMTime] = []
+    for _ in 0..<cycles {
+        for (burst, gap) in zip(screencastBursts, screencastGaps600) {
+            for _ in 0..<burst {
+                times.append(CMTime(value: t, timescale: 600))
+                t += 10
+            }
+            t += gap - 10 // the burst's last frame lasts the whole gap
+        }
+    }
+    return (times, CMTime(value: t, timescale: 600))
+}
+
 func waitReady(_ input: AVAssetWriterInput, _ writer: AVAssetWriter) {
     while !input.isReadyForMoreMediaData {
         if writer.status == .failed { fail("writer failed: \(String(describing: writer.error))") }
@@ -519,6 +540,18 @@ func writeConformanceMedia() {
                                 frames: 300, bitRate: 8_000_000, keyFrameInterval: 150),
                audio: nil, fastStart: true)
     record("gop5s_h264_1080p30.mp4", ["codec": "avc1", "width": 1920, "height": 1080, "frames": 300, "gop": 150])
+
+    // A screen recording: frames only while the screen changes (screencastTimes), B-frames, a
+    // keyframe every 120 frames (so keyframes lie seconds to tens of seconds apart), for the paused
+    // seek tests (EngineTests/Playback/PausedSeekTests.mm).
+    let screencast = screencastTimes(cycles: 2)
+    writeVideo(outDir.appendingPathComponent("screencast_vfr_h264.mov"), type: .mov,
+               video: VideoSpec(codec: .h264, width: 1280, height: 720, frameDuration: CMTime(value: 1, timescale: 60),
+                                frames: screencast.times.count, bitRate: 2_000_000, keyFrameInterval: 120,
+                                times: screencast.times, end: screencast.end),
+               audio: nil, fastStart: false)
+    record("screencast_vfr_h264.mov", ["codec": "avc1", "width": 1280, "height": 720,
+                                       "frames": screencast.times.count, "gop": 120])
 
     // Leading empty edit: the first video frame is presented at 0.5 s.
     let gapStart = CMTime(value: 1, timescale: 2)
