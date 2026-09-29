@@ -253,11 +253,36 @@ extension ProjectStore {
         }
         engine.endCoalescing()
         statusMessage = nil
+        var note: String?
         if span.kind == .motion, let motionMode {
-            rememberKenBurnsMode(motionMode, for: span.spanID) // before selecting: it opens in this mode
+            note = rememberAskedKenBurnsMode(motionMode, for: span.spanID) // before selecting: it opens in it
         }
         select(span: span.spanID)
+        if let note { statusMessage = note }
         return VEEditResult.success(withCreatedIDs: [NSNumber(value: span.spanID)])
+    }
+
+    /// An entry point asked for the Ken Burns editor's `mode` on the Motion span `id` (the Effects tab's
+    /// Ken Burns and Move, Clip > Add Ken Burns… and Add Motion Span, their context-menu items):
+    /// remembered for the span, except Ken Burns on a clip whose automatic mode is Transform (placed
+    /// inside the frame: a picture in picture, a clip scaled down or moved off the frame), whose Ken
+    /// Burns rectangles are larger than the frame: the span is left to the automatic mode (or the mode
+    /// the user chose for it before) and the returned note says so (post-lanes review M2). Nil when
+    /// the asked mode is the one it opens in.
+    func rememberAskedKenBurnsMode(_ mode: KenBurnsMode, for id: VESpanID) -> String? {
+        guard mode == .kenBurns, let span = engine.spanInfo(id), let clip = engine.clipInfo(span.clipID),
+              let asset = asset(clip.assetID),
+              KenBurnsModel.automaticMode(span: span, clip: clip, asset: asset, sequence: sequence) == .transform
+        else {
+            rememberKenBurnsMode(mode, for: id)
+            return nil
+        }
+        if kenBurnsModes[id] == .kenBurns {
+            rememberKenBurnsMode(.kenBurns, for: id) // the user switched this span to Ken Burns before
+            return nil
+        }
+        return "“\(clip.name)” is placed inside the frame: opened in Transform mode; switch to Ken Burns on the bar "
+            + "to crop."
     }
 
     /// Sets a new span's default values inside the adding group (see `addSpan`); `pushIn` false: a
@@ -403,10 +428,10 @@ extension ProjectStore {
         // Pressed again on the same frame: the span it added is selected, not a second push in on
         // top of it (review L6: repeated presses stacked 1.25 x 1.25 x 1.25).
         if let existing = clip.spans.first(where: { $0.kind == .motion && $0.start == start }) {
-            if let mode { rememberKenBurnsMode(mode, for: existing.spanID) }
+            let note = mode.flatMap { rememberAskedKenBurnsMode($0, for: existing.spanID) }
             select(span: existing.spanID)
-            statusMessage = "“\(clip.name)” already has a Motion span starting here: it is selected (drag on an empty "
-                + "lane to add another)."
+            statusMessage = ["“\(clip.name)” already has a Motion span starting here: it is selected (drag on an "
+                + "empty lane to add another).", note].compactMap { $0 }.joined(separator: " ")
             return
         }
         let length = CMTime.onFrameGrid(seconds: Self.motionSpanSeconds, frameDuration: frameDuration)
@@ -613,7 +638,16 @@ extension ProjectStore {
     /// sentence: no clip touching its clip's end, not the clip's last move, no lane of the next clip free
     /// on its first frame, a locked track), nil when it can.
     func continueMotionProblem(_ id: VESpanID) -> String? {
-        engine.continueMotionProblem(forSpan: id)
+        let change = engine.changeCount
+        if let cached = continueMotionProblemCache, cached.span == id, cached.change == change {
+            return cached.problem
+        }
+        // The engine plans the continuation (planContinueMotion) to answer: once per model change and
+        // span, however many views and menus ask (review L5).
+        continueMotionProblemReads += 1
+        let problem = engine.continueMotionProblem(forSpan: id)
+        continueMotionProblemCache = (id, change, problem)
+        return problem
     }
 
     /// Clip > Continue on Next Clip is enabled: no gesture, a selected Motion span that can be continued.

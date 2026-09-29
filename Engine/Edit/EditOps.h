@@ -201,6 +201,12 @@ class SplitClip final : public SequenceCommand {
     const std::vector<ClipId> &createdClipIds() const {
         return created_;
     }
+    // The effect spans the cut divided, in the same order: (the span's id, which the left piece
+    // keeps; the id of the right piece's part). The app gives the part what it remembers for the
+    // span, such as its Ken Burns editor mode (review L6).
+    const std::vector<std::pair<SpanId, SpanId>> &dividedSpans() const {
+        return divided_;
+    }
 
   protected:
     EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
@@ -210,6 +216,7 @@ class SplitClip final : public SequenceCommand {
     CMTime at_;
     SplitOptions options_;
     std::vector<ClipId> created_;
+    std::vector<std::pair<SpanId, SpanId>> divided_;
 };
 
 // Removes clips, leaving gaps.

@@ -1733,10 +1733,14 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     auto command =
         std::make_unique<SplitClip>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)), time);
     SplitClip *raw = command.get();
-    return [self push:std::move(command)
-              created:^NSArray<NSNumber *> * {
-                  return toNumbers(raw->createdClipIds());
-              }];
+    VEEditResult *result = [self push:std::move(command)
+                              created:^NSArray<NSNumber *> * {
+                                  return toNumbers(raw->createdClipIds());
+                              }];
+    if (result.ok) {
+        setDividedSpans(result, raw->dividedSpans());
+    }
+    return result;
 }
 
 - (VEEditResult *)splitClips:(NSArray<NSNumber *> *)clipIDs atTime:(CMTime)time {
@@ -1783,10 +1787,18 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
         }
         return all;
     };
-    if (children.size() == 1) {
-        return [self push:std::move(children.front()) created:createdBlock];
+    VEEditResult *result = children.size() == 1
+                               ? [self push:std::move(children.front()) created:createdBlock]
+                               : [self push:std::make_unique<CompositeCommand>("Split", std::move(children))
+                                    created:createdBlock];
+    if (result.ok) {
+        std::vector<std::pair<SpanId, SpanId>> divided;
+        for (SplitClip *s : splits) {
+            divided.insert(divided.end(), s->dividedSpans().begin(), s->dividedSpans().end());
+        }
+        setDividedSpans(result, divided);
     }
-    return [self push:std::make_unique<CompositeCommand>("Split", std::move(children)) created:createdBlock];
+    return result;
 }
 
 - (VEEditResult *)removeClips:(NSArray<NSNumber *> *)clipIDs {

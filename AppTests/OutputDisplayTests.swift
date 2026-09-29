@@ -314,6 +314,10 @@ final class OutputDisplayTests: XCTestCase {
         store.selection = [clip]
         store.playheadTime = .zero
         store.addMotionSpanAtPlayhead(mode: .kenBurns)
+        // A half-size clip is placed inside the frame, so it opens in Transform (post-lanes review M2):
+        // switched to Ken Burns on the bar, as the user would.
+        XCTAssertEqual(store.kenBurns?.mode, .transform)
+        store.kenBurns?.setMode(.kenBurns)
         XCTAssertEqual(store.engine.programPreviewSoloClipID, clip)
 
         func render() async {

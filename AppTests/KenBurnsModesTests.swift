@@ -643,6 +643,115 @@ final class KenBurnsModesTests: XCTestCase {
         XCTAssertEqual(store.statusMessage, "Select a clip first.")
     }
 
+    /// Review M2: Add Ken Burns… (the Clip menu, the context menu, the Effects tab's Ken Burns "+" and
+    /// a drop of its tile) on a clip placed inside the frame (a 30 % picture in picture) opens in
+    /// Transform mode, the automatic one, with a note, since Ken Burns mode's rectangles for such a
+    /// placement are 3.3 frames wide; and switched to Ken Burns mode by hand, the monitor gives the
+    /// frame room so both rectangles' corners are on it and a corner drag zooms in.
+    func testAddKenBurnsOnAPictureInPictureOpensInTransformAndKenBurnsModeReachesItsCorners() async throws {
+        let clip = try await longClip()
+        XCTAssertTrue(store.engine.setVideoParams(VEVideoParams(x: 690, y: 324, scale: 0.3, rotationDegrees: 0, opacity: 1),
+                                                  forClip: clip).ok)
+        store.selection = [clip]
+        store.playheadTime = frames(3)
+        store.addMotionSpanAtPlayhead(mode: .kenBurns)
+        let model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.mode, .transform, "the picture in picture opens in Transform mode")
+        XCTAssertEqual(store.statusMessage, "“long.mov” is placed inside the frame: opened in Transform mode; switch to "
+            + "Ken Burns on the bar to crop.")
+        XCTAssertNil(store.kenBurnsModes[model.spanID], "not a choice to remember: the automatic mode")
+        XCTAssertEqual(try span(model.spanID).endValues.scale, 1.25, accuracy: 1e-12, "still the push in")
+        XCTAssertEqual(store.engine.programPreviewSoloClipID, 0, "the program, not the clip alone")
+
+        // The monitor at 960 x 540, as the layout sizes it for each mode.
+        let monitor = CGSize(width: 960, height: 540)
+        func reachableCorners(_ which: KenBurnsModel.Framing) -> Int {
+            let viewport = Self.editorViewport(store: store, monitor: monitor)
+            let area = CGRect(origin: .zero, size: monitor).insetBy(dx: -KenBurnsHit.cornerRadius,
+                                                                    dy: -KenBurnsHit.cornerRadius)
+            return viewport.view(model.box(which)).corners.filter { area.contains($0) }.count
+        }
+        XCTAssertEqual(reachableCorners(.start), 4, "Transform: the start box's corners are on the monitor")
+        XCTAssertEqual(reachableCorners(.end), 4)
+
+        // Switched to Ken Burns on the bar: the rectangles are the frame's preimage, 3.3 frames wide,
+        // and every corner of both is on the monitor.
+        model.setMode(.kenBurns)
+        XCTAssertGreaterThan(model.start.size.width, sequence.width * 3)
+        XCTAssertEqual(reachableCorners(.start), 4, "Ken Burns: the start rectangle's corners are on the monitor")
+        XCTAssertEqual(reachableCorners(.end), 4, "and the end rectangle's")
+        // A corner drag zooms in (the rectangle shrinks about its centre toward the frame).
+        let origin = model.end
+        model.applyDrag(.corner(.end, .bottomRight), origin: origin,
+                        translation: CGSize(width: -origin.size.width / 4, height: -origin.size.height / 4))
+        model.endDrag()
+        XCTAssertLessThan(model.end.size.width, origin.size.width * 0.8, "the corner drag zoomed in")
+        XCTAssertEqual(reachableCorners(.end), 4, "and its corners stay on the monitor")
+
+        // The Effects tab's tile dropped on the clip's lane: the same.
+        store.selection = [clip]
+        let gestures = TimelineGestureController(store: store)
+        store.refreshModel()
+        let timeline = store.timelineModel
+        let layout = try XCTUnwrap(timeline.layout(forTrack: try XCTUnwrap(store.clips[clip]).trackID))
+        let lane2 = try XCTUnwrap(layout.laneY(2)) - timeline.scrollY + TimelineViewModel.laneHeight / 2
+        XCTAssertTrue(gestures.dropEffect(kind: .kenBurns, at: CGPoint(x: timeline.x(forTime: 6), y: lane2)))
+        XCTAssertEqual(store.kenBurns?.mode, .transform)
+        XCTAssertEqual(store.statusMessage, "“long.mov” is placed inside the frame: opened in Transform mode; switch to "
+            + "Ken Burns on the bar to crop.")
+
+        // A clip covering the frame still opens Add Ken Burns… in Ken Burns mode, with no note.
+        XCTAssertTrue(store.engine.setVideoParams(VEVideoParams(x: 0, y: 0, scale: 1, rotationDegrees: 0, opacity: 1),
+                                                  forClip: clip).ok)
+        store.selection = [clip]
+        store.playheadTime = frames(250)
+        store.addMotionSpanAtPlayhead(mode: .kenBurns)
+        XCTAssertEqual(store.kenBurns?.mode, .kenBurns)
+        XCTAssertNil(store.statusMessage)
+        XCTAssertNil(store.kenBurnsExtent, "its rectangles are inside the frame: the monitor shows the frame alone")
+        let whole = Self.editorViewport(store: store, monitor: monitor)
+        XCTAssertEqual(whole.frame, CGRect(origin: .zero, size: monitor), "fitted into the whole monitor, as before")
+    }
+
+    /// Review L6: a split inside a Motion span divides it (the right piece's part gets a new span id);
+    /// both parts open in the mode the user chose for the span, through undo and redo too.
+    func testASplitKeepsTheChosenModeOnBothPieces() async throws {
+        let clip = try await longClip()
+        store.selection = [clip]
+        store.playheadTime = frames(30)
+        store.addMotionSpanAtPlayhead() // Control-K: the full-frame clip opens in Ken Burns mode
+        let model = try XCTUnwrap(store.kenBurns)
+        let spanID = model.spanID
+        XCTAssertEqual(model.mode, .kenBurns)
+        model.setMode(.transform) // the user's choice for this span
+        XCTAssertEqual(store.kenBurnsModes[spanID], .transform)
+
+        store.selection = [clip]
+        store.playheadTime = frames(90) // inside the span [30, 180)
+        store.splitAtPlayhead()
+        let pieces = store.clips.values.filter { $0.trackKind == .video }.sorted { $0.timelineStart < $1.timelineStart }
+        XCTAssertEqual(pieces.count, 2)
+        let right = try XCTUnwrap(pieces.last)
+        let part = try XCTUnwrap(right.spans.first { $0.kind == .motion })
+        XCTAssertNotEqual(part.spanID, spanID, "the right piece's part is a new span")
+        XCTAssertEqual(store.kenBurnsModes[part.spanID], .transform, "it inherits the mode chosen for the span")
+        store.select(span: part.spanID)
+        XCTAssertEqual(store.kenBurns?.mode, .transform, "and opens in it, not the automatic Ken Burns")
+        store.select(span: spanID)
+        XCTAssertEqual(store.kenBurns?.mode, .transform, "the left piece keeps the span and its mode")
+        store.undo()
+        store.redo()
+        store.select(span: part.spanID)
+        XCTAssertEqual(store.kenBurns?.mode, .transform, "after undo and redo too")
+    }
+
+    /// The viewport the program monitor's layout gives the Ken Burns editor in a monitor of `monitor`.
+    private static func editorViewport(store: ProjectStore, monitor: CGSize) -> KenBurnsViewport {
+        KenBurnsViewport.editor(mode: store.kenBurnsMode, extent: store.kenBurnsExtent,
+                                sequence: CGSize(width: store.sequence.width, height: store.sequence.height),
+                                monitor: monitor)
+    }
+
     /// The entry points with an intent: the Effects tab's Ken Burns (the push in, Ken Burns mode) and
     /// Move (the end where the start is, Transform mode), dropped on a lane or added with "+" at the
     /// playhead; Clip > Add Ken Burns… and Add Motion Span. A Ken Burns asked for on a frame where a

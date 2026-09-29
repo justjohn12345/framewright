@@ -675,6 +675,37 @@ TEST_CASE("SplitClip splits at a frame inside the clip") {
     CHECK(clipFadeLength(fx.clip(right), ClipEdge::Tail) == f30(4));
 }
 
+TEST_CASE("SplitClip reports each span it divided with the id of the right piece's part (review L6)") {
+    Fixture fx;
+    const auto [v, a] = fx.addLinkedPair(0, 90);
+    SpanTracks zoom;
+    zoom.scale = {key(kCMTimeZero, 1, KeyframeInterpolation::EaseInOut), key(f30(60), 2)};
+    const SpanId across = fx.addSpan(v, SpanKind::Motion, 1, f30(0), f30(60), zoom); // divided at 30
+    const SpanId before = fx.addSpan(v, SpanKind::Opacity, 2, f30(0), f30(20));      // wholly left
+    const SpanId after = fx.addSpan(v, SpanKind::Motion, 3, f30(40), f30(80));       // wholly right
+    SpanTracks duck;
+    duck.gain = {key(kCMTimeZero, 0), key(f30(50), -6)};
+    const SpanId gain = fx.addSpan(a, SpanKind::Gain, 1, f30(10), f30(60), duck); // divided on the sound
+    fx.requireValid();
+    SplitClip split(fx.seq, v, f30(30));
+    applyReversible(fx.project, split);
+    REQUIRE(split.createdClipIds().size() == 2);
+    const ClipId vRight = split.createdClipIds()[0];
+    const ClipId aRight = split.createdClipIds()[1];
+    const auto &divided = split.dividedSpans();
+    REQUIRE(divided.size() == 2);
+    // (the span, the right piece's part): the left piece keeps the span's id.
+    CHECK(divided[0].first == across);
+    CHECK(fx.clip(v).findSpan(across) != nullptr);
+    CHECK(fx.clip(vRight).findSpan(divided[0].second) != nullptr);
+    CHECK(fx.clip(vRight).findSpan(divided[0].second)->kind == SpanKind::Motion);
+    CHECK(divided[1].first == gain);
+    CHECK(fx.clip(aRight).findSpan(divided[1].second) != nullptr);
+    // Spans on one side of the cut are not divided: they keep their ids where they are.
+    CHECK(fx.clip(v).findSpan(before) != nullptr);
+    CHECK(fx.clip(vRight).findSpan(after) != nullptr);
+}
+
 TEST_CASE("SplitClip splits the linked clip too and links the halves pairwise") {
     Fixture fx;
     const auto [v, a] = fx.addLinkedPair(0, 60);

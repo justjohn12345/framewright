@@ -174,7 +174,11 @@ final class TimelineRedrawTests: XCTestCase {
     /// a Ken Burns drag changes the model (the span's values), but nothing the timeline draws, so no
     /// step rebuilds the timeline's content model or redraws its clips; the drag's end neither. A
     /// span range change afterwards rebuilds it once. A positive control first proves the canvas
-    /// does redraw in this host.
+    /// does redraw in this host. Post-lanes review L5: with the editor's bar and the Effects tab
+    /// hosted too, no drag step asks the engine whether the move can continue on the next clip (the
+    /// bar reads it once per model change, held during the drag) and the lane-effect tiles are not
+    /// redrawn by the steps (at most as the drag starts and ends, when their "+" is disabled and
+    /// enabled again); a positive control shows the tiles do redraw when what they draw changes.
     func testAKenBurnsDragBuildsNoTimelineModelAndRedrawsNoClips() async throws {
         try await makeTwentyClipSequence()
         let store = fixture.store
@@ -194,6 +198,21 @@ final class TimelineRedrawTests: XCTestCase {
             window.orderOut(nil)
             window.close()
         }
+        // The editor's bar and the Effects tab, in a window of their own.
+        let panels = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+                              styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
+        panels.isReleasedWhenClosed = false
+        let panelHost = NSHostingView(rootView: VStack {
+            KenBurnsControls(store: store, model: model)
+            EffectsPanel(store: store)
+        })
+        panels.contentView = panelHost
+        panels.orderFront(nil)
+        defer {
+            panels.orderOut(nil)
+            panels.close()
+        }
+        await Self.display(panelHost)
         var lastDraws = -1
         for _ in 0 ..< 50 where lastDraws != TimelineDiagnostics.canvasDraws {
             lastDraws = TimelineDiagnostics.canvasDraws
@@ -219,15 +238,31 @@ final class TimelineRedrawTests: XCTestCase {
             let modeDraws = TimelineDiagnostics.canvasDraws
             let changes = store.changeCount
             let origin = model.end
+            await Self.display(panelHost)
+            let tileBodies = EffectsPanelDiagnostics.laneEffectsBodies
+            var engineReadsDuringSteps = 0
             for step in 1 ... 20 {
                 // The end's bottom-right corner pulled in: a zoom that grows with every step.
                 let pulled = CGFloat(step) * 20
+                let reads = store.continueMotionProblemReads
                 model.applyDrag(.corner(.end, .bottomRight), origin: origin,
                                 translation: CGSize(width: -pulled, height: -pulled * 9 / 16))
                 await Self.display(host)
+                await Self.display(panelHost)
+                engineReadsDuringSteps += store.continueMotionProblemReads - reads
             }
+            let readsBeforeRelease = store.continueMotionProblemReads
             model.endDrag()
             await Self.display(host)
+            await Self.display(panelHost)
+            let tilesRedrawn = EffectsPanelDiagnostics.laneEffectsBodies - tileBodies
+            print("20 Ken Burns drag steps (\(mode.title)): Continue on Next Clip engine reads during the steps "
+                + "\(engineReadsDuringSteps), at the release \(store.continueMotionProblemReads - readsBeforeRelease); "
+                + "lane-effect tile redraws \(tilesRedrawn)")
+            XCTAssertEqual(engineReadsDuringSteps, 0, "no drag step asks the engine (\(mode))")
+            XCTAssertLessThanOrEqual(store.continueMotionProblemReads - readsBeforeRelease, 1,
+                                     "the release asks once (\(mode))")
+            XCTAssertLessThanOrEqual(tilesRedrawn, 2, "the steps do not redraw the lane-effect tiles (\(mode))")
             let rebuilt = store.timelineBuildCount - modeBuilds
             let modeRedrawn = TimelineDiagnostics.canvasDraws - modeDraws
             redrawn += modeRedrawn
@@ -246,6 +281,16 @@ final class TimelineRedrawTests: XCTestCase {
         _ = store.timelineModel
         XCTAssertEqual(store.timelineBuildCount - builds, 1)
         XCTAssertGreaterThan(TimelineDiagnostics.canvasDraws, canvasDraws + redrawn, "and redrawn")
+
+        // Positive control: nothing selected, the tiles' "+" is disabled: they redraw.
+        XCTAssertTrue(store.laneEffects.canAddMotionSpan)
+        let tiles = EffectsPanelDiagnostics.laneEffectsBodies
+        store.selectedSpanID = nil
+        store.selection = []
+        await StoreFixture.wait(until: { !store.laneEffects.canAddMotionSpan }, timeout: 2)
+        await Self.display(panelHost)
+        XCTAssertFalse(store.laneEffects.canAddMotionSpan)
+        XCTAssertGreaterThan(EffectsPanelDiagnostics.laneEffectsBodies, tiles, "the tiles redraw when \"+\" changes")
     }
 
     /// The Ken Burns editor open over the program monitor (the layout the app uses, a plain picture

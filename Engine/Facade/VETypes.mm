@@ -147,6 +147,7 @@ VESpanValues VESpanValuesUnchanged(void) {
 @end
 
 @interface VEEditResult ()
+@property (nonatomic, readwrite, copy) NSDictionary<NSNumber *, NSNumber *> *dividedSpanIDs;
 - (instancetype)initWithCode:(VEEditErrorCode)code
                      message:(NSString *)message
                   createdIDs:(NSArray<NSNumber *> *)createdIDs
@@ -402,6 +403,7 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
         _freeRange = freeRange;
         _span = span;
         _note = [note copy];
+        _dividedSpanIDs = @{};
     }
     return self;
 }
@@ -1040,6 +1042,14 @@ VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *crea
                                     freeRange:kCMTimeRangeInvalid
                                          span:span
                                          note:text];
+}
+
+void setDividedSpans(VEEditResult *result, const std::vector<std::pair<SpanId, SpanId>> &divided) {
+    NSMutableDictionary<NSNumber *, NSNumber *> *map = [NSMutableDictionary dictionaryWithCapacity:divided.size()];
+    for (const auto &[original, part] : divided) {
+        map[@(static_cast<VESpanID>(part.value()))] = @(static_cast<VESpanID>(original.value()));
+    }
+    result.dividedSpanIDs = map;
 }
 
 VETransitionLimit *makeTransitionLimit(const TransitionLimit &limit) {

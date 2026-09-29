@@ -70,7 +70,8 @@ EditResult retimeRefusal(RetimeResult result, ClipId clipId, CMTime at) {
                                    "cut would change the picture");
 }
 
-EditResult splitClipAt(Sequence &, Track &track, std::size_t index, CMTime at, IdGenerator &ids, ClipId &rightId) {
+EditResult splitClipAt(Sequence &, Track &track, std::size_t index, CMTime at, IdGenerator &ids, ClipId &rightId,
+                       std::vector<std::pair<SpanId, SpanId>> *divided) {
     Clip left = track.clips[index];
     Clip right = track.clips[index];
     // Lane 0: the head span stays with the left piece, the tail span goes with the right one.
@@ -89,7 +90,11 @@ EditResult splitClipAt(Sequence &, Track &track, std::size_t index, CMTime at, I
     // A span divided by the cut is on both pieces: the right piece's part gets a new id.
     for (EffectSpan &span : right.spans) {
         if (!span.isTransition() && left.findSpan(span.id) != nullptr) {
+            const SpanId original = span.id;
             span.id = ids.make<SpanId>();
+            if (divided != nullptr) {
+                divided->emplace_back(original, span.id);
+            }
         }
     }
     rightId = right.id;

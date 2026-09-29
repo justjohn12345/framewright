@@ -175,6 +175,14 @@ final class KenBurnsModel: ObservableObject {
     /// The clip touching this one's start / end on its track (nil when there is none).
     @Published private(set) var previous: Neighbour?
     @Published private(set) var next: Neighbour?
+    /// Ken Burns mode: the part of the sequence plane (sequence pixels) the program monitor shows so
+    /// that every corner of both rectangles is on it: the frame and the rectangles' bounds, or nil
+    /// while both rectangles lie inside the frame box (the monitor then shows the frame alone, as when
+    /// the editor is closed). A rectangle leaves the frame box on a clip placed inside the frame (a
+    /// picture in picture's is 3.3 frames wide at 30 %) or with values typed or made in Transform
+    /// mode (post-lanes review M2). Re-read with the rectangles but never during a drag, so the
+    /// monitor does not rescale under the pointer. Nil in Transform mode (its margin is fixed).
+    @Published private(set) var monitorExtent: CGRect?
     /// Why the last edit was refused or limited (nil when it went as asked).
     @Published private(set) var note: String?
     /// A box drag is in progress (its coalescing group is open).
@@ -234,6 +242,7 @@ final class KenBurnsModel: ObservableObject {
                                                sequence: sequenceSize)
         readBoxes()
         readOutlines()
+        readContinueOnNextClipProblem()
     }
 
     // MARK: Mode
@@ -327,24 +336,57 @@ final class KenBurnsModel: ObservableObject {
         if after != self.next { self.next = after }
         if !isDragging { readBoxes() }
         readOutlines()
+        readContinueOnNextClipProblem()
     }
 
     /// The Motion an edge of the span shows (static values with every started span composed on, this
     /// one at that edge), or the clip's Motion there if the engine cannot say.
     private func edgeMotion(atEnd: Bool) -> VEVideoParams {
+        Self.edgeMotion(of: span, clip: clip, atEnd: atEnd, frameDuration: frameDuration)
+    }
+
+    /// The Motion an edge of `span` of `clip` shows (see `edgeMotion(atEnd:)`).
+    static func edgeMotion(of span: VEEffectSpan, clip: VEClipInfo, atEnd: Bool,
+                           frameDuration: CMTime) -> VEVideoParams {
         var motion = VEVideoParams()
-        if clip.getMotion(&motion, atEdgeOfSpan: spanID, atEnd: atEnd, frameDuration: frameDuration) {
+        if clip.getMotion(&motion, atEdgeOfSpan: span.spanID, atEnd: atEnd, frameDuration: frameDuration) {
             return motion
         }
         return clip.motion(at: atEnd ? CMTimeSubtract(span.end, frameDuration) : span.start)
     }
 
-    /// Re-reads both boxes (or rectangles) from the span's edges.
+    /// The mode the editor opens `span` of `clip` in when no mode is remembered for it
+    /// (`automaticMode(start:picture:sequence:)` at the span's start); nil when the editor cannot open
+    /// on it (`problem`).
+    static func automaticMode(span: VEEffectSpan, clip: VEClipInfo, asset: VEAssetInfo,
+                              sequence: VESequenceInfo) -> KenBurnsMode? {
+        guard problem(span: span, clip: clip, asset: asset, sequence: sequence) == nil else { return nil }
+        let start = edgeMotion(of: span, clip: clip, atEnd: false, frameDuration: sequence.frameDuration)
+        return automaticMode(start: start, picture: CGSize(width: asset.width, height: asset.height),
+                             sequence: CGSize(width: sequence.width, height: sequence.height))
+    }
+
+    /// Re-reads both boxes (or rectangles) from the span's edges, and what the monitor shows around
+    /// the frame in Ken Burns mode (`monitorExtent`).
     private func readBoxes() {
         let first = shape(for: edgeMotion(atEnd: false))
         let last = shape(for: edgeMotion(atEnd: true))
         if start != first { start = first }
         if end != last { end = last }
+        let extent = mode == .kenBurns ? Self.extent(of: [first, last], frame: frameBox) : nil
+        if extent != monitorExtent {
+            monitorExtent = extent
+            store.kenBurnsExtentDidChange(self)
+        }
+    }
+
+    /// The frame with every corner of `shapes` (sequence pixels), or nil when all of them lie inside
+    /// `frame` (to a millionth of a pixel).
+    static func extent(of shapes: [KenBurnsBox], frame: CGRect) -> CGRect? {
+        let corners = shapes.flatMap(\.corners)
+        let inside = frame.insetBy(dx: -1e-6, dy: -1e-6)
+        guard !corners.allSatisfy({ inside.contains($0) }) else { return nil }
+        return corners.reduce(frame) { $0.union(CGRect(origin: $1, size: .zero)) }
     }
 
     /// What the current mode draws for an edge whose composed Motion is `motion`: its placement box
@@ -571,6 +613,7 @@ final class KenBurnsModel: ObservableObject {
         isDragging = false
         dragBase = nil
         store.cancelActiveGesture = nil
+        readContinueOnNextClipProblem()
     }
 
     /// Where a box's centre may be dragged: the frame and `reachFraction` of it around it, widened to
@@ -800,9 +843,16 @@ final class KenBurnsModel: ObservableObject {
     }
 
     /// Why Continue on Next Clip cannot carry this move on to the next clip (the engine's sentence), nil
-    /// when it can (`ProjectStore.continueMotionProblem`).
-    var continueOnNextClipProblem: String? {
-        store.continueMotionProblem(spanID)
+    /// when it can (`ProjectStore.continueMotionProblem`). Read once per model change (`update`), not
+    /// by the bar's body, and held during a drag (whose steps change the span's values every step;
+    /// the button cannot be pressed meanwhile): re-read when the drag ends (review L5).
+    @Published private(set) var continueOnNextClipProblem: String?
+
+    /// Re-reads `continueOnNextClipProblem` (not during a drag).
+    private func readContinueOnNextClipProblem() {
+        guard !isDragging else { return }
+        let problem = store.continueMotionProblem(spanID)
+        if problem != continueOnNextClipProblem { continueOnNextClipProblem = problem }
     }
 
     /// Continue on Next Clip: a new Motion span on the clip after this one continues this move from where
@@ -1015,6 +1065,45 @@ struct KenBurnsViewport: Equatable {
     let frame: CGRect
     /// Points per sequence pixel.
     let scale: CGFloat
+
+    /// Room kept between what the Ken Burns mode's extent holds and the monitor's edge (points): a
+    /// corner handle and its hit area fit inside.
+    static let extentPadding: CGFloat = 12
+
+    /// The viewport the program monitor's layout gives the picture and the Ken Burns editor: closed,
+    /// the frame fitted into the whole monitor; Transform mode, inside `marginFraction`; Ken Burns
+    /// mode, the whole monitor while both rectangles are inside the frame box, else `extent` (the
+    /// frame and the rectangles, `KenBurnsModel.monitorExtent`) fitted with `extentPadding` to spare,
+    /// never showing the frame larger than Transform mode does (review M2: a picture in picture's
+    /// rectangles are larger than the frame, and their corners must be on the monitor to zoom).
+    static func editor(mode: KenBurnsMode?, extent: CGRect?, sequence: CGSize, monitor: CGSize) -> KenBurnsViewport {
+        switch mode {
+        case .transform:
+            return KenBurnsViewport(sequence: sequence, monitor: monitor, margin: marginFraction)
+        case .kenBurns:
+            if let extent {
+                return KenBurnsViewport(sequence: sequence, monitor: monitor, showing: extent)
+            }
+            return KenBurnsViewport(sequence: sequence, monitor: monitor, margin: 0)
+        case nil:
+            return KenBurnsViewport(sequence: sequence, monitor: monitor, margin: 0)
+        }
+    }
+
+    /// `extent` (sequence pixels; it holds the frame) fitted and centred in the monitor less
+    /// `extentPadding` on each side, at no larger a scale than the Transform margin gives.
+    init(sequence: CGSize, monitor: CGSize, showing extent: CGRect) {
+        let standard = KenBurnsViewport(sequence: sequence, monitor: monitor, margin: Self.marginFraction)
+        let inner = CGSize(width: max(0, monitor.width - 2 * Self.extentPadding),
+                           height: max(0, monitor.height - 2 * Self.extentPadding))
+        let fit = extent.width > 0 && extent.height > 0
+            ? min(inner.width / extent.width, inner.height / extent.height) : standard.scale
+        let scale = max(min(fit, standard.scale), 1e-6)
+        self.monitor = monitor
+        self.scale = scale
+        frame = CGRect(x: monitor.width / 2 - extent.midX * scale, y: monitor.height / 2 - extent.midY * scale,
+                       width: sequence.width * scale, height: sequence.height * scale)
+    }
 
     init(sequence: CGSize, monitor: CGSize, margin: CGFloat = KenBurnsViewport.marginFraction) {
         self.monitor = monitor

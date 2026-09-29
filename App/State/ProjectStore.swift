@@ -169,6 +169,10 @@ final class ProjectStore: ObservableObject {
     /// program monitor's layout (which observes the store) follows a mode switch: Ken Burns shows the
     /// picture without a margin, Transform inside one.
     @Published private(set) var kenBurnsMode: KenBurnsMode?
+    /// The open editor's `KenBurnsModel.monitorExtent` (nil while it is closed), republished for the
+    /// program monitor's layout like `kenBurnsMode`: in Ken Burns mode with a rectangle outside the
+    /// frame box, the monitor shows the frame with room for the rectangles (review M2).
+    @Published private(set) var kenBurnsExtent: CGRect?
     /// The Ken Burns editor's mode the user chose for each Motion span (the editor's switch, or an
     /// entry point with an intent: the Effects tab's Ken Burns and Move, Clip > Add Ken Burns… and
     /// Add Motion Span). A span without one opens in the automatic mode. Kept for the session of the
@@ -187,7 +191,14 @@ final class ProjectStore: ObservableObject {
     var timelineViewportHeight: CGFloat = 0
 
     /// Cancels the timeline gesture in progress (set by the timeline while dragging).
-    var cancelActiveGesture: (() -> Void)?
+    var cancelActiveGesture: (() -> Void)? {
+        didSet {
+            // A gesture starting or ending changes what the Effects tab's "+" allows.
+            if (cancelActiveGesture == nil) != (oldValue == nil) { laneEffects.scheduleRefresh() }
+        }
+    }
+    /// What the Effects tab's lane-effect tiles draw (they observe it, not the store; review L5).
+    private(set) lazy var laneEffects = LaneEffectsAvailability(store: self)
 
     /// The editor window (set by `ContentView`). Keyboard shortcuts are taken only from it, and
     /// clicks in the timeline, monitors and bin take keyboard focus back from its text fields. The
@@ -213,6 +224,10 @@ final class ProjectStore: ObservableObject {
     /// Number of times the timeline's content model was rebuilt (once per change of what it draws;
     /// diagnostics and tests).
     private(set) var timelineBuildCount = 0
+    /// `continueMotionProblem`'s last answer, for the span and engine change count it was read at.
+    var continueMotionProblemCache: (span: VESpanID, change: UInt64, problem: String?)?
+    /// Times `continueMotionProblem` asked the engine (diagnostics and tests).
+    var continueMotionProblemReads = 0
     private var cachedTimeline: (key: TimelineCacheKey, drawn: DrawnTimeline, model: TimelineViewModel)?
     /// What the timeline's content model is made of (compared to decide whether to rebuild it).
     private struct DrawnTimeline: Equatable {
@@ -815,7 +830,19 @@ final class ProjectStore: ObservableObject {
                 + "Use Split at Playhead, Removing Transitions (⌥⌘K) to split it anyway."
             return
         }
-        report(result)
+        if report(result) {
+            inheritKenBurnsModes(result.dividedSpanIDs)
+        }
+    }
+
+    /// A split divided Motion spans: each right piece's part (a new span id) opens in the Ken Burns
+    /// editor mode chosen for the span it came from (review L6); `divided` maps the part to that span.
+    func inheritKenBurnsModes(_ divided: [NSNumber: NSNumber]) {
+        for (part, original) in divided {
+            if let mode = kenBurnsModes[original.int64Value] {
+                kenBurnsModes[part.int64Value] = mode
+            }
+        }
     }
 
     /// Whether Delete has something to remove in the focused panel.
@@ -1141,6 +1168,13 @@ final class ProjectStore: ObservableObject {
         syncProgramPreview()
     }
 
+    /// The open editor's rectangles left or entered the frame box (`KenBurnsModel.monitorExtent`):
+    /// the program monitor's layout follows.
+    func kenBurnsExtentDidChange(_ model: KenBurnsModel) {
+        guard model === kenBurns, kenBurnsExtent != model.monitorExtent else { return }
+        kenBurnsExtent = model.monitorExtent
+    }
+
     /// Remembers the Ken Burns editor's mode for a span (an entry point with an intent); the open
     /// editor on that span switches to it.
     func rememberKenBurnsMode(_ mode: KenBurnsMode, for span: VESpanID) {
@@ -1157,6 +1191,8 @@ final class ProjectStore: ObservableObject {
     func syncProgramPreview() {
         let mode = kenBurns?.mode
         if kenBurnsMode != mode { kenBurnsMode = mode }
+        let extent = kenBurns?.monitorExtent
+        if kenBurnsExtent != extent { kenBurnsExtent = extent }
         if let kenBurns, kenBurns.mode == .kenBurns {
             let clip = kenBurns.clip.clipID
             if engine.programPreviewSoloClipID != clip || !engine.programPreviewSoloIdentityMotion {
@@ -1536,6 +1572,7 @@ final class ProjectStore: ObservableObject {
         kenBurnsClosedSpan = nil
         kenBurnsFailedSpan = nil
         kenBurnsModes = [:] // span ids restart per project
+        continueMotionProblemCache = nil // so do the engine's change counts
         syncProgramPreview()
         // Media still arriving belongs to the previous project (its Media folder).
         incoming.discardAll()

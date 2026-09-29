@@ -345,7 +345,8 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)splitClip:(VEClipID)clipID atTime:(CMTime)time;
 /// Splits the given clips at `time` (clips not spanning `time` are skipped); an empty list
 /// splits every clip under `time` on unlocked tracks. One undo step. A split inside a
-/// transition is refused (VEEditErrorInsideTransition).
+/// transition is refused (VEEditErrorInsideTransition). The result's dividedSpanIDs pair each
+/// effect span the cut divided with its right piece's part.
 - (VEEditResult *)splitClips:(NSArray<NSNumber *> *)clipIDs atTime:(CMTime)time;
 /// Like splitClips:atTime:, but with `breakingTransitions` a transition around the split point
 /// is removed (listed in droppedTransitionIDs) instead of refusing.

@@ -29,7 +29,8 @@ enum MonitorFrame {
 /// render path) is sized to the sequence's frame: closed, and in Ken Burns mode (the clip alone),
 /// fitted into the whole area; in Transform mode fitted inside a margin (`KenBurnsViewport`) that
 /// stands for the space off the frame, so a box larger than the frame or partly off it keeps its
-/// corners and body on screen. The area around the frame is `MonitorFrame.outsideColor`, the frame's
+/// corners and body on screen; in Ken Burns mode with a rectangle outside the frame box (a picture in
+/// picture's), fitted with the rectangles around it (`KenBurnsViewport.editor`). The area around the frame is `MonitorFrame.outsideColor`, the frame's
 /// edge a thin line while the editor is open; the editor's boxes or rectangles and the other clips'
 /// outlines are drawn over the whole area and its bar (range, caption, toggles, mode, smoothing,
 /// Swap, Close) below it. A selected Opacity or Gain span shows its readout instead. The debug HUD
@@ -43,10 +44,12 @@ struct ProgramMonitorLayout<Picture: View>: View {
     var body: some View {
         let editor = store.kenBurns
         let sequenceSize = CGSize(width: store.sequence.width, height: store.sequence.height)
-        let margin = store.kenBurnsMode == .transform ? KenBurnsViewport.marginFraction : 0
+        let mode = store.kenBurnsMode
+        let extent = store.kenBurnsExtent
         VStack(spacing: 0) {
             GeometryReader { geometry in
-                let viewport = KenBurnsViewport(sequence: sequenceSize, monitor: geometry.size, margin: margin)
+                let viewport = KenBurnsViewport.editor(mode: mode, extent: extent, sequence: sequenceSize,
+                                                       monitor: geometry.size)
                 let frame = sequenceSize.width > 0 && sequenceSize.height > 0
                     ? viewport.frame : CGRect(origin: .zero, size: geometry.size)
                 ZStack(alignment: .topLeading) {

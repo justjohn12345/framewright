@@ -693,11 +693,12 @@ EditResult SplitClip::perform(const Project &, Sequence &sequence, IdGenerator &
         std::erase_if(sequence.findClip(owner)->spans, [spanId](const EffectSpan &span) { return span.id == spanId; });
     }
     created_.clear();
+    divided_.clear();
     SplitList splits;
     for (const ClipId clipId : splitting) {
         Track &track = *sequence.trackOfClip(clipId);
         ClipId right;
-        if (EditResult r = splitClipAt(sequence, track, *track.indexOf(clipId), at, ids, right); !r) {
+        if (EditResult r = splitClipAt(sequence, track, *track.indexOf(clipId), at, ids, right, &divided_); !r) {
             return r;
         }
         splits.emplace_back(clipId, right);

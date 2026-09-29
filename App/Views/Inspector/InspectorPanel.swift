@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// The right-hand panel: the Inspector (the selection's properties) and Effects (the transitions to
@@ -43,7 +44,8 @@ struct InspectorPanel: View {
 /// of 5 s, a Fade or Gain of the default transition length); Ken Burns and Move also have a "+" that
 /// adds them at the playhead on the selected clip (like Clip > Add Ken Burns… and Add Motion Span).
 struct EffectsPanel: View {
-    @ObservedObject var store: ProjectStore
+    /// Passed to the panels, which observe what they draw; not observed here (nothing of it is drawn).
+    let store: ProjectStore
 
     var body: some View {
         ScrollView {
@@ -55,7 +57,7 @@ struct EffectsPanel: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 8)
-                LaneEffectsPanel(store: store)
+                LaneEffectsPanel(store: store, availability: store.laneEffects)
                 Text("Drag an effect onto an effect lane under a clip (or onto the clip: the first lane with room), "
                     + "or press + to add Ken Burns or a Move at the playhead on the selected clip. Motion spans are "
                     + "also made by dragging across an empty lane of a video track, or with ⌃K.")
@@ -70,11 +72,57 @@ struct EffectsPanel: View {
     }
 }
 
+/// What the Effects tab's lane-effect tiles draw from the store: whether "+" can add a Motion span at
+/// the playhead (`ProjectStore.canAddMotionSpanAtPlayhead`). Re-read after every change of the store
+/// (and when a gesture starts or ends) and republished only when it changes, so the tiles do not
+/// redraw on every change of the store: a Ken Burns drag changes the model on every step (post-lanes
+/// review L5).
+@MainActor
+final class LaneEffectsAvailability: ObservableObject {
+    @Published private(set) var canAddMotionSpan = false
+    private unowned let store: ProjectStore
+    private var subscription: AnyCancellable?
+    private var refreshScheduled = false
+
+    init(store: ProjectStore) {
+        self.store = store
+        canAddMotionSpan = store.canAddMotionSpanAtPlayhead
+        // objectWillChange comes before the change: read the store once it is done.
+        subscription = store.objectWillChange.sink { [weak self] _ in self?.scheduleRefresh() }
+    }
+
+    /// Re-reads the availability on the main queue's next turn (once however many changes come first).
+    func scheduleRefresh() {
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            refreshScheduled = false
+            refresh()
+        }
+    }
+
+    func refresh() {
+        let can = store.canAddMotionSpanAtPlayhead
+        if can != canAddMotionSpan { canAddMotionSpan = can }
+    }
+}
+
+/// Counters of the Effects tab's drawing (diagnostics and the redraw-count tests).
+@MainActor
+enum EffectsPanelDiagnostics {
+    /// `LaneEffectsPanel` body evaluations.
+    static var laneEffectsBodies = 0
+}
+
 /// The effects that go on a clip's effect lanes: Ken Burns and Move (Motion spans on video, opened in
 /// Ken Burns and Transform mode), Fade (an Opacity span on video) and Gain (an audio span), each a
-/// drag source (`EffectReference`); Ken Burns and Move also add at the playhead with "+".
+/// drag source (`EffectReference`); Ken Burns and Move also add at the playhead with "+". It observes
+/// only what it draws (`LaneEffectsAvailability`), not the store.
 struct LaneEffectsPanel: View {
-    @ObservedObject var store: ProjectStore
+    /// For the "+" buttons' action; not observed.
+    let store: ProjectStore
+    @ObservedObject var availability: LaneEffectsAvailability
 
     private static func color(_ kind: EffectKind) -> Color {
         switch kind.spanKind {
@@ -85,7 +133,8 @@ struct LaneEffectsPanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        EffectsPanelDiagnostics.laneEffectsBodies += 1
+        return VStack(alignment: .leading, spacing: 4) {
             Text("Lane Effects")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -127,7 +176,7 @@ struct LaneEffectsPanel: View {
                     Image(systemName: "plus.circle")
                 }
                 .buttonStyle(.borderless)
-                .disabled(!store.canAddMotionSpanAtPlayhead)
+                .disabled(!availability.canAddMotionSpan)
                 .help("Add at the playhead on the selected clip")
                 .accessibilityIdentifier("Effect.\(kind.rawValue).add")
             }

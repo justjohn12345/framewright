@@ -65,6 +65,8 @@ VEEditErrorCode toVE(EditError error);
 /// refusal's free range is passed on.
 VEEditResult *makeEditResult(const EditResult &result, NSArray<NSNumber *> *created, NSString *note,
                              VEEffectSpan *span = nil);
+/// Records a split's divided spans (SplitClip::dividedSpans) on its successful result.
+void setDividedSpans(VEEditResult *result, const std::vector<std::pair<SpanId, SpanId>> &divided);
 VETransitionLimit *makeTransitionLimit(const TransitionLimit &limit);
 VEPlaybackState playbackStateToVE(playback::PlaybackState state);
 VEPlaybackStatus *makePlaybackStatus(const playback::PlaybackStatus &status);

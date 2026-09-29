@@ -450,6 +450,10 @@ typedef NS_ENUM(NSInteger, VEEditErrorCode) {
 /// back to the synced tracks, a transition fitted to its cut. What the edit removed as a side
 /// effect is not in it: see droppedTransitionIDs and droppedSpanIDs (the app words them).
 @property (nonatomic, readonly, copy) NSString *note;
+/// A split: the effect spans the cut divided, keyed by the id of the right piece's part (new) with
+/// the id of the span it came from (which the left piece keeps) as the value. Empty for every other
+/// edit.
+@property (nonatomic, readonly, copy) NSDictionary<NSNumber *, NSNumber *> *dividedSpanIDs;
 + (instancetype)success;
 + (instancetype)successWithCreatedIDs:(NSArray<NSNumber *> *)createdIDs;
 + (instancetype)failureWithMessage:(NSString *)message;

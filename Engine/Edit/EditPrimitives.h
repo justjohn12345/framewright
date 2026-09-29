@@ -59,11 +59,13 @@ EditResult retimeRefusal(RetimeResult result, ClipId clipId, CMTime at);
 // the left piece keeps a divided span's id, the right piece's part gets a new one; a span wholly
 // before the cut stays on the left piece and the value it holds becomes part of the right piece's
 // static values (Clip::fitSpans); both pieces show exactly what the clip showed. Stores the right
-// piece's id in `rightId`. Fails (changing nothing) with NotRepresentable when the right piece's
-// source in point has no exact CMTime form, and with InvalidArgument when a custom timing curve
-// (from a project file) overshoots a parameter's range at the cut.
+// piece's id in `rightId`, and appends each divided span to `divided` (when given) as (its id, which
+// the left piece keeps; the id of the right piece's part). Fails (changing nothing) with
+// NotRepresentable when the right piece's source in point has no exact CMTime form, and with
+// InvalidArgument when a custom timing curve (from a project file) overshoots a parameter's range at
+// the cut.
 EditResult splitClipAt(Sequence &sequence, Track &track, std::size_t index, CMTime at, IdGenerator &ids,
-                       ClipId &rightId);
+                       ClipId &rightId, std::vector<std::pair<SpanId, SpanId>> *divided = nullptr);
 
 // Links the right pieces of split clips whose left pieces are linked to each other, so a split
 // linked pair yields two linked pairs.
