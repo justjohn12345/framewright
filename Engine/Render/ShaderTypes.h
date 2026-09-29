@@ -21,6 +21,7 @@ typedef simd_uint4 VEUInt4;
 enum VEBufferIndex {
     VEBufferIndexDraw = 0,    // VEDrawUniforms (vertex and fragment)
     VEBufferIndexConvert = 0, // VEConvertUniforms (compute)
+    VEBufferIndexUnsharp = 0, // VEUnsharpUniforms (compute)
 };
 
 enum VETextureIndex {
@@ -32,6 +33,9 @@ enum VETextureIndex {
     VETextureIndexComposite = 0, // RGBA16Float intermediate (read)
     VETextureIndexOut0 = 1,      // BGRA, or luma of a biplanar target (write)
     VETextureIndexOut1 = 2,      // CbCr of a biplanar target (write)
+    // Unsharp mask of a pre-scaled plane.
+    VETextureIndexUnsharpSource = 0,      // the Lanczos output (read)
+    VETextureIndexUnsharpDestination = 1, // the sharpened plane (write)
 };
 
 // Function constants that specialise the fragment function (one pipeline per combination).
@@ -88,6 +92,16 @@ struct VEDrawUniforms {
     VEFloat4 reserved;
     struct VESourceUniforms a;
     struct VESourceUniforms b;
+};
+
+// The unsharp mask of a pre-scaled plane (Compositor.h "Sharpening").
+struct VEUnsharpUniforms {
+    // x: amount; y: threshold t (the mask fades in over |c - blur| in [t, 2t]); z: 1 for a luma
+    // plane (sharpen .r, keep it within [min(range.x, c), max(range.y, c)]), 0 for premultiplied RGBA
+    // (sharpen .rgb within [0, alpha], keep alpha); w: unused.
+    VEFloat4 params;
+    // x, y: the luma plane's nominal range in unorm (16/255 and 235/255 for 8-bit video range...).
+    VEFloat4 range;
 };
 
 // RGB -> output conversion for the export compute pass.

@@ -93,6 +93,18 @@ final class SequenceSettingsTests: XCTestCase {
         XCTAssertEqual(store.sequence.audioSampleRate, 48000)
     }
 
+    func testTheSharpeningIsAppliedWithTheSettings() throws {
+        let store = fixture.store
+        let model = try openSheet()
+        XCTAssertTrue(model.sharpenScaledDownSources)
+        model.sharpenScaledDownSources = false
+        XCTAssertTrue(model.changes.contains("Scaled-down sources are no longer sharpened."), "\(model.changes)")
+        XCTAssertTrue(store.engine.sharpenScaledDownSources, "not before Apply")
+        XCTAssertTrue(model.apply())
+        XCTAssertFalse(store.engine.sharpenScaledDownSources)
+        XCTAssertFalse(try openSheet().sharpenScaledDownSources, "the sheet shows the project's setting")
+    }
+
     func testCustomSizesAndRatesAndRefusals() throws {
         let store = fixture.store
         // A sequence at a rate outside the list (a project made elsewhere) shows it as custom.

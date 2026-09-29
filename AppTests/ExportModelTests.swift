@@ -373,4 +373,25 @@ final class ExportModelTests: XCTestCase {
         XCTAssertFalse(ExportModel.hasSource(in: store, largerThan: CGSize(width: 480, height: 400)),
                        "the 640x480 still is larger but not a video source; the portrait movie is not larger")
     }
+
+    /// The export sheet's "Sharpen scaled-down sources" is the project's setting: toggling it is an undo
+    /// step of the project, and the sheet shows what an undo (or the Sequence Settings sheet) sets.
+    func testTheSharpeningToggleIsTheProjectsSetting() throws {
+        let store = fixture.store
+        let model = makeModel()
+        XCTAssertTrue(model.sharpenScaledDownSources, "on by default")
+        var changes = 0
+        let watch = model.objectWillChange.sink { changes += 1 }
+        model.sharpenScaledDownSources = false
+        XCTAssertFalse(store.engine.sharpenScaledDownSources)
+        XCTAssertEqual(store.engine.undoActionName, "Don't Sharpen Scaled-Down Sources")
+        XCTAssertTrue(store.engine.undo())
+        XCTAssertTrue(model.sharpenScaledDownSources)
+        XCTAssertGreaterThanOrEqual(changes, 2, "the sheet redraws for the edit and for the undo")
+        // Setting it to what it is changes nothing.
+        let steps = store.engine.undoActionName
+        model.sharpenScaledDownSources = true
+        XCTAssertEqual(store.engine.undoActionName, steps)
+        withExtendedLifetime(watch) {}
+    }
 }

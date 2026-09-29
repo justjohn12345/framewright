@@ -131,6 +131,7 @@ final class ExportModel: ObservableObject {
     /// The name (without extension) of the last file chosen, offered again after a container change.
     private var lastChosenName: String?
     private var preferencesForwarding: AnyCancellable?
+    private var modelForwarding: AnyCancellable?
 
     /// The clock the progress throttle uses (tests inject their own).
     var now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
@@ -166,6 +167,10 @@ final class ExportModel: ObservableObject {
         preferencesForwarding = store.preferences.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        // The sharpening toggle follows the project (an undo, the Sequence Settings sheet).
+        modelForwarding = NotificationCenter.default
+            .publisher(for: .VEEngineModelDidChange, object: store.engine)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
         refreshFormats()
     }
 
@@ -271,6 +276,17 @@ final class ExportModel: ObservableObject {
             guard videoTracks.contains(clip.trackID), let asset = store.assetsByID[clip.assetID],
                   asset.hasVideo, !asset.isStill else { return false }
             return CGFloat(asset.width) > size.width || CGFloat(asset.height) > size.height
+        }
+    }
+
+    /// The project's "Sharpen scaled-down sources", edited here as in Sequence Settings (one setting: an
+    /// undoable edit of the project, read back from the engine).
+    var sharpenScaledDownSources: Bool {
+        get { store.engine.sharpenScaledDownSources }
+        set {
+            guard newValue != store.engine.sharpenScaledDownSources else { return }
+            objectWillChange.send()
+            store.report(store.engine.setSharpenScaledDownSources(newValue))
         }
     }
 
@@ -498,6 +514,9 @@ struct ExportSheet: View {
                         .frame(width: 160)
                 }
                 LabeledContent("Frame size", value: model.sizeText)
+                Toggle("Sharpen scaled-down sources", isOn: $model.sharpenScaledDownSources)
+                    .help(SequenceSettingsModel.sharpenHelp + " A project setting (Sequence Settings).")
+                    .accessibilityIdentifier("ExportSharpen")
                 if !model.isProRes {
                     Picker("Rate control", selection: $model.rateControl) {
                         Text("Quality").tag(VEExportRateControl.quality)

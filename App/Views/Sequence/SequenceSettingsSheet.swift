@@ -5,7 +5,8 @@ import SwiftUI
 import FramewrightEngine
 
 /// The Sequence Settings sheet's logic (Sequence > Sequence Settings…): the frame size (common presets
-/// or a custom even size), the frame rate (the engine's standard list), the audio sample rate, what
+/// or a custom even size), the frame rate (the engine's standard list), the audio sample rate, the
+/// project's "Sharpen scaled-down sources" (VEEngine.sharpenScaledDownSources), what
 /// applying them does to the clips (the engine's preview, re-read as the values change), the
 /// confirmation before a change of size or frame rate is applied to a sequence with clips, and Apply
 /// (one undo step).
@@ -27,6 +28,10 @@ final class SequenceSettingsModel: ObservableObject {
         SizePreset(title: "1080 × 1080 (square)", width: 1080, height: 1080),
     ]
     static let standardSampleRates = [44100, 48000]
+    /// What "Sharpen scaled-down sources" does (the sheet's and the export sheet's help).
+    static let sharpenHelp = "A picture drawn smaller than 3/4 of its size (a 4K recording in a 1080p "
+        + "sequence or export, any picture in a small monitor) gets a light unsharp mask after it is scaled "
+        + "down, so fine text stays crisp. Monitors and export alike."
 
     /// The Frame size picker's value: a preset (index into sizePresets) or the custom fields.
     enum SizeChoice: Hashable {
@@ -207,6 +212,9 @@ struct SequenceSettingsSheet: View {
                 Picker("Audio sample rate", selection: $model.audioSampleRate) {
                     ForEach(model.sampleRates, id: \.self) { Text(SequenceSettingsModel.sampleRateTitle($0)).tag($0) }
                 }
+                Toggle("Sharpen scaled-down sources", isOn: $model.sharpenScaledDownSources)
+                    .help(SequenceSettingsModel.sharpenHelp)
+                    .accessibilityIdentifier("SequenceSharpen")
             }
             if !model.changes.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {

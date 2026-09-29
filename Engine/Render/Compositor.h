@@ -44,7 +44,10 @@
 // MPSImageLanczosScale into a pooled texture of about its drawn size, then sampled bilinearly at
 // ~1:1. Straight-alpha RGBA is premultiplied into a pooled RGBA8 texture before resampling.
 // Pooled textures are keyed by (format, size), with sizes rounded up to 1/16-1/32 steps so a
-// live resize reuses them, and released after 120 frames unused (or releaseScratchMemory()).
+// live resize reuses them (texture targets: the monitors), and released after 120 frames unused
+// (or releaseScratchMemory()). Pixel-buffer targets (exports, a fixed size) pre-scale to the drawn
+// size itself, rounded up to a whole texel, so their planes are sampled at 1:1 (a 4K picture at
+// 1080p: 1080 rows, not 1088 resampled onto 1080, which blurred fine text in bands).
 // Why this and not the alternatives (measured on this Apple-silicon Mac; standalone numbers are
 // GPU time per plane of a 3840x2160 4:2:0 frame resampled to 1920x1080):
 //   - MPSImageBilinearScale: 0.13 ms for the luma plane, but it does not widen its kernel when
@@ -58,6 +61,22 @@
 //     mipmapped RGBA16F texture every frame (66 MB + 22 MB of mips for 4K, about three times
 //     the bytes the Lanczos pass moves), and a box-filtered mip chain blurs more than Lanczos.
 // Pictures drawn at >= 0.75 of their size (including all magnification) take no extra pass.
+//
+// Sharpening (RenderGraph::sharpenMinified, the project's "Sharpen scaled-down sources"): a Lanczos
+// pre-scaled plane is then sharpened with an unsharp mask into a second pooled texture, which the
+// draw samples: out = c + kSharpenAmount * g(c - blur(c)), where blur is the separable binomial
+// kernel [1 4 6 4 1] / 16 in both directions (a Gaussian of sigma 1 texel reaching 2 texels, about 2
+// output pixels, since the pre-scaled plane is about output size; ffmpeg's unsharp=5:5 uses the same
+// kernel) and g(d) = d * smoothstep(t, 2t, |d|) with t = kSharpenThreshold leaves flat areas and faint
+// noise alone. YCbCr sources: the luma plane only (chroma is not sharpened, as ffmpeg's unsharp=5:5:0.6
+// leaves it), the result held within the format's nominal luma range (16-235 / 64-940 for video
+// range, 0-1 for full range) or the texel's own value when that lies outside. RGBA sources: the
+// premultiplied colour, each channel within [0, alpha]; alpha is left as the pre-scale made it. The
+// kernel is a plain compute pass over fixed arithmetic, so the program monitor, the solo preview, the
+// output display, the source monitor and the export (each its own Compositor) produce the same planes.
+// Pictures that are not pre-scaled are never sharpened. Cost (testPreviewOf4KSourceTiming): the 4K
+// luma plane shown at 1080p gains one 5x5 pass over the 1920x1080 pre-scaled plane, 0.61 -> 0.88 ms
+// of GPU time per frame.
 //
 // Resources: one render pipeline per (source A class, has partner, source B class, target
 // format), created lazily and cached (those for create()'s prepared formats up front).
@@ -142,6 +161,7 @@ struct RenderResult {
     std::vector<SkippedLayer> skippedLayers; ///< Layers left out because their picture was missing.
     std::size_t drawnLayers = 0;            ///< Layers that had a picture (a dissolve pair counts 2).
     std::size_t prescaledPlanes = 0;        ///< Source planes Lanczos pre-scaled for minification.
+    std::size_t sharpenedPlanes = 0;        ///< Pre-scaled planes sharpened (RenderGraph::sharpenMinified).
     double gpuSeconds = 0;                  ///< GPU execution time of the frame's command buffer.
     /// Host times (seconds, CACurrentMediaTime base) the GPU started and finished the frame.
     /// Frames in flight overlap, so GPU load is the union of these intervals, not a sum.
@@ -167,6 +187,9 @@ enum class Submission {
 class Compositor {
   public:
     static constexpr std::size_t kFramesInFlight = 3;
+    /// The unsharp mask's amount and threshold (grey levels 0...1): see "Sharpening" above.
+    static constexpr double kSharpenAmount = 0.6;
+    static constexpr double kSharpenThreshold = 2.0 / 255.0;
 
     /// Loads the engine's Metal library from the framework bundle and prepares the pipelines
     /// for rendering into `preparedFormats` (pipelines for other target formats are built on

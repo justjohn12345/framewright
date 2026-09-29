@@ -191,10 +191,32 @@ std::optional<media::Result<ex::ExportSummary>> runExport(ex::ExportRequest requ
     return *result;
 }
 
+/// kBlock x kBlock block means of the luma plane of a biplanar 8-bit YCbCr buffer (the codes as stored).
+std::vector<double> lumaBlockMeans(CVPixelBufferRef buffer) {
+    const size_t w = CVPixelBufferGetWidthOfPlane(buffer, 0), h = CVPixelBufferGetHeightOfPlane(buffer, 0);
+    std::vector<double> out((w / kBlock) * (h / kBlock), 0.0);
+    CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
+    const auto *base = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddressOfPlane(buffer, 0));
+    const size_t stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0);
+    for (size_t by = 0; by < h / kBlock; ++by) {
+        for (size_t bx = 0; bx < w / kBlock; ++bx) {
+            double sum = 0;
+            for (size_t y = by * kBlock; y < by * kBlock + kBlock; ++y) {
+                for (size_t x = bx * kBlock; x < bx * kBlock + kBlock; ++x) {
+                    sum += base[y * stride + x];
+                }
+            }
+            out[by * (w / kBlock) + bx] = sum / double(kBlock * kBlock);
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
+    return out;
+}
+
 /// Renders the harness's current frame (the program monitor's graph and textures) into a 32BGRA buffer of
 /// the pool's size, as the preview view composites it; false when a layer has no picture.
 bool renderMonitorFrame(PlaybackHarness &h, render::Compositor &compositor, media::PixelBufferPool &pool,
-                        media::PixelBuffer &out) {
+                        media::PixelBuffer &out, render::RenderResult *resultOut = nullptr) {
     const render::PreviewFrame &frame = h.frame();
     auto buffer = pool.makeBuffer();
     if (!buffer.ok()) {
@@ -211,21 +233,26 @@ bool renderMonitorFrame(PlaybackHarness &h, render::Compositor &compositor, medi
     if (!rendered.ok() || !rendered->status.ok() || !rendered->skippedLayers.empty()) {
         return false;
     }
+    if (resultOut != nullptr) {
+        *resultOut = rendered.value();
+    }
     out = std::move(buffer).value();
     return true;
 }
 
-/// The first `frames` frames of the movie at `path` decoded to 32BGRA, keyed by frame index (at `fps`).
+/// Frames `frames` of the movie at `path` decoded to `pixelFormat` (32BGRA by default), keyed by frame
+/// index (at `fps`).
 std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &router, const std::string &path,
-                                                   const std::vector<int64_t> &frames, int32_t fps) {
+                                                   const std::vector<int64_t> &frames, int32_t fps,
+                                                   OSType pixelFormat = kCVPixelFormatType_32BGRA) {
     std::map<int64_t, media::PixelBuffer> decoded;
     auto routed = router.probe(path);
     if (!routed.ok()) {
         return decoded;
     }
-    media::DecodeOptions bgra;
-    bgra.pixelFormat = kCVPixelFormatType_32BGRA;
-    auto decoder = router.makeVideoDecoder(*routed, -1, bgra);
+    media::DecodeOptions options;
+    options.pixelFormat = pixelFormat;
+    auto decoder = router.makeVideoDecoder(*routed, -1, options);
     if (!decoder.ok()) {
         return decoded;
     }
@@ -473,6 +500,116 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         const Difference other = compare(monitor[3], blockMeans(exported.at(4).get()));
         NSLog(@"PARITY 4K monitor frame 3 vs exported frame 4: %.1f", other.maxBlock);
         XCTAssertGreaterThan(other.maxBlock, 40.0);
+    }
+}
+
+/// A 3840x2160 screen recording with small text in a 1920x1080 sequence (the picture drawn at half its
+/// size: Lanczos pre-scaled and, with "Sharpen scaled-down sources" on, sharpened): the export (ProRes 422)
+/// shows the monitor's sharpened pictures, and it is sharper than the same export with the setting off
+/// (the edge measure of its text), so the sharpening reached it. Both sides are compared as luma codes:
+/// the monitor's frame composited into a '420v' buffer by the compositor's own conversion, the export
+/// decoded to '420v'. (Decoded to 32BGRA the export's mid-greys come out about 3 codes darker than the
+/// monitor's composite, sharpened or not: the decoder's own YCbCr-to-RGB conversion, which this picture
+/// of anti-aliased grey text shows far more than the other parity tests' pictures do.)
+- (void)testAMinifiedSharpenedSourceExportsTheMonitorsPictures {
+    const std::string moviePath = _dir + "/text4k-in-hd.mov";
+    const std::string written = writeTextCardMovie(moviePath, 3840, 2160, 10, 30, 60'000'000, 22, false, 4);
+    XCTAssertTrue(written.empty(), @"%s", written.c_str());
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    const AssetId movie = h.importAssetAtPath(moviePath);
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    XCTAssertEqual(h.sequence().width, 1920);
+    XCTAssertTrue(h.project.sharpenScaledDownSources);
+    h.addClip(h.v1, movie, 0, 10, kCMTimeZero);
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+
+    auto exportTo = [&](const std::string &path, bool sharpen) -> bool {
+        Project project = h.project;
+        project.sharpenScaledDownSources = sharpen;
+        ex::ExportRequest request;
+        request.project = std::make_shared<const Project>(project);
+        request.sequenceId = h.sequenceId;
+        request.encode.container = media::ContainerFormat::MOV;
+        media::VideoEncodeSettings v;
+        v.codec = media::VideoCodec::ProRes422;
+        v.width = 1920;
+        v.height = 1080;
+        request.encode.video = v;
+        request.outputPath = path;
+        ex::ExportServices services;
+        services.router = h.router;
+        services.cache = std::make_shared<media::FrameCache>();
+        services.routing = routingOf(project, *h.router);
+        std::string error;
+        auto result = runExport(request, services, error);
+        if (!result || !result->ok()) {
+            XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
+            return false;
+        }
+        return true;
+    };
+    const std::string sharpened = _dir + "/sharpened.mov", plain = _dir + "/plain.mov";
+    if (!exportTo(sharpened, true) || !exportTo(plain, false)) {
+        return;
+    }
+    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
+    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, 1920, 1080);
+    XCTAssertTrue(created.ok() && pool.ok());
+    if (!created.ok() || !pool.ok()) {
+        return;
+    }
+    const std::vector<int64_t> frames{0, 4, 9};
+    // The monitor's pictures with the setting on, then off (the same edit published to the controller).
+    auto monitorFrames = [&](bool sharpen) {
+        h.project.sharpenScaledDownSources = sharpen;
+        h.publishEdit();
+        std::map<int64_t, std::vector<double>> means;
+        for (int64_t f : frames) {
+            h.controller->seek(frames30(f));
+            h.presentExact();
+            media::PixelBuffer picture;
+            render::RenderResult rendered;
+            XCTAssertTrue(renderMonitorFrame(h, *created.value(), *pool, picture, &rendered), @"frame %lld", f);
+            XCTAssertEqual(rendered.prescaledPlanes, 1u);
+            XCTAssertEqual(rendered.sharpenedPlanes, sharpen ? 1u : 0u, @"the monitor sharpens the luma plane");
+            if (picture) {
+                means[f] = lumaBlockMeans(picture.get());
+            }
+        }
+        return means;
+    };
+    const auto monitorSharp = monitorFrames(true);
+    const auto monitorPlain = monitorFrames(false);
+    const auto exported = decodeFrames(*h.router, sharpened, frames, 30, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+    const auto unsharpened = decodeFrames(*h.router, plain, frames, 30, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+    const auto exportedRGB = decodeFrames(*h.router, sharpened, frames, 30);
+    const auto unsharpenedRGB = decodeFrames(*h.router, plain, frames, 30);
+    XCTAssertEqual(exported.size(), frames.size());
+    XCTAssertEqual(unsharpened.size(), frames.size());
+    for (int64_t f : frames) {
+        if (!exported.count(f) || !unsharpened.count(f) || !monitorSharp.count(f) || !monitorPlain.count(f)) {
+            continue;
+        }
+        const Difference d = compare(monitorSharp.at(f), lumaBlockMeans(exported.at(f).get()));
+        const Difference plainPair = compare(monitorPlain.at(f), lumaBlockMeans(unsharpened.at(f).get()));
+        const Difference crossed = compare(monitorSharp.at(f), lumaBlockMeans(unsharpened.at(f).get()));
+        NSLog(@"PARITY sharpened frame %lld: luma blocks differ by at most %.2f, on average %.3f (unsharpened pair "
+              @"%.2f, %.3f; the sharpened monitor against the unsharpened export %.2f, %.3f)",
+              f, d.maxBlock, d.meanBlock, plainPair.maxBlock, plainPair.meanBlock, crossed.maxBlock, crossed.meanBlock);
+        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld", f);
+        XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
+        XCTAssertLessThan(plainPair.meanBlock, 1.0, @"frame %lld", f);
+        XCTAssertGreaterThan(crossed.meanBlock, d.meanBlock * 2, @"frame %lld: the measure sees the sharpening", f);
+        if (exportedRGB.count(f) && unsharpenedRGB.count(f)) {
+            const double sharp = edgeMeasure(grayOf(exportedRGB.at(f).get()), 100, 100, 1700, 880);
+            const double soft = edgeMeasure(grayOf(unsharpenedRGB.at(f).get()), 100, 100, 1700, 880);
+            NSLog(@"PARITY sharpened frame %lld: edge measure %.4f, %.4f without sharpening", f, sharp, soft);
+            XCTAssertGreaterThan(sharp, soft * 1.1, @"frame %lld: the export is sharpened", f);
+        }
     }
 }
 

@@ -203,6 +203,46 @@ kernel void ve_premultiply(texture2d<float, access::read> source [[texture(0)]],
     destination.write(float4(c.rgb * c.a, c.a), gid);
 }
 
+// MARK: - Sharpening of pre-scaled planes
+
+// Compositor.h "Sharpening": out = c + amount * g(c - blur), blur the separable binomial [1 4 6 4 1] / 16
+// (sigma 1 texel) with the edge texels repeated, g(d) = d * smoothstep(t, 2t, |d|).
+kernel void ve_unsharp(texture2d<float, access::read> source [[texture(VETextureIndexUnsharpSource)]],
+                       texture2d<float, access::write> destination [[texture(VETextureIndexUnsharpDestination)]],
+                       constant VEUnsharpUniforms &uniforms [[buffer(VEBufferIndexUnsharp)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    const int width = int(source.get_width());
+    const int height = int(source.get_height());
+    if (int(gid.x) >= width || int(gid.y) >= height) {
+        return;
+    }
+    const float weights[5] = {1.0, 4.0, 6.0, 4.0, 1.0};
+    const bool luma = uniforms.params.z > 0.5;
+    float4 blur = float4(0.0);
+    for (int j = -2; j <= 2; ++j) {
+        const int y = clamp(int(gid.y) + j, 0, height - 1);
+        float4 row = float4(0.0);
+        for (int i = -2; i <= 2; ++i) {
+            const int x = clamp(int(gid.x) + i, 0, width - 1);
+            row += weights[i + 2] * source.read(uint2(uint(x), uint(y)));
+        }
+        blur += weights[j + 2] * row;
+    }
+    blur *= 1.0 / 256.0;
+    const float4 c = source.read(gid);
+    const float amount = uniforms.params.x;
+    const float t = uniforms.params.y;
+    const float4 d = c - blur;
+    const float4 sharpened = c + amount * d * smoothstep(float4(t), float4(2.0 * t), abs(d));
+    if (luma) {
+        const float lo = min(uniforms.range.x, c.r);
+        const float hi = max(uniforms.range.y, c.r);
+        destination.write(float4(clamp(sharpened.r, lo, hi), 0.0, 0.0, 1.0), gid);
+    } else {
+        destination.write(float4(clamp(sharpened.rgb, float3(0.0), float3(c.a)), c.a), gid);
+    }
+}
+
 // MARK: - Export conversion (RGBA16Float composite -> target pixel buffer planes)
 
 kernel void ve_convert_to_bgra(texture2d<float, access::read> composite [[texture(VETextureIndexComposite)]],

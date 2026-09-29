@@ -1172,12 +1172,26 @@ static Throughput runPipelined(Compositor &compositor, const RenderGraph &graph,
     XCTAssertEqual(statsAfter.freeSlots, Compositor::kFramesInFlight, @"every frame's slot came back");
 }
 
-// A 3840x2160 4:2:0 source shown in a 1920x1080 preview (the luma plane is Lanczos pre-scaled,
-// the chroma plane is drawn at 1:1): frame time and GPU load, pipelined and one at a time.
+// A 3840x2160 4:2:0 source shown in a 1920x1080 preview (the luma plane is Lanczos pre-scaled and
+// sharpened, the chroma plane is drawn at 1:1): frame time and GPU load, pipelined and one at a time,
+// within the same budget as before sharpening; the unsharpened run is logged beside it.
 - (void)testPreviewOf4KSourceTiming {
     media::PixelBuffer source = makeBurnIn420v(7, 3840, 2160);
     RenderGraph g = makeGraph(3840, 2160);
     g.layers.push_back(makeLayer(1));
+    {
+        RenderGraph plain = g;
+        plain.sharpenMinified = false;
+        std::vector<id<MTLTexture>> targets{makeTargetTexture(1920, 1080), makeTargetTexture(1920, 1080),
+                                            makeTargetTexture(1920, 1080)};
+        size_t n = 0;
+        auto target = [&]() -> RenderTarget { return TextureTarget{targets[n++ % targets.size()], {}, nil}; };
+        runPipelined(*_compositor, plain, {source}, target, 30);
+        const Throughput unsharpened = runPipelined(*_compositor, plain, {source}, target, 300);
+        NSLog(@"Compositor 4K 420v -> 1080p preview without sharpening: %.3f ms/frame wall pipelined, %.3f ms/frame "
+              @"GPU busy",
+              unsharpened.wallMs, unsharpened.gpuMs);
+    }
     std::vector<id<MTLTexture>> drawables{makeTargetTexture(1920, 1080), makeTargetTexture(1920, 1080),
                                           makeTargetTexture(1920, 1080)};
     size_t next = 0;
@@ -1187,6 +1201,7 @@ static Throughput runPipelined(Compositor &compositor, const RenderGraph &graph,
     XCTAssertTrue(first.ok() && first->status.ok());
     if (first.ok()) {
         XCTAssertEqual(first->prescaledPlanes, 1u);
+        XCTAssertEqual(first->sharpenedPlanes, 1u);
     }
     runPipelined(*_compositor, g, {source}, previewTarget, 30); // warm up
     const Throughput run = runPipelined(*_compositor, g, {source}, previewTarget, 300);

@@ -164,6 +164,7 @@ RenderGraph Scheduler::renderGraphAt(const Sequence &sequence, const Project &pr
     RenderGraph graph;
     graph.width = sequence.width;
     graph.height = sequence.height;
+    graph.sharpenMinified = project.sharpenScaledDownSources;
     if (!isNumeric(time)) {
         return graph;
     }
@@ -220,6 +221,7 @@ RenderGraph Scheduler::soloGraphAt(const Sequence &sequence, const Project &proj
     RenderGraph graph;
     graph.width = sequence.width;
     graph.height = sequence.height;
+    graph.sharpenMinified = project.sharpenScaledDownSources;
     if (!isNumeric(time) || !isPositive(sequence.frameDuration)) {
         return graph;
     }

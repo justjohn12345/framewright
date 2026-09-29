@@ -132,15 +132,16 @@ const ClipId kSourceVideoClip{kSourceProjectFirstId + 10};
 
 /// The source monitor's private project: `asset` (same id as in the real project, so the
 /// frame cache and routing are shared) as one clip over the whole media, video on V1 and audio
-/// on A1 (linked), on a sequence at the asset's own frame rate and size. Nullopt for stills and
-/// media without a positive duration.
-std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbackFrameDuration) {
+/// on A1 (linked), on a sequence at the asset's own frame rate and size, sharpening scaled-down
+/// pictures as the real project says (`sharpen`). Nullopt for stills and media without a positive duration.
+std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbackFrameDuration, bool sharpen) {
     if (asset.isStill() || !CMTIME_IS_NUMERIC(asset.duration) || asset.duration <= kCMTimeZero) {
         return std::nullopt;
     }
     Project project;
     project.name = "Source";
     project.ids = IdGenerator(kSourceProjectFirstId);
+    project.sharpenScaledDownSources = sharpen;
     project.assets.push_back(asset);
     const CMTime fd = asset.hasVideo() && isPositive(asset.frameDuration) ? asset.frameDuration : fallbackFrameDuration;
     const SequenceId sequenceId = project.addSequence("Source", fd, asset.hasVideo() ? std::max(1, asset.width) : 16,
@@ -412,6 +413,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
     AssetId _sourceAsset;
     CMTime _sourceTime;
     std::optional<Project> _sourceProject;   // for _sourceAsset
+    bool _sourceSharpening;                  // the sharpening the source monitor last drew with
     AssetId _sourcePlaybackAsset;            // asset of the source controller's sequence
     bool _sourceUsesController;              // the source view shows the controller's picture
     BOOL _sourceMonitorVisible;              // see -setSourceMonitorVisible:
@@ -509,6 +511,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
         _sourcePool = std::make_shared<media::DecodePool>(_router, _frameCache, sourcePoolConfig);
         _sourceProvider = std::make_shared<ProgramFrameProvider>(_sourcePool, kSourceScrubLaneBase);
         _sourceTime = kCMTimeZero;
+        _sourceSharpening = true; // Project::sharpenScaledDownSources' default
         _sourceUsesController = false;
         _sourceMonitorVisible = YES;
         _playbackGeneration = 0;
@@ -585,6 +588,7 @@ VEEditErrorCode refusalCode(const TransitionLimit &limit) {
 
 - (void)notifyModelChanged {
     [self publishPlaybackSnapshot];
+    [self syncSourceSharpening];
     [self updateUseCounts];
     const uint64_t count = self.changeCount;
     [NSNotificationCenter.defaultCenter postNotificationName:VEEngineModelDidChangeNotification
@@ -3624,6 +3628,25 @@ static bool isRunning(playback::PlaybackState state) {
     [self refreshSourcePicture];
 }
 
+/// The source monitor draws with the project's "Sharpen scaled-down sources": its private project
+/// follows a change of the setting (an edit, an undo) and the monitor redraws.
+- (void)syncSourceSharpening {
+    const bool sharpen = _project.sharpenScaledDownSources;
+    if (_sourceSharpening == sharpen) {
+        return;
+    }
+    _sourceSharpening = sharpen;
+    if (_sourceProject) {
+        _sourceProject->sharpenScaledDownSources = sharpen;
+        if (_sourcePlayback && _sourcePlaybackAsset == _sourceAsset) {
+            _sourcePlayback->modelChanged(std::make_shared<const Project>(*_sourceProject));
+        }
+    }
+    if (_sourceAsset) {
+        [self refreshSourcePicture];
+    }
+}
+
 /// Shows the provider's picture of the source asset at _sourceTime (black without an asset).
 - (void)refreshSourcePicture {
     if (_sourceUsesController) {
@@ -3646,6 +3669,7 @@ static bool isRunning(playback::PlaybackState state) {
         graph.time = kCMTimeZero;
         graph.width = std::max(1, asset->width);
         graph.height = std::max(1, asset->height);
+        graph.sharpenMinified = _project.sharpenScaledDownSources;
     }
     if (_sourceView == nil) {
         _sourceProvider->cancel();
@@ -3692,7 +3716,7 @@ static bool isRunning(playback::PlaybackState state) {
     if (id != _sourceAsset) {
         [self resetSourceMonitor];
         _sourceAsset = id;
-        _sourceProject = makeSourceProject(*asset, [self activeSequence].frameDuration);
+        _sourceProject = makeSourceProject(*asset, [self activeSequence].frameDuration, _project.sharpenScaledDownSources);
     }
     _sourceTime = t;
     if (_sourceUsesController && _sourcePlayback) {

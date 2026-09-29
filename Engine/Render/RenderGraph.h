@@ -127,6 +127,11 @@ struct RenderGraph {
     CMTime time = kCMTimeInvalid; // the sequence frame this graph shows (on the frame grid)
     std::int32_t width = 0;
     std::int32_t height = 0;
+    // Pictures the compositor draws smaller than 3/4 of their size (Lanczos pre-scaled) are sharpened
+    // after the pre-scale (Compositor.h "Sharpening"): Project::sharpenScaledDownSources, which the
+    // Scheduler copies into every graph it makes, so the monitors, the solo preview and the export
+    // draw alike.
+    bool sharpenMinified = true;
     std::vector<VideoLayer> layers; // bottom to top; empty means black
 
     bool isEmpty() const {

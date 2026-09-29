@@ -533,5 +533,13 @@ TEST_CASE("SetSharpenScaledDownSources: an undoable project setting") {
     CHECK(fx.project.sharpenScaledDownSources);
     CHECK(undo.redo(fx.project));
     CHECK_FALSE(fx.project.sharpenScaledDownSources);
-    // The render graphs carry it (RenderGraph::sharpenMinified): tested with the compositor.
+    // Every graph the Scheduler makes carries it (RenderGraph::sharpenMinified): the program's, the solo
+    // preview's; the compositor sharpens by it.
+    const ClipId clip = fx.addClip(fx.v1, fx.av30, 0, 30);
+    for (const bool sharpen : {false, true}) {
+        fx.project.sharpenScaledDownSources = sharpen;
+        CHECK(Scheduler::renderGraphAt(fx.sequence(), fx.project, f30(3)).sharpenMinified == sharpen);
+        CHECK(Scheduler::renderGraphAt(fx.sequence(), fx.project, f30(300)).sharpenMinified == sharpen); // empty
+        CHECK(Scheduler::soloGraphAt(fx.sequence(), fx.project, clip, f30(3), true).sharpenMinified == sharpen);
+    }
 }
