@@ -232,6 +232,20 @@ Each phase ends with something runnable and its tests green. Playback and A/V sy
   tab; the inspector's span section shows absolute values (converted through the facade's `getBaseValues`); the Ken
   Burns editor opens on a selected Motion span and edits it live, one undo step per drag. Next: the review round.
 
+### Planned features (not yet scheduled)
+- **Nested sequences** (asked 2026-09-29): a sequence used as a clip in another sequence, live (an edit inside
+  the nest shows in the parent; nothing is exported), trimmed, sped up, transitioned, stacked and given spans
+  like any clip. Engine: a clip whose asset is a sequence; the scheduler renders the nested sequence's frame at
+  the mapped time as one layer (the solo-preview path already renders "a sequence, but different" into the
+  monitor) and the mixer its sound; a cycle is refused. Model: the project's sequences array in use, a
+  sequence-typed asset in the bin, "Nest" on a selection (replaces the selected clips with a new sequence and a
+  clip of it, one undo step) and "Open Nested Sequence". Across projects: File > Import Sequences from a
+  Framewright project (its sequences and media references come in as bin items). Ordered after D1 (compact
+  rows) and D3 (window frame restore) unless the user moves it up.
+- **D1 compact rows and D3 window frame restore**: see `docs/reviews/open-findings.md`.
+- **Per-project Ken Burns mode memory** (the mode is remembered per session today), **notarization** once a
+  Developer ID identity exists.
+
 ## Key risks and mitigations
 - **A/V drift**: audio clock is master; video never blocks; burn-in media tests in phase 4.
 - **Two backends diverging**: one conformance suite run against both; router decisions are visible in the UI and HUD.
