@@ -147,6 +147,21 @@ is the source of truth.
 The build treats warnings as errors (`-Wall -Wextra` for C/Objective-C/C++,
 `SWIFT_TREAT_WARNINGS_AS_ERRORS` for Swift).
 
+### Stress tests
+
+Two long-running tests are opt-in: `xcodebuild -scheme StressTests -destination 'platform=macOS' test`
+(about ten minutes on an M-series Mac). `HourExportStressTests` (EngineTests) exports a one-hour 29.97 fps
+sequence (107,892 frames from 44.1 and 48 kHz sources, at several speeds, with dissolves) with the H.264
+preset (AAC, then PCM) and once more at 44.1 kHz, decodes every frame and checks its picture and time, and
+measures the offset between a flash and a beep at the start and at the end: the drift over the hour is a
+fixed placement of the end marker's audio on the nearest output sample (0.2 to 0.4 samples, under 10 µs),
+nothing accumulates. `TwoHourProjectStressTests` (AppTests) builds a two-hour project of about 400 clips
+on three video and three audio tracks through the facade and measures memory and latencies (edits,
+scrubs, play start, the timeline's thumbnails, waveforms and model, save and reopen). The scheme selects
+only these tests and sets `FRAMEWRIGHT_STRESS=1`; the other schemes skip them, and without the variable
+they skip themselves. Their media are generated at test time (`Scripts/make_test_media.swift --stress`
+and the test itself), and the numbers are logged with the prefixes `HOUR EXPORT` and `STRESS 2H`.
+
 ## Signing
 
 - **Debug** (what `build`/`test` above use) and **Release** are signed ad hoc

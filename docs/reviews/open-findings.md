@@ -70,13 +70,30 @@ server's drag session, so these are covered at the model level only:
   through `NSWindow.sendEvent` during playback, and the user confirmed the grab by hand on 2026-09-25; the original
   SwiftUI failure was never reproduced in the test host.
 
+## Stress test observations (StressTests scheme, 2026-09-29; numbers in the test logs, Debug build)
+- The timeline's minimum zoom is 2 pt/s (`TimelineViewModel.minPixelsPerSecond`), so Zoom to Fit cannot show a
+  two-hour sequence: it needs 14,400 pt (`TwoHourProjectStressTests` pages through it in 11 widths of 1429 pt). A
+  minimum derived from the sequence's length would let a long project fit the window.
+- Footprint not explained by the frame cache: on the two-hour project the thumbnail and waveform pass adds about 230 MB
+  (198 thumbnails fetched; the frame cache stays at 48 MB), and the edits and a reopen add 24 to 149 MB each, varying
+  between runs, while the frame cache is full (512 MB, of which the footprint shows far less) or, after the reopen,
+  nearly empty (3 MB). Everything stays under the test's bound (growth after the build under the frame cache budget
+  plus 131 MB: measured +283 to +375 MB after the edits); an Instruments allocation pass over the thumbnail service
+  and the reopen would say whether anything is kept that should not be.
+- A cold play start (caches purged, a jump, play at once) measured 34 to 60 ms; the one at 1:40:00 was 51 to 60 ms in
+  every run. The product's 50 ms target is for a cached start (`testPlayStartLatencyThroughTheFacade`); a cold start
+  has no target yet.
+
 ## Test gaps that need media or a performance scheme (phase 7)
 - Gap 8, size estimate against a real export in quality mode: the estimate is a bits-per-pixel heuristic (labelled "≈");
   the synthetic burn-in media compresses far better than camera footage, so a tolerance tight enough to mean something
   would only hold for that media. Needs a set of representative camera clips (not in the repository) to calibrate.
-- Gap 9, multi-minute 4K export memory (at least 2 min at 4K): the test media has no 4K source, and such an export takes
-  minutes per run. `ExportJobTests` checks 1800 frames at 720p with about 150 footprint samples and a per-frame growth
-  bound (20 KB/frame); a 4K soak belongs in a separate, opt-in performance scheme.
+- Gap 9, long-export memory: now in the opt-in `StressTests` scheme (README, "Stress tests").
+  `HourExportStressTests` exports 107,892 frames (one hour at 29.97 fps) three times, sampling the footprint at every
+  progress delivery (about 700 samples): the trend stays within 0.25 KB per frame and the peak within 96 MB of the first
+  warm sample (measured over four runs: +0.1 to +31.2 MB, trend -0.32 to +0.01 KB per frame). It renders at 640x360, so the hour takes
+  about 80 s; a 4K soak would need 4K source media, which the generator does not make, and is still not covered (the
+  per-frame buffers scale with the size, the flatness over time is what the hour shows).
 - Not deterministic to unit-test: AVAssetWriter's cancel in the middle of `finishWritingWithCompletionHandler`
   (`cancelWriting` while the MP4 index rewrite runs). The early check and the FFmpeg writer's per-packet check are tested
   (`testFinishIsCancellableOnBothWriters`, `testCancelWhileFinishingKeepsTheExistingFile`); the 20 ms polling loop
