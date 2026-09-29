@@ -65,6 +65,11 @@ settings:
       CODE_SIGN_IDENTITY: $(FRAMEWRIGHT_CODE_SIGN_IDENTITY)
       DEVELOPMENT_TEAM: $(FRAMEWRIGHT_DEVELOPMENT_TEAM)
       ENABLE_HARDENED_RUNTIME: YES
+      # Notarization needs a secure timestamp on every signature (xcodebuild build, unlike
+      # archive, does not add it) and refuses the get-task-allow entitlement Xcode injects
+      # into non-archive builds for debugging.
+      OTHER_CODE_SIGN_FLAGS: --timestamp
+      CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 
 targets:
   FramewrightEngine:
