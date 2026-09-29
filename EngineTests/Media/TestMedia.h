@@ -84,6 +84,14 @@ std::string testMediaDirectory(std::string &error);
 /// Full path of a generated file (empty if generation failed; see testMediaDirectory).
 std::string testMediaPath(const std::string &file, std::string &error);
 
+/// Directory holding the media of the opt-in stress tests (`make_test_media.swift --stress`: the
+/// sync marker and the long filler clips; see the script's "Stress media"), "<testMediaDirectory>-stress".
+/// Generated on first use and cached like the conformance media (thread-safe); empty with `error`
+/// set on failure. Only the stress tests ask for it, so ordinary runs never make these files.
+std::string stressMediaDirectory(std::string &error);
+/// Full path of a stress media file (empty if generation failed).
+std::string stressMediaPath(const std::string &file, std::string &error);
+
 /// A fresh scratch directory for files a test writes (removed at process exit is not
 /// guaranteed; it lives under NSTemporaryDirectory()).
 std::string scratchDirectory();

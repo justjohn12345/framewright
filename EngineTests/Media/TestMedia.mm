@@ -223,7 +223,8 @@ std::string fnv1a64Hex(const std::string &data) {
 
 /// Generates the media into `dir` (replacing what is there): the script writes into a temporary
 /// directory beside it, which is renamed into place with the script's hash inside.
-bool generateInto(const fs::path &dir, const fs::path &script, const std::string &hash, std::string &error) {
+bool generateInto(const fs::path &dir, const fs::path &script, const std::string &hash, std::string &error,
+                  NSArray<NSString *> *modeArguments = @[]) {
     std::error_code ec;
     fs::create_directories(dir.parent_path(), ec);
     const fs::path tmp = dir.string() + ".tmp-" + std::to_string(getpid());
@@ -232,7 +233,10 @@ bool generateInto(const fs::path &dir, const fs::path &script, const std::string
 
     NSTask *task = [NSTask new];
     task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/xcrun"];
-    task.arguments = @[ @"swift", @(script.c_str()), @(tmp.c_str()) ];
+    NSMutableArray<NSString *> *arguments = [NSMutableArray arrayWithObjects:@"swift", @(script.c_str()), nil];
+    [arguments addObjectsFromArray:modeArguments];
+    [arguments addObject:@(tmp.c_str())];
+    task.arguments = arguments;
     [NSFileManager.defaultManager createFileAtPath:@(log.c_str()) contents:nil attributes:nil];
     NSFileHandle *logHandle = [NSFileHandle fileHandleForWritingAtPath:@(log.c_str())];
     task.standardOutput = logHandle;
@@ -373,6 +377,37 @@ std::string testMediaDirectory(std::string &error) {
 
 std::string testMediaPath(const std::string &file, std::string &error) {
     const std::string dir = testMediaDirectory(error);
+    return dir.empty() ? std::string() : (fs::path(dir) / file).string();
+}
+
+std::string stressMediaDirectory(std::string &error) {
+    static std::once_flag once;
+    static std::string dir;
+    static std::string generationError;
+    std::call_once(once, [] {
+        std::string mediaError;
+        const std::string media = testMediaDirectory(mediaError);
+        if (media.empty()) {
+            generationError = mediaError;
+            return;
+        }
+        // "<hash>-stress" beside the conformance media: pruned with it when the script changes.
+        const fs::path target = media + "-stress";
+        const std::string hash = testMediaScriptHash();
+        if (testMediaIsComplete(target.string(), hash)) {
+            dir = target.string();
+            return;
+        }
+        if (generateInto(target, scriptPath(), hash, generationError, @[ @"--stress" ])) {
+            dir = target.string();
+        }
+    });
+    error = generationError;
+    return dir;
+}
+
+std::string stressMediaPath(const std::string &file, std::string &error) {
+    const std::string dir = stressMediaDirectory(error);
     return dir.empty() ? std::string() : (fs::path(dir) / file).string();
 }
 

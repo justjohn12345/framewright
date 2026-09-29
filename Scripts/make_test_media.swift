@@ -1,10 +1,12 @@
 // Generates the deterministic media files used by the media backend conformance tests.
 //
 //   swift Scripts/make_test_media.swift <output-directory>
+//   swift Scripts/make_test_media.swift --stress <output-directory>
 //
 // EngineTests runs this itself (see EngineTests/Media/TestMedia.mm) and caches the output in
 // the build directory, keyed by a hash of this file, so edit freely: the next test run
-// regenerates.
+// regenerates. With --stress it writes only the media of the opt-in stress tests (the StressTests
+// scheme; see "Stress media" at the end), which the ordinary test runs never make.
 //
 // Video burn-in (decoded by EngineTests/Media/BurnIn.h; keep the two in sync):
 //   cell = width / 18. Square i (i = 0..15) covers
@@ -13,6 +15,8 @@
 //   The rest of the frame is palette[index % 8] (all mid-luma colours, see `palette`).
 // Audio: 0.1 * sin(2 pi f t) (per-file f) on every channel, plus a beep
 //   0.7 * sin(2 pi 1000 (t - 2.0)) for 2.000 s <= t < 2.100 s.
+// Sync markers (stress media): black frames with one white frame (the flash), and silence with
+//   the same beep starting on the flash frame's first sample (see AudioSignal.beepOnly).
 // Every file's parameters are also written to manifest.json.
 
 import AVFoundation
@@ -74,6 +78,16 @@ func drawBurnIn(index: Int, base: UnsafeMutableRawPointer, bytesPerRow: Int, wid
     }
 }
 
+/// Fills a BGRA frame with one grey level (opaque).
+func fillFrame(_ level: UInt8, base: UnsafeMutableRawPointer, bytesPerRow: Int, width: Int, height: Int) {
+    let row = [UInt8](repeating: level, count: width * 4).enumerated().map { $0.offset % 4 == 3 ? 255 : $0.element }
+    row.withUnsafeBytes { bytes in
+        for y in 0..<height {
+            memcpy(base + y * bytesPerRow, bytes.baseAddress!, width * 4)
+        }
+    }
+}
+
 /// Sets the alpha byte of the left half of a BGRA frame (colour stays straight, unmultiplied:
 /// the ProRes 4444 alpha convention).
 func setLeftHalfAlpha(_ alpha: UInt8, base: UnsafeMutableRawPointer, bytesPerRow: Int, width: Int, height: Int) {
@@ -85,7 +99,24 @@ func setLeftHalfAlpha(_ alpha: UInt8, base: UnsafeMutableRawPointer, bytesPerRow
 
 // MARK: - Audio
 
-func audioSample(frame: Int, rate: Double, frequency: Double) -> Float {
+/// What an audio track carries.
+enum AudioSignal {
+    /// The tone at the file's frequency plus the beep at `beepStart` (the conformance media).
+    case toneWithBeep
+    /// Silence, and the beep starting on sample `atFrame` (a sync marker).
+    case beepOnly(atFrame: Int)
+}
+
+/// The beep's sample `index` samples after its onset (0 outside it).
+func beepSample(_ index: Int, rate: Double) -> Float {
+    guard index >= 0, index < Int((beepDuration * rate).rounded()) else { return 0 }
+    return beepAmplitude * Float(sin(2.0 * Double.pi * beepFrequency * Double(index) / rate))
+}
+
+func audioSample(frame: Int, rate: Double, frequency: Double, signal: AudioSignal = .toneWithBeep) -> Float {
+    if case let .beepOnly(onset) = signal {
+        return beepSample(frame - onset, rate: rate)
+    }
     let t = Double(frame) / rate
     var v = toneAmplitude * Float(sin(2.0 * Double.pi * frequency * t))
     let beepFirst = Int((beepStart * rate).rounded())
@@ -101,14 +132,16 @@ final class AudioSource {
     let channels: Int
     let frequency: Double
     let totalFrames: Int
+    let signal: AudioSignal
     private(set) var written = 0
     private let format: CMAudioFormatDescription
 
-    init(rate: Double, channels: Int, frequency: Double, totalFrames: Int) {
+    init(rate: Double, channels: Int, frequency: Double, totalFrames: Int, signal: AudioSignal = .toneWithBeep) {
         self.rate = rate
         self.channels = channels
         self.frequency = frequency
         self.totalFrames = totalFrames
+        self.signal = signal
         var asbd = AudioStreamBasicDescription(
             mSampleRate: rate, mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
@@ -134,7 +167,7 @@ final class AudioSource {
         if n <= 0 { return nil }
         var samples = [Float](repeating: 0, count: n * channels)
         for f in 0..<n {
-            let v = audioSample(frame: written + f, rate: rate, frequency: frequency)
+            let v = audioSample(frame: written + f, rate: rate, frequency: frequency, signal: signal)
             for c in 0..<channels { samples[f * channels + c] = v }
         }
         let bytes = n * channels * 4
@@ -177,6 +210,7 @@ struct AudioSpec {
     var frequency: Double
     var rate: Double = 48000
     var channels: Int = 2
+    var signal: AudioSignal = .toneWithBeep
 
     var outputSettings: [String: Any] {
         switch codec {
@@ -210,6 +244,8 @@ struct VideoSpec {
     /// gets this alpha (straight colour), the right half stays opaque.
     var leftHalfAlpha: UInt8? = nil
     var allowFrameReordering: Bool = true
+    /// Sync marker: every frame black except frame `flashFrame`, which is white (no burn-in).
+    var flashFrame: Int? = nil
 
     func time(_ i: Int) -> CMTime { times?[i] ?? CMTimeMultiply(frameDuration, multiplier: Int32(i)) }
     var endTime: CMTime { end ?? CMTimeMultiply(frameDuration, multiplier: Int32(frames)) }
@@ -295,7 +331,7 @@ func writeVideo(_ url: URL, type: AVFileType, video v: VideoSpec, audio a: Audio
     if let a {
         audioInput = addAudioInput(writer, a)
         source = AudioSource(rate: a.rate, channels: a.channels, frequency: a.frequency,
-                             totalFrames: Int((end.seconds * a.rate).rounded()))
+                             totalFrames: Int((end.seconds * a.rate).rounded()), signal: a.signal)
     }
     guard writer.startWriting() else { fail("startWriting: \(String(describing: writer.error))") }
     writer.startSession(atSourceTime: .zero)
@@ -315,8 +351,13 @@ func writeVideo(_ url: URL, type: AVFileType, video v: VideoSpec, audio a: Audio
             var pb: CVPixelBuffer?
             guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb) == kCVReturnSuccess, let pb else { fail("pool") }
             CVPixelBufferLockBaseAddress(pb, [])
-            drawBurnIn(index: i, base: CVPixelBufferGetBaseAddress(pb)!, bytesPerRow: CVPixelBufferGetBytesPerRow(pb),
-                       width: v.width, height: v.height)
+            if let flash = v.flashFrame {
+                fillFrame(i == flash ? 255 : 0, base: CVPixelBufferGetBaseAddress(pb)!,
+                          bytesPerRow: CVPixelBufferGetBytesPerRow(pb), width: v.width, height: v.height)
+            } else {
+                drawBurnIn(index: i, base: CVPixelBufferGetBaseAddress(pb)!,
+                           bytesPerRow: CVPixelBufferGetBytesPerRow(pb), width: v.width, height: v.height)
+            }
             if let alpha = v.leftHalfAlpha {
                 setLeftHalfAlpha(alpha, base: CVPixelBufferGetBaseAddress(pb)!, bytesPerRow: CVPixelBufferGetBytesPerRow(pb),
                                  width: v.width, height: v.height)
@@ -382,8 +423,12 @@ func writeStill(_ url: URL, type: UTType, width: Int, height: Int, index: Int) {
 
 // MARK: - Main
 
-guard CommandLine.arguments.count == 2 else { fail("usage: make_test_media.swift <output-directory>") }
-let outDir = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+let arguments = Array(CommandLine.arguments.dropFirst())
+let stressMode = arguments.first == "--stress"
+guard arguments.count == (stressMode ? 2 : 1) else {
+    fail("usage: make_test_media.swift [--stress] <output-directory>")
+}
+let outDir = URL(fileURLWithPath: arguments.last!, isDirectory: true)
 do {
     try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
 } catch { fail("cannot create \(outDir.path): \(error)") }
@@ -396,113 +441,166 @@ func record(_ name: String, _ fields: [String: Any]) {
     print("wrote \(name)")
 }
 
-let h264 = VideoSpec(codec: .h264, width: 1920, height: 1080, frameDuration: CMTime(value: 1, timescale: 30),
-                     frames: 300, bitRate: 6_000_000, keyFrameInterval: 30)
-writeVideo(outDir.appendingPathComponent("h264_1080p30.mp4"), type: .mp4, video: h264,
-           audio: AudioSpec(codec: .aac, frequency: 440), fastStart: true)
-record("h264_1080p30.mp4", ["codec": "avc1", "width": 1920, "height": 1080, "fdValue": 1, "fdTimescale": 30,
-                            "frames": 300, "audio": "aac", "toneHz": 440])
+/// The conformance media and the special-purpose clips (every ordinary test run).
+func writeConformanceMedia() {
+    let h264 = VideoSpec(codec: .h264, width: 1920, height: 1080, frameDuration: CMTime(value: 1, timescale: 30),
+                         frames: 300, bitRate: 6_000_000, keyFrameInterval: 30)
+    writeVideo(outDir.appendingPathComponent("h264_1080p30.mp4"), type: .mp4, video: h264,
+               audio: AudioSpec(codec: .aac, frequency: 440), fastStart: true)
+    record("h264_1080p30.mp4", ["codec": "avc1", "width": 1920, "height": 1080, "fdValue": 1, "fdTimescale": 30,
+                                "frames": 300, "audio": "aac", "toneHz": 440])
 
-let hevc = VideoSpec(codec: .hevc, width: 1280, height: 720, frameDuration: CMTime(value: 1001, timescale: 30000),
-                     frames: 300, bitRate: 3_000_000, keyFrameInterval: 60)
-writeVideo(outDir.appendingPathComponent("hevc_720p2997.mov"), type: .mov, video: hevc,
-           audio: AudioSpec(codec: .aac, frequency: 550), fastStart: false)
-record("hevc_720p2997.mov", ["codec": "hvc1", "width": 1280, "height": 720, "fdValue": 1001, "fdTimescale": 30000,
-                             "frames": 300, "audio": "aac", "toneHz": 550])
+    let hevc = VideoSpec(codec: .hevc, width: 1280, height: 720, frameDuration: CMTime(value: 1001, timescale: 30000),
+                         frames: 300, bitRate: 3_000_000, keyFrameInterval: 60)
+    writeVideo(outDir.appendingPathComponent("hevc_720p2997.mov"), type: .mov, video: hevc,
+               audio: AudioSpec(codec: .aac, frequency: 550), fastStart: false)
+    record("hevc_720p2997.mov", ["codec": "hvc1", "width": 1280, "height": 720, "fdValue": 1001, "fdTimescale": 30000,
+                                 "frames": 300, "audio": "aac", "toneHz": 550])
 
-let prores = VideoSpec(codec: .proRes422, width: 960, height: 540, frameDuration: CMTime(value: 1, timescale: 25),
-                       frames: 75, bitRate: nil, keyFrameInterval: nil)
-writeVideo(outDir.appendingPathComponent("prores_540p25.mov"), type: .mov, video: prores,
-           audio: AudioSpec(codec: .pcm16, frequency: 660), fastStart: false)
-record("prores_540p25.mov", ["codec": "apcn", "width": 960, "height": 540, "fdValue": 1, "fdTimescale": 25,
-                             "frames": 75, "audio": "lpcm", "toneHz": 660])
+    let prores = VideoSpec(codec: .proRes422, width: 960, height: 540, frameDuration: CMTime(value: 1, timescale: 25),
+                           frames: 75, bitRate: nil, keyFrameInterval: nil)
+    writeVideo(outDir.appendingPathComponent("prores_540p25.mov"), type: .mov, video: prores,
+               audio: AudioSpec(codec: .pcm16, frequency: 660), fastStart: false)
+    record("prores_540p25.mov", ["codec": "apcn", "width": 960, "height": 540, "fdValue": 1, "fdTimescale": 25,
+                                 "frames": 75, "audio": "lpcm", "toneHz": 660])
 
-writeAudioOnly(outDir.appendingPathComponent("audio_only.m4a"), type: .m4a,
-               audio: AudioSpec(codec: .aac, frequency: 330), seconds: 10)
-record("audio_only.m4a", ["audio": "aac", "toneHz": 330, "seconds": 10])
+    writeAudioOnly(outDir.appendingPathComponent("audio_only.m4a"), type: .m4a,
+                   audio: AudioSpec(codec: .aac, frequency: 330), seconds: 10)
+    record("audio_only.m4a", ["audio": "aac", "toneHz": 330, "seconds": 10])
 
-writeAudioOnly(outDir.appendingPathComponent("audio_only.wav"), type: .wav,
-               audio: AudioSpec(codec: .pcm16, frequency: 770), seconds: 10)
-record("audio_only.wav", ["audio": "lpcm", "toneHz": 770, "seconds": 10])
+    writeAudioOnly(outDir.appendingPathComponent("audio_only.wav"), type: .wav,
+                   audio: AudioSpec(codec: .pcm16, frequency: 770), seconds: 10)
+    record("audio_only.wav", ["audio": "lpcm", "toneHz": 770, "seconds": 10])
 
-writeStill(outDir.appendingPathComponent("still.png"), type: .png, width: 1280, height: 720, index: 0x1234)
-record("still.png", ["width": 1280, "height": 720, "burnIn": 0x1234])
-writeStill(outDir.appendingPathComponent("still.heic"), type: .heic, width: 1024, height: 576, index: 0xBEEF)
-record("still.heic", ["width": 1024, "height": 576, "burnIn": 0xBEEF])
+    writeStill(outDir.appendingPathComponent("still.png"), type: .png, width: 1280, height: 720, index: 0x1234)
+    record("still.png", ["width": 1280, "height": 720, "burnIn": 0x1234])
+    writeStill(outDir.appendingPathComponent("still.heic"), type: .heic, width: 1024, height: 576, index: 0xBEEF)
+    record("still.heic", ["width": 1024, "height": 576, "burnIn": 0xBEEF])
 
-// Variable frame rate: irregular frame durations (vfrPattern), B-frames, keyframe every 30.
-let vfr = vfrTimes(frames: 150)
-writeVideo(outDir.appendingPathComponent("vfr_h264.mp4"), type: .mp4,
-           video: VideoSpec(codec: .h264, width: 640, height: 360, frameDuration: CMTime(value: 1, timescale: 30),
-                            frames: 150, bitRate: 2_000_000, keyFrameInterval: 30, times: vfr.times, end: vfr.end),
-           audio: nil, fastStart: true)
-record("vfr_h264.mp4", ["codec": "avc1", "width": 640, "height": 360, "frames": 150, "vfrPattern600": vfrPattern])
+    // Variable frame rate: irregular frame durations (vfrPattern), B-frames, keyframe every 30.
+    let vfr = vfrTimes(frames: 150)
+    writeVideo(outDir.appendingPathComponent("vfr_h264.mp4"), type: .mp4,
+               video: VideoSpec(codec: .h264, width: 640, height: 360, frameDuration: CMTime(value: 1, timescale: 30),
+                                frames: 150, bitRate: 2_000_000, keyFrameInterval: 30, times: vfr.times, end: vfr.end),
+               audio: nil, fastStart: true)
+    record("vfr_h264.mp4", ["codec": "avc1", "width": 640, "height": 360, "frames": 150, "vfrPattern600": vfrPattern])
 
-// Display rotation: stored landscape, shown rotated 90 degrees clockwise (an iPhone portrait clip).
-writeVideo(outDir.appendingPathComponent("rotated90_h264.mp4"), type: .mp4,
-           video: VideoSpec(codec: .h264, width: 640, height: 360, frameDuration: CMTime(value: 1, timescale: 30),
-                            frames: 30, bitRate: 1_000_000, keyFrameInterval: 30,
-                            transform: CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 360, ty: 0)),
-           audio: nil, fastStart: true)
-record("rotated90_h264.mp4", ["codec": "avc1", "width": 640, "height": 360, "frames": 30, "rotation": 90])
+    // Display rotation: stored landscape, shown rotated 90 degrees clockwise (an iPhone portrait clip).
+    writeVideo(outDir.appendingPathComponent("rotated90_h264.mp4"), type: .mp4,
+               video: VideoSpec(codec: .h264, width: 640, height: 360, frameDuration: CMTime(value: 1, timescale: 30),
+                                frames: 30, bitRate: 1_000_000, keyFrameInterval: 30,
+                                transform: CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 360, ty: 0)),
+               audio: nil, fastStart: true)
+    record("rotated90_h264.mp4", ["codec": "avc1", "width": 640, "height": 360, "frames": 30, "rotation": 90])
 
-// Slow motion as Photos hands over an iPhone clip: HEVC, portrait (stored landscape, shown rotated
-// 90 degrees clockwise), 30 fps around a 240 fps section: 30 frames of 1/30 s, 120 of 1/240 s,
-// 30 of 1/30 s (variable frame rate). The frame times are also written to the manifest
-// ("frameTicks960"), which EngineTests checks slowmoFrameTime in TestMedia.mm against.
-var slowmoTimes: [CMTime] = []
-var slowmoTick: Int64 = 0 // 1/960 s
-for i in 0..<180 {
-    slowmoTimes.append(CMTime(value: slowmoTick, timescale: 960))
-    slowmoTick += (i >= 30 && i < 150) ? 4 : 32
+    // Slow motion as Photos hands over an iPhone clip: HEVC, portrait (stored landscape, shown rotated
+    // 90 degrees clockwise), 30 fps around a 240 fps section: 30 frames of 1/30 s, 120 of 1/240 s,
+    // 30 of 1/30 s (variable frame rate). The frame times are also written to the manifest
+    // ("frameTicks960"), which EngineTests checks slowmoFrameTime in TestMedia.mm against.
+    var slowmoTimes: [CMTime] = []
+    var slowmoTick: Int64 = 0 // 1/960 s
+    for i in 0..<180 {
+        slowmoTimes.append(CMTime(value: slowmoTick, timescale: 960))
+        slowmoTick += (i >= 30 && i < 150) ? 4 : 32
+    }
+    writeVideo(outDir.appendingPathComponent("slowmo_hevc_portrait.mov"), type: .mov,
+               video: VideoSpec(codec: .hevc, width: 640, height: 360, frameDuration: CMTime(value: 1, timescale: 240),
+                                frames: 180, bitRate: 2_000_000, keyFrameInterval: 30, times: slowmoTimes,
+                                end: CMTime(value: slowmoTick, timescale: 960),
+                                transform: CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 360, ty: 0)),
+               audio: nil, fastStart: false)
+    record("slowmo_hevc_portrait.mov", ["codec": "hvc1", "width": 640, "height": 360, "frames": 180, "rotation": 90,
+                                        "slowmo": "30x1/30, 120x1/240, 30x1/30",
+                                        "frameTicks960": slowmoTimes.map { $0.value } + [slowmoTick]])
+
+    // Long GOP: one keyframe every 5 s (150 frames), for seeks deep into a GOP.
+    writeVideo(outDir.appendingPathComponent("gop5s_h264_1080p30.mp4"), type: .mp4,
+               video: VideoSpec(codec: .h264, width: 1920, height: 1080, frameDuration: CMTime(value: 1, timescale: 30),
+                                frames: 300, bitRate: 8_000_000, keyFrameInterval: 150),
+               audio: nil, fastStart: true)
+    record("gop5s_h264_1080p30.mp4", ["codec": "avc1", "width": 1920, "height": 1080, "frames": 300, "gop": 150])
+
+    // Leading empty edit: the first video frame is presented at 0.5 s.
+    let gapStart = CMTime(value: 1, timescale: 2)
+    writeVideo(outDir.appendingPathComponent("leading_gap_h264.mov"), type: .mov,
+               video: VideoSpec(codec: .h264, width: 640, height: 360, frameDuration: CMTime(value: 1, timescale: 30),
+                                frames: 60, bitRate: 1_000_000, keyFrameInterval: 30,
+                                times: (0..<60).map {
+                                    CMTimeAdd(gapStart, CMTime(value: CMTimeValue($0), timescale: 30))
+                                },
+                                end: CMTimeAdd(gapStart, CMTime(value: 60, timescale: 30))),
+               audio: nil, fastStart: false)
+    record("leading_gap_h264.mov", ["codec": "avc1", "width": 640, "height": 360, "frames": 60, "firstFrame": 0.5])
+
+    // ProRes 4444 with alpha: left half 50 % transparent with straight (unpremultiplied) colour.
+    writeVideo(outDir.appendingPathComponent("prores4444_alpha.mov"), type: .mov,
+               video: VideoSpec(codec: .proRes4444, width: 576, height: 324,
+                                frameDuration: CMTime(value: 1, timescale: 25), frames: 10, bitRate: nil,
+                                keyFrameInterval: nil, leftHalfAlpha: 128),
+               audio: nil, fastStart: false)
+    record("prores4444_alpha.mov", ["codec": "ap4h", "width": 576, "height": 324, "frames": 10, "leftHalfAlpha": 128])
+
+    // Audio variants: 44.1 kHz (AAC and PCM), mono AAC, 5.1 AAC.
+    writeAudioOnly(outDir.appendingPathComponent("audio_44k.m4a"), type: .m4a,
+                   audio: AudioSpec(codec: .aac, frequency: 880, rate: 44100), seconds: 6)
+    record("audio_44k.m4a", ["audio": "aac", "toneHz": 880, "rate": 44100, "seconds": 6])
+    writeAudioOnly(outDir.appendingPathComponent("audio_44k.wav"), type: .wav,
+                   audio: AudioSpec(codec: .pcm16, frequency: 990, rate: 44100), seconds: 6)
+    record("audio_44k.wav", ["audio": "lpcm", "toneHz": 990, "rate": 44100, "seconds": 6])
+    writeAudioOnly(outDir.appendingPathComponent("audio_mono.m4a"), type: .m4a,
+                   audio: AudioSpec(codec: .aac, frequency: 660, channels: 1), seconds: 4)
+    record("audio_mono.m4a", ["audio": "aac", "toneHz": 660, "channels": 1, "seconds": 4])
+    writeAudioOnly(outDir.appendingPathComponent("audio_51.m4a"), type: .m4a,
+                   audio: AudioSpec(codec: .aac, frequency: 520, channels: 6), seconds: 4)
+    record("audio_51.m4a", ["audio": "aac", "toneHz": 520, "channels": 6, "seconds": 4])
 }
-writeVideo(outDir.appendingPathComponent("slowmo_hevc_portrait.mov"), type: .mov,
-           video: VideoSpec(codec: .hevc, width: 640, height: 360, frameDuration: CMTime(value: 1, timescale: 240),
-                            frames: 180, bitRate: 2_000_000, keyFrameInterval: 30, times: slowmoTimes,
-                            end: CMTime(value: slowmoTick, timescale: 960),
-                            transform: CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 360, ty: 0)),
-           audio: nil, fastStart: false)
-record("slowmo_hevc_portrait.mov", ["codec": "hvc1", "width": 640, "height": 360, "frames": 180, "rotation": 90,
-                                    "slowmo": "30x1/30, 120x1/240, 30x1/30",
-                                    "frameTicks960": slowmoTimes.map { $0.value } + [slowmoTick]])
 
-// Long GOP: one keyframe every 5 s (150 frames), for seeks deep into a GOP.
-writeVideo(outDir.appendingPathComponent("gop5s_h264_1080p30.mp4"), type: .mp4,
-           video: VideoSpec(codec: .h264, width: 1920, height: 1080, frameDuration: CMTime(value: 1, timescale: 30),
-                            frames: 300, bitRate: 8_000_000, keyFrameInterval: 150),
-           audio: nil, fastStart: true)
-record("gop5s_h264_1080p30.mp4", ["codec": "avc1", "width": 1920, "height": 1080, "frames": 300, "gop": 150])
+// MARK: - Stress media (--stress)
 
-// Leading empty edit: the first video frame is presented at 0.5 s.
-let gapStart = CMTime(value: 1, timescale: 2)
-writeVideo(outDir.appendingPathComponent("leading_gap_h264.mov"), type: .mov,
-           video: VideoSpec(codec: .h264, width: 640, height: 360, frameDuration: CMTime(value: 1, timescale: 30),
-                            frames: 60, bitRate: 1_000_000, keyFrameInterval: 30,
-                            times: (0..<60).map { CMTimeAdd(gapStart, CMTime(value: CMTimeValue($0), timescale: 30)) },
-                            end: CMTimeAdd(gapStart, CMTime(value: 60, timescale: 30))),
-           audio: nil, fastStart: false)
-record("leading_gap_h264.mov", ["codec": "avc1", "width": 640, "height": 360, "frames": 60, "firstFrame": 0.5])
+// The opt-in stress tests (EngineTests/Stress, the StressTests scheme) export a one-hour 29.97 fps
+// sequence at 640x360 built from these. Frame duration 1001/30000 s throughout.
+//   sync_marker_2997.mov   201 black frames with frame 100 white (the flash); 44.1 kHz 16-bit PCM
+//                          stereo, silent except the beep starting on sample 147147, the first sample
+//                          of frame 100 (100 * 1001/30000 s * 44100 Hz is a whole number).
+//   filler_h264_44k.mp4    9000 burn-in frames (300.3 s), H.264, keyframe every 30; AAC 44.1 kHz,
+//                          tone 620 Hz with the beep at 2 s.
+//   filler_hevc_48k.mov    5400 burn-in frames (180.18 s), HEVC, keyframe every 60; AAC 48 kHz,
+//                          tone 740 Hz with the beep at 2 s.
+let ntscFrame = CMTime(value: 1001, timescale: 30000)
+let markerFlashFrame = 100
 
-// ProRes 4444 with alpha: left half 50 % transparent with straight (unpremultiplied) colour.
-writeVideo(outDir.appendingPathComponent("prores4444_alpha.mov"), type: .mov,
-           video: VideoSpec(codec: .proRes4444, width: 576, height: 324, frameDuration: CMTime(value: 1, timescale: 25),
-                            frames: 10, bitRate: nil, keyFrameInterval: nil, leftHalfAlpha: 128),
-           audio: nil, fastStart: false)
-record("prores4444_alpha.mov", ["codec": "ap4h", "width": 576, "height": 324, "frames": 10, "leftHalfAlpha": 128])
+func writeStressMedia() {
+    let markerBeepSample = markerFlashFrame * 1001 * 44100 / 30000
+    precondition(markerFlashFrame * 1001 * 44100 % 30000 == 0, "the flash must start on a 44.1 kHz sample")
+    writeVideo(outDir.appendingPathComponent("sync_marker_2997.mov"), type: .mov,
+               video: VideoSpec(codec: .h264, width: 640, height: 360, frameDuration: ntscFrame, frames: 201,
+                                bitRate: 2_000_000, keyFrameInterval: 30, flashFrame: markerFlashFrame),
+               audio: AudioSpec(codec: .pcm16, frequency: 0, rate: 44100, signal: .beepOnly(atFrame: markerBeepSample)),
+               fastStart: false)
+    record("sync_marker_2997.mov", ["codec": "avc1", "width": 640, "height": 360, "fdValue": 1001,
+                                    "fdTimescale": 30000, "frames": 201, "flashFrame": markerFlashFrame,
+                                    "audio": "lpcm", "rate": 44100, "beepSample": markerBeepSample])
 
-// Audio variants: 44.1 kHz (AAC and PCM), mono AAC, 5.1 AAC.
-writeAudioOnly(outDir.appendingPathComponent("audio_44k.m4a"), type: .m4a,
-               audio: AudioSpec(codec: .aac, frequency: 880, rate: 44100), seconds: 6)
-record("audio_44k.m4a", ["audio": "aac", "toneHz": 880, "rate": 44100, "seconds": 6])
-writeAudioOnly(outDir.appendingPathComponent("audio_44k.wav"), type: .wav,
-               audio: AudioSpec(codec: .pcm16, frequency: 990, rate: 44100), seconds: 6)
-record("audio_44k.wav", ["audio": "lpcm", "toneHz": 990, "rate": 44100, "seconds": 6])
-writeAudioOnly(outDir.appendingPathComponent("audio_mono.m4a"), type: .m4a,
-               audio: AudioSpec(codec: .aac, frequency: 660, channels: 1), seconds: 4)
-record("audio_mono.m4a", ["audio": "aac", "toneHz": 660, "channels": 1, "seconds": 4])
-writeAudioOnly(outDir.appendingPathComponent("audio_51.m4a"), type: .m4a,
-               audio: AudioSpec(codec: .aac, frequency: 520, channels: 6), seconds: 4)
-record("audio_51.m4a", ["audio": "aac", "toneHz": 520, "channels": 6, "seconds": 4])
+    writeVideo(outDir.appendingPathComponent("filler_h264_44k.mp4"), type: .mp4,
+               video: VideoSpec(codec: .h264, width: 640, height: 360, frameDuration: ntscFrame, frames: 9000,
+                                bitRate: 1_500_000, keyFrameInterval: 30),
+               audio: AudioSpec(codec: .aac, frequency: 620, rate: 44100), fastStart: true)
+    record("filler_h264_44k.mp4", ["codec": "avc1", "width": 640, "height": 360, "fdValue": 1001,
+                                   "fdTimescale": 30000, "frames": 9000, "audio": "aac", "rate": 44100, "toneHz": 620])
+
+    writeVideo(outDir.appendingPathComponent("filler_hevc_48k.mov"), type: .mov,
+               video: VideoSpec(codec: .hevc, width: 640, height: 360, frameDuration: ntscFrame, frames: 5400,
+                                bitRate: 1_000_000, keyFrameInterval: 60),
+               audio: AudioSpec(codec: .aac, frequency: 740, rate: 48000), fastStart: false)
+    record("filler_hevc_48k.mov", ["codec": "hvc1", "width": 640, "height": 360, "fdValue": 1001,
+                                   "fdTimescale": 30000, "frames": 5400, "audio": "aac", "rate": 48000, "toneHz": 740])
+}
+
+if stressMode {
+    writeStressMedia()
+} else {
+    writeConformanceMedia()
+}
 
 let manifestData = try! JSONSerialization.data(withJSONObject: ["files": manifest, "beepStart": beepStart,
                                                                 "beepHz": beepFrequency], options: [.prettyPrinted, .sortedKeys])
