@@ -1494,3 +1494,49 @@ the GitHub release. `--skip-notarize` stops after the signed build. Per machine,
 certificate for that team in the keychain (Xcode > Settings > Accounts > Manage Certificates), and notarytool
 credentials stored as the keychain profile `framewright-notary` (an app-specific password from appleid.apple.com).
 Debug and Release stay ad hoc signed without the hardened runtime, so tests and local runs need none of this.
+
+## Paused seeks on VFR sources (2026-09-29; user report "sometimes clicking to move the playhead the program output doesn't update")
+- Reproduced on the user's demo project (3832x2154 H.264 screen recordings: variable frame rate with static gaps up to
+  5.9 s, keyframes up to 7.3 s apart; clips at 3/5, 3/2, 5/4, 1/10 and 1): 61 of 200 ruler clicks left the monitor on
+  another picture for good (every miss "presented without its picture"), and 52 of 200 on generated media of the same
+  shape. `PausedSeekTests` drives a PlaybackController the way the app does (`PausedSeekRig`: scrubTo on mouse down,
+  endScrub on mouse up, the frame source called only on needsDisplay, as the paused VEPreviewView renders only on
+  renderOnce) and checks each click within 2 s against the file's own sample table (the pts of the frame containing
+  each layer's picture time, read without decoding), so a wrong cache lookup cannot agree with itself.
+- Root cause: eviction, not decoding or VFR lookup. The decode pool declares its streams' targets as the FrameCache
+  focus; after a click they stay at the previous place until the stopped lookahead follows (100 ms after the playhead
+  stops). A picture the scrub path decoded far from there (behind it, or on a cold part of a busy asset) ranked first
+  to go and was evicted as it was put (`FrameCache::insert` enforced the budget with the new entry unprotected; the
+  first run's diagnostics found it gone already when its request completed), or later by the previous lookahead's
+  puts before the redraw looked it up. The request had completed, so the redraw found nothing with nothing
+  in flight and presented the frame with the clip's previous picture (`exact` false); the stopped lookahead decoded the
+  picture again later, but stream puts never ask for a redraw, so the monitor stayed on the old picture. The warm path
+  had the same gap (`requestDisplayFramesLocked` checked `contains()`, then the redraw looked the picture up later).
+- Fix: the paused picture is pinned from its insertion until the playhead moves on. `FrameCache::putPinned` pins the
+  entry before the budget is enforced (no hit counted); `DecodePool::requestFrame` puts its frame pinned (and pins a
+  cache hit) and hands the pin over in `ScrubFrame::pin` (ScrubFrame is now move-only; a receiver that ignores the pin
+  releases it with the result, e.g. the source monitor's ProgramFrameProvider, which keeps only the image); the
+  playback controller keeps the pins of the current display target (`Core::displayPins`, also for pictures found in
+  the cache) until the next target (`beginDisplayRequests`, now also when there is no sequence). The frame sources pin
+  what they present, as before. At most one extra frame per layer stays pinned (the cache may exceed its budget by the
+  pinned bytes, reported in its stats).
+- Ruled out with the harness and the first run's diagnostics: coalescing (every final request completed; the only
+  cancellations were superseded ones), the VFR time lookup (no presented picture ever had the wrong pts; gaps are
+  answered by the frame before them), a missing needsDisplay (every completion posted one), long-GOP decode time (the
+  reported files: click-to-picture median 79 ms, p95 185 ms, max 320 ms; the 11.6 s-GOP take measured separately:
+  max 218 ms), and the app side (ProjectStore.scrub/endScrub forward every click; no debounce). No solo preview or
+  reversed clip in the project; the fix covers their layers too (layersToDecodeLocked feeds the same requests).
+- After: 0 of 200 on the demo project and 0 of 200 on the generated media. Tests: `PausedSeekTests` (the demo
+  project, skipped where `~/Movies/Framewright Demo/demo1.framewright` or its media are absent, or
+  `FRAMEWRIGHT_DEMO_PROJECT` names another; the generated `screencast_vfr_h264.mov` project with a 40-frame cache; two
+  deterministic cases, a picture decoded far behind the lookahead and an already decoded picture whose redraw comes
+  after the cache filled up), `FrameCacheTests.testPutPinnedKeepsAFrameTheEvictionOrderWouldDropAtOnce`,
+  `DecodePoolTests.testAScrubbedFrameStaysCachedWhileItsReceiverHoldsIt`. `PresentedLayer::shownPts` (the pts of the
+  picture shown) is new for diagnostics. EngineTests now links AVFoundation (the sample table).
+- Observations, not changed: endScrub right after a click re-requests the same picture while the click's request is
+  still decoding, which supersedes and restarts it (the latencies above include it; letting a request for the time
+  already being decoded take over the decode in flight would save the restart on long GOPs). J from a pause on a forward clip still shows 3 to 5 late first
+  frames (unrelated: reverse playback needs frames the forward stopped lookahead does not decode).
+- By hand in the demo project: click around the ruler (especially back into earlier clips, into the 1/10 clip on V2
+  and the 3/2 and 5/4 clips, and into long static stretches) with the monitor visible: each click shows its frame at
+  once; also right after an edit and while clicking quickly.
