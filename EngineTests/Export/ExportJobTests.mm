@@ -973,10 +973,11 @@ static int expectedBurnIn(int64_t f) {
         }
     }
 
-    // Progress: at most one delivery per interval, increasing, with plausible numbers.
+    // Progress: at most one delivery per interval, increasing, with plausible numbers. The interval is
+    // kept by a timer, so a delivery may land up to a few ms early (macOS timer jitter): 15 % of room.
     for (size_t i = 1; i < outcome.progress.size(); ++i) {
         const double gap = outcome.progress[i].first - outcome.progress[i - 1].first;
-        XCTAssertGreaterThanOrEqual(gap, options.progressInterval * 0.95, @"progress delivered %.3f s after the previous one",
+        XCTAssertGreaterThanOrEqual(gap, options.progressInterval * 0.85, @"progress delivered %.3f s after the previous one",
                                     gap);
         XCTAssertGreaterThanOrEqual(outcome.progress[i].second.framesDone, outcome.progress[i - 1].second.framesDone);
     }
