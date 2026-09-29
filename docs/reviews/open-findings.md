@@ -19,18 +19,16 @@ the full reports are in git history at the commits the table names.
   `isRestorable = false` so SwiftUI restoration does not fight it. A pure
   `restoredFrame(saved:savedScreen:screens:minimum:)` unit-tested for external-monitor → laptop.
 
-## Post-lanes review (2026-09-29; report `docs/reviews/2026-09-29-post-lanes-review.md`)
-Fix round 47b1a45..9f8c23d (integration notes, "Post-lanes review fix round"); the closed items move to the README
-history table once verified.
-- Closed, awaiting verification: M1 and L1, L2 (ba5c86f); M2, L5, L6 (6aa5210); L3, L8, L9 (5c09617); L4
-  (798c866); L7 (the docs commit after 9f8c23d); test gaps 1, 2, 3, 6 (9f8c23d) and 10 (47b1a45); test gaps 4 and 5
-  are the M1, M2 and L1-L3 tests.
-- Open: test gap 7, the throughput of a reversed long-GOP 4K clip in playback and export (each backward window
-  decodes forward from its keyframe; unmeasured, the test media has no 4K long-GOP source); test gap 8, the Ken
-  Burns mode switch's own timeline builds and canvas draws, and Continue on Next Clip from Ken Burns mode; test gap 9,
-  the export parity tolerance, kept on purpose (the wipe edge is held by `TransitionShapeTests`).
-- Open, found in the fix round: J (-1x) from a pause on a forward clip presents 2 to 5 late first frames in the
-  playback harness (the stopped lookahead decodes toward forward play only); a reversed clip at J is exact.
+## Post-lanes review (2026-09-29; report in git history at f486a6a)
+All findings (M1, M2, L1-L9) and test gaps 1-6 and 10 were fixed in 47b1a45..eb4d3d5 and verified by the lead (see the
+README history table). Still open:
+- Test gap 7, the throughput of a reversed long-GOP 4K clip in playback and export (each backward window decodes
+  forward from its keyframe; unmeasured, the test media has no 4K long-GOP source).
+- Test gap 8, the Ken Burns mode switch's own timeline builds and canvas draws, and Continue on Next Clip from Ken
+  Burns mode.
+- Test gap 9, the export parity tolerance, kept on purpose (the wipe edge is held by `TransitionShapeTests`).
+- Found in the fix round: J (-1x) from a pause on a forward clip presents 2 to 5 late first frames in the playback
+  harness (the stopped lookahead decodes toward forward play only); a reversed clip at J is exact.
 - Known limit: an insert or overwrite in the middle of a clip divides its Motion spans too; their right parts open
   in the automatic Ken Burns mode (only a split passes the chosen mode on, L6).
 

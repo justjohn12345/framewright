@@ -651,7 +651,7 @@ calls and app controls described here are gone. Kept for the history of the eval
   (`pruneTestMediaVersions`); the slow-motion clip's frame times are in the manifest (`frameTicks960`).
 
 
-## Effect lanes round 1 (engine; plan `docs/plans/2026-09-24-effect-lanes.md`)
+## Effect lanes round 1 (engine; plan `docs/plans/2026-09-24-effect-lanes-done.md`)
 - Model (schema 5; `Engine/Model/EffectSpan.{h,cpp}`, `Clip.h`, `Transition.h`, `Sequence.h`). A clip's
   `spans` are `EffectSpan { id (SpanId), lane 0-3, kind (Transition, Motion, Opacity, Gain), start, end, edge,
   transition, tracks }`, sorted lane 0 (head, tail) then lanes 1-3 by start. Effect spans (lanes 1-3; Motion
@@ -792,7 +792,7 @@ calls and app controls described here are gone. Kept for the history of the eval
   default rectangles come from `motion(at:)`, so after a move they show the held framing, and a second move
   applied from the playhead starts there (AppTests updated).
 
-## Effect lanes round 2 (app; plan `docs/plans/2026-09-24-effect-lanes.md`)
+## Effect lanes round 2 (app; plan `docs/plans/2026-09-24-effect-lanes-done.md`)
 - Facade addition (engine): `VEClipInfo getBaseValues(_:underSpan:atEnd:frameDuration:)` (`VESpanValues`): what the
   rest of the clip composes to under an edge of an effect span, at the instants `getMotion(_:atEdgeOfSpan:)` reads
   (`composeMotion` / `composeGainDb` with the span left out at `spanEdgeFrameTime`), the fields of the span's kind set,
@@ -1144,7 +1144,7 @@ so switching writes nothing. No model or schema change.
   placed short of the frame's edge shows the black of the frame beside it; the source monitor with a portrait photo; the
   output window on a second display stays black outside the frame.
 
-## Wipe and iris transitions (2026-09-27; plan `docs/plans/2026-09-27-reverse-speed-wipes.md`, item 1)
+## Wipe and iris transitions (2026-09-27; plan `docs/plans/2026-09-27-reverse-speed-wipes-done.md`, item 1)
 - Model: `TransitionKind` (Transition.h) is `CrossDissolve`, `WipeLeft`, `WipeRight`, `WipeUp`, `WipeDown`, `Iris`
   (`kTransitionKinds`; names `crossDissolve` ... `iris`, `displayNameOf`, `transitionKindNamed`). A wipe is named for
   the way the edge travels: Wipe Left brings the incoming picture in from the right edge. The kind is a video
