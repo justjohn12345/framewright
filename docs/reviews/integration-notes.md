@@ -1484,3 +1484,13 @@ purpose); see `open-findings.md`.
   corners on it, a corner drag zooms in and the monitor follows at the release); reversing a clip of a Matroska file
   imported now (it reverses; an older project's clip with a nanosecond end is refused with the trim to make); Unlink
   with two pairs selected by a marquee and by Cmd-A (both pairs unlinked, one clip each selected, one Cmd-Z).
+
+## Notarized releases (2026-09-29)
+`Scripts/release.sh` builds the Distribution configuration (a real identity, the hardened runtime, every embedded
+dylib re-signed with the app's Team ID by CodeSignOnCopy), verifies the signature, submits the zip to Apple's notary
+service, staples the ticket, checks it with `spctl`, and writes `build/release/Framewright-<version>-macOS.zip` for
+the GitHub release. `--skip-notarize` stops after the signed build. Per machine, once: the team in
+`Config/Signing.local.xcconfig` (gitignored; `FRAMEWRIGHT_DEVELOPMENT_TEAM = <team id>`), a Developer ID Application
+certificate for that team in the keychain (Xcode > Settings > Accounts > Manage Certificates), and notarytool
+credentials stored as the keychain profile `framewright-notary` (an app-specific password from appleid.apple.com).
+Debug and Release stay ad hoc signed without the hardened runtime, so tests and local runs need none of this.
