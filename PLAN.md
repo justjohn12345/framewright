@@ -242,6 +242,14 @@ Each phase ends with something runnable and its tests green. Playback and A/V sy
   clip of it, one undo step) and "Open Nested Sequence". Across projects: File > Import Sequences from a
   Framewright project (its sequences and media references come in as bin items). Ordered after D1 (compact
   rows) and D3 (window frame restore) unless the user moves it up.
+- **Colour correction and grading** (asked 2026-09-29): a Colour span kind on the effect lanes with start and
+  end values, applied per clip in the fragment shader after the source conversion (the per-source colour matrix)
+  and before compositing, in a linear-light working space so 8-bit and 10-bit sources grade alike and export stays
+  identical to the monitor (the parity tests enforce it). Slice 1: exposure, contrast, temperature, tint,
+  saturation, and a waveform scope (a compute pass over the composited frame, drawn in a panel). Slice 2: lift /
+  gamma / gain colour wheels, luma and per-channel curves, a hue-versus-saturation secondary, LUT files (.cube)
+  as an input conversion or a look, plus vectorscope and histogram. Inspector rows and a live editor on the
+  program monitor as the Ken Burns editor is; the audio side is untouched.
 - **D1 compact rows and D3 window frame restore**: see `docs/reviews/open-findings.md`.
 - **Per-project Ken Burns mode memory** (the mode is remembered per session today), **notarization** once a
   Developer ID identity exists.
