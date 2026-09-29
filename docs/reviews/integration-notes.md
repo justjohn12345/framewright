@@ -1229,7 +1229,8 @@ so switching writes nothing. No model or schema change.
   pre-roll decode the frames before the picture in the media), and Backward in export for a reversed layer.
   `AudioSourceMapping::reversed` / `mirror`: sample n reads media at mirror - u(t of sample n + 1); the producer decodes
   a forward block of at least `kReverseBlockSeconds` (0.5 s) ending at the mirrored position (one seek per block) and
-  delivers it back to front, at speed 1 bit-exactly the forward samples, resampled after the mirror otherwise (pitch
+  delivers it back to front, at speed 1 bit-exactly the forward samples on PCM sources (on AAC within 1e-7: each
+  block is its own decode, 6.0e-8 measured by the post-lanes review), resampled after the mirror otherwise (pitch
   follows speed). Reverse playback stays silent as before; a reversed clip in forward playback sounds reversed.
 - Facade: `VEClipInfo.reversed`, `mediaIn` / `mediaOut` (the media shown), `mediaEnd`; `sourceIn` / `sourceOut` stay the
   model's clip times. `setReversed:forClips:` (one undo step, linked partners follow; a still refused).
@@ -1374,3 +1375,112 @@ From the user's hands-on testing of the reverse, speed and wipes round.
   brighter fill, readable label). A 10-frame wipe and iris played and stepped frame by frame: the edge moves
   smoothly, the frame before and after are clean; export one. An iris and a wipe fade in and fade out stepped
   frame by frame: the fade in's first frame and the fade out's last are black; the iris closes at the clip's end.
+
+## Post-lanes review fix round (review `docs/reviews/2026-09-29-post-lanes-review.md`)
+Closed: M1, M2, L1-L9 and test gaps 1-6 and 10. Left open: test gap 7 (reversed long-GOP 4K throughput), 8 (the mode
+switch's own builds and draws, Continue on Next Clip from Ken Burns mode) and 9 (the parity tolerance, kept on
+purpose); see `open-findings.md`.
+- M1, the Speed/Duration sheet's Reverse box is three-state. `SpeedDurationModel.reversed: Bool?` starts as the
+  chosen clips' common direction, nil (mixed) when they differ (`direction(of:)`); the checkbox is
+  `Toggle(sources: reverseSources, isOn: \.self)`, one binding per clip reading the direction it will have and
+  setting the box for all (a click on a mixed box turns it on). Apply changes the direction only of the clips whose
+  direction differs from a set box (`setReversed` on those clips alone), so a mixed box left alone keeps each
+  clip's own; the status line says "Reversed n clips." / "Played n clips forward." when it changes. Speed and
+  direction stay one undo step also for several clips: an Accumulate coalescing group now keeps commands that
+  cannot merge (`Command::mergeWith` false: the facade's `CompositeCommand` of a multi-clip speed change) in the
+  group's one step (`UndoStack` `AccumulatedSteps`: undone backwards, redone forwards, cancelled together). Before
+  this the second command of such a group became its own step (found by the M1 test: two clips, speed then
+  direction, undo left the speed). Tests: `ReverseClipTests.testTheSpeedSheetOnAMixedSelectionChangesDirectionOnly
+  WhenTheBoxIsSet`, `UndoStackTests` ("accumulate mode keeps commands that cannot merge in one step").
+- M2, Add Ken Burns… on a clip placed inside the frame. `ProjectStore.rememberAskedKenBurnsMode(_:for:)` (every entry
+  point with an intent: the Effects tab's tiles and "+", the Clip and context menus, a press on a frame where a
+  Motion span starts): Ken Burns asked on a span whose automatic mode is Transform
+  (`KenBurnsModel.automaticMode(span:clip:asset:sequence:)`) is not remembered (so it opens in Transform, the
+  automatic mode, unless the user switched that span to Ken Burns before) and the status line says "“x” is placed
+  inside the frame: opened in Transform mode; switch to Ken Burns on the bar to crop." Ken Burns mode on such a clip
+  is usable: `KenBurnsModel.monitorExtent` is the frame with every corner of both rectangles when one is outside the
+  frame box (nil otherwise), re-read with the rectangles but never during a drag (the monitor does not rescale under
+  the pointer), republished as `ProjectStore.kenBurnsExtent`; `KenBurnsViewport.editor(mode:extent:sequence:
+  monitor:)` (the layout's viewport) fits that extent with `extentPadding` (12 pt) to spare and never shows the frame
+  larger than Transform mode does; closed, Transform and an in-frame Ken Burns keep their viewports. A corner drag
+  then zooms the rectangle back toward the frame (the existing rules for a rectangle already outside the frame box).
+  Test: `KenBurnsModesTests.testAddKenBurnsOnAPictureInPictureOpensInTransformAndKenBurnsModeReachesItsCorners` (a
+  30 % clip: Transform with the note, 4 reachable corners on each box; switched, 4 on each rectangle, a corner drag
+  zooms and stays reachable; the tile dropped on a lane the same; a full-frame clip still Ken Burns, no extent).
+  `OutputDisplayTests.testTheOutputWindowStaysBlackOutsideTheFrame` asked Add Ken Burns… on a half-size clip for
+  the solo picture; it now switches to Ken Burns mode on the bar, as a user would.
+- L1, reversing media whose end is stated to the nanosecond. Root cause at import: Matroska's per-track DURATION tag
+  (`FFProber` `durationTagNanoseconds`, now read exactly instead of through a double) is the length rounded to the
+  nanosecond, on which few clip ends combine exactly. `tagDurationOnGrid` puts it on the track's own grid: an audio
+  track's nearest whole number of samples; a constant-rate video track's nearest whole number of frames when within
+  the container's timestamp resolution (1 ms in Matroska), else rounded up to that resolution. In the engine
+  (existing projects keep their stored ends): `SetClipReversed` puts the new in point on the old one's timescale, else
+  the sequence's frame grid, else the media end's timescale, else its smallest exact one; when E - out has no CMTime
+  form on any timescale (a nanosecond end against a third of a second) it is refused `NotRepresentable` with a
+  sentence ("“odd.mkv” cannot be reversed: its media's length as the file states it (10.123456789 s) does not line
+  up exactly with this clip's frames, so they cannot be mirrored frame for frame. Trimming 1 frame off its end makes
+  it reversible.", the trim found by trying up to 30 frames). Deviation: the brief asked to compute the in point
+  exactly on a representable timescale "instead of refusing"; there is none for the review's case (the exact value's
+  reduced denominator is 3 x 10^9, and every exact representation needs a multiple of it), so the engine refuses
+  in words and the import stops such ends arising. Tests: `ReverseTests` ("a media end on a nanosecond timescale":
+  exact on the media's timescale for 30 frames, refused with "Trimming 1 frame" for 31 and "2 frames" for 32, the
+  trim then reverses frame for frame), `FFmpegBackendConformanceTests.testMatroskaWriterRoundTrip` (the tags of a
+  written Matroska file: the video 45 x 1001/30000 exactly, the sound whole 48 kHz samples, both less 31/30 s exact;
+  its tag says 1.501 s).
+- L2: `SetClipReversed` skips a still among the linked partners (only a still asked for is refused); the facade's
+  note: "“photo.heic” is a still image, which has no direction: its linked “tone.wav” was reversed on its own."
+  Tests: `ReverseTests` ("the sound linked to a still is reversed on its own"),
+  `ReverseClipTests.testReversingSoundLinkedToAStillReversesTheSoundAlone`.
+- L3: `repairSequence` clears `"reversed": true` on a still with a warning ("a still has no direction to reverse;
+  \"reversed\" was cleared"); validation still refuses it in the model. A clip "with no media length" cannot reach
+  it (validation requires a positive length of a non-still asset and a clip's still flag to match its asset's), so
+  only the still is repaired. Test: `ProjectJSONTests` ("\"reversed\" on a still is cleared with a warning").
+- L4: Unlink with several linked pairs selected unlinks every pair in one undo step (an Accumulate group) and keeps
+  one clip of each: the clicked one (`keeping`, else `selectionAnchor`) for its pair, the one selected when only one
+  is, else the picture; "Unlinked 2 pairs of clips." The anchor is now cleared when the selection no longer holds it
+  and by Select All. Test: `UnlinkSelectionTests.testUnlinkWithSeveralPairsUnlinksEveryPairAndKeepsOneClipOfEach`.
+- L5: `KenBurnsModel.continueOnNextClipProblem` is published, read once per model change (`update`) and held during
+  a drag (re-read at its end); `ProjectStore.continueMotionProblem` caches the engine's answer by span and engine
+  change count (`continueMotionProblemReads` counts the engine calls). `LaneEffectsPanel` observes
+  `LaneEffectsAvailability` (the "+" state, re-read on the main queue after store changes and when a gesture starts
+  or ends, published only when it changes) instead of the store, and `EffectsPanel` no longer observes the store.
+  Measured by `TimelineRedrawTests.testAKenBurnsDragBuildsNoTimelineModelAndRedrawsNoClips` with the bar and the
+  Effects tab hosted: 0 engine reads during 20 drag steps, 1 at the release, 2 tile redraws per drag (the "+"
+  disabled and enabled again) in both modes; a positive control redraws the tiles when "+" changes.
+- L6: `SplitClip::dividedSpans()` (from `splitClipAt`'s new `divided` list) and `VEEditResult.dividedSpanIDs` (right
+  part -> original, set by `splitClip:` and `splitClips:`); `ProjectStore.splitAtPlayhead` gives each part the Ken
+  Burns mode chosen for its span (`inheritKenBurnsModes`). Only splits: an insert or overwrite in the middle of a
+  clip also divides spans, and their right part opens in the automatic mode. Tests: `ClipOpsTests` ("SplitClip
+  reports each span it divided"), `KenBurnsModesTests.testASplitKeepsTheChosenModeOnBothPieces`.
+- L7: README says a wipe or iris fade starts and ends on black and a cross-dissolve fade's first frame shows
+  1/(2n) of the picture; reversed sound is sample for sample on PCM, within 1e-7 on AAC (also in the Reverse notes
+  above).
+- L8: `migrateV5ToV6` warns for each clip with `"reversed": true` and each wipe or iris kind in a version 5 file ("...
+  is a version 6 feature in a project of an earlier version: kept, and the project is saved as version 6"); every
+  project is saved as version 6. An unknown transition kind (a newer version's) loads as a cross dissolve with
+  `EffectSpan::unknownTransitionName` holding the file's name, which saving writes back ("unknown transition kind
+  \"clockWipe\" (from a newer version of Framewright?); shown as a cross dissolve and saved as \"clockWipe\"");
+  `SetTransitionKind` replaces it. The legacy (version 1-4) transition list keeps its old handling. Tests:
+  `ProjectJSONTests` (the round trip of an unknown kind and its replacement; a version 5 file with a reversed clip
+  and a Wipe Left).
+- L9: `SetTransitionKind` Cross Dissolve on an audio transition succeeds and changes nothing; `checkTransitionSpan`
+  names the kind by its display name ("not a Wipe Left"); `setClipFade` refuses a fade out meeting the incoming
+  dissolve and fades that together overlap with `Overlap`, as `fadeLimitFrames` does (longer than the clip stays
+  `InvalidTime`). Tests: `TransitionFadeEditTests` ("Refusal wording and codes"), updated codes in
+  `EffectsEditTests`, `SchedulerTests`, `SpanEditTests`.
+- Test gaps: the H1 migration with an 11-frame crossfade (54 frames and one warning; the floor mutation gives two
+  warnings and fails), `ReverseClipTests.testAnAsymmetricRangeShowsItsMediaInTheSourceRowsAndMirrorsAboutTheMediaEnd`,
+  `TimelineRedrawTests.testASelectedClipIsDrawnWithTheSelectionBorderAndFill` (rendered offscreen; a renderer passed
+  `selected: false` fails it), `PlaybackLookaheadTests.testAReversedClipPlaysBackwardFastAndScrubsFrameExact` (-1x,
+  -2x and 2x over a reversed clip and ten scrub positions: every sample the mirrored picture, no late frame), and a
+  doctest filter: `TEST_RUNNER_DOCTEST_TEST_CASE='*pattern*'` (also `_TEST_CASE_EXCLUDE`, `_SUBCASE`) with
+  `-only-testing:EngineTests/DoctestRunnerTests` runs a subset; a filter that matches nothing fails.
+- Observation, not changed: J (-1x) from a pause on a FORWARD clip presents 2 to 5 late first frames in the harness
+  (the stopped lookahead decodes toward forward play only); a reversed clip at J is exact once the lookahead has
+  settled. Reverse playback from a pause on forward media would need a lookahead in both directions.
+- By hand: the Speed/Duration sheet on a reversed and a forward clip (the box shows the dash; 50 % alone keeps both
+  directions; a click on the box and Apply reverses both, one Cmd-Z undoes speed and direction); Add Ken Burns… on
+  a picture in picture (Transform, the note; switch to Ken Burns on the bar: the monitor zooms out, both rectangles'
+  corners on it, a corner drag zooms in and the monitor follows at the release); reversing a clip of a Matroska file
+  imported now (it reverses; an older project's clip with a nanosecond end is refused with the trim to make); Unlink
+  with two pairs selected by a marquee and by Cmd-A (both pairs unlinked, one clip each selected, one Cmd-Z).

@@ -47,8 +47,9 @@ audited the code line by line.
   right, up and down and an iris on video, constant-power crossfades on audio, across a cut with any split of the
   two sides such as 70/30, and fades or wipes to and from black or silence at a free edge; the inspector changes a
   video transition's kind; a wipe's or the iris's edge is averaged over each frame's exposure, so it sweeps smoothly
-  instead of stepping from frame to frame, a fade in starts and a fade out ends on a black frame, and the iris
-  closes on the picture at a clip's end); lanes 1-3 have Motion, Fade (opacity) and Gain spans, each with start and end values that
+  instead of stepping from frame to frame, a wipe or iris fade in starts and fade out ends on a black frame (a
+  cross-dissolve fade mixes at each frame's centre, so its first frame already shows 1/(2n) of the picture over n
+  frames), and the iris closes on the picture at a clip's end); lanes 1-3 have Motion, Fade (opacity) and Gain spans, each with start and end values that
   compose onto the clip's own (a pan on one lane, a zoom on another) and hold their end value until the clip ends.
   Drag across an empty lane to make a span (a Motion span on video, with Option a fade, a Gain span on audio), or
   press Control-K for a Motion span at the playhead; drag a span to move it and its edges to trim it (snapping to
@@ -65,10 +66,13 @@ audited the code line by line.
   down the timeline: a Motion span on the next clip starts where the move is at the cut and goes on at the same
   speed for as long, one undo step, and the editor follows it. Ken Burns and Move in the Effects tab or the Clip menu open in their mode,
   Control-K in Ken Burns mode when the clip spans the frame across or down (a letterboxed or pillarboxed picture
-  too). The monitors shade the area around the frame so its edge shows. Projects from earlier versions open with their keyframes and fades as spans and look and sound the
+  too); Ken Burns asked for on a clip placed inside the frame (a picture in picture) opens in Transform with a note,
+  and switched to Ken Burns mode there the monitor zooms out to show the rectangles, which are larger than the
+  frame. A split keeps the mode chosen for a Motion span on both pieces. The monitors shade the area around the frame so its edge shows. Projects from earlier versions open with their keyframes and fades as spans and look and sound the
   same.
 - Reverse Clip (Option-Cmd-R, the clip's context menu, the inspector's Speed row or the Speed/Duration sheet):
-  a clip and its linked audio play their media backwards, frame for frame and sample for sample, in playback,
+  a clip and its linked audio play their media backwards, frame for frame and, on PCM sources, sample for sample
+  (within 1e-7 on AAC and other compressed audio, read back in separately decoded half-second blocks), in playback,
   scrubbing, thumbnails and export; trims and splits keep the pictures where they are.
 - Inspector for the clips' position, scale, rotation, opacity, gain, fades and exact speed (typed as a
   percentage, a multiplier or a fraction, or from presets); transitions
