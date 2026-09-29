@@ -1,6 +1,12 @@
 // Runs every doctest TEST_CASE linked into EngineTests (plain C++ model/edit tests)
 // as a single XCTest, reporting each failed doctest assertion as an XCTest failure
 // at its source location.
+//
+// A subset: set DOCTEST_TEST_CASE (and/or DOCTEST_TEST_CASE_EXCLUDE, DOCTEST_SUBCASE) in the test
+// process's environment to a doctest filter (comma-separated, `*` wildcards). From xcodebuild, prefix
+// it with TEST_RUNNER_, which xcodebuild strips before passing it on:
+//   TEST_RUNNER_DOCTEST_TEST_CASE='*reverse*' xcodebuild ... -only-testing:EngineTests/DoctestRunnerTests test
+// A filter that matches nothing fails the test (a mistyped filter would otherwise pass silently).
 
 #define DOCTEST_CONFIG_IMPLEMENT
 #define DOCTEST_CONFIG_NO_POSIX_SIGNALS
@@ -8,6 +14,8 @@
 
 #import <XCTest/XCTest.h>
 
+#include <cctype>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -86,10 +94,31 @@ REGISTER_LISTENER("xctest-bridge", 1, XCTestBridgeListener);
     doctest::Context context;
     context.setOption("no-breaks", true);
     context.setOption("no-intro", true);
+    // Optional filters from the environment (see the top of the file).
+    NSMutableArray<NSString *> *filters = [NSMutableArray array];
+    for (const char *option : {"test-case", "test-case-exclude", "subcase"}) {
+        std::string variable = "DOCTEST_" + std::string(option);
+        for (char &c : variable) {
+            c = c == '-' ? '_' : static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        const char *value = std::getenv(variable.c_str());
+        if (value != nullptr && value[0] != '\0') {
+            context.setOption(option, value);
+            [filters addObject:[NSString stringWithFormat:@"%s=%s", variable.c_str(), value]];
+        }
+    }
+    if (filters.count > 0) {
+        NSLog(@"DoctestRunnerTests: running the doctest cases matching %@", [filters componentsJoinedByString:@", "]);
+    }
     const int result = context.run();
 
     std::lock_guard<std::mutex> lock(gResults.mutex);
-    XCTAssertGreaterThan(gResults.testCasesRun, 0u, @"no doctest test cases were linked into EngineTests");
+    if (filters.count > 0) {
+        XCTAssertGreaterThan(gResults.testCasesRun, 0u, @"no doctest test case matches %@",
+                             [filters componentsJoinedByString:@", "]);
+    } else {
+        XCTAssertGreaterThan(gResults.testCasesRun, 0u, @"no doctest test cases were linked into EngineTests");
+    }
     for (const DoctestFailure &failure : gResults.failures) {
         XCTSourceCodeLocation *location = [[XCTSourceCodeLocation alloc] initWithFilePath:@(failure.file.c_str())
                                                                                lineNumber:failure.line];
