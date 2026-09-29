@@ -16,6 +16,13 @@ It runs on Apple silicon and uses the hardware wherever there is hardware to use
 
 Screenshots use footage from [Sintel](https://durian.blender.org) (Blender Foundation, CC BY 3.0).
 
+## Download
+
+The latest test build is on the [Releases](https://github.com/justjohn12345/framewright/releases) page:
+signed with a Developer ID and notarized by Apple, so it opens with a double-click. macOS 14 or later on
+Apple silicon. Unzip, move `Framewright.app` to Applications, open. It is a fast-moving test build: a
+later version may not open projects saved by an earlier one, so keep real work elsewhere for now.
+
 **This codebase is entirely AI-written.** Every line of engine code, UI, build script, test
 and document was produced by Claude Code: Claude Fable 5.1 acting as the lead (planning,
 review, verification) directing Claude Opus 5.5 subagents that implemented each phase, with a
@@ -167,7 +174,8 @@ and the test itself), and the numbers are logged with the prefixes `HOUR EXPORT`
 - **Debug** (what `build`/`test` above use) and **Release** are signed ad hoc
   (`CODE_SIGN_IDENTITY=-`) without the hardened runtime, so they build, test and launch
   headless with no developer account.
-- **Distribution** (used by Archive) is Release plus the hardened runtime and a real identity,
+- **Distribution** (what `Scripts/release.sh` builds, signs, notarizes and staples) is Release plus
+  the hardened runtime and a real identity,
   as notarized distribution outside the App Store requires. It defaults to
   `Developer ID Application`; set your team (and, if you like, another identity) in
   `Config/Signing.local.xcconfig` (gitignored; read by `Config/Distribution.xcconfig`):
