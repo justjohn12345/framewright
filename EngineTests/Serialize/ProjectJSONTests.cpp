@@ -879,6 +879,43 @@ TEST_CASE("ProjectJSON: a version 4 fade out reaching into an incoming crossfade
     CHECK_FALSE(validateProject(*loaded.project).has_value());
 }
 
+TEST_CASE("ProjectJSON: a version 4 fade out against an odd-length crossfade keeps duration - ceil(n / 2) (test gap 1)") {
+    // As above with an 11-frame crossfade: 6 of its frames are inside clip 14 (the incoming share,
+    // ceil(11 / 2)), so the 57-frame fade out is shortened to 54, not 55 (a floor would give 55 and
+    // leave the repair to the loader's pruning, with a second warning).
+    json document = json::parse(readFile(goldenPath("project-v4-render.json")));
+    bool foundTransition = false;
+    for (json &transition : document.at("sequences")[0].at("transitions")) {
+        if (transition.at("id") == 16) {
+            transition.at("duration") = json{{"value", 11}, {"timescale", 30}};
+            foundTransition = true;
+        }
+    }
+    bool foundClip = false;
+    for (json &track : document.at("sequences")[0].at("audioTracks")) {
+        for (json &clip : track.at("clips")) {
+            if (clip.at("id") == 14) {
+                clip.at("audio")["fadeOutDuration"] = json{{"value", 57}, {"timescale", 30}};
+                foundClip = true;
+            }
+        }
+    }
+    REQUIRE(foundTransition);
+    REQUIRE(foundClip);
+    const ProjectLoadResult loaded = parseProject(document.dump());
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    const Sequence &sequence = loaded.project->sequences[0];
+    const Clip *clip = sequence.findClip(ClipId{14});
+    REQUIRE(clip != nullptr);
+    CHECK(clipFadeLength(*clip, ClipEdge::Tail) == f30(54)); // 60 - ceil(11 / 2)
+    const EffectSpan *crossfade = sequence.findSpan(SpanId{16});
+    REQUIRE(crossfade != nullptr);
+    CHECK(crossfade->end == f30(6));
+    CHECK(loaded.warnings.size() == 1); // the migration's own, and nothing left for the loader to prune
+    CHECK(anyContains(loaded.warnings, "shortened to 54/30 "));
+    CHECK_FALSE(validateProject(*loaded.project).has_value());
+}
+
 namespace {
 
 // V1: clip A [0,90) with a Motion span on lane 1 [0,30), an Opacity span on lane 2 [15,60) and a

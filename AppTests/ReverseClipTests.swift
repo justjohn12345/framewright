@@ -233,4 +233,30 @@ final class ReverseClipTests: XCTestCase {
                        accuracy: 1e-9)
         XCTAssertEqual(clip.mediaEnd, 2, accuracy: 1e-9, "the 2 s movie's end is the mirror")
     }
+
+    /// Test gap 2: on a range that is not symmetric in the 2 s movie (0.2 s to 0.8 s, so the clip's
+    /// own times after reversing, 1.2 s to 1.8 s, differ from the media it shows), the Source rows show
+    /// the media range, and the timeline's thumbnails mirror about the media's end: 0.8 s at the
+    /// clip's first instant and 0.2 s at its last (a mirror about the clip's own range, or the rows
+    /// showing clip times, would both be caught).
+    func testAnAsymmetricRangeShowsItsMediaInTheSourceRowsAndMirrorsAboutTheMediaEnd() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let v1 = try XCTUnwrap(store.videoTracks.first).trackID
+        XCTAssertTrue(store.place(asset: movie.assetID, at: .zero, videoTrack: v1, audioTrack: 0,
+                                  sourceIn: store.frameTime(0.2), sourceOut: store.frameTime(0.8), overwrite: true))
+        let clip = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.setReversed(true))
+        let info = try XCTUnwrap(store.clips[clip])
+        XCTAssertEqual(info.sourceIn.seconds, 1.2, accuracy: 1e-9, "its clip times count back from the 2 s end")
+        XCTAssertEqual(info.sourceOut.seconds, 1.8, accuracy: 1e-9)
+        XCTAssertEqual(info.mediaIn.seconds, 0.2, accuracy: 1e-9)
+        XCTAssertEqual(info.mediaOut.seconds, 0.8, accuracy: 1e-9)
+        let rows = InspectorModel.sourceRangeTexts(of: info)
+        XCTAssertEqual(rows.in, Timecode.duration(store.frameTime(0.2)) + " (reversed)")
+        XCTAssertEqual(rows.out, Timecode.duration(store.frameTime(0.8)) + " (reversed)")
+        let drawn = try XCTUnwrap(store.timelineModel.clips.first { $0.id == clip })
+        XCTAssertEqual(drawn.mediaTime(atClipTime: drawn.sourceIn), 0.8, accuracy: 1e-9)
+        XCTAssertEqual(drawn.mediaTime(atClipTime: drawn.sourceIn + (drawn.end - drawn.start) * drawn.speed), 0.2,
+                       accuracy: 1e-9)
+    }
 }

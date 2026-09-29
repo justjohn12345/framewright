@@ -476,6 +476,75 @@ double secondsOf(CMTime t) {
     XCTAssertEqual(h.controller->stats().audioUnderruns, 0u, @"the reversed audio kept up");
 }
 
+/// Test gap 6 of the post-lanes review: a reversed clip under J (-1x), -2x and 2x and while scrubbing
+/// shows at every presented frame p exactly the mirrored picture, source frame 119 - p (the decode
+/// direction is the clip's XOR the rate's: forward decoding for a reversed clip played backwards),
+/// with no late frame. The review's scratch run: 90 of 90 samples exact at each rate.
+- (void)testAReversedClipPlaysBackwardFastAndScrubsFrameExact {
+    PlaybackHarness h(PlaybackHarness::Mode::Realtime, 3.0);
+    const Rig r = buildRig(h);
+    if (!h.ok()) {
+        XCTFail(@"%s", h.error().c_str());
+        return;
+    }
+    SetClipReversed reverse(h.sequenceId, r.a, true);
+    const EditResult reversed = reverse.apply(h.project);
+    XCTAssertTrue(reversed.ok(), @"%s", reversed.message.c_str());
+    h.load();
+    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return h.output->isRunning(); }), @"the output warms up");
+
+    // Each run starts paused on `from` and plays for 1.2 s at `rate`, staying inside the clip.
+    const std::pair<double, int64_t> runs[] = {{-1.0, 100}, {-2.0, 110}, {2.0, 10}};
+    for (const auto &[rate, from] : runs) {
+        h.controller->seek(frames30(from));
+        const PlaybackHarness::Sample paused = h.presentExact();
+        XCTAssertEqual(paused.burnIns.front().value_or(-1), 119 - from, @"rate %.0f: paused on frame %lld", rate, from);
+        XCTAssertTrue(h.pool->waitUntilIdle(std::chrono::seconds(10)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300)); // the stopped lookahead settles
+        const uint64_t lateBefore = h.controller->stats().lateFrames;
+        h.controller->setRate(rate);
+        // Sampled once the transport plays (2x pre-rolls its audio first).
+        XCTAssertTrue(PlaybackHarness::waitUntil([&] { return h.controller->state() == PlaybackState::Playing; }),
+                      @"rate %.0f: playing", rate);
+        int samples = 0;
+        std::vector<std::string> wrong;
+        const auto start = SteadyClock::now();
+        auto next = start;
+        while (SteadyClock::now() - start < std::chrono::milliseconds(1200)) {
+            next += std::chrono::microseconds(16667);
+            std::this_thread::sleep_until(next);
+            const PlaybackHarness::Sample s = h.present();
+            const int64_t p = s.presented.frameIndex;
+            if (p < 0 || p >= 120 || s.burnIns.empty() || !s.presented.clockDriven) {
+                continue;
+            }
+            ++samples;
+            if (s.burnIns.front().value_or(-1) != 119 - p) {
+                wrong.push_back("frame " + std::to_string(p) + " shows " +
+                                std::to_string(s.burnIns.front().value_or(-1)) + ", expected " +
+                                std::to_string(119 - p));
+            }
+        }
+        const uint64_t late = h.controller->stats().lateFrames - lateBefore;
+        h.controller->pause();
+        NSLog(@"REVERSED CLIP AT %.0fx: %d samples, %zu not the mirrored picture, %llu late", rate, samples,
+              wrong.size(), late);
+        XCTAssertGreaterThan(samples, 30, @"rate %.0f", rate);
+        XCTAssertTrue(wrong.empty(), @"rate %.0f: %zu of %d samples wrong, first: %s", rate, wrong.size(), samples,
+                      wrong.empty() ? "" : wrong.front().c_str());
+        XCTAssertEqual(late, 0u, @"rate %.0f: late frames", rate);
+    }
+
+    // Scrubbing across the clip, both ways and jumping: every position shows its mirrored picture.
+    for (const int64_t f : {0, 1, 45, 44, 90, 119, 118, 60, 7, 100}) {
+        h.controller->scrubTo(frames30(f));
+        const PlaybackHarness::Sample s = h.presentExact();
+        XCTAssertEqual(s.presented.frameIndex, f);
+        XCTAssertEqual(s.burnIns.empty() ? -1 : s.burnIns.front().value_or(-1), 119 - f, @"scrubbed to frame %lld", f);
+    }
+    h.controller->endScrub();
+}
+
 /// A cut from a forward clip into a reversed one while playing (hands-on round, 2026-09-27): the
 /// reversed clip's first picture is the END of a backward decode window, so its window must be decoded
 /// before the playhead reaches the cut or the first frames are late (the forward clip's last picture

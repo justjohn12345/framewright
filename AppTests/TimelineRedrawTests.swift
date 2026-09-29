@@ -470,6 +470,53 @@ final class TimelineRedrawTests: XCTestCase {
         XCTAssertGreaterThan(store.waveforms.stripsRendered, 0)
     }
 
+    /// Test gap 3 of the post-lanes review: the renderer draws a selected clip differently, in pixels
+    /// (the style tests restate the style; passing `selected: false` to the renderer survived them). Two
+    /// audio clips of the same media, one selected: on the selected one the top edge is the accent
+    /// border and the body is the lighter fill; on the other neither.
+    func testASelectedClipIsDrawnWithTheSelectionBorderAndFill() async throws {
+        let store = fixture.store
+        let (_, tone) = try await fixture.importMedia()
+        let a1 = try XCTUnwrap(store.audioTracks.first).trackID
+        XCTAssertTrue(store.place(asset: tone.assetID, at: .zero, videoTrack: 0, audioTrack: a1,
+                                  sourceIn: .zero, sourceOut: CMTime(value: 2, timescale: 1), overwrite: true))
+        let first = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.place(asset: tone.assetID, at: CMTime(value: 3, timescale: 1), videoTrack: 0, audioTrack: a1,
+                                  sourceIn: .zero, sourceOut: CMTime(value: 2, timescale: 1), overwrite: true))
+        let second = try XCTUnwrap(store.selection.first)
+        store.selection = [first]
+
+        let size = CGSize(width: 1000, height: 400)
+        let content = TimelineView(store: store)
+            .frame(width: size.width, height: size.height)
+            .background(Color.white)
+            .environment(\.colorScheme, .light)
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = 1
+        let bitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(renderer.cgImage))
+        let model = store.timelineModel
+        func pixel(_ x: CGFloat, _ y: CGFloat) -> (r: CGFloat, g: CGFloat, b: CGFloat) {
+            let px = Int(TimelineView.headerWidth + 1 + x)
+            let py = Int(TimelineView.rulerHeight + 1 + y)
+            guard let color = bitmap.colorAt(x: px, y: py)?.usingColorSpace(.sRGB) else { return (0, 0, 0) }
+            return (color.redComponent, color.greenComponent, color.blueComponent)
+        }
+        let selected = try XCTUnwrap(model.rect(forClip: try XCTUnwrap(model.clip(id: first))))
+        let unselected = try XCTUnwrap(model.rect(forClip: try XCTUnwrap(model.clip(id: second))))
+        XCTAssertEqual(selected.width, unselected.width, accuracy: 0.5)
+        // The border: the top edge, a point inside, at the middle.
+        let border = pixel(selected.midX, selected.minY + 1)
+        let plainEdge = pixel(unselected.midX, unselected.minY + 1)
+        XCTAssertGreaterThan(border.b, border.g + 0.2, "the selected clip's edge is the accent colour: \(border)")
+        XCTAssertLessThan(plainEdge.b, plainEdge.g, "the other clip's edge is not: \(plainEdge)")
+        // The fill: the label band's right part (no text there), lighter when selected.
+        let fill = pixel(selected.minX + selected.width * 0.75, selected.minY + 6)
+        let plainFill = pixel(unselected.minX + unselected.width * 0.75, unselected.minY + 6)
+        XCTAssertGreaterThan(fill.r + fill.g + fill.b, plainFill.r + plainFill.g + plainFill.b + 0.15,
+                             "the selected fill is lighter: \(fill) against \(plainFill)")
+        XCTAssertGreaterThan(fill.g, fill.b, "and still the audio clips' green: \(fill)")
+    }
+
     /// The lanes paint their spans: a Motion span's bar in its colour on lane 1 under its clip, a
     /// fade out's bar on lane 0, the empty part of a lane not.
     func testTheLanesPaintTheirSpans() async throws {
