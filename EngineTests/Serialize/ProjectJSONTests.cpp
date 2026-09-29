@@ -583,11 +583,16 @@ TEST_CASE("ProjectJSON: unknown kinds and keys of spans warn instead of failing"
     const Fixture fx = richFixture();
     json j = projectToJson(fx.project);
     json &spans = j["sequences"][0]["videoTracks"][0]["clips"][0]["spans"];
-    SUBCASE("an unknown transition kind degrades to a cross dissolve") {
+    SUBCASE("an unknown transition kind degrades to a cross dissolve, kept by name") {
         spans[0]["transition"] = "wipe";
         const ProjectLoadResult loaded = projectFromJson(j);
         REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
-        CHECK(*loaded.project == fx.project);
+        Project stripped = *loaded.project;
+        EffectSpan &span = stripped.sequences[0].videoTracks[0].clips[0].spans[0];
+        CHECK(span.transition == TransitionKind::CrossDissolve);
+        CHECK(span.unknownTransitionName == "wipe");
+        span.unknownTransitionName.clear();
+        CHECK(stripped == fx.project);
         REQUIRE(loaded.warnings.size() == 1);
         CHECK(contains(loaded.warnings[0], "clips[0].spans[0].transition: unknown transition kind \"wipe\""));
     }
@@ -670,14 +675,40 @@ TEST_CASE("ProjectJSON: every transition kind round trips on a cut and on a free
 
 TEST_CASE("ProjectJSON: an unknown transition kind is named in the warning and a shaped kind on audio is repaired") {
     const Fixture fx = richFixture();
-    SUBCASE("unknown: a cross dissolve, the name in the warning") {
+    SUBCASE("unknown: shown as a cross dissolve, the name in the warning, kept by name when saved (review L8)") {
         json j = projectToJson(fx.project);
         j["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][0]["transition"] = "clockWipe";
         const ProjectLoadResult loaded = projectFromJson(j);
         REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
-        CHECK(*loaded.project == fx.project);
         REQUIRE(loaded.warnings.size() == 1);
-        CHECK(contains(loaded.warnings[0], "unknown transition kind \"clockWipe\"; using a cross dissolve"));
+        CHECK(contains(loaded.warnings[0], "unknown transition kind \"clockWipe\""));
+        CHECK(contains(loaded.warnings[0], "shown as a cross dissolve and saved as \"clockWipe\""));
+        const EffectSpan &span = loaded.project->sequences[0].videoTracks[0].clips[0].spans[0];
+        REQUIRE(span.isTransition());
+        CHECK(span.transition == TransitionKind::CrossDissolve); // what it renders and edits as
+        CHECK(span.unknownTransitionName == "clockWipe");
+        // Everything else is the project as written.
+        Project stripped = *loaded.project;
+        stripped.sequences[0].videoTracks[0].clips[0].spans[0].unknownTransitionName.clear();
+        CHECK(stripped == fx.project);
+        // Saved and loaded again: the name comes back, not "crossDissolve".
+        const json saved = projectToJson(*loaded.project);
+        CHECK(saved["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][0]["transition"] == "clockWipe");
+        CHECK(saved == j);
+        const ProjectLoadResult again = projectFromJson(saved);
+        REQUIRE(again.ok());
+        CHECK(*again.project == *loaded.project);
+        // Choosing a kind replaces it.
+        Project edited = *loaded.project;
+        SetTransitionKind kind(edited.sequences[0].id, span.id, TransitionKind::WipeUp);
+        REQUIRE(kind.apply(edited).ok());
+        const EffectSpan *chosen = edited.sequences[0].findSpan(span.id);
+        REQUIRE(chosen != nullptr);
+        CHECK(chosen->transition == TransitionKind::WipeUp);
+        CHECK(chosen->unknownTransitionName.empty());
+        CHECK(projectToJson(edited)["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][0]["transition"] == "wipeUp");
+        kind.revert(edited);
+        CHECK(edited.sequences[0].findSpan(span.id)->unknownTransitionName == "clockWipe");
     }
     SUBCASE("a wipe on an audio track's fade becomes a cross dissolve (audio has no shapes)") {
         json j = projectToJson(fx.project);
@@ -696,7 +727,7 @@ TEST_CASE("ProjectJSON: an unknown transition kind is named in the warning and a
         music.transitionAt(ClipEdge::Head)->transition = TransitionKind::WipeUp;
         const auto problem = validateProject(edited.project);
         REQUIRE(problem.has_value());
-        CHECK(contains(*problem, "wipeUp"));
+        CHECK(contains(*problem, "not a Wipe Up")); // the kind's display name (review L9)
     }
 }
 
@@ -1007,7 +1038,7 @@ TEST_CASE("ProjectJSON: the checked-in version 6 project matches the current wri
     CHECK(contains(text, "\"transition\": \"wipeLeft\""));
 }
 
-TEST_CASE("ProjectJSON: a reversed clip round trips; reversing a still fails validation") {
+TEST_CASE("ProjectJSON: a reversed clip round trips; an explicit false reads as forward") {
     Fixture fx = richFixtureV6();
     const ProjectLoadResult loaded = parseProject(serializeProject(fx.project));
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
@@ -1015,12 +1046,75 @@ TEST_CASE("ProjectJSON: a reversed clip round trips; reversing a still fails val
     const Clip &reversed = loaded.project->sequences[0].videoTracks[1].clips.back();
     CHECK(reversed.reversed);
     json j = projectToJson(fx.project);
-    j["sequences"][0]["videoTracks"][1]["clips"][1]["reversed"] = true; // the still
-    CHECK(contains(loadError(j), "a still cannot be reversed"));
     j["sequences"][0]["videoTracks"][1]["clips"][1]["reversed"] = false;
     const ProjectLoadResult explicitFalse = projectFromJson(j);
     REQUIRE(explicitFalse.ok());
     CHECK(*explicitFalse.project == fx.project);
+}
+
+TEST_CASE("ProjectJSON: \"reversed\" on a still is cleared with a warning, not refused (review L3)") {
+    const Fixture fx = richFixtureV6();
+    json j = projectToJson(fx.project);
+    json &still = j["sequences"][0]["videoTracks"][1]["clips"][1];
+    REQUIRE(still.value("isStill", false));
+    still["reversed"] = true;
+    const ProjectLoadResult loaded = projectFromJson(j);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(*loaded.project == fx.project); // the flag cleared, nothing else changed
+    REQUIRE(loaded.warnings.size() == 1);
+    CHECK(contains(loaded.warnings[0], "a still has no direction to reverse; \"reversed\" was cleared"));
+    CHECK_FALSE(validateProject(*loaded.project).has_value());
+    // The model itself still refuses it (an edit never makes one).
+    Project edited = *loaded.project;
+    edited.sequences[0].videoTracks[1].clips[1].reversed = true;
+    const auto problem = validateProject(edited);
+    REQUIRE(problem.has_value());
+    CHECK(contains(*problem, "a still cannot be reversed"));
+}
+
+TEST_CASE("ProjectJSON: a version 5 file with version 6 content opens with a warning naming it (review L8)") {
+    json document = json::parse(readFile(goldenPath("project-v5.json")));
+    REQUIRE(document.at("schemaVersion") == 5);
+    bool reversedSet = false;
+    bool kindSet = false;
+    for (json &track : document.at("sequences")[0].at("videoTracks")) {
+        for (json &clip : track.at("clips")) {
+            if (clip.at("id") == 15) { // a video-only clip on V2
+                clip["reversed"] = true;
+                reversedSet = true;
+            }
+            if (clip.contains("spans")) {
+                for (json &span : clip.at("spans")) {
+                    if (span.at("id") == 14) { // the dissolve between clips 11 and 13
+                        span["transition"] = "wipeLeft";
+                        kindSet = true;
+                    }
+                }
+            }
+        }
+    }
+    REQUIRE(reversedSet);
+    REQUIRE(kindSet);
+    const ProjectLoadResult loaded = parseProject(document.dump());
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    for (const std::string &warning : loaded.warnings) {
+        MESSAGE(warning);
+    }
+    REQUIRE(loaded.warnings.size() == 2);
+    CHECK(anyContains(loaded.warnings, "\"reversed\" is a version 6 feature in a project of an earlier version: "
+                                       "kept, and the project is saved as version 6"));
+    CHECK(anyContains(loaded.warnings, "a Wipe Left transition is a version 6 feature in a project of an earlier "
+                                       "version: kept, and the project is saved as version 6"));
+    const Sequence &sequence = loaded.project->sequences[0];
+    CHECK(sequence.findClip(ClipId{15})->reversed);
+    CHECK(sequence.findSpan(SpanId{14})->transition == TransitionKind::WipeLeft);
+    // Saved as version 6, with both.
+    const json saved = projectToJson(*loaded.project);
+    CHECK(saved.at("schemaVersion") == 6);
+    const ProjectLoadResult again = projectFromJson(saved);
+    REQUIRE(again.ok());
+    CHECK(again.warnings.empty());
+    CHECK(*again.project == *loaded.project);
 }
 
 TEST_CASE("ProjectJSON: version 4 to 5 migration rules") {

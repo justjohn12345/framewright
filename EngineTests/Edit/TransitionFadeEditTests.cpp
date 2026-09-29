@@ -188,7 +188,7 @@ TEST_CASE("Fades always fit the clip after edits that shorten it") {
             return std::vector<ClipParamsChange>{fades};
         };
         SetClipsParams overlap(fx.seq, change(f30(200), f30(101)));
-        applyRefused(fx.project, overlap, EditError::InvalidTime);
+        applyRefused(fx.project, overlap, EditError::Overlap);
         SetClipsParams meet(fx.seq, change(f30(200), f30(100)));
         applyReversible(fx.project, meet);
         CHECK(fadeIn(fx, c) == f30(200));
@@ -226,7 +226,7 @@ TEST_CASE("A fade out never removes the crossfade coming into its clip (review M
     };
     SUBCASE("an 80-frame fade out is refused with its room; 75 frames fit beside the crossfade") {
         SetClipsParams tooLong(fx.seq, fadeOutOf(b, f30(80)));
-        const EditResult r = applyRefused(fx.project, tooLong, EditError::InvalidTime);
+        const EditResult r = applyRefused(fx.project, tooLong, EditError::Overlap);
         CHECK(r.message.find("crossfade coming into clip") != std::string::npos);
         CHECK(r.message.find("75/30") != std::string::npos);
         CHECK(fx.span(crossfade) != nullptr);
@@ -325,6 +325,56 @@ TEST_CASE("SetTransitionKind refuses what is not a video transition") {
         AddTransitionSpans add(fx.seq, {request});
         const EditResult r = add.apply(fx.project);
         CHECK_FALSE(r.ok());
-        CHECK(r.message.find("wipeLeft") != std::string::npos);
+        CHECK(r.message.find("not a Wipe Left") != std::string::npos); // the display name (review L9)
+        CHECK(r.message.find("wipeLeft") == std::string::npos);
+    }
+}
+
+TEST_CASE("Refusal wording and codes (review L9)") {
+    SUBCASE("Cross Dissolve asked of an audio crossfade: nothing to do, not a refusal") {
+        DissolveFixture fx;
+        const auto [lv, la] = fx.addLinkedPair(200, 60);
+        const auto [rv, ra] = fx.addLinkedPair(260, 60, 300);
+        const SpanId audioCut = fx.addTransition(fx.a1, la, ra, 10);
+        fx.requireValid();
+        (void)lv;
+        (void)rv;
+        const Project before = fx.project;
+        SetTransitionKind edit(fx.seq, audioCut, TransitionKind::CrossDissolve);
+        const EditResult r = edit.apply(fx.project);
+        CHECK_MESSAGE(r.ok(), doctest::String(r.message.c_str()));
+        CHECK(fx.project == before);
+        // A shape is still refused, by its display name.
+        SetTransitionKind wipe(fx.seq, audioCut, TransitionKind::WipeRight);
+        const EditResult refused = applyRefused(fx.project, wipe, EditError::TrackKindMismatch);
+        CHECK(refused.message.find("Wipe Right") != std::string::npos);
+    }
+    SUBCASE("a fade out meeting the dissolve coming into its clip: Overlap, as the facade's limit says") {
+        Fixture fx;
+        const ClipId a = fx.addClip(fx.a1, fx.audioOnly, 0, 60, 0);
+        const ClipId b = fx.addClip(fx.a1, fx.audioOnly, 60, 90, 300);
+        fx.addTransition(fx.a1, a, b, 30); // 15 frames inside B
+        fx.requireValid();
+        ClipParamsChange change;
+        change.clipId = b;
+        change.fadeOut = f30(80);
+        SetClipsParams tooLong(fx.seq, {change});
+        applyRefused(fx.project, tooLong, EditError::Overlap);
+    }
+    SUBCASE("a fade out meeting the fade in: Overlap; one longer than the clip: InvalidTime") {
+        Fixture fx;
+        const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 0, 100);
+        fx.addFade(c, ClipEdge::Head, f30(30));
+        fx.requireValid();
+        ClipParamsChange meets;
+        meets.clipId = c;
+        meets.fadeOut = f30(71);
+        SetClipsParams overlap(fx.seq, {meets});
+        applyRefused(fx.project, overlap, EditError::Overlap);
+        ClipParamsChange longer;
+        longer.clipId = c;
+        longer.fadeOut = f30(101);
+        SetClipsParams tooLong(fx.seq, {longer});
+        applyRefused(fx.project, tooLong, EditError::InvalidTime);
     }
 }

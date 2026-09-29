@@ -132,6 +132,11 @@ struct EffectSpan {
     ClipEdge edge = ClipEdge::Tail;                     // transition spans only (Tail for effect spans)
     TransitionKind transition = TransitionKind::CrossDissolve; // transition spans only
     SpanTracks tracks;                                  // effect spans only; times relative to `start`
+    // Transition spans read from a project file whose kind this version does not know (a newer
+    // version's): the file's name for it, kept so saving writes it back instead of "crossDissolve"
+    // (review L8). The span renders and edits as `transition` (CrossDissolve); choosing a kind
+    // (SetTransitionKind) replaces it. Empty otherwise.
+    std::string unknownTransitionName;
 
     bool isTransition() const {
         return kind == SpanKind::Transition;

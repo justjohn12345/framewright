@@ -1805,8 +1805,9 @@ EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime len
         const CMTime incoming = incomingTransitionInside(track, clip);
         const auto room = checkedSubtract(clip.timelineDuration, incoming);
         if (kCMTimeZero < incoming && (!room || *room < length)) {
+            // Overlap, as the facade's fade limit reports the same condition (review L9).
             return EditResult::failure(
-                EditError::InvalidTime,
+                EditError::Overlap,
                 "a fade out of " + describe(length) + " would meet the " +
                     (track.kind == TrackKind::Audio ? "crossfade" : "cross dissolve") + " coming into clip " +
                     idString(clip.id.value()) + ": it has room for " + describe(room ? maxTime(*room, kCMTimeZero)
@@ -1822,9 +1823,9 @@ EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime len
                            ? ExactTime::from(length)->plus(*ExactTime::from(other))
                            : std::nullopt;
     if (!total || total->compare(clip.timelineDuration) > 0) {
-        return EditResult::failure(EditError::InvalidTime, "the fade in and fade out overlap: together they are "
-                                                           "longer than the clip (" +
-                                                               describe(clip.timelineDuration) + ")");
+        return EditResult::failure(EditError::Overlap, "the fade in and fade out overlap: together they are "
+                                                       "longer than the clip (" +
+                                                           describe(clip.timelineDuration) + ")");
     }
     const auto start = checkedNegate(length);
     if (!start) {
@@ -2161,11 +2162,15 @@ EditResult SetTransitionKind::perform(const Project &project, Sequence &sequence
         return r;
     }
     if (track->kind != TrackKind::Video) {
+        if (kind_ == TransitionKind::CrossDissolve) {
+            return EditResult::success(); // what every audio transition is: nothing to change (review L9)
+        }
         return EditResult::failure(EditError::TrackKindMismatch,
                                    std::string("An audio transition is a crossfade or a fade; it cannot be a ") +
                                        displayNameOf(kind_) + ".");
     }
     span->transition = kind_;
+    span->unknownTransitionName.clear(); // a kind chosen replaces one from a newer version's file
     if (EditResult r = checkPlacedTransition(project, sequence, *track, *clip, *span); !r) {
         return r;
     }

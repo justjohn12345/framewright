@@ -433,7 +433,7 @@ TEST_CASE("Scheduler: fade envelopes are exactly linear per segment because fade
     ClipParamsChange overlapping{c, std::nullopt, std::nullopt};
     overlapping.fadeOut = f30(20);
     SetClipsParams overlap(fx.seq, {overlapping});
-    applyRefused(fx.project, overlap, EditError::InvalidTime);
+    applyRefused(fx.project, overlap, EditError::Overlap);
 
     // Fades that meet exactly: every segment is one linear ramp of the true envelope.
     fx.requireValid();

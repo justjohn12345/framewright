@@ -58,12 +58,12 @@ TEST_CASE("SetClipsParams is refused as a whole") {
         SetClipsParams batch(fx.seq, {ClipParamsChange{video, std::nullopt, AudioParams{}}});
         applyRefused(fx.project, batch, EditError::TrackKindMismatch);
     }
-    SUBCASE("fades longer than the clip") {
+    SUBCASE("fades longer than the clip together") {
         ClipParamsChange fades{audio, std::nullopt, std::nullopt};
         fades.fadeIn = f30(20);
         fades.fadeOut = f30(11);
         SetClipsParams batch(fx.seq, {ClipParamsChange{video, params, std::nullopt}, fades});
-        applyRefused(fx.project, batch, EditError::InvalidTime);
+        applyRefused(fx.project, batch, EditError::Overlap); // the fades overlap (review L9)
     }
     SUBCASE("fades on a video clip") {
         ClipParamsChange fades{video, std::nullopt, std::nullopt};

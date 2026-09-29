@@ -650,9 +650,10 @@ const Clip *adjacentClip(const Sequence &sequence, ClipId clipId, ClipEdge edge)
 // on `track`: a head fade span over the first `length` of the clip, or a tail span ending on the
 // cut; zero removes it. Refused: InvalidTime (not an exact time >= 0, or longer than the clip);
 // InvalidArgument for a fade in on a clip whose start another clip touches (the cut is that clip's)
-// or a fade out on a clip that ends in a cross dissolve (the tail's transition is the dissolve), and
-// when the two fades together would be longer than the clip. Unchanged fades change nothing. New
-// span ids come from `ids`.
+// or a fade out on a clip that ends in a cross dissolve (the tail's transition is the dissolve);
+// Overlap when the two fades together would be longer than the clip or a fade out would meet the part
+// of a cross dissolve coming into the clip (the code the facade's fade limit gives the same
+// conditions, review L9). Unchanged fades change nothing. New span ids come from `ids`.
 EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime length, IdGenerator &ids);
 
 // The clip's lane-0 fade in (Head: a head span) or fade out (Tail: a tail span ending on the cut)
@@ -727,9 +728,11 @@ class SetTransitionRanges final : public SequenceCommand {
 
 // Sets the kind of a video transition span (Transition.h: a cross dissolve, a wipe or the iris),
 // whatever its role: across a cut, or a fade to or from black at a free edge. Its range, its role and
-// its linked audio transition are unchanged (audio has no kinds: a crossfade or a fade). Refused:
+// its linked audio transition are unchanged (audio has no kinds: a crossfade or a fade). A kind
+// from a newer version's file (EffectSpan::unknownTransitionName) is replaced. Refused:
 // TransitionNotFound (no transition span with that id, an effect span's id included),
-// TrackKindMismatch (a transition on an audio track), TrackLocked. Giving it the kind it has
+// TrackKindMismatch (a wipe or the iris on an audio track; Cross Dissolve, what every audio
+// transition is, succeeds and changes nothing, review L9), TrackLocked. Giving it the kind it has
 // succeeds and changes nothing.
 class SetTransitionKind final : public SequenceCommand {
   public:

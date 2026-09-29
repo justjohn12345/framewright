@@ -541,7 +541,7 @@ TEST_CASE("setClipFade sets, shortens and removes lane-0 fades; clipFadeLength r
     REQUIRE(setClipFade(clip, track, ClipEdge::Head, f30(30), fx.project.ids).ok());
     CHECK(clip.transitionAt(ClipEdge::Head)->id == head); // changed, not replaced
     CHECK(setClipFade(clip, track, ClipEdge::Head, f30(101), fx.project.ids).error == EditError::InvalidTime);
-    CHECK(setClipFade(clip, track, ClipEdge::Tail, f30(71), fx.project.ids).error == EditError::InvalidTime);
+    CHECK(setClipFade(clip, track, ClipEdge::Tail, f30(71), fx.project.ids).error == EditError::Overlap);
     CHECK(setClipFade(clip, track, ClipEdge::Tail, -f30(1), fx.project.ids).error == EditError::InvalidTime);
     REQUIRE(setClipFade(clip, track, ClipEdge::Head, kCMTimeZero, fx.project.ids).ok());
     CHECK(clip.transitionAt(ClipEdge::Head) == nullptr);

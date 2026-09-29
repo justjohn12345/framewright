@@ -297,7 +297,7 @@ std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const
     }
     if (track.kind == TrackKind::Audio && span.transition != TransitionKind::CrossDissolve) {
         return TransitionIssue{K::Structure, where + ": an audio transition is a crossfade or a fade, not a " +
-                                                 nameOf(span.transition)};
+                                                 displayNameOf(span.transition)};
     }
     for (const auto &[time, what] : {std::pair{span.start, "start"}, std::pair{span.end, "end"}}) {
         if (auto problem = modelTimeProblem(time, what)) {

@@ -61,7 +61,8 @@ json spanToJson(const EffectSpan &span) {
            {"end", timeToJson(span.end)}};
     if (span.isTransition()) {
         j["edge"] = nameOf(span.edge);
-        j["transition"] = nameOf(span.transition);
+        j["transition"] = span.unknownTransitionName.empty() ? std::string(nameOf(span.transition))
+                                                             : span.unknownTransitionName;
         return j;
     }
     json tracks = json::object();
@@ -462,8 +463,23 @@ std::optional<EffectSpan> parseSpan(const Node &node, Warnings &warnings) {
     span.end = node.field("end").asTime();
     if (span.isTransition()) {
         span.edge = parseClipEdge(node.field("edge"));
-        span.transition = node.has("transition") ? parseTransitionKind(node.field("transition"), warnings)
-                                                 : TransitionKind::CrossDissolve;
+        span.transition = TransitionKind::CrossDissolve;
+        if (node.has("transition")) {
+            // A kind this version does not know (a newer version's) is shown and edited as a cross
+            // dissolve but kept by name, so saving the project does not rewrite it (review L8).
+            const Node transitionNode = node.field("transition");
+            const std::string name = transitionNode.asString();
+            if (const auto known = transitionKindNamed(name)) {
+                span.transition = *known;
+            } else if (name.empty()) {
+                warnings.push_back(transitionNode.path() + ": an empty transition kind; using a cross dissolve");
+            } else {
+                span.unknownTransitionName = name;
+                warnings.push_back(transitionNode.path() + ": unknown transition kind \"" + name +
+                                   "\" (from a newer version of Framewright?); shown as a cross dissolve and saved as \"" +
+                                   name + "\"");
+            }
+        }
         return span;
     }
     if (node.has("tracks")) {
@@ -1145,9 +1161,66 @@ void migrateV4ToV5(json &document, Warnings &warnings) {
 }
 
 // Version 6 added clips' "reversed" flag (absent means forward) and the wipe and iris transition
-// kinds: a version 5 file has neither, so only the version number changes.
-void migrateV5ToV6(json &document, Warnings &) {
+// kinds: a version 5 file has neither, so only the version number changes. One that has them anyway
+// (written by hand, or by a build between the two) keeps them, with a warning naming each (review
+// L8); the project is then saved as version 6, as every project is.
+void migrateV5ToV6(json &document, Warnings &warnings) {
     Node(document, "").requireObject();
+    const auto sequences = document.find("sequences");
+    if (sequences == document.end() || !sequences->is_array()) {
+        return; // the parser reports what is missing
+    }
+    const std::string feature = " is a version 6 feature in a project of an earlier version: kept, and the "
+                                "project is saved as version 6";
+    for (std::size_t s = 0; s < sequences->size(); ++s) {
+        const json &sequence = (*sequences)[s];
+        if (!sequence.is_object()) {
+            continue;
+        }
+        for (const char *key : {"videoTracks", "audioTracks"}) {
+            const auto tracks = sequence.find(key);
+            if (tracks == sequence.end() || !tracks->is_array()) {
+                continue;
+            }
+            for (std::size_t t = 0; t < tracks->size(); ++t) {
+                const json &track = (*tracks)[t];
+                const auto clips = track.is_object() ? track.find("clips") : track.end();
+                if (!track.is_object() || clips == track.end() || !clips->is_array()) {
+                    continue;
+                }
+                for (std::size_t c = 0; c < clips->size(); ++c) {
+                    const json &clip = (*clips)[c];
+                    if (!clip.is_object()) {
+                        continue;
+                    }
+                    const std::string where = "sequences[" + std::to_string(s) + "]." + key + "[" +
+                                              std::to_string(t) + "].clips[" + std::to_string(c) + "]";
+                    const auto reversed = clip.find("reversed");
+                    if (reversed != clip.end() && reversed->is_boolean() && reversed->get<bool>()) {
+                        warnings.push_back(where + ": \"reversed\"" + feature);
+                    }
+                    const auto spans = clip.find("spans");
+                    if (spans == clip.end() || !spans->is_array()) {
+                        continue;
+                    }
+                    for (std::size_t i = 0; i < spans->size(); ++i) {
+                        const json &span = (*spans)[i];
+                        const auto kind = span.is_object() ? span.find("transition") : span.end();
+                        if (!span.is_object() || kind == span.end() || !kind->is_string()) {
+                            continue;
+                        }
+                        const auto known = transitionKindNamed(kind->get<std::string>());
+                        if (known && *known != TransitionKind::CrossDissolve) {
+                            const std::string name = displayNameOf(*known);
+                            const bool vowel = std::string("AEIOU").find(name.front()) != std::string::npos;
+                            warnings.push_back(where + ".spans[" + std::to_string(i) + "]: " + (vowel ? "an " : "a ") +
+                                               name + " transition" + feature);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 struct MigrationStep {
@@ -1271,7 +1344,8 @@ std::optional<std::string> migrateProjectJson(json &document, int fromVersion, s
 namespace {
 
 // Repairs, with a warning each, what a file may hold that the model forbids but that has one safe
-// reading (review M8): clips and spans out of order are sorted; a transition off lane 0 goes to
+// reading (review M8): clips and spans out of order are sorted; "reversed" on a still is cleared
+// (post-lanes review L3: a still has no direction); a transition off lane 0 goes to
 // lane 0; an effect span off lanes 1-3, or overlapping an earlier span of its lane, moves to the
 // first effect lane where it overlaps nothing (the composition does not depend on the lane: its
 // operations commute), refused when no lane has room; transitions that are not valid (a fade in on
@@ -1310,6 +1384,13 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
             }
             for (Clip &clip : track.clips) {
                 const std::string clipWhere = where + ": clip " + std::to_string(clip.id.value());
+                // "reversed" on a still (review L3): it has no direction, forward is the only reading.
+                // (Every other clip's media has a length: validation requires a positive duration of
+                // a non-still asset and a clip's still flag to match its asset's.)
+                if (clip.reversed && clip.isStill) {
+                    clip.reversed = false;
+                    warnings.push_back(clipWhere + ": a still has no direction to reverse; \"reversed\" was cleared");
+                }
                 std::vector<SpanId> order;
                 for (const EffectSpan &span : clip.spans) {
                     order.push_back(span.id);

@@ -169,7 +169,8 @@ bool SpanTracks::empty() const {
 
 bool operator==(const EffectSpan &a, const EffectSpan &b) {
     return a.id == b.id && a.lane == b.lane && a.kind == b.kind && identical(a.start, b.start) &&
-           identical(a.end, b.end) && a.edge == b.edge && a.transition == b.transition && a.tracks == b.tracks;
+           identical(a.end, b.end) && a.edge == b.edge && a.transition == b.transition && a.tracks == b.tracks &&
+           a.unknownTransitionName == b.unknownTransitionName;
 }
 
 namespace {
