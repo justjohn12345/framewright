@@ -91,6 +91,8 @@ final class ProjectStore: ObservableObject {
     @Published var selection: Set<VEClipID> = [] {
         didSet {
             if !selection.isEmpty, selectedSpanID != nil { selectedSpanID = nil }
+            // The anchor is a clip of the selection or none (a marquee or a deselect replaced it).
+            if let anchor = selectionAnchor, !selection.contains(anchor) { selectionAnchor = nil }
         }
     }
     /// The selected span (an effect span on lanes 1-3 or a transition on lane 0), exclusive with the
@@ -811,6 +813,7 @@ final class ProjectStore: ObservableObject {
 
     func selectAll() {
         selection = Set(clips.keys)
+        selectionAnchor = nil // made for no clip in particular
         focusArea = .timeline
     }
 
@@ -1270,23 +1273,57 @@ final class ProjectStore: ObservableObject {
     }
 
     /// Clip > Link / Unlink (⌘L), the clip context menu and the inspector's button. When every selected
-    /// clip is linked, unlinks the pair of `keeping` (the clip the action was invoked for: the clicked
-    /// clip of the context menu, the inspector's clip) or, without one, of the clip the selection was
-    /// made for by a click (`selectionAnchor`) or the first selected clip; the selection is then that
-    /// one clip alone, so a drag or Delete acts on it and not on its former partner, and the status line
-    /// names both. With two unlinked clips selected, links them. One undo step either way.
+    /// clip is linked, unlinks every selected pair (one undo step) and keeps one clip of each selected,
+    /// so a drag or Delete acts on it and not on its former partner: for the pair of `keeping` (the clip
+    /// the action was invoked for: the clicked clip of the context menu, the inspector's clip) or,
+    /// without one, of the clip the selection was made for by a click (`selectionAnchor`), that clip;
+    /// for the others the one selected when only one is, else the picture (review L4: a marquee or
+    /// Select All over several pairs unlinked one and dropped the rest from the selection). The status
+    /// line names the clips of one pair and counts several. With two unlinked clips selected, links
+    /// them. One undo step either way.
     func linkOrUnlinkSelection(keeping preferred: VEClipID? = nil) {
         guard !isGestureActive else { return }
         let chosen = selectedClips
-        if let first = chosen.first, chosen.allSatisfy({ $0.linkedClipID != 0 }) {
+        if !chosen.isEmpty, chosen.allSatisfy({ $0.linkedClipID != 0 }) {
             let wanted = preferred ?? selectionAnchor
-            let clip = chosen.first { $0.clipID == wanted } ?? first
-            let partner = clips[clip.linkedClipID]
-            let result = engine.unlinkClip(clip.clipID)
+            // The pairs, in selection order, each with the clip that stays selected.
+            var kept: [VEClipInfo] = []
+            var covered = Set<VEClipID>()
+            for clip in chosen where !covered.contains(clip.clipID) {
+                covered.formUnion([clip.clipID, clip.linkedClipID])
+                let pair = chosen.filter { $0.clipID == clip.clipID || $0.clipID == clip.linkedClipID }
+                let keep = pair.first { $0.clipID == wanted } ?? (pair.count == 1 ? clip : nil)
+                    ?? pair.first { $0.trackKind == .video } ?? clip
+                kept.append(keep)
+            }
+            let result: VEEditResult
+            if kept.count == 1 {
+                result = engine.unlinkClip(kept[0].clipID)
+            } else {
+                let group = "unlink.\(UUID().uuidString)"
+                engine.beginCoalescing(withKey: group, mode: .accumulate)
+                var last = VEEditResult.success()
+                for clip in kept {
+                    last = engine.performInCoalescingGroup(group) { self.engine.unlinkClip(clip.clipID) }
+                    if !last.ok { break }
+                }
+                if last.ok {
+                    engine.endCoalescing()
+                } else {
+                    engine.cancelCoalescing()
+                }
+                result = last
+            }
             guard report(result) else { return }
-            selection = [clip.clipID]
-            selectionAnchor = clip.clipID
-            let unlinked = "Unlinked “\(clip.name)” from “\(partner?.name ?? "its partner")”."
+            selection = Set(kept.map(\.clipID))
+            selectionAnchor = kept.count == 1 ? kept[0].clipID : kept.first { $0.clipID == wanted }?.clipID
+            let unlinked: String
+            if kept.count == 1, let clip = kept.first {
+                let partner = clips[clip.linkedClipID] ?? chosen.first { $0.clipID == clip.linkedClipID }
+                unlinked = "Unlinked “\(clip.name)” from “\(partner?.name ?? "its partner")”."
+            } else {
+                unlinked = "Unlinked \(kept.count) pairs of clips."
+            }
             statusMessage = [unlinked, statusMessage].compactMap { $0 }.joined(separator: " ")
         } else if chosen.count == 2 {
             report(engine.linkClip(chosen[0].clipID, withClip: chosen[1].clipID))

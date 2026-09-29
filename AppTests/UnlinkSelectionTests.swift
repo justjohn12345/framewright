@@ -84,6 +84,47 @@ final class UnlinkSelectionTests: XCTestCase {
         XCTAssertNotNil(store.clips[audio])
     }
 
+    /// Review L4: Unlink with several linked pairs selected (a marquee, Select All) unlinks every pair
+    /// in one undo step and keeps one clip of each selected: the clicked clip for its pair, the
+    /// picture for the others.
+    func testUnlinkWithSeveralPairsUnlinksEveryPairAndKeepsOneClipOfEach() async throws {
+        let (video, audio) = try await linkedPair()
+        let (movie, tone) = (try XCTUnwrap(store.asset(try XCTUnwrap(store.clips[video]).assetID)),
+                             try XCTUnwrap(store.asset(try XCTUnwrap(store.clips[audio]).assetID)))
+        let v1 = try XCTUnwrap(store.videoTracks.first).trackID
+        let a1 = try XCTUnwrap(store.audioTracks.first).trackID
+        XCTAssertTrue(store.place(asset: movie.assetID, at: store.frameTime(2), videoTrack: v1, audioTrack: 0,
+                                  sourceIn: .zero, sourceOut: store.frameTime(1), overwrite: true))
+        let video2 = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.place(asset: tone.assetID, at: store.frameTime(2), videoTrack: 0, audioTrack: a1,
+                                  sourceIn: .zero, sourceOut: store.frameTime(1), overwrite: true))
+        let audio2 = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.engine.linkClip(video2, withClip: audio2).ok)
+
+        // Both pairs selected by clicks (the second extending): the second pair's sound was clicked.
+        store.select(clip: video, extend: false)
+        store.select(clip: audio2, extend: true)
+        XCTAssertEqual(store.selection, [video, audio, video2, audio2])
+        store.linkOrUnlinkSelection()
+        for clip in [video, audio, video2, audio2] {
+            XCTAssertEqual(store.clips[clip]?.linkedClipID, 0, "every selected pair is unlinked")
+        }
+        XCTAssertEqual(store.selection, [video, audio2], "the clicked sound for its pair, the picture for the other")
+        XCTAssertEqual(store.statusMessage, "Unlinked 2 pairs of clips.")
+        XCTAssertEqual(store.undoActionName, "Unlink")
+        store.undo()
+        XCTAssertEqual(store.clips[video]?.linkedClipID, audio, "one undo step")
+        XCTAssertEqual(store.clips[video2]?.linkedClipID, audio2)
+
+        // Select All (no clicked clip): the picture of each pair.
+        store.selectAll()
+        XCTAssertEqual(store.selection, [video, audio, video2, audio2])
+        store.linkOrUnlinkSelection()
+        XCTAssertEqual(store.clips[video]?.linkedClipID, 0)
+        XCTAssertEqual(store.clips[video2]?.linkedClipID, 0)
+        XCTAssertEqual(store.selection, [video, video2])
+    }
+
     func testTheContextMenuAndTheInspectorKeepTheClipTheyActOn() async throws {
         let (video, audio) = try await linkedPair()
         let gestures = TimelineGestureController(store: store)
