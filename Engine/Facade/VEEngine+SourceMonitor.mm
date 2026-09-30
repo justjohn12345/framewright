@@ -137,6 +137,16 @@ const SourceProjectIds kSourceIds{kSourceProjectFirstId, ClipId(kSourceProjectFi
     return YES;
 }
 
+/// Whether the source monitor may start now: no export runs and its asset can play
+/// (prepareSourcePlayback). If so the program is paused first (one monitor plays at a time).
+- (BOOL)prepareToStartSource {
+    if ([self refusesPlaybackForExport] || ![self prepareSourcePlayback]) {
+        return NO;
+    }
+    [self pauseProgramIfRunning];
+    return YES;
+}
+
 - (void)sourceMonitorTogglePlay {
     VE_ASSERT_MAIN();
     const bool running = _source.usesController && _source.playback && isRunning(_source.playback->state());
@@ -177,22 +187,14 @@ const SourceProjectIds kSourceIds{kSourceProjectFirstId, ClipId(kSourceProjectFi
 
 - (void)sourceMonitorShuttleForward {
     VE_ASSERT_MAIN();
-    if ([self refusesPlaybackForExport]) {
-        return;
-    }
-    if ([self prepareSourcePlayback]) {
-        [self pauseProgramIfRunning];
+    if ([self prepareToStartSource]) {
         _source.playback->shuttleForward();
     }
 }
 
 - (void)sourceMonitorShuttleReverse {
     VE_ASSERT_MAIN();
-    if ([self refusesPlaybackForExport]) {
-        return;
-    }
-    if ([self prepareSourcePlayback]) {
-        [self pauseProgramIfRunning];
+    if ([self prepareToStartSource]) {
         _source.playback->shuttleReverse();
     }
 }
@@ -299,14 +301,12 @@ const SourceProjectIds kSourceIds{kSourceProjectFirstId, ClipId(kSourceProjectFi
         shown.time = _source.time;
         info = makePlaybackStatus(shown);
     }
-    [NSNotificationCenter.defaultCenter postNotificationName:VEEngineSourcePlaybackDidChangeNotification
-                                                      object:self
-                                                    userInfo:@{VEEnginePlaybackStatusKey : info}];
-    for (id<VEEngineObserver> observer in _observers.allObjects) {
-        if ([observer respondsToSelector:@selector(engine:sourcePlaybackDidChange:)]) {
-            [observer engine:self sourcePlaybackDidChange:info];
-        }
-    }
+    [self postNotification:VEEngineSourcePlaybackDidChangeNotification
+                  userInfo:@{VEEnginePlaybackStatusKey : info}
+            observerMethod:@selector(engine:sourcePlaybackDidChange:)
+                    notify:^(id<VEEngineObserver> observer) {
+                        [observer engine:self sourcePlaybackDidChange:info];
+                    }];
 }
 
 /// One monitor plays at a time (as in Premiere): starting the program pauses the source monitor.

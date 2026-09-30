@@ -91,8 +91,7 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
 - (void)newProjectWithName:(NSString *)name {
     VE_ASSERT_MAIN();
     [self resetToEmptyProjectNamed:name];
-    [self notifyAssetsChanged];
-    [self notifyModelChanged];
+    [self notifyAssetsAndModelChanged];
 }
 
 - (BOOL)openProjectAtURL:(NSURL *)url error:(NSError *_Nullable *_Nullable)error {
@@ -231,8 +230,7 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
         _source.pool->registerAsset(asset.id, asset.url);
     }
     [self probeDetailsForProjectAssets];
-    [self notifyAssetsChanged];
-    [self notifyModelChanged];
+    [self notifyAssetsAndModelChanged];
     return YES;
 }
 

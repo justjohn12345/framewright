@@ -102,12 +102,21 @@ bool isRunning(playback::PlaybackState state) {
     [self seekToTime:time];
 }
 
-- (void)play {
-    VE_ASSERT_MAIN();
+/// Whether the program may start now (no export runs); if so the source monitor is paused first
+/// (one monitor plays at a time).
+- (BOOL)prepareToStartProgram {
     if ([self refusesPlaybackForExport]) {
-        return;
+        return NO;
     }
     [self pauseSourceMonitorIfRunning];
+    return YES;
+}
+
+- (void)play {
+    VE_ASSERT_MAIN();
+    if (![self prepareToStartProgram]) {
+        return;
+    }
     _program.playback->play();
 }
 
@@ -118,11 +127,8 @@ bool isRunning(playback::PlaybackState state) {
 
 - (void)togglePlay {
     VE_ASSERT_MAIN();
-    if (!isRunning(_program.playback->state())) {
-        if ([self refusesPlaybackForExport]) {
-            return;
-        }
-        [self pauseSourceMonitorIfRunning];
+    if (!isRunning(_program.playback->state()) && ![self prepareToStartProgram]) {
+        return;
     }
     _program.playback->togglePlay();
 }
@@ -134,30 +140,25 @@ bool isRunning(playback::PlaybackState state) {
 
 - (void)setRate:(double)rate {
     VE_ASSERT_MAIN();
-    if (rate != 0) {
-        if ([self refusesPlaybackForExport]) {
-            return;
-        }
-        [self pauseSourceMonitorIfRunning];
+    if (rate != 0 && ![self prepareToStartProgram]) {
+        return;
     }
     _program.playback->setRate(rate);
 }
 
 - (void)shuttleForward {
     VE_ASSERT_MAIN();
-    if ([self refusesPlaybackForExport]) {
+    if (![self prepareToStartProgram]) {
         return;
     }
-    [self pauseSourceMonitorIfRunning];
     _program.playback->shuttleForward();
 }
 
 - (void)shuttleReverse {
     VE_ASSERT_MAIN();
-    if ([self refusesPlaybackForExport]) {
+    if (![self prepareToStartProgram]) {
         return;
     }
-    [self pauseSourceMonitorIfRunning];
     _program.playback->shuttleReverse();
 }
 
@@ -290,14 +291,12 @@ bool isRunning(playback::PlaybackState state) {
         }
     }
     VEPlaybackStatus *info = makePlaybackStatus(status);
-    [NSNotificationCenter.defaultCenter postNotificationName:VEEnginePlaybackDidChangeNotification
-                                                      object:self
-                                                    userInfo:@{VEEnginePlaybackStatusKey : info}];
-    for (id<VEEngineObserver> observer in _observers.allObjects) {
-        if ([observer respondsToSelector:@selector(engine:playbackDidChange:)]) {
-            [observer engine:self playbackDidChange:info];
-        }
-    }
+    [self postNotification:VEEnginePlaybackDidChangeNotification
+                  userInfo:@{VEEnginePlaybackStatusKey : info}
+            observerMethod:@selector(engine:playbackDidChange:)
+                    notify:^(id<VEEngineObserver> observer) {
+                        [observer engine:self playbackDidChange:info];
+                    }];
 }
 
 /// Starting the source monitor pauses the program.

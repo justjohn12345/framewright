@@ -227,8 +227,7 @@ NSData *makeBookmark(NSString *path) {
     _assets.mainThreadImportSeconds += CFAbsoluteTimeGetCurrent() - start;
     os_signpost_interval_end(_log, signpost, "ImportMainThread");
     if (changed) {
-        [self notifyAssetsChanged];
-        [self notifyModelChanged];
+        [self notifyAssetsAndModelChanged];
     }
     if (completion) {
         completion(assets, errors);
@@ -282,8 +281,7 @@ NSData *makeBookmark(NSString *path) {
     }
     EditResult result = [self pushCommand:std::make_unique<RemoveAsset>(id)];
     if (result) {
-        [self notifyAssetsChanged];
-        [self notifyModelChanged];
+        [self notifyAssetsAndModelChanged];
     }
     return toVE(result);
 }

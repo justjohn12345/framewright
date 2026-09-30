@@ -189,14 +189,12 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
     [self syncSourceSharpening];
     [self updateUseCounts];
     const uint64_t count = self.changeCount;
-    [NSNotificationCenter.defaultCenter postNotificationName:VEEngineModelDidChangeNotification
-                                                      object:self
-                                                    userInfo:@{VEEngineChangeCountKey : @(count)}];
-    for (id<VEEngineObserver> observer in _observers.allObjects) {
-        if ([observer respondsToSelector:@selector(engine:modelDidChange:)]) {
-            [observer engine:self modelDidChange:count];
-        }
-    }
+    [self postNotification:VEEngineModelDidChangeNotification
+                  userInfo:@{VEEngineChangeCountKey : @(count)}
+            observerMethod:@selector(engine:modelDidChange:)
+                    notify:^(id<VEEngineObserver> observer) {
+                        [observer engine:self modelDidChange:count];
+                    }];
 }
 
 /// Posts an assets notification when a clip edit changed how often an asset is used
@@ -210,36 +208,47 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
 }
 
 - (void)notifyAssetsChanged {
-    [NSNotificationCenter.defaultCenter postNotificationName:VEEngineAssetsDidChangeNotification
-                                                      object:self
-                                                    userInfo:nil];
-    for (id<VEEngineObserver> observer in _observers.allObjects) {
-        if ([observer respondsToSelector:@selector(engineAssetsDidChange:)]) {
-            [observer engineAssetsDidChange:self];
-        }
-    }
+    [self postNotification:VEEngineAssetsDidChangeNotification
+                  userInfo:nil
+            observerMethod:@selector(engineAssetsDidChange:)
+                    notify:^(id<VEEngineObserver> observer) {
+                        [observer engineAssetsDidChange:self];
+                    }];
+}
+
+- (void)notifyAssetsAndModelChanged {
+    [self notifyAssetsChanged];
+    [self notifyModelChanged];
 }
 
 - (void)notifyThumbnailForAsset:(AssetId)asset {
     const auto assetID = static_cast<VEAssetID>(asset.value());
-    [NSNotificationCenter.defaultCenter postNotificationName:VEEngineThumbnailDidBecomeAvailableNotification
-                                                      object:self
-                                                    userInfo:@{VEEngineAssetIDKey : @(assetID)}];
-    for (id<VEEngineObserver> observer in _observers.allObjects) {
-        if ([observer respondsToSelector:@selector(engine:thumbnailAvailableForAsset:)]) {
-            [observer engine:self thumbnailAvailableForAsset:assetID];
-        }
-    }
+    [self postNotification:VEEngineThumbnailDidBecomeAvailableNotification
+                  userInfo:@{VEEngineAssetIDKey : @(assetID)}
+            observerMethod:@selector(engine:thumbnailAvailableForAsset:)
+                    notify:^(id<VEEngineObserver> observer) {
+                        [observer engine:self thumbnailAvailableForAsset:assetID];
+                    }];
 }
 
 - (void)notifyWaveformForAsset:(AssetId)asset {
     const auto assetID = static_cast<VEAssetID>(asset.value());
-    [NSNotificationCenter.defaultCenter postNotificationName:VEEngineWaveformDidBecomeAvailableNotification
-                                                      object:self
-                                                    userInfo:@{VEEngineAssetIDKey : @(assetID)}];
+    [self postNotification:VEEngineWaveformDidBecomeAvailableNotification
+                  userInfo:@{VEEngineAssetIDKey : @(assetID)}
+            observerMethod:@selector(engine:waveformAvailableForAsset:)
+                    notify:^(id<VEEngineObserver> observer) {
+                        [observer engine:self waveformAvailableForAsset:assetID];
+                    }];
+}
+
+- (void)postNotification:(NSNotificationName)name
+                userInfo:(nullable NSDictionary *)userInfo
+          observerMethod:(SEL)selector
+                  notify:(void(NS_NOESCAPE ^)(id<VEEngineObserver> observer))notify {
+    [NSNotificationCenter.defaultCenter postNotificationName:name object:self userInfo:userInfo];
     for (id<VEEngineObserver> observer in _observers.allObjects) {
-        if ([observer respondsToSelector:@selector(engine:waveformAvailableForAsset:)]) {
-            [observer engine:self waveformAvailableForAsset:assetID];
+        if ([observer respondsToSelector:selector]) {
+            notify(observer);
         }
     }
 }

@@ -27,6 +27,11 @@ VEEditResult *refuseTransition(const TransitionLimit &limit, int64_t frames, CMT
                                  message:toNS(transitionRefusal(limit, frames, frameDuration))];
 }
 
+/// The refusal of an edit of a transition that no longer exists.
+VEEditResult *transitionNotFound() {
+    return [VEEditResult failureWithCode:VEEditErrorTransitionNotFound message:@"The transition no longer exists."];
+}
+
 /// The engine kind of a VETransitionKind that refuseTransitionKind accepted.
 TransitionKind requestedKind(VETransitionKind kind) {
     return fromVE(kind).value_or(TransitionKind::CrossDissolve);
@@ -301,7 +306,7 @@ static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
     VE_ASSERT_MAIN();
     const SpanId id(static_cast<SpanId::ValueType>(transitionID));
     if (!findTransition([self activeSequence], id)) {
-        return [VEEditResult failureWithCode:VEEditErrorTransitionNotFound message:@"The transition no longer exists."];
+        return transitionNotFound();
     }
     return [self push:std::make_unique<RemoveSpans>([self sequenceId], std::vector<SpanId>{id}) created:nil];
 }
@@ -339,7 +344,7 @@ static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
     const Sequence &sequence = [self activeSequence];
     const auto transition = findTransition(sequence, id);
     if (!transition) {
-        return [VEEditResult failureWithCode:VEEditErrorTransitionNotFound message:@"The transition no longer exists."];
+        return transitionNotFound();
     }
     int64_t frames = 0;
     if (VEEditResult *refusal = [self refuseTransitionDuration:duration frames:&frames]) {
@@ -432,7 +437,7 @@ static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
     const Sequence &sequence = [self activeSequence];
     const auto transition = findTransition(sequence, id);
     if (!transition) {
-        return [VEEditResult failureWithCode:VEEditErrorTransitionNotFound message:@"The transition no longer exists."];
+        return transitionNotFound();
     }
     const auto ends = numericRange(range);
     if (!ends) {

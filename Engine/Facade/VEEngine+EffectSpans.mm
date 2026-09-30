@@ -44,6 +44,16 @@ using namespace ve::facade;
     return makeEditResult(result, ids, note, [self effectSpanInfo:id]);
 }
 
+/// pushSpanCommand: for an edit of the existing span `spanId`.
+- (VEEditResult *)pushSpanEdit:(std::unique_ptr<Command>)command span:(SpanId)spanId note:(nullable NSString *)note {
+    return [self pushSpanCommand:std::move(command)
+                          spanId:^SpanId {
+                              return spanId;
+                          }
+                         created:NO
+                            note:note];
+}
+
 - (NSArray<VEEffectSpan *> *)spansForClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
     const Sequence &sequence = [self activeSequence];
@@ -116,12 +126,9 @@ using namespace ve::facade;
         return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The span's range is not a valid time range."];
     }
     const SpanId id(static_cast<SpanId::ValueType>(spanID));
-    return [self pushSpanCommand:std::make_unique<SetSpanRange>([self sequenceId], id, ends->start, ends->end)
-                          spanId:^SpanId {
-                              return id;
-                          }
-                         created:NO
-                            note:nil];
+    return [self pushSpanEdit:std::make_unique<SetSpanRange>([self sequenceId], id, ends->start, ends->end)
+                         span:id
+                         note:nil];
 }
 
 - (VEEditResult *)setValuesOfSpan:(VESpanID)spanID start:(VESpanValues)start end:(VESpanValues)end {
@@ -144,12 +151,9 @@ using namespace ve::facade;
         changes.push_back(change);
     }
     const SpanId id(static_cast<SpanId::ValueType>(spanID));
-    return [self pushSpanCommand:std::make_unique<SetSpanValues>([self sequenceId], id, std::move(changes))
-                          spanId:^SpanId {
-                              return id;
-                          }
-                         created:NO
-                            note:nil];
+    return [self pushSpanEdit:std::make_unique<SetSpanValues>([self sequenceId], id, std::move(changes))
+                         span:id
+                         note:nil];
 }
 
 - (VEEditResult *)setInterpolationOfSpan:(VESpanID)spanID interpolation:(VEKeyframeInterpolation)interpolation {
@@ -159,24 +163,17 @@ using namespace ve::facade;
         return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"Unknown interpolation."];
     }
     const SpanId id(static_cast<SpanId::ValueType>(spanID));
-    return [self pushSpanCommand:std::make_unique<SetSpanInterpolation>([self sequenceId], id, *easing)
-                          spanId:^SpanId {
-                              return id;
-                          }
-                         created:NO
-                            note:nil];
+    return [self pushSpanEdit:std::make_unique<SetSpanInterpolation>([self sequenceId], id, *easing) span:id note:nil];
 }
 
 - (VEEditResult *)moveSpan:(VESpanID)spanID toLane:(NSInteger)lane {
     VE_ASSERT_MAIN();
     const SpanId id(static_cast<SpanId::ValueType>(spanID));
-    return [self pushSpanCommand:std::make_unique<MoveSpanLane>([self sequenceId], id,
-                                                                static_cast<int>(std::clamp<NSInteger>(lane, INT_MIN, INT_MAX)))
-                          spanId:^SpanId {
-                              return id;
-                          }
-                         created:NO
-                            note:nil];
+    return [self
+        pushSpanEdit:std::make_unique<MoveSpanLane>([self sequenceId], id,
+                                                    static_cast<int>(std::clamp<NSInteger>(lane, INT_MIN, INT_MAX)))
+                span:id
+                note:nil];
 }
 
 - (VEEditResult *)removeSpan:(VESpanID)spanID {
@@ -207,13 +204,10 @@ using namespace ve::facade;
         return makeEditResult(EditResult::success(), @[], [NSString stringWithFormat:@"This span already matches %@.", what],
                               [self effectSpanInfo:id]);
     }
-    return [self pushSpanCommand:std::make_unique<SetSpanValues>([self sequenceId], id, std::move(changes),
-                                                                 previous ? "Match Previous Clip" : "Match Next Clip")
-                          spanId:^SpanId {
-                              return id;
-                          }
-                         created:NO
-                            note:[NSString stringWithFormat:@"Matched %@.", what]];
+    return [self pushSpanEdit:std::make_unique<SetSpanValues>([self sequenceId], id, std::move(changes),
+                                                              previous ? "Match Previous Clip" : "Match Next Clip")
+                         span:id
+                         note:[NSString stringWithFormat:@"Matched %@.", what]];
 }
 
 - (VEEditResult *)continueMotionSpanOnNextClip:(VESpanID)spanID {
@@ -261,13 +255,10 @@ using namespace ve::facade;
         !planned) {
         return toVE(planned);
     }
-    return [self pushSpanCommand:std::make_unique<SetSpanValues>([self sequenceId], id, std::move(changes), "Ken Burns",
-                                                                 *easing)
-                          spanId:^SpanId {
-                              return id;
-                          }
-                         created:NO
-                            note:nil];
+    return [self
+        pushSpanEdit:std::make_unique<SetSpanValues>([self sequenceId], id, std::move(changes), "Ken Burns", *easing)
+                span:id
+                note:nil];
 }
 
 - (VEClipID)adjacentClipOfClip:(VEClipID)clipID atEdge:(VEClipEdge)edge {

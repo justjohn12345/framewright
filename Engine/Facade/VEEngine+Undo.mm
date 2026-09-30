@@ -60,8 +60,7 @@ using namespace ve::facade;
     _undo.coalescingKey = nil;
     const bool reverted = _undo.stack->cancelCoalescing(_project);
     if (reverted) {
-        [self notifyAssetsChanged];
-        [self notifyModelChanged];
+        [self notifyAssetsAndModelChanged];
     }
     [self flushDeferredImports];
 }
@@ -78,8 +77,7 @@ using namespace ve::facade;
     if (!_undo.stack->undo(_project)) {
         return NO;
     }
-    [self notifyAssetsChanged];
-    [self notifyModelChanged];
+    [self notifyAssetsAndModelChanged];
     return YES;
 }
 
@@ -91,8 +89,7 @@ using namespace ve::facade;
         return NO;
     }
     _undo.idFloor = std::max(_undo.idFloor, _project.ids.nextValue());
-    [self notifyAssetsChanged];
-    [self notifyModelChanged];
+    [self notifyAssetsAndModelChanged];
     return YES;
 }
 
@@ -146,7 +143,14 @@ using namespace ve::facade;
 - (VEEditResult *)push:(std::unique_ptr<Command>)command
                created:(NSArray<NSNumber *> * (^_Nullable)(void))created
                   note:(nullable NSString *)note {
-    EditResult result = [self pushCommand:std::move(command)];
+    return [self finishPush:[self pushCommand:std::move(command)] created:created note:note];
+}
+
+/// The facade's result for a pushed edit: its refusal, or (after notifying the change) its success
+/// with the ids `created` lists and `note`.
+- (VEEditResult *)finishPush:(const EditResult &)result
+                     created:(NSArray<NSNumber *> * (^_Nullable)(void))created
+                        note:(nullable NSString *)note {
     if (!result) {
         return toVE(result);
     }
@@ -183,12 +187,7 @@ using namespace ve::facade;
                   created:created
                      note:note.length > 0 ? [NSString stringWithFormat:@"%@ %@", note, fallback] : fallback];
     }
-    if (!result) {
-        return toVE(result);
-    }
-    NSArray<NSNumber *> *ids = created ? created() : @[];
-    [self notifyModelChanged];
-    return toVE(result, ids, note);
+    return [self finishPush:result created:created note:note];
 }
 
 - (void)closeCoalescingIfOpen {

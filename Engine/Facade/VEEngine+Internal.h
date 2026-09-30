@@ -204,6 +204,14 @@ NS_ASSUME_NONNULL_BEGIN
 @interface VEEngine ()
 - (void)notifyModelChanged;
 - (void)notifyAssetsChanged;
+/// notifyAssetsChanged, then notifyModelChanged: after a change that may touch the asset list.
+- (void)notifyAssetsAndModelChanged;
+/// Posts `name` (object: the engine) with `userInfo`, then calls `notify` with every observer that
+/// implements `selector`, the VEEngineObserver method that mirrors the notification.
+- (void)postNotification:(NSNotificationName)name
+                userInfo:(nullable NSDictionary *)userInfo
+          observerMethod:(SEL)selector
+                  notify:(void(NS_NOESCAPE ^)(id<VEEngineObserver> observer))notify;
 - (void)notifyThumbnailForAsset:(ve::AssetId)asset;
 - (void)notifyWaveformForAsset:(ve::AssetId)asset;
 @end
