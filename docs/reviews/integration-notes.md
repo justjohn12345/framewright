@@ -1658,20 +1658,44 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   must be marked `NS_SWIFT_UI_ACTOR` itself, or Swift imports the block as `@Sendable` (the class attribute does
   not reach it; see the comment above `@interface VEEngine`).
 - `VEEngine+Internal.h` (private, excluded from the framework's headers by the `*+Internal.h` rule) holds the
-  state and the cross-file private API. State is grouped in structs, each owned by one file and main thread only:
-  `MediaServices _services` (init), `AssetState _assets` (Media), `DocumentState _document` (Project),
-  `UndoState _undo` (Undo), `ProgramMonitorState _program` (Playback), `SourceMonitorState _source`
-  (SourceMonitor), `ExportState _export` (Export), plus `_project` (the model), `_rippleScope` and VEEngine.mm's
-  observers. Only the owning file writes a struct's fields; other files go through that area's private methods
-  (declared in the header's `<Area>Internal` category and implemented in an `@implementation VEEngine
-  (<Area>Internal)` block of the owning file, so the compiler checks them): e.g. `detachProgramFromProject`,
-  `resetSourceMonitor`, `startUndoHistory`, `deferUntilCoalescingEnds:`, and for Media's asset state and the
-  media epoch `keepAccessToURL:`, `rememberBookmark:forAsset:`, `markAssetMissing:`, `bookmarkForSavingAsset:`,
-  `beginMediaEpoch`, `forgetAssetState`, `stopAccessingURLs`. The one exception is construction: init
-  (`VEEngine.mm`) creates the services, both pools, the program controller, the source provider and the first
-  undo stack. Calls on the shared, thread-safe objects (a pool's `registerAsset`, a controller's `pause`) are made
-  directly. New/Open (`forgetProjectMedia`) is the one place that resets every area, in the order its comments
-  give.
+  engine's state and the cross-file private API: `_project` (the model), `MediaServices _services` (init),
+  `DocumentState _document` (Project), `UndoState _undo` (Undo), `_rippleScope`, VEEngine.mm's observers, and one
+  instance of each class below. Only the owning file writes a struct's fields; other files go through that area's
+  private methods (declared in the header's `<Area>Internal` category and implemented in an `@implementation
+  VEEngine (<Area>Internal)` block of the owning file, so the compiler checks them), e.g. `startUndoHistory`,
+  `deferUntilCoalescingEnds:`, `publishPlaybackSnapshot`, `handRoutingToMonitors:forAsset:path:`. New/Open
+  (`forgetProjectMedia`) is the one place that resets every area, in the order its comments give.
+- Update 2026-09-30: the areas with real state and lifecycle are classes of their own, each with its state in
+  ivars of its own `.mm` and a facade-private `VE<Name>+Internal.h` header (excluded by the same rule; included
+  by path, never public). None holds a reference to `VEEngine`, includes `VEEngine.h` or `VEEngine+Internal.h`,
+  or knows another class; the engine owns one of each and coordinates them, and the rules between areas stay in
+  the engine (playback refused during an export, one monitor playing at a time, both muted together, the stopped
+  lookahead given up during an export, New/Open's order). They get their collaborators through the constructor
+  or per call and report through return values and data-only blocks the engine supplies:
+  - `VEExporter` (running export, output URL access): `beginExportOfProject:settings:outputURL:services:options:
+    progress:finish:refusal:`; `VEExporterProgressBlock` `void (^)(VEExportProgress *)` and
+    `VEExporterFinishBlock` `void (^)(const media::Result<exporting::ExportSummary> &, BOOL endedRunningExport)`
+    per start. A refusal is an `ExportRefusal` (reason and sentence) that the engine turns into its NSError.
+  - `VEMediaLibrary` (routing, probe details, missing assets, bookmarks and their resolution on Open, the files'
+    security-scoped access, thumbnail and waveform services, probe queue): per-call completions
+    (`VEMediaProbeCompletion`, `VEMediaDetailsCompletion`, `VEMediaAssetReady`, `VEMediaThumbnailCompletion`,
+    `VEMediaWaveformCompletion`); results of requests made before `forgetProjectAssets` (New/Open) are dropped.
+    The engine still adds imports to the model, checks a re-probed asset is current and hands routing to the
+    monitors.
+  - `VESourceMonitor` (pool, still provider, lazily created controller, private one-clip project, view,
+    visibility, whether the engine allows the stopped lookahead) and `VEProgramMonitor` (pool, controller,
+    published generation, program and output views): the model per call (`const Project &`, and the document
+    generation for `publishProject:generation:`); one status block each, `void (^)(VEPlaybackStatus *)`, given at
+    construction, from which the engine posts the playback notifications.
+  - The router and frame cache are not owned by any class: `MediaServices` keeps them and the media epoch as a
+    shared dependency injected into the classes (the library's probes and thumbnails, both monitors' pools and
+    controllers, each export), and `beginMediaEpoch` (VEEngine.mm) starts an epoch across the cache and both
+    monitors' pools.
+  - Put new state in the class of its area, not in `VEEngine+Internal.h`; a new cross-area rule goes in the
+    engine. The classes check the main thread themselves (`VE_ASSERT_MAIN`, now in `VEFacadeSupport+Internal.h`
+    with `VE_FACADE_HIDDEN` and `isRunning`), except the methods the engine's dealloc calls (`cancel`,
+    `stopAccessingURLs`, `disconnectView(s)`). They can be constructed without an engine: `VEExporterTests`,
+    `VEMediaLibraryTests`, `VESourceMonitorTests`, `VEProgramMonitorTests`.
 - Functions the facade's files share are declared `VE_FACADE_HIDDEN` (hidden visibility) in
   `VEEngine+Internal.h`: shared between the facade's files, not exported from the framework. Use it for any new
   one (file-local helpers stay in an anonymous namespace).
