@@ -24,6 +24,8 @@
 
 #include <os/log.h>
 
+#include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -72,6 +74,24 @@ template <class IdType> NSArray<NSNumber *> *toNumbers(const std::vector<IdType>
         [numbers addObject:@(static_cast<int64_t>(id.value()))];
     }
     return numbers;
+}
+/// The model id a facade id names (0 is the invalid id in both).
+inline ClipId toClipId(VEClipID id) {
+    return ClipId(static_cast<ClipId::ValueType>(id));
+}
+inline TrackId toTrackId(VETrackID id) {
+    return TrackId(static_cast<TrackId::ValueType>(id));
+}
+/// Span ids; transition ids (VETransitionID) are span ids too.
+inline SpanId toSpanId(VESpanID id) {
+    return SpanId(static_cast<SpanId::ValueType>(id));
+}
+inline AssetId toAssetId(VEAssetID id) {
+    return AssetId(static_cast<AssetId::ValueType>(id));
+}
+/// `value` clamped into the range of int (lanes, frame steps from Swift's Int).
+inline int clampToInt(NSInteger value) {
+    return static_cast<int>(std::clamp<NSInteger>(value, INT_MIN, INT_MAX));
 }
 /// Security-scoped bookmark for a file, falling back to a plain bookmark (outside the sandbox
 /// security scope may be unavailable). Nil if the file cannot be bookmarked.
@@ -130,8 +150,8 @@ struct DocumentState {
     NSData *_Nullable mediaFolderBookmark = nil; // see -mediaFolderBookmark
 };
 
-/// The undo history and the gesture in progress (VEEngine+Undo.mm). New/Open
-/// (VEEngine+Project.mm) replaces the stack.
+/// The undo history and the gesture in progress (VEEngine+Undo.mm; New/Open starts a new history
+/// with startUndoHistory, an import finishing during a gesture waits with deferUntilCoalescingEnds:).
 struct UndoState {
     std::unique_ptr<UndoStack> stack;
     uint64_t idFloor = 0; // highest IdGenerator value the project has reached (see FreshIds)
@@ -142,7 +162,8 @@ struct UndoState {
 };
 
 /// The program monitor (VEEngine+Playback.mm): the active sequence's playback controller on its
-/// own decode pool, and the views showing it.
+/// own decode pool, and the views showing it. New/Open detaches it (detachProgramFromProject) and
+/// starts a new epoch on its pool; an export pauses it and its stopped lookahead.
 struct ProgramMonitorState {
     std::shared_ptr<media::DecodePool> pool;
     std::unique_ptr<playback::PlaybackController> playback;
@@ -154,7 +175,8 @@ struct ProgramMonitorState {
 
 /// The source monitor (VEEngine+SourceMonitor.mm): a pool of its own (a playback controller
 /// replaces its pool's whole target set), a still provider for scrubbing and a controller over a
-/// private one-clip project that is created when the monitor first plays.
+/// private one-clip project that is created when the monitor first plays. New/Open resets it
+/// (resetSourceMonitor) and starts a new epoch on its pool; an export pauses its controller.
 struct SourceMonitorState {
     std::shared_ptr<media::DecodePool> pool;
     std::shared_ptr<ProgramFrameProvider> provider;
@@ -254,12 +276,20 @@ NS_ASSUME_NONNULL_BEGIN
                      created:(NSArray<NSNumber *> * (^_Nullable)(void))created
                         note:(nullable NSString *)note;
 - (void)closeCoalescingIfOpen;
+/// Runs `block` when the open coalescing group ends (flushDeferredImports).
+- (void)deferUntilCoalescingEnds:(dispatch_block_t)block;
 - (void)flushDeferredImports;
+/// A fresh undo history for the project just installed (New/Open): no coalescing group, the id
+/// floor at the project's generator.
+- (void)startUndoHistory;
 @end
 
 // VEEngine+Playback.mm
 @interface VEEngine (PlaybackInternal)
 - (void)publishPlaybackSnapshot;
+/// Stops the program controller using the project's media (New/Open): it gets an empty project
+/// until publishPlaybackSnapshot gives it the next project's sequence.
+- (void)detachProgramFromProject;
 - (void)observeController:(ve::playback::PlaybackController &)controller source:(BOOL)isSource;
 - (void)pauseProgramIfRunning;
 @end
@@ -267,7 +297,9 @@ NS_ASSUME_NONNULL_BEGIN
 // VEEngine+SourceMonitor.mm
 @interface VEEngine (SourceMonitorInternal)
 - (void)resetSourceMonitor;
-- (void)syncSourceSharpening;
+/// Follows a model change: clears the monitor when its asset was removed (the undo of its import)
+/// and follows the project's sharpening.
+- (void)sourceMonitorModelChanged;
 - (void)refreshSourcePicture;
 - (void)notifySourcePlayback:(const ve::playback::PlaybackStatus &)status;
 - (void)pauseSourceMonitorIfRunning;

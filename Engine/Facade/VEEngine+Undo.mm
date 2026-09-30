@@ -198,6 +198,16 @@ using namespace ve::facade;
     [self flushDeferredImports];
 }
 
+- (void)deferUntilCoalescingEnds:(dispatch_block_t)block {
+    [_undo.deferredImports addObject:block];
+}
+
+- (void)startUndoHistory {
+    _undo.stack = std::make_unique<UndoStack>();
+    _undo.coalescingKey = nil;
+    _undo.idFloor = _project.ids.nextValue();
+}
+
 /// Runs the imports that finished while a coalescing group was open (on the next main-queue
 /// turn, so the caller that ended the group finishes first).
 - (void)flushDeferredImports {

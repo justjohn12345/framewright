@@ -53,7 +53,7 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
 }
 
 - (ClipParamsChange &)entryForClip:(VEClipID)clipID {
-    const ClipId id(static_cast<ClipId::ValueType>(clipID));
+    const ClipId id = toClipId(clipID);
     for (ClipParamsChange &change : _changes) {
         if (change.clipId == id) {
             return change;
@@ -98,13 +98,12 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
                    sourceOut:(CMTime)sourceOut
                    overwrite:(BOOL)overwrite {
     VE_ASSERT_MAIN();
-    const MediaAsset *asset = _project.findAsset(AssetId(static_cast<AssetId::ValueType>(assetID)));
+    const MediaAsset *asset = _project.findAsset(toAssetId(assetID));
     if (asset == nullptr) {
         return [VEEditResult failureWithMessage:@"The media is not in the project."];
     }
     std::vector<ClipPlacement> placements =
-        placementsForAsset(*asset, TrackId(static_cast<TrackId::ValueType>(videoTrackID)),
-                           TrackId(static_cast<TrackId::ValueType>(audioTrackID)), sourceIn, sourceOut);
+        placementsForAsset(*asset, toTrackId(videoTrackID), toTrackId(audioTrackID), sourceIn, sourceOut);
     if (placements.empty()) {
         return [VEEditResult failureWithMessage:asset->hasVideo() ? @"Choose a video track for this media."
                                                                   : @"Choose an audio track for this media."];
@@ -201,8 +200,7 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
 
 - (VEEditResult *)moveClip:(VEClipID)clipID toTrack:(VETrackID)trackID start:(CMTime)start {
     VE_ASSERT_MAIN();
-    return [self push:std::make_unique<MoveClip>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)),
-                                                 TrackId(static_cast<TrackId::ValueType>(trackID)), start)
+    return [self push:std::make_unique<MoveClip>([self sequenceId], toClipId(clipID), toTrackId(trackID), start)
               created:nil];
 }
 
@@ -243,24 +241,19 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
     VE_ASSERT_MAIN();
     TrimOptions options;
     options.clampToLimits = clamp;
-    return [self push:std::make_unique<TrimClipHead>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)),
-                                                     time, options)
-              created:nil];
+    return [self push:std::make_unique<TrimClipHead>([self sequenceId], toClipId(clipID), time, options) created:nil];
 }
 
 - (VEEditResult *)trimClipTail:(VEClipID)clipID toTime:(CMTime)time clamp:(BOOL)clamp {
     VE_ASSERT_MAIN();
     TrimOptions options;
     options.clampToLimits = clamp;
-    return [self push:std::make_unique<TrimClipTail>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)),
-                                                     time, options)
-              created:nil];
+    return [self push:std::make_unique<TrimClipTail>([self sequenceId], toClipId(clipID), time, options) created:nil];
 }
 
 - (VEEditResult *)splitClip:(VEClipID)clipID atTime:(CMTime)time {
     VE_ASSERT_MAIN();
-    auto command =
-        std::make_unique<SplitClip>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)), time);
+    auto command = std::make_unique<SplitClip>([self sequenceId], toClipId(clipID), time);
     SplitClip *raw = command.get();
     VEEditResult *result = [self push:std::move(command)
                               created:^NSArray<NSNumber *> * {
@@ -354,15 +347,14 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
 
 - (VEEditResult *)setVideoParams:(VEVideoParams)params forClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
-    return [self push:std::make_unique<SetVideoParams>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)),
-                                                       fromVE(params))
+    return [self push:std::make_unique<SetVideoParams>([self sequenceId], toClipId(clipID), fromVE(params))
               created:nil];
 }
 
 - (VEEditResult *)setAudioParams:(VEAudioParams)params forClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
     ClipParamsChange change;
-    change.clipId = ClipId(static_cast<ClipId::ValueType>(clipID));
+    change.clipId = toClipId(clipID);
     setAudioChange(change, params);
     return [self push:std::make_unique<SetClipsParams>([self sequenceId], std::vector<ClipParamsChange>{change})
               created:nil];
@@ -397,7 +389,7 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
 
 - (VEEditResult *)setSpeedRatio:(Ratio)speed forClip:(VEClipID)clipID {
     const SequenceId sequenceId = [self sequenceId];
-    const ClipId clip(static_cast<ClipId::ValueType>(clipID));
+    const ClipId clip = toClipId(clipID);
     return [self pushRipple:^std::unique_ptr<Command>(RippleScope scope) {
         SpeedOptions options;
         options.ripple = true;
@@ -497,15 +489,13 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
 
 - (VEEditResult *)linkClip:(VEClipID)clipID withClip:(VEClipID)otherClipID {
     VE_ASSERT_MAIN();
-    return [self push:std::make_unique<LinkClips>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)),
-                                                  ClipId(static_cast<ClipId::ValueType>(otherClipID)))
+    return [self push:std::make_unique<LinkClips>([self sequenceId], toClipId(clipID), toClipId(otherClipID))
               created:nil];
 }
 
 - (VEEditResult *)unlinkClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
-    return [self push:std::make_unique<UnlinkClip>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)))
-              created:nil];
+    return [self push:std::make_unique<UnlinkClip>([self sequenceId], toClipId(clipID)) created:nil];
 }
 
 - (VEEditResult *)addTrackOfKind:(VETrackKind)kind name:(nullable NSString *)name {
@@ -523,19 +513,16 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
 - (VEEditResult *)removeTrack:(VETrackID)trackID {
     VE_ASSERT_MAIN();
     const Sequence &sequence = [self activeSequence];
-    const Track *track = sequence.findTrack(TrackId(static_cast<TrackId::ValueType>(trackID)));
+    const Track *track = sequence.findTrack(toTrackId(trackID));
     if (track != nullptr && sequence.tracks(track->kind).size() <= 1) {
         return [VEEditResult failureWithMessage:@"A sequence keeps at least one track of each kind."];
     }
-    return [self push:std::make_unique<RemoveTrack>([self sequenceId], TrackId(static_cast<TrackId::ValueType>(trackID)))
-              created:nil];
+    return [self push:std::make_unique<RemoveTrack>([self sequenceId], toTrackId(trackID)) created:nil];
 }
 
 - (VEEditResult *)updateTrack:(VETrackID)trackID with:(const TrackFlagsUpdate &)update {
     VE_ASSERT_MAIN();
-    return [self push:std::make_unique<SetTrackFlags>([self sequenceId],
-                                                      TrackId(static_cast<TrackId::ValueType>(trackID)), update)
-              created:nil];
+    return [self push:std::make_unique<SetTrackFlags>([self sequenceId], toTrackId(trackID), update) created:nil];
 }
 
 - (VEEditResult *)setTrack:(VETrackID)trackID muted:(BOOL)muted {

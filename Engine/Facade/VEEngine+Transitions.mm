@@ -97,8 +97,8 @@ static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
         return refusal;
     }
     const SequenceId sequenceId = [self sequenceId];
-    const ClipId from(static_cast<ClipId::ValueType>(fromClipID));
-    const ClipId to(static_cast<ClipId::ValueType>(toClipID));
+    const ClipId from = toClipId(fromClipID);
+    const ClipId to = toClipId(toClipID);
     const TransitionLimit limit = transitionLimit(_project, sequenceId, from, to);
     if (limit.maximumFrames == 0 || (frames > limit.maximumFrames && !(options & VETransitionOptionFitToCut))) {
         return refuseTransition(limit, frames, frameDuration);
@@ -195,7 +195,7 @@ static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
     }
     const Sequence &sequence = [self activeSequence];
     const CMTime frameDuration = sequence.frameDuration;
-    const ClipId id(static_cast<ClipId::ValueType>(clipID));
+    const ClipId id = toClipId(clipID);
     const Track *track = sequence.trackOfClip(id);
     const Clip *clip = track ? track->find(id) : nullptr;
     if (clip == nullptr) {
@@ -278,21 +278,18 @@ static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
     if (!engineKind) {
         return refuseTransitionKind(kind);
     }
-    return [self push:std::make_unique<SetTransitionKind>([self sequenceId],
-                                                          SpanId(static_cast<SpanId::ValueType>(transitionID)), *engineKind)
+    return [self push:std::make_unique<SetTransitionKind>([self sequenceId], toSpanId(transitionID), *engineKind)
               created:nil];
 }
 
 - (VETransitionLimit *)transitionLimitFromClip:(VEClipID)fromClipID toClip:(VEClipID)toClipID {
     VE_ASSERT_MAIN();
-    return makeTransitionLimit(transitionLimit(_project, [self sequenceId],
-                                               ClipId(static_cast<ClipId::ValueType>(fromClipID)),
-                                               ClipId(static_cast<ClipId::ValueType>(toClipID))));
+    return makeTransitionLimit(transitionLimit(_project, [self sequenceId], toClipId(fromClipID), toClipId(toClipID)));
 }
 
 - (VETransitionLimit *)transitionLimitForTransition:(VETransitionID)transitionID {
     VE_ASSERT_MAIN();
-    const auto transition = findTransition([self activeSequence], SpanId(static_cast<SpanId::ValueType>(transitionID)));
+    const auto transition = findTransition([self activeSequence], toSpanId(transitionID));
     if (!transition) {
         TransitionLimit none;
         none.limitError = EditError::TransitionNotFound;
@@ -304,7 +301,7 @@ static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
 
 - (VEEditResult *)removeTransition:(VETransitionID)transitionID {
     VE_ASSERT_MAIN();
-    const SpanId id(static_cast<SpanId::ValueType>(transitionID));
+    const SpanId id = toSpanId(transitionID);
     if (!findTransition([self activeSequence], id)) {
         return transitionNotFound();
     }
@@ -313,13 +310,13 @@ static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
 
 - (VETransitionID)linkedTransitionForTransition:(VETransitionID)transitionID {
     VE_ASSERT_MAIN();
-    const auto partner = linkedTransition([self activeSequence], SpanId(static_cast<SpanId::ValueType>(transitionID)));
+    const auto partner = linkedTransition([self activeSequence], toSpanId(transitionID));
     return partner ? static_cast<VETransitionID>(partner->value()) : 0;
 }
 
 - (VEEditResult *)removeTransition:(VETransitionID)transitionID includingLinked:(BOOL)includingLinked {
     VE_ASSERT_MAIN();
-    const SpanId id(static_cast<SpanId::ValueType>(transitionID));
+    const SpanId id = toSpanId(transitionID);
     const Sequence &sequence = [self activeSequence];
     const auto partner = includingLinked ? linkedTransition(sequence, id) : std::nullopt;
     if (!partner || !findTransition(sequence, id)) {
@@ -340,7 +337,7 @@ static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
                 forTransition:(VETransitionID)transitionID
               includingLinked:(BOOL)includingLinked {
     VE_ASSERT_MAIN();
-    const SpanId id(static_cast<SpanId::ValueType>(transitionID));
+    const SpanId id = toSpanId(transitionID);
     const Sequence &sequence = [self activeSequence];
     const auto transition = findTransition(sequence, id);
     if (!transition) {
@@ -433,7 +430,7 @@ static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
                                  range:(CMTimeRange)range
                        includingLinked:(BOOL)includingLinked {
     VE_ASSERT_MAIN();
-    const SpanId id(static_cast<SpanId::ValueType>(transitionID));
+    const SpanId id = toSpanId(transitionID);
     const Sequence &sequence = [self activeSequence];
     const auto transition = findTransition(sequence, id);
     if (!transition) {

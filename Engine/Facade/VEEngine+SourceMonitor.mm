@@ -49,13 +49,13 @@ const SourceProjectIds kSourceIds{kSourceProjectFirstId, ClipId(kSourceProjectFi
 
 - (CMTime)frameTimeForAsset:(VEAssetID)assetID atTime:(CMTime)time {
     VE_ASSERT_MAIN();
-    const MediaAsset *asset = _project.findAsset(AssetId(static_cast<AssetId::ValueType>(assetID)));
+    const MediaAsset *asset = _project.findAsset(toAssetId(assetID));
     return asset != nullptr ? assetFrameTime(*asset, time, [self activeSequence].frameDuration) : kCMTimeZero;
 }
 
 - (void)sourceMonitorShowAsset:(VEAssetID)assetID atTime:(CMTime)time {
     VE_ASSERT_MAIN();
-    const AssetId id(static_cast<AssetId::ValueType>(assetID));
+    const AssetId id = toAssetId(assetID);
     const MediaAsset *asset = assetID > 0 ? _project.findAsset(id) : nullptr;
     if (asset == nullptr) {
         [self resetSourceMonitor];
@@ -202,7 +202,7 @@ const SourceProjectIds kSourceIds{kSourceProjectFirstId, ClipId(kSourceProjectFi
 - (void)sourceMonitorStepFrames:(NSInteger)frames {
     VE_ASSERT_MAIN();
     if (_source.usesController && _source.playback) {
-        _source.playback->stepFrames(static_cast<int>(std::clamp<NSInteger>(frames, INT_MIN, INT_MAX)));
+        _source.playback->stepFrames(clampToInt(frames));
         return;
     }
     if (!_source.project) {
@@ -235,6 +235,15 @@ const SourceProjectIds kSourceIds{kSourceProjectFirstId, ClipId(kSourceProjectFi
     _source.project.reset();
     _source.time = kCMTimeZero;
     [self refreshSourcePicture];
+}
+
+- (void)sourceMonitorModelChanged {
+    // The source monitor's asset may have been removed (undo of its import).
+    if (_source.asset && _project.findAsset(_source.asset) == nullptr) {
+        [self resetSourceMonitor];
+        [self notifySourcePlayback:_source.playback ? _source.playback->status() : playback::PlaybackStatus{}];
+    }
+    [self syncSourceSharpening];
 }
 
 /// The source monitor draws with the project's "Sharpen scaled-down sources": its private project

@@ -161,7 +161,7 @@ NSData *makeBookmark(NSString *path) {
         // A gesture is in progress: adding the assets now would end its undo group (and its
         // edits are expressed against the state when it began). Add them when it ends.
         __weak VEEngine *weakSelf = self;
-        [_undo.deferredImports addObject:^{
+        [self deferUntilCoalescingEnds:^{
             [weakSelf finishImport:probed urls:urls generation:generation completion:completion];
         }];
         return;
@@ -274,7 +274,7 @@ NSData *makeBookmark(NSString *path) {
 
 - (VEEditResult *)removeAsset:(VEAssetID)assetID {
     VE_ASSERT_MAIN();
-    const AssetId id(static_cast<AssetId::ValueType>(assetID));
+    const AssetId id = toAssetId(assetID);
     if (_undo.coalescingKey != nil) {
         return [VEEditResult failureWithCode:VEEditErrorBusy
                                      message:@"Finish the current edit before removing media."];
@@ -291,7 +291,7 @@ NSData *makeBookmark(NSString *path) {
              maxDimension:(NSInteger)maxDimension
                completion:(void (^)(CGImageRef _Nullable, NSError *_Nullable))completion {
     VE_ASSERT_MAIN();
-    const AssetId id(static_cast<AssetId::ValueType>(assetID));
+    const AssetId id = toAssetId(assetID);
     const MediaAsset *asset = _project.findAsset(id);
     if (asset == nullptr || !asset->hasVideo() || _assets.missing.count(id)) {
         NSError *error = makeError(VEEngineErrorReadFailed, asset == nullptr ? @"unknown asset"
@@ -325,7 +325,7 @@ NSData *makeBookmark(NSString *path) {
 
 - (void)waveformForAsset:(VEAssetID)assetID completion:(void (^)(VEWaveform *_Nullable, NSError *_Nullable))completion {
     VE_ASSERT_MAIN();
-    const AssetId id(static_cast<AssetId::ValueType>(assetID));
+    const AssetId id = toAssetId(assetID);
     const MediaAsset *asset = _project.findAsset(id);
     if (asset == nullptr || !asset->hasAudio() || _assets.missing.count(id)) {
         NSError *error = makeError(VEEngineErrorReadFailed, asset == nullptr ? @"unknown asset"
@@ -356,7 +356,7 @@ NSData *makeBookmark(NSString *path) {
 
 - (nullable VEWaveform *)cachedWaveformForAsset:(VEAssetID)assetID {
     VE_ASSERT_MAIN();
-    const AssetId id(static_cast<AssetId::ValueType>(assetID));
+    const AssetId id = toAssetId(assetID);
     auto peaks = _services.waveforms->cached(id);
     return peaks ? makeWaveform(id, peaks) : nil;
 }

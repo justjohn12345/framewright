@@ -48,8 +48,8 @@ bool isRunning(playback::PlaybackState state) {
 - (BOOL)setProgramPreviewSoloClip:(VEClipID)clipID identityMotion:(BOOL)identityMotion {
     VE_ASSERT_MAIN();
     // The controller has the current model (every model change is published to it at once).
-    _program.playback->setPreviewSolo(playback::PlaybackController::PreviewSolo{
-        ClipId(static_cast<ClipId::ValueType>(clipID)), identityMotion == YES});
+    _program.playback->setPreviewSolo(
+        playback::PlaybackController::PreviewSolo{toClipId(clipID), identityMotion == YES});
     return _program.playback->previewSolo().has_value();
 }
 
@@ -169,7 +169,7 @@ bool isRunning(playback::PlaybackState state) {
 
 - (void)stepFrames:(NSInteger)frames {
     VE_ASSERT_MAIN();
-    _program.playback->stepFrames(static_cast<int>(std::clamp<NSInteger>(frames, INT_MIN, INT_MAX)));
+    _program.playback->stepFrames(clampToInt(frames));
 }
 
 - (void)scrubToTime:(CMTime)time {
@@ -232,8 +232,8 @@ bool isRunning(playback::PlaybackState state) {
 
 @implementation VEEngine (PlaybackInternal)
 
-/// Hands the controllers the model: the active sequence of a new project (setSequence, which
-/// stops and moves to frame 0), or the edited snapshot (modelChanged, which keeps playing).
+/// Hands the program controller the model: the active sequence of a new project (setSequence,
+/// which stops and moves to frame 0), or the edited snapshot (modelChanged, which keeps playing).
 - (void)publishPlaybackSnapshot {
     auto snapshot = std::make_shared<const Project>(_project);
     if (!_program.published || _program.generation != _document.generation) {
@@ -243,11 +243,11 @@ bool isRunning(playback::PlaybackState state) {
     } else {
         _program.playback->modelChanged(std::move(snapshot));
     }
-    // The source monitor's asset may have been removed (undo of its import).
-    if (_source.asset && _project.findAsset(_source.asset) == nullptr) {
-        [self resetSourceMonitor];
-        [self notifySourcePlayback:_source.playback ? _source.playback->status() : playback::PlaybackStatus{}];
-    }
+}
+
+- (void)detachProgramFromProject {
+    _program.playback->setSequence(std::make_shared<const Project>(), SequenceId{});
+    _program.published = false;
 }
 
 - (void)observeController:(playback::PlaybackController &)controller source:(BOOL)isSource {

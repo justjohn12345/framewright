@@ -22,7 +22,7 @@ using namespace ve::facade;
 - (nullable VEClipInfo *)clipInfo:(VEClipID)clipID {
     VE_ASSERT_MAIN();
     const Sequence &sequence = [self activeSequence];
-    const ClipId id(static_cast<ClipId::ValueType>(clipID));
+    const ClipId id = toClipId(clipID);
     const Track *track = sequence.trackOfClip(id);
     const Clip *clip = track ? track->find(id) : nullptr;
     return clip ? makeClipInfo(*clip, *track, _project, sequence) : nil;
@@ -43,7 +43,7 @@ using namespace ve::facade;
 
 - (nullable VEAssetInfo *)assetInfo:(VEAssetID)assetID {
     VE_ASSERT_MAIN();
-    const MediaAsset *asset = _project.findAsset(AssetId(static_cast<AssetId::ValueType>(assetID)));
+    const MediaAsset *asset = _project.findAsset(toAssetId(assetID));
     return asset ? [self makeInfoForAsset:*asset] : nil;
 }
 
@@ -55,7 +55,7 @@ using namespace ve::facade;
 
 - (nullable VETransitionInfo *)transitionInfo:(VETransitionID)transitionID {
     VE_ASSERT_MAIN();
-    const auto transition = findTransition([self activeSequence], SpanId(static_cast<SpanId::ValueType>(transitionID)));
+    const auto transition = findTransition([self activeSequence], toSpanId(transitionID));
     return transition ? makeTransitionInfo(*transition) : nil;
 }
 
@@ -82,7 +82,7 @@ using namespace ve::facade;
 
 - (NSArray<VEClipInfo *> *)clipsOnTrack:(VETrackID)trackID {
     VE_ASSERT_MAIN();
-    const Track *track = [self activeSequence].findTrack(TrackId(static_cast<TrackId::ValueType>(trackID)));
+    const Track *track = [self activeSequence].findTrack(toTrackId(trackID));
     NSMutableArray<VEClipInfo *> *clips = [NSMutableArray array];
     if (track != nullptr) {
         const Sequence &sequence = [self activeSequence];

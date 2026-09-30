@@ -350,8 +350,7 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
     // A running export renders the old project, whose ids are about to name other media.
     [_export.active cancel];
     // The controllers stop using the old assets first (their ids will name other files).
-    _program.playback->setSequence(std::make_shared<const Project>(), SequenceId{});
-    _program.published = false;
+    [self detachProgramFromProject];
     [self resetSourceMonitor]; // stops the source controller and drops its private project
     for (const MediaAsset &asset : _project.assets) {
         _services.thumbnails->cancelPending(asset.id);
@@ -384,11 +383,9 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
     _document.extraChanges = 0;
     _document.metadataDirty = false;
     _document.mediaFolderBookmark = nil;
-    _undo.stack = std::make_unique<UndoStack>();
-    _undo.coalescingKey = nil;
     _project = std::move(project);
+    [self startUndoHistory];
     _document.url = url;
-    _undo.idFloor = _project.ids.nextValue();
     _document.loadWarnings = @[];
     _lastUseCounts.clear();
     // Imports waiting for the old project's gesture belong to the old project: run them now

@@ -186,7 +186,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
 
 - (void)notifyModelChanged {
     [self publishPlaybackSnapshot];
-    [self syncSourceSharpening];
+    [self sourceMonitorModelChanged];
     [self updateUseCounts];
     const uint64_t count = self.changeCount;
     [self postNotification:VEEngineModelDidChangeNotification
