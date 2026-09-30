@@ -1,0 +1,364 @@
+// VEEngine (EffectSpans): the effect spans of clips' lanes 1-3 (Motion, Opacity, Gain), Ken Burns,
+// Continue on Next Clip, and matching a span or a clip's static Motion to its neighbour.
+
+#import "VEEngine+Internal.h"
+
+#include "../Render/Scheduler.h"
+
+#include <algorithm>
+#include <climits>
+#include <cmath>
+#include <memory>
+#include <optional>
+#include <vector>
+
+using namespace ve;
+using namespace ve::facade;
+
+namespace ve::facade {
+
+/// A timeline range as its two ends, or a refusal for an unusable range.
+std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
+    if (!CMTIME_IS_NUMERIC(range.start) || !CMTIME_IS_NUMERIC(range.duration)) {
+        return std::nullopt;
+    }
+    return std::make_pair(range.start, range.start + range.duration);
+}
+
+} // namespace ve::facade
+
+@implementation VEEngine (EffectSpans)
+
+// MARK: - Effect spans
+
+/// The span `spanId` as it is now, or nil.
+- (nullable VEEffectSpan *)effectSpanInfo:(SpanId)spanId {
+    const Sequence &sequence = [self activeSequence];
+    const Clip *clip = nullptr;
+    const Track *track = nullptr;
+    const EffectSpan *span = sequence.findSpan(spanId, &clip, &track);
+    return span != nullptr ? makeEffectSpan(*span, *clip, *track, sequence) : nil;
+}
+
+/// Pushes a span edit; on success the result carries the span `spanId()` names (as it is after the
+/// edit), and `created` lists it when the edit created it.
+- (VEEditResult *)pushSpanCommand:(std::unique_ptr<Command>)command
+                           spanId:(SpanId (^)(void))spanId
+                          created:(BOOL)created
+                             note:(nullable NSString *)note {
+    const EditResult result = [self pushCommand:std::move(command)];
+    if (!result) {
+        return toVE(result);
+    }
+    const SpanId id = spanId();
+    [self notifyModelChanged];
+    NSArray<NSNumber *> *ids = created ? @[ @(static_cast<VESpanID>(id.value())) ] : @[];
+    return makeEditResult(result, ids, note, [self effectSpanInfo:id]);
+}
+
+- (NSArray<VEEffectSpan *> *)spansForClip:(VEClipID)clipID {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    const ClipId id(static_cast<ClipId::ValueType>(clipID));
+    const Track *track = sequence.trackOfClip(id);
+    const Clip *clip = track ? track->find(id) : nullptr;
+    NSMutableArray<VEEffectSpan *> *spans = [NSMutableArray array];
+    if (clip != nullptr) {
+        for (const EffectSpan &span : clip->spans) {
+            [spans addObject:makeEffectSpan(span, *clip, *track, sequence)];
+        }
+    }
+    return spans;
+}
+
+- (NSArray<VEEffectSpan *> *)spansForTrack:(VETrackID)trackID {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    const Track *track = sequence.findTrack(TrackId(static_cast<TrackId::ValueType>(trackID)));
+    NSMutableArray<VEEffectSpan *> *spans = [NSMutableArray array];
+    if (track != nullptr) {
+        const ClipIndex index(sequence);
+        for (const Clip &clip : track->clips) {
+            for (const EffectSpan &span : clip.spans) {
+                [spans addObject:makeEffectSpan(span, clip, *track, sequence, &index)];
+            }
+        }
+    }
+    return spans;
+}
+
+- (nullable VEEffectSpan *)spanInfo:(VESpanID)spanID {
+    VE_ASSERT_MAIN();
+    return [self effectSpanInfo:SpanId(static_cast<SpanId::ValueType>(spanID))];
+}
+
+- (NSInteger)laneCountForTrack:(VETrackID)trackID {
+    VE_ASSERT_MAIN();
+    const Track *track = [self activeSequence].findTrack(TrackId(static_cast<TrackId::ValueType>(trackID)));
+    if (track == nullptr) {
+        return 0;
+    }
+    int highest = 0;
+    for (const Clip &clip : track->clips) {
+        for (const EffectSpan &span : clip.spans) {
+            highest = std::max(highest, span.lane);
+        }
+    }
+    return highest + 1;
+}
+
+- (VEEditResult *)addSpanOfKind:(VESpanKind)kind lane:(NSInteger)lane clip:(VEClipID)clipID range:(CMTimeRange)range {
+    VE_ASSERT_MAIN();
+    const std::optional<SpanKind> spanKind = fromVE(kind);
+    if (!spanKind || *spanKind == SpanKind::Transition) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"Add a Motion, Opacity or Gain span (transitions have their own calls)."];
+    }
+    const auto ends = rangeEnds(range);
+    if (!ends) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The span's range is not a valid time range."];
+    }
+    auto command = std::make_unique<AddSpan>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)), *spanKind,
+                                             static_cast<int>(std::clamp<NSInteger>(lane, INT_MIN, INT_MAX)),
+                                             ends->first, ends->second);
+    AddSpan *raw = command.get();
+    return [self pushSpanCommand:std::move(command)
+                          spanId:^SpanId {
+                              return raw->createdSpanId();
+                          }
+                         created:YES
+                            note:nil];
+}
+
+- (VEEditResult *)setRangeOfSpan:(VESpanID)spanID range:(CMTimeRange)range {
+    VE_ASSERT_MAIN();
+    const auto ends = rangeEnds(range);
+    if (!ends) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The span's range is not a valid time range."];
+    }
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    return [self pushSpanCommand:std::make_unique<SetSpanRange>([self sequenceId], id, ends->first, ends->second)
+                          spanId:^SpanId {
+                              return id;
+                          }
+                         created:NO
+                            note:nil];
+}
+
+- (VEEditResult *)setValuesOfSpan:(VESpanID)spanID start:(VESpanValues)start end:(VESpanValues)end {
+    VE_ASSERT_MAIN();
+    std::vector<SpanValueChange> changes;
+    for (const SpanParameter parameter : kSpanParameters) {
+        const double from = spanValueIn(start, parameter);
+        const double to = spanValueIn(end, parameter);
+        if (std::isnan(from) && std::isnan(to)) {
+            continue;
+        }
+        SpanValueChange change;
+        change.parameter = parameter;
+        if (!std::isnan(from)) {
+            change.start = from;
+        }
+        if (!std::isnan(to)) {
+            change.end = to;
+        }
+        changes.push_back(change);
+    }
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    return [self pushSpanCommand:std::make_unique<SetSpanValues>([self sequenceId], id, std::move(changes))
+                          spanId:^SpanId {
+                              return id;
+                          }
+                         created:NO
+                            note:nil];
+}
+
+- (VEEditResult *)setInterpolationOfSpan:(VESpanID)spanID interpolation:(VEKeyframeInterpolation)interpolation {
+    VE_ASSERT_MAIN();
+    const std::optional<KeyframeInterpolation> easing = fromVE(interpolation);
+    if (!easing) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"Unknown interpolation."];
+    }
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    return [self pushSpanCommand:std::make_unique<SetSpanInterpolation>([self sequenceId], id, *easing)
+                          spanId:^SpanId {
+                              return id;
+                          }
+                         created:NO
+                            note:nil];
+}
+
+- (VEEditResult *)moveSpan:(VESpanID)spanID toLane:(NSInteger)lane {
+    VE_ASSERT_MAIN();
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    return [self pushSpanCommand:std::make_unique<MoveSpanLane>([self sequenceId], id,
+                                                                static_cast<int>(std::clamp<NSInteger>(lane, INT_MIN, INT_MAX)))
+                          spanId:^SpanId {
+                              return id;
+                          }
+                         created:NO
+                            note:nil];
+}
+
+- (VEEditResult *)removeSpan:(VESpanID)spanID {
+    VE_ASSERT_MAIN();
+    return [self push:std::make_unique<RemoveSpans>([self sequenceId],
+                                                    std::vector<SpanId>{SpanId(static_cast<SpanId::ValueType>(spanID))})
+              created:nil];
+}
+
+- (VEEditResult *)matchSpanEdge:(VESpanID)spanID toAdjacentClipAtEdge:(VEClipEdge)edge {
+    VE_ASSERT_MAIN();
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    const bool previous = edge == VEClipEdgeStart;
+    const Sequence &sequence = [self activeSequence];
+    std::vector<SpanValueChange> changes;
+    if (EditResult planned = planMatchSpanEdge(sequence, id, previous ? ClipEdge::Head : ClipEdge::Tail, changes);
+        !planned) {
+        return toVE(planned);
+    }
+    NSString *what = previous ? @"the previous clip's end" : @"the next clip's start";
+    if (changes.empty()) {
+        const Track *track = nullptr;
+        sequence.findSpan(id, nullptr, &track);
+        if (track != nullptr && track->locked) {
+            return [VEEditResult failureWithCode:VEEditErrorTrackLocked
+                                         message:[NSString stringWithFormat:@"Track %@ is locked.", toNS(track->name)]];
+        }
+        return makeEditResult(EditResult::success(), @[], [NSString stringWithFormat:@"This span already matches %@.", what],
+                              [self effectSpanInfo:id]);
+    }
+    return [self pushSpanCommand:std::make_unique<SetSpanValues>([self sequenceId], id, std::move(changes),
+                                                                 previous ? "Match Previous Clip" : "Match Next Clip")
+                          spanId:^SpanId {
+                              return id;
+                          }
+                         created:NO
+                            note:[NSString stringWithFormat:@"Matched %@.", what]];
+}
+
+- (VEEditResult *)continueMotionSpanOnNextClip:(VESpanID)spanID {
+    VE_ASSERT_MAIN();
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    auto command = std::make_unique<ContinueMotionSpan>([self sequenceId], id);
+    ContinueMotionSpan *raw = command.get();
+    return [self pushSpanCommand:std::move(command)
+                          spanId:^SpanId {
+                              return raw->createdSpanId();
+                          }
+                         created:YES
+                            note:nil];
+}
+
+- (nullable NSString *)problemContinuingMotionSpanOnNextClip:(VESpanID)spanID {
+    VE_ASSERT_MAIN();
+    ContinueMotionPlan plan;
+    const EditResult planned = planContinueMotion(_project, [self activeSequence],
+                                                  SpanId(static_cast<SpanId::ValueType>(spanID)), plan);
+    return planned ? nil : toNS(planned.message);
+}
+
+- (VEEditResult *)applyKenBurnsToSpan:(VESpanID)spanID
+                                start:(VEMotionFraming)start
+                                  end:(VEMotionFraming)end
+                        interpolation:(VEKeyframeInterpolation)interpolation {
+    VE_ASSERT_MAIN();
+    const SpanId id(static_cast<SpanId::ValueType>(spanID));
+    const Sequence &sequence = [self activeSequence];
+    const Clip *clip = nullptr;
+    const Track *track = nullptr;
+    const EffectSpan *span = sequence.findSpan(id, &clip, &track);
+    if (span == nullptr) {
+        return [VEEditResult failureWithCode:VEEditErrorSpanNotFound message:@"The span no longer exists."];
+    }
+    const std::optional<KeyframeInterpolation> easing = fromVE(interpolation);
+    if (!easing || *easing == KeyframeInterpolation::Bezier) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"Choose hold, linear or an ease for the Ken Burns move."];
+    }
+    std::vector<SpanValueChange> changes;
+    if (EditResult planned = planKenBurns(*clip, *span, sequence.frameDuration, MotionFraming{start.x, start.y, start.scale},
+                                          MotionFraming{end.x, end.y, end.scale}, changes);
+        !planned) {
+        return toVE(planned);
+    }
+    return [self pushSpanCommand:std::make_unique<SetSpanValues>([self sequenceId], id, std::move(changes), "Ken Burns",
+                                                                 *easing)
+                          spanId:^SpanId {
+                              return id;
+                          }
+                         created:NO
+                            note:nil];
+}
+
+- (VEClipID)adjacentClipOfClip:(VEClipID)clipID atEdge:(VEClipEdge)edge {
+    VE_ASSERT_MAIN();
+    const Clip *neighbour = adjacentClip([self activeSequence], ClipId(static_cast<ClipId::ValueType>(clipID)),
+                                         edge == VEClipEdgeStart ? ClipEdge::Head : ClipEdge::Tail);
+    return neighbour != nullptr ? static_cast<VEClipID>(neighbour->id.value()) : 0;
+}
+
+- (VEEditResult *)matchMotionOfClip:(VEClipID)clipID toAdjacentAtEdge:(VEClipEdge)edge {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    const ClipId id(static_cast<ClipId::ValueType>(clipID));
+    const Track *track = sequence.trackOfClip(id);
+    const Clip *clip = track ? track->find(id) : nullptr;
+    if (clip == nullptr) {
+        return [VEEditResult failureWithCode:VEEditErrorClipNotFound message:@"The clip no longer exists."];
+    }
+    if (track->kind != TrackKind::Video) {
+        return [VEEditResult failureWithCode:VEEditErrorTrackKindMismatch message:@"Audio clips have no Motion."];
+    }
+    const bool previous = edge == VEClipEdgeStart;
+    const CMTime fd = sequence.frameDuration;
+    const Clip *neighbour = touchingClip(*track, *clip, previous ? ClipEdge::Head : ClipEdge::Tail);
+    if (neighbour == nullptr) {
+        return [VEEditResult failureWithCode:VEEditErrorNotAdjacent
+                                     message:previous ? @"No clip ends where this clip starts on its track."
+                                                      : @"No clip starts where this clip ends on its track."];
+    }
+    // The neighbour's frame at the cut, as the monitors and export draw it; this clip's frame there.
+    const CMTime neighbourFrame = previous ? neighbour->timelineEnd() - fd : neighbour->timelineStart;
+    const CMTime frame = previous ? clip->timelineStart : clip->timelineEnd() - fd;
+    const VideoParams target = Scheduler::motionAt(*neighbour, neighbourFrame);
+    // What the clip's spans add and multiply there, composed onto neutral static values.
+    Clip neutral = *clip;
+    neutral.video = VideoParams{};
+    const VideoParams spans = motionValuesAt(neutral, frame);
+    if (!(spans.scale > 0.0) || !(spans.opacity > 0.0)) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"The clip's spans make its scale or opacity 0 there, so no static value "
+                                             @"can match."];
+    }
+    VideoParams values = clip->video;
+    values.x = target.x - spans.x;
+    values.y = target.y - spans.y;
+    values.scale = target.scale / spans.scale;
+    values.rotationDegrees = target.rotationDegrees - spans.rotationDegrees;
+    values.opacity = target.opacity / spans.opacity;
+    if (!(values.opacity <= 1.0)) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                     message:@"The clip's spans lower its opacity there, so no static opacity can reach "
+                                             @"the neighbour's."];
+    }
+    NSString *what = previous ? @"the previous clip's end" : @"the next clip's start";
+    bool changesAnything = false;
+    for (const MotionParameter parameter : kMotionParameters) {
+        changesAnything = changesAnything || !spanValuesMatch(spanParameterOf(parameter), values.staticValue(parameter),
+                                                              clip->video.staticValue(parameter));
+    }
+    if (!changesAnything) {
+        if (track->locked) {
+            return [VEEditResult failureWithCode:VEEditErrorTrackLocked
+                                         message:[NSString stringWithFormat:@"Track %@ is locked.", toNS(track->name)]];
+        }
+        return toVE(EditResult::success(), @[], [NSString stringWithFormat:@"This clip already matches %@.", what]);
+    }
+    return [self push:std::make_unique<SetVideoParams>([self sequenceId], clip->id, values,
+                                                       previous ? "Match Previous Clip" : "Match Next Clip")
+              created:nil
+                 note:[NSString stringWithFormat:@"Matched %@: set as this clip's static values.", what]];
+}
+
+@end
