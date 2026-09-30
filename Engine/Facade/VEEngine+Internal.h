@@ -15,7 +15,6 @@
 #include "../Edit/EditOps.h"
 #include "../Edit/UndoStack.h"
 #include "../Media/BackendRouter.h"
-#include "../Media/DecodePool.h"
 #include "../Media/FrameCache.h"
 #include "../Model/Project.h"
 #include "../Playback/PlaybackController.h"
@@ -36,6 +35,7 @@
 // use it); they know nothing of the engine.
 @class VEExporter;
 @class VEMediaLibrary;
+@class VEProgramMonitor;
 @class VESourceMonitor;
 
 namespace ve::facade {
@@ -49,7 +49,8 @@ constexpr double kSourcePoolBudgetShare = 0.25;
 constexpr double kExportPoolBudgetShare = 0.25;
 
 /// Lanes of DecodePool::requestFrame: the program controller's layers use kProgramLaneBase + i,
-/// the source monitor's scrub provider and controller their own ranges (on the source pool).
+/// the source monitor's scrub provider and controller their own ranges (on the source pool). The
+/// engine hands the shares and lanes to the monitors' and the exporter's constructors or starts.
 constexpr uint64_t kProgramLaneBase = 0;
 constexpr uint64_t kSourceScrubLaneBase = uint64_t(1) << 40;
 constexpr uint64_t kSourcePlaybackLaneBase = uint64_t(2) << 40;
@@ -96,17 +97,14 @@ NS_ASSUME_NONNULL_END
 // ----- The engine's state -----
 //
 // The areas that own real state and lifecycle are classes of their own, each with its state private
-// to its .mm and knowing nothing of the engine (VEExporter, VEMediaLibrary, VESourceMonitor; see
-// their +Internal.h headers): the engine owns one instance of each and coordinates them. The rest
-// is grouped by the file that owns it: only that file's methods change a struct's fields, and other
-// files ask it through the private methods below (they may call methods of the thread-safe objects
-// the pointers name, e.g. the program pool's registerAsset or the program controller's pause). The
-// one exception is construction: -initWithCacheDirectory: (VEEngine.mm) creates the services, the
-// classes, the program monitor's pool and controller and the first undo stack. Everything here is
-// main thread only unless a field says otherwise: the engine's methods run on the main thread
-// (VE_ASSERT_MAIN), and the classes, the decode pools and the playback controllers hand their
-// results back on the main queue. The objects the pointers name (router, frame cache, the program
-// monitor's pool and controller) are thread safe themselves.
+// to its .mm and knowing nothing of the engine (VEExporter, VEMediaLibrary, VESourceMonitor,
+// VEProgramMonitor; see their +Internal.h headers): the engine owns one instance of each and
+// coordinates them. The rest is grouped by the file that owns it: only that file's methods change a
+// struct's fields, and other files ask it through the private methods below. The one exception is
+// construction: -initWithCacheDirectory: (VEEngine.mm) creates the services, the classes and the
+// first undo stack. Everything here is main thread only unless a field says otherwise: the engine's
+// methods run on the main thread (VE_ASSERT_MAIN), and the classes hand their results back on the
+// main queue. The objects the pointers name (router, frame cache) are thread safe themselves.
 
 namespace ve::facade {
 
@@ -146,18 +144,6 @@ struct UndoState {
     NSMutableArray<dispatch_block_t> *_Nonnull deferredImports = [NSMutableArray array];
 };
 
-/// The program monitor (VEEngine+Playback.mm): the active sequence's playback controller on its
-/// own decode pool, and the views showing it. New/Open detaches it (detachProgramFromProject) and
-/// starts a new epoch on its pool; an export pauses it and its stopped lookahead.
-struct ProgramMonitorState {
-    std::shared_ptr<media::DecodePool> pool;
-    std::unique_ptr<playback::PlaybackController> playback;
-    uint64_t generation = 0; // DocumentState::generation the controller's sequence belongs to
-    bool published = false;  // the controller has the current project's sequence
-    __weak VEPreviewView *_Nullable view = nil;
-    __weak VEPreviewView *_Nullable outputView = nil; // mirrors the program (a second display)
-};
-
 } // namespace ve::facade
 
 @interface VEEngine () {
@@ -172,7 +158,10 @@ struct ProgramMonitorState {
     double _mainThreadImportSeconds; // see -mainThreadImportSeconds (VEEngine+Media.mm)
     ve::facade::DocumentState _document;
     ve::facade::UndoState _undo;
-    ve::facade::ProgramMonitorState _program;
+    // The program monitor: a class of its own (VEProgramMonitor+Internal.h) that knows nothing of
+    // the engine. VEEngine+Playback.mm drives it; model changes, New/Open, imports, exports,
+    // memory pressure and the source monitor's transport reach it through its methods.
+    VEProgramMonitor *_programMonitor;
     // The source monitor: a class of its own (VESourceMonitor+Internal.h) that knows nothing of
     // the engine. VEEngine+SourceMonitor.mm drives it; New/Open, imports, exports, memory pressure
     // and the program transport reach it through its methods.
@@ -260,12 +249,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 // VEEngine+Playback.mm
 @interface VEEngine (PlaybackInternal)
+/// Hands the program monitor the model (every model change, and the first after New/Open).
 - (void)publishPlaybackSnapshot;
-/// Stops the program controller using the project's media (New/Open): it gets an empty project
-/// until publishPlaybackSnapshot gives it the next project's sequence.
-- (void)detachProgramFromProject;
-- (void)observeProgramController;
-- (void)pauseProgramIfRunning;
+/// Posts VEEnginePlaybackDidChangeNotification (and tells the observers) with `status`.
+- (void)postPlaybackStatus:(VEPlaybackStatus *)status;
 @end
 
 // VEEngine+SourceMonitor.mm

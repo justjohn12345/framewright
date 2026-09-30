@@ -6,6 +6,7 @@
 #import "VEExport+Internal.h"
 #import "VEExporter+Internal.h"
 #import "VEMediaLibrary+Internal.h"
+#import "VEProgramMonitor+Internal.h"
 #import "VESourceMonitor+Internal.h"
 
 #include "../Export/ExportJob.h"
@@ -136,7 +137,7 @@ VEEngineErrorCode errorCodeFor(ExportRefusalReason reason) {
           if (endedRunningExport) {
               // The monitors' stopped lookahead resumes at their paused frames (the source
               // monitor's only while it is on screen).
-              strongSelf->_program.playback->setIdleLookahead(true);
+              [strongSelf->_programMonitor setIdleLookahead:YES];
               [strongSelf updateSourceIdleLookahead];
           }
           [NSNotificationCenter.defaultCenter
@@ -164,8 +165,8 @@ VEEngineErrorCode errorCodeFor(ExportRefusalReason reason) {
     // The monitors pause (the export gets the decoders and the GPU); they keep their own pools,
     // and both stop decoding their stopped lookahead (their decoders are released) until the
     // export ends. The paused pictures still come through the scrub path.
-    _program.playback->pause();
-    _program.playback->setIdleLookahead(false);
+    [_programMonitor pause];
+    [_programMonitor setIdleLookahead:NO];
     [_sourceMonitor pauseController];
     [self updateSourceIdleLookahead];
     return handle;

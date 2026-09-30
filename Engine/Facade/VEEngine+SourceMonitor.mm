@@ -7,6 +7,7 @@
 
 #import "VEExporter+Internal.h"
 #import "VEMediaLibrary+Internal.h"
+#import "VEProgramMonitor+Internal.h"
 #import "VESourceMonitor+Internal.h"
 
 #include "../Model/SourceProject.h"
@@ -74,7 +75,7 @@ using namespace ve::facade;
 /// program, with every asset's routing). False when the asset cannot play (none, a still, no
 /// duration).
 - (BOOL)prepareSourcePlayback {
-    return [_sourceMonitor prepareToPlayWithRouting:_media.routing muted:_program.playback->isMuted()];
+    return [_sourceMonitor prepareToPlayWithRouting:_media.routing muted:_programMonitor.muted];
 }
 
 /// Whether the source monitor may start now: no export runs and its asset can play
@@ -83,7 +84,7 @@ using namespace ve::facade;
     if ([self refusesPlaybackForExport] || ![self prepareSourcePlayback]) {
         return NO;
     }
-    [self pauseProgramIfRunning];
+    [_programMonitor pauseIfRunning];
     return YES;
 }
 
@@ -95,7 +96,7 @@ using namespace ve::facade;
     }
     if ([self prepareSourcePlayback]) {
         if (!_sourceMonitor.controllerRunning) {
-            [self pauseProgramIfRunning];
+            [_programMonitor pauseIfRunning];
         }
         [_sourceMonitor togglePlay];
     }

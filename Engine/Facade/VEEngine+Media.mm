@@ -4,11 +4,10 @@
 
 #import "VEEngine+Internal.h"
 
-#import "VEPreviewView.h"
-
 #import "VEExporter+Internal.h"
 #import "VEFacadeCommands+Internal.h"
 #import "VEMediaLibrary+Internal.h"
+#import "VEProgramMonitor+Internal.h"
 #import "VESourceMonitor+Internal.h"
 
 #include "../Media/MediaTypes.h"
@@ -279,8 +278,7 @@ NSError *makeError(const media::MediaError &error, NSString *context) {
     VE_ASSERT_MAIN();
     _services.frameCache->handleMemoryPressure(critical ? media::MemoryPressure::Critical
                                                         : media::MemoryPressure::Warning);
-    [_program.view handleMemoryPressure];
-    [_program.outputView handleMemoryPressure];
+    [_programMonitor handleMemoryPressure];
     [_sourceMonitor handleMemoryPressure];
     [_exporter handleMemoryPressure:critical];
     [_media purgeThumbnailsAndWaveformsOfAssets:_project.assets];
@@ -300,9 +298,8 @@ NSError *makeError(const media::MediaError &error, NSString *context) {
 - (void)handRoutingToMonitors:(const media::RoutedMediaInfo &)routed
                      forAsset:(AssetId)asset
                          path:(const std::string &)path {
-    _program.pool->registerAsset(asset, path, routed);
+    [_programMonitor registerAsset:asset path:path routing:routed];
     [_sourceMonitor registerAsset:asset path:path routing:routed];
-    _program.playback->setAssetRouting(asset, routed);
 }
 
 /// Re-probes the project's assets in the background for the details that are not stored in

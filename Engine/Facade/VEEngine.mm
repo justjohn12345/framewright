@@ -5,11 +5,8 @@
 #import "VEEngine+Internal.h"
 #import "VEExporter+Internal.h"
 #import "VEMediaLibrary+Internal.h"
+#import "VEProgramMonitor+Internal.h"
 #import "VESourceMonitor+Internal.h"
-
-#import "VEPreviewView.h"
-
-#import "../Render/VEPreviewView+Internal.h"
 
 #include "../Media/FFmpeg/FFmpegBackend.h"
 #include "../Media/HardwareCaps.h"
@@ -107,15 +104,21 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
         (void)_services.router->registerBackend(media::ffmpeg::makeFFmpegBackend());
         _services.frameCache = std::make_shared<media::FrameCache>();
         _services.epoch = _services.frameCache->epoch();
-        media::DecodePool::Config programPoolConfig;
-        programPoolConfig.budgetFraction = kProgramPoolBudgetShare;
-        _program.pool = std::make_shared<media::DecodePool>(_services.router, _services.frameCache, programPoolConfig);
+        __weak VEEngine *weakEngine = self;
+        ProgramMonitorConfig programConfig;
+        programConfig.poolBudgetShare = kProgramPoolBudgetShare;
+        programConfig.scrubLaneBase = kProgramLaneBase;
+        _programMonitor = [[VEProgramMonitor alloc] initWithRouter:_services.router
+                                                        frameCache:_services.frameCache
+                                                            config:programConfig
+                                                          onStatus:^(VEPlaybackStatus *status) {
+                                                            [weakEngine postPlaybackStatus:status];
+                                                          }];
         _media = [[VEMediaLibrary alloc] initWithRouter:_services.router cacheDirectory:cacheDirectory];
         SourceMonitorConfig sourceConfig;
         sourceConfig.poolBudgetShare = kSourcePoolBudgetShare;
         sourceConfig.scrubLaneBase = kSourceScrubLaneBase;
         sourceConfig.playbackLaneBase = kSourcePlaybackLaneBase;
-        __weak VEEngine *weakEngine = self;
         _sourceMonitor = [[VESourceMonitor alloc] initWithRouter:_services.router
                                                       frameCache:_services.frameCache
                                                           config:sourceConfig
@@ -123,11 +126,6 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
                                                           [weakEngine postSourcePlaybackStatus:status];
                                                         }];
         _rippleScope = VERippleScopeAllTracks;
-        playback::PlaybackConfig config;
-        config.scrubLaneBase = kProgramLaneBase;
-        _program.playback = std::make_unique<playback::PlaybackController>(_services.router, _services.frameCache,
-                                                                           _program.pool, config);
-        [self observeProgramController];
         _undo.stack = std::make_unique<UndoStack>();
         _exporter = [[VEExporter alloc] init];
         _observers = [NSHashTable weakObjectsHashTable];
@@ -164,8 +162,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
     }
     [_exporter cancel]; // the job deletes its partial file on its own queue
     // The views may outlive the engine: they must stop calling into the controllers first.
-    [_program.view setFrameSource:ve::render::PreviewFrameSource{}];
-    [_program.outputView setFrameSource:ve::render::PreviewFrameSource{}];
+    [_programMonitor disconnectViews];
     [_sourceMonitor disconnectView];
     [_media stopAccessingURLs];
 }
@@ -184,7 +181,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
 
 - (void)beginMediaEpoch {
     _services.epoch = _services.frameCache->beginEpoch();
-    _program.pool->beginEpoch(_services.epoch);
+    [_programMonitor beginMediaEpoch:_services.epoch];
     [_sourceMonitor beginMediaEpoch:_services.epoch];
 }
 

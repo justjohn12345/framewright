@@ -1,15 +1,13 @@
-// VEEngine (Playback): the program monitor (its view, the output view that mirrors it, the preview
-// solo clip) and the transport of the active sequence's playback controller.
+// VEEngine (Playback): the program monitor's API (its view, the output view that mirrors it, the
+// preview solo clip, the transport). The monitor itself is VEProgramMonitor
+// (VEProgramMonitor+Internal.h); the engine hands it the model and applies the rules between the
+// areas: no playback while an export runs, and one monitor playing at a time.
 
 #import "VEEngine+Internal.h"
 
+#import "VEProgramMonitor+Internal.h"
 #import "VESourceMonitor+Internal.h"
 
-#import "VEPreviewView.h"
-
-#import "../Render/VEPreviewView+Internal.h"
-
-#include <memory>
 #include <optional>
 
 using namespace ve;
@@ -21,72 +19,49 @@ using namespace ve::facade;
 
 - (void)attachProgramView:(nullable VEPreviewView *)view {
     VE_ASSERT_MAIN();
-    VEPreviewView *previous = _program.view;
-    if (previous != nil && previous != view) {
-        [previous setFrameSource:ve::render::PreviewFrameSource{}];
-    }
-    _program.view = view;
-    if (view != nil) {
-        [view setFrameSource:_program.playback->frameSource()];
-        [view renderOnce];
-    }
+    [_programMonitor attachView:view];
 }
 
 - (nullable VEPreviewView *)programView {
     VE_ASSERT_MAIN();
-    return _program.view;
+    return _programMonitor.view;
 }
 
 - (BOOL)setProgramPreviewSoloClip:(VEClipID)clipID identityMotion:(BOOL)identityMotion {
     VE_ASSERT_MAIN();
-    // The controller has the current model (every model change is published to it at once).
-    _program.playback->setPreviewSolo(
-        playback::PlaybackController::PreviewSolo{toClipId(clipID), identityMotion == YES});
-    return _program.playback->previewSolo().has_value();
+    return [_programMonitor setPreviewSoloClip:toClipId(clipID) identityMotion:identityMotion];
 }
 
 - (void)clearProgramPreviewSolo {
     VE_ASSERT_MAIN();
-    _program.playback->setPreviewSolo(std::nullopt);
+    [_programMonitor clearPreviewSolo];
 }
 
 - (VEClipID)programPreviewSoloClipID {
     VE_ASSERT_MAIN();
-    const auto solo = _program.playback->previewSolo();
+    const auto solo = _programMonitor.previewSolo;
     return solo ? static_cast<VEClipID>(solo->clip.value()) : 0;
 }
 
 - (BOOL)programPreviewSoloIdentityMotion {
     VE_ASSERT_MAIN();
-    const auto solo = _program.playback->previewSolo();
+    const auto solo = _programMonitor.previewSolo;
     return solo && solo->identityMotion ? YES : NO;
 }
 
 - (void)attachOutputView:(VEPreviewView *)view {
     VE_ASSERT_MAIN();
-    if (_program.outputView != nil && _program.outputView != view) {
-        [self detachOutputView];
-    }
-    _program.outputView = view;
-    // A mirror source: the same frames as the program view, without adding to its counters.
-    [view setFrameSource:_program.playback->frameSource(playback::PlaybackController::SourceRole::Mirror)];
-    view.paused = !isRunning(_program.playback->state());
-    [view renderOnce];
+    [_programMonitor attachOutputView:view];
 }
 
 - (void)detachOutputView {
     VE_ASSERT_MAIN();
-    VEPreviewView *view = _program.outputView;
-    _program.outputView = nil;
-    if (view != nil) {
-        [view setFrameSource:ve::render::PreviewFrameSource{}];
-        view.paused = YES;
-    }
+    [_programMonitor detachOutputView];
 }
 
 - (nullable VEPreviewView *)outputView {
     VE_ASSERT_MAIN();
-    return _program.outputView;
+    return _programMonitor.outputView;
 }
 
 - (void)showProgramFrameAtTime:(CMTime)time {
@@ -109,25 +84,25 @@ using namespace ve::facade;
     if (![self prepareToStartProgram]) {
         return;
     }
-    _program.playback->play();
+    [_programMonitor play];
 }
 
 - (void)pause {
     VE_ASSERT_MAIN();
-    _program.playback->pause();
+    [_programMonitor pause];
 }
 
 - (void)togglePlay {
     VE_ASSERT_MAIN();
-    if (!isRunning(_program.playback->state()) && ![self prepareToStartProgram]) {
+    if (!_programMonitor.running && ![self prepareToStartProgram]) {
         return;
     }
-    _program.playback->togglePlay();
+    [_programMonitor togglePlay];
 }
 
 - (void)seekToTime:(CMTime)time {
     VE_ASSERT_MAIN();
-    _program.playback->seek(CMTIME_IS_NUMERIC(time) ? time : kCMTimeZero, playback::SeekMode::Exact);
+    [_programMonitor seekToTime:time];
 }
 
 - (void)setRate:(double)rate {
@@ -135,7 +110,7 @@ using namespace ve::facade;
     if (rate != 0 && ![self prepareToStartProgram]) {
         return;
     }
-    _program.playback->setRate(rate);
+    [_programMonitor setRate:rate];
 }
 
 - (void)shuttleForward {
@@ -143,7 +118,7 @@ using namespace ve::facade;
     if (![self prepareToStartProgram]) {
         return;
     }
-    _program.playback->shuttleForward();
+    [_programMonitor shuttleForward];
 }
 
 - (void)shuttleReverse {
@@ -151,71 +126,68 @@ using namespace ve::facade;
     if (![self prepareToStartProgram]) {
         return;
     }
-    _program.playback->shuttleReverse();
+    [_programMonitor shuttleReverse];
 }
 
 - (void)shuttleStop {
     VE_ASSERT_MAIN();
-    _program.playback->pause();
+    [_programMonitor pause];
 }
 
 - (void)stepFrames:(NSInteger)frames {
     VE_ASSERT_MAIN();
-    _program.playback->stepFrames(clampToInt(frames));
+    [_programMonitor stepFrames:frames];
 }
 
 - (void)scrubToTime:(CMTime)time {
     VE_ASSERT_MAIN();
-    if (CMTIME_IS_NUMERIC(time)) {
-        _program.playback->scrubTo(time);
-    }
+    [_programMonitor scrubToTime:time];
 }
 
 - (void)endScrub {
     VE_ASSERT_MAIN();
-    _program.playback->endScrub();
+    [_programMonitor endScrub];
 }
 
 - (BOOL)isMuted {
     VE_ASSERT_MAIN();
-    return _program.playback->isMuted();
+    return _programMonitor.muted;
 }
 
 - (void)setMuted:(BOOL)muted {
     VE_ASSERT_MAIN();
-    _program.playback->setMuted(muted);
+    _programMonitor.muted = muted;
     [_sourceMonitor setMuted:muted];
 }
 
 - (VEPlaybackState)playbackState {
     VE_ASSERT_MAIN();
-    return playbackStateToVE(_program.playback->state());
+    return _programMonitor.playbackState;
 }
 
 - (double)playbackRate {
     VE_ASSERT_MAIN();
-    return _program.playback->rate();
+    return _programMonitor.rate;
 }
 
 - (CMTime)currentTime {
     VE_ASSERT_MAIN();
-    return _program.playback->currentTime();
+    return _programMonitor.currentTime;
 }
 
 - (NSString *)playbackError {
     VE_ASSERT_MAIN();
-    const playback::PlaybackStatus status = _program.playback->status();
-    return status.lastError ? toNS(status.lastError->message) : @"";
+    return _programMonitor.playbackError;
 }
 
 - (VEPlaybackStatus *)playbackStatus {
     VE_ASSERT_MAIN();
-    return makePlaybackStatus(_program.playback->status());
+    return _programMonitor.playbackStatus;
 }
 
 - (VEPlaybackStats *)playbackStats {
     VE_ASSERT_MAIN();
-    return makePlaybackStats(_program.playback->stats(), _program.playback->lastPresented());
+    return _programMonitor.playbackStats;
 }
 
 @end
@@ -224,68 +196,19 @@ using namespace ve::facade;
 
 // MARK: - Private (VEEngine+Internal.h declares what other files call)
 
-/// Hands the program controller the model: the active sequence of a new project (setSequence,
-/// which stops and moves to frame 0), or the edited snapshot (modelChanged, which keeps playing).
+/// Hands the program monitor the model: the active sequence of a new project (a new document
+/// generation, or after New/Open detached it), or the edited snapshot (which keeps playing).
 - (void)publishPlaybackSnapshot {
-    auto snapshot = std::make_shared<const Project>(_project);
-    if (!_program.published || _program.generation != _document.generation) {
-        _program.published = true;
-        _program.generation = _document.generation;
-        _program.playback->setSequence(std::move(snapshot), _project.activeSequenceId);
-    } else {
-        _program.playback->modelChanged(std::move(snapshot));
-    }
+    [_programMonitor publishProject:_project generation:_document.generation];
 }
 
-- (void)detachProgramFromProject {
-    _program.playback->setSequence(std::make_shared<const Project>(), SequenceId{});
-    _program.published = false;
-}
-
-- (void)observeProgramController {
-    __weak VEEngine *weakSelf = self;
-    playback::PlaybackObserver observer;
-    observer.statusChanged = [weakSelf](const playback::PlaybackStatus &status) {
-        VEEngine *strongSelf = weakSelf;
-        if (strongSelf == nil) {
-            return;
-        }
-        [strongSelf notifyPlayback:status];
-    };
-    observer.needsDisplay = [weakSelf] {
-        VEEngine *strongSelf = weakSelf;
-        if (strongSelf == nil) {
-            return;
-        }
-        [strongSelf->_program.view renderOnce];
-        [strongSelf->_program.outputView renderOnce];
-    };
-    _program.playback->setObserver(dispatch_get_main_queue(), std::move(observer));
-}
-
-- (void)notifyPlayback:(const playback::PlaybackStatus &)status {
-    if (VEPreviewView *output = _program.outputView) {
-        // The output view's render loop follows the program's transport (the owner of the
-        // program view does this for it).
-        const BOOL paused = !isRunning(status.state);
-        if (output.paused != paused) {
-            output.paused = paused;
-        }
-    }
-    VEPlaybackStatus *info = makePlaybackStatus(status);
+- (void)postPlaybackStatus:(VEPlaybackStatus *)info {
     [self postNotification:VEEnginePlaybackDidChangeNotification
                   userInfo:@{VEEnginePlaybackStatusKey : info}
             observerMethod:@selector(engine:playbackDidChange:)
                     notify:^(id<VEEngineObserver> observer) {
                         [observer engine:self playbackDidChange:info];
                     }];
-}
-
-/// Starting the source monitor pauses the program.
-- (void)pauseProgramIfRunning {
-    if (isRunning(_program.playback->state())) {
-        _program.playback->pause();
-    }
 }
 
 @end
