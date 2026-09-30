@@ -98,9 +98,6 @@ inline AssetId toAssetId(VEAssetID id) {
 inline int clampToInt(NSInteger value) {
     return static_cast<int>(std::clamp<NSInteger>(value, INT_MIN, INT_MAX));
 }
-/// Security-scoped bookmark for a file, falling back to a plain bookmark (outside the sandbox
-/// security scope may be unavailable). Nil if the file cannot be bookmarked (VEEngine+Media.mm).
-NSData *_Nullable makeBookmark(NSString *path);
 /// Whether a playback controller in `state` is playing or pre-rolling (VEEngine+Playback.mm).
 bool isRunning(playback::PlaybackState state);
 
@@ -110,7 +107,11 @@ NS_ASSUME_NONNULL_END
 
 // ----- The engine's state -----
 //
-// Grouped by the file that owns it (creates, mutates and documents it). Everything here is main
+// Grouped by the file that owns it: only that file's methods change a struct's fields, and other
+// files ask it through the private methods below (they may call methods of the thread-safe objects
+// the pointers name, e.g. a pool's registerAsset or a controller's pause). The one exception is
+// construction: -initWithCacheDirectory: (VEEngine.mm) creates the services, both monitors' pools,
+// the program controller, the source provider and the first undo stack. Everything here is main
 // thread only unless a field says otherwise: the engine's methods run on the main thread
 // (VE_ASSERT_MAIN), and the probe queue, the decode pools, the thumbnail and waveform services and
 // the playback controllers hand their results back on the main queue. The objects the pointers name
@@ -119,7 +120,8 @@ NS_ASSUME_NONNULL_END
 namespace ve::facade {
 
 /// The media services behind every area. Created by -initWithCacheDirectory: (VEEngine.mm) and
-/// never replaced; New/Open (VEEngine+Project.mm) starts a new media `epoch`.
+/// never replaced; afterwards only -beginMediaEpoch (VEEngine+Media.mm, called on New/Open) changes
+/// it, advancing `epoch`.
 struct MediaServices {
     std::shared_ptr<media::BackendRouter> router;
     std::shared_ptr<media::FrameCache> frameCache;
@@ -131,8 +133,9 @@ struct MediaServices {
 };
 
 /// What the engine knows about the project's media files beyond the model (VEEngine+Media.mm):
-/// filled by imports and the background probes, by Open's bookmark resolution
-/// (VEEngine+Project.mm), and cleared on New/Open.
+/// filled by imports and the background probes; Open and Save (VEEngine+Project.mm) go through
+/// keepAccessToURL:, rememberBookmark:forAsset:, markAssetMissing: and bookmarkForSavingAsset:,
+/// and New/Open clears it with forgetAssetState.
 struct AssetState {
     std::map<AssetId, media::RoutedMediaInfo> routing; // handed to every decode path (registerRouting)
     std::map<AssetId, AssetDetails> details;           // probe details not stored in the project file
@@ -246,7 +249,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 // VEEngine+Project.mm
 @interface VEEngine (ProjectInternal)
-- (void)stopAccessingURLs;
 - (void)installProject:(ve::Project)project url:(nullable NSURL *)url;
 - (void)resetToEmptyProjectNamed:(NSString *)name;
 @end
@@ -260,6 +262,25 @@ NS_ASSUME_NONNULL_BEGIN
 // VEEngine+Media.mm
 @interface VEEngine (MediaInternal)
 - (void)probeDetailsForProjectAssets;
+/// Keeps sandbox access to `url` for this project (when it grants security-scoped access);
+/// stopAccessingURLs ends it.
+- (void)keepAccessToURL:(NSURL *)url;
+/// Ends the security-scoped access of every URL keepAccessToURL: kept.
+- (void)stopAccessingURLs;
+/// Remembers `bookmark` as `asset`'s, to be saved with the project (Open: a bookmark that resolved
+/// and is not stale, so re-saving is byte identical).
+- (void)rememberBookmark:(NSData *)bookmark forAsset:(ve::AssetId)asset;
+/// Records that `asset`'s file was not found when the project was opened.
+- (void)markAssetMissing:(ve::AssetId)asset;
+/// The bookmark to save for `asset`: the one remembered, else (unless its file is missing) a new
+/// one, which is remembered; nil when the file cannot be bookmarked.
+- (nullable NSData *)bookmarkForSavingAsset:(const ve::MediaAsset &)asset;
+/// Starts a new media epoch (New/Open): the frame cache drops every frame and refuses frames of
+/// the old epoch, and both monitors' decode pools forget every asset (see forgetProjectMedia).
+- (void)beginMediaEpoch;
+/// Forgets the routing, details, missing assets and bookmarks of the project's assets and ends
+/// the access to their URLs (New/Open).
+- (void)forgetAssetState;
 - (void)registerRouting:(const ve::media::RoutedMediaInfo &)routed
                forAsset:(ve::AssetId)asset
                    path:(const std::string &)path;

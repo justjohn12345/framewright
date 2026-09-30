@@ -195,9 +195,7 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
             NSURL *resolved = resolutionOf[i]->url;
             const BOOL stale = resolutionOf[i]->stale;
             if (resolved != nil) {
-                if ([resolved startAccessingSecurityScopedResource]) {
-                    [_assets.accessedURLs addObject:resolved];
-                }
+                [self keepAccessToURL:resolved];
                 // Bookmarks resolve to canonical paths (/private/var/...): only a different
                 // file counts as a relink.
                 NSString *canonicalResolved = resolved.URLByResolvingSymlinksInPath.path;
@@ -208,12 +206,12 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
                     relinked = true;
                 }
                 if (!stale) {
-                    _assets.bookmarks[key] = bookmark; // reused on save so re-saving is byte identical
+                    [self rememberBookmark:bookmark forAsset:asset.id]; // re-saving is byte identical
                 }
             }
         }
         if (![NSFileManager.defaultManager fileExistsAtPath:toNS(asset.url)]) {
-            _assets.missing.insert(asset.id);
+            [self markAssetMissing:asset.id];
         }
     }
     if (relinked) {
@@ -237,15 +235,7 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
     nlohmann::json json = projectToJson(_project);
     nlohmann::json bookmarks = nlohmann::json::object();
     for (const MediaAsset &asset : _project.assets) {
-        NSNumber *key = @(static_cast<int64_t>(asset.id.value()));
-        NSData *bookmark = _assets.bookmarks[key];
-        if (bookmark == nil && !_assets.missing.count(asset.id)) {
-            bookmark = makeBookmark(toNS(asset.url));
-            if (bookmark != nil) {
-                _assets.bookmarks[key] = bookmark;
-            }
-        }
-        if (bookmark != nil) {
+        if (NSData *bookmark = [self bookmarkForSavingAsset:asset]) {
             bookmarks[std::to_string(asset.id.value())] = toStd([bookmark base64EncodedStringWithOptions:0]);
         }
     }
@@ -338,13 +328,6 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
 
 // MARK: - Private (VEEngine+Internal.h declares what other files call)
 
-- (void)stopAccessingURLs {
-    for (NSURL *url in _assets.accessedURLs) {
-        [url stopAccessingSecurityScopedResource];
-    }
-    [_assets.accessedURLs removeAllObjects];
-}
-
 /// Forgets everything cached for the current project's assets (ids restart in every project).
 - (void)forgetProjectMedia {
     // A running export renders the old project, whose ids are about to name other media.
@@ -361,18 +344,12 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
     // ids, and both decode pools forget every asset, target, scrub request and decoder, so no
     // decode in flight can publish the previous project's picture under a reused id (see
     // FrameCache.h and DecodePool.h). The controllers register the new project's assets again.
-    _services.epoch = _services.frameCache->beginEpoch();
-    _program.pool->beginEpoch(_services.epoch);
-    _source.pool->beginEpoch(_services.epoch);
+    [self beginMediaEpoch];
     _program.playback->forgetMedia();
     if (_source.playback) {
         _source.playback->forgetMedia();
     }
-    _assets.routing.clear();
-    _assets.details.clear();
-    _assets.missing.clear();
-    [_assets.bookmarks removeAllObjects];
-    [self stopAccessingURLs];
+    [self forgetAssetState];
     ++_document.generation;
 }
 

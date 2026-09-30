@@ -74,10 +74,8 @@ struct ProbedFile {
     NSError *error = nil;
 };
 
-} // namespace
-
-namespace ve::facade {
-
+/// Security-scoped bookmark for a file, falling back to a plain bookmark (outside the sandbox
+/// security scope may be unavailable). Nil if the file cannot be bookmarked.
 NSData *makeBookmark(NSString *path) {
     NSURL *url = [NSURL fileURLWithPath:path];
     NSData *data = [url bookmarkDataWithOptions:NSURLBookmarkCreationWithSecurityScope |
@@ -91,7 +89,7 @@ NSData *makeBookmark(NSString *path) {
     return data;
 }
 
-} // namespace ve::facade
+} // namespace
 
 @implementation VEEngine (Media)
 
@@ -205,10 +203,7 @@ NSData *makeBookmark(NSString *path) {
                 _assets.missing.erase(id);
                 // Keep sandbox access to the file for this session (bookmark resolution
                 // grants it again after reopening).
-                NSURL *url = urls[sourceIndex[k]];
-                if ([url startAccessingSecurityScopedResource]) {
-                    [_assets.accessedURLs addObject:url];
-                }
+                [self keepAccessToURL:urls[sourceIndex[k]]];
                 [self registerRouting:*file.routed forAsset:id path:file.asset->url];
                 [self startPosterAndWaveformForAsset:id];
                 [reportedIDs addObject:@(static_cast<int64_t>(id.value()))];
@@ -459,6 +454,53 @@ NSData *makeBookmark(NSString *path) {
             });
         });
     }
+}
+
+- (void)keepAccessToURL:(NSURL *)url {
+    if ([url startAccessingSecurityScopedResource]) {
+        [_assets.accessedURLs addObject:url];
+    }
+}
+
+- (void)stopAccessingURLs {
+    for (NSURL *url in _assets.accessedURLs) {
+        [url stopAccessingSecurityScopedResource];
+    }
+    [_assets.accessedURLs removeAllObjects];
+}
+
+- (void)rememberBookmark:(NSData *)bookmark forAsset:(AssetId)asset {
+    _assets.bookmarks[@(static_cast<int64_t>(asset.value()))] = bookmark;
+}
+
+- (void)markAssetMissing:(AssetId)asset {
+    _assets.missing.insert(asset);
+}
+
+- (nullable NSData *)bookmarkForSavingAsset:(const MediaAsset &)asset {
+    NSNumber *key = @(static_cast<int64_t>(asset.id.value()));
+    NSData *bookmark = _assets.bookmarks[key];
+    if (bookmark == nil && !_assets.missing.count(asset.id)) {
+        bookmark = makeBookmark(toNS(asset.url));
+        if (bookmark != nil) {
+            _assets.bookmarks[key] = bookmark;
+        }
+    }
+    return bookmark;
+}
+
+- (void)beginMediaEpoch {
+    _services.epoch = _services.frameCache->beginEpoch();
+    _program.pool->beginEpoch(_services.epoch);
+    _source.pool->beginEpoch(_services.epoch);
+}
+
+- (void)forgetAssetState {
+    _assets.routing.clear();
+    _assets.details.clear();
+    _assets.missing.clear();
+    [_assets.bookmarks removeAllObjects];
+    [self stopAccessingURLs];
 }
 
 /// Hands an asset's routing to every decode path (saves a probe per decoder).
