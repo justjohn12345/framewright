@@ -3,7 +3,8 @@
 
 #import "VEEngine+Internal.h"
 
-#include <algorithm>
+#include "../Edit/TransitionFitting.h"
+
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -15,33 +16,20 @@ using namespace ve::facade;
 
 namespace {
 
-/// "12 frames (0.40 s)".
-NSString *describeFrames(int64_t frames, CMTime frameDuration) {
-    const double seconds = static_cast<double>(frames) * CMTimeGetSeconds(frameDuration);
-    return [NSString stringWithFormat:@"%lld %@ (%.2f s)", (long long)frames, frames == 1 ? @"frame" : @"frames", seconds];
+/// describeFrames (TransitionFitting.h) for the notes: "12 frames (0.40 s)".
+NSString *framesText(int64_t frames, CMTime frameDuration) {
+    return toNS(describeFrames(frames, frameDuration));
 }
 
-/// Whether a transition refusal is about length (media, clip length, neighbours) rather than
-/// structure (missing clips, no cut, locked track, a transition already there).
-bool isLengthLimit(EditError error) {
-    return error == EditError::InsufficientHandles || error == EditError::InvalidArgument ||
-           error == EditError::Overlap;
+/// The refusal of a transition of `frames` on a cut limited by `limit` (transitionRefusal).
+VEEditResult *refuseTransition(const TransitionLimit &limit, int64_t frames, CMTime frameDuration) {
+    return [VEEditResult failureWithCode:toVE(refusalError(limit))
+                                 message:toNS(transitionRefusal(limit, frames, frameDuration))];
 }
 
-/// The user-facing refusal of a transition of `frames` on a cut limited by `limit`.
-NSString *transitionRefusal(const TransitionLimit &limit, int64_t frames, CMTime frameDuration) {
-    NSString *reason = toNS(limit.reason);
-    if (limit.maximumFrames == 0) {
-        return isLengthLimit(limit.limitError) ? [NSString stringWithFormat:@"No transition fits this cut: %@", reason]
-                                               : reason;
-    }
-    return [NSString stringWithFormat:@"A transition of %@ does not fit this cut: %@ The longest it allows is %@.",
-                                      describeFrames(frames, frameDuration), reason,
-                                      describeFrames(limit.maximumFrames, frameDuration)];
-}
-
-VEEditErrorCode refusalCode(const TransitionLimit &limit) {
-    return limit.limitError == EditError::None ? VEEditErrorInvalidArgument : ve::facade::toVE(limit.limitError);
+/// The engine kind of a VETransitionKind that refuseTransitionKind accepted.
+TransitionKind requestedKind(VETransitionKind kind) {
+    return fromVE(kind).value_or(TransitionKind::CrossDissolve);
 }
 
 } // namespace
@@ -88,12 +76,6 @@ static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
                                  message:[NSString stringWithFormat:@"%ld is not a transition kind.", long(kind)]];
 }
 
-/// The kind a transition on `track` gets for the requested `kind`: audio transitions have none.
-static TransitionKind transitionKindOn(const Track &track, VETransitionKind kind) {
-    return track.kind == TrackKind::Video ? fromVE(kind).value_or(TransitionKind::CrossDissolve)
-                                          : TransitionKind::CrossDissolve;
-}
-
 - (VEEditResult *)addTransitionFromClip:(VEClipID)fromClipID
                                  toClip:(VEClipID)toClipID
                                duration:(CMTime)duration
@@ -114,8 +96,7 @@ static TransitionKind transitionKindOn(const Track &track, VETransitionKind kind
     const ClipId to(static_cast<ClipId::ValueType>(toClipID));
     const TransitionLimit limit = transitionLimit(_project, sequenceId, from, to);
     if (limit.maximumFrames == 0 || (frames > limit.maximumFrames && !(options & VETransitionOptionFitToCut))) {
-        return [VEEditResult failureWithCode:refusalCode(limit)
-                                     message:transitionRefusal(limit, frames, frameDuration)];
+        return refuseTransition(limit, frames, frameDuration);
     }
     // Each transition is fitted to its own cut: the linked partners' cut never shortens the
     // requested one, nor the other way round.
@@ -124,7 +105,7 @@ static TransitionKind transitionKindOn(const Track &track, VETransitionKind kind
     int64_t mainFrames = requested;
     if (mainFrames > limit.maximumFrames) {
         mainFrames = limit.maximumFrames;
-        [notes addObject:[NSString stringWithFormat:@"Shortened to %@: %@", describeFrames(mainFrames, frameDuration),
+        [notes addObject:[NSString stringWithFormat:@"Shortened to %@: %@", framesText(mainFrames, frameDuration),
                                                     toNS(limit.reason)]];
     }
     std::vector<TransitionSpanRequest> requests;
@@ -136,7 +117,8 @@ static TransitionKind transitionKindOn(const Track &track, VETransitionKind kind
         request.start = start;
         request.end = end;
         const Track *ownerTrack = sequence.trackOfClip(owner);
-        request.kind = ownerTrack != nullptr ? transitionKindOn(*ownerTrack, kind) : TransitionKind::CrossDissolve;
+        request.kind = ownerTrack != nullptr ? transitionKindOnTrack(ownerTrack->kind, requestedKind(kind))
+                                             : TransitionKind::CrossDissolve;
         return request;
     };
     requests.push_back(centred(from, mainFrames));
@@ -151,13 +133,13 @@ static TransitionKind transitionKindOn(const Track &track, VETransitionKind kind
             if (linked.maximumFrames == 0 ||
                 (requested > linked.maximumFrames && !(options & VETransitionOptionFitToCut))) {
                 [notes addObject:[NSString stringWithFormat:@"The linked clips got no transition: %@",
-                                                            transitionRefusal(linked, requested, frameDuration)]];
+                                                            toNS(transitionRefusal(linked, requested, frameDuration))]];
             } else {
                 int64_t partnerFrames = requested;
                 if (partnerFrames > linked.maximumFrames) {
                     partnerFrames = linked.maximumFrames;
                     [notes addObject:[NSString stringWithFormat:@"The linked clips' transition was shortened to %@: %@",
-                                                                describeFrames(partnerFrames, frameDuration),
+                                                                framesText(partnerFrames, frameDuration),
                                                                 toNS(linked.reason)]];
                 }
                 requests.push_back(centred(*fromClip->linkedClipId, partnerFrames));
@@ -183,39 +165,6 @@ static TransitionKind transitionKindOn(const Track &track, VETransitionKind kind
                   return toNumbers(raw->createdSpanIds());
               }
                  note:note];
-}
-
-/// "black" for a video track, "silence" for an audio track.
-static NSString *fadeTarget(const Track &track) {
-    return track.kind == TrackKind::Video ? @"black" : @"silence";
-}
-
-/// The longest fade (whole frames) `clip` (of `track`) takes at `edge`: its length less its other
-/// lane-0 span's part inside it and, for a fade out, less the part inside it of a cross dissolve
-/// coming into it; and why not longer.
-static int64_t fadeLimitFrames(const Clip &clip, const Track &track, ClipEdge edge, CMTime frameDuration,
-                               NSString **reason, EditError *error) {
-    CMTime taken = kCMTimeZero;
-    CMTime incoming = kCMTimeZero;
-    if (edge == ClipEdge::Head) {
-        if (const EffectSpan *tail = clip.transitionAt(ClipEdge::Tail)) {
-            taken = -tail->start;
-        }
-    } else {
-        taken = clipFadeLength(clip, ClipEdge::Head);
-        incoming = incomingTransitionInside(track, clip);
-    }
-    const CMTime room = clip.timelineDuration - taken - incoming;
-    if (kCMTimeZero < incoming) {
-        *reason = track.kind == TrackKind::Audio ? @"It would meet the crossfade coming into the clip."
-                                                 : @"It would meet the cross dissolve coming into the clip.";
-        *error = EditError::Overlap;
-    } else {
-        *reason = taken == kCMTimeZero ? @"A fade cannot be longer than its clip."
-                                       : @"It would overlap the transition at the clip's other end.";
-        *error = taken == kCMTimeZero ? EditError::InvalidArgument : EditError::Overlap;
-    }
-    return std::max<int64_t>(0, frameIndexAt(room, frameDuration, SnapMode::Floor));
 }
 
 - (VEEditResult *)addTransitionAtEdge:(VEClipEdge)edge
@@ -267,39 +216,17 @@ static int64_t fadeLimitFrames(const Clip &clip, const Track &track, ClipEdge ed
     }
     NSMutableArray<NSString *> *notes = [NSMutableArray array];
     std::vector<TransitionSpanRequest> requests;
-    // A fade of `length` frames at `side` of `owner`, fitted when allowed; nil on success.
+    // A fade at `side` of `owner` (planFade); nil on success, else why not.
     auto plan = [&](const Clip &owner, const Track &ownerTrack, bool linked) -> NSString * {
-        if (owner.transitionAt(side) != nullptr) {
-            return side == ClipEdge::Head ? @"The clip already has a transition at its start."
-                                          : @"The clip already has a transition at its end.";
+        const FadePlan fade = planFade(owner, ownerTrack, side, frames, frameDuration,
+                                       (options & VETransitionOptionFitToCut) != 0, requestedKind(kind), linked);
+        if (!fade.request) {
+            return toNS(fade.refusal);
         }
-        if (side == ClipEdge::Head && touchingClip(ownerTrack, owner, ClipEdge::Head) != nullptr) {
-            return @"Another clip touches the clip's start, so the cut belongs to that clip: add a transition at its "
-                   @"end instead.";
+        if (fade.note) {
+            [notes addObject:toNS(*fade.note)];
         }
-        NSString *reason = nil;
-        EditError error = EditError::None;
-        const int64_t limitFrames = fadeLimitFrames(owner, ownerTrack, side, frameDuration, &reason, &error);
-        int64_t length = frames;
-        if (length > limitFrames) {
-            if (!(options & VETransitionOptionFitToCut) || limitFrames == 0) {
-                return [NSString stringWithFormat:@"A fade of %@ does not fit: %@ The longest it allows is %@.",
-                                                  describeFrames(frames, frameDuration), reason,
-                                                  describeFrames(limitFrames, frameDuration)];
-            }
-            length = limitFrames;
-            [notes addObject:[NSString stringWithFormat:@"%@shortened to %@: %@", linked ? @"The linked clip's fade was "
-                                                                                          : @"Shortened to ",
-                                                        describeFrames(length, frameDuration), reason]];
-        }
-        TransitionSpanRequest request;
-        request.clipId = owner.id;
-        request.edge = side;
-        request.kind = transitionKindOn(ownerTrack, kind);
-        const CMTime fade = timeForFrame(length, frameDuration);
-        request.start = side == ClipEdge::Head ? kCMTimeZero : -fade;
-        request.end = side == ClipEdge::Head ? fade : kCMTimeZero;
-        requests.push_back(request);
+        requests.push_back(*fade.request);
         return nil;
     };
     if (NSString *refusal = plan(*clip, *track, false)) {
@@ -320,11 +247,12 @@ static int64_t fadeLimitFrames(const Clip &clip, const Track &track, ClipEdge ed
             }
         }
     }
-    const TransitionKind shape = transitionKindOn(*track, kind);
+    const TransitionKind shape = transitionKindOnTrack(track->kind, requestedKind(kind));
     if (shape == TransitionKind::CrossDissolve) {
-        [notes insertObject:[NSString stringWithFormat:side == ClipEdge::Head ? @"Fades in from %@." : @"Fades out to %@.",
-                                                       fadeTarget(*track)]
-                    atIndex:0];
+        [notes
+            insertObject:[NSString stringWithFormat:side == ClipEdge::Head ? @"Fades in from %@." : @"Fades out to %@.",
+                                                    @(fadeTargetName(track->kind))]
+                 atIndex:0];
     } else {
         [notes insertObject:[NSString stringWithFormat:side == ClipEdge::Head ? @"%@ from black." : @"%@ to black.",
                                                        toNS(displayNameOf(shape))]
@@ -357,71 +285,6 @@ static int64_t fadeLimitFrames(const Clip &clip, const Track &track, ClipEdge ed
                                                ClipId(static_cast<ClipId::ValueType>(toClipID))));
 }
 
-/// The offsets a transition of `frames` gets from setDuration: a centred cross dissolve stays
-/// centred, an uneven one keeps its share before the cut in proportion (rounded down), a fade keeps
-/// its edge.
-static std::pair<CMTime, CMTime> resizedOffsets(const TransitionPlacement &transition, int64_t frames, CMTime fd) {
-    if (transition.role == TransitionRole::FadeIn) {
-        return {kCMTimeZero, timeForFrame(frames, fd)};
-    }
-    if (transition.role == TransitionRole::FadeOut) {
-        return {-timeForFrame(frames, fd), kCMTimeZero};
-    }
-    const int64_t before = frameIndexAt(transition.cut - transition.range.start, fd, SnapMode::Round);
-    const int64_t total = frameIndexAt(transition.range.duration(), fd, SnapMode::Round);
-    int64_t newBefore = frames / 2;
-    if (total > 0 && before != total / 2) {
-        newBefore = static_cast<int64_t>((static_cast<Int128>(frames) * before) / total);
-    }
-    return {-timeForFrame(newBefore, fd), timeForFrame(frames - newBefore, fd)};
-}
-
-/// The longest duration `transition` can be given by setDuration (resizedOffsets), and why not longer.
-- (TransitionLimit)durationLimitFor:(const TransitionPlacement &)transition {
-    const CMTime fd = [self activeSequence].frameDuration;
-    TransitionLimit limit;
-    if (transition.role != TransitionRole::CrossDissolve) {
-        NSString *reason = nil;
-        EditError error = EditError::None;
-        const ClipEdge edge = transition.role == TransitionRole::FadeIn ? ClipEdge::Head : ClipEdge::Tail;
-        // The fade's own length does not count against it.
-        Clip without = *transition.owner;
-        std::erase_if(without.spans, [&](const EffectSpan &s) { return s.id == transition.span->id; });
-        limit.maximumFrames = fadeLimitFrames(without, *transition.track, edge, fd, &reason, &error);
-        limit.maximum = limit.maximumFrames > 0 ? timeForFrame(limit.maximumFrames, fd) : kCMTimeZero;
-        limit.limitError = error;
-        limit.reason = toStd(reason);
-        return limit;
-    }
-    EditResult why = EditResult::success();
-    const auto sides = transitionSideLimits(_project, [self sequenceId], transition.owner->id, transition.span->id, why);
-    if (!sides) {
-        limit.limitError = why.error;
-        limit.reason = why.message;
-        return limit;
-    }
-    auto fits = [&](int64_t frames) {
-        const auto [start, end] = resizedOffsets(transition, frames, fd);
-        return frameIndexAt(-start, fd, SnapMode::Round) <= sides->maxBeforeFrames &&
-               frameIndexAt(end, fd, SnapMode::Round) <= sides->maxAfterFrames;
-    };
-    int64_t lo = 0;
-    int64_t hi = sides->maxBeforeFrames + sides->maxAfterFrames + 1;
-    while (hi - lo > 1) {
-        const int64_t mid = lo + (hi - lo) / 2;
-        (fits(mid) ? lo : hi) = mid;
-    }
-    limit.maximumFrames = lo;
-    limit.maximum = lo > 0 ? timeForFrame(lo, fd) : kCMTimeZero;
-    const auto [start, end] = resizedOffsets(transition, lo + 1, fd);
-    const bool beforeOverruns = frameIndexAt(-start, fd, SnapMode::Round) > sides->maxBeforeFrames;
-    (void)end;
-    limit.limitError = beforeOverruns ? sides->beforeError : sides->afterError;
-    limit.reason = beforeOverruns ? sides->beforeReason : sides->afterReason;
-    limit.limitingClip = beforeOverruns ? sides->beforeLimitingClip : sides->afterLimitingClip;
-    return limit;
-}
-
 - (VETransitionLimit *)transitionLimitForTransition:(VETransitionID)transitionID {
     VE_ASSERT_MAIN();
     const auto transition = findTransition([self activeSequence], SpanId(static_cast<SpanId::ValueType>(transitionID)));
@@ -431,7 +294,7 @@ static std::pair<CMTime, CMTime> resizedOffsets(const TransitionPlacement &trans
         none.reason = "The transition no longer exists.";
         return makeTransitionLimit(none);
     }
-    return makeTransitionLimit([self durationLimitFor:*transition]);
+    return makeTransitionLimit(transitionDurationLimit(_project, [self activeSequence], *transition));
 }
 
 - (VEEditResult *)removeTransition:(VETransitionID)transitionID {
@@ -483,11 +346,11 @@ static std::pair<CMTime, CMTime> resizedOffsets(const TransitionPlacement &trans
         return refusal;
     }
     const CMTime fd = sequence.frameDuration;
-    const TransitionLimit limit = [self durationLimitFor:*transition];
+    const TransitionLimit limit = transitionDurationLimit(_project, sequence, *transition);
     if (frames > limit.maximumFrames && isLengthLimit(limit.limitError)) {
-        return [VEEditResult failureWithCode:refusalCode(limit) message:transitionRefusal(limit, frames, fd)];
+        return refuseTransition(limit, frames, fd);
     }
-    const auto [start, end] = resizedOffsets(*transition, frames, fd);
+    const auto [start, end] = resizedTransitionOffsets(*transition, frames, fd);
     std::vector<TransitionRangeChange> changes{{id, start, end}};
     NSString *note = nil;
     const auto partner = includingLinked ? linkedTransition(sequence, id) : std::nullopt;
@@ -497,7 +360,7 @@ static std::pair<CMTime, CMTime> resizedOffsets(const TransitionPlacement &trans
                                               toNS(linked->track->name)];
         } else {
             // The linked transition gets the same length, fitted to its own cut.
-            const TransitionLimit linkedLimit = [self durationLimitFor:*linked];
+            const TransitionLimit linkedLimit = transitionDurationLimit(_project, sequence, *linked);
             if (linkedLimit.maximumFrames == 0) {
                 note = [NSString stringWithFormat:@"The linked transition was not changed: %@", toNS(linkedLimit.reason)];
             } else {
@@ -505,9 +368,9 @@ static std::pair<CMTime, CMTime> resizedOffsets(const TransitionPlacement &trans
                 if (linkedFrames > linkedLimit.maximumFrames) {
                     linkedFrames = linkedLimit.maximumFrames;
                     note = [NSString stringWithFormat:@"The linked transition was limited to %@: %@",
-                                                      describeFrames(linkedFrames, fd), toNS(linkedLimit.reason)];
+                                                      framesText(linkedFrames, fd), toNS(linkedLimit.reason)];
                 }
-                const auto [linkedStart, linkedEnd] = resizedOffsets(*linked, linkedFrames, fd);
+                const auto [linkedStart, linkedEnd] = resizedTransitionOffsets(*linked, linkedFrames, fd);
                 changes.push_back({*partner, linkedStart, linkedEnd});
             }
         }
@@ -533,7 +396,7 @@ static std::pair<CMTime, CMTime> resizedOffsets(const TransitionPlacement &trans
           result.errorCode == VEEditErrorOverlap)) {
         return result;
     }
-    const TransitionLimit limit = [self durationLimitFor:*transition];
+    const TransitionLimit limit = transitionDurationLimit(_project, sequence, *transition);
     const int64_t frames =
         frameIndexAt(snapToFrame(duration, sequence.frameDuration, SnapMode::Round), sequence.frameDuration,
                      SnapMode::Round);
@@ -541,100 +404,24 @@ static std::pair<CMTime, CMTime> resizedOffsets(const TransitionPlacement &trans
         return result; // refused for another reason (e.g. shorter than a frame)
     }
     return [VEEditResult failureWithCode:result.errorCode
-                                 message:transitionRefusal(limit, frames, sequence.frameDuration)];
+                                 message:toNS(transitionRefusal(limit, frames, sequence.frameDuration))];
 }
 
-/// The offsets of `transition` covering the timeline frames `range` (whole frames), fitted to what
-/// its clips allow; `notes` says what was fitted or changed role. Nil when nothing fits (`refusal`
-/// set).
+/// The offsets of `transition` covering the timeline frames `range` (fitTransitionRange), its notes
+/// added to `notes`. Nil when nothing fits (`refusal` set).
 - (std::optional<std::pair<CMTime, CMTime>>)offsetsFor:(const TransitionPlacement &)transition
                                                  range:(TimeRange)range
                                                 linked:(BOOL)linked
                                                  notes:(NSMutableArray<NSString *> *)notes
                                                refusal:(VEEditResult **)refusal {
-    const CMTime fd = [self activeSequence].frameDuration;
-    NSString *who = linked ? @"The linked transition" : @"The transition";
-    const Clip &owner = *transition.owner;
-    if (transition.span->edge == ClipEdge::Head) {
-        if (range.start != owner.timelineStart) {
-            *refusal = [VEEditResult failureWithCode:VEEditErrorInvalidTime
-                                             message:@"A fade in starts at its clip's start."];
-            return std::nullopt;
-        }
-        NSString *reason = nil;
-        EditError error = EditError::None;
-        Clip without = owner;
-        std::erase_if(without.spans, [&](const EffectSpan &s) { return s.id == transition.span->id; });
-        const int64_t limit = fadeLimitFrames(without, *transition.track, ClipEdge::Head, fd, &reason, &error);
-        int64_t length = frameIndexAt(range.duration(), fd, SnapMode::Round);
-        if (length > limit) {
-            length = limit;
-            [notes addObject:[NSString stringWithFormat:@"%@ was shortened to %@: %@", who, describeFrames(length, fd), reason]];
-        }
-        if (length < 1) {
-            *refusal = [VEEditResult failureWithCode:toVE(error) message:reason];
-            return std::nullopt;
-        }
-        return std::make_pair(kCMTimeZero, timeForFrame(length, fd));
+    const TransitionRangeFit fit = fitTransitionRange(_project, [self activeSequence], transition, range, linked);
+    for (const std::string &note : fit.notes) {
+        [notes addObject:toNS(note)];
     }
-    const CMTime cut = owner.timelineEnd();
-    if (cut < range.start) {
-        *refusal = [VEEditResult failureWithCode:VEEditErrorInvalidTime
-                                         message:@"A transition at a clip's end starts inside the clip."];
-        return std::nullopt;
+    if (!fit.offsets) {
+        *refusal = toVE(fit.refusal);
     }
-    int64_t before = frameIndexAt(cut - range.start, fd, SnapMode::Round);
-    int64_t after = std::max<int64_t>(0, frameIndexAt(range.end - cut, fd, SnapMode::Round));
-    const Clip *next = touchingClip(*transition.track, owner, ClipEdge::Tail);
-    NSString *target = fadeTarget(*transition.track);
-    if (after > 0 && next == nullptr) {
-        after = 0;
-        [notes addObject:[NSString stringWithFormat:@"%@ fades out to %@: nothing follows the clip.", who, target]];
-    }
-    if (after > 0) {
-        EditResult why = EditResult::success();
-        const auto sides = transitionSideLimits(_project, [self sequenceId], owner.id, transition.span->id, why);
-        if (!sides) {
-            *refusal = toVE(why);
-            return std::nullopt;
-        }
-        if (before > sides->maxBeforeFrames) {
-            before = sides->maxBeforeFrames;
-            [notes addObject:[NSString stringWithFormat:@"%@ was shortened before the cut to %@: %@", who,
-                                                        describeFrames(before, fd), toNS(sides->beforeReason)]];
-        }
-        if (after > sides->maxAfterFrames) {
-            after = sides->maxAfterFrames;
-            [notes addObject:[NSString stringWithFormat:@"%@ was shortened after the cut to %@: %@", who,
-                                                        describeFrames(after, fd), toNS(sides->afterReason)]];
-        }
-        if (after > 0 && transition.role != TransitionRole::CrossDissolve) {
-            [notes addObject:[NSString stringWithFormat:@"%@ now crosses the cut: a %@ into the next clip.", who,
-                                                        transition.track->kind == TrackKind::Video ? @"cross dissolve"
-                                                                                                    : @"crossfade"]];
-        }
-    }
-    if (after == 0) {
-        NSString *reason = nil;
-        EditError error = EditError::None;
-        Clip without = owner;
-        std::erase_if(without.spans, [&](const EffectSpan &s) { return s.id == transition.span->id; });
-        const int64_t limit = fadeLimitFrames(without, *transition.track, ClipEdge::Tail, fd, &reason, &error);
-        if (before > limit) {
-            before = limit;
-            [notes addObject:[NSString stringWithFormat:@"%@ was shortened to %@: %@", who, describeFrames(before, fd), reason]];
-        }
-        if (transition.role == TransitionRole::CrossDissolve && before > 0 && next != nullptr) {
-            [notes addObject:[NSString stringWithFormat:@"%@ no longer reaches past the cut, so it now fades out to %@.",
-                                                        who, target]];
-        }
-    }
-    if (before + after < 1) {
-        *refusal = [VEEditResult failureWithCode:VEEditErrorInvalidArgument
-                                         message:[NSString stringWithFormat:@"%@ would cover no frame.", who]];
-        return std::nullopt;
-    }
-    return std::make_pair(-timeForFrame(before, fd), timeForFrame(after, fd));
+    return fit.offsets;
 }
 
 - (VEEditResult *)setRangeOfTransition:(VETransitionID)transitionID
