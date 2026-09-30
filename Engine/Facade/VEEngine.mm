@@ -102,13 +102,13 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
     VE_ASSERT_MAIN();
     if ((self = [super init])) {
         _log = os_log_create("com.justjohn12345.framewright.engine", "Facade");
-        _router = media::BackendRouter::makeDefault();
-        (void)_router->registerBackend(media::ffmpeg::makeFFmpegBackend());
-        _frameCache = std::make_shared<media::FrameCache>();
-        _mediaEpoch = _frameCache->epoch();
+        _services.router = media::BackendRouter::makeDefault();
+        (void)_services.router->registerBackend(media::ffmpeg::makeFFmpegBackend());
+        _services.frameCache = std::make_shared<media::FrameCache>();
+        _services.epoch = _services.frameCache->epoch();
         media::DecodePool::Config programPoolConfig;
         programPoolConfig.budgetFraction = kProgramPoolBudgetShare;
-        _decodePool = std::make_shared<media::DecodePool>(_router, _frameCache, programPoolConfig);
+        _program.pool = std::make_shared<media::DecodePool>(_services.router, _services.frameCache, programPoolConfig);
         thumbs::ThumbnailService::Config thumbConfig;
         thumbs::WaveformService::Config waveConfig;
         if (cacheDirectory != nil) {
@@ -117,37 +117,23 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
             waveConfig.diskCacheDirectory =
                 toStd([cacheDirectory URLByAppendingPathComponent:@"Waveforms" isDirectory:YES].path);
         }
-        _thumbnails = std::make_unique<thumbs::ThumbnailService>(_router, thumbConfig);
-        _waveforms = std::make_unique<thumbs::WaveformService>(_router, waveConfig);
+        _services.thumbnails = std::make_unique<thumbs::ThumbnailService>(_services.router, thumbConfig);
+        _services.waveforms = std::make_unique<thumbs::WaveformService>(_services.router, waveConfig);
         media::DecodePool::Config sourcePoolConfig;
         sourcePoolConfig.budgetFraction = kSourcePoolBudgetShare;
-        _sourcePool = std::make_shared<media::DecodePool>(_router, _frameCache, sourcePoolConfig);
-        _sourceProvider = std::make_shared<ProgramFrameProvider>(_sourcePool, kSourceScrubLaneBase);
-        _sourceTime = kCMTimeZero;
-        _sourceSharpening = true; // Project::sharpenScaledDownSources' default
-        _sourceUsesController = false;
-        _sourceMonitorVisible = YES;
-        _playbackGeneration = 0;
-        _playbackPublished = false;
-        _idFloor = 0;
-        _loadWarnings = @[];
+        _source.pool = std::make_shared<media::DecodePool>(_services.router, _services.frameCache, sourcePoolConfig);
+        _source.provider = std::make_shared<ProgramFrameProvider>(_source.pool, kSourceScrubLaneBase);
         _rippleScope = VERippleScopeAllTracks;
-        _deferredImports = [NSMutableArray array];
         playback::PlaybackConfig config;
         config.scrubLaneBase = kProgramLaneBase;
-        _playback = std::make_unique<playback::PlaybackController>(_router, _frameCache, _decodePool, config);
-        [self observeController:*_playback source:NO];
-        _undo = std::make_unique<UndoStack>();
-        _changeBase = 0;
-        _extraChanges = 0;
-        _metadataDirty = false;
-        _projectGeneration = 0;
-        _bookmarks = [NSMutableDictionary dictionary];
-        _accessedURLs = [NSMutableArray array];
+        _program.playback = std::make_unique<playback::PlaybackController>(_services.router, _services.frameCache,
+                                                                           _program.pool, config);
+        [self observeController:*_program.playback source:NO];
+        _undo.stack = std::make_unique<UndoStack>();
         _observers = [NSHashTable weakObjectsHashTable];
-        _probeQueue = dispatch_queue_create("com.justjohn12345.framewright.engine.probe",
-                                            dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT,
-                                                                                    QOS_CLASS_USER_INITIATED, 0));
+        _services.probeQueue = dispatch_queue_create(
+            "com.justjohn12345.framewright.engine.probe",
+            dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INITIATED, 0));
         // Probe VideoToolbox once off the main thread so the Preferences pane never waits.
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             (void)media::HardwareCaps::get();
@@ -179,11 +165,11 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
     if (_memoryPressureSource != nil) {
         dispatch_source_cancel(_memoryPressureSource);
     }
-    [_activeExport cancel]; // the job deletes its partial file on its own queue
+    [_export.active cancel]; // the job deletes its partial file on its own queue
     // The views may outlive the engine: they must stop calling into the controllers first.
-    [_programView setFrameSource:ve::render::PreviewFrameSource{}];
-    [_outputView setFrameSource:ve::render::PreviewFrameSource{}];
-    [_sourceView setFrameSource:ve::render::PreviewFrameSource{}];
+    [_program.view setFrameSource:ve::render::PreviewFrameSource{}];
+    [_program.outputView setFrameSource:ve::render::PreviewFrameSource{}];
+    [_source.view setFrameSource:ve::render::PreviewFrameSource{}];
     [self stopAccessingURLs];
 }
 

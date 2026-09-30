@@ -167,12 +167,12 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
                            ": the folder for media received from Photos could not be read; it will be asked for again");
     }
     [self installProject:std::move(project) url:url];
-    _mediaFolderBookmark = mediaFolderBookmark;
+    _document.mediaFolderBookmark = mediaFolderBookmark;
     NSMutableArray<NSString *> *warningStrings = [NSMutableArray arrayWithCapacity:warnings.size()];
     for (const std::string &warning : warnings) {
         [warningStrings addObject:toNS(warning)];
     }
-    _loadWarnings = warningStrings;
+    _document.loadWarnings = warningStrings;
 
     // Resolve every asset: through its bookmark (follows moves and grants sandbox access),
     // else by path. The bookmarks resolve in parallel off the main thread, bounded in time.
@@ -199,7 +199,7 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
             const BOOL stale = resolutionOf[i]->stale;
             if (resolved != nil) {
                 if ([resolved startAccessingSecurityScopedResource]) {
-                    [_accessedURLs addObject:resolved];
+                    [_assets.accessedURLs addObject:resolved];
                 }
                 // Bookmarks resolve to canonical paths (/private/var/...): only a different
                 // file counts as a relink.
@@ -211,24 +211,24 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
                     relinked = true;
                 }
                 if (!stale) {
-                    _bookmarks[key] = bookmark; // reused on save so re-saving is byte identical
+                    _assets.bookmarks[key] = bookmark; // reused on save so re-saving is byte identical
                 }
             }
         }
         if (![NSFileManager.defaultManager fileExistsAtPath:toNS(asset.url)]) {
-            _missing.insert(asset.id);
+            _assets.missing.insert(asset.id);
         }
     }
     if (relinked) {
-        _metadataDirty = true;
-        ++_extraChanges;
+        _document.metadataDirty = true;
+        ++_document.extraChanges;
     }
 
     // Every asset is registered with both decode pools now, the missing ones included (their
     // decodes fail as missing instead of finding whatever the id named before).
     for (const MediaAsset &asset : _project.assets) {
-        _decodePool->registerAsset(asset.id, asset.url);
-        _sourcePool->registerAsset(asset.id, asset.url);
+        _program.pool->registerAsset(asset.id, asset.url);
+        _source.pool->registerAsset(asset.id, asset.url);
     }
     [self probeDetailsForProjectAssets];
     [self notifyAssetsChanged];
@@ -242,11 +242,11 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
     nlohmann::json bookmarks = nlohmann::json::object();
     for (const MediaAsset &asset : _project.assets) {
         NSNumber *key = @(static_cast<int64_t>(asset.id.value()));
-        NSData *bookmark = _bookmarks[key];
-        if (bookmark == nil && !_missing.count(asset.id)) {
+        NSData *bookmark = _assets.bookmarks[key];
+        if (bookmark == nil && !_assets.missing.count(asset.id)) {
             bookmark = makeBookmark(toNS(asset.url));
             if (bookmark != nil) {
-                _bookmarks[key] = bookmark;
+                _assets.bookmarks[key] = bookmark;
             }
         }
         if (bookmark != nil) {
@@ -254,8 +254,8 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
         }
     }
     json[kBookmarksKey] = std::move(bookmarks);
-    if (_mediaFolderBookmark != nil) {
-        json[kMediaFolderBookmarkKey] = toStd([_mediaFolderBookmark base64EncodedStringWithOptions:0]);
+    if (_document.mediaFolderBookmark != nil) {
+        json[kMediaFolderBookmarkKey] = toStd([_document.mediaFolderBookmark base64EncodedStringWithOptions:0]);
     }
     // Invalid UTF-8 in names or paths is written as U+FFFD rather than throwing.
     const std::string text = json.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
@@ -269,45 +269,45 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
         }
         return NO;
     }
-    _projectURL = url;
-    _undo->markClean();
-    _metadataDirty = false;
+    _document.url = url;
+    _undo.stack->markClean();
+    _document.metadataDirty = false;
     [self notifyModelChanged];
     return YES;
 }
 
 - (NSString *)projectName {
     VE_ASSERT_MAIN();
-    if (_projectURL != nil) {
-        return _projectURL.URLByDeletingPathExtension.lastPathComponent;
+    if (_document.url != nil) {
+        return _document.url.URLByDeletingPathExtension.lastPathComponent;
     }
     return toNS(_project.name);
 }
 
 - (nullable NSURL *)projectURL {
     VE_ASSERT_MAIN();
-    return _projectURL;
+    return _document.url;
 }
 
 - (BOOL)isDirty {
     VE_ASSERT_MAIN();
-    return _undo->isDirty() || _metadataDirty;
+    return _undo.stack->isDirty() || _document.metadataDirty;
 }
 
 - (uint64_t)changeCount {
     VE_ASSERT_MAIN();
-    return _changeBase + _undo->changeCount() + _extraChanges;
+    return _document.changeBase + _undo.stack->changeCount() + _document.extraChanges;
 }
 
 - (NSArray<NSString *> *)loadWarnings {
     VE_ASSERT_MAIN();
-    return _loadWarnings;
+    return _document.loadWarnings;
 }
 
 - (NSArray<NSNumber *> *)missingAssetIDs {
     VE_ASSERT_MAIN();
     NSMutableArray<NSNumber *> *ids = [NSMutableArray array];
-    for (AssetId id : _missing) {
+    for (AssetId id : _assets.missing) {
         [ids addObject:@(static_cast<int64_t>(id.value()))];
     }
     return ids;
@@ -320,18 +320,19 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
 
 - (nullable NSData *)mediaFolderBookmark {
     VE_ASSERT_MAIN();
-    return _mediaFolderBookmark;
+    return _document.mediaFolderBookmark;
 }
 
 - (void)setMediaFolderBookmark:(nullable NSData *)mediaFolderBookmark {
     VE_ASSERT_MAIN();
-    if (mediaFolderBookmark == _mediaFolderBookmark || [mediaFolderBookmark isEqualToData:_mediaFolderBookmark]) {
+    if (mediaFolderBookmark == _document.mediaFolderBookmark ||
+        [mediaFolderBookmark isEqualToData:_document.mediaFolderBookmark]) {
         return;
     }
-    _mediaFolderBookmark = [mediaFolderBookmark copy];
+    _document.mediaFolderBookmark = [mediaFolderBookmark copy];
     // Saved with the project: an unsaved change, outside the undo history.
-    _metadataDirty = true;
-    ++_extraChanges;
+    _document.metadataDirty = true;
+    ++_document.extraChanges;
     [self notifyModelChanged];
 }
 
@@ -340,57 +341,57 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
 @implementation VEEngine (ProjectInternal)
 
 - (void)stopAccessingURLs {
-    for (NSURL *url in _accessedURLs) {
+    for (NSURL *url in _assets.accessedURLs) {
         [url stopAccessingSecurityScopedResource];
     }
-    [_accessedURLs removeAllObjects];
+    [_assets.accessedURLs removeAllObjects];
 }
 
 /// Forgets everything cached for the current project's assets (ids restart in every project).
 - (void)forgetProjectMedia {
     // A running export renders the old project, whose ids are about to name other media.
-    [_activeExport cancel];
+    [_export.active cancel];
     // The controllers stop using the old assets first (their ids will name other files).
-    _playback->setSequence(std::make_shared<const Project>(), SequenceId{});
-    _playbackPublished = false;
+    _program.playback->setSequence(std::make_shared<const Project>(), SequenceId{});
+    _program.published = false;
     [self resetSourceMonitor]; // stops the source controller and drops its private project
     for (const MediaAsset &asset : _project.assets) {
-        _thumbnails->cancelPending(asset.id);
-        _thumbnails->purge(asset.id);
-        _waveforms->purge(asset.id);
+        _services.thumbnails->cancelPending(asset.id);
+        _services.thumbnails->purge(asset.id);
+        _services.waveforms->purge(asset.id);
     }
     // A new media epoch: the frame cache drops every frame and refuses any decoded for the old
     // ids, and both decode pools forget every asset, target, scrub request and decoder, so no
     // decode in flight can publish the previous project's picture under a reused id (see
     // FrameCache.h and DecodePool.h). The controllers register the new project's assets again.
-    _mediaEpoch = _frameCache->beginEpoch();
-    _decodePool->beginEpoch(_mediaEpoch);
-    _sourcePool->beginEpoch(_mediaEpoch);
-    _playback->forgetMedia();
-    if (_sourcePlayback) {
-        _sourcePlayback->forgetMedia();
+    _services.epoch = _services.frameCache->beginEpoch();
+    _program.pool->beginEpoch(_services.epoch);
+    _source.pool->beginEpoch(_services.epoch);
+    _program.playback->forgetMedia();
+    if (_source.playback) {
+        _source.playback->forgetMedia();
     }
-    _routing.clear();
-    _details.clear();
-    _missing.clear();
-    [_bookmarks removeAllObjects];
+    _assets.routing.clear();
+    _assets.details.clear();
+    _assets.missing.clear();
+    [_assets.bookmarks removeAllObjects];
     [self stopAccessingURLs];
-    ++_projectGeneration;
+    ++_document.generation;
 }
 
 /// Installs `project` as the current project with a fresh undo history.
 - (void)installProject:(Project)project url:(nullable NSURL *)url {
     [self forgetProjectMedia];
-    _changeBase += _undo->changeCount() + _extraChanges + 1;
-    _extraChanges = 0;
-    _metadataDirty = false;
-    _mediaFolderBookmark = nil;
-    _undo = std::make_unique<UndoStack>();
-    _coalescingKey = nil;
+    _document.changeBase += _undo.stack->changeCount() + _document.extraChanges + 1;
+    _document.extraChanges = 0;
+    _document.metadataDirty = false;
+    _document.mediaFolderBookmark = nil;
+    _undo.stack = std::make_unique<UndoStack>();
+    _undo.coalescingKey = nil;
     _project = std::move(project);
-    _projectURL = url;
-    _idFloor = _project.ids.nextValue();
-    _loadWarnings = @[];
+    _document.url = url;
+    _undo.idFloor = _project.ids.nextValue();
+    _document.loadWarnings = @[];
     _lastUseCounts.clear();
     // Imports waiting for the old project's gesture belong to the old project: run them now
     // (they see the new generation and report the project as closed).

@@ -82,14 +82,14 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
 
 - (void)attachSourceView:(nullable VEPreviewView *)view {
     VE_ASSERT_MAIN();
-    VEPreviewView *previous = _sourceView;
+    VEPreviewView *previous = _source.view;
     if (previous != nil && previous != view) {
         [previous setFrameSource:ve::render::PreviewFrameSource{}];
     }
-    _sourceView = view;
+    _source.view = view;
     if (view != nil) {
-        [view setFrameSource:_sourceUsesController && _sourcePlayback ? _sourcePlayback->frameSource()
-                                                                       : _sourceProvider->makeSource()];
+        [view setFrameSource:_source.usesController && _source.playback ? _source.playback->frameSource()
+                                                                        : _source.provider->makeSource()];
         [self refreshSourcePicture];
     }
 }
@@ -123,14 +123,15 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
         return;
     }
     const CMTime t = [self frameTimeForAsset:assetID atTime:time];
-    if (id != _sourceAsset) {
+    if (id != _source.asset) {
         [self resetSourceMonitor];
-        _sourceAsset = id;
-        _sourceProject = makeSourceProject(*asset, [self activeSequence].frameDuration, _project.sharpenScaledDownSources);
+        _source.asset = id;
+        _source.project =
+            makeSourceProject(*asset, [self activeSequence].frameDuration, _project.sharpenScaledDownSources);
     }
-    _sourceTime = t;
-    if (_sourceUsesController && _sourcePlayback) {
-        _sourcePlayback->seek(t, playback::SeekMode::Exact);
+    _source.time = t;
+    if (_source.usesController && _source.playback) {
+        _source.playback->seek(t, playback::SeekMode::Exact);
         return; // the controller reports the new position
     }
     [self refreshSourcePicture];
@@ -139,98 +140,99 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
 
 - (VEAssetID)sourceMonitorAssetID {
     VE_ASSERT_MAIN();
-    return static_cast<VEAssetID>(_sourceAsset.value());
+    return static_cast<VEAssetID>(_source.asset.value());
 }
 
 - (CMTime)sourceMonitorTime {
     VE_ASSERT_MAIN();
-    return _sourceUsesController && _sourcePlayback ? _sourcePlayback->currentTime() : _sourceTime;
+    return _source.usesController && _source.playback ? _source.playback->currentTime() : _source.time;
 }
 
 - (VEPlaybackState)sourceMonitorPlaybackState {
     VE_ASSERT_MAIN();
-    return _sourceUsesController && _sourcePlayback ? playbackStateToVE(_sourcePlayback->state())
-                                                    : VEPlaybackStateStopped;
+    return _source.usesController && _source.playback ? playbackStateToVE(_source.playback->state())
+                                                      : VEPlaybackStateStopped;
 }
 
 - (VEPlaybackStatus *)sourceMonitorPlaybackStatus {
     VE_ASSERT_MAIN();
-    if (_sourceUsesController && _sourcePlayback) {
-        return makePlaybackStatus(_sourcePlayback->status());
+    if (_source.usesController && _source.playback) {
+        return makePlaybackStatus(_source.playback->status());
     }
     playback::PlaybackStatus shown;
-    shown.time = _sourceTime;
+    shown.time = _source.time;
     return makePlaybackStatus(shown);
 }
 
 /// Makes the source controller play the monitor's asset and shows its picture. False when the
 /// asset cannot play (none, a still, no duration).
 - (BOOL)prepareSourcePlayback {
-    if (!_sourceProject) {
+    if (!_source.project) {
         return NO;
     }
-    if (!_sourcePlayback) {
+    if (!_source.playback) {
         playback::PlaybackConfig config;
         config.scrubLaneBase = kSourcePlaybackLaneBase;
-        _sourcePlayback = std::make_unique<playback::PlaybackController>(_router, _frameCache, _sourcePool, config);
-        _sourcePlayback->setMuted(_playback->isMuted());
-        for (const auto &[asset, routed] : _routing) {
-            _sourcePlayback->setAssetRouting(asset, routed);
+        _source.playback = std::make_unique<playback::PlaybackController>(_services.router, _services.frameCache,
+                                                                          _source.pool, config);
+        _source.playback->setMuted(_program.playback->isMuted());
+        for (const auto &[asset, routed] : _assets.routing) {
+            _source.playback->setAssetRouting(asset, routed);
         }
-        [self observeController:*_sourcePlayback source:YES];
+        [self observeController:*_source.playback source:YES];
         [self updateSourceIdleLookahead];
     }
-    if (_sourcePlaybackAsset != _sourceAsset) {
-        _sourcePlaybackAsset = _sourceAsset;
-        _sourcePlayback->setSequence(std::make_shared<const Project>(*_sourceProject),
-                                     _sourceProject->activeSequenceId);
+    if (_source.playbackAsset != _source.asset) {
+        _source.playbackAsset = _source.asset;
+        _source.playback->setSequence(std::make_shared<const Project>(*_source.project),
+                                      _source.project->activeSequenceId);
     }
-    if (!_sourceUsesController) {
-        _sourceProvider->cancel();
-        _sourceUsesController = true;
-        _sourcePlayback->seek(_sourceTime, playback::SeekMode::Exact);
-        [_sourceView setFrameSource:_sourcePlayback->frameSource()];
-        [_sourceView renderOnce];
+    if (!_source.usesController) {
+        _source.provider->cancel();
+        _source.usesController = true;
+        _source.playback->seek(_source.time, playback::SeekMode::Exact);
+        [_source.view setFrameSource:_source.playback->frameSource()];
+        [_source.view renderOnce];
     }
     return YES;
 }
 
 - (void)sourceMonitorTogglePlay {
     VE_ASSERT_MAIN();
-    const bool running = _sourceUsesController && _sourcePlayback && isRunning(_sourcePlayback->state());
+    const bool running = _source.usesController && _source.playback && isRunning(_source.playback->state());
     if (!running && [self refusesPlaybackForExport]) {
         return;
     }
     if ([self prepareSourcePlayback]) {
-        if (!isRunning(_sourcePlayback->state())) {
+        if (!isRunning(_source.playback->state())) {
             [self pauseProgramIfRunning];
         }
-        _sourcePlayback->togglePlay();
+        _source.playback->togglePlay();
     }
 }
 
 - (void)sourceMonitorPause {
     VE_ASSERT_MAIN();
-    if (_sourceUsesController && _sourcePlayback) {
-        _sourcePlayback->pause();
+    if (_source.usesController && _source.playback) {
+        _source.playback->pause();
     }
 }
 
 - (BOOL)sourceMonitorVisible {
     VE_ASSERT_MAIN();
-    return _sourceMonitorVisible;
+    return _source.visible;
 }
 
 - (void)setSourceMonitorVisible:(BOOL)visible {
     VE_ASSERT_MAIN();
-    _sourceMonitorVisible = visible;
+    _source.visible = visible;
     [self updateSourceIdleLookahead];
 }
 
 - (VEPlaybackStats *)sourceMonitorPlaybackStats {
     VE_ASSERT_MAIN();
-    return _sourcePlayback ? makePlaybackStats(_sourcePlayback->stats(), _sourcePlayback->lastPresented())
-                           : makePlaybackStats(playback::PlaybackStats{}, playback::PresentedFrame{});
+    return _source.playback ? makePlaybackStats(_source.playback->stats(), _source.playback->lastPresented())
+                            : makePlaybackStats(playback::PlaybackStats{}, playback::PresentedFrame{});
 }
 
 - (void)sourceMonitorShuttleForward {
@@ -240,7 +242,7 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
     }
     if ([self prepareSourcePlayback]) {
         [self pauseProgramIfRunning];
-        _sourcePlayback->shuttleForward();
+        _source.playback->shuttleForward();
     }
 }
 
@@ -251,23 +253,24 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
     }
     if ([self prepareSourcePlayback]) {
         [self pauseProgramIfRunning];
-        _sourcePlayback->shuttleReverse();
+        _source.playback->shuttleReverse();
     }
 }
 
 - (void)sourceMonitorStepFrames:(NSInteger)frames {
     VE_ASSERT_MAIN();
-    if (_sourceUsesController && _sourcePlayback) {
-        _sourcePlayback->stepFrames(static_cast<int>(std::clamp<NSInteger>(frames, INT_MIN, INT_MAX)));
+    if (_source.usesController && _source.playback) {
+        _source.playback->stepFrames(static_cast<int>(std::clamp<NSInteger>(frames, INT_MIN, INT_MAX)));
         return;
     }
-    if (!_sourceProject) {
+    if (!_source.project) {
         return;
     }
-    const CMTime fd = _sourceProject->activeSequence()->frameDuration;
-    const CMTime t = std::max(kCMTimeZero, _sourceTime + CMTimeMultiply(fd, static_cast<int32_t>(std::clamp<NSInteger>(
-                                                                                 frames, INT32_MIN, INT32_MAX))));
-    [self sourceMonitorShowAsset:static_cast<VEAssetID>(_sourceAsset.value()) atTime:t];
+    const CMTime fd = _source.project->activeSequence()->frameDuration;
+    const CMTime t = std::max(
+        kCMTimeZero,
+        _source.time + CMTimeMultiply(fd, static_cast<int32_t>(std::clamp<NSInteger>(frames, INT32_MIN, INT32_MAX))));
+    [self sourceMonitorShowAsset:static_cast<VEAssetID>(_source.asset.value()) atTime:t];
 }
 
 @end
@@ -276,19 +279,19 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
 
 /// Clears the source monitor (no asset, provider picture, controller stopped and emptied).
 - (void)resetSourceMonitor {
-    _sourceProvider->cancel();
-    if (_sourceUsesController) {
-        _sourceUsesController = false;
-        [_sourceView setFrameSource:_sourceProvider->makeSource()];
+    _source.provider->cancel();
+    if (_source.usesController) {
+        _source.usesController = false;
+        [_source.view setFrameSource:_source.provider->makeSource()];
     }
-    if (_sourcePlayback && _sourcePlaybackAsset) {
+    if (_source.playback && _source.playbackAsset) {
         // Stops it and drops its private project (and decode targets) until the next play.
-        _sourcePlayback->setSequence(std::make_shared<const Project>(), SequenceId{});
-        _sourcePlaybackAsset = AssetId{};
+        _source.playback->setSequence(std::make_shared<const Project>(), SequenceId{});
+        _source.playbackAsset = AssetId{};
     }
-    _sourceAsset = AssetId{};
-    _sourceProject.reset();
-    _sourceTime = kCMTimeZero;
+    _source.asset = AssetId{};
+    _source.project.reset();
+    _source.time = kCMTimeZero;
     [self refreshSourcePicture];
 }
 
@@ -296,34 +299,34 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
 /// follows a change of the setting (an edit, an undo) and the monitor redraws.
 - (void)syncSourceSharpening {
     const bool sharpen = _project.sharpenScaledDownSources;
-    if (_sourceSharpening == sharpen) {
+    if (_source.sharpening == sharpen) {
         return;
     }
-    _sourceSharpening = sharpen;
-    if (_sourceProject) {
-        _sourceProject->sharpenScaledDownSources = sharpen;
-        if (_sourcePlayback && _sourcePlaybackAsset == _sourceAsset) {
-            _sourcePlayback->modelChanged(std::make_shared<const Project>(*_sourceProject));
+    _source.sharpening = sharpen;
+    if (_source.project) {
+        _source.project->sharpenScaledDownSources = sharpen;
+        if (_source.playback && _source.playbackAsset == _source.asset) {
+            _source.playback->modelChanged(std::make_shared<const Project>(*_source.project));
         }
     }
-    if (_sourceAsset) {
+    if (_source.asset) {
         [self refreshSourcePicture];
     }
 }
 
-/// Shows the provider's picture of the source asset at _sourceTime (black without an asset).
+/// Shows the provider's picture of the source asset at _source.time (black without an asset).
 - (void)refreshSourcePicture {
-    if (_sourceUsesController) {
-        [_sourceView renderOnce];
+    if (_source.usesController) {
+        [_source.view renderOnce];
         return;
     }
     RenderGraph graph;
-    if (_sourceProject) {
-        const Sequence &sequence = *_sourceProject->activeSequence();
-        graph = Scheduler::renderGraphAt(sequence, *_sourceProject, _sourceTime);
+    if (_source.project) {
+        const Sequence &sequence = *_source.project->activeSequence();
+        graph = Scheduler::renderGraphAt(sequence, *_source.project, _source.time);
         graph.width = sequence.width;
         graph.height = sequence.height;
-    } else if (const MediaAsset *asset = _project.findAsset(_sourceAsset); asset != nullptr && asset->isStill()) {
+    } else if (const MediaAsset *asset = _project.findAsset(_source.asset); asset != nullptr && asset->isStill()) {
         VideoLayer layer;
         layer.clipId = kSourceVideoClip;
         layer.assetId = asset->id;
@@ -335,25 +338,25 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
         graph.height = std::max(1, asset->height);
         graph.sharpenMinified = _project.sharpenScaledDownSources;
     }
-    if (_sourceView == nil) {
-        _sourceProvider->cancel();
+    if (_source.view == nil) {
+        _source.provider->cancel();
         return;
     }
     __weak VEEngine *weakSelf = self;
-    _sourceProvider->show(std::move(graph), [weakSelf] {
+    _source.provider->show(std::move(graph), [weakSelf] {
         VEEngine *strongSelf = weakSelf;
-        if (strongSelf != nil && !strongSelf->_sourceUsesController) {
-            [strongSelf->_sourceView renderOnce];
+        if (strongSelf != nil && !strongSelf->_source.usesController) {
+            [strongSelf->_source.view renderOnce];
         }
     });
 }
 
 - (void)notifySourcePlayback:(const playback::PlaybackStatus &)status {
     VEPlaybackStatus *info = makePlaybackStatus(status);
-    if (!_sourceUsesController) {
+    if (!_source.usesController) {
         // The controller is not what the monitor shows: report the scrub position, stopped.
         playback::PlaybackStatus shown;
-        shown.time = _sourceTime;
+        shown.time = _source.time;
         info = makePlaybackStatus(shown);
     }
     [NSNotificationCenter.defaultCenter postNotificationName:VEEngineSourcePlaybackDidChangeNotification
@@ -368,16 +371,16 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
 
 /// One monitor plays at a time (as in Premiere): starting the program pauses the source monitor.
 - (void)pauseSourceMonitorIfRunning {
-    if (_sourceUsesController && _sourcePlayback && isRunning(_sourcePlayback->state())) {
-        _sourcePlayback->pause();
+    if (_source.usesController && _source.playback && isRunning(_source.playback->state())) {
+        _source.playback->pause();
     }
 }
 
 /// The source controller keeps its stopped lookahead only while the monitor is on screen and no
 /// export runs (the export gets the decoders; a hidden monitor needs no frames ahead).
 - (void)updateSourceIdleLookahead {
-    if (_sourcePlayback) {
-        _sourcePlayback->setIdleLookahead(_sourceMonitorVisible && _activeExport == nil);
+    if (_source.playback) {
+        _source.playback->setIdleLookahead(_source.visible && _export.active == nil);
     }
 }
 

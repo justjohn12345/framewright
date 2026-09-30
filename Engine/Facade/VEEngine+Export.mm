@@ -53,17 +53,17 @@ using namespace ve::facade;
 
 - (nullable VEExportHandle *)activeExport {
     VE_ASSERT_MAIN();
-    return _activeExport;
+    return _export.active;
 }
 
 - (BOOL)isExporting {
     VE_ASSERT_MAIN();
-    return _activeExport != nil;
+    return _export.active != nil;
 }
 
 - (void)stopAccessingExportURL {
-    [_exportAccessedURL stopAccessingSecurityScopedResource];
-    _exportAccessedURL = nil;
+    [_export.accessedURL stopAccessingSecurityScopedResource];
+    _export.accessedURL = nil;
 }
 
 - (nullable VEExportHandle *)beginExportWithSettings:(VEExportSettings *)settings
@@ -79,10 +79,10 @@ using namespace ve::facade;
         }
         return nil;
     };
-    if (_activeExport != nil) {
+    if (_export.active != nil) {
         return refuse(VEEngineErrorBusy, @"An export is already running.");
     }
-    if (_coalescingKey != nil) {
+    if (_undo.coalescingKey != nil) {
         return refuse(VEEngineErrorBusy, @"Finish the current edit (a drag or slider) before exporting.");
     }
     if (NSString *invalid = settings.validationMessage) {
@@ -102,10 +102,10 @@ using namespace ve::facade;
     request.encode = makeEncodeSettings(settings, size, sequence.audioSampleRate, request.videoBitDepth);
     request.outputPath = outputURL.path.fileSystemRepresentation ?: "";
     exporting::ExportServices services;
-    services.router = _router;
-    services.cache = _frameCache;
-    services.epoch = _mediaEpoch;
-    services.routing = _routing;
+    services.router = _services.router;
+    services.cache = _services.frameCache;
+    services.epoch = _services.epoch;
+    services.routing = _assets.routing;
     exporting::ExportOptions options;
     options.poolBudgetFraction = kExportPoolBudgetShare;
 
@@ -140,12 +140,12 @@ using namespace ve::facade;
                                 toNS(e.message.empty() ? e.description() : e.message));
         }
         if (strongSelf != nil) {
-            if (strongSelf->_activeExport == weakHandle) {
-                strongSelf->_activeExport = nil;
+            if (strongSelf->_export.active == weakHandle) {
+                strongSelf->_export.active = nil;
                 [strongSelf stopAccessingExportURL];
                 // The monitors' stopped lookahead resumes at their paused frames (the source
                 // monitor's only while it is on screen).
-                strongSelf->_playback->setIdleLookahead(true);
+                strongSelf->_program.playback->setIdleLookahead(true);
                 [strongSelf updateSourceIdleLookahead];
             }
             [NSNotificationCenter.defaultCenter
@@ -171,15 +171,15 @@ using namespace ve::facade;
         return refuse(code, toNS(e.message));
     }
     attachExportJob(handle, std::move(started).value());
-    _activeExport = handle;
-    _exportAccessedURL = accessing ? outputURL : nil;
+    _export.active = handle;
+    _export.accessedURL = accessing ? outputURL : nil;
     // The monitors pause (the export gets the decoders and the GPU); they keep their own pools,
     // and both stop decoding their stopped lookahead (their decoders are released) until the
     // export ends. The paused pictures still come through the scrub path.
-    _playback->pause();
-    _playback->setIdleLookahead(false);
-    if (_sourcePlayback) {
-        _sourcePlayback->pause();
+    _program.playback->pause();
+    _program.playback->setIdleLookahead(false);
+    if (_source.playback) {
+        _source.playback->pause();
     }
     [self updateSourceIdleLookahead];
     return handle;
@@ -192,7 +192,7 @@ using namespace ve::facade;
 /// Playback does not start while an export runs (the export has the decoders and the GPU; the
 /// monitors were paused when it began).
 - (BOOL)refusesPlaybackForExport {
-    return _activeExport != nil;
+    return _export.active != nil;
 }
 
 @end

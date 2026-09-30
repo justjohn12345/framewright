@@ -48,9 +48,9 @@ using namespace ve::facade;
 }
 
 - (VEAssetInfo *)makeInfoForAsset:(const MediaAsset &)asset {
-    auto details = _details.find(asset.id);
-    return makeAssetInfo(asset, details == _details.end() ? nullptr : &details->second, _missing.count(asset.id) > 0,
-                         NSInteger(countAssetUses(_project, asset.id)));
+    auto details = _assets.details.find(asset.id);
+    return makeAssetInfo(asset, details == _assets.details.end() ? nullptr : &details->second,
+                         _assets.missing.count(asset.id) > 0, NSInteger(countAssetUses(_project, asset.id)));
 }
 
 - (nullable VETransitionInfo *)transitionInfo:(VETransitionID)transitionID {

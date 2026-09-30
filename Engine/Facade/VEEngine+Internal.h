@@ -84,64 +84,119 @@ NS_ASSUME_NONNULL_END
 
 } // namespace ve::facade
 
+// ----- The engine's state -----
+//
+// Grouped by the file that owns it (creates, mutates and documents it). Everything here is main
+// thread only unless a field says otherwise: the engine's methods run on the main thread
+// (VE_ASSERT_MAIN), and the probe queue, the decode pools, the thumbnail and waveform services and
+// the playback controllers hand their results back on the main queue. The objects the pointers name
+// (router, frame cache, pools, services, controllers, frame provider) are thread safe themselves.
+
+namespace ve::facade {
+
+/// The media services behind every area. Created by -initWithCacheDirectory: (VEEngine.mm) and
+/// never replaced; New/Open (VEEngine+Project.mm) starts a new media `epoch`.
+struct MediaServices {
+    std::shared_ptr<media::BackendRouter> router;
+    std::shared_ptr<media::FrameCache> frameCache;
+    media::FrameCache::Epoch epoch = 0; // advanced on every New/Open (ids restart per project)
+    std::unique_ptr<thumbs::ThumbnailService> thumbnails;
+    std::unique_ptr<thumbs::WaveformService> waveforms;
+    // Concurrent (created by init): probes files and hands the results to the main queue.
+    dispatch_queue_t _Null_unspecified probeQueue = nil;
+};
+
+/// What the engine knows about the project's media files beyond the model (VEEngine+Media.mm):
+/// filled by imports and the background probes, by Open's bookmark resolution
+/// (VEEngine+Project.mm), and cleared on New/Open.
+struct AssetState {
+    std::map<AssetId, media::RoutedMediaInfo> routing; // handed to every decode path (registerRouting)
+    std::map<AssetId, AssetDetails> details;           // probe details not stored in the project file
+    std::set<AssetId> missing;                         // files not found when the project was opened
+    // Asset id -> security-scoped bookmark, saved with the project.
+    NSMutableDictionary<NSNumber *, NSData *> *_Nonnull bookmarks = [NSMutableDictionary dictionary];
+    // Security-scoped URLs accessed for this project (stopAccessingURLs ends the access).
+    NSMutableArray<NSURL *> *_Nonnull accessedURLs = [NSMutableArray array];
+    double mainThreadImportSeconds = 0; // see -mainThreadImportSeconds
+};
+
+/// The open project as a document (VEEngine+Project.mm): where it lives, its dirty state and what
+/// loading it reported.
+struct DocumentState {
+    NSURL *_Nullable url = nil; // see -projectURL
+    uint64_t generation = 0;    // drops async results that belong to a replaced project
+    uint64_t changeBase = 0;    // changeCount of earlier projects' undo stacks
+    uint64_t extraChanges = 0;  // changes outside the undo stack (relinks on open)
+    bool metadataDirty = false; // relinked paths not saved yet
+    NSArray<NSString *> *_Nonnull loadWarnings = @[];
+    NSData *_Nullable mediaFolderBookmark = nil; // see -mediaFolderBookmark
+};
+
+/// The undo history and the gesture in progress (VEEngine+Undo.mm). New/Open
+/// (VEEngine+Project.mm) replaces the stack.
+struct UndoState {
+    std::unique_ptr<UndoStack> stack;
+    uint64_t idFloor = 0; // highest IdGenerator value the project has reached (see FreshIds)
+    NSString *_Nullable coalescingKey = nil;
+    NSString *_Nullable gestureEditKey = nil; // set while performInCoalescingGroup:edit: runs its block
+    // Imports that finished while a coalescing group was open (flushDeferredImports runs them).
+    NSMutableArray<dispatch_block_t> *_Nonnull deferredImports = [NSMutableArray array];
+};
+
+/// The program monitor (VEEngine+Playback.mm): the active sequence's playback controller on its
+/// own decode pool, and the views showing it.
+struct ProgramMonitorState {
+    std::shared_ptr<media::DecodePool> pool;
+    std::unique_ptr<playback::PlaybackController> playback;
+    uint64_t generation = 0; // DocumentState::generation the controller's sequence belongs to
+    bool published = false;  // the controller has the current project's sequence
+    __weak VEPreviewView *_Nullable view = nil;
+    __weak VEPreviewView *_Nullable outputView = nil; // mirrors the program (a second display)
+};
+
+/// The source monitor (VEEngine+SourceMonitor.mm): a pool of its own (a playback controller
+/// replaces its pool's whole target set), a still provider for scrubbing and a controller over a
+/// private one-clip project that is created when the monitor first plays.
+struct SourceMonitorState {
+    std::shared_ptr<media::DecodePool> pool;
+    std::shared_ptr<ProgramFrameProvider> provider;
+    std::unique_ptr<playback::PlaybackController> playback;
+    __weak VEPreviewView *_Nullable view = nil;
+    AssetId asset;
+    CMTime time = kCMTimeZero;
+    std::optional<Project> project; // for `asset`
+    bool sharpening = true;         // what it last drew with (Project::sharpenScaledDownSources' default)
+    AssetId playbackAsset;          // asset of the controller's sequence
+    bool usesController = false;    // the view shows the controller's picture
+    BOOL visible = YES;             // see -setSourceMonitorVisible:
+};
+
+/// The running export (VEEngine+Export.mm).
+struct ExportState {
+    VEExportHandle *_Nullable active = nil;
+    NSURL *_Nullable accessedURL = nil; // security-scoped output URL accessed for the running export
+};
+
+} // namespace ve::facade
+
 @interface VEEngine () {
-    std::shared_ptr<ve::media::BackendRouter> _router;
-    std::shared_ptr<ve::media::FrameCache> _frameCache;
-    ve::media::FrameCache::Epoch _mediaEpoch; // advanced on every New/Open (ids restart per project)
-    std::shared_ptr<ve::media::DecodePool> _decodePool;
-    std::unique_ptr<ve::thumbs::ThumbnailService> _thumbnails;
-    std::unique_ptr<ve::thumbs::WaveformService> _waveforms;
-    std::unique_ptr<ve::playback::PlaybackController> _playback;
-    uint64_t _playbackGeneration; // _projectGeneration the controller's sequence belongs to
-    bool _playbackPublished;
-
-    // Source monitor: a pool of its own (a playback controller replaces its pool's whole target
-    // set), a still provider for scrubbing and a controller over a private one-clip project that
-    // is created when the monitor first plays.
-    std::shared_ptr<ve::media::DecodePool> _sourcePool;
-    std::shared_ptr<ve::facade::ProgramFrameProvider> _sourceProvider;
-    std::unique_ptr<ve::playback::PlaybackController> _sourcePlayback;
-    __weak VEPreviewView *_sourceView;
-    ve::AssetId _sourceAsset;
-    CMTime _sourceTime;
-    std::optional<ve::Project> _sourceProject;   // for _sourceAsset
-    bool _sourceSharpening;                  // the sharpening the source monitor last drew with
-    ve::AssetId _sourcePlaybackAsset;            // asset of the source controller's sequence
-    bool _sourceUsesController;              // the source view shows the controller's picture
-    BOOL _sourceMonitorVisible;              // see -setSourceMonitorVisible:
-    std::map<ve::AssetId, ve::media::RoutedMediaInfo> _routing;
-
+    // The model. Only commands (VEEngine+Undo.mm) and New/Open (VEEngine+Project.mm, with the relinks
+    // of an opened project's assets) change it.
     ve::Project _project;
-    std::unique_ptr<ve::UndoStack> _undo;
-    uint64_t _changeBase;      // changeCount of earlier projects' undo stacks
-    uint64_t _extraChanges;    // changes outside the undo stack (relinks on open)
-    bool _metadataDirty;       // relinked paths not saved yet
-    uint64_t _projectGeneration; // drops async results that belong to a replaced project
-    uint64_t _idFloor; // highest IdGenerator value the project has reached (see FreshIds)
-    std::vector<std::pair<ve::AssetId, size_t>> _lastUseCounts;
-    NSArray<NSString *> *_loadWarnings;
-    VERippleScope _rippleScope;
-    NSMutableArray<dispatch_block_t> *_deferredImports; // imports waiting for a coalescing group
-    NSString *_coalescingKey;
-    NSString *_gestureEditKey; // set while performInCoalescingGroup:edit: runs its block
+    ve::facade::MediaServices _services;
+    ve::facade::AssetState _assets;
+    ve::facade::DocumentState _document;
+    ve::facade::UndoState _undo;
+    ve::facade::ProgramMonitorState _program;
+    ve::facade::SourceMonitorState _source;
+    ve::facade::ExportState _export;
+    VERippleScope _rippleScope; // see -rippleScope (VEEngine+Edits.mm)
 
-    std::map<ve::AssetId, ve::facade::AssetDetails> _details;
-    std::set<ve::AssetId> _missing;
-    NSMutableDictionary<NSNumber *, NSData *> *_bookmarks;
-    NSData *_mediaFolderBookmark; // see -mediaFolderBookmark
-    NSMutableArray<NSURL *> *_accessedURLs;
-    NSURL *_projectURL;
-
+    // VEEngine.mm
     NSHashTable<id<VEEngineObserver>> *_observers;
-    __weak VEPreviewView *_programView;
-    __weak VEPreviewView *_outputView; // mirrors the program (a second display)
-    dispatch_queue_t _probeQueue;
+    std::vector<std::pair<ve::AssetId, size_t>> _lastUseCounts; // posted by updateUseCounts
     dispatch_source_t _memoryPressureSource;
-    double _mainThreadImportSeconds;
     os_log_t _log;
-
-    VEExportHandle *_activeExport;
-    NSURL *_exportAccessedURL; // security-scoped output URL accessed for the running export
 }
 @end
 

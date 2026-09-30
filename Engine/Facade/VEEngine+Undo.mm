@@ -23,26 +23,27 @@ using namespace ve::facade;
 - (void)beginCoalescingWithKey:(NSString *)key mode:(VECoalescingMode)mode {
     VE_ASSERT_MAIN();
     [self closeCoalescingIfOpen];
-    _coalescingKey = [key copy];
-    _undo->beginCoalescing(toStd(_coalescingKey), mode == VECoalescingModeAccumulate ? CoalesceMode::Accumulate
-                                                                                   : CoalesceMode::ReplacePrevious);
+    _undo.coalescingKey = [key copy];
+    _undo.stack->beginCoalescing(toStd(_undo.coalescingKey), mode == VECoalescingModeAccumulate
+                                                                 ? CoalesceMode::Accumulate
+                                                                 : CoalesceMode::ReplacePrevious);
 }
 
 - (nullable NSString *)coalescingKey {
     VE_ASSERT_MAIN();
-    return _coalescingKey;
+    return _undo.coalescingKey;
 }
 
 - (VEEditResult *)performInCoalescingGroup:(NSString *)key edit:(NS_NOESCAPE VEEditResult * (^)(void))edit {
     VE_ASSERT_MAIN();
-    if (_coalescingKey == nil || ![_coalescingKey isEqualToString:key]) {
+    if (_undo.coalescingKey == nil || ![_undo.coalescingKey isEqualToString:key]) {
         return [VEEditResult failureWithCode:VEEditErrorBusy
                                      message:@"The gesture's edit group has ended (another edit committed it)."];
     }
-    NSString *outer = _gestureEditKey;
-    _gestureEditKey = [key copy];
+    NSString *outer = _undo.gestureEditKey;
+    _undo.gestureEditKey = [key copy];
     VEEditResult *result = edit();
-    _gestureEditKey = outer;
+    _undo.gestureEditKey = outer;
     return result ?: [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"The edit returned no result."];
 }
 
@@ -53,11 +54,11 @@ using namespace ve::facade;
 
 - (void)cancelCoalescing {
     VE_ASSERT_MAIN();
-    if (_coalescingKey == nil) {
+    if (_undo.coalescingKey == nil) {
         return;
     }
-    _coalescingKey = nil;
-    const bool reverted = _undo->cancelCoalescing(_project);
+    _undo.coalescingKey = nil;
+    const bool reverted = _undo.stack->cancelCoalescing(_project);
     if (reverted) {
         [self notifyAssetsChanged];
         [self notifyModelChanged];
@@ -67,14 +68,14 @@ using namespace ve::facade;
 
 - (BOOL)isCoalescing {
     VE_ASSERT_MAIN();
-    return _coalescingKey != nil;
+    return _undo.coalescingKey != nil;
 }
 
 - (BOOL)undo {
     VE_ASSERT_MAIN();
-    _coalescingKey = nil;
+    _undo.coalescingKey = nil;
     [self flushDeferredImports];
-    if (!_undo->undo(_project)) {
+    if (!_undo.stack->undo(_project)) {
         return NO;
     }
     [self notifyAssetsChanged];
@@ -84,12 +85,12 @@ using namespace ve::facade;
 
 - (BOOL)redo {
     VE_ASSERT_MAIN();
-    _coalescingKey = nil;
+    _undo.coalescingKey = nil;
     [self flushDeferredImports];
-    if (!_undo->redo(_project)) {
+    if (!_undo.stack->redo(_project)) {
         return NO;
     }
-    _idFloor = std::max(_idFloor, _project.ids.nextValue());
+    _undo.idFloor = std::max(_undo.idFloor, _project.ids.nextValue());
     [self notifyAssetsChanged];
     [self notifyModelChanged];
     return YES;
@@ -97,22 +98,22 @@ using namespace ve::facade;
 
 - (BOOL)canUndo {
     VE_ASSERT_MAIN();
-    return _undo->canUndo();
+    return _undo.stack->canUndo();
 }
 
 - (BOOL)canRedo {
     VE_ASSERT_MAIN();
-    return _undo->canRedo();
+    return _undo.stack->canRedo();
 }
 
 - (NSString *)undoActionName {
     VE_ASSERT_MAIN();
-    return toNS(_undo->undoName());
+    return toNS(_undo.stack->undoName());
 }
 
 - (NSString *)redoActionName {
     VE_ASSERT_MAIN();
-    return toNS(_undo->redoName());
+    return toNS(_undo.stack->redoName());
 }
 
 @end
@@ -124,16 +125,16 @@ using namespace ve::facade;
 /// key) join its coalescing group; any other edit first ends the group, committing the gesture
 /// as one undo step, and is then pushed on its own.
 - (EditResult)pushCommand:(std::unique_ptr<Command>)command {
-    if (_coalescingKey != nil && ![_gestureEditKey isEqualToString:_coalescingKey]) {
+    if (_undo.coalescingKey != nil && ![_undo.gestureEditKey isEqualToString:_undo.coalescingKey]) {
         [self closeCoalescingIfOpen];
     }
-    _idFloor = std::max(_idFloor, _project.ids.nextValue());
-    auto wrapped = std::make_unique<FreshIds>(std::move(command), _idFloor);
-    if (_coalescingKey != nil) {
-        wrapped->setCoalescingKey(toStd(_coalescingKey));
+    _undo.idFloor = std::max(_undo.idFloor, _project.ids.nextValue());
+    auto wrapped = std::make_unique<FreshIds>(std::move(command), _undo.idFloor);
+    if (_undo.coalescingKey != nil) {
+        wrapped->setCoalescingKey(toStd(_undo.coalescingKey));
     }
-    EditResult result = _undo->push(_project, std::move(wrapped));
-    _idFloor = std::max(_idFloor, _project.ids.nextValue());
+    EditResult result = _undo.stack->push(_project, std::move(wrapped));
+    _undo.idFloor = std::max(_undo.idFloor, _project.ids.nextValue());
     return result;
 }
 
@@ -191,9 +192,9 @@ using namespace ve::facade;
 }
 
 - (void)closeCoalescingIfOpen {
-    if (_coalescingKey != nil) {
-        _undo->endCoalescing();
-        _coalescingKey = nil;
+    if (_undo.coalescingKey != nil) {
+        _undo.stack->endCoalescing();
+        _undo.coalescingKey = nil;
     }
     [self flushDeferredImports];
 }
@@ -201,11 +202,11 @@ using namespace ve::facade;
 /// Runs the imports that finished while a coalescing group was open (on the next main-queue
 /// turn, so the caller that ended the group finishes first).
 - (void)flushDeferredImports {
-    if (_deferredImports.count == 0) {
+    if (_undo.deferredImports.count == 0) {
         return;
     }
-    NSArray<dispatch_block_t> *pending = [_deferredImports copy];
-    [_deferredImports removeAllObjects];
+    NSArray<dispatch_block_t> *pending = [_undo.deferredImports copy];
+    [_undo.deferredImports removeAllObjects];
     for (dispatch_block_t block in pending) {
         dispatch_async(dispatch_get_main_queue(), block);
     }
