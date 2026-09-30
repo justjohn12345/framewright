@@ -453,23 +453,32 @@ struct Compositor::Impl {
 
     // The textures to sample for `t` drawn at `outputScale` target pixels per source pixel:
     // planes minified below kMinifyThreshold get a Lanczos pre-scale job (straight-alpha RGBA is
-    // premultiplied first), and with `sharpen` the luma or RGBA plane is sharpened after it.
-    Result<SourceBinding> bindSource(const TextureSet &t, const VideoLayer &layer, double outputScale, bool sharpen) {
+    // premultiplied first). With `sharpenSetting`, a source at fewer than kMinifyThreshold pixels per
+    // texel at `sharpenScale` (the scale sharpening is decided at: the output's for an export, the
+    // sequence's for a monitor, never a monitor's viewport) has its luma or RGBA plane pre-scaled to the
+    // smaller of its drawn size and its size at that scale, then sharpened.
+    Result<SourceBinding> bindSource(const TextureSet &t, const VideoLayer &layer, double outputScale,
+                                     double sharpenScale, bool sharpenSetting) {
         SourceBinding binding;
         binding.planes[0] = t.plane(0);
         binding.planes[1] = t.plane(1);
         const bool rgba = t.sourceClass() == SourceClass::RGBA;
         binding.straightAlpha = rgba && !t.alphaIsPremultiplied(layer.isStill);
-        if (lanczos == nil || !(outputScale < kMinifyThreshold) || !(outputScale > 0)) {
+        const bool sharpen =
+            sharpenSetting && unsharp != nil && sharpenScale > 0 && sharpenScale < kMinifyThreshold;
+        if (lanczos == nil || !(outputScale > 0) || (!(outputScale < kMinifyThreshold) && !sharpen)) {
             return binding;
         }
+        // A monitor drawing larger than the sequence pre-scales to the sequence's size (what an export at
+        // that size sharpens) and magnifies it; otherwise to the drawn size.
+        const double scale = sharpen ? std::min(outputScale, sharpenScale) : outputScale;
         for (std::size_t p = 0; p < t.planeCount(); ++p) {
             id<MTLTexture> plane = t.plane(p);
             const double planeW = double(plane.width);
             const double planeH = double(plane.height);
             // Output pixels per texel of this plane along each axis (chroma planes are smaller).
-            const double sx = outputScale * double(t.width()) / planeW;
-            const double sy = outputScale * double(t.height()) / planeH;
+            const double sx = scale * double(t.width()) / planeW;
+            const double sy = scale * double(t.height()) / planeH;
             if (sx >= kMinifyThreshold && sy >= kMinifyThreshold) {
                 continue;
             }
@@ -632,7 +641,7 @@ struct Compositor::Impl {
     // Builds `items` and `jobs` for the graph; fills `skipped` and `resolved`. `targetScale`:
     // target pixels per sequence pixel.
     Status buildItems(const RenderGraph &graph, TextureLookup lookup, MTLPixelFormat format, double targetScale,
-                      std::size_t &drawnLayers) {
+                      double sharpenTargetScale, std::size_t &drawnLayers) {
         const std::size_t n = graph.layers.size();
         ++buildCounter;
         items.clear();
@@ -682,7 +691,8 @@ struct Compositor::Impl {
                 if (!pl.visible || weight <= 0.0) {
                     continue;
                 }
-                auto binding = bindSource(t, layer, pl.scale * targetScale, graph.sharpenMinified);
+                auto binding =
+                    bindSource(t, layer, pl.scale * targetScale, pl.scale * sharpenTargetScale, graph.sharpenMinified);
                 if (!binding.ok()) {
                     return std::move(binding).error();
                 }
@@ -716,11 +726,13 @@ struct Compositor::Impl {
                 if (!pa.visible && !pb.visible) {
                     continue;
                 }
-                auto bindingA = bindSource(ta, outLayer, pa.visible ? pa.scale * targetScale : 1.0, graph.sharpenMinified);
+                auto bindingA = bindSource(ta, outLayer, pa.visible ? pa.scale * targetScale : 1.0,
+                                           pa.visible ? pa.scale * sharpenTargetScale : 1.0, graph.sharpenMinified);
                 if (!bindingA.ok()) {
                     return std::move(bindingA).error();
                 }
-                auto bindingB = bindSource(tb, inLayer, pb.visible ? pb.scale * targetScale : 1.0, graph.sharpenMinified);
+                auto bindingB = bindSource(tb, inLayer, pb.visible ? pb.scale * targetScale : 1.0,
+                                           pb.visible ? pb.scale * sharpenTargetScale : 1.0, graph.sharpenMinified);
                 if (!bindingB.ok()) {
                     return std::move(bindingB).error();
                 }
@@ -909,7 +921,13 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
                                    : std::min(double(viewport.width) / graph.width, double(viewport.height) / graph.height);
     std::size_t drawnLayers = 0;
     im.exactPrescaleSizes = targetBuffer != nullptr;
-    if (Status built = im.buildItems(graph, lookup, colorTexture.pixelFormat, targetScale, drawnLayers); !built.ok()) {
+    // Sharpening is decided at the output's scale for a pixel-buffer target (an export of the sequence) and
+    // at the sequence's own scale for a texture target (a monitor: its viewport scale never decides), so a
+    // monitor sharpens what an export at the sequence's size sharpens.
+    const double sharpenTargetScale = targetBuffer != nullptr ? targetScale : 1.0;
+    if (Status built =
+            im.buildItems(graph, lookup, colorTexture.pixelFormat, targetScale, sharpenTargetScale, drawnLayers);
+        !built.ok()) {
         im.dropScratchReferences();
         return std::move(built).error();
     }

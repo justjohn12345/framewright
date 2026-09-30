@@ -1246,12 +1246,12 @@ static Throughput runPipelined(Compositor &compositor, const RenderGraph &graph,
     XCTAssertEqual(statsAfter.freeSlots, Compositor::kFramesInFlight, @"every frame's slot came back");
 }
 
-// A 3840x2160 4:2:0 source shown in a 1920x1080 preview (the luma plane is Lanczos pre-scaled and
-// sharpened, the chroma plane is drawn at 1:1): frame time and GPU load, pipelined and one at a time,
-// within the same budget as before sharpening; the unsharpened run is logged beside it.
+// A 3840x2160 4:2:0 source in a 1080p sequence shown in a 1920x1080 preview (the luma plane is Lanczos
+// pre-scaled and sharpened, the chroma plane is drawn at 1:1): frame time and GPU load, pipelined and one
+// at a time, within the same budget as before sharpening; the unsharpened run is logged beside it.
 - (void)testPreviewOf4KSourceTiming {
     media::PixelBuffer source = makeBurnIn420v(7, 3840, 2160);
-    RenderGraph g = makeGraph(3840, 2160);
+    RenderGraph g = makeGraph(1920, 1080);
     g.layers.push_back(makeLayer(1));
     {
         RenderGraph plain = g;
