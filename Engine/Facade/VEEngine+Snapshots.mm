@@ -33,7 +33,7 @@ using namespace ve::facade;
     const Sequence &sequence = [self activeSequence];
     for (const auto *tracks : {&sequence.videoTracks, &sequence.audioTracks}) {
         for (size_t i = 0; i < tracks->size(); ++i) {
-            if ((*tracks)[i].id.value() == static_cast<TrackId::ValueType>(trackID)) {
+            if ((*tracks)[i].id == toTrackId(trackID)) {
                 return makeTrackInfo((*tracks)[i], NSInteger(i));
             }
         }

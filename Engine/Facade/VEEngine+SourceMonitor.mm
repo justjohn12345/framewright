@@ -21,11 +21,15 @@ using namespace ve::facade;
 
 namespace {
 
-/// The ids of the source monitor's private one-clip project (never colliding with model ids);
-/// kSourceIds.videoClip is its picture's clip in the still graphs too.
-constexpr uint64_t kSourceProjectFirstId = uint64_t(1) << 56;
-const SourceProjectIds kSourceIds{kSourceProjectFirstId, ClipId(kSourceProjectFirstId + 10),
-                                  ClipId(kSourceProjectFirstId + 11)};
+/// The ids of the source monitor's private one-clip project: they start at 2^56, never colliding
+/// with model ids; kSourceIds.videoClip is its picture's clip in the still graphs too.
+const SourceProjectIds kSourceIds = [] {
+    SourceProjectIds ids;
+    ids.first = uint64_t(1) << 56;
+    ids.videoClip = ClipId(ids.first + 10);
+    ids.audioClip = ClipId(ids.first + 11);
+    return ids;
+}();
 
 } // namespace
 

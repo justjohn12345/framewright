@@ -24,7 +24,7 @@ std::vector<ClipId> toClipIds(NSArray<NSNumber *> *numbers) {
     for (NSNumber *n : numbers) {
         const int64_t value = n.longLongValue;
         if (value > 0) {
-            ids.emplace_back(static_cast<ClipId::ValueType>(value));
+            ids.push_back(toClipId(value));
         }
     }
     return ids;
