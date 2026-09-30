@@ -33,14 +33,95 @@ README history table). Still open:
   in the automatic Ken Burns mode (only a split passes the chosen mode on, L6).
 
 ## Facade class extraction review (2026-09-30; commits be13a90..6435e24)
-- An export's security-scoped output URL stays accessed when its exporter goes away first (predates the extraction:
-  the engine's dealloc behaved the same). `-[VEExporter dealloc]` (and `-[VEEngine dealloc]` through `cancel`)
-  cancels the running job, but the job's completion then finds no exporter (`VEExporter.mm`, the `onCompletion`
-  lambda in `beginExportOfProject:...`), so `stopAccessingOutputURL` never runs and the
-  `startAccessingSecurityScopedResource` balance leaks for the process's life. It cannot simply stop in `dealloc`:
-  the cancelled job still deletes its partial file on its own queue and needs the access until it ends. Fix: let the
-  completion lambda own the accessed URL (capture it and stop there whether or not the exporter is alive), and test
-  it with `testReleasingTheExporterCancelsItsExport` extended to count the accesses.
+- Fixed in the fix round below: the export's security-scoped output URL access leaked when its exporter
+  went away first (2407b2a).
+
+## Fix round 2026-09-30: status
+Brief: the lead's fix round from 84d9e20 (items 1-18). Scope was cut to group A mid-round (quota); the rest
+is not started. Each done item has regression tests that fail on 84d9e20 (see the commit messages).
+
+Done (group A):
+- 12, wrong waveform after New/Open: beb0969. The file is part of WaveformService's and ThumbnailService's
+  identity; VEMediaLibrary cancels its waveform requests on New/Open.
+- 1, frame-rate change opened a frame gap at cuts: 5479b1b. `EdgeConform` (EditOps.cpp) conforms each cut
+  once for both clips; whole clips move with their media; linked clips move together.
+- 5, odd sizes and 3832x2154: 246ae5c. Odd sides round down on adoption and placeSource draws a covering
+  picture 1:1; 1080p/720p of a near-16:9 sequence are exact; fitRect fills sub-pixel bars.
+- 6, the monitor sharpened what the export would not: 5d8fc6e. Decided at the sequence's scale (texture
+  targets) or the output's (pixel-buffer targets).
+- 2, sharpness popped at 0.75: 573cc63. `Compositor::sharpenAmountAt` ramps the amount (smoothstep, full at
+  0.6, none at 0.75).
+- 7, a 1000 fps time base adopted 50 fps: 1f11f18. Import takes the nominal rate for an interval over 240
+  fps; standardFrameDurationFor refuses rates above 240.
+- 18, the exporter's output URL access leak: 2407b2a. The job's completion owns and ends the access.
+
+Found while doing them (open):
+- `ProgramFrameProviderTests testCancelledScrubRequestIsMadeAgain` fails when run alone (also at 84d9e20:
+  checked in a worktree): "the other client still gets its frame" (-1). It passes in the full suite, so its
+  outcome depends on timing (the provider's re-request can replace the other client's request).
+- The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
+  resampling filter (Lanczos pre-scale below 0.75, bilinear above), not sharpening. Pre-scaling every
+  minified picture (threshold 1.0) would remove it at some GPU cost in the monitors.
+- Item 1 refuses a frame-rate change where a clip would have to move with its media against a linked clip
+  that was conformed first (linked clips already out of sync, the sound starting earlier): the message says
+  to unlink or trim. Only out-of-sync linked pairs reach it.
+
+Not started (groups B and C), with what a fresh implementer needs:
+- 9, stuck paused seek under load: `VEEnginePlaybackTests testADissolveBetweenTwoVFRSourcesMixesTheirPicturesAtTheFrameCentre`
+  (EngineTests/Facade/VEEnginePlaybackTests.mm ~1003-1016) saw presentedFrameIndex stay at 56 after a seek
+  to 63 for 20 s in one full-suite run; passes alone. Suspect a residual race in the paused-seek pinning
+  (integration notes, "Paused seeks on VFR sources": `FrameCache::putPinned`, `DecodePool::requestFrame`,
+  `Core::displayPins`, `beginDisplayRequests`). Reproduce under CPU load or with a looped stress variant;
+  root-cause, do not raise the timeout; add diagnostics if it will not reproduce.
+- 11, `laneCount` overflow: Engine/Model/Track.cpp:124 returns highest + 1 as int; the parser reads lanes
+  with `node.field("lane").asInt32()` (Engine/Serialize/ProjectJSON.cpp:462). Bound lanes at load (a sane
+  maximum) with a load warning or refusal as the parser treats other invalid values; test with crafted JSON.
+- Nit (a): the adoption composite (Engine/Facade/VEEngine+Edits.mm:142, `withAdoption`) drops
+  SetSequenceFormat's report; keep a pointer to the child and add its sentences to the note when it
+  conformed clips (the note is built before the push: it needs the result after apply). Nit (b):
+  `sequenceFormatProblem` accepts up to 192 kHz (Engine/Model/Sequence.h:74 kMaxSequenceSampleRate) but AAC
+  export tops out at 96 kHz: validate consistently or refuse clearly at export. Nit (c):
+  `CompositeCommand::canRevert` (Engine/Facade/VEFacadeCommands.mm:123-126) checks only the last child:
+  check all.
+- 3, per-frame texture allocation under animated scale: the pre-scale takes exact sizes per frame for
+  pixel-buffer targets (`quantizeScratchSize(..., !exactPrescaleSizes)`, `acquireScratch(format, w, h)` at
+  Engine/Render/Compositor.mm ~505/513), so a Ken Burns export misses the pool every frame. Hand out a
+  texture at least as large and render into a sub-region (MPS destination region, sampling uv scaled), or
+  similar; test no pool growth after warm-up with a changing scale into a pixel-buffer target.
+- 4, the parity test compares the export path with itself: EngineTests/Export/ExportParityTests.mm ~232
+  renders the "monitor" into a PixelBufferTarget. Render it through a texture target as ProgramView does
+  and read it back (or give monitors exact sizes with item 3's pooling); tighten the loose bound (max block
+  14.0 against a measured 2.1). Note: since 5d8fc6e sharpening differs by target kind by design only in
+  its deciding scale (equal at the sequence's size).
+- 8, garbled transition notes: "Shortened to shortened to ..." (Engine/Edit/TransitionFitting.cpp:230-231,
+  `planFade`) and the refused linked fade-in range fit that first notes "was shortened to 0 frames" (the
+  head-fade path adds the note at ~148 before the `length < 1` refusal at ~150). Fix both and update the
+  pinning cases in EngineTests/Edit/TransitionFittingTests.cpp (allowed: they pin the wrong text).
+- 13, ownership breaches: Engine/Facade/VEEngine+Project.mm:171 calls `_undo.stack->markClean()` and :273
+  `_lastUseCounts.clear()`: route through methods of the owners (Undo, VEEngine.mm). Drop unused includes
+  from Engine/Facade/VEEngine+Internal.h (`PlaybackController.h`, `<map>`, `<optional>`, `<set>` if unused);
+  optionally stop exposing the class pointers to categories that never use them.
+- 14, enforce "no engine dependency": define a marker macro in VEEngine.h and VEEngine+Internal.h and add
+  `#ifdef ... #error` after the includes of VEExporter.mm, VEMediaLibrary.mm, VESourceMonitor.mm and
+  VEProgramMonitor.mm; prove it fires by including the engine header temporarily; correct the integration
+  notes' claim (a class header that includes the engine header itself compiles in its test).
+- 15, untested rules and weak tests: the mutation list in the brief (VESourceMonitor setMuted:, pauseController,
+  the lookahead update at controller creation, `_asset &&` in resetIfAssetLeft:, the size < 2 export refusal,
+  the routing forward to the source controller, the `_missing` skip in the details probe, the numeric-scrub
+  guard in VEProgramMonitor ~230; TransitionFitting.cpp ~115/146/150/162/175/180/197/223; EditPlans.cpp
+  ~100-101 `- fd`; SourceProject.cpp ~38 `max(1, width)` and ~57 `videoLength > 0`). Replace the fixed
+  sleeps at VEMediaLibraryTests.mm:293, VESourceMonitorTests.mm:260 and 327-330, VEProgramMonitorTests.mm:161
+  and 295 with completion signals where possible. Report a before/after mutation table.
+- 16, `fadeLimit`'s dead `excluded` parameter: Engine/Edit/TransitionFitting.cpp:42-48 (and
+  TransitionFittingTests.cpp ~113-115 asserts 60 with and without it): remove it and the copy, or show a
+  case where it matters.
+- 17, small items: `__attribute__((objc_subclassing_restricted))` on the four extracted classes;
+  `describeFrames` (TransitionFitting.cpp:8-15) needs a larger buffer or an snprintf fallback when to_chars
+  fails or the value is not finite; the stale comment in EngineTests/Playback/PausedSeekRig.h:5 (it is
+  VEProgramMonitor that observes the controller now); document or guard the nil receiver of
+  `-[VEMediaLibrary routing]` and `missingAssets` (C++ references through ObjC messaging).
+- Finishing work not done this round (the lead runs them): ThreadSanitizer over the facade, playback and the
+  new tests, and the StressTests scheme (items 1, 2, 5 and 6 touch rendering, export and the conform).
 
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked

@@ -1728,3 +1728,43 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
     frames (0.00 s): ..." and then "The linked transition was not changed: ...": `fitTransitionRange`'s head-fade
     path adds the shortening note before its `length < 1` refusal (asserted by "fitTransitionRange fits a fade in
     to its clip").
+
+## Fix round 2026-09-30 (group A of the lead's brief; status in `open-findings.md`)
+- Media identity (supersedes nothing, adds to "Media identity"): WaveformService keys running jobs and the
+  memory cache by (asset, track, path) and `cached()` takes the path; ThumbnailService's memory and coalescing
+  key includes the path. `-[VEMediaLibrary cachedWaveformOfAsset:]` takes the asset (its current path);
+  `-[VEEngine cachedWaveformForAsset:]` answers only for an asset of the project with sound. The library
+  tracks its waveform request ids per asset and cancels them in `forgetThumbnailsAndWaveformsOfAssets:` and
+  (any left, of removed assets) in `forgetProjectAssets`. Test media: `ve::test::writeToneAudioFile` writes an
+  AAC tone of any length at test time.
+- Frame-rate conform (supersedes "each clip edge to the nearest new frame ... inward where the media ends" in
+  "Export sharpness"): `EdgeConform` in EditOps.cpp groups the edges that must stay together (a clip's end and
+  the start touching it; the same edges of linked clips that were aligned) and gives each group one grid
+  time: the nearest where every clip allows it, else the other side; at a cut between two whole clips the cut
+  goes to the frame before and the clips starting there move with their media (in point kept), linked clips
+  with them. `SequenceConformReport::clipsMoved`/`largestMove` and a sentence report the moves. A clip that
+  would have to move against a linked clip conformed earlier is refused (OutOfSourceRange, "unlink them or
+  trim it first"). Touching clips stay touching, so a cross dissolve keeps its partner.
+- Sizes (supersedes "odd sides rounded up to even"): `formatAdoptedFrom` rounds odd sides down; `placeSource`
+  draws a picture with no clip transform that covers the frame with under 2 px to spare per axis at exactly
+  1:1, top-left anchored. `fitRect` fills an axis whose bars would be under a pixel each. 1080p/720p of a
+  sequence within 0.5 % of 16:9 are exactly 1920x1080 / 1280x720 (`widthForRows` in VEExport.mm).
+- Sharpening (supersedes the decision part of "Export sharpness" item 1): decided at the picture's scale in
+  the sequence for texture targets (monitors, solo preview, output display) and in the target for pixel-buffer
+  targets (exports), never at a monitor's viewport scale; the source monitor (its sequence is the source's
+  size) therefore never sharpens. The amount is `Compositor::sharpenAmountAt(scale)`: 0.6 at 0.6 and below,
+  none at 0.75, smoothstep between.
+- Frame rates above 240 fps (`kMaxFramesPerSecond`, Sequence.h) are a time base: `makeMediaAsset` takes the
+  track's nominal rate instead (as n/120000), `standardFrameDurationFor` returns nullopt.
+- VEExporter: the job's completion ends the output URL's security-scoped access (after a cancelled job
+  deleted its partial file), also when the exporter is gone; the exporter no longer holds the URL.
+- By hand in the app: (1) import a 3832x2154 screen recording into a new project and place it: the label
+  reads 3832×2154; export at 1080p: the file is 1920x1080 with no black column or row. Place a 1273x815
+  window recording in a new project: 1272×814, and the picture at 100 % is sharp (no half-pixel blur).
+  (2) A Ken Burns zoom from about 0.5 to 1.0 of a 4K source in a 1080p sequence: the text sharpens and
+  softens gradually through 0.6-0.75, no pop; the program monitor at half size shows a 1080p source in a
+  1080p sequence unsharpened (toggle "Sharpen scaled-down sources": no change). (3) New/Open waveforms:
+  import a long sound file, New at once, import a short one: its waveform is its own (short), also after
+  Open of a saved project. (4) Sequence Settings on whole clips back to back (for example 30 -> 25 fps): the
+  confirmation says clips move earlier with their media; after Apply no black frame or audio gap at the
+  cuts, picture and sound still in sync.
