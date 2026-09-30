@@ -1653,10 +1653,10 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
 - `VEEngine.h` declares the class (versions, lifetime, observers) and one category per area; each category is
   implemented in `Engine/Facade/VEEngine+<Area>.mm`: Project (with SequenceSettings), Snapshots, Media, Edits
   (with `VEClipParamsBatch`), EffectSpans, Transitions, Undo, Playback (program monitor), SourceMonitor, Export;
-  `VEEngine.mm` keeps init/dealloc, the notification constants, `VE_ASSERT_MAIN`'s failure and the notify
-  helpers. Put a new public method in the category of its area. A category method that takes a completion block
-  must be marked `NS_SWIFT_UI_ACTOR` itself, or Swift imports the block as `@Sendable` (the class attribute does
-  not reach it; see the comment above `@interface VEEngine`).
+  `VEEngine.mm` keeps init/dealloc, the notification constants and the notify helpers (`VE_ASSERT_MAIN`'s failure
+  is `VEFacadeSupport.mm`'s, 2026-09-30). Put a new public method in the category of its area. A category method
+  that takes a completion block must be marked `NS_SWIFT_UI_ACTOR` itself, or Swift imports the block as
+  `@Sendable` (the class attribute does not reach it; see the comment above `@interface VEEngine`).
 - `VEEngine+Internal.h` (private, excluded from the framework's headers by the `*+Internal.h` rule) holds the
   engine's state and the cross-file private API: `_project` (the model), `MediaServices _services` (init),
   `DocumentState _document` (Project), `UndoState _undo` (Undo), `_rippleScope`, VEEngine.mm's observers, and one
@@ -1675,13 +1675,18 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   - `VEExporter` (running export, output URL access): `beginExportOfProject:settings:outputURL:services:options:
     progress:finish:refusal:`; `VEExporterProgressBlock` `void (^)(VEExportProgress *)` and
     `VEExporterFinishBlock` `void (^)(const media::Result<exporting::ExportSummary> &, BOOL endedRunningExport)`
-    per start. A refusal is an `ExportRefusal` (reason and sentence) that the engine turns into its NSError.
+    per start. A refusal is an `ExportRefusal` (reason and sentence) that the engine turns into its NSError. One
+    refusal is new and unreachable through the engine (the model always has an active sequence): a project without
+    one is refused as unsupported with "The project has no sequence to export."
   - `VEMediaLibrary` (routing, probe details, missing assets, bookmarks and their resolution on Open, the files'
     security-scoped access, thumbnail and waveform services, probe queue): per-call completions
     (`VEMediaProbeCompletion`, `VEMediaDetailsCompletion`, `VEMediaAssetReady`, `VEMediaThumbnailCompletion`,
-    `VEMediaWaveformCompletion`); results of requests made before `forgetProjectAssets` (New/Open) are dropped.
-    The engine still adds imports to the model, checks a re-probed asset is current and hands routing to the
-    monitors.
+    `VEMediaWaveformCompletion`). After `forgetProjectAssets` (New/Open) the library drops what it requested
+    before: a thumbnail or waveform completion gets `nullptr`, a poster, waveform or details probe is not reported.
+    An import probe always completes; the engine drops a stale one through the document generation. `routing` and
+    `missingAssets` return const references to the library's containers (read or copy them at once), and
+    `detailsForAsset:` a `std::optional`. The engine still adds imports to the model, checks a re-probed asset is
+    current and hands routing to the monitors.
   - `VESourceMonitor` (pool, still provider, lazily created controller, private one-clip project, view,
     visibility, whether the engine allows the stopped lookahead) and `VEProgramMonitor` (pool, controller,
     published generation, program and output views): the model per call (`const Project &`, and the document
@@ -1693,9 +1698,12 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
     monitors' pools.
   - Put new state in the class of its area, not in `VEEngine+Internal.h`; a new cross-area rule goes in the
     engine. The classes check the main thread themselves (`VE_ASSERT_MAIN`, now in `VEFacadeSupport+Internal.h`
-    with `VE_FACADE_HIDDEN` and `isRunning`), except the methods the engine's dealloc calls (`cancel`,
+    with `VE_FACADE_HIDDEN` and `isRunning`; its failure, in `VEFacadeSupport.mm`, raises "must be used on the main
+    thread (<function> called on <thread>)"), except the methods the engine's dealloc calls (`cancel`,
     `stopAccessingURLs`, `disconnectView(s)`). They can be constructed without an engine: `VEExporterTests`,
-    `VEMediaLibraryTests`, `VESourceMonitorTests`, `VEProgramMonitorTests`.
+    `VEMediaLibraryTests`, `VESourceMonitorTests`, `VEProgramMonitorTests`, which import each class's header first
+    and no engine header, so a class header that starts needing the engine fails to compile there. A monitor decodes
+    only assets registered with it (`registerAsset:path:[routing:]`), as the engine does on import and Open.
 - Functions the facade's files share are declared `VE_FACADE_HIDDEN` (hidden visibility) in
   `VEEngine+Internal.h`: shared between the facade's files, not exported from the framework. Use it for any new
   one (file-local helpers stay in an anonymous namespace).

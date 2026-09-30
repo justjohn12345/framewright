@@ -32,6 +32,16 @@ README history table). Still open:
 - Known limit: an insert or overwrite in the middle of a clip divides its Motion spans too; their right parts open
   in the automatic Ken Burns mode (only a split passes the chosen mode on, L6).
 
+## Facade class extraction review (2026-09-30; commits be13a90..6435e24)
+- An export's security-scoped output URL stays accessed when its exporter goes away first (predates the extraction:
+  the engine's dealloc behaved the same). `-[VEExporter dealloc]` (and `-[VEEngine dealloc]` through `cancel`)
+  cancels the running job, but the job's completion then finds no exporter (`VEExporter.mm`, the `onCompletion`
+  lambda in `beginExportOfProject:...`), so `stopAccessingOutputURL` never runs and the
+  `startAccessingSecurityScopedResource` balance leaks for the process's life. It cannot simply stop in `dealloc`:
+  the cancelled job still deletes its partial file on its own queue and needs the access until it ends. Fix: let the
+  completion lambda own the accessed URL (capture it and stop there whether or not the exporter is alive), and test
+  it with `testReleasingTheExporterCancelsItsExport` extended to count the accesses.
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
