@@ -16,8 +16,9 @@
 #define VE_FACADE_HIDDEN __attribute__((visibility("hidden")))
 
 NS_ASSUME_NONNULL_BEGIN
-/// Raises NSInternalInconsistencyException: a method of the facade (VEEngine or a class it
-/// coordinates) was called off the main thread.
+/// Raises NSInternalInconsistencyException ("must be used on the main thread (<function> called on
+/// <thread>)"): a method of the facade (VEEngine or a class it coordinates) was called off the main
+/// thread (VEFacadeSupport.mm).
 [[noreturn]] VE_FACADE_HIDDEN void veMainThreadViolation(const char *function);
 NS_ASSUME_NONNULL_END
 

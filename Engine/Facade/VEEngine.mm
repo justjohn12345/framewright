@@ -1,6 +1,6 @@
 // VEEngine: lifetime (init, dealloc), versions, observers and the notifications every area posts,
-// with the main-thread check and the makeError / toVE helpers VEEngine+Internal.h declares. The areas
-// of VEEngine.h are implemented in the VEEngine+<Area>.mm categories.
+// with the makeError / toVE helpers VEEngine+Internal.h declares. The areas of VEEngine.h are
+// implemented in the VEEngine+<Area>.mm categories (the main-thread check is VEFacadeSupport.mm's).
 
 #import "VEEngine+Internal.h"
 #import "VEExporter+Internal.h"
@@ -42,12 +42,6 @@ NSString *const VEEngineAssetIDKey = @"assetID";
 NSString *const VEEnginePlaybackStatusKey = @"playbackStatus";
 NSString *const VEEngineCriticalKey = @"critical";
 NSErrorDomain const VEEngineErrorDomain = @"FramewrightEngine.VEEngine";
-
-[[noreturn]] void veMainThreadViolation(const char *function) {
-    [NSException raise:NSInternalInconsistencyException
-                format:@"VEEngine must be used on the main thread (%s called on %@)", function, NSThread.currentThread];
-    __builtin_unreachable();
-}
 
 namespace ve::facade {
 
