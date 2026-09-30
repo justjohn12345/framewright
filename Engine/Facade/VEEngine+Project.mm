@@ -2,6 +2,7 @@
 // resolved and relinked, save), its properties, and the active sequence's settings.
 
 #import "VEEngine+Internal.h"
+#import "VEExporter+Internal.h"
 
 #import "VEFacadeCommands+Internal.h"
 
@@ -331,7 +332,7 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
 /// Forgets everything cached for the current project's assets (ids restart in every project).
 - (void)forgetProjectMedia {
     // A running export renders the old project, whose ids are about to name other media.
-    [_export.active cancel];
+    [_exporter cancel];
     // The controllers stop using the old assets first (their ids will name other files).
     [self detachProgramFromProject];
     [self resetSourceMonitor]; // stops the source controller and drops its private project

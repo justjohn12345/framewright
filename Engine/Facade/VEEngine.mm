@@ -3,6 +3,7 @@
 // of VEEngine.h are implemented in the VEEngine+<Area>.mm categories.
 
 #import "VEEngine+Internal.h"
+#import "VEExporter+Internal.h"
 
 #import "VEPreviewView.h"
 
@@ -128,6 +129,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
                                                                            _program.pool, config);
         [self observeController:*_program.playback source:NO];
         _undo.stack = std::make_unique<UndoStack>();
+        _exporter = [[VEExporter alloc] init];
         _observers = [NSHashTable weakObjectsHashTable];
         _services.probeQueue = dispatch_queue_create(
             "com.justjohn12345.framewright.engine.probe",
@@ -163,7 +165,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
     if (_memoryPressureSource != nil) {
         dispatch_source_cancel(_memoryPressureSource);
     }
-    [_export.active cancel]; // the job deletes its partial file on its own queue
+    [_exporter cancel]; // the job deletes its partial file on its own queue
     // The views may outlive the engine: they must stop calling into the controllers first.
     [_program.view setFrameSource:ve::render::PreviewFrameSource{}];
     [_program.outputView setFrameSource:ve::render::PreviewFrameSource{}];

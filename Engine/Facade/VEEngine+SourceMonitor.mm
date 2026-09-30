@@ -3,6 +3,7 @@
 // once it plays.
 
 #import "VEEngine+Internal.h"
+#import "VEExporter+Internal.h"
 
 #import "VEPreviewView.h"
 
@@ -335,7 +336,7 @@ const SourceProjectIds kSourceIds = [] {
 /// export runs (the export gets the decoders; a hidden monitor needs no frames ahead).
 - (void)updateSourceIdleLookahead {
     if (_source.playback) {
-        _source.playback->setIdleLookahead(_source.visible && _export.active == nil);
+        _source.playback->setIdleLookahead(_source.visible && !_exporter.isExporting);
     }
 }
 

@@ -5,7 +5,7 @@
 
 #import "VEPreviewView.h"
 
-#import "VEExport+Internal.h"
+#import "VEExporter+Internal.h"
 #import "VEFacadeCommands+Internal.h"
 
 #include "../Media/AssetImport.h"
@@ -407,9 +407,7 @@ NSData *makeBookmark(NSString *path) {
     [_program.view handleMemoryPressure];
     [_program.outputView handleMemoryPressure];
     [_source.view handleMemoryPressure];
-    if (auto job = exportJobOf(_export.active)) {
-        job->handleMemoryPressure(critical);
-    }
+    [_exporter handleMemoryPressure:critical];
     for (const MediaAsset &asset : _project.assets) {
         _services.thumbnails->purge(asset.id);
         _services.waveforms->purge(asset.id);

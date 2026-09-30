@@ -35,6 +35,10 @@
 #include <utility>
 #include <vector>
 
+// The classes VEEngine coordinates (each in its own VE<Name>+Internal.h, included by the files that
+// use it); they know nothing of the engine.
+@class VEExporter;
+
 namespace ve::facade {
 
 /// Shares of the frame cache budget the two decode pools may fill with lookahead windows. They
@@ -185,12 +189,6 @@ struct SourceMonitorState {
     BOOL visible = YES;             // see -setSourceMonitorVisible:
 };
 
-/// The running export (VEEngine+Export.mm).
-struct ExportState {
-    VEExportHandle *_Nullable active = nil;
-    NSURL *_Nullable accessedURL = nil; // security-scoped output URL accessed for the running export
-};
-
 } // namespace ve::facade
 
 @interface VEEngine () {
@@ -203,7 +201,9 @@ struct ExportState {
     ve::facade::UndoState _undo;
     ve::facade::ProgramMonitorState _program;
     ve::facade::SourceMonitorState _source;
-    ve::facade::ExportState _export;
+    // The running export: a class of its own (VEExporter+Internal.h) that knows nothing of the
+    // engine. VEEngine+Export.mm starts it, the engine's other files only ask and cancel it.
+    VEExporter *_exporter;
     VERippleScope _rippleScope; // see -rippleScope (VEEngine+Edits.mm)
 
     // VEEngine.mm
