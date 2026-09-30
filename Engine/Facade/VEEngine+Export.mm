@@ -189,6 +189,8 @@ using namespace ve::facade;
 
 @implementation VEEngine (ExportInternal)
 
+// MARK: - Private (VEEngine+Internal.h declares what other files call)
+
 /// Playback does not start while an export runs (the export has the decoders and the GPU; the
 /// monitors were paused when it began).
 - (BOOL)refusesPlaybackForExport {

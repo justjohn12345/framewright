@@ -219,6 +219,8 @@ const SourceProjectIds kSourceIds{kSourceProjectFirstId, ClipId(kSourceProjectFi
 
 @implementation VEEngine (SourceMonitorInternal)
 
+// MARK: - Private (VEEngine+Internal.h declares what other files call)
+
 /// Clears the source monitor (no asset, provider picture, controller stopped and emptied).
 - (void)resetSourceMonitor {
     _source.provider->cancel();

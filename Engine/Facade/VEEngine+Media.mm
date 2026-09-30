@@ -78,8 +78,6 @@ struct ProbedFile {
 
 namespace ve::facade {
 
-/// Security-scoped bookmark for a file, falling back to a plain bookmark (outside the sandbox
-/// security scope may be unavailable). Nil if the file cannot be bookmarked.
 NSData *makeBookmark(NSString *path) {
     NSURL *url = [NSURL fileURLWithPath:path];
     NSData *data = [url bookmarkDataWithOptions:NSURLBookmarkCreationWithSecurityScope |
@@ -429,6 +427,8 @@ NSData *makeBookmark(NSString *path) {
 @end
 
 @implementation VEEngine (MediaInternal)
+
+// MARK: - Private (VEEngine+Internal.h declares what other files call)
 
 /// Re-probes the project's assets in the background for the details that are not stored in
 /// the project file (codec names, routing reason), and hands the routing to the decode pool.

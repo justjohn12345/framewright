@@ -1,6 +1,6 @@
-// VEEngine: lifetime (init, dealloc), versions, observers and the notifications every area
-// posts, and the helpers VEEngine+Internal.h declares. The areas of VEEngine.h are implemented in
-// the VEEngine+<Area>.mm categories.
+// VEEngine: lifetime (init, dealloc), versions, observers and the notifications every area posts,
+// with the main-thread check and the makeError / toVE helpers VEEngine+Internal.h declares. The areas
+// of VEEngine.h are implemented in the VEEngine+<Area>.mm categories.
 
 #import "VEEngine+Internal.h"
 
@@ -43,7 +43,6 @@ NSString *const VEEnginePlaybackStatusKey = @"playbackStatus";
 NSString *const VEEngineCriticalKey = @"critical";
 NSErrorDomain const VEEngineErrorDomain = @"FramewrightEngine.VEEngine";
 
-/// Raises NSInternalInconsistencyException: a VEEngine method was called off the main thread.
 [[noreturn]] void veMainThreadViolation(const char *function) {
     [NSException raise:NSInternalInconsistencyException
                 format:@"VEEngine must be used on the main thread (%s called on %@)", function, NSThread.currentThread];

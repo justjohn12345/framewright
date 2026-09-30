@@ -7,8 +7,6 @@
 
 #import "../Render/VEPreviewView+Internal.h"
 
-#include <algorithm>
-#include <climits>
 #include <memory>
 #include <optional>
 
@@ -231,6 +229,8 @@ bool isRunning(playback::PlaybackState state) {
 @end
 
 @implementation VEEngine (PlaybackInternal)
+
+// MARK: - Private (VEEngine+Internal.h declares what other files call)
 
 /// Hands the program controller the model: the active sequence of a new project (setSequence,
 /// which stops and moves to frame 0), or the edited snapshot (modelChanged, which keeps playing).

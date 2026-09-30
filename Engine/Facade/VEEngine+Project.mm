@@ -9,8 +9,6 @@
 
 #include <json.hpp>
 
-#include <algorithm>
-#include <climits>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
@@ -337,6 +335,8 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
 @end
 
 @implementation VEEngine (ProjectInternal)
+
+// MARK: - Private (VEEngine+Internal.h declares what other files call)
 
 - (void)stopAccessingURLs {
     for (NSURL *url in _assets.accessedURLs) {

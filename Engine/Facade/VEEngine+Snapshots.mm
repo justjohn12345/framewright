@@ -119,6 +119,8 @@ using namespace ve::facade;
 
 @implementation VEEngine (SnapshotsInternal)
 
+// MARK: - Private (VEEngine+Internal.h declares what other files call)
+
 - (const Sequence &)activeSequence {
     const Sequence *sequence = _project.activeSequence();
     NSAssert(sequence != nullptr, @"the project always has an active sequence");

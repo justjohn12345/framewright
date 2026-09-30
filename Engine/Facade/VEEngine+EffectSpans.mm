@@ -5,8 +5,6 @@
 
 #include "../Edit/EditPlans.h"
 
-#include <algorithm>
-#include <climits>
 #include <cmath>
 #include <memory>
 #include <optional>

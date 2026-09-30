@@ -117,6 +117,8 @@ using namespace ve::facade;
 
 @implementation VEEngine (UndoInternal)
 
+// MARK: - Private (VEEngine+Internal.h declares what other files call)
+
 /// Pushes a command onto the undo stack, wrapped so it never reuses an id (see FreshIds). Only
 /// the open gesture's own edits (made inside performInCoalescingGroup:edit: with the group's
 /// key) join its coalescing group; any other edit first ends the group, committing the gesture

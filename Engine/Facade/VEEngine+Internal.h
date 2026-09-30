@@ -66,8 +66,13 @@ constexpr uint64_t kSourcePlaybackLaneBase = uint64_t(2) << 40;
 
 NS_ASSUME_NONNULL_BEGIN
 
+// Helpers several files use; each is defined in the file named after it.
+
+/// An NSError of VEEngineErrorDomain with `message` as its description (VEEngine.mm).
 NSError *makeError(VEEngineErrorCode code, NSString *message);
+/// The facade's result for an engine edit result: makeEditResult without a span (VEEngine.mm).
 VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created = @[], NSString *_Nullable note = nil);
+/// Model ids as NSNumbers (int64), in order.
 template <class IdType> NSArray<NSNumber *> *toNumbers(const std::vector<IdType> &ids) {
     NSMutableArray<NSNumber *> *numbers = [NSMutableArray arrayWithCapacity:ids.size()];
     for (const IdType &id : ids) {
@@ -94,8 +99,9 @@ inline int clampToInt(NSInteger value) {
     return static_cast<int>(std::clamp<NSInteger>(value, INT_MIN, INT_MAX));
 }
 /// Security-scoped bookmark for a file, falling back to a plain bookmark (outside the sandbox
-/// security scope may be unavailable). Nil if the file cannot be bookmarked.
+/// security scope may be unavailable). Nil if the file cannot be bookmarked (VEEngine+Media.mm).
 NSData *_Nullable makeBookmark(NSString *path);
+/// Whether a playback controller in `state` is playing or pre-rolling (VEEngine+Playback.mm).
 bool isRunning(playback::PlaybackState state);
 
 NS_ASSUME_NONNULL_END
