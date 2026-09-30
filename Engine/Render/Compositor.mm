@@ -47,9 +47,16 @@ PixelRect fitRect(double sourceWidth, double sourceHeight, std::int32_t destWidt
         return {};
     }
     const double scale = std::min(destWidth / sourceWidth, destHeight / sourceHeight);
+    const double fittedWidth = sourceWidth * scale;
+    const double fittedHeight = sourceHeight * scale;
+    // Bars under a pixel on each side cannot be drawn as bars (rounded, they become a one-pixel black
+    // line on one edge): such an axis fills the destination, stretching the picture by under 2 px.
     PixelRect r;
-    r.width = std::clamp(static_cast<std::int32_t>(std::lround(sourceWidth * scale)), 1, destWidth);
-    r.height = std::clamp(static_cast<std::int32_t>(std::lround(sourceHeight * scale)), 1, destHeight);
+    r.width = destWidth - fittedWidth < 2.0 ? destWidth
+                                            : std::clamp(static_cast<std::int32_t>(std::lround(fittedWidth)), 1, destWidth);
+    r.height = destHeight - fittedHeight < 2.0
+                   ? destHeight
+                   : std::clamp(static_cast<std::int32_t>(std::lround(fittedHeight)), 1, destHeight);
     r.x = (destWidth - r.width) / 2;
     r.y = (destHeight - r.height) / 2;
     return r;
@@ -127,7 +134,20 @@ Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegr
     const bool swapped = (quarterTurns & 1) != 0;
     const double sourceWidth = swapped ? storageHeight : storageWidth; // displayed orientation
     const double sourceHeight = swapped ? storageWidth : storageHeight;
-    const double fit = std::min(frameWidth / sourceWidth, frameHeight / sourceHeight);
+    double fit = std::min(frameWidth / sourceWidth, frameHeight / sourceHeight);
+    double cx = frameWidth / 2.0 + params.x;
+    double cy = frameHeight / 2.0 + params.y;
+    // Pixel exact: a picture at its fitted place with no clip transform, which covers the frame with
+    // under 2 px to spare on each axis (a frame taken from it with odd sides rounded down, see
+    // formatAdoptedFrom), is drawn at exactly its own size with its top-left pixel on the frame's,
+    // the spare column and row cropped, rather than scaled by a fraction of a pixel (a blur).
+    const bool identity = params.scale == 1.0 && params.rotationDegrees == 0.0 && params.x == 0.0 && params.y == 0.0;
+    if (identity && sourceWidth >= frameWidth && sourceHeight >= frameHeight && sourceWidth - frameWidth < 2.0 &&
+        sourceHeight - frameHeight < 2.0) {
+        fit = 1.0;
+        cx = sourceWidth / 2.0;
+        cy = sourceHeight / 2.0;
+    }
     const double sx = sourceWidth * fit * params.scale;
     const double sy = sourceHeight * fit * params.scale;
     if (!(sx > 1e-6) || !(sy > 1e-6) || !std::isfinite(sx) || !std::isfinite(sy)) {
@@ -136,8 +156,6 @@ Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegr
     const double theta = params.rotationDegrees * M_PI / 180.0;
     const double c = std::cos(theta);
     const double s = std::sin(theta);
-    const double cx = frameWidth / 2.0 + params.x;
-    const double cy = frameHeight / 2.0 + params.y;
     // Displayed uv' of a sequence position. Forward: p = centre + R (uv' - 0.5) * size,
     // R = [c -s; s c] (clockwise with +y down). Inverse: uv' = 0.5 + R^T (p - centre) / size.
     const simd_float4 ux = simd_make_float4(float(c / sx), float(s / sx), float(0.5 - (c * cx + s * cy) / sx), 0.0f);

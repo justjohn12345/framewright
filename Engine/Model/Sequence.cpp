@@ -135,8 +135,10 @@ std::optional<SequenceFormat> formatAdoptedFrom(const MediaAsset &asset, const S
             format.frameDuration = *standard;
         }
     }
-    format.width = asset.width + (asset.width & 1);
-    format.height = asset.height + (asset.height & 1);
+    // Odd sides are rounded down: the compositor then draws the picture pixel exact at 1:1, cropping the
+    // spare column or row (rounded up, the picture would be scaled by a fraction of a pixel, a blur).
+    format.width = asset.width - (asset.width & 1);
+    format.height = asset.height - (asset.height & 1);
     format.configured = true;
     if (sequenceFormatProblem(format)) {
         format.width = current.width;

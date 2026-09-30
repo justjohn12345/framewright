@@ -84,7 +84,8 @@ SequenceFormat requestedSequenceFormat(std::int64_t width, std::int64_t height, 
 struct MediaAsset;
 
 // The settings an unconfigured sequence takes from its first video clip's asset, configured: the
-// displayed size (after the rotation; an odd side rounded up to even) and the standard frame rate
+// displayed size (after the rotation; an odd side rounded down to even, so the compositor shows the
+// picture pixel exact with its spare column or row cropped) and the standard frame rate
 // for the asset's (standardFrameDurationFor; `current`'s when the asset has no frame duration),
 // with `current`'s audio sample rate. A size sequenceFormatProblem refuses (a side under 16 or over
 // 16384 pixels) keeps `current`'s size. Nullopt for stills and sound (and a video without a size).

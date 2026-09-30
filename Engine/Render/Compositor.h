@@ -22,8 +22,11 @@
 // turned picture is fitted into the sequence frame preserving its aspect ratio
 // (letterbox/pillarbox, square pixels), then scaled by VideoParams::scale about its centre,
 // rotated by rotationDegrees (positive = clockwise on screen) about its centre, and its centre
-// is offset by (x, y) from the frame centre. The sequence frame itself is fitted into the
-// target the same way (black bars).
+// is offset by (x, y) from the frame centre. A picture with no clip transform that covers the frame
+// with under 2 px to spare on each axis (a sequence adopted from it with odd sides rounded down) is
+// drawn at exactly 1:1 with its top-left pixel on the frame's instead (pixel exact; the spare column
+// and row are cropped). The sequence frame itself is fitted into the target the same way (black bars;
+// bars under a pixel on each side fill instead, see fitRect).
 //
 // Colour: blending happens on gamma-encoded BT.709 R'G'B' values (display-referred, like
 // Premiere's default non-linear compositing), not in linear light. Opacity and dissolves are
@@ -125,7 +128,9 @@ struct PixelRect {
 };
 
 /// Largest rectangle of aspect sourceWidth:sourceHeight centred in the destination, rounded to
-/// whole pixels. Empty if any size is not positive.
+/// whole pixels; an axis whose bars would be under a pixel on each side (the fitted size within 2 px of
+/// the destination) fills the destination instead of leaving a one-pixel black line (a stretch of
+/// under 2 px: a 3832x2154 sequence fills a 1920x1080 export). Empty if any size is not positive.
 PixelRect fitRect(double sourceWidth, double sourceHeight, std::int32_t destWidth, std::int32_t destHeight);
 
 /// Render into an existing texture (must have MTLTextureUsageRenderTarget, any

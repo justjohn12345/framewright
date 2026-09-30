@@ -602,6 +602,80 @@ struct FrameLog {
     XCTAssertTrue(near(texturePixel(square, 500, 781), 0, 0, 0, 0));
 }
 
+// A picture one pixel larger than its frame on each axis (a sequence adopted from a 1273x815 recording is
+// 1272x814: odd sides rounded down) is drawn pixel exact at 1:1, its last column and row cropped, not
+// scaled by 0.9988 (which resamples every pixel).
+- (void)testAPictureOnePixelLargerThanItsFrameIsDrawnPixelExact {
+    const size_t w = 1273, h = 815;
+    media::PixelBuffer source = makeBuffer(kCVPixelFormatType_32BGRA, w, h);
+    {
+        media::PixelBufferLock lock(source.get(), false);
+        auto *base = static_cast<uint8_t *>(CVPixelBufferGetBaseAddress(source.get()));
+        const size_t stride = CVPixelBufferGetBytesPerRow(source.get());
+        for (size_t y = 0; y < h; ++y) {
+            for (size_t x = 0; x < w; ++x) {
+                uint8_t *p = base + y * stride + x * 4;
+                p[0] = static_cast<uint8_t>((x * 7 + y * 3) & 0xFF);
+                p[1] = static_cast<uint8_t>((x * 5 + y * 11) & 0xFF);
+                p[2] = static_cast<uint8_t>((x ^ y) & 0xFF);
+                p[3] = 255;
+            }
+        }
+    }
+    const size_t fw = 1272, fh = 814;
+    media::PixelBuffer out = makeBuffer(kCVPixelFormatType_32BGRA, fw, fh);
+    RenderGraph g = makeGraph(int32_t(fw), int32_t(fh));
+    g.layers.push_back(makeLayer(1));
+    RenderResult r = [self render:g textures:{texturesFor(*_compositor, source)} target:PixelBufferTarget{out}];
+    XCTAssertEqual(r.drawnLayers, 1u);
+    media::PixelBufferLock a(source.get(), true);
+    media::PixelBufferLock b(out.get(), true);
+    const auto *pa = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddress(source.get()));
+    const auto *pb = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddress(out.get()));
+    const size_t sa = CVPixelBufferGetBytesPerRow(source.get());
+    const size_t sb = CVPixelBufferGetBytesPerRow(out.get());
+    int maxDiff = 0;
+    for (size_t y = 0; y < fh; ++y) {
+        for (size_t x = 0; x < fw * 4; ++x) {
+            maxDiff = std::max(maxDiff, std::abs(int(pa[y * sa + x]) - int(pb[y * sb + x])));
+        }
+    }
+    XCTAssertLessThanOrEqual(maxDiff, 1, @"every frame pixel is the source pixel at the same place");
+}
+
+// Bars under a pixel on each side fill the target: a 3832x2154 sequence (a Retina screen recording) in a
+// 1920x1080 export fits 1920x1079.25, which rounded left a black bottom row; now the frame fills the
+// target and no edge pixel is black.
+- (void)testBarsUnderAPixelFillTheTarget {
+    XCTAssertEqual(fitRect(3832, 2154, 1920, 1080), (PixelRect{0, 0, 1920, 1080}));
+    XCTAssertEqual(fitRect(3832, 2154, 1922, 1080), (PixelRect{0, 0, 1922, 1080}));
+    XCTAssertEqual(fitRect(1920, 1080, 1920, 1081), (PixelRect{0, 0, 1920, 1081})); // half a pixel each side
+    XCTAssertEqual(fitRect(1920, 1080, 1920, 1082), (PixelRect{0, 1, 1920, 1080})); // a pixel each side: bars
+    media::PixelBuffer source = makeBuffer(kCVPixelFormatType_32BGRA, 3832, 2154);
+    fillBGRA(source, {40, 200, 90, 255});
+    RenderGraph g = makeGraph(3832, 2154);
+    g.layers.push_back(makeLayer(1));
+    media::PixelBuffer out = makeBuffer(kCVPixelFormatType_32BGRA, 1920, 1080);
+    fillBGRA(out, {255, 255, 255, 255});
+    [self render:g textures:{texturesFor(*_compositor, source)} target:PixelBufferTarget{out}];
+    for (size_t x = 0; x < 1920; ++x) {
+        for (const size_t y : {size_t(0), size_t(1079)}) {
+            if (!near(pixelAt(out, x, y), 40, 200, 90, 1)) {
+                XCTFail(@"pixel (%zu, %zu) is not the picture", x, y);
+                return;
+            }
+        }
+    }
+    for (size_t y = 0; y < 1080; ++y) {
+        for (const size_t x : {size_t(0), size_t(1919)}) {
+            if (!near(pixelAt(out, x, y), 40, 200, 90, 1)) {
+                XCTFail(@"pixel (%zu, %zu) is not the picture", x, y);
+                return;
+            }
+        }
+    }
+}
+
 // A caller's viewport may reach outside the texture: it is clipped (the scissor rectangle must
 // lie inside the render target) and the frame is still mapped through the whole viewport.
 - (void)testViewportOutsideTheTextureIsClipped {

@@ -7,6 +7,7 @@
 // output is kept), playback pausing when an export starts and not starting while it runs, and the
 // source monitor keeping no stopped lookahead while it is hidden or an export runs.
 
+#import <AVFoundation/AVFoundation.h>
 #import <FramewrightEngine/FramewrightEngine.h>
 #import <XCTest/XCTest.h>
 
@@ -14,6 +15,7 @@
 #include "../../Engine/Media/FFmpeg/FFmpegBackend.h"
 #include "../Media/BurnIn.h"
 #include "../Media/TestMedia.h"
+#include "../Media/TextCard.h"
 #include "../Media/VideoToolboxProbe.h"
 
 #include <chrono>
@@ -173,6 +175,93 @@ CMTime seconds(double s) {
                                                            audioBitRate:0];
     XCTAssertTrue([pcmMP4.validationMessage containsString:@"PCM"], @"%@", pcmMP4.validationMessage);
     XCTAssertEqualObjects(h264, [h264 copy]);
+}
+
+/// 1080p and 720p of a sequence within half a percent of 16:9 are exactly 1920x1080 and 1280x720 (a 3832x2154
+/// Retina screen recording is 0.07 % wider than 16:9 and gave 1922x1080); further from 16:9 the aspect is kept.
+- (void)testANearlySixteenByNineSequenceExportsAtExactHDSizes {
+    CGSize s = [[self settingsFor:VEExportPresetH264 resolution:VEExportResolution1080p] outputSizeForSequenceWidth:3832
+                                                                                                          height:2154];
+    XCTAssertEqual(s.width, 1920);
+    XCTAssertEqual(s.height, 1080);
+    s = [[self settingsFor:VEExportPresetH264 resolution:VEExportResolution720p] outputSizeForSequenceWidth:3832
+                                                                                                     height:2154];
+    XCTAssertEqual(s.width, 1280);
+    XCTAssertEqual(s.height, 720);
+    s = [[self settingsFor:VEExportPresetH264 resolution:VEExportResolution1080p] outputSizeForSequenceWidth:1940
+                                                                                                      height:1080];
+    XCTAssertEqual(s.width, 1940, @"1 %% wider than 16:9: the aspect is kept");
+}
+
+/// The user's case end to end: a 3832x2154 screen recording placed on a new sequence (which adopts its size)
+/// exports at 1080p as 1920x1080 with no black line on any edge (the picture is white paper with text).
+- (void)testARetinaScreenRecordingExportsAt1080pWithoutABlackEdge {
+    NSURL *source = [_scratch URLByAppendingPathComponent:@"retina-3832x2154.mov"];
+    const std::string written =
+        ve::test::writeTextCardMovie(source.path.UTF8String, 3832, 2154, 10, 30, 60'000'000, 22, false, 10);
+    XCTAssertTrue(written.empty(), @"%s", written.c_str());
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *movie = [self importURL:source into:engine];
+    XCTAssertTrue([engine overwriteAsset:movie.assetID
+                                  atTime:kCMTimeZero
+                              videoTrack:engine.sequence.videoTrackIDs[0].longLongValue
+                              audioTrack:0
+                                sourceIn:kCMTimeInvalid
+                               sourceOut:kCMTimeInvalid]
+                      .ok);
+    XCTAssertEqual(engine.sequence.width, 3832);
+    XCTAssertEqual(engine.sequence.height, 2154);
+    VEExportSettings *settings = [self settingsFor:VEExportPresetH264 resolution:VEExportResolution1080p];
+    NSURL *output = [_scratch URLByAppendingPathComponent:@"retina-1080p.mov"];
+    XCTestExpectation *done = [self expectationWithDescription:@"export"];
+    NSError *error = nil;
+    VEExportHandle *handle = [engine beginExportWithSettings:settings
+                                                   outputURL:output
+                                                    progress:nil
+                                                  completion:^(VEExportSummary *summary, NSError *failure) {
+                                                      XCTAssertNil(failure);
+                                                      XCTAssertEqual(summary.width, 1920);
+                                                      XCTAssertEqual(summary.height, 1080);
+                                                      [done fulfill];
+                                                  }
+                                                       error:&error];
+    XCTAssertNotNil(handle, @"%@", error);
+    [self waitForExpectations:@[ done ] timeout:120];
+
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:output options:nil];
+    AVAssetTrack *track = [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+    XCTAssertNotNil(track);
+    AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:&error];
+    AVAssetReaderTrackOutput *frames = [AVAssetReaderTrackOutput
+        assetReaderTrackOutputWithTrack:track
+                         outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA)}];
+    [reader addOutput:frames];
+    XCTAssertTrue([reader startReading]);
+    CMSampleBufferRef sample = [frames copyNextSampleBuffer];
+    XCTAssertTrue(sample != nullptr);
+    if (sample == nullptr) {
+        return;
+    }
+    const ve::test::GrayImage gray = ve::test::grayOf(CMSampleBufferGetImageBuffer(sample));
+    CFRelease(sample);
+    XCTAssertEqual(gray.width, 1920u);
+    XCTAssertEqual(gray.height, 1080u);
+    // Each edge line's mean: paper (about 255) with at most some text, never a black line.
+    auto meanOf = [&](size_t x0, size_t y0, size_t w, size_t h) {
+        double sum = 0;
+        for (size_t y = y0; y < y0 + h; ++y) {
+            for (size_t x = x0; x < x0 + w; ++x) {
+                sum += gray.at(x, y);
+            }
+        }
+        return sum / double(w * h);
+    };
+    if (gray.width == 1920 && gray.height == 1080) {
+        XCTAssertGreaterThan(meanOf(0, 0, 1, 1080), 200.0, @"left column");
+        XCTAssertGreaterThan(meanOf(1919, 0, 1, 1080), 200.0, @"right column");
+        XCTAssertGreaterThan(meanOf(0, 0, 1920, 1), 200.0, @"top row");
+        XCTAssertGreaterThan(meanOf(0, 1079, 1920, 1), 200.0, @"bottom row");
+    }
 }
 
 - (void)testFormatsMatchVideoToolboxAndTheEstimateScales {

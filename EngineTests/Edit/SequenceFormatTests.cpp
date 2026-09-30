@@ -143,15 +143,24 @@ TEST_CASE("SequenceFormat: what a sequence adopts from its first video clip's as
     // Stills and sound never count.
     CHECK_FALSE(formatAdoptedFrom(*fx.project.findAsset(fx.still), unconfigured).has_value());
     CHECK_FALSE(formatAdoptedFrom(*fx.project.findAsset(fx.audioOnly), unconfigured).has_value());
-    // The displayed size (MediaAsset keeps it after the rotation), odd sides rounded up to even.
+    // The displayed size (MediaAsset keeps it after the rotation), odd sides rounded down to even (the
+    // compositor draws the picture pixel exact, its spare column and row cropped).
     MediaAsset odd = *fx.project.findAsset(fx.video60);
     odd.width = 1081;
     odd.height = 1921;
     odd.rotationDegrees = 90;
     const auto portrait = formatAdoptedFrom(odd, unconfigured);
     REQUIRE(portrait.has_value());
-    CHECK(portrait->width == 1082);
-    CHECK(portrait->height == 1922);
+    CHECK(portrait->width == 1080);
+    CHECK(portrait->height == 1920);
+    MediaAsset window = odd;
+    window.width = 1273;
+    window.height = 815;
+    window.rotationDegrees = 0;
+    const auto recording = formatAdoptedFrom(window, unconfigured);
+    REQUIRE(recording.has_value());
+    CHECK(recording->width == 1272);
+    CHECK(recording->height == 814);
     CHECK(identical(portrait->frameDuration, CMTimeMake(1, 60)));
     // A variable frame rate: the rate of its shortest frame interval, rounded to a standard rate.
     MediaAsset vfr = odd;

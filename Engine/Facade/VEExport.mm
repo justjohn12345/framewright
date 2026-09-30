@@ -25,6 +25,17 @@ NSInteger roundToEven(double value) {
     return static_cast<NSInteger>(std::lround(value / 2.0)) * 2;
 }
 
+// The width of a `height`-row output of a sequence of aspect `aspect`: 16:9 exactly (1920 for 1080 rows)
+// when the sequence is within half a percent of it (a 3832x2154 screen recording is 0.07 % wider), else
+// the aspect's width rounded to even. The compositor fills the remaining sub-pixel difference (fitRect).
+NSInteger widthForRows(NSInteger height, double aspect) {
+    constexpr double kWide = 16.0 / 9.0;
+    if (std::fabs(aspect / kWide - 1.0) <= 0.005) {
+        return height * 16 / 9;
+    }
+    return roundToEven(double(height) * aspect);
+}
+
 media::VideoCodec codecOf(VEExportPreset preset) {
     switch (preset) {
     case VEExportPresetH264:
@@ -257,11 +268,11 @@ double bitsPerPixel(VEExportPreset preset, double quality) {
         break;
     case VEExportResolution1080p:
         h = 1080;
-        w = roundToEven(1080.0 * aspect);
+        w = widthForRows(h, aspect);
         break;
     case VEExportResolution720p:
         h = 720;
-        w = roundToEven(720.0 * aspect);
+        w = widthForRows(h, aspect);
         break;
     case VEExportResolutionCustom:
         w = (_customWidth / 2) * 2;
