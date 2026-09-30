@@ -13,14 +13,6 @@
 using namespace ve;
 using namespace ve::facade;
 
-namespace ve::facade {
-
-bool isRunning(playback::PlaybackState state) {
-    return state == playback::PlaybackState::Playing || state == playback::PlaybackState::Prerolling;
-}
-
-} // namespace ve::facade
-
 @implementation VEEngine (Playback)
 
 // MARK: - Playback

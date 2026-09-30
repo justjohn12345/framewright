@@ -8,6 +8,7 @@
 
 #import "VEEngine.h"
 
+#import "VEFacadeSupport+Internal.h"
 #import "VEProgramFrameProvider+Internal.h"
 #import "VETypes+Internal.h"
 
@@ -33,25 +34,6 @@
 #include <set>
 #include <utility>
 #include <vector>
-
-/// Marks a function shared by the facade's files as private to the framework: visible to the other
-/// facade files, not exported from FramewrightEngine (the helpers below were file-local before the
-/// facade was split and must not become framework API).
-#define VE_FACADE_HIDDEN __attribute__((visibility("hidden")))
-
-NS_ASSUME_NONNULL_BEGIN
-/// Raises NSInternalInconsistencyException: a VEEngine method was called off the main thread.
-[[noreturn]] VE_FACADE_HIDDEN void veMainThreadViolation(const char *function);
-NS_ASSUME_NONNULL_END
-
-/// Engine model calls are confined to the main thread. Active in every build configuration: a
-/// call from another thread would race the model, so it fails loudly instead.
-#define VE_ASSERT_MAIN()                                                                                               \
-    do {                                                                                                               \
-        if (__builtin_expect(!NSThread.isMainThread, 0)) {                                                             \
-            veMainThreadViolation(__PRETTY_FUNCTION__);                                                                \
-        }                                                                                                              \
-    } while (0)
 
 namespace ve::facade {
 
@@ -104,9 +86,6 @@ VE_FACADE_HIDDEN inline AssetId toAssetId(VEAssetID id) {
 VE_FACADE_HIDDEN inline int clampToInt(NSInteger value) {
     return static_cast<int>(std::clamp<NSInteger>(value, INT_MIN, INT_MAX));
 }
-/// Whether a playback controller in `state` is playing or pre-rolling (VEEngine+Playback.mm).
-VE_FACADE_HIDDEN bool isRunning(playback::PlaybackState state);
-
 NS_ASSUME_NONNULL_END
 
 } // namespace ve::facade
