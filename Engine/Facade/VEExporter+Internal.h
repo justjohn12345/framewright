@@ -38,8 +38,8 @@ NS_ASSUME_NONNULL_BEGIN
 typedef void (^VEExporterProgressBlock)(VEExportProgress *progress);
 /// Called once on the main thread when the export ends: `result` is the job's summary, or its
 /// error (MediaErrorCode::Cancelled after a cancel). `endedRunningExport` is YES when the export
-/// was still the exporter's running export: the exporter has just cleared it (isExporting is NO)
-/// and ended the access to its output URL. It is NO when the exporter is gone.
+/// was still the exporter's running export: the exporter has just cleared it (isExporting is NO).
+/// It is NO when the exporter is gone. Either way the access to the output URL has ended.
 typedef void (^VEExporterFinishBlock)(const ve::media::Result<ve::exporting::ExportSummary> &result,
                                       BOOL endedRunningExport);
 
@@ -55,7 +55,9 @@ typedef void (^VEExporterFinishBlock)(const ve::media::Result<ve::exporting::Exp
 /// returning nil with `refusal` filled in and no file created, while another export runs, for
 /// invalid settings or an unusable frame size, a URL that is not a file URL, and whatever
 /// ExportJob::start refuses. `progress` and `finish` run on the main thread (finish exactly once
-/// per started export). A security-scoped `outputURL` is accessed until the export ends.
+/// per started export). A security-scoped `outputURL` is accessed until the export ends: the
+/// job's completion ends the access (after a cancelled job deleted its partial file), also when the
+/// exporter was released while the export ran.
 - (nullable VEExportHandle *)beginExportOfProject:(const ve::Project &)project
                                          settings:(VEExportSettings *)settings
                                         outputURL:(NSURL *)outputURL

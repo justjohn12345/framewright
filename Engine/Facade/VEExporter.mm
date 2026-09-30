@@ -13,8 +13,7 @@ using namespace ve;
 using namespace ve::facade;
 
 @implementation VEExporter {
-    VEExportHandle *_active;   // the running export
-    NSURL *_accessedOutputURL; // security-scoped output URL accessed for the running export
+    VEExportHandle *_active; // the running export
 }
 
 - (void)dealloc {
@@ -29,11 +28,6 @@ using namespace ve::facade;
 - (BOOL)isExporting {
     VE_ASSERT_MAIN();
     return _active != nil;
-}
-
-- (void)stopAccessingOutputURL {
-    [_accessedOutputURL stopAccessingSecurityScopedResource];
-    _accessedOutputURL = nil;
 }
 
 - (nullable VEExportHandle *)beginExportOfProject:(const Project &)project
@@ -83,12 +77,18 @@ using namespace ve::facade;
     auto onProgress = [progressBlock](const exporting::ExportProgress &p) {
         progressBlock(makeExportProgress(p));
     };
-    auto onCompletion = [weakSelf, weakHandle, finishBlock](media::Result<exporting::ExportSummary> result) {
+    // The completion owns the output URL's security-scoped access: it runs once per started job, after
+    // the job tore its run down (a cancelled job has deleted its partial file by then, which needs the
+    // access), and ends the access whether or not this exporter still exists (released mid-export, it
+    // cannot end it: the job still works on its own queue when dealloc cancels it).
+    NSURL *accessedURL = accessing ? outputURL : nil;
+    auto onCompletion = [weakSelf, weakHandle, finishBlock,
+                         accessedURL](media::Result<exporting::ExportSummary> result) {
+        [accessedURL stopAccessingSecurityScopedResource];
         VEExporter *strongSelf = weakSelf;
         BOOL endedRunningExport = NO;
         if (strongSelf != nil && strongSelf->_active == weakHandle) {
             strongSelf->_active = nil;
-            [strongSelf stopAccessingOutputURL];
             endedRunningExport = YES;
         }
         finishBlock(result, endedRunningExport);
@@ -110,7 +110,6 @@ using namespace ve::facade;
     }
     attachExportJob(handle, std::move(started).value());
     _active = handle;
-    _accessedOutputURL = accessing ? outputURL : nil;
     return handle;
 }
 

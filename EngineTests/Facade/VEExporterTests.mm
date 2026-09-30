@@ -116,6 +116,26 @@ struct Report {
 
 } // namespace
 
+/// A file URL that counts its security-scoped access (a test host is not sandboxed, so real file URLs
+/// grant none), and lists its directory when the access ends.
+@interface VECountingURL : NSURL
+@property (nonatomic) int starts;
+@property (nonatomic) int stops;
+@property (nonatomic, copy, nullable) NSArray<NSString *> *directoryAtStop;
+@end
+
+@implementation VECountingURL
+- (BOOL)startAccessingSecurityScopedResource {
+    self.starts += 1;
+    return YES;
+}
+- (void)stopAccessingSecurityScopedResource {
+    self.stops += 1;
+    self.directoryAtStop =
+        [NSFileManager.defaultManager contentsOfDirectoryAtPath:self.URLByDeletingLastPathComponent.path error:nil];
+}
+@end
+
 @interface VEExporterTests : XCTestCase
 @end
 
@@ -329,6 +349,69 @@ struct Report {
     }
     XCTAssertFalse(report->endedRunningExport);
     XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:output.path]);
+}
+
+/// A counting output URL in a fresh directory (so its listing shows only what the export leaves).
+- (VECountingURL *)countingURLNamed:(NSString *)name {
+    NSURL *directory = [_scratch URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
+    XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:directory
+                                         withIntermediateDirectories:YES
+                                                          attributes:nil
+                                                               error:nil]);
+    return [[VECountingURL alloc] initFileURLWithPath:[directory URLByAppendingPathComponent:name].path];
+}
+
+/// The output URL's security-scoped access starts once per export and ends once when it ends: after an
+/// export that runs to its end, and after one cancelled through the exporter.
+- (void)testTheOutputURLAccessEndsWithTheExport {
+    ExporterRig rig;
+    std::string error;
+    XCTAssertTrue(rig.addClip([self mediaPath:"h264_1080p30.mp4"], 15, error), @"%s", error.c_str());
+    VEExporter *exporter = [[VEExporter alloc] init];
+    for (const bool cancel : {false, true}) {
+        VECountingURL *output = [self countingURLNamed:cancel ? @"cancelled.mp4" : @"finished.mp4"];
+        auto report = std::make_shared<Report>();
+        ExportRefusal refusal;
+        XCTAssertNotNil([self begin:exporter rig:rig settings:smallH264Settings() url:output report:report
+                            refusal:&refusal],
+                        @"%@", refusal.message);
+        XCTAssertEqual(output.starts, 1);
+        XCTAssertEqual(output.stops, 0, @"accessed while the export runs");
+        if (cancel) {
+            [exporter cancel];
+        }
+        XCTAssertTrue([self spinUntil:^BOOL { return report->finishCount > 0; } timeout:60]);
+        XCTAssertEqual(output.starts, 1);
+        XCTAssertEqual(output.stops, 1, @"%s: the access ended with the export", cancel ? "cancelled" : "finished");
+    }
+}
+
+/// An exporter released while its export runs: dealloc cancels the job, which deletes its partial file on
+/// its own queue and then completes; the completion ends the output URL's access although no exporter is
+/// left (the access leaked for the process's life), after the partial file is gone.
+- (void)testReleasingTheExporterMidExportEndsTheOutputURLAccess {
+    ExporterRig rig;
+    std::string error;
+    XCTAssertTrue(rig.addClip([self mediaPath:"h264_1080p30.mp4"], 150, error), @"%s", error.c_str());
+    auto report = std::make_shared<Report>();
+    VECountingURL *output = [self countingURLNamed:@"released.mp4"];
+    __weak VEExporter *weakExporter = nil;
+    @autoreleasepool {
+        VEExporter *exporter = [[VEExporter alloc] init];
+        weakExporter = exporter;
+        ExportRefusal refusal;
+        XCTAssertNotNil([self begin:exporter rig:rig settings:smallH264Settings() url:output report:report
+                            refusal:&refusal],
+                        @"%@", refusal.message);
+    }
+    XCTAssertNil(weakExporter);
+    XCTAssertTrue([self spinUntil:^BOOL { return report->finishCount > 0; } timeout:60]);
+    XCTAssertFalse(report->endedRunningExport, @"no exporter was left to end it");
+    XCTAssertEqual(output.starts, 1);
+    XCTAssertEqual(output.stops, 1, @"the access ended although the exporter was gone");
+    XCTAssertNotNil(output.directoryAtStop);
+    XCTAssertEqual(output.directoryAtStop.count, 0u, @"the partial file was deleted before the access ended: %@",
+                   output.directoryAtStop);
 }
 
 @end
