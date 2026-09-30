@@ -5,10 +5,11 @@
 // exporter, and an exporter released while its export runs (the export is cancelled and finish
 // still runs once, reporting that no exporter was left to end it).
 
-#import <FramewrightEngine/FramewrightEngine.h>
-#import <XCTest/XCTest.h>
-
+// The class's facade-private header comes first and alone: it must compile without the engine's
+// headers (the test imports no FramewrightEngine umbrella, which would bring in VEEngine.h).
 #import "../../Engine/Facade/VEExporter+Internal.h"
+
+#import <XCTest/XCTest.h>
 
 #include "../../Engine/Media/AssetImport.h"
 #include "../../Engine/Media/BackendRouter.h"
@@ -93,6 +94,15 @@ VEExportSettings *smallH264Settings(VEExportContainer container = VEExportContai
                                        audioBitRate:0];
 }
 
+/// Default options, except that progress is delivered as often as the main queue takes it (a short
+/// export can end before the default 0.1 s interval has passed once; a delivery that finds the job
+/// finished is dropped).
+exporting::ExportOptions progressOnEveryFrame() {
+    exporting::ExportOptions options;
+    options.progressInterval = 0;
+    return options;
+}
+
 /// What a started export reported through its blocks.
 struct Report {
     int progressCount = 0;
@@ -144,7 +154,7 @@ struct Report {
         settings:settings
         outputURL:url
         services:rig.services()
-        options:exporting::ExportOptions{}
+        options:progressOnEveryFrame()
         progress:^(VEExportProgress *progress) {
           XCTAssertNotNil(progress);
           report->progressCount += 1;
@@ -213,7 +223,7 @@ struct Report {
 - (void)testAnExportRunsToItsEndAndClearsTheRunningExportBeforeFinish {
     ExporterRig rig;
     std::string error;
-    XCTAssertTrue(rig.addClip([self mediaPath:"h264_1080p30.mp4"], 45, error), @"%s", error.c_str());
+    XCTAssertTrue(rig.addClip([self mediaPath:"h264_1080p30.mp4"], 300, error), @"%s", error.c_str());
     VEExporter *exporter = [[VEExporter alloc] init];
     auto report = std::make_shared<Report>();
     NSURL *output = [_scratch URLByAppendingPathComponent:@"exported.mp4"];
@@ -255,7 +265,7 @@ struct Report {
     XCTAssertFalse(exporter.isExporting);
     XCTAssertNil(exporter.activeExport);
     if (report->result && report->result->ok()) {
-        XCTAssertEqual(report->result->value().frames, 45);
+        XCTAssertEqual(report->result->value().frames, 300);
     }
     XCTAssertTrue([NSFileManager.defaultManager fileExistsAtPath:output.path]);
     XCTAssertEqual(second->finishCount, 0);

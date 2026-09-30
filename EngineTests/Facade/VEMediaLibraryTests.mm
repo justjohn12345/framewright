@@ -6,9 +6,11 @@
 // memory cache purged), and New/Open: the state forgotten and the results of earlier requests
 // dropped.
 
-#import <XCTest/XCTest.h>
-
+// The class's facade-private header comes first and alone: it must compile without the engine's
+// headers (the test imports no FramewrightEngine umbrella, which would bring in VEEngine.h).
 #import "../../Engine/Facade/VEMediaLibrary+Internal.h"
+
+#import <XCTest/XCTest.h>
 
 #include "../../Engine/Media/BackendRouter.h"
 #include "../../Engine/Media/FFmpeg/FFmpegBackend.h"

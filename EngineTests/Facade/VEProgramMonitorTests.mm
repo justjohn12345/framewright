@@ -1,18 +1,23 @@
 // VEProgramMonitor on its own, constructed without an engine: which snapshot the controller gets (a
 // new project generation or a detach moves it to frame 0, an edit of the same generation keeps the
-// playhead), the transport and the status block on the main thread, the preview solo clip, and the
-// output view's render loop following the transport.
+// playhead), the transport and the status block on the main thread, the preview solo clip, the
+// output view's render loop following the transport, the stopped lookahead turned off and on, and a
+// new media epoch (New/Open): the old media forgotten, the assets registered again and shown.
 
-#import <FramewrightEngine/FramewrightEngine.h>
+// The class's facade-private header comes first and alone: it must compile without the engine's
+// headers (the test imports no FramewrightEngine umbrella, which would bring in VEEngine.h).
+#import "../../Engine/Facade/VEProgramMonitor+Internal.h"
+
 #import <Metal/Metal.h>
 #import <XCTest/XCTest.h>
 
-#import "../../Engine/Facade/VEProgramMonitor+Internal.h"
+#import "../../Engine/Facade/VEPreviewView.h"
 
 #include "../../Engine/Media/AssetImport.h"
 #include "../../Engine/Media/BackendRouter.h"
 #include "../../Engine/Media/FFmpeg/FFmpegBackend.h"
 #include "../../Engine/Media/FrameCache.h"
+#include "../Media/BurnIn.h"
 #include "../Media/TestMedia.h"
 
 #include <memory>
@@ -27,6 +32,33 @@ CMTime frames(int64_t n) {
     return CMTimeMake(n, 30);
 }
 
+/// The burn-in frame index of what `view` shows (-1 when unreadable or nothing is shown).
+int shownIndex(VEPreviewView *view) {
+    CGImageRef image = [view snapshot];
+    if (image == NULL) {
+        return -1;
+    }
+    const size_t w = CGImageGetWidth(image);
+    const size_t h = CGImageGetHeight(image);
+    CVPixelBufferRef buffer = nullptr;
+    if (CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA, nullptr, &buffer) !=
+        kCVReturnSuccess) {
+        return -1;
+    }
+    CVPixelBufferLockBaseAddress(buffer, 0);
+    CGContextRef ctx = CGBitmapContextCreate(CVPixelBufferGetBaseAddress(buffer), w, h, 8,
+                                             CVPixelBufferGetBytesPerRow(buffer), CGImageGetColorSpace(image),
+                                             CGBitmapInfo(kCGImageAlphaNoneSkipFirst) |
+                                                 CGBitmapInfo(kCGBitmapByteOrder32Little));
+    CGContextSetBlendMode(ctx, kCGBlendModeCopy);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, CGFloat(w), CGFloat(h)), image);
+    CGContextRelease(ctx);
+    CVPixelBufferUnlockBaseAddress(buffer, 0);
+    const int index = ve::test::readBurnIn(buffer).value_or(-1);
+    CVPixelBufferRelease(buffer);
+    return index;
+}
+
 /// A 1920x1080 30 fps model with a 3 s clip of h264_1080p30.mp4 (and its linked audio), and the
 /// shared services the monitor decodes through.
 struct ProgramRig {
@@ -37,10 +69,13 @@ struct ProgramRig {
     ClipId videoClip;
     std::string error;
 
+    std::string path;
+    media::RoutedMediaInfo routing;
+
     ProgramRig() {
         (void)router->registerBackend(media::ffmpeg::makeFFmpegBackend());
         project.activeSequenceId = project.addSequence("Main", CMTimeMake(1, 30), 1920, 1080, 1, 1);
-        const std::string path = test::testMediaPath("h264_1080p30.mp4", error);
+        path = test::testMediaPath("h264_1080p30.mp4", error);
         if (path.empty()) {
             return;
         }
@@ -55,6 +90,7 @@ struct ProgramRig {
             return;
         }
         project.assets.push_back(*made);
+        routing = *routed;
         asset = made->id;
         Sequence &sequence = *project.activeSequence();
         Clip video;
@@ -221,6 +257,79 @@ ProgramMonitorConfig monitorConfig() {
     [monitor attachView:nil];
     XCTAssertNil(monitor.view);
     [monitor handleMemoryPressure];
+}
+
+- (void)renderAndWait:(VEPreviewView *)view {
+    XCTestExpectation *rendered = [self expectationWithDescription:@"rendered"];
+    [view renderOnceWithCompletion:^(NSError *) {
+      [rendered fulfill];
+    }];
+    [self waitForExpectations:@[ rendered ] timeout:5];
+}
+
+/// Renders until `view` shows burn-in `expected` (or `timeout`); returns what it showed last.
+- (int)renderUntil:(VEPreviewView *)view shows:(int)expected timeout:(NSTimeInterval)timeout {
+    int shown = -1;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    while (shown != expected && deadline.timeIntervalSinceNow > 0) {
+        [self renderAndWait:view];
+        shown = shownIndex(view);
+    }
+    return shown;
+}
+
+- (void)testTheStoppedLookaheadTurnsOffAndOn {
+    ProgramRig rig;
+    XCTAssertTrue(rig.asset, @"%s", rig.error.c_str());
+    VEProgramMonitor *monitor = [self makeMonitor:rig statuses:[NSMutableArray array]];
+    [monitor registerAsset:rig.asset path:rig.path routing:rig.routing];
+    [monitor publishProject:rig.project generation:1];
+    [monitor seekToTime:frames(30)];
+    XCTAssertTrue([self waitForTime:frames(30) monitor:monitor]);
+    auto streams = ^NSInteger {
+        return monitor.playbackStats.decodeStreams;
+    };
+    XCTAssertTrue([self spinUntil:^BOOL { return streams() > 0; } timeout:5], @"paused: a stopped lookahead");
+    [monitor setIdleLookahead:NO];
+    XCTAssertTrue([self spinUntil:^BOOL { return streams() == 0; } timeout:5], @"turned off: no decode streams");
+    [self spinUntil:^BOOL { return NO; } timeout:0.3];
+    XCTAssertEqual(streams(), 0, @"and it stays off");
+    [monitor setIdleLookahead:YES];
+    XCTAssertTrue([self spinUntil:^BOOL { return streams() > 0; } timeout:5], @"turned on: it resumes");
+}
+
+- (void)testANewMediaEpochForgetsTheOldMediaAndShowsTheRegisteredAssets {
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil) {
+        XCTSkip(@"no Metal device");
+    }
+    ProgramRig rig;
+    XCTAssertTrue(rig.asset, @"%s", rig.error.c_str());
+    VEPreviewView *view = [[VEPreviewView alloc] initWithFrame:NSMakeRect(0, 0, 480, 270) device:device error:nil];
+    VEProgramMonitor *monitor = [self makeMonitor:rig statuses:[NSMutableArray array]];
+    [monitor registerAsset:rig.asset path:rig.path routing:rig.routing];
+    [monitor publishProject:rig.project generation:1];
+    [monitor attachView:view];
+    [monitor seekToTime:frames(40)];
+    XCTAssertEqual([self renderUntil:view shows:40 timeout:20], 40);
+
+    // New/Open, in the engine's order: detach, a new epoch on the cache and the pool, forget.
+    [monitor detachFromProject];
+    const media::FrameCache::Epoch epoch = rig.cache->beginEpoch();
+    [monitor beginMediaEpoch:epoch];
+    [monitor forgetMedia];
+    XCTAssertEqual(CMTimeCompare(monitor.currentTime, kCMTimeZero), 0, @"detached: an empty project");
+
+    // The next project's assets are registered (the file first, as Open does, then the routing)
+    // and its sequence is shown from frame 0; the pictures decode in the new epoch.
+    [monitor registerAsset:rig.asset path:rig.path];
+    [monitor registerAsset:rig.asset path:rig.path routing:rig.routing];
+    [monitor publishProject:rig.project generation:2];
+    XCTAssertTrue([self waitForTime:kCMTimeZero monitor:monitor]);
+    [monitor seekToTime:frames(15)];
+    XCTAssertEqual([self renderUntil:view shows:15 timeout:20], 15);
+    XCTAssertEqualObjects(monitor.playbackError, @"");
+    [monitor disconnectViews];
 }
 
 @end
