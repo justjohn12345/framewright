@@ -35,6 +35,9 @@ std::optional<CMTime> standardFrameDurationFor(double framesPerSecond) {
     if (!std::isfinite(framesPerSecond) || !(framesPerSecond > 0)) {
         return std::nullopt;
     }
+    if (framesPerSecond > kMaxFramesPerSecond * 1.0005) {
+        return std::nullopt; // a container's time base, not a picture rate (see Sequence.h)
+    }
     const std::vector<CMTime> &standard = standardFrameDurations();
     const double fastest = ratePerSecond(standard.back());
     if (framesPerSecond > fastest * 1.001) {

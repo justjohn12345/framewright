@@ -135,6 +135,28 @@ RoutedMediaInfo routed(std::vector<TrackInfo> tracks, const std::string &backend
     XCTAssertTrue(identical(v->frameDuration, CMTimeMake(1, 60)));
 }
 
+/// A shortest frame interval of a millisecond (a Matroska/WebM time base: two frames a tick apart) is no
+/// picture rate: the asset takes the track's nominal rate instead (a new sequence then adopts that, see
+/// SequenceFormatTests; it adopted 50 fps, 1000 being a multiple of 50). Without a usable nominal rate the
+/// interval is kept (and a new sequence keeps its own rate).
+- (void)testAMillisecondTimeBaseIsNotTheFrameRate {
+    TrackInfo mkv = videoTrack(0, 1920, 1080, CMTimeMake(1, 1000));
+    mkv.isVFR = true;
+    mkv.nominalFps = 30000.0 / 1001.0;
+    auto asset = makeMediaAsset(routed({mkv}, "ffmpeg"), AssetId(4));
+    XCTAssertTrue(asset.ok());
+    XCTAssertTrue(CMTimeCompare(asset->frameDuration, CMTimeMake(1001, 30000)) == 0, @"%lld/%d",
+                  asset->frameDuration.value, asset->frameDuration.timescale);
+    XCTAssertTrue(asset->isVFR);
+    mkv.nominalFps = 0;
+    auto unknown = makeMediaAsset(routed({mkv}, "ffmpeg"), AssetId(5));
+    XCTAssertTrue(unknown.ok());
+    XCTAssertTrue(identical(unknown->frameDuration, CMTimeMake(1, 1000)));
+    // 240 fps is still a picture rate (slow motion): kept.
+    auto slowMotion = makeMediaAsset(routed({videoTrack(0, 1280, 720, CMTimeMake(1, 240))}), AssetId(6));
+    XCTAssertTrue(identical(slowMotion->frameDuration, CMTimeMake(1, 240)));
+}
+
 - (void)testPerTrackRoutingIsReflected {
     // Video on FFmpeg (software), audio on Apple: the hint follows the picture.
     auto r = routed({videoTrack(0, 640, 480, CMTimeMake(1, 25)), audioTrack(1, 48000, 2)});

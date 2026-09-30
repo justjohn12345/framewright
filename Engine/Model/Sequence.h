@@ -58,7 +58,10 @@ const std::vector<CMTime> &standardFrameDurations();
 //     a whole multiple of (within 0.05 %: 100 -> 50, 119.88 -> 59.94, 120 and 240 -> 60), else 60.
 //     A sequence never runs faster than 60 fps (the monitors and the export are paced for it);
 //     such a source plays on it at its normal speed with frames skipped evenly.
-// Nullopt for a rate that is not finite and positive.
+// Nullopt for a rate that is not finite and positive, and for one above kMaxFramesPerSecond: no
+// picture rate, but a container's time base read as one (Matroska and WebM tick in milliseconds, so two
+// frames a tick apart read as 1000 fps; 1000 is a multiple of 50, which it used to adopt).
+inline constexpr double kMaxFramesPerSecond = 240.0;
 std::optional<CMTime> standardFrameDurationFor(double framesPerSecond);
 
 // "23.976", "24", "25", "29.97", "30", "50", "59.94", "60" (another rate: to 3 decimals, trailing
@@ -86,7 +89,8 @@ struct MediaAsset;
 // The settings an unconfigured sequence takes from its first video clip's asset, configured: the
 // displayed size (after the rotation; an odd side rounded down to even, so the compositor shows the
 // picture pixel exact with its spare column or row cropped) and the standard frame rate
-// for the asset's (standardFrameDurationFor; `current`'s when the asset has no frame duration),
+// for the asset's (standardFrameDurationFor; `current`'s when the asset has no frame duration or no usable
+// rate),
 // with `current`'s audio sample rate. A size sequenceFormatProblem refuses (a side under 16 or over
 // 16384 pixels) keeps `current`'s size. Nullopt for stills and sound (and a video without a size).
 std::optional<SequenceFormat> formatAdoptedFrom(const MediaAsset &asset, const SequenceFormat &current);

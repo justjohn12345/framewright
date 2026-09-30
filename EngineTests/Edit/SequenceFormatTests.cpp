@@ -124,6 +124,28 @@ TEST_CASE("SequenceFormat: the standard frame rates and what a source's rate map
     CHECK_FALSE(standardFrameDurationFor(NAN).has_value());
 }
 
+TEST_CASE("SequenceFormat: a rate above 240 fps is a time base, not a frame rate") {
+    // Matroska and WebM tick in milliseconds: a variable-rate file's shortest interval can read as 1000 fps,
+    // which is a whole multiple of 50 and used to adopt 50 fps.
+    CHECK_FALSE(standardFrameDurationFor(1000.0).has_value());
+    CHECK_FALSE(standardFrameDurationFor(90000.0).has_value());
+    CHECK_FALSE(standardFrameDurationFor(241.0).has_value());
+    const auto fastest = standardFrameDurationFor(240.0);
+    REQUIRE(fastest.has_value());
+    CHECK(identical(*fastest, CMTimeMake(1, 60)));
+    const Fixture fx;
+    SequenceFormat unconfigured = fx.sequence().format();
+    unconfigured.configured = false;
+    MediaAsset mkv = *fx.project.findAsset(fx.video60);
+    mkv.frameDuration = CMTimeMake(1, 1000);
+    mkv.isVFR = true;
+    const auto adopted = formatAdoptedFrom(mkv, unconfigured);
+    REQUIRE(adopted.has_value());
+    CHECK(identical(adopted->frameDuration, unconfigured.frameDuration)); // no usable rate: the sequence's own
+    CHECK(adopted->width == 1280);
+    CHECK(adopted->configured);
+}
+
 TEST_CASE("SequenceFormat: what a sequence adopts from its first video clip's asset") {
     const Fixture fx;
     const SequenceFormat current = fx.sequence().format();

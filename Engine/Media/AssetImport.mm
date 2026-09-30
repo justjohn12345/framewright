@@ -1,5 +1,8 @@
 #include "AssetImport.h"
 
+#include "../Model/Sequence.h"
+
+#include <algorithm>
 #include <cmath>
 
 namespace ve::media {
@@ -84,6 +87,15 @@ Result<MediaAsset> makeMediaAsset(const RoutedMediaInfo &routed, AssetId id, con
                                  " has no frame duration");
         }
         asset.frameDuration = video->frameDuration;
+        // A shortest frame interval faster than kMaxFramesPerSecond is the container's time base, not the
+        // picture's rate (Matroska and WebM tick in milliseconds: two frames a tick apart read as 1000 fps).
+        // The track's nominal (average) rate stands in for it, when that is a picture rate; 120000 is a
+        // multiple of every standard rate's frame duration (1001/24000 ... 1/60), so those stay exact.
+        const double fastest = 1.0 / CMTimeGetSeconds(video->frameDuration);
+        if (fastest > kMaxFramesPerSecond * 1.0005 && video->nominalFps > 0 &&
+            video->nominalFps <= kMaxFramesPerSecond * 1.0005) {
+            asset.frameDuration = CMTimeMake(std::max<int64_t>(1, std::llround(120000.0 / video->nominalFps)), 120000);
+        }
         asset.isVFR = video->isVFR;
     }
     if (audio != nullptr) {
