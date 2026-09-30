@@ -34,9 +34,14 @@
 #include <utility>
 #include <vector>
 
+/// Marks a function shared by the facade's files as private to the framework: visible to the other
+/// facade files, not exported from FramewrightEngine (the helpers below were file-local before the
+/// facade was split and must not become framework API).
+#define VE_FACADE_HIDDEN __attribute__((visibility("hidden")))
+
 NS_ASSUME_NONNULL_BEGIN
 /// Raises NSInternalInconsistencyException: a VEEngine method was called off the main thread.
-[[noreturn]] void veMainThreadViolation(const char *function);
+[[noreturn]] VE_FACADE_HIDDEN void veMainThreadViolation(const char *function);
 NS_ASSUME_NONNULL_END
 
 /// Engine model calls are confined to the main thread. Active in every build configuration: a
@@ -69,11 +74,12 @@ NS_ASSUME_NONNULL_BEGIN
 // Helpers several files use; each is defined in the file named after it.
 
 /// An NSError of VEEngineErrorDomain with `message` as its description (VEEngine.mm).
-NSError *makeError(VEEngineErrorCode code, NSString *message);
+VE_FACADE_HIDDEN NSError *makeError(VEEngineErrorCode code, NSString *message);
 /// The facade's result for an engine edit result: makeEditResult without a span (VEEngine.mm).
-VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created = @[], NSString *_Nullable note = nil);
+VE_FACADE_HIDDEN VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created = @[],
+                                    NSString *_Nullable note = nil);
 /// Model ids as NSNumbers (int64), in order.
-template <class IdType> NSArray<NSNumber *> *toNumbers(const std::vector<IdType> &ids) {
+template <class IdType> VE_FACADE_HIDDEN NSArray<NSNumber *> *toNumbers(const std::vector<IdType> &ids) {
     NSMutableArray<NSNumber *> *numbers = [NSMutableArray arrayWithCapacity:ids.size()];
     for (const IdType &id : ids) {
         [numbers addObject:@(static_cast<int64_t>(id.value()))];
@@ -81,25 +87,25 @@ template <class IdType> NSArray<NSNumber *> *toNumbers(const std::vector<IdType>
     return numbers;
 }
 /// The model id a facade id names (0 is the invalid id in both).
-inline ClipId toClipId(VEClipID id) {
+VE_FACADE_HIDDEN inline ClipId toClipId(VEClipID id) {
     return ClipId(static_cast<ClipId::ValueType>(id));
 }
-inline TrackId toTrackId(VETrackID id) {
+VE_FACADE_HIDDEN inline TrackId toTrackId(VETrackID id) {
     return TrackId(static_cast<TrackId::ValueType>(id));
 }
 /// Span ids; transition ids (VETransitionID) are span ids too.
-inline SpanId toSpanId(VESpanID id) {
+VE_FACADE_HIDDEN inline SpanId toSpanId(VESpanID id) {
     return SpanId(static_cast<SpanId::ValueType>(id));
 }
-inline AssetId toAssetId(VEAssetID id) {
+VE_FACADE_HIDDEN inline AssetId toAssetId(VEAssetID id) {
     return AssetId(static_cast<AssetId::ValueType>(id));
 }
 /// `value` clamped into the range of int (lanes, frame steps from Swift's Int).
-inline int clampToInt(NSInteger value) {
+VE_FACADE_HIDDEN inline int clampToInt(NSInteger value) {
     return static_cast<int>(std::clamp<NSInteger>(value, INT_MIN, INT_MAX));
 }
 /// Whether a playback controller in `state` is playing or pre-rolling (VEEngine+Playback.mm).
-bool isRunning(playback::PlaybackState state);
+VE_FACADE_HIDDEN bool isRunning(playback::PlaybackState state);
 
 NS_ASSUME_NONNULL_END
 
