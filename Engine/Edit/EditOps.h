@@ -943,6 +943,11 @@ struct SequenceConformReport {
     // move of an edge.
     std::size_t clipsRetimed = 0;
     CMTime largestShift = kCMTimeZero;
+    // Clips moved with their media (their in point kept) to keep touching the clip before them at a cut
+    // neither side has media to spare for (see SetSequenceFormat), with the clips linked to them, and the
+    // largest such move.
+    std::size_t clipsMoved = 0;
+    CMTime largestMove = kCMTimeZero;
     // Transitions (lane-0 spans) that kept their frame counts on each side of their edge (their
     // length in seconds follows the frame rate), shortened to fit, or removed because not one frame
     // of them fits; with a sentence each for those that changed.
@@ -959,9 +964,15 @@ struct SequenceConformReport {
 //   frame (SequenceConformReport::placementScale), Motion spans' X/Y values with them; a clip's
 //   static scale keeps its picture's size within the fitted old frame. Scale, rotation and opacity
 //   spans are factors and offsets in degrees: unchanged.
-// - Frame rate (1 to 240 fps): each clip's start and end move to the nearest frame
-//   of the new grid (touching clips stay touching), inward where the media ends there; a clip shorter
-//   than a new frame keeps one frame. Its media in point moves with its start. Effect spans stay on
+// - Frame rate (1 to 240 fps): each clip's start and end move to a frame of the new grid, the nearest
+//   one where the media allows it, else the one on the other side. A cut (a clip's end touching the
+//   next clip's start) moves as one: touching clips stay touching, and linked clips whose edges were
+//   aligned stay aligned. At a cut neither clip has media to spare for (the clip before it ends on its
+//   media's end, the clip after it starts on its media's start) the cut goes to the frame before it and
+//   the clips starting there move to it with their media (their in point kept; their linked clips move
+//   with them, so picture and sound stay in sync) rather than losing their first picture; the report
+//   counts them (clipsMoved). A clip shorter than a new frame keeps one frame. A trimmed start moves
+//   the media in point with it. Effect spans stay on
 //   their pictures (source time: their times do not change; a clip that got shorter clips them as a
 //   trim does). Transitions keep their frame counts on each side of their cut or edge; one the clips'
 //   lengths or media no longer allow is shortened to the most that fits, and removed when no frame
@@ -970,7 +981,8 @@ struct SequenceConformReport {
 // The sequence is configured afterwards. One undo step; allowed on locked tracks (the conform keeps
 // their pictures and timing; refusing would leave no way to change the settings). Refused
 // (InvalidArgument) for settings out of range, and when a clip could not be conformed (a clip
-// shorter than a frame with no room or media for one, a media time with no exact form).
+// shorter than a frame with no room or media for one, a clip that would have to move against the clip
+// it is linked to, a media time with no exact form).
 class SetSequenceFormat final : public SequenceCommand {
   public:
     SetSequenceFormat(SequenceId sequenceId, SequenceFormat format, std::string name = "Sequence Settings");

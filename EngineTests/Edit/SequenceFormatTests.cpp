@@ -7,6 +7,7 @@
 
 #include "../../Engine/Edit/EditOps.h"
 #include "../../Engine/Edit/UndoStack.h"
+#include "../../Engine/Facade/VEFacadeCommands+Internal.h"
 #include "../../Engine/Render/Scheduler.h"
 #include "EditTestSupport.h"
 
@@ -40,6 +41,31 @@ SequenceFormat formatWith(const Sequence &sequence, std::int32_t width, std::int
 
 CMTime f25(std::int64_t frames) {
     return CMTimeMake(frames, 25);
+}
+
+// A movie asset of `frames` frames at 30 fps (video only; with `audioExtraFrames` its sound, and so an
+// audio clip of it, runs that many frames past the video), for clips that use the whole media.
+AssetId addWholeMedia(Fixture &fx, const std::string &name, std::int64_t frames, std::int64_t audioExtraFrames = -1) {
+    MediaAsset asset = *fx.project.findAsset(fx.video60);
+    asset.name = name;
+    asset.url = "file:///media/" + name;
+    asset.frameDuration = CMTimeMake(1, 30);
+    asset.duration = f30(frames);
+    if (audioExtraFrames >= 0) {
+        asset.kind = AssetKind::AudioVideo;
+        asset.videoDuration = f30(frames);
+        asset.duration = f30(frames + audioExtraFrames);
+        asset.audioSampleRate = 48000;
+        asset.audioChannels = 2;
+    }
+    return fx.project.addAsset(asset);
+}
+
+// Whether every clip of every track ends where the next one on its track starts, where they touched.
+bool clipsTouch(const Sequence &sequence, const std::vector<std::pair<ClipId, ClipId>> &cuts) {
+    return std::all_of(cuts.begin(), cuts.end(), [&](const auto &cut) {
+        return sequence.findClip(cut.first)->timelineEnd() == sequence.findClip(cut.second)->timelineStart;
+    });
 }
 
 } // namespace
@@ -383,11 +409,11 @@ TEST_CASE("SetSequenceFormat: transitions that no longer fit are shortened or re
                                         "frames"));
 }
 
-TEST_CASE("SetSequenceFormat: an end on the media's end rounds inward; its fade keeps its frames") {
+TEST_CASE("SetSequenceFormat: an end on the media's end takes the cut to the frame before; its fade keeps its frames") {
     Fixture fx;
-    // A [0, 45) ends exactly where its media ends (1.5 s). At 25 fps its end would round up to 38/25 =
-    // 1.52 s, past the media: it goes down to 37/25 instead, while B's start rounds up to 38/25, which
-    // leaves a one-frame gap. A's 6-frame fade out keeps its 6 frames.
+    // A [0, 45) ends exactly where its media ends (1.5 s). At 25 fps the cut (37.5 frames) would round up to
+    // 38/25 = 1.52 s, past A's media: the cut goes down to 37/25 instead, for B too (B has media before its in
+    // point), so the clips still touch (no black frame between them). A's 6-frame fade out keeps its 6 frames.
     MediaAsset shortMedia = *fx.project.findAsset(fx.video60);
     shortMedia.name = "ends.mov";
     shortMedia.duration = CMTimeMake(45, 30);
@@ -395,16 +421,227 @@ TEST_CASE("SetSequenceFormat: an end on the media's end rounds inward; its fade 
     const AssetId shortId = fx.project.addAsset(shortMedia);
     const ClipId a = fx.addClip(fx.v1, shortId, 0, 45, 0);
     const ClipId b = fx.addClip(fx.v1, fx.av30, 45, 45, 300);
+    const Clip bBefore = fx.clip(b);
     const SpanId fade = fx.addFade(a, ClipEdge::Tail, f30(6));
     fx.requireValid();
     SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 25)));
     applyReversible(fx.project, command);
     INFO(joined(command.report().sentences));
     CHECK(fx.clip(a).timelineEnd() == f25(37));
-    CHECK(fx.clip(b).timelineStart == f25(38));
+    CHECK(fx.clip(b).timelineStart == f25(37));
+    CHECK(fx.clip(b).sourceIn == bBefore.sourceIn + (f25(37) - f30(45))); // a trim: B's head shows 0.02 s more
+    CHECK(command.report().clipsMoved == 0);
     REQUIRE(fx.span(fade) != nullptr);
     CHECK(identical(fx.span(fade)->start, -f25(6)));
     CHECK(command.report().transitionsKept == 1);
+}
+
+TEST_CASE("SetSequenceFormat: a start on the media's start takes the cut to the frame after") {
+    Fixture fx;
+    // A [0, 46) has media after its out point; B [46, 91) starts on its media's start. At 25 fps the cut
+    // (46/30 s = 38.33 frames) rounds down to 38/25 s, before B's media: the cut goes up to 39/25 s for
+    // both (A shows 0.027 s more of its media), and B's end on its media's end rounds inward (75.83 -> 75).
+    const AssetId whole = addWholeMedia(fx, "starts.mov", 45);
+    const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 46, 0);
+    const ClipId b = fx.addClip(fx.v1, whole, 46, 45, 0);
+    fx.requireValid();
+    SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 25)));
+    applyReversible(fx.project, command);
+    INFO(joined(command.report().sentences));
+    CHECK(fx.clip(a).timelineEnd() == f25(39));
+    CHECK(fx.clip(b).timelineStart == f25(39));
+    CHECK(fx.clip(b).sourceIn == f25(39) - f30(46)); // B's head is trimmed by 0.027 s
+    CHECK(fx.clip(b).timelineEnd() == f25(75));
+    CHECK(command.report().clipsMoved == 0);
+}
+
+TEST_CASE("SetSequenceFormat: whole clips back to back stay touching; the later ones move with their media") {
+    // Clips that each use their whole media (each ends on its media's end and starts on its media's start):
+    // no cut between them can move to either neighbouring frame by a trim. The cut goes to the frame before it
+    // and the next clip moves there with its media (its in point stays 0), so there is no black frame between
+    // them; each clip then shows the whole frames its media fills.
+    SUBCASE("the cut would round up") {
+        Fixture fx;
+        // Three clips of 45 frames at 30 fps (1.5 s = 37.5 frames at 25 fps): each keeps 37 frames.
+        const ClipId a = fx.addClip(fx.v1, addWholeMedia(fx, "a.mov", 45), 0, 45, 0);
+        const ClipId b = fx.addClip(fx.v1, addWholeMedia(fx, "b.mov", 45), 45, 45, 0);
+        const ClipId c = fx.addClip(fx.v1, addWholeMedia(fx, "c.mov", 45), 90, 45, 0);
+        fx.requireValid();
+        SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 25)));
+        applyReversible(fx.project, command);
+        const SequenceConformReport &report = command.report();
+        INFO(joined(report.sentences));
+        CHECK(fx.clip(a).timelineStart == f25(0));
+        CHECK(fx.clip(a).timelineEnd() == f25(37));
+        CHECK(fx.clip(b).timelineStart == f25(37));
+        CHECK(fx.clip(b).timelineEnd() == f25(74));
+        CHECK(fx.clip(c).timelineStart == f25(74));
+        CHECK(fx.clip(c).timelineEnd() == f25(111));
+        for (const ClipId id : {a, b, c}) {
+            CHECK(fx.clip(id).sourceIn == kCMTimeZero); // every clip still starts on its first picture
+        }
+        CHECK(report.clipsMoved == 2);
+        CHECK(report.largestMove == CMTimeMake(1, 25)); // C: 3 s -> 74/25 s
+        CHECK(anyContains(report.sentences, "2 clips move earlier with their media, by at most 0.04 s, to keep "
+                                            "touching the clip before: neither side of the cut has media to spare."));
+    }
+    SUBCASE("the cut would round down") {
+        Fixture fx;
+        // A has 46 frames (38.33 at 25 fps), B 45: the cut at 46/30 s rounds down to 38/25 s, before B's media.
+        const ClipId a = fx.addClip(fx.v1, addWholeMedia(fx, "a.mov", 46), 0, 46, 0);
+        const ClipId b = fx.addClip(fx.v1, addWholeMedia(fx, "b.mov", 45), 46, 45, 0);
+        fx.requireValid();
+        SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 25)));
+        applyReversible(fx.project, command);
+        const SequenceConformReport &report = command.report();
+        INFO(joined(report.sentences));
+        CHECK(fx.clip(a).timelineEnd() == f25(38));
+        CHECK(fx.clip(b).timelineStart == f25(38));
+        CHECK(fx.clip(b).sourceIn == kCMTimeZero);
+        // B moved 1/75 s earlier (46/30 -> 38/25 s); its end, on its media's end at 3.02 s now, is 75/25 s.
+        CHECK(fx.clip(b).timelineEnd() == f25(75));
+        CHECK(report.clipsMoved == 1);
+        CHECK(report.largestMove == CMTimeMake(1, 75));
+    }
+}
+
+TEST_CASE("SetSequenceFormat: linked picture and sound of whole clips stay touching, aligned and in sync") {
+    Fixture fx;
+    // Two linked pairs from media whose sound runs 3 frames past the picture (as in most camera files): the
+    // picture of each clip ends on its video's end and starts on its media's start, the sound has media to
+    // spare. The cut (1.5 s = 37.5 frames at 25 fps) goes to 37 on both tracks, and B's picture and sound move
+    // there together, so B's sound plays against its own picture.
+    const AssetId first = addWholeMedia(fx, "first.mov", 45, 3);
+    const AssetId second = addWholeMedia(fx, "second.mov", 45, 3);
+    const ClipId av = fx.addClip(fx.v1, first, 0, 45, 0);
+    const ClipId aa = fx.addClip(fx.a1, first, 0, 45, 0);
+    fx.link(av, aa);
+    const ClipId bv = fx.addClip(fx.v1, second, 45, 45, 0);
+    const ClipId ba = fx.addClip(fx.a1, second, 45, 45, 0);
+    fx.link(bv, ba);
+    fx.requireValid();
+    SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 25)));
+    applyReversible(fx.project, command);
+    const SequenceConformReport &report = command.report();
+    INFO(joined(report.sentences));
+    CHECK(clipsTouch(fx.sequence(), {{av, bv}, {aa, ba}}));
+    for (const ClipId id : {av, aa}) {
+        CHECK(fx.clip(id).timelineEnd() == f25(37));
+    }
+    for (const ClipId id : {bv, ba}) {
+        CHECK(fx.clip(id).timelineStart == f25(37));
+        CHECK(fx.clip(id).timelineEnd() == f25(74));
+        CHECK(fx.clip(id).sourceIn == kCMTimeZero);
+    }
+    CHECK(report.clipsMoved == 2); // B's picture and its sound
+}
+
+TEST_CASE("SetSequenceFormat: a clip linked to a moved clip moves with it and conforms from there") {
+    Fixture fx;
+    // B's picture moves 0.02 s earlier with its media to keep touching A (both whole at the cut). B's sound
+    // starts later than the picture (at 2 s, in sync: its in point 0.5 s) and runs past it to 4 s; it moves
+    // with the picture, so its start and end (both on the 25 fps grid before the move) are conformed from
+    // 1.98 s and 3.98 s: back to 2 s and 4 s by a trim, still in sync with the picture.
+    fx.addClip(fx.v1, addWholeMedia(fx, "a.mov", 45), 0, 45, 0);
+    const AssetId bMedia = addWholeMedia(fx, "b.mov", 45, 45);
+    const ClipId bv = fx.addClip(fx.v1, bMedia, 45, 45, 0);
+    const ClipId ba = fx.addClip(fx.a1, bMedia, 60, 60, 15);
+    fx.link(bv, ba);
+    fx.requireValid();
+    SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 25)));
+    applyReversible(fx.project, command);
+    INFO(joined(command.report().sentences));
+    CHECK(fx.clip(bv).timelineStart == f25(37));
+    CHECK(fx.clip(bv).sourceIn == kCMTimeZero);
+    CHECK(fx.clip(ba).timelineStart == f25(50));
+    CHECK(fx.clip(ba).timelineEnd() == f25(100));
+    CHECK(fx.clip(ba).sourceIn == CMTimeMake(13, 25)); // 0.5 s + the 0.02 s move
+    for (const CMTime t : {f25(50), f25(60), f25(70)}) {
+        const auto picture = fx.clip(bv).exactSourceTimeAt(t);
+        const auto sound = fx.clip(ba).exactSourceTimeAt(t);
+        REQUIRE((picture && sound));
+        CHECK(*picture == *sound);
+    }
+    CHECK(command.report().clipsMoved == 2);
+}
+
+TEST_CASE("SetSequenceFormat: a cross dissolve at a cut that moves keeps its partner and its frames") {
+    Fixture fx;
+    // A [0, 46) has media after its out point, B [46, 91) starts on its media's start: a dissolve at their cut
+    // lies wholly after it (no media before B's in point), 5 frames. At 25 fps the cut goes to 39/25 s for both
+    // clips (see "a start on the media's start"), and the dissolve stays a cross dissolve between A and B.
+    const AssetId whole = addWholeMedia(fx, "starts.mov", 45);
+    const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 46, 0);
+    const ClipId b = fx.addClip(fx.v1, whole, 46, 45, 0);
+    const SpanId dissolve = fx.addTailTransition(a, 0, 5);
+    fx.requireValid();
+    SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 25)));
+    applyReversible(fx.project, command);
+    const SequenceConformReport &report = command.report();
+    INFO(joined(report.sentences));
+    const auto placed = findTransition(fx.sequence(), dissolve);
+    REQUIRE(placed.has_value());
+    CHECK(placed->role == TransitionRole::CrossDissolve);
+    REQUIRE(placed->partner != nullptr);
+    CHECK(placed->partner->id == b);
+    CHECK(placed->range.start == f25(39));
+    CHECK(placed->range.end == f25(44));
+    CHECK(report.transitionsKept == 1);
+    CHECK(report.transitionsRemoved.empty());
+    CHECK(report.transitionsShortened.empty());
+}
+
+TEST_CASE("SetSequenceFormat: adopting a first clip's rate keeps the sound already on the sequence touching") {
+    Fixture fx;
+    // The placement that sets an unconfigured sequence runs the settings change first (the facade's
+    // composite): two whole sound files back to back on A1 conform like any clips.
+    fx.sequence().configured = false;
+    MediaAsset sound = *fx.project.findAsset(fx.audioOnly);
+    sound.duration = f30(45);
+    sound.name = "one.m4a";
+    const AssetId one = fx.project.addAsset(sound);
+    sound.name = "two.m4a";
+    const AssetId two = fx.project.addAsset(sound);
+    const ClipId first = fx.addClip(fx.a1, one, 0, 45, 0);
+    const ClipId second = fx.addClip(fx.a1, two, 45, 45, 0);
+    fx.requireValid();
+    SequenceFormat adopted = formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 25));
+    std::vector<std::unique_ptr<Command>> children;
+    auto settings = std::make_unique<SetSequenceFormat>(fx.seq, adopted, "Overwrite");
+    const SetSequenceFormat *conform = settings.get();
+    children.push_back(std::move(settings));
+    children.push_back(std::make_unique<OverwriteClip>(
+        fx.seq, f25(100), std::vector<ClipPlacement>{place(fx.v1, fx.video60, 0, 60)}, false));
+    ve::facade::CompositeCommand composite("Overwrite", std::move(children));
+    applyReversible(fx.project, composite);
+    INFO(joined(conform->report().sentences));
+    CHECK(fx.sequence().configured);
+    CHECK(fx.clip(first).timelineEnd() == f25(37));
+    CHECK(fx.clip(second).timelineStart == f25(37));
+    CHECK(fx.clip(second).sourceIn == kCMTimeZero);
+    CHECK(conform->report().clipsMoved == 1);
+}
+
+TEST_CASE("SetSequenceFormat: a clip that would have to move against its linked clip is refused") {
+    Fixture fx;
+    // B's picture starts on its media's start against A, which ends on its media's end: the cut can only
+    // stay by moving B earlier with its media. B's sound, linked to it, was slipped to start 5 frames before
+    // the picture (so it no longer plays in sync) and was conformed first: moving B's picture alone would move
+    // it against its sound. Refused with the reason; nothing changes.
+    fx.addClip(fx.v1, addWholeMedia(fx, "a.mov", 45), 0, 45, 0);
+    const AssetId bMedia = addWholeMedia(fx, "b.mov", 45, 10);
+    const ClipId bv = fx.addClip(fx.v1, bMedia, 45, 45, 0);
+    const ClipId ba = fx.addClip(fx.a1, bMedia, 40, 50, 0);
+    fx.link(bv, ba);
+    fx.requireValid();
+    const Project before = fx.project;
+    SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 25)));
+    const EditResult result = command.apply(fx.project);
+    CHECK(result.error == EditError::OutOfSourceRange);
+    CHECK(result.message == "“b.mov” cannot stay against the clip before it at 25 fps: it has no media before its "
+                            "in point and moving it would put it out of sync with the clip it is linked to; unlink "
+                            "them or trim it first.");
+    CHECK(fx.project == before);
 }
 
 TEST_CASE("SetSequenceFormat: a cross dissolve with not one frame left is removed with a sentence") {
@@ -458,15 +695,51 @@ TEST_CASE("SetSequenceFormat: a clip shorter than a frame keeps one, or the chan
         CHECK(kept.timelineStart == CMTimeMake(24, 24));
         CHECK(kept.timelineDuration == CMTimeMake(1, 24));
     }
-    // With a clip right after it there is no room for that frame: refused, nothing changes.
-    add60(fx.v2, fx.still, 61, 60);
+    // With a still right after it, touching it, the cut moves to the frame after the flash (the next still
+    // gives up the sliver): both keep touching.
+    const ClipId next = add60(fx.v2, fx.still, 61, 60);
+    fx.requireValid();
+    {
+        Project copy = fx.project;
+        SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 24)));
+        REQUIRE(command.apply(copy).ok());
+        const Sequence &conformed = *copy.findSequence(fx.seq);
+        CHECK(conformed.findClip(flash)->timelineStart == CMTimeMake(24, 24));
+        CHECK(conformed.findClip(flash)->timelineEnd() == CMTimeMake(25, 24));
+        CHECK(conformed.findClip(next)->timelineStart == CMTimeMake(25, 24));
+        CHECK(conformed.findClip(next)->timelineEnd() == CMTimeMake(48, 24)); // 121/60 s is 48.4 frames
+    }
+    // One frame of a movie at the very end of its media (nothing after it to extend into): refused, nothing
+    // changes.
+    const ClipId last = add60(fx.v1, fx.video60, 60, 1);
+    fx.sequence().findClip(last)->sourceIn = CMTimeMake(599, 60);
     fx.requireValid();
     const Project before = fx.project;
     SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 24)));
     const EditResult result = command.apply(fx.project);
-    CHECK(result.error == EditError::Overlap);
-    CHECK(result.message.find("“title.png” is shorter than a frame at 24 fps") != std::string::npos);
+    CHECK(result.error == EditError::OutOfSourceRange);
+    CHECK(result.message == "“video60.mkv” is shorter than a frame at 24 fps and has no media to fill one; trim or "
+                            "remove it first.");
     CHECK(fx.project == before);
+}
+
+TEST_CASE("SetSequenceFormat: a one-frame clip whose start moves up keeps a frame after it") {
+    Fixture fx;
+    // One frame at 60 fps from the start of its media, at 61/60 s: at 24 fps its start cannot round down to
+    // 24/24 s (before its media) and goes up to 25/24 s; its end (62/60 s, 24.8 frames) rounds to the same
+    // frame, so it ends one frame later, 26/24 s, where its media still reaches.
+    fx.sequence().frameDuration = CMTimeMake(1, 60);
+    const ClipId flash = fx.addClip(fx.v1, fx.video60, 0, 1);
+    Clip &c = *fx.sequence().findClip(flash);
+    c.timelineStart = CMTimeMake(61, 60);
+    c.timelineDuration = CMTimeMake(1, 60);
+    c.sourceIn = kCMTimeZero;
+    fx.requireValid();
+    SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 24)));
+    applyReversible(fx.project, command);
+    CHECK(fx.clip(flash).timelineStart == CMTimeMake(25, 24));
+    CHECK(fx.clip(flash).timelineEnd() == CMTimeMake(26, 24));
+    CHECK(fx.clip(flash).sourceIn == CMTimeMake(25, 24) - CMTimeMake(61, 60));
 }
 
 TEST_CASE("SetSequenceFormat: locked tracks are conformed too; unchanged settings change nothing") {

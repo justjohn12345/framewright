@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -2644,6 +2645,389 @@ void setTransitionFrames(EffectSpan &span, TransitionFrames frames, CMTime frame
     }
 }
 
+// ----- The frame-rate conform of clip edges -----
+//
+// Every clip edge moves to the new frame grid. Edges that must stay together are conformed together, as
+// one "edge group" that gets one new time: a clip's end and the start of the clip touching it on its
+// track (a cut), and the same edges of linked clips that were at the same time (a linked pair stays
+// aligned). A group takes the nearest grid time if every clip allows it (an end needs media up to it, a
+// start media from it, each clip keeps a frame, a start stays at or after the end of the clip before it),
+// else the grid time on the other side of the old time. When neither works at a cut (the clip before it
+// ends on its media's end and the clip after it starts on its media's start: two whole clips), the cut
+// goes to the latest grid time the ends allow and the clips starting there move to it with their media
+// (their in point is kept) instead of losing their first picture to a trim; a clip keeps the move of
+// the clips it is linked to, so linked picture and sound stay in sync, and a later edge of a moved clip
+// is conformed from its moved time. Groups are handled in time order, so a clip's start is decided
+// before its end.
+struct ConformedClip {
+    Clip *clip = nullptr;
+    const Track *track = nullptr;
+    std::size_t indexOnTrack = 0;
+    CMTime mediaEnd = kCMTimeInvalid; // not numeric for a still (no media bounds)
+    std::size_t component = 0;        // linked clips share one
+    std::optional<CMTime> newStart;
+    std::optional<CMTime> newEnd;
+};
+
+class EdgeConform {
+  public:
+    EdgeConform(const Project &project, Sequence &sequence, CMTime newFrameDuration)
+        : project_(project), fd_(newFrameDuration) {
+        std::unordered_map<ClipId, std::size_t> indexOf;
+        for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+            for (Track &track : *list) {
+                for (std::size_t i = 0; i < track.clips.size(); ++i) {
+                    Clip &clip = track.clips[i];
+                    ConformedClip c;
+                    c.clip = &clip;
+                    c.track = &track;
+                    c.indexOnTrack = i;
+                    const MediaAsset *asset = project.findAsset(clip.assetId);
+                    if (asset != nullptr && !clip.isStill) {
+                        c.mediaEnd = mediaEndFor(*asset, track.kind);
+                    }
+                    c.component = clips_.size();
+                    indexOf[clip.id] = clips_.size();
+                    clips_.push_back(c);
+                }
+            }
+        }
+        for (ConformedClip &c : clips_) {
+            if (c.clip->linkedClipId) {
+                if (auto it = indexOf.find(*c.clip->linkedClipId); it != indexOf.end()) {
+                    c.component = std::min(c.component, clips_[it->second].component);
+                    clips_[it->second].component = c.component;
+                }
+            }
+        }
+        shift_.assign(clips_.size(), std::nullopt);
+        // Edge groups: edge 2i is clip i's start, 2i + 1 its end.
+        parent_.resize(clips_.size() * 2);
+        for (std::size_t e = 0; e < parent_.size(); ++e) {
+            parent_[e] = e;
+        }
+        std::size_t first = 0;
+        for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+            for (Track &track : *list) {
+                for (std::size_t i = 0; i + 1 < track.clips.size(); ++i) {
+                    if (track.clips[i].timelineEnd() == track.clips[i + 1].timelineStart) {
+                        unite(2 * (first + i) + 1, 2 * (first + i + 1));
+                    }
+                }
+                first += track.clips.size();
+            }
+        }
+        for (std::size_t i = 0; i < clips_.size(); ++i) {
+            const Clip &clip = *clips_[i].clip;
+            if (!clip.linkedClipId) {
+                continue;
+            }
+            const auto it = indexOf.find(*clip.linkedClipId);
+            if (it == indexOf.end()) {
+                continue;
+            }
+            const Clip &partner = *clips_[it->second].clip;
+            if (clip.timelineStart == partner.timelineStart) {
+                unite(2 * i, 2 * it->second);
+            }
+            if (clip.timelineEnd() == partner.timelineEnd()) {
+                unite(2 * i + 1, 2 * it->second + 1);
+            }
+        }
+    }
+
+    // Decides every edge's new time (and the clips that move with their media), then retimes the clips.
+    EditResult run(SequenceConformReport &report) {
+        std::map<std::size_t, std::vector<std::size_t>> groups; // root edge -> its edges
+        for (std::size_t e = 0; e < parent_.size(); ++e) {
+            groups[find(e)].push_back(e);
+        }
+        std::vector<std::vector<std::size_t>> ordered;
+        ordered.reserve(groups.size());
+        for (auto &[root, edges] : groups) {
+            ordered.push_back(std::move(edges));
+        }
+        std::sort(ordered.begin(), ordered.end(), [&](const auto &a, const auto &b) {
+            const CMTime ta = edgeTime(a.front());
+            const CMTime tb = edgeTime(b.front());
+            return ta < tb || (ta == tb && a.front() < b.front());
+        });
+        for (const std::vector<std::size_t> &group : ordered) {
+            if (EditResult r = decide(group); !r) {
+                return r;
+            }
+        }
+        return apply(report);
+    }
+
+  private:
+    std::size_t find(std::size_t e) {
+        while (parent_[e] != e) {
+            parent_[e] = parent_[parent_[e]];
+            e = parent_[e];
+        }
+        return e;
+    }
+    void unite(std::size_t a, std::size_t b) {
+        a = find(a);
+        b = find(b);
+        if (a != b) {
+            parent_[std::max(a, b)] = std::min(a, b);
+        }
+    }
+    static bool isHead(std::size_t edge) {
+        return edge % 2 == 0;
+    }
+    CMTime edgeTime(std::size_t edge) const {
+        const Clip &clip = *clips_[edge / 2].clip;
+        return isHead(edge) ? clip.timelineStart : clip.timelineEnd();
+    }
+    // The move of clip `i` with its media: decided, or none yet.
+    CMTime shiftOf(std::size_t i) const {
+        return shift_[clips_[i].component].value_or(kCMTimeZero);
+    }
+    bool shiftDecided(std::size_t i) const {
+        return shift_[clips_[i].component].has_value();
+    }
+    std::string name(std::size_t i) const {
+        return quotedMediaName(project_, *clips_[i].clip);
+    }
+
+    // Whether clip `i` (moved by its shift) has media up to `p` for its end, and keeps a frame.
+    bool endAllows(std::size_t i, CMTime p) const {
+        const ConformedClip &c = clips_[i];
+        if (!(*c.newStart < p)) {
+            return false;
+        }
+        if (!isNumeric(c.mediaEnd)) {
+            return true;
+        }
+        const auto source = c.clip->exactSourceTimeAt(p - shiftOf(i));
+        return source && source->compare(c.mediaEnd) <= 0;
+    }
+    // Whether clip `i` (moved by its shift) has media from `p` for its start.
+    bool mediaFrom(std::size_t i, CMTime p) const {
+        const ConformedClip &c = clips_[i];
+        if (!isNumeric(c.mediaEnd)) {
+            return true;
+        }
+        const auto source = c.clip->exactSourceTimeAt(p - shiftOf(i));
+        return source && source->compare(kCMTimeZero) >= 0;
+    }
+    // The clip before clip `i` on its track, when its end is not in `group` (it does not touch).
+    std::optional<std::size_t> separatePrevious(std::size_t i, const std::vector<std::size_t> &group) const {
+        const ConformedClip &c = clips_[i];
+        if (c.indexOnTrack == 0) {
+            return std::nullopt;
+        }
+        const std::size_t previous = i - 1; // the same track's clips are consecutive in clips_
+        const std::size_t previousEnd = 2 * previous + 1;
+        if (std::find(group.begin(), group.end(), previousEnd) != group.end()) {
+            return std::nullopt;
+        }
+        return previous;
+    }
+    bool startAllows(std::size_t i, CMTime p, const std::vector<std::size_t> &group) const {
+        if (!mediaFrom(i, p)) {
+            return false;
+        }
+        const auto previous = separatePrevious(i, group);
+        return !previous || *clips_[*previous].newEnd <= p;
+    }
+
+    EditResult decide(const std::vector<std::size_t> &group) {
+        std::vector<std::size_t> ends;
+        std::vector<std::size_t> starts;
+        for (std::size_t e : group) {
+            (isHead(e) ? starts : ends).push_back(e / 2);
+        }
+        const CMTime t = edgeTime(group.front());
+        // Where the group's clips are now: moved clips count from their moved time when they all moved alike.
+        CMTime reference = t;
+        {
+            std::optional<CMTime> common;
+            bool alike = true;
+            for (std::size_t e : group) {
+                const CMTime shift = shiftOf(e / 2);
+                if (common && !(*common == shift)) {
+                    alike = false;
+                }
+                common = shift;
+            }
+            if (alike && common) {
+                reference = t + *common;
+            }
+        }
+        auto allows = [&](CMTime p) {
+            return std::all_of(ends.begin(), ends.end(), [&](std::size_t i) { return endAllows(i, p); }) &&
+                   std::all_of(starts.begin(), starts.end(), [&](std::size_t i) { return startAllows(i, p, group); });
+        };
+        const CMTime nearest = snapToFrame(reference, fd_, SnapMode::Round);
+        std::vector<CMTime> candidates{nearest};
+        if (!(nearest == reference)) {
+            candidates.push_back(snapToFrame(reference, fd_, nearest < reference ? SnapMode::Ceil : SnapMode::Floor));
+        }
+        for (const CMTime p : candidates) {
+            if (allows(p)) {
+                settle(group, p, {});
+                return EditResult::success();
+            }
+        }
+        if (ends.empty()) {
+            // Starts only: later, as far as their media and the clips before them require (a trim).
+            CMTime p = snapToFrame(reference, fd_, SnapMode::Ceil);
+            for (std::size_t i : starts) {
+                const ConformedClip &c = clips_[i];
+                if (isNumeric(c.mediaEnd)) {
+                    const auto zeroAt = c.clip->exactTimelineTimeAt(kCMTimeZero);
+                    const auto shift = ExactTime::from(shiftOf(i));
+                    const auto from = zeroAt && shift ? zeroAt->plus(*shift) : std::nullopt;
+                    const auto frame = from ? from->frameIndex(fd_, SnapMode::Ceil) : std::nullopt;
+                    if (!frame) {
+                        return notRepresentable(i);
+                    }
+                    p = maxTime(p, timeForFrame(*frame, fd_));
+                }
+                if (const auto previous = separatePrevious(i, group)) {
+                    p = maxTime(p, *clips_[*previous].newEnd);
+                }
+            }
+            settle(group, p, {});
+            return EditResult::success();
+        }
+        // The latest grid time at or before the old one that every end's media reaches, unless a clip ending
+        // here needs a later one to keep a frame.
+        CMTime p = snapToFrame(minTime(reference, t), fd_, SnapMode::Floor);
+        CMTime keepsAFrame = *clips_[ends.front()].newStart + fd_;
+        for (std::size_t i : ends) {
+            keepsAFrame = maxTime(keepsAFrame, *clips_[i].newStart + fd_);
+        }
+        for (std::size_t i : ends) {
+            const ConformedClip &c = clips_[i];
+            if (!isNumeric(c.mediaEnd)) {
+                continue;
+            }
+            const auto endAt = c.clip->exactTimelineTimeAt(c.mediaEnd);
+            const auto shift = ExactTime::from(shiftOf(i));
+            const auto until = endAt && shift ? endAt->plus(*shift) : std::nullopt;
+            const auto frame = until ? until->frameIndex(fd_, SnapMode::Floor) : std::nullopt;
+            if (!frame) {
+                return notRepresentable(i);
+            }
+            p = minTime(p, timeForFrame(*frame, fd_));
+        }
+        p = maxTime(p, keepsAFrame);
+        for (std::size_t i : ends) {
+            if (!endAllows(i, p)) {
+                return EditResult::failure(EditError::OutOfSourceRange,
+                                           name(i) + " is shorter than a frame at " + frameRateName(fd_) +
+                                               " fps and has no media to fill one; trim or remove it first.");
+            }
+        }
+        // The starts that have no media from p move there with their media (with the clips linked to them).
+        std::vector<std::pair<std::size_t, CMTime>> moves;
+        for (std::size_t i : starts) {
+            if (const auto previous = separatePrevious(i, group); previous && p < *clips_[*previous].newEnd) {
+                return EditResult::failure(EditError::Overlap,
+                                           name(*previous) + " is shorter than a frame at " + frameRateName(fd_) +
+                                               " fps and the next clip leaves no room for one; trim or remove it "
+                                               "first.");
+            }
+            if (mediaFrom(i, p)) {
+                continue;
+            }
+            if (shiftDecided(i)) {
+                return EditResult::failure(
+                    EditError::OutOfSourceRange,
+                    name(i) + " cannot stay against the clip before it at " + frameRateName(fd_) +
+                        " fps: it has no media before its in point and moving it would put it out of sync with the "
+                        "clip it is linked to; unlink them or trim it first.");
+            }
+            moves.emplace_back(i, p - clips_[i].clip->timelineStart); // its in point then plays at p
+        }
+        settle(group, p, moves);
+        return EditResult::success();
+    }
+
+    // Records `p` as the new time of every edge of `group`, the moves of the clips in `moves` (for their
+    // linked clips too), and no move for the other clips starting there.
+    void settle(const std::vector<std::size_t> &group, CMTime p,
+                const std::vector<std::pair<std::size_t, CMTime>> &moves) {
+        for (const auto &[i, move] : moves) {
+            shift_[clips_[i].component] = move;
+        }
+        for (std::size_t e : group) {
+            ConformedClip &c = clips_[e / 2];
+            if (isHead(e)) {
+                c.newStart = p;
+                if (!shift_[c.component]) {
+                    shift_[c.component] = kCMTimeZero;
+                }
+            } else {
+                c.newEnd = p;
+            }
+        }
+    }
+
+    EditResult notRepresentable(std::size_t i) const {
+        return EditResult::failure(EditError::NotRepresentable,
+                                   "A media time of " + name(i) + " has no exact form at " + frameRateName(fd_) +
+                                       " fps.");
+    }
+
+    EditResult apply(SequenceConformReport &report) {
+        for (std::size_t i = 0; i < clips_.size(); ++i) {
+            ConformedClip &c = clips_[i];
+            Clip &clip = *c.clip;
+            const CMTime start = clip.timelineStart;
+            const CMTime end = clip.timelineEnd();
+            const CMTime newStart = *c.newStart;
+            const CMTime newEnd = *c.newEnd;
+            const CMTime shift = shiftOf(i);
+            if (!(shift == kCMTimeZero)) {
+                // Moves with its media: the in point, and the spans (source times; a still's are relative to
+                // its start), stay as they are.
+                clip.timelineStart = start + shift;
+                ++report.clipsMoved;
+                report.largestMove = maxTime(report.largestMove, shift < kCMTimeZero ? -shift : shift);
+            }
+            const CMTime movedStart = clip.timelineStart;
+            const CMTime movedEnd = clip.timelineEnd();
+            if (newStart == start && newEnd == end && shift == kCMTimeZero) {
+                continue;
+            }
+            RetimeResult retimed = RetimeResult::Ok;
+            if (newEnd > movedEnd) {
+                retimed = clip.setTimelineEnd(newEnd);
+                if (retimed == RetimeResult::Ok && !(newStart == movedStart)) {
+                    retimed = clip.setTimelineStartKeepingEnd(newStart);
+                }
+            } else {
+                if (!(newStart == movedStart)) {
+                    retimed = clip.setTimelineStartKeepingEnd(newStart);
+                }
+                if (retimed == RetimeResult::Ok && !(newEnd == movedEnd)) {
+                    retimed = clip.setTimelineEnd(newEnd);
+                }
+            }
+            if (retimed != RetimeResult::Ok) {
+                return retimeRefusal(retimed, clip.id, newStart);
+            }
+            ++report.clipsRetimed;
+            for (const CMTime change : {newStart - start, newEnd - end}) {
+                report.largestShift = maxTime(report.largestShift, change < kCMTimeZero ? -change : change);
+            }
+        }
+        return EditResult::success();
+    }
+
+    const Project &project_;
+    const CMTime fd_;
+    std::vector<ConformedClip> clips_;
+    std::vector<std::optional<CMTime>> shift_; // by component
+    std::vector<std::size_t> parent_;          // edge groups (union-find)
+};
+
 } // namespace
 
 SetSequenceFormat::SetSequenceFormat(SequenceId sequenceId, SequenceFormat format, std::string name)
@@ -2719,6 +3103,7 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
     const CMTime newFd = target.frameDuration;
     const bool rateChanged = !(fd == newFd);
     std::unordered_map<SpanId, TransitionFrames> wanted;
+    std::unordered_set<SpanId> dissolves; // cross dissolves (with a partner) before the conform
     bool hasEffectSpans = false;
     if (rateChanged) {
         for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
@@ -2738,78 +3123,17 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
                             frames.after = 1; // a fade shorter than half a frame keeps one
                         }
                         wanted[span.id] = frames;
+                        const auto placement = placeTransition(track, clip, span);
+                        if (placement && placement->role == TransitionRole::CrossDissolve &&
+                            placement->partner != nullptr) {
+                            dissolves.insert(span.id);
+                        }
                     }
                 }
             }
         }
-        for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
-            for (Track &track : *list) {
-                for (Clip &clip : track.clips) {
-                    const CMTime start = clip.timelineStart;
-                    const CMTime end = clip.timelineEnd();
-                    CMTime newStart = snapToFrame(start, newFd, SnapMode::Round);
-                    CMTime newEnd = snapToFrame(end, newFd, SnapMode::Round);
-                    const MediaAsset *asset = project.findAsset(clip.assetId);
-                    const CMTime mediaEnd = asset && !clip.isStill ? mediaEndFor(*asset, track.kind) : kCMTimeInvalid;
-                    auto beforeMedia = [&](CMTime t) {
-                        const auto source = clip.exactSourceTimeAt(t);
-                        return !source || source->compare(kCMTimeZero) < 0;
-                    };
-                    auto pastMedia = [&](CMTime t) {
-                        const auto source = clip.exactSourceTimeAt(t);
-                        return !source || source->compare(mediaEnd) > 0;
-                    };
-                    if (!clip.isStill) {
-                        if (beforeMedia(newStart)) {
-                            newStart = snapToFrame(start, newFd, SnapMode::Ceil);
-                        }
-                        if (isNumeric(mediaEnd) && pastMedia(newEnd)) {
-                            newEnd = snapToFrame(end, newFd, SnapMode::Floor);
-                        }
-                    }
-                    if (!(newStart < newEnd)) {
-                        newEnd = newStart + newFd;
-                        if (!clip.isStill && (beforeMedia(newStart) || (isNumeric(mediaEnd) && pastMedia(newEnd)))) {
-                            return EditResult::failure(EditError::OutOfSourceRange,
-                                                       quotedMediaName(project, clip) + " is shorter than a frame at " +
-                                                           frameRateName(newFd) +
-                                                           " fps and has no media to fill one; trim or remove it first.");
-                        }
-                    }
-                    if (newStart == start && newEnd == end) {
-                        continue;
-                    }
-                    RetimeResult retimed = RetimeResult::Ok;
-                    if (newEnd > end) {
-                        retimed = clip.setTimelineEnd(newEnd);
-                        if (retimed == RetimeResult::Ok && !(newStart == start)) {
-                            retimed = clip.setTimelineStartKeepingEnd(newStart);
-                        }
-                    } else {
-                        if (!(newStart == start)) {
-                            retimed = clip.setTimelineStartKeepingEnd(newStart);
-                        }
-                        if (retimed == RetimeResult::Ok && !(newEnd == end)) {
-                            retimed = clip.setTimelineEnd(newEnd);
-                        }
-                    }
-                    if (retimed != RetimeResult::Ok) {
-                        return retimeRefusal(retimed, clip.id, newStart);
-                    }
-                    ++report_.clipsRetimed;
-                    for (const CMTime shift : {newStart - start, newEnd - end}) {
-                        report_.largestShift = maxTime(report_.largestShift, shift < kCMTimeZero ? -shift : shift);
-                    }
-                }
-                for (std::size_t i = 0; i + 1 < track.clips.size(); ++i) {
-                    if (track.clips[i + 1].timelineStart < track.clips[i].timelineEnd()) {
-                        return EditResult::failure(EditError::Overlap,
-                                                   quotedMediaName(project, track.clips[i]) + " is shorter than a frame at " +
-                                                       frameRateName(newFd) + " fps and the next clip leaves no room "
-                                                       "for one; trim or remove it first.");
-                    }
-                }
-            }
+        if (EditResult r = EdgeConform(project, sequence, newFd).run(report_); !r) {
+            return r;
         }
     }
     sequence.setFormat(target);
@@ -2842,7 +3166,12 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
                                               placement->partner != nullptr;
                         TransitionFrames fitted = goal;
                         std::string reason;
-                        if (dissolve) {
+                        if (dissolves.contains(span->id) && !dissolve) {
+                            // The conform keeps touching clips touching, so a cross dissolve keeps its partner;
+                            // should one ever lose it, it is removed and named, never kept as a fade.
+                            fitted = TransitionFrames{};
+                            reason = "the clips no longer meet at a cut.";
+                        } else if (dissolve) {
                             EditResult why = EditResult::success();
                             const auto limits = transitionSideLimits(project, sequence, clip.id, span->id, why);
                             if (!limits) {
@@ -2928,6 +3257,12 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
             rate += "; every clip already starts and ends on a frame.";
         } else {
             rate += ".";
+        }
+        if (report_.clipsMoved > 0) {
+            rate += " " + countName(report_.clipsMoved, "clip moves", "clips move") + " earlier with " +
+                    (report_.clipsMoved == 1 ? "its" : "their") + " media, by at most " +
+                    secondsName(report_.largestMove) +
+                    ", to keep touching the clip before: neither side of the cut has media to spare.";
         }
         // The frame-grid sentence goes before the transitions'.
         sentences.insert(sentences.begin() + (target.width != old.width || target.height != old.height ? 1 : 0), rate);
