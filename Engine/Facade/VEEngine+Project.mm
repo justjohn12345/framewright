@@ -6,6 +6,7 @@
 
 #import "VEFacadeCommands+Internal.h"
 #import "VEMediaLibrary+Internal.h"
+#import "VESourceMonitor+Internal.h"
 
 #include "../Serialize/ProjectJSON.h"
 
@@ -133,7 +134,7 @@ constexpr const char *kMediaFolderBookmarkKey = "mediaFolderBookmark";
     // decodes fail as missing instead of finding whatever the id named before).
     for (const MediaAsset &asset : _project.assets) {
         _program.pool->registerAsset(asset.id, asset.url);
-        _source.pool->registerAsset(asset.id, asset.url);
+        [_sourceMonitor registerAsset:asset.id path:asset.url];
     }
     [self probeDetailsForProjectAssets];
     [self notifyAssetsAndModelChanged];
@@ -244,7 +245,7 @@ constexpr const char *kMediaFolderBookmarkKey = "mediaFolderBookmark";
     [_exporter cancel];
     // The controllers stop using the old assets first (their ids will name other files).
     [self detachProgramFromProject];
-    [self resetSourceMonitor]; // stops the source controller and drops its private project
+    [_sourceMonitor resetWithProject:_project]; // stops its controller and drops its private project
     [_media forgetThumbnailsAndWaveformsOfAssets:_project.assets];
     // A new media epoch: the frame cache drops every frame and refuses any decoded for the old
     // ids, and both decode pools forget every asset, target, scrub request and decoder, so no
@@ -252,9 +253,7 @@ constexpr const char *kMediaFolderBookmarkKey = "mediaFolderBookmark";
     // FrameCache.h and DecodePool.h). The controllers register the new project's assets again.
     [self beginMediaEpoch];
     _program.playback->forgetMedia();
-    if (_source.playback) {
-        _source.playback->forgetMedia();
-    }
+    [_sourceMonitor forgetMedia];
     [_media forgetProjectAssets];
     ++_document.generation;
 }

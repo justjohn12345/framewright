@@ -9,7 +9,6 @@
 #import "VEEngine.h"
 
 #import "VEFacadeSupport+Internal.h"
-#import "VEProgramFrameProvider+Internal.h"
 #import "VETypes+Internal.h"
 
 #include "../Edit/Command.h"
@@ -37,6 +36,7 @@
 // use it); they know nothing of the engine.
 @class VEExporter;
 @class VEMediaLibrary;
+@class VESourceMonitor;
 
 namespace ve::facade {
 
@@ -95,18 +95,18 @@ NS_ASSUME_NONNULL_END
 
 // ----- The engine's state -----
 //
-// The areas that own real state and lifecycle are classes of their own, each with its state
-// private to its .mm and knowing nothing of the engine (VEExporter, VEMediaLibrary; see their
-// +Internal.h headers): the engine owns one instance of each and coordinates them. The rest is
-// grouped by the file that owns it: only that file's methods change a struct's fields, and other
+// The areas that own real state and lifecycle are classes of their own, each with its state private
+// to its .mm and knowing nothing of the engine (VEExporter, VEMediaLibrary, VESourceMonitor; see
+// their +Internal.h headers): the engine owns one instance of each and coordinates them. The rest
+// is grouped by the file that owns it: only that file's methods change a struct's fields, and other
 // files ask it through the private methods below (they may call methods of the thread-safe objects
-// the pointers name, e.g. a pool's registerAsset or a controller's pause). The one exception is
-// construction: -initWithCacheDirectory: (VEEngine.mm) creates the services, the classes, both
-// monitors' pools, the program controller, the source provider and the first undo stack.
-// Everything here is main thread only unless a field says otherwise: the engine's methods run on
-// the main thread (VE_ASSERT_MAIN), and the classes, the decode pools and the playback controllers
-// hand their results back on the main queue. The objects the pointers name (router, frame cache,
-// pools, controllers, frame provider) are thread safe themselves.
+// the pointers name, e.g. the program pool's registerAsset or the program controller's pause). The
+// one exception is construction: -initWithCacheDirectory: (VEEngine.mm) creates the services, the
+// classes, the program monitor's pool and controller and the first undo stack. Everything here is
+// main thread only unless a field says otherwise: the engine's methods run on the main thread
+// (VE_ASSERT_MAIN), and the classes, the decode pools and the playback controllers hand their
+// results back on the main queue. The objects the pointers name (router, frame cache, the program
+// monitor's pool and controller) are thread safe themselves.
 
 namespace ve::facade {
 
@@ -158,24 +158,6 @@ struct ProgramMonitorState {
     __weak VEPreviewView *_Nullable outputView = nil; // mirrors the program (a second display)
 };
 
-/// The source monitor (VEEngine+SourceMonitor.mm): a pool of its own (a playback controller
-/// replaces its pool's whole target set), a still provider for scrubbing and a controller over a
-/// private one-clip project that is created when the monitor first plays. New/Open resets it
-/// (resetSourceMonitor) and starts a new epoch on its pool; an export pauses its controller.
-struct SourceMonitorState {
-    std::shared_ptr<media::DecodePool> pool;
-    std::shared_ptr<ProgramFrameProvider> provider;
-    std::unique_ptr<playback::PlaybackController> playback;
-    __weak VEPreviewView *_Nullable view = nil;
-    AssetId asset;
-    CMTime time = kCMTimeZero;
-    std::optional<Project> project; // for `asset`
-    bool sharpening = true;         // what it last drew with (Project::sharpenScaledDownSources' default)
-    AssetId playbackAsset;          // asset of the controller's sequence
-    bool usesController = false;    // the view shows the controller's picture
-    BOOL visible = YES;             // see -setSourceMonitorVisible:
-};
-
 } // namespace ve::facade
 
 @interface VEEngine () {
@@ -191,7 +173,10 @@ struct SourceMonitorState {
     ve::facade::DocumentState _document;
     ve::facade::UndoState _undo;
     ve::facade::ProgramMonitorState _program;
-    ve::facade::SourceMonitorState _source;
+    // The source monitor: a class of its own (VESourceMonitor+Internal.h) that knows nothing of
+    // the engine. VEEngine+SourceMonitor.mm drives it; New/Open, imports, exports, memory pressure
+    // and the program transport reach it through its methods.
+    VESourceMonitor *_sourceMonitor;
     // The running export: a class of its own (VEExporter+Internal.h) that knows nothing of the
     // engine. VEEngine+Export.mm starts it, the engine's other files only ask and cancel it.
     VEExporter *_exporter;
@@ -279,19 +264,18 @@ NS_ASSUME_NONNULL_BEGIN
 /// Stops the program controller using the project's media (New/Open): it gets an empty project
 /// until publishPlaybackSnapshot gives it the next project's sequence.
 - (void)detachProgramFromProject;
-- (void)observeController:(ve::playback::PlaybackController &)controller source:(BOOL)isSource;
+- (void)observeProgramController;
 - (void)pauseProgramIfRunning;
 @end
 
 // VEEngine+SourceMonitor.mm
 @interface VEEngine (SourceMonitorInternal)
-- (void)resetSourceMonitor;
 /// Follows a model change: clears the monitor when its asset was removed (the undo of its import)
 /// and follows the project's sharpening.
 - (void)sourceMonitorModelChanged;
-- (void)refreshSourcePicture;
-- (void)notifySourcePlayback:(const ve::playback::PlaybackStatus &)status;
-- (void)pauseSourceMonitorIfRunning;
+/// Posts VEEngineSourcePlaybackDidChangeNotification (and tells the observers) with `status`.
+- (void)postSourcePlaybackStatus:(VEPlaybackStatus *)status;
+/// Allows the source monitor's stopped lookahead unless an export runs (export start and end).
 - (void)updateSourceIdleLookahead;
 @end
 

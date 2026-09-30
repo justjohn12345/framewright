@@ -3,6 +3,8 @@
 
 #import "VEEngine+Internal.h"
 
+#import "VESourceMonitor+Internal.h"
+
 #import "VEPreviewView.h"
 
 #import "../Render/VEPreviewView+Internal.h"
@@ -98,7 +100,7 @@ using namespace ve::facade;
     if ([self refusesPlaybackForExport]) {
         return NO;
     }
-    [self pauseSourceMonitorIfRunning];
+    [_sourceMonitor pauseIfRunning];
     return YES;
 }
 
@@ -182,9 +184,7 @@ using namespace ve::facade;
 - (void)setMuted:(BOOL)muted {
     VE_ASSERT_MAIN();
     _program.playback->setMuted(muted);
-    if (_source.playback) {
-        _source.playback->setMuted(muted);
-    }
+    [_sourceMonitor setMuted:muted];
 }
 
 - (VEPlaybackState)playbackState {
@@ -242,35 +242,25 @@ using namespace ve::facade;
     _program.published = false;
 }
 
-- (void)observeController:(playback::PlaybackController &)controller source:(BOOL)isSource {
+- (void)observeProgramController {
     __weak VEEngine *weakSelf = self;
     playback::PlaybackObserver observer;
-    observer.statusChanged = [weakSelf, isSource](const playback::PlaybackStatus &status) {
+    observer.statusChanged = [weakSelf](const playback::PlaybackStatus &status) {
         VEEngine *strongSelf = weakSelf;
         if (strongSelf == nil) {
             return;
         }
-        if (isSource) {
-            [strongSelf notifySourcePlayback:status];
-        } else {
-            [strongSelf notifyPlayback:status];
-        }
+        [strongSelf notifyPlayback:status];
     };
-    observer.needsDisplay = [weakSelf, isSource] {
+    observer.needsDisplay = [weakSelf] {
         VEEngine *strongSelf = weakSelf;
         if (strongSelf == nil) {
             return;
         }
-        if (isSource) {
-            if (strongSelf->_source.usesController) {
-                [strongSelf->_source.view renderOnce];
-            }
-        } else {
-            [strongSelf->_program.view renderOnce];
-            [strongSelf->_program.outputView renderOnce];
-        }
+        [strongSelf->_program.view renderOnce];
+        [strongSelf->_program.outputView renderOnce];
     };
-    controller.setObserver(dispatch_get_main_queue(), std::move(observer));
+    _program.playback->setObserver(dispatch_get_main_queue(), std::move(observer));
 }
 
 - (void)notifyPlayback:(const playback::PlaybackStatus &)status {

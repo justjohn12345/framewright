@@ -5,6 +5,7 @@
 #import "VEEngine+Internal.h"
 #import "VEExporter+Internal.h"
 #import "VEMediaLibrary+Internal.h"
+#import "VESourceMonitor+Internal.h"
 
 #import "VEPreviewView.h"
 
@@ -110,16 +111,23 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
         programPoolConfig.budgetFraction = kProgramPoolBudgetShare;
         _program.pool = std::make_shared<media::DecodePool>(_services.router, _services.frameCache, programPoolConfig);
         _media = [[VEMediaLibrary alloc] initWithRouter:_services.router cacheDirectory:cacheDirectory];
-        media::DecodePool::Config sourcePoolConfig;
-        sourcePoolConfig.budgetFraction = kSourcePoolBudgetShare;
-        _source.pool = std::make_shared<media::DecodePool>(_services.router, _services.frameCache, sourcePoolConfig);
-        _source.provider = std::make_shared<ProgramFrameProvider>(_source.pool, kSourceScrubLaneBase);
+        SourceMonitorConfig sourceConfig;
+        sourceConfig.poolBudgetShare = kSourcePoolBudgetShare;
+        sourceConfig.scrubLaneBase = kSourceScrubLaneBase;
+        sourceConfig.playbackLaneBase = kSourcePlaybackLaneBase;
+        __weak VEEngine *weakEngine = self;
+        _sourceMonitor = [[VESourceMonitor alloc] initWithRouter:_services.router
+                                                      frameCache:_services.frameCache
+                                                          config:sourceConfig
+                                                        onStatus:^(VEPlaybackStatus *status) {
+                                                          [weakEngine postSourcePlaybackStatus:status];
+                                                        }];
         _rippleScope = VERippleScopeAllTracks;
         playback::PlaybackConfig config;
         config.scrubLaneBase = kProgramLaneBase;
         _program.playback = std::make_unique<playback::PlaybackController>(_services.router, _services.frameCache,
                                                                            _program.pool, config);
-        [self observeController:*_program.playback source:NO];
+        [self observeProgramController];
         _undo.stack = std::make_unique<UndoStack>();
         _exporter = [[VEExporter alloc] init];
         _observers = [NSHashTable weakObjectsHashTable];
@@ -158,7 +166,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
     // The views may outlive the engine: they must stop calling into the controllers first.
     [_program.view setFrameSource:ve::render::PreviewFrameSource{}];
     [_program.outputView setFrameSource:ve::render::PreviewFrameSource{}];
-    [_source.view setFrameSource:ve::render::PreviewFrameSource{}];
+    [_sourceMonitor disconnectView];
     [_media stopAccessingURLs];
 }
 
@@ -177,7 +185,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
 - (void)beginMediaEpoch {
     _services.epoch = _services.frameCache->beginEpoch();
     _program.pool->beginEpoch(_services.epoch);
-    _source.pool->beginEpoch(_services.epoch);
+    [_sourceMonitor beginMediaEpoch:_services.epoch];
 }
 
 // MARK: - Notifications

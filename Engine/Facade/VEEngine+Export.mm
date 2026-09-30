@@ -6,6 +6,7 @@
 #import "VEExport+Internal.h"
 #import "VEExporter+Internal.h"
 #import "VEMediaLibrary+Internal.h"
+#import "VESourceMonitor+Internal.h"
 
 #include "../Export/ExportJob.h"
 
@@ -165,9 +166,7 @@ VEEngineErrorCode errorCodeFor(ExportRefusalReason reason) {
     // export ends. The paused pictures still come through the scrub path.
     _program.playback->pause();
     _program.playback->setIdleLookahead(false);
-    if (_source.playback) {
-        _source.playback->pause();
-    }
+    [_sourceMonitor pauseController];
     [self updateSourceIdleLookahead];
     return handle;
 }
