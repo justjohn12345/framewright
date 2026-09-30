@@ -67,7 +67,9 @@
 //
 // Sharpening (RenderGraph::sharpenMinified, the project's "Sharpen scaled-down sources"): a Lanczos
 // pre-scaled plane is then sharpened with an unsharp mask into a second pooled texture, which the
-// draw samples: out = c + kSharpenAmount * g(c - blur(c)), where blur is the separable binomial
+// draw samples: out = c + amount * g(c - blur(c)), amount = sharpenAmountAt(scale) (kSharpenAmount at
+// half size and below, ramping smoothly to none at the 0.75 minification threshold), where blur is the
+// separable binomial
 // kernel [1 4 6 4 1] / 16 in both directions (a Gaussian of sigma 1 texel reaching 2 texels, about 2
 // output pixels, since the pre-scaled plane is about output size; ffmpeg's unsharp=5:5 uses the same
 // kernel) and g(d) = d * smoothstep(t, 2t, |d|) with t = kSharpenThreshold leaves flat areas and faint
@@ -203,6 +205,14 @@ class Compositor {
     /// The unsharp mask's amount and threshold (grey levels 0...1): see "Sharpening" above.
     static constexpr double kSharpenAmount = 0.6;
     static constexpr double kSharpenThreshold = 2.0 / 255.0;
+    /// The mask's amount grows smoothly as a picture shrinks: none at kSharpenRampEnd output pixels per
+    /// texel or more (where minification starts), the whole kSharpenAmount at kSharpenRampStart or less,
+    /// a smoothstep between (so a Ken Burns zoom through the threshold changes the picture gradually).
+    static constexpr double kSharpenRampStart = 0.6;
+    static constexpr double kSharpenRampEnd = 0.75;
+    /// The amount for a picture at `scale` output pixels per texel (0 when it is not minified). A pure
+    /// function of the scale, so every monitor and export computes the same amount.
+    static double sharpenAmountAt(double scale);
 
     /// Loads the engine's Metal library from the framework bundle and prepares the pipelines
     /// for rendering into `preparedFormats` (pipelines for other target formats are built on

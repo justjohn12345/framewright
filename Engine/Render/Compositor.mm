@@ -464,8 +464,8 @@ struct Compositor::Impl {
         binding.planes[1] = t.plane(1);
         const bool rgba = t.sourceClass() == SourceClass::RGBA;
         binding.straightAlpha = rgba && !t.alphaIsPremultiplied(layer.isStill);
-        const bool sharpen =
-            sharpenSetting && unsharp != nil && sharpenScale > 0 && sharpenScale < kMinifyThreshold;
+        const double amount = sharpenSetting && unsharp != nil ? Compositor::sharpenAmountAt(sharpenScale) : 0.0;
+        const bool sharpen = amount > 0;
         if (lanczos == nil || !(outputScale > 0) || (!(outputScale < kMinifyThreshold) && !sharpen)) {
             return binding;
         }
@@ -515,7 +515,7 @@ struct Compositor::Impl {
                     return std::move(sharpened).error();
                 }
                 job.sharpened = sharpened.value();
-                job.unsharp.params = simd_make_float4(float(Compositor::kSharpenAmount),
+                job.unsharp.params = simd_make_float4(float(amount),
                                                       float(Compositor::kSharpenThreshold), rgba ? 0.0f : 1.0f, 0.0f);
                 job.unsharp.range = rgba ? simd_make_float4(0.0f, 1.0f, 0.0f, 0.0f) : lumaRangeOf(t.pixelFormat());
                 binding.planes[p] = job.sharpened;
@@ -766,6 +766,18 @@ struct Compositor::Impl {
         return media::okStatus();
     }
 };
+
+double Compositor::sharpenAmountAt(double scale) {
+    static_assert(kSharpenRampEnd == kMinifyThreshold, "the ramp ends where minification (the pre-scale) starts");
+    if (!(scale > 0) || scale >= kSharpenRampEnd) {
+        return 0.0;
+    }
+    if (scale <= kSharpenRampStart) {
+        return kSharpenAmount;
+    }
+    const double t = (kSharpenRampEnd - scale) / (kSharpenRampEnd - kSharpenRampStart); // 0 at the end, 1 at the start
+    return kSharpenAmount * t * t * (3.0 - 2.0 * t);
+}
 
 Compositor::Compositor(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
