@@ -176,6 +176,11 @@ NS_SWIFT_UI_ACTOR
 - (void)engine:(VEEngine *)engine sourcePlaybackDidChange:(VEPlaybackStatus *)status;
 @end
 
+// The API is the class and one category per area below; each area is implemented in
+// VEEngine+<Area>.mm, and VEEngine.mm has the lifetime. Swift sees them as one @MainActor class (the
+// members of a category of an NS_SWIFT_UI_ACTOR class are main-actor isolated too). A category method
+// that takes a completion block is marked NS_SWIFT_UI_ACTOR itself: without it Swift would import the
+// block as @Sendable (the class attribute does not reach it), although it runs on the main thread.
 NS_SWIFT_UI_ACTOR
 @interface VEEngine : NSObject
 
@@ -202,7 +207,11 @@ NS_SWIFT_UI_ACTOR
 - (void)addObserver:(id<VEEngineObserver>)observer;
 - (void)removeObserver:(id<VEEngineObserver>)observer;
 
+@end
+
 // MARK: Project
+
+@interface VEEngine (Project)
 
 /// Replaces the project with an empty one: one sequence (tracks V1 V2 / A1 A2) at 1920x1080, 30 fps,
 /// 48 kHz, not configured (VESequenceInfo.configured): the first video clip placed on it sets its
@@ -242,7 +251,11 @@ NS_SWIFT_UI_ACTOR
 /// old location before a Save As to another folder.
 @property (nonatomic, copy, nullable) NSData *mediaFolderBookmark;
 
+@end
+
 // MARK: Snapshots
+
+@interface VEEngine (Snapshots)
 
 @property (nonatomic, readonly) VESequenceInfo *sequence;
 - (nullable VEClipInfo *)clipInfo:(VEClipID)clipID;
@@ -260,7 +273,11 @@ NS_SWIFT_UI_ACTOR
 /// Clips covering `time` (video bottom to top, then audio).
 - (NSArray<NSNumber *> *)clipIDsAtTime:(CMTime)time;
 
+@end
+
 // MARK: Sequence settings
+
+@interface VEEngine (SequenceSettings)
 
 /// The active sequence's size, frame rate and audio sample rate, and the project's sharpening.
 @property (nonatomic, readonly) VESequenceSettings *sequenceSettings;
@@ -285,7 +302,11 @@ NS_SWIFT_UI_ACTOR
 /// Sets it as an undo step.
 - (VEEditResult *)setSharpenScaledDownSources:(BOOL)sharpen;
 
+@end
+
 // MARK: Media
+
+@interface VEEngine (Media)
 
 /// Probes the files on a background queue, then (on the main thread) adds the playable ones
 /// to the project as one undoable "Import" step, registers them with the decode pool and
@@ -295,7 +316,8 @@ NS_SWIFT_UI_ACTOR
 /// replaced (New, Open) before the probe finishes, nothing is added and every file reports
 /// VEEngineErrorProjectClosed. While a coalescing group is open the import waits for it to end.
 - (void)importMediaAtURLs:(NSArray<NSURL *> *)urls
-               completion:(nullable void (^)(NSArray<VEAssetInfo *> *assets, NSArray<NSError *> *errors))completion;
+               completion:(nullable void (^)(NSArray<VEAssetInfo *> *assets, NSArray<NSError *> *errors))completion
+    NS_SWIFT_UI_ACTOR;
 /// Imports whose files were probed and that wait for the open coalescing group to end
 /// (diagnostics and tests).
 @property (nonatomic, readonly) NSUInteger deferredImportCount;
@@ -308,10 +330,12 @@ NS_SWIFT_UI_ACTOR
 - (void)thumbnailForAsset:(VEAssetID)assetID
                    atTime:(CMTime)time
              maxDimension:(NSInteger)maxDimension
-               completion:(void (^)(CGImageRef _Nullable image, NSError *_Nullable error))completion;
+               completion:(void (^)(CGImageRef _Nullable image, NSError *_Nullable error))completion
+    NS_SWIFT_UI_ACTOR;
 /// Audio peaks of the asset (computed once, cached in memory and on disk).
 - (void)waveformForAsset:(VEAssetID)assetID
-              completion:(void (^)(VEWaveform *_Nullable waveform, NSError *_Nullable error))completion;
+              completion:(void (^)(VEWaveform *_Nullable waveform, NSError *_Nullable error))completion
+    NS_SWIFT_UI_ACTOR;
 /// The peaks if already in memory, else nil (does not start a computation).
 - (nullable VEWaveform *)cachedWaveformForAsset:(VEAssetID)assetID;
 
@@ -333,7 +357,11 @@ NS_SWIFT_UI_ACTOR
 /// diagnostics: import must never stall the UI).
 @property (nonatomic, readonly) double mainThreadImportSeconds;
 
+@end
+
 // MARK: Edits (all undoable; ids of 0 mean "none")
+
+@interface VEEngine (Edits)
 
 /// Inserts the asset at `time`, rippling later clips right. The video part goes on
 /// `videoTrackID` and the audio part on `audioTrackID` (linked); pass 0 to skip a part.
@@ -425,6 +453,19 @@ NS_SWIFT_UI_ACTOR
 /// (VEEditErrorInvalidArgument, nothing changes), a missing clip, a locked track.
 - (VEEditResult *)setReversed:(BOOL)reversed forClips:(NSArray<NSNumber *> *)clipIDs
     NS_SWIFT_NAME(setReversed(_:forClips:));
+
+- (VEEditResult *)linkClip:(VEClipID)clipID withClip:(VEClipID)otherClipID;
+- (VEEditResult *)unlinkClip:(VEClipID)clipID;
+/// Adds a track on top of its kind (empty name: "V<n>"/"A<n>").
+- (VEEditResult *)addTrackOfKind:(VETrackKind)kind name:(nullable NSString *)name;
+- (VEEditResult *)removeTrack:(VETrackID)trackID;
+- (VEEditResult *)setTrack:(VETrackID)trackID muted:(BOOL)muted;
+- (VEEditResult *)setTrack:(VETrackID)trackID solo:(BOOL)solo;
+- (VEEditResult *)setTrack:(VETrackID)trackID locked:(BOOL)locked;
+- (VEEditResult *)renameTrack:(VETrackID)trackID to:(NSString *)name;
+
+@end
+
 // MARK: Transitions
 //
 // A transition is a lane-0 span of the clip that owns it (VEEffectSpan, VETransitionStyle): at a
@@ -434,6 +475,8 @@ NS_SWIFT_UI_ACTOR
 // the cut; ending on the cut it is a fade out to black or silence. At a clip's start it is a fade in,
 // allowed only where no clip touches that start (a cut belongs to its outgoing clip). Transition ids
 // are span ids. Every call is one undo step and joins a coalescing group like any other edit.
+
+@interface VEEngine (Transitions)
 
 /// Adds a cross dissolve (video track) or constant-power crossfade (audio track), centred on the
 /// cut where `fromClipID` ends and `toClipID` starts. A refusal for lack of media or length says
@@ -521,6 +564,8 @@ NS_SWIFT_UI_ACTOR
                        includingLinked:(BOOL)includingLinked
     NS_SWIFT_NAME(setTransitionRange(_:range:includingLinked:));
 
+@end
+
 // MARK: Effect spans
 //
 // A clip's lanes 1-3 hold effect spans (VEEffectSpan): Motion and Opacity on video clips, Gain on
@@ -541,6 +586,8 @@ NS_SWIFT_UI_ACTOR
 // clip or shorter than a frame), VEEditErrorOverlap (another span of the lane is there;
 // VEEditResult.freeRange is the nearest free range), VEEditErrorTrackLocked,
 // VEEditErrorNotRepresentable.
+
+@interface VEEngine (EffectSpans)
 
 /// The clip's spans (lane 0 first, then lanes 1-3, each in time order); empty for an unknown clip.
 - (NSArray<VEEffectSpan *> *)spansForClip:(VEClipID)clipID NS_SWIFT_NAME(spans(forClip:));
@@ -622,17 +669,11 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)matchMotionOfClip:(VEClipID)clipID
                    toAdjacentAtEdge:(VEClipEdge)edge NS_SWIFT_NAME(matchMotion(clip:toAdjacentAt:));
 
-- (VEEditResult *)linkClip:(VEClipID)clipID withClip:(VEClipID)otherClipID;
-- (VEEditResult *)unlinkClip:(VEClipID)clipID;
-/// Adds a track on top of its kind (empty name: "V<n>"/"A<n>").
-- (VEEditResult *)addTrackOfKind:(VETrackKind)kind name:(nullable NSString *)name;
-- (VEEditResult *)removeTrack:(VETrackID)trackID;
-- (VEEditResult *)setTrack:(VETrackID)trackID muted:(BOOL)muted;
-- (VEEditResult *)setTrack:(VETrackID)trackID solo:(BOOL)solo;
-- (VEEditResult *)setTrack:(VETrackID)trackID locked:(BOOL)locked;
-- (VEEditResult *)renameTrack:(VETrackID)trackID to:(NSString *)name;
+@end
 
 // MARK: Undo
+
+@interface VEEngine (Undo)
 
 /// Same as beginCoalescingWithKey:mode: with VECoalescingModeReplace.
 - (void)beginCoalescingWithKey:(NSString *)key;
@@ -659,7 +700,11 @@ NS_SWIFT_UI_ACTOR
 @property (nonatomic, readonly, copy) NSString *undoActionName;
 @property (nonatomic, readonly, copy) NSString *redoActionName;
 
+@end
+
 // MARK: Program monitor and playback
+
+@interface VEEngine (Playback)
 
 /// Shows the active sequence in `view`: installs the playback controller's frame source (the
 /// paused picture at currentTime, and the playing picture); pass nil to detach. Keep the view
@@ -729,7 +774,11 @@ NS_SWIFT_UI_ACTOR
 @property (nonatomic, readonly) VEPlaybackStatus *playbackStatus;
 @property (nonatomic, readonly) VEPlaybackStats *playbackStats;
 
+@end
+
 // MARK: Export
+
+@interface VEEngine (Export)
 
 /// Which presets can be exported at `width` x `height` on this machine and whether their encoder
 /// runs in hardware (VideoToolbox asked at that size; hardware encoders are size dependent).
@@ -738,7 +787,8 @@ NS_SWIFT_UI_ACTOR
 - (NSArray<VEExportFormat *> *)exportFormatsForWidth:(NSInteger)width height:(NSInteger)height;
 - (void)exportFormatsForWidth:(NSInteger)width
                        height:(NSInteger)height
-                   completion:(void (^)(NSArray<VEExportFormat *> *formats))completion;
+                   completion:(void (^)(NSArray<VEExportFormat *> *formats))completion
+    NS_SWIFT_UI_ACTOR;
 /// The output size `settings` give the active sequence.
 - (CGSize)exportSizeForSettings:(VEExportSettings *)settings;
 /// Approximate size in bytes of an export of the active sequence with `settings` (from the bit
@@ -769,7 +819,11 @@ NS_SWIFT_UI_ACTOR
 @property (nonatomic, readonly, nullable) VEExportHandle *activeExport;
 @property (nonatomic, readonly) BOOL isExporting;
 
+@end
+
 // MARK: Source monitor
+
+@interface VEEngine (SourceMonitor)
 
 /// Shows the source monitor's asset in `view` (nil detaches).
 - (void)attachSourceView:(nullable VEPreviewView *)view NS_SWIFT_NAME(attachSourceView(_:));
