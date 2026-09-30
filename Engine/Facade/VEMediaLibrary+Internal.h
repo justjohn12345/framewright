@@ -8,8 +8,12 @@
 // paths and posts the notifications.
 //
 // The router is a shared dependency injected by the engine (the monitors' decode pools and
-// controllers and the exports use it too), not owned here. Results of requests made before
-// -forgetProjectAssets (New/Open) are dropped: a thumbnail or waveform completion then gets nullptr.
+// controllers and the exports use it too), not owned here. -forgetProjectAssets (New/Open) starts a
+// new project for the library: a thumbnail or waveform requested before it completes with nullptr,
+// and a poster, waveform (startPosterAndWaveformForAsset:...) or details probe
+// (probeDetailsOfAssets:completion:) requested before it is not reported at all. An import probe
+// (probeFilesAtURLs:completion:) always completes: whether its files still belong to the open
+// project is the caller's to decide.
 // Private to the facade implementation: excluded from the framework's headers (project.yml).
 
 #pragma once
@@ -85,7 +89,8 @@ typedef void (^VEMediaWaveformCompletion)(const ve::thumbs::WaveformResult *_Nul
 // MARK: Import
 
 /// Probes `urls` in parallel off the main thread (with their security-scoped access for the
-/// probe) and hands the results to `completion` on the main queue.
+/// probe) and hands the results to `completion` on the main queue, always (also after
+/// -forgetProjectAssets: the library records nothing until -addImportedAsset:file:url:).
 - (void)probeFilesAtURLs:(NSArray<NSURL *> *)urls completion:(VEMediaProbeCompletion)completion;
 /// Records `file` (a successful probe) as the media of the imported asset `asset`: its details,
 /// routing and bookmark, the file not missing, and sandbox access to `url` kept for this project.
@@ -117,13 +122,15 @@ typedef void (^VEMediaWaveformCompletion)(const ve::thumbs::WaveformResult *_Nul
 
 // MARK: What is known per asset
 
-/// Every asset's routing (handed to exports and to a new playback controller).
-@property (nonatomic, readonly) std::map<ve::AssetId, ve::media::RoutedMediaInfo> routing;
-/// `asset`'s probe details, or nullptr (valid until the library changes).
-- (const ve::facade::AssetDetails *_Nullable)detailsForAsset:(ve::AssetId)asset;
+/// Every asset's routing (handed to exports and to a new playback controller). A reference to the
+/// library's own map, valid until the library next changes: read it, or copy it, at once.
+- (const std::map<ve::AssetId, ve::media::RoutedMediaInfo> &)routing;
+/// `asset`'s probe details, or nullopt.
+- (std::optional<ve::facade::AssetDetails>)detailsForAsset:(ve::AssetId)asset;
 - (BOOL)isAssetMissing:(ve::AssetId)asset;
-/// The assets whose files were missing when the project was opened.
-@property (nonatomic, readonly) std::set<ve::AssetId> missingAssets;
+/// The assets whose files were missing when the project was opened. A reference to the library's
+/// own set, valid until the library next changes.
+- (const std::set<ve::AssetId> &)missingAssets;
 
 // MARK: Thumbnails and waveforms
 

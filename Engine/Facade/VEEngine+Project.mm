@@ -205,7 +205,7 @@ constexpr const char *kMediaFolderBookmarkKey = "mediaFolderBookmark";
 - (NSArray<NSNumber *> *)missingAssetIDs {
     VE_ASSERT_MAIN();
     NSMutableArray<NSNumber *> *ids = [NSMutableArray array];
-    for (AssetId id : _media.missingAssets) {
+    for (AssetId id : [_media missingAssets]) {
         [ids addObject:@(static_cast<int64_t>(id.value()))];
     }
     return ids;

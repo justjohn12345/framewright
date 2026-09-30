@@ -8,6 +8,8 @@
 
 #include "../Render/Scheduler.h"
 
+#include <optional>
+
 using namespace ve;
 using namespace ve::facade;
 
@@ -49,7 +51,8 @@ using namespace ve::facade;
 }
 
 - (VEAssetInfo *)makeInfoForAsset:(const MediaAsset &)asset {
-    return makeAssetInfo(asset, [_media detailsForAsset:asset.id], [_media isAssetMissing:asset.id],
+    const std::optional<AssetDetails> details = [_media detailsForAsset:asset.id];
+    return makeAssetInfo(asset, details ? &*details : nullptr, [_media isAssetMissing:asset.id],
                          NSInteger(countAssetUses(_project, asset.id)));
 }
 

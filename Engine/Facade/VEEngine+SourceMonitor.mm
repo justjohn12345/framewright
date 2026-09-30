@@ -75,7 +75,7 @@ using namespace ve::facade;
 /// program, with every asset's routing). False when the asset cannot play (none, a still, no
 /// duration).
 - (BOOL)prepareSourcePlayback {
-    return [_sourceMonitor prepareToPlayWithRouting:_media.routing muted:_programMonitor.muted];
+    return [_sourceMonitor prepareToPlayWithRouting:[_media routing] muted:_programMonitor.muted];
 }
 
 /// Whether the source monitor may start now: no export runs and its asset can play

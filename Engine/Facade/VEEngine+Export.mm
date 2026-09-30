@@ -103,7 +103,7 @@ VEEngineErrorCode errorCodeFor(ExportRefusalReason reason) {
     services.router = _services.router;
     services.cache = _services.frameCache;
     services.epoch = _services.epoch;
-    services.routing = _media.routing;
+    services.routing = [_media routing]; // the export keeps its own copy
     exporting::ExportOptions options;
     options.poolBudgetFraction = kExportPoolBudgetShare;
 

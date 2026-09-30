@@ -116,20 +116,20 @@ std::shared_ptr<media::BackendRouter> makeRouter() {
     XCTAssertTrue(bad.error.has_value());
     XCTAssertNil(bad.bookmark);
     // Probing records nothing: only an import does.
-    XCTAssertTrue(library.routing.empty());
+    XCTAssertTrue([library routing].empty());
 }
 
 - (void)testAnImportedAssetIsRecordedAndBookmarkedForSaving {
     VEMediaLibrary *library = [[VEMediaLibrary alloc] initWithRouter:makeRouter() cacheDirectory:nil];
     const AssetId assetId(7);
-    XCTAssertTrue([library detailsForAsset:assetId] == nullptr);
+    XCTAssertFalse([library detailsForAsset:assetId].has_value());
     const MediaAsset asset = [self import:library url:[self mediaURL:"h264_1080p30.mp4"] as:assetId];
-    const AssetDetails *details = [library detailsForAsset:assetId];
-    XCTAssertTrue(details != nullptr);
-    if (details != nullptr) {
+    const std::optional<AssetDetails> details = [library detailsForAsset:assetId];
+    XCTAssertTrue(details.has_value());
+    if (details) {
         XCTAssertFalse(details->codecName.empty());
     }
-    XCTAssertEqual(library.routing.count(assetId), 1u);
+    XCTAssertEqual([library routing].count(assetId), 1u);
     XCTAssertFalse([library isAssetMissing:assetId]);
     NSData *bookmark = [library bookmarkForSavingAsset:asset];
     XCTAssertNotNil(bookmark);
@@ -170,7 +170,7 @@ std::shared_ptr<media::BackendRouter> makeRouter() {
     XCTAssertFalse([library isAssetMissing:AssetId(1)]);
     XCTAssertTrue([library isAssetMissing:AssetId(2)]);
     XCTAssertFalse([library isAssetMissing:AssetId(3)]);
-    XCTAssertTrue(library.missingAssets == (std::set<AssetId>{AssetId(2)}));
+    XCTAssertTrue([library missingAssets] == (std::set<AssetId>{AssetId(2)}));
     XCTAssertNil([library bookmarkForSavingAsset:assets[1]], @"a missing file gets no new bookmark");
 
     // The details probe skips the missing asset and reports the others on the main thread.
@@ -189,8 +189,8 @@ std::shared_ptr<media::BackendRouter> makeRouter() {
     XCTAssertTrue(onMain);
     std::sort(reported.begin(), reported.end());
     XCTAssertTrue(reported == (std::vector<AssetId>{AssetId(1), AssetId(3)}));
-    XCTAssertTrue([library detailsForAsset:AssetId(3)] != nullptr);
-    XCTAssertEqual(library.routing.size(), 2u);
+    XCTAssertTrue([library detailsForAsset:AssetId(3)].has_value());
+    XCTAssertEqual([library routing].size(), 2u);
 }
 
 - (void)testThumbnailsAndWaveformsAreDeliveredAndPurged {
@@ -280,9 +280,9 @@ std::shared_ptr<media::BackendRouter> makeRouter() {
 
     [library forgetThumbnailsAndWaveformsOfAssets:{asset}];
     [library forgetProjectAssets];
-    XCTAssertTrue(library.routing.empty());
-    XCTAssertTrue(library.missingAssets.empty());
-    XCTAssertTrue([library detailsForAsset:asset.id] == nullptr);
+    XCTAssertTrue([library routing].empty());
+    XCTAssertTrue([library missingAssets].empty());
+    XCTAssertFalse([library detailsForAsset:asset.id].has_value());
 
     XCTAssertTrue([self spinUntil:^BOOL { return thumbnailCalls > 0 && waveformCalls > 0; } timeout:60]);
     // Give the poster, waveform and details probes time to come back too.

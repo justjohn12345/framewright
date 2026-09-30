@@ -359,15 +359,15 @@ NSNumber *keyFor(AssetId asset) {
 
 // MARK: - What is known per asset
 
-- (std::map<AssetId, media::RoutedMediaInfo>)routing {
+- (const std::map<AssetId, media::RoutedMediaInfo> &)routing {
     VE_ASSERT_MAIN();
     return _routing;
 }
 
-- (const AssetDetails *_Nullable)detailsForAsset:(AssetId)asset {
+- (std::optional<AssetDetails>)detailsForAsset:(AssetId)asset {
     VE_ASSERT_MAIN();
     auto details = _details.find(asset);
-    return details == _details.end() ? nullptr : &details->second;
+    return details == _details.end() ? std::nullopt : std::optional<AssetDetails>(details->second);
 }
 
 - (BOOL)isAssetMissing:(AssetId)asset {
@@ -375,7 +375,7 @@ NSNumber *keyFor(AssetId asset) {
     return _missing.count(asset) > 0;
 }
 
-- (std::set<AssetId>)missingAssets {
+- (const std::set<AssetId> &)missingAssets {
     VE_ASSERT_MAIN();
     return _missing;
 }
