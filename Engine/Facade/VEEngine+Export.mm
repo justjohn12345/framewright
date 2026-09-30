@@ -5,6 +5,7 @@
 
 #import "VEExport+Internal.h"
 #import "VEExporter+Internal.h"
+#import "VEMediaLibrary+Internal.h"
 
 #include "../Export/ExportJob.h"
 
@@ -100,7 +101,7 @@ VEEngineErrorCode errorCodeFor(ExportRefusalReason reason) {
     services.router = _services.router;
     services.cache = _services.frameCache;
     services.epoch = _services.epoch;
-    services.routing = _assets.routing;
+    services.routing = _media.routing;
     exporting::ExportOptions options;
     options.poolBudgetFraction = kExportPoolBudgetShare;
 

@@ -4,6 +4,7 @@
 
 #import "VEEngine+Internal.h"
 #import "VEExporter+Internal.h"
+#import "VEMediaLibrary+Internal.h"
 
 #import "VEPreviewView.h"
 
@@ -108,16 +109,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
         media::DecodePool::Config programPoolConfig;
         programPoolConfig.budgetFraction = kProgramPoolBudgetShare;
         _program.pool = std::make_shared<media::DecodePool>(_services.router, _services.frameCache, programPoolConfig);
-        thumbs::ThumbnailService::Config thumbConfig;
-        thumbs::WaveformService::Config waveConfig;
-        if (cacheDirectory != nil) {
-            thumbConfig.diskCacheDirectory =
-                toStd([cacheDirectory URLByAppendingPathComponent:@"Thumbnails" isDirectory:YES].path);
-            waveConfig.diskCacheDirectory =
-                toStd([cacheDirectory URLByAppendingPathComponent:@"Waveforms" isDirectory:YES].path);
-        }
-        _services.thumbnails = std::make_unique<thumbs::ThumbnailService>(_services.router, thumbConfig);
-        _services.waveforms = std::make_unique<thumbs::WaveformService>(_services.router, waveConfig);
+        _media = [[VEMediaLibrary alloc] initWithRouter:_services.router cacheDirectory:cacheDirectory];
         media::DecodePool::Config sourcePoolConfig;
         sourcePoolConfig.budgetFraction = kSourcePoolBudgetShare;
         _source.pool = std::make_shared<media::DecodePool>(_services.router, _services.frameCache, sourcePoolConfig);
@@ -131,9 +123,6 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
         _undo.stack = std::make_unique<UndoStack>();
         _exporter = [[VEExporter alloc] init];
         _observers = [NSHashTable weakObjectsHashTable];
-        _services.probeQueue = dispatch_queue_create(
-            "com.justjohn12345.framewright.engine.probe",
-            dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INITIATED, 0));
         // Probe VideoToolbox once off the main thread so the Preferences pane never waits.
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             (void)media::HardwareCaps::get();
@@ -170,7 +159,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
     [_program.view setFrameSource:ve::render::PreviewFrameSource{}];
     [_program.outputView setFrameSource:ve::render::PreviewFrameSource{}];
     [_source.view setFrameSource:ve::render::PreviewFrameSource{}];
-    [self stopAccessingURLs];
+    [_media stopAccessingURLs];
 }
 
 - (void)addObserver:(id<VEEngineObserver>)observer {
@@ -181,6 +170,14 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
 - (void)removeObserver:(id<VEEngineObserver>)observer {
     VE_ASSERT_MAIN();
     [_observers removeObject:observer];
+}
+
+// MARK: - Media epoch
+
+- (void)beginMediaEpoch {
+    _services.epoch = _services.frameCache->beginEpoch();
+    _program.pool->beginEpoch(_services.epoch);
+    _source.pool->beginEpoch(_services.epoch);
 }
 
 // MARK: - Notifications

@@ -1,5 +1,6 @@
-// VEEngine (Media): importing files (probing off the main thread), the asset details and routing
-// kept per asset, thumbnails and waveforms, backend and cache preferences, and memory pressure.
+// VEEngine (Media): importing files (VEMediaLibrary probes them off the main thread; the engine adds
+// them to the model), thumbnails and waveforms, backend and cache preferences, and memory pressure.
+// What is known per asset beyond the model lives in VEMediaLibrary (VEMediaLibrary+Internal.h).
 
 #import "VEEngine+Internal.h"
 
@@ -7,15 +8,14 @@
 
 #import "VEExporter+Internal.h"
 #import "VEFacadeCommands+Internal.h"
+#import "VEMediaLibrary+Internal.h"
 
-#include "../Media/AssetImport.h"
 #include "../Media/MediaTypes.h"
 
 #include <os/signpost.h>
 
 #include <algorithm>
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,69 +24,12 @@ using namespace ve::facade;
 
 namespace {
 
-/// Size of the poster thumbnail generated at import (matches the media bin's request).
-constexpr int kPosterMaxDimension = 320;
-
 NSError *makeError(const media::MediaError &error, NSString *context) {
     NSString *message = [NSString stringWithFormat:@"%@: %@", context, toNS(error.message.empty() ? error.description()
                                                                                                     : error.message)];
     return [NSError errorWithDomain:VEEngineErrorDomain
                                code:VEEngineErrorImportFailed
                            userInfo:@{NSLocalizedDescriptionKey : message, @"mediaErrorCode" : @(int(error.code))}];
-}
-
-AssetDetails detailsFor(const media::RoutedMediaInfo &routed) {
-    AssetDetails details;
-    const media::MediaInfo &info = routed.info;
-    const media::TrackInfo *visual = info.firstTrack(media::TrackKind::Video);
-    if (visual == nullptr) {
-        visual = info.firstTrack(media::TrackKind::Still);
-    }
-    const media::TrackInfo *audio = info.firstTrack(media::TrackKind::Audio);
-    if (visual != nullptr) {
-        details.codecName = visual->codec.name.empty() ? media::codecDisplayName(visual->codec.fourCC) : visual->codec.name;
-    }
-    if (audio != nullptr) {
-        details.audioCodecName = audio->codec.name.empty() ? media::codecDisplayName(audio->codec.fourCC) : audio->codec.name;
-    }
-    if (details.codecName.empty()) {
-        details.codecName = details.audioCodecName;
-    }
-    details.container = info.container;
-    std::string reason;
-    for (const media::TrackRoute &route : routed.routes) {
-        if (!reason.empty()) {
-            reason += "\n";
-        }
-        reason += std::string(media::toString(route.kind)) + ": " + (route.backend.empty() ? "unroutable" : route.backend) +
-                  (route.hardwareDecode ? " (hardware)" : "") + " - " + route.reason;
-    }
-    details.routingReason = reason.empty() ? routed.reason : reason;
-    return details;
-}
-
-/// Result of probing one file on the background queue.
-struct ProbedFile {
-    std::optional<MediaAsset> asset;
-    std::optional<media::RoutedMediaInfo> routed;
-    AssetDetails details;
-    NSData *bookmark = nil;
-    NSError *error = nil;
-};
-
-/// Security-scoped bookmark for a file, falling back to a plain bookmark (outside the sandbox
-/// security scope may be unavailable). Nil if the file cannot be bookmarked.
-NSData *makeBookmark(NSString *path) {
-    NSURL *url = [NSURL fileURLWithPath:path];
-    NSData *data = [url bookmarkDataWithOptions:NSURLBookmarkCreationWithSecurityScope |
-                                                NSURLBookmarkCreationSecurityScopeAllowOnlyReadAccess
-                 includingResourceValuesForKeys:nil
-                                  relativeToURL:nil
-                                          error:nil];
-    if (data == nil) {
-        data = [url bookmarkDataWithOptions:0 includingResourceValuesForKeys:nil relativeToURL:nil error:nil];
-    }
-    return data;
 }
 
 } // namespace
@@ -98,45 +41,16 @@ NSData *makeBookmark(NSString *path) {
 - (void)importMediaAtURLs:(NSArray<NSURL *> *)urls
                completion:(nullable void (^)(NSArray<VEAssetInfo *> *, NSArray<NSError *> *))completion {
     VE_ASSERT_MAIN();
-    auto router = _services.router;
-    const size_t count = urls.count;
     const uint64_t generation = _document.generation;
-    auto results = std::make_shared<std::vector<ProbedFile>>(count);
     NSArray<NSURL *> *files = [urls copy];
     __weak VEEngine *weakSelf = self;
-    dispatch_queue_t queue = _services.probeQueue;
-    dispatch_async(queue, ^{
-        // Probe in parallel (each probe blocks on file I/O).
-        dispatch_apply(count, queue, ^(size_t i) {
-            ProbedFile &file = (*results)[i];
-            NSURL *url = files[i];
-            const std::string path = toStd(url.path);
-            BOOL accessing = [url startAccessingSecurityScopedResource];
-            auto routed = router->probe(path);
-            if (!routed.ok()) {
-                file.error = makeError(routed.error(), url.lastPathComponent);
-            } else {
-                auto asset = media::makeMediaAsset(routed.value(), AssetId(1));
-                if (!asset.ok()) {
-                    file.error = makeError(asset.error(), url.lastPathComponent);
-                } else {
-                    file.details = detailsFor(routed.value());
-                    file.asset = std::move(asset).value();
-                    file.routed = std::move(routed).value();
-                    file.bookmark = makeBookmark(url.path);
-                }
-            }
-            if (accessing) {
-                [url stopAccessingSecurityScopedResource];
-            }
-        });
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [weakSelf finishImport:results urls:files generation:generation completion:completion];
-        });
-    });
+    [_media probeFilesAtURLs:files
+                  completion:^(std::shared_ptr<std::vector<ProbedMediaFile>> results) {
+                    [weakSelf finishImport:results urls:files generation:generation completion:completion];
+                  }];
 }
 
-- (void)finishImport:(std::shared_ptr<std::vector<ProbedFile>>)probed
+- (void)finishImport:(std::shared_ptr<std::vector<ProbedMediaFile>>)probed
                 urls:(NSArray<NSURL *> *)urls
           generation:(uint64_t)generation
           completion:(nullable void (^)(NSArray<VEAssetInfo *> *, NSArray<NSError *> *))completion {
@@ -162,7 +76,7 @@ NSData *makeBookmark(NSString *path) {
         }];
         return;
     }
-    std::vector<ProbedFile> &results = *probed;
+    std::vector<ProbedMediaFile> &results = *probed;
     const os_signpost_id_t signpost = os_signpost_id_generate(_log);
     os_signpost_interval_begin(_log, signpost, "ImportMainThread", "%zu files", results.size());
     const CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
@@ -172,9 +86,10 @@ NSData *makeBookmark(NSString *path) {
     std::vector<MediaAsset> toAdd;
     std::vector<size_t> sourceIndex;
     for (size_t i = 0; i < results.size(); ++i) {
-        ProbedFile &file = results[i];
+        ProbedMediaFile &file = results[i];
         if (!file.asset) {
-            [errors addObject:file.error ?: makeError(VEEngineErrorImportFailed, @"import failed")];
+            [errors addObject:file.error ? makeError(*file.error, urls[i].lastPathComponent)
+                                         : makeError(VEEngineErrorImportFailed, @"import failed")];
             continue;
         }
         auto existing = std::find_if(_project.assets.begin(), _project.assets.end(),
@@ -194,18 +109,23 @@ NSData *makeBookmark(NSString *path) {
             [errors addObject:makeError(VEEngineErrorImportFailed, toNS(result.message))];
         } else {
             const std::vector<AssetId> &ids = import->createdAssetIds();
+            __weak VEEngine *weakSelf = self;
             for (size_t k = 0; k < ids.size(); ++k) {
-                ProbedFile &file = results[sourceIndex[k]];
+                ProbedMediaFile &file = results[sourceIndex[k]];
                 const AssetId id = ids[k];
-                _assets.details[id] = file.details;
-                // Ids are never reused, but never let a stale entry name another file.
-                _assets.bookmarks[@(static_cast<int64_t>(id.value()))] = file.bookmark;
-                _assets.missing.erase(id);
-                // Keep sandbox access to the file for this session (bookmark resolution
-                // grants it again after reopening).
-                [self keepAccessToURL:urls[sourceIndex[k]]];
-                [self registerRouting:*file.routed forAsset:id path:file.asset->url];
-                [self startPosterAndWaveformForAsset:id];
+                // Its details, bookmark and routing, and sandbox access to the file for this
+                // session (bookmark resolution grants it again after reopening).
+                [_media addImportedAsset:id file:file url:urls[sourceIndex[k]]];
+                [self handRoutingToMonitors:*file.routed forAsset:id path:file.asset->url];
+                if (const MediaAsset *asset = _project.findAsset(id)) {
+                    [_media startPosterAndWaveformForAsset:*asset
+                        thumbnailReady:^(AssetId ready) {
+                          [weakSelf notifyThumbnailForAsset:ready];
+                        }
+                        waveformReady:^(AssetId ready) {
+                          [weakSelf notifyWaveformForAsset:ready];
+                        }];
+                }
                 [reportedIDs addObject:@(static_cast<int64_t>(id.value()))];
             }
         }
@@ -217,7 +137,7 @@ NSData *makeBookmark(NSString *path) {
         }
     }
     const bool changed = !toAdd.empty() || reportedIDs.count > 0;
-    _assets.mainThreadImportSeconds += CFAbsoluteTimeGetCurrent() - start;
+    _mainThreadImportSeconds += CFAbsoluteTimeGetCurrent() - start;
     os_signpost_interval_end(_log, signpost, "ImportMainThread");
     if (changed) {
         [self notifyAssetsAndModelChanged];
@@ -230,39 +150,6 @@ NSData *makeBookmark(NSString *path) {
 - (NSUInteger)deferredImportCount {
     VE_ASSERT_MAIN();
     return _undo.deferredImports.count;
-}
-
-- (void)startPosterAndWaveformForAsset:(AssetId)id {
-    const MediaAsset *asset = _project.findAsset(id);
-    if (asset == nullptr) {
-        return;
-    }
-    const uint64_t generation = _document.generation;
-    __weak VEEngine *weakSelf = self;
-    if (asset->hasVideo()) {
-        thumbs::ThumbnailRequest request;
-        request.asset = id;
-        request.url = asset->url;
-        request.time = kCMTimeZero;
-        request.maxDimension = kPosterMaxDimension;
-        _services.thumbnails->request(request, dispatch_get_main_queue(), [weakSelf, generation, id](auto result) {
-            VEEngine *strongSelf = weakSelf;
-            if (strongSelf != nil && strongSelf->_document.generation == generation && result.ok()) {
-                [strongSelf notifyThumbnailForAsset:id];
-            }
-        });
-    }
-    if (asset->hasAudio()) {
-        thumbs::WaveformRequest request;
-        request.asset = id;
-        request.url = asset->url;
-        _services.waveforms->request(request, dispatch_get_main_queue(), [weakSelf, generation, id](auto result) {
-            VEEngine *strongSelf = weakSelf;
-            if (strongSelf != nil && strongSelf->_document.generation == generation && result.ok()) {
-                [strongSelf notifyWaveformForAsset:id];
-            }
-        });
-    }
 }
 
 - (VEEditResult *)removeAsset:(VEAssetID)assetID {
@@ -286,7 +173,7 @@ NSData *makeBookmark(NSString *path) {
     VE_ASSERT_MAIN();
     const AssetId id = toAssetId(assetID);
     const MediaAsset *asset = _project.findAsset(id);
-    if (asset == nullptr || !asset->hasVideo() || _assets.missing.count(id)) {
+    if (asset == nullptr || !asset->hasVideo() || [_media isAssetMissing:id]) {
         NSError *error = makeError(VEEngineErrorReadFailed, asset == nullptr ? @"unknown asset"
                                                             : !asset->hasVideo() ? @"the asset has no picture"
                                                                                  : @"the media file is missing");
@@ -295,32 +182,25 @@ NSData *makeBookmark(NSString *path) {
         });
         return;
     }
-    thumbs::ThumbnailRequest request;
-    request.asset = id;
-    request.url = asset->url;
-    request.time = asset->isStill() || !CMTIME_IS_NUMERIC(time) ? kCMTimeZero : time;
-    request.maxDimension = int(std::clamp<NSInteger>(maxDimension, 16, 4096));
-    const uint64_t generation = _document.generation;
-    __weak VEEngine *weakSelf = self;
-    _services.thumbnails->request(request, dispatch_get_main_queue(),
-                                  [weakSelf, generation, completion](media::Result<thumbs::ThumbnailImage> result) {
-                                      VEEngine *strongSelf = weakSelf;
-                                      if (strongSelf == nil || strongSelf->_document.generation != generation) {
-                                          completion(NULL,
-                                                     makeError(VEEngineErrorProjectClosed, @"the project was closed"));
-                                      } else if (!result.ok()) {
-                                          completion(NULL, makeError(result.error(), @"thumbnail"));
-                                      } else {
-                                          completion(result.value().get(), nil);
-                                      }
-                                  });
+    [_media thumbnailOfAsset:*asset
+                      atTime:time
+                maxDimension:maxDimension
+                  completion:^(const media::Result<thumbs::ThumbnailImage> *result) {
+                    if (result == nullptr) {
+                        completion(NULL, makeError(VEEngineErrorProjectClosed, @"the project was closed"));
+                    } else if (!result->ok()) {
+                        completion(NULL, makeError(result->error(), @"thumbnail"));
+                    } else {
+                        completion(result->value().get(), nil);
+                    }
+                  }];
 }
 
 - (void)waveformForAsset:(VEAssetID)assetID completion:(void (^)(VEWaveform *_Nullable, NSError *_Nullable))completion {
     VE_ASSERT_MAIN();
     const AssetId id = toAssetId(assetID);
     const MediaAsset *asset = _project.findAsset(id);
-    if (asset == nullptr || !asset->hasAudio() || _assets.missing.count(id)) {
+    if (asset == nullptr || !asset->hasAudio() || [_media isAssetMissing:id]) {
         NSError *error = makeError(VEEngineErrorReadFailed, asset == nullptr ? @"unknown asset"
                                                             : !asset->hasAudio() ? @"the asset has no audio"
                                                                                  : @"the media file is missing");
@@ -329,28 +209,22 @@ NSData *makeBookmark(NSString *path) {
         });
         return;
     }
-    thumbs::WaveformRequest request;
-    request.asset = id;
-    request.url = asset->url;
-    const uint64_t generation = _document.generation;
-    __weak VEEngine *weakSelf = self;
-    _services.waveforms->request(
-        request, dispatch_get_main_queue(), [weakSelf, generation, completion, id](thumbs::WaveformResult result) {
-            VEEngine *strongSelf = weakSelf;
-            if (strongSelf == nil || strongSelf->_document.generation != generation) {
-                completion(nil, makeError(VEEngineErrorProjectClosed, @"the project was closed"));
-            } else if (!result.ok()) {
-                completion(nil, makeError(result.error(), @"waveform"));
-            } else {
-                completion(makeWaveform(id, result.value()), nil);
-            }
-        });
+    [_media waveformOfAsset:*asset
+                 completion:^(const thumbs::WaveformResult *result) {
+                   if (result == nullptr) {
+                       completion(nil, makeError(VEEngineErrorProjectClosed, @"the project was closed"));
+                   } else if (!result->ok()) {
+                       completion(nil, makeError(result->error(), @"waveform"));
+                   } else {
+                       completion(makeWaveform(id, result->value()), nil);
+                   }
+                 }];
 }
 
 - (nullable VEWaveform *)cachedWaveformForAsset:(VEAssetID)assetID {
     VE_ASSERT_MAIN();
     const AssetId id = toAssetId(assetID);
-    auto peaks = _services.waveforms->cached(id);
+    auto peaks = [_media cachedWaveformForAsset:id];
     return peaks ? makeWaveform(id, peaks) : nil;
 }
 
@@ -397,7 +271,7 @@ NSData *makeBookmark(NSString *path) {
 
 - (double)mainThreadImportSeconds {
     VE_ASSERT_MAIN();
-    return _assets.mainThreadImportSeconds;
+    return _mainThreadImportSeconds;
 }
 
 - (void)handleMemoryPressure:(BOOL)critical {
@@ -408,10 +282,7 @@ NSData *makeBookmark(NSString *path) {
     [_program.outputView handleMemoryPressure];
     [_source.view handleMemoryPressure];
     [_exporter handleMemoryPressure:critical];
-    for (const MediaAsset &asset : _project.assets) {
-        _services.thumbnails->purge(asset.id);
-        _services.waveforms->purge(asset.id);
-    }
+    [_media purgeThumbnailsAndWaveformsOfAssets:_project.assets];
     [NSNotificationCenter.defaultCenter postNotificationName:VEEngineMemoryPressureNotification
                                                       object:self
                                                     userInfo:@{VEEngineCriticalKey : @(critical)}];
@@ -421,95 +292,39 @@ NSData *makeBookmark(NSString *path) {
 
 @implementation VEEngine (MediaInternal)
 
-// MARK: - Private (VEEngine+Internal.h declares what other files call)
+// MARK: - Private (VEEngine+Internal.h declares them)
 
-/// Re-probes the project's assets in the background for the details that are not stored in
-/// the project file (codec names, routing reason), and hands the routing to the decode pool.
-- (void)probeDetailsForProjectAssets {
-    const uint64_t generation = _document.generation;
-    auto router = _services.router;
-    __weak VEEngine *weakSelf = self;
-    for (const MediaAsset &asset : _project.assets) {
-        if (_assets.missing.count(asset.id)) {
-            continue;
-        }
-        const AssetId assetId = asset.id;
-        const std::string path = asset.url;
-        dispatch_async(_services.probeQueue, ^{
-            auto routed = std::make_shared<media::Result<media::RoutedMediaInfo>>(router->probe(path));
-            dispatch_async(dispatch_get_main_queue(), ^{
-                VEEngine *strongSelf = weakSelf;
-                if (strongSelf == nil || strongSelf->_document.generation != generation || !routed->ok()) {
-                    return;
-                }
-                const MediaAsset *current = strongSelf->_project.findAsset(assetId);
-                if (current == nullptr || current->url != path) {
-                    return;
-                }
-                strongSelf->_assets.details[assetId] = detailsFor(routed->value());
-                [strongSelf registerRouting:routed->value() forAsset:assetId path:path];
-                [strongSelf notifyAssetsChanged];
-            });
-        });
-    }
-}
-
-- (void)keepAccessToURL:(NSURL *)url {
-    if ([url startAccessingSecurityScopedResource]) {
-        [_assets.accessedURLs addObject:url];
-    }
-}
-
-- (void)stopAccessingURLs {
-    for (NSURL *url in _assets.accessedURLs) {
-        [url stopAccessingSecurityScopedResource];
-    }
-    [_assets.accessedURLs removeAllObjects];
-}
-
-- (void)rememberBookmark:(NSData *)bookmark forAsset:(AssetId)asset {
-    _assets.bookmarks[@(static_cast<int64_t>(asset.value()))] = bookmark;
-}
-
-- (void)markAssetMissing:(AssetId)asset {
-    _assets.missing.insert(asset);
-}
-
-- (nullable NSData *)bookmarkForSavingAsset:(const MediaAsset &)asset {
-    NSNumber *key = @(static_cast<int64_t>(asset.id.value()));
-    NSData *bookmark = _assets.bookmarks[key];
-    if (bookmark == nil && !_assets.missing.count(asset.id)) {
-        bookmark = makeBookmark(toNS(asset.url));
-        if (bookmark != nil) {
-            _assets.bookmarks[key] = bookmark;
-        }
-    }
-    return bookmark;
-}
-
-- (void)beginMediaEpoch {
-    _services.epoch = _services.frameCache->beginEpoch();
-    _program.pool->beginEpoch(_services.epoch);
-    _source.pool->beginEpoch(_services.epoch);
-}
-
-- (void)forgetAssetState {
-    _assets.routing.clear();
-    _assets.details.clear();
-    _assets.missing.clear();
-    [_assets.bookmarks removeAllObjects];
-    [self stopAccessingURLs];
-}
-
-/// Hands an asset's routing to every decode path (saves a probe per decoder).
-- (void)registerRouting:(const media::RoutedMediaInfo &)routed forAsset:(AssetId)asset path:(const std::string &)path {
-    _assets.routing[asset] = routed;
+/// Hands an asset's routing to both monitors' decode paths (saves a probe per decoder); the
+/// library keeps it for exports and a new source controller.
+- (void)handRoutingToMonitors:(const media::RoutedMediaInfo &)routed
+                     forAsset:(AssetId)asset
+                         path:(const std::string &)path {
     _program.pool->registerAsset(asset, path, routed);
     _source.pool->registerAsset(asset, path, routed);
     _program.playback->setAssetRouting(asset, routed);
     if (_source.playback) {
         _source.playback->setAssetRouting(asset, routed);
     }
+}
+
+/// Re-probes the project's assets in the background for the details that are not stored in
+/// the project file (codec names, routing reason), and hands the routing to the decode pools.
+- (void)probeDetailsForProjectAssets {
+    __weak VEEngine *weakSelf = self;
+    [_media probeDetailsOfAssets:_project.assets
+                      completion:^(AssetId assetId, const std::string &path, const media::RoutedMediaInfo &routed) {
+                        VEEngine *strongSelf = weakSelf;
+                        if (strongSelf == nil) {
+                            return;
+                        }
+                        const MediaAsset *current = strongSelf->_project.findAsset(assetId);
+                        if (current == nullptr || current->url != path) {
+                            return;
+                        }
+                        [strongSelf->_media recordProbe:routed forAsset:assetId];
+                        [strongSelf handRoutingToMonitors:routed forAsset:assetId path:path];
+                        [strongSelf notifyAssetsChanged];
+                      }];
 }
 
 @end

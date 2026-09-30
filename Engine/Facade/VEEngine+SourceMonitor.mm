@@ -4,6 +4,7 @@
 
 #import "VEEngine+Internal.h"
 #import "VEExporter+Internal.h"
+#import "VEMediaLibrary+Internal.h"
 
 #import "VEPreviewView.h"
 
@@ -121,7 +122,7 @@ const SourceProjectIds kSourceIds = [] {
         _source.playback = std::make_unique<playback::PlaybackController>(_services.router, _services.frameCache,
                                                                           _source.pool, config);
         _source.playback->setMuted(_program.playback->isMuted());
-        for (const auto &[asset, routed] : _assets.routing) {
+        for (const auto &[asset, routed] : _media.routing) {
             _source.playback->setAssetRouting(asset, routed);
         }
         [self observeController:*_source.playback source:YES];

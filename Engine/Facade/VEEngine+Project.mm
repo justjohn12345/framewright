@@ -5,6 +5,7 @@
 #import "VEExporter+Internal.h"
 
 #import "VEFacadeCommands+Internal.h"
+#import "VEMediaLibrary+Internal.h"
 
 #include "../Serialize/ProjectJSON.h"
 
@@ -12,8 +13,6 @@
 
 #include <cstdlib>
 #include <memory>
-#include <mutex>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,60 +25,6 @@ namespace {
 constexpr const char *kBookmarksKey = "assetBookmarks";
 /// Key under which the project file stores the media folder's bookmark (base64).
 constexpr const char *kMediaFolderBookmarkKey = "mediaFolderBookmark";
-/// Longest the main thread waits for the bookmarks of a project being opened (they resolve in
-/// parallel, never mounting volumes or showing UI); an asset whose bookmark is not resolved in
-/// time keeps its stored path.
-constexpr double kBookmarkResolutionTimeout = 3.0;
-
-/// A bookmark resolved by resolveBookmarks(): nil url when it could not be resolved (in time).
-struct ResolvedBookmark {
-    NSURL *url = nil;
-    BOOL stale = NO;
-};
-
-/// Resolves `bookmarks` concurrently on a background queue, security-scoped first, then plain,
-/// without mounting volumes or showing UI; waits at most kBookmarkResolutionTimeout seconds in
-/// total. Results that arrive later are discarded. Security-scoped access is not started here.
-std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
-    struct Shared {
-        std::mutex mutex;
-        std::vector<ResolvedBookmark> results;
-        bool abandoned = false;
-    };
-    auto shared = std::make_shared<Shared>();
-    shared->results.resize(bookmarks.count);
-    dispatch_group_t group = dispatch_group_create();
-    dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
-    for (NSUInteger i = 0; i < bookmarks.count; ++i) {
-        NSData *data = bookmarks[i];
-        dispatch_group_async(group, queue, ^{
-            const NSURLBookmarkResolutionOptions options =
-                NSURLBookmarkResolutionWithoutUI | NSURLBookmarkResolutionWithoutMounting;
-            BOOL stale = NO;
-            NSURL *url = [NSURL URLByResolvingBookmarkData:data
-                                                   options:options | NSURLBookmarkResolutionWithSecurityScope
-                                             relativeToURL:nil
-                                       bookmarkDataIsStale:&stale
-                                                     error:nil];
-            if (url == nil) {
-                stale = NO;
-                url = [NSURL URLByResolvingBookmarkData:data
-                                                options:options
-                                          relativeToURL:nil
-                                    bookmarkDataIsStale:&stale
-                                                  error:nil];
-            }
-            std::lock_guard<std::mutex> lock(shared->mutex);
-            if (!shared->abandoned) {
-                shared->results[i] = ResolvedBookmark{url, stale};
-            }
-        });
-    }
-    dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, int64_t(kBookmarkResolutionTimeout * NSEC_PER_SEC)));
-    std::lock_guard<std::mutex> lock(shared->mutex);
-    shared->abandoned = true;
-    return shared->results;
-}
 
 } // namespace
 
@@ -172,49 +117,13 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
     }
     _document.loadWarnings = warningStrings;
 
-    // Resolve every asset: through its bookmark (follows moves and grants sandbox access),
-    // else by path. The bookmarks resolve in parallel off the main thread, bounded in time.
-    NSMutableArray<NSData *> *toResolve = [NSMutableArray array];
-    std::vector<size_t> resolvedAsset; // index into _project.assets per entry of toResolve
-    for (size_t i = 0; i < _project.assets.size(); ++i) {
-        if (NSData *bookmark = bookmarks[@(static_cast<int64_t>(_project.assets[i].id.value()))]) {
-            [toResolve addObject:bookmark];
-            resolvedAsset.push_back(i);
-        }
+    // Find every asset's file: through its bookmark (follows moves and grants sandbox access),
+    // else by path (VEMediaLibrary keeps the access, the bookmarks to save and the missing files).
+    const std::vector<AssetRelink> relinks = [_media locateOpenedAssets:_project.assets bookmarks:bookmarks];
+    for (const AssetRelink &relink : relinks) {
+        _project.assets[relink.index].url = relink.path;
     }
-    const std::vector<ResolvedBookmark> resolutions = resolveBookmarks(toResolve);
-    std::vector<std::optional<ResolvedBookmark>> resolutionOf(_project.assets.size());
-    for (size_t k = 0; k < resolutions.size(); ++k) {
-        resolutionOf[resolvedAsset[k]] = resolutions[k];
-    }
-    bool relinked = false;
-    for (size_t i = 0; i < _project.assets.size(); ++i) {
-        MediaAsset &asset = _project.assets[i];
-        NSNumber *key = @(static_cast<int64_t>(asset.id.value()));
-        NSData *bookmark = bookmarks[key];
-        if (resolutionOf[i]) {
-            NSURL *resolved = resolutionOf[i]->url;
-            const BOOL stale = resolutionOf[i]->stale;
-            if (resolved != nil) {
-                [self keepAccessToURL:resolved];
-                // Bookmarks resolve to canonical paths (/private/var/...): only a different
-                // file counts as a relink.
-                NSString *canonicalResolved = resolved.URLByResolvingSymlinksInPath.path;
-                NSString *canonicalStored = [NSURL fileURLWithPath:toNS(asset.url)].URLByResolvingSymlinksInPath.path;
-                const std::string resolvedPath = toStd(resolved.path);
-                if (!resolvedPath.empty() && ![canonicalResolved isEqualToString:canonicalStored]) {
-                    asset.url = resolvedPath;
-                    relinked = true;
-                }
-                if (!stale) {
-                    [self rememberBookmark:bookmark forAsset:asset.id]; // re-saving is byte identical
-                }
-            }
-        }
-        if (![NSFileManager.defaultManager fileExistsAtPath:toNS(asset.url)]) {
-            [self markAssetMissing:asset.id];
-        }
-    }
+    const bool relinked = !relinks.empty();
     if (relinked) {
         _document.metadataDirty = true;
         ++_document.extraChanges;
@@ -236,7 +145,7 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
     nlohmann::json json = projectToJson(_project);
     nlohmann::json bookmarks = nlohmann::json::object();
     for (const MediaAsset &asset : _project.assets) {
-        if (NSData *bookmark = [self bookmarkForSavingAsset:asset]) {
+        if (NSData *bookmark = [_media bookmarkForSavingAsset:asset]) {
             bookmarks[std::to_string(asset.id.value())] = toStd([bookmark base64EncodedStringWithOptions:0]);
         }
     }
@@ -294,7 +203,7 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
 - (NSArray<NSNumber *> *)missingAssetIDs {
     VE_ASSERT_MAIN();
     NSMutableArray<NSNumber *> *ids = [NSMutableArray array];
-    for (AssetId id : _assets.missing) {
+    for (AssetId id : _media.missingAssets) {
         [ids addObject:@(static_cast<int64_t>(id.value()))];
     }
     return ids;
@@ -336,11 +245,7 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
     // The controllers stop using the old assets first (their ids will name other files).
     [self detachProgramFromProject];
     [self resetSourceMonitor]; // stops the source controller and drops its private project
-    for (const MediaAsset &asset : _project.assets) {
-        _services.thumbnails->cancelPending(asset.id);
-        _services.thumbnails->purge(asset.id);
-        _services.waveforms->purge(asset.id);
-    }
+    [_media forgetThumbnailsAndWaveformsOfAssets:_project.assets];
     // A new media epoch: the frame cache drops every frame and refuses any decoded for the old
     // ids, and both decode pools forget every asset, target, scrub request and decoder, so no
     // decode in flight can publish the previous project's picture under a reused id (see
@@ -350,7 +255,7 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
     if (_source.playback) {
         _source.playback->forgetMedia();
     }
-    [self forgetAssetState];
+    [_media forgetProjectAssets];
     ++_document.generation;
 }
 

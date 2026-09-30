@@ -4,6 +4,7 @@
 #import "VEEngine+Internal.h"
 
 #import "VEFacadeCommands+Internal.h"
+#import "VEMediaLibrary+Internal.h"
 
 #include "../Render/Scheduler.h"
 
@@ -48,9 +49,8 @@ using namespace ve::facade;
 }
 
 - (VEAssetInfo *)makeInfoForAsset:(const MediaAsset &)asset {
-    auto details = _assets.details.find(asset.id);
-    return makeAssetInfo(asset, details == _assets.details.end() ? nullptr : &details->second,
-                         _assets.missing.count(asset.id) > 0, NSInteger(countAssetUses(_project, asset.id)));
+    return makeAssetInfo(asset, [_media detailsForAsset:asset.id], [_media isAssetMissing:asset.id],
+                         NSInteger(countAssetUses(_project, asset.id)));
 }
 
 - (nullable VETransitionInfo *)transitionInfo:(VETransitionID)transitionID {

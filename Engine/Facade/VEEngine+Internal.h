@@ -20,8 +20,6 @@
 #include "../Media/FrameCache.h"
 #include "../Model/Project.h"
 #include "../Playback/PlaybackController.h"
-#include "../Thumbs/ThumbnailService.h"
-#include "../Thumbs/WaveformService.h"
 
 #include <os/log.h>
 
@@ -38,6 +36,7 @@
 // The classes VEEngine coordinates (each in its own VE<Name>+Internal.h, included by the files that
 // use it); they know nothing of the engine.
 @class VEExporter;
+@class VEMediaLibrary;
 
 namespace ve::facade {
 
@@ -96,44 +95,32 @@ NS_ASSUME_NONNULL_END
 
 // ----- The engine's state -----
 //
-// Grouped by the file that owns it: only that file's methods change a struct's fields, and other
+// The areas that own real state and lifecycle are classes of their own, each with its state
+// private to its .mm and knowing nothing of the engine (VEExporter, VEMediaLibrary; see their
+// +Internal.h headers): the engine owns one instance of each and coordinates them. The rest is
+// grouped by the file that owns it: only that file's methods change a struct's fields, and other
 // files ask it through the private methods below (they may call methods of the thread-safe objects
 // the pointers name, e.g. a pool's registerAsset or a controller's pause). The one exception is
-// construction: -initWithCacheDirectory: (VEEngine.mm) creates the services, both monitors' pools,
-// the program controller, the source provider and the first undo stack. Everything here is main
-// thread only unless a field says otherwise: the engine's methods run on the main thread
-// (VE_ASSERT_MAIN), and the probe queue, the decode pools, the thumbnail and waveform services and
-// the playback controllers hand their results back on the main queue. The objects the pointers name
-// (router, frame cache, pools, services, controllers, frame provider) are thread safe themselves.
+// construction: -initWithCacheDirectory: (VEEngine.mm) creates the services, the classes, both
+// monitors' pools, the program controller, the source provider and the first undo stack.
+// Everything here is main thread only unless a field says otherwise: the engine's methods run on
+// the main thread (VE_ASSERT_MAIN), and the classes, the decode pools and the playback controllers
+// hand their results back on the main queue. The objects the pointers name (router, frame cache,
+// pools, controllers, frame provider) are thread safe themselves.
 
 namespace ve::facade {
 
-/// The media services behind every area. Created by -initWithCacheDirectory: (VEEngine.mm) and
-/// never replaced; afterwards only -beginMediaEpoch (VEEngine+Media.mm, called on New/Open) changes
-/// it, advancing `epoch`.
+/// The shared media services: the router and the frame cache every area decodes through (the
+/// media library's probes and thumbnails, both monitors' pools and controllers, the exports), and
+/// the media epoch the cache and the pools are in. A dependency the engine injects into the
+/// classes that need it, not owned by any of them. Created by -initWithCacheDirectory:
+/// (VEEngine.mm) and never replaced; afterwards only -beginMediaEpoch (VEEngine.mm, called on
+/// New/Open) changes it, advancing `epoch`. Other files may call the router's and the cache's
+/// methods (they are thread safe).
 struct MediaServices {
     std::shared_ptr<media::BackendRouter> router;
     std::shared_ptr<media::FrameCache> frameCache;
     media::FrameCache::Epoch epoch = 0; // advanced on every New/Open (ids restart per project)
-    std::unique_ptr<thumbs::ThumbnailService> thumbnails;
-    std::unique_ptr<thumbs::WaveformService> waveforms;
-    // Concurrent (created by init): probes files and hands the results to the main queue.
-    dispatch_queue_t _Null_unspecified probeQueue = nil;
-};
-
-/// What the engine knows about the project's media files beyond the model (VEEngine+Media.mm):
-/// filled by imports and the background probes; Open and Save (VEEngine+Project.mm) go through
-/// keepAccessToURL:, rememberBookmark:forAsset:, markAssetMissing: and bookmarkForSavingAsset:,
-/// and New/Open clears it with forgetAssetState.
-struct AssetState {
-    std::map<AssetId, media::RoutedMediaInfo> routing; // handed to every decode path (registerRouting)
-    std::map<AssetId, AssetDetails> details;           // probe details not stored in the project file
-    std::set<AssetId> missing;                         // files not found when the project was opened
-    // Asset id -> security-scoped bookmark, saved with the project.
-    NSMutableDictionary<NSNumber *, NSData *> *_Nonnull bookmarks = [NSMutableDictionary dictionary];
-    // Security-scoped URLs accessed for this project (stopAccessingURLs ends the access).
-    NSMutableArray<NSURL *> *_Nonnull accessedURLs = [NSMutableArray array];
-    double mainThreadImportSeconds = 0; // see -mainThreadImportSeconds
 };
 
 /// The open project as a document (VEEngine+Project.mm): where it lives, its dirty state and what
@@ -196,7 +183,11 @@ struct SourceMonitorState {
     // of an opened project's assets) change it.
     ve::Project _project;
     ve::facade::MediaServices _services;
-    ve::facade::AssetState _assets;
+    // What is known about the project's media files beyond the model: a class of its own
+    // (VEMediaLibrary+Internal.h) that knows nothing of the engine. VEEngine+Media.mm imports
+    // through it; Open, Save and New/Open (VEEngine+Project.mm) and the snapshots ask it.
+    VEMediaLibrary *_media;
+    double _mainThreadImportSeconds; // see -mainThreadImportSeconds (VEEngine+Media.mm)
     ve::facade::DocumentState _document;
     ve::facade::UndoState _undo;
     ve::facade::ProgramMonitorState _program;
@@ -218,6 +209,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 // VEEngine.mm
 @interface VEEngine ()
+/// Starts a new media epoch (New/Open): the frame cache drops every frame and refuses frames of
+/// the old epoch, and both monitors' decode pools forget every asset (see forgetProjectMedia).
+- (void)beginMediaEpoch;
 - (void)notifyModelChanged;
 - (void)notifyAssetsChanged;
 /// notifyAssetsChanged, then notifyModelChanged: after a change that may touch the asset list.
@@ -246,29 +240,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 // VEEngine+Media.mm
 @interface VEEngine (MediaInternal)
+/// Probes the project's present assets again for their details and routing (Open).
 - (void)probeDetailsForProjectAssets;
-/// Keeps sandbox access to `url` for this project (when it grants security-scoped access);
-/// stopAccessingURLs ends it.
-- (void)keepAccessToURL:(NSURL *)url;
-/// Ends the security-scoped access of every URL keepAccessToURL: kept.
-- (void)stopAccessingURLs;
-/// Remembers `bookmark` as `asset`'s, to be saved with the project (Open: a bookmark that resolved
-/// and is not stale, so re-saving is byte identical).
-- (void)rememberBookmark:(NSData *)bookmark forAsset:(ve::AssetId)asset;
-/// Records that `asset`'s file was not found when the project was opened.
-- (void)markAssetMissing:(ve::AssetId)asset;
-/// The bookmark to save for `asset`: the one remembered, else (unless its file is missing) a new
-/// one, which is remembered; nil when the file cannot be bookmarked.
-- (nullable NSData *)bookmarkForSavingAsset:(const ve::MediaAsset &)asset;
-/// Starts a new media epoch (New/Open): the frame cache drops every frame and refuses frames of
-/// the old epoch, and both monitors' decode pools forget every asset (see forgetProjectMedia).
-- (void)beginMediaEpoch;
-/// Forgets the routing, details, missing assets and bookmarks of the project's assets and ends
-/// the access to their URLs (New/Open).
-- (void)forgetAssetState;
-- (void)registerRouting:(const ve::media::RoutedMediaInfo &)routed
-               forAsset:(ve::AssetId)asset
-                   path:(const std::string &)path;
+/// Hands an asset's routing to both monitors' decode pools and controllers.
+- (void)handRoutingToMonitors:(const ve::media::RoutedMediaInfo &)routed
+                     forAsset:(ve::AssetId)asset
+                         path:(const std::string &)path;
 @end
 
 // VEEngine+Undo.mm
