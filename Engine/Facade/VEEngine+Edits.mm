@@ -5,12 +5,12 @@
 
 #import "VEFacadeCommands+Internal.h"
 
+#include "../Edit/EditPlans.h"
 #include "../Render/Scheduler.h"
 
 #include <cmath>
 #include <memory>
 #include <optional>
-#include <set>
 #include <vector>
 
 using namespace ve;
@@ -90,38 +90,6 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
 
 // MARK: - Edits
 
-- (std::vector<ClipPlacement>)placementsForAsset:(const MediaAsset &)asset
-                                      videoTrack:(VETrackID)videoTrackID
-                                      audioTrack:(VETrackID)audioTrackID
-                                        sourceIn:(CMTime)sourceIn
-                                       sourceOut:(CMTime)sourceOut {
-    std::vector<ClipPlacement> placements;
-    auto configure = [&](TrackId track) {
-        ClipPlacement p = placementForAsset(asset, track);
-        if (asset.isStill()) {
-            if (CMTIME_IS_NUMERIC(sourceIn) && CMTIME_IS_NUMERIC(sourceOut) && sourceIn < sourceOut) {
-                p.sourceIn = kCMTimeZero;
-                p.sourceOut = sourceOut - sourceIn;
-            }
-        } else {
-            if (CMTIME_IS_NUMERIC(sourceIn)) {
-                p.sourceIn = sourceIn;
-            }
-            if (CMTIME_IS_NUMERIC(sourceOut)) {
-                p.sourceOut = sourceOut;
-            }
-        }
-        placements.push_back(p);
-    };
-    if (asset.hasVideo() && videoTrackID != 0) {
-        configure(TrackId(static_cast<TrackId::ValueType>(videoTrackID)));
-    }
-    if (asset.hasAudio() && audioTrackID != 0) {
-        configure(TrackId(static_cast<TrackId::ValueType>(audioTrackID)));
-    }
-    return placements;
-}
-
 - (VEEditResult *)placeAsset:(VEAssetID)assetID
                       atTime:(CMTime)time
                   videoTrack:(VETrackID)videoTrackID
@@ -134,11 +102,9 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
     if (asset == nullptr) {
         return [VEEditResult failureWithMessage:@"The media is not in the project."];
     }
-    std::vector<ClipPlacement> placements = [self placementsForAsset:*asset
-                                                          videoTrack:videoTrackID
-                                                          audioTrack:audioTrackID
-                                                            sourceIn:sourceIn
-                                                           sourceOut:sourceOut];
+    std::vector<ClipPlacement> placements =
+        placementsForAsset(*asset, TrackId(static_cast<TrackId::ValueType>(videoTrackID)),
+                           TrackId(static_cast<TrackId::ValueType>(audioTrackID)), sourceIn, sourceOut);
     if (placements.empty()) {
         return [VEEditResult failureWithMessage:asset->hasVideo() ? @"Choose a video track for this media."
                                                                   : @"Choose an audio track for this media."];
@@ -319,23 +285,11 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
     options.allowBreakingTransitions = breakingTransitions;
     const Sequence &sequence = [self activeSequence];
     const CMTime at = snapToFrame(time, sequence.frameDuration, SnapMode::Round);
-    std::vector<ClipId> candidates = clipIDs.count > 0 ? toClipIds(clipIDs) : Scheduler::clipsAt(sequence, at);
-    std::set<ClipId> covered;
+    // The given clips, or every clip under the playhead on an unlocked track.
+    const std::vector<ClipId> candidates = clipIDs.count > 0 ? toClipIds(clipIDs) : Scheduler::clipsAt(sequence, at);
     std::vector<std::unique_ptr<Command>> children;
     std::vector<SplitClip *> splits;
-    for (ClipId id : candidates) {
-        const Track *track = sequence.trackOfClip(id);
-        const Clip *clip = track ? track->find(id) : nullptr;
-        if (clip == nullptr || covered.count(id) || !(clip->timelineStart < at && at < clip->timelineEnd())) {
-            continue;
-        }
-        if (clipIDs.count == 0 && track->locked) {
-            continue;
-        }
-        covered.insert(id);
-        if (clip->linkedClipId) {
-            covered.insert(*clip->linkedClipId); // SplitClip splits the partner too
-        }
+    for (ClipId id : splitTargets(sequence, candidates, at, clipIDs.count == 0)) {
         auto split = std::make_unique<SplitClip>([self sequenceId], id, at, options);
         splits.push_back(split.get());
         children.push_back(std::move(split));
@@ -467,24 +421,11 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
     }
     const Sequence &sequence = [self activeSequence];
     std::vector<ClipId> targets;
-    std::set<ClipId> covered;
-    for (ClipId id : toClipIds(clipIDs)) {
-        const Clip *clip = sequence.findClip(id);
-        if (clip == nullptr) {
-            return [VEEditResult failureWithCode:VEEditErrorClipNotFound message:@"A selected clip no longer exists."];
-        }
-        if (clip->isStill) {
-            return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
-                                         message:@"Still images have no playback speed; change their duration by "
-                                                 @"trimming instead."];
-        }
-        if (!covered.insert(id).second) {
-            continue;
-        }
-        if (clip->linkedClipId) {
-            covered.insert(*clip->linkedClipId); // SetClipSpeed changes the partner too
-        }
-        targets.push_back(id);
+    if (const EditResult listed = linkedEditTargets(
+            sequence, toClipIds(clipIDs),
+            "Still images have no playback speed; change their duration by trimming instead.", targets);
+        !listed) {
+        return toVE(listed);
     }
     if (targets.empty()) {
         return [VEEditResult failureWithMessage:@"Nothing selected."];
@@ -515,23 +456,10 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
     VE_ASSERT_MAIN();
     const Sequence &sequence = [self activeSequence];
     std::vector<ClipId> targets;
-    std::set<ClipId> covered;
-    for (ClipId id : toClipIds(clipIDs)) {
-        const Clip *clip = sequence.findClip(id);
-        if (clip == nullptr) {
-            return [VEEditResult failureWithCode:VEEditErrorClipNotFound message:@"A selected clip no longer exists."];
-        }
-        if (clip->isStill) {
-            return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
-                                         message:@"A still image has no motion to reverse."];
-        }
-        if (!covered.insert(id).second) {
-            continue;
-        }
-        if (clip->linkedClipId) {
-            covered.insert(*clip->linkedClipId); // SetClipReversed changes the partner too
-        }
-        targets.push_back(id);
+    if (const EditResult listed =
+            linkedEditTargets(sequence, toClipIds(clipIDs), "A still image has no motion to reverse.", targets);
+        !listed) {
+        return toVE(listed);
     }
     if (targets.empty()) {
         return [VEEditResult failureWithMessage:@"Nothing selected."];

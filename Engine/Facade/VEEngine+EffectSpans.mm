@@ -3,7 +3,7 @@
 
 #import "VEEngine+Internal.h"
 
-#include "../Render/Scheduler.h"
+#include "../Edit/EditPlans.h"
 
 #include <algorithm>
 #include <climits>
@@ -281,60 +281,22 @@ using namespace ve::facade;
     VE_ASSERT_MAIN();
     const Sequence &sequence = [self activeSequence];
     const ClipId id(static_cast<ClipId::ValueType>(clipID));
-    const Track *track = sequence.trackOfClip(id);
-    const Clip *clip = track ? track->find(id) : nullptr;
-    if (clip == nullptr) {
-        return [VEEditResult failureWithCode:VEEditErrorClipNotFound message:@"The clip no longer exists."];
-    }
-    if (track->kind != TrackKind::Video) {
-        return [VEEditResult failureWithCode:VEEditErrorTrackKindMismatch message:@"Audio clips have no Motion."];
-    }
     const bool previous = edge == VEClipEdgeStart;
-    const CMTime fd = sequence.frameDuration;
-    const Clip *neighbour = touchingClip(*track, *clip, previous ? ClipEdge::Head : ClipEdge::Tail);
-    if (neighbour == nullptr) {
-        return [VEEditResult failureWithCode:VEEditErrorNotAdjacent
-                                     message:previous ? @"No clip ends where this clip starts on its track."
-                                                      : @"No clip starts where this clip ends on its track."];
-    }
-    // The neighbour's frame at the cut, as the monitors and export draw it; this clip's frame there.
-    const CMTime neighbourFrame = previous ? neighbour->timelineEnd() - fd : neighbour->timelineStart;
-    const CMTime frame = previous ? clip->timelineStart : clip->timelineEnd() - fd;
-    const VideoParams target = Scheduler::motionAt(*neighbour, neighbourFrame);
-    // What the clip's spans add and multiply there, composed onto neutral static values.
-    Clip neutral = *clip;
-    neutral.video = VideoParams{};
-    const VideoParams spans = motionValuesAt(neutral, frame);
-    if (!(spans.scale > 0.0) || !(spans.opacity > 0.0)) {
-        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
-                                     message:@"The clip's spans make its scale or opacity 0 there, so no static value "
-                                             @"can match."];
-    }
-    VideoParams values = clip->video;
-    values.x = target.x - spans.x;
-    values.y = target.y - spans.y;
-    values.scale = target.scale / spans.scale;
-    values.rotationDegrees = target.rotationDegrees - spans.rotationDegrees;
-    values.opacity = target.opacity / spans.opacity;
-    if (!(values.opacity <= 1.0)) {
-        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
-                                     message:@"The clip's spans lower its opacity there, so no static opacity can reach "
-                                             @"the neighbour's."];
+    std::optional<VideoParams> values;
+    if (const EditResult planned = planMatchMotion(sequence, id, previous ? ClipEdge::Head : ClipEdge::Tail, values);
+        !planned) {
+        return toVE(planned);
     }
     NSString *what = previous ? @"the previous clip's end" : @"the next clip's start";
-    bool changesAnything = false;
-    for (const MotionParameter parameter : kMotionParameters) {
-        changesAnything = changesAnything || !spanValuesMatch(spanParameterOf(parameter), values.staticValue(parameter),
-                                                              clip->video.staticValue(parameter));
-    }
-    if (!changesAnything) {
+    if (!values) {
+        const Track *track = sequence.trackOfClip(id);
         if (track->locked) {
             return [VEEditResult failureWithCode:VEEditErrorTrackLocked
                                          message:[NSString stringWithFormat:@"Track %@ is locked.", toNS(track->name)]];
         }
         return toVE(EditResult::success(), @[], [NSString stringWithFormat:@"This clip already matches %@.", what]);
     }
-    return [self push:std::make_unique<SetVideoParams>([self sequenceId], clip->id, values,
+    return [self push:std::make_unique<SetVideoParams>([self sequenceId], id, *values,
                                                        previous ? "Match Previous Clip" : "Match Next Clip")
               created:nil
                  note:[NSString stringWithFormat:@"Matched %@: set as this clip's static values.", what]];
