@@ -1662,22 +1662,37 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   `MediaServices _services` (init), `AssetState _assets` (Media), `DocumentState _document` (Project),
   `UndoState _undo` (Undo), `ProgramMonitorState _program` (Playback), `SourceMonitorState _source`
   (SourceMonitor), `ExportState _export` (Export), plus `_project` (the model), `_rippleScope` and VEEngine.mm's
-  observers. Other files change another area's struct through that area's private methods (declared in the
-  header's `<Area>Internal` category and implemented in an `@implementation VEEngine (<Area>Internal)` block of
-  the owning file, so the compiler checks them): e.g. `detachProgramFromProject`, `resetSourceMonitor`,
-  `startUndoHistory`, `deferUntilCoalescingEnds:`. Calls on the shared objects (a pool's `beginEpoch`, a
-  controller's `pause`) are made directly. New/Open (`forgetProjectMedia`) is the one place that resets every
-  area, in the order its comments give.
+  observers. Only the owning file writes a struct's fields; other files go through that area's private methods
+  (declared in the header's `<Area>Internal` category and implemented in an `@implementation VEEngine
+  (<Area>Internal)` block of the owning file, so the compiler checks them): e.g. `detachProgramFromProject`,
+  `resetSourceMonitor`, `startUndoHistory`, `deferUntilCoalescingEnds:`, and for Media's asset state and the
+  media epoch `keepAccessToURL:`, `rememberBookmark:forAsset:`, `markAssetMissing:`, `bookmarkForSavingAsset:`,
+  `beginMediaEpoch`, `forgetAssetState`, `stopAccessingURLs`. The one exception is construction: init
+  (`VEEngine.mm`) creates the services, both pools, the program controller, the source provider and the first
+  undo stack. Calls on the shared, thread-safe objects (a pool's `registerAsset`, a controller's `pause`) are made
+  directly. New/Open (`forgetProjectMedia`) is the one place that resets every area, in the order its comments
+  give.
+- Functions the facade's files share are declared `VE_FACADE_HIDDEN` (hidden visibility) in
+  `VEEngine+Internal.h`: shared between the facade's files, not exported from the framework. Use it for any new
+  one (file-local helpers stay in an anonymous namespace).
 - Every edit goes through `pushCommand:` / `push:created:note:` / `pushRipple:` (Undo); span edits through
   `pushSpanCommand:` / `pushSpanEdit:` (EffectSpans); notifications through
   `postNotification:userInfo:observerMethod:notify:`. Id conversions: `toClipId`, `toTrackId`, `toSpanId`,
   `toAssetId`; `clampToInt` for NSInteger lanes and steps.
-- Rules are not written in the facade: the transition limits, offsets, range fitting, fade planning and their
+- Rules moved out of the facade: the transition limits, offsets, range fitting, fade planning and their
   sentences are in `Engine/Edit/TransitionFitting.h`; placements, split and speed/reverse targets and matching a
   neighbour's Motion in `Engine/Edit/EditPlans.h`; the source monitor's one-asset project and asset frame times in
   `Engine/Model/SourceProject.h`; `numericRange` (TimeUtil), `requestedSequenceFormat` (Sequence),
   `assetUseCounts` (Project) and `laneCount` (Track) in the model. They have doctest coverage (TransitionFitting,
   EditPlans, SourceProject and ModelQuery tests); new rules go there too, with the facade only converting (toNS,
-  toVE, `makeEditResult`) and managing threads.
-- Kept as it was, noted: the fade note on a clip's own fitted fade reads "Shortened to shortened to ..."
-  (`planFade`; pinned by TransitionFittingTests until the wording is fixed on purpose).
+  toVE, `makeEditResult`) and managing threads. Still inline in `VEEngine+Transitions.mm`, and the next extraction
+  candidate (a `planCutTransition` in TransitionFitting.h): `addTransitionFromClip`'s refuse-or-fit decision and
+  the fitting of the linked partners' cut, the linked transition's limit in `setDuration:...includingLinked:`,
+  and the linked clip's fade in `addTransitionAtEdge:` (the per-clip fade itself is `planFade`).
+- Kept as they were, noted for the next fix round (both pinned by TransitionFittingTests, to be changed on
+  purpose there):
+  - The note on a clip's own fitted fade reads "Shortened to shortened to ..." (`planFade`).
+  - A linked fade in whose range fit is refused first gets the note "The linked transition was shortened to 0
+    frames (0.00 s): ..." and then "The linked transition was not changed: ...": `fitTransitionRange`'s head-fade
+    path adds the shortening note before its `length < 1` refusal (asserted by "fitTransitionRange fits a fade in
+    to its clip").
