@@ -434,12 +434,12 @@ static VEEditResult *_Nullable refuseTransitionKind(VETransitionKind kind) {
     if (!transition) {
         return [VEEditResult failureWithCode:VEEditErrorTransitionNotFound message:@"The transition no longer exists."];
     }
-    const auto ends = rangeEnds(range);
+    const auto ends = numericRange(range);
     if (!ends) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The range is not a valid time range."];
     }
     const CMTime fd = sequence.frameDuration;
-    const TimeRange frames{snapToFrame(ends->first, fd, SnapMode::Round), snapToFrame(ends->second, fd, SnapMode::Round)};
+    const TimeRange frames{snapToFrame(ends->start, fd, SnapMode::Round), snapToFrame(ends->end, fd, SnapMode::Round)};
     if (!(frames.start < frames.end)) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"A transition covers at least one frame."];
     }

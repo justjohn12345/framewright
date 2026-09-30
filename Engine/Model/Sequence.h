@@ -75,6 +75,12 @@ inline constexpr std::int32_t kMaxSequenceSampleRate = 192000;
 // encoders need even sides), a sample rate outside 8 to 192 kHz. A sentence for the user.
 std::optional<std::string> sequenceFormatProblem(const SequenceFormat &format);
 
+// The configured settings a caller asks for with wider integers (the Sequence Settings sheet's).
+// A size or sample rate outside the model's integers is clamped to 0 or INT32_MAX, which
+// sequenceFormatProblem refuses, so an out-of-range request is refused rather than wrapped.
+SequenceFormat requestedSequenceFormat(std::int64_t width, std::int64_t height, CMTime frameDuration,
+                                       std::int64_t audioSampleRate);
+
 struct MediaAsset;
 
 // The settings an unconfigured sequence takes from its first video clip's asset, configured: the

@@ -316,6 +316,10 @@ inline bool identical(const TimeRange &a, const TimeRange &b) {
 // The overlap of two ranges, or nullopt when they do not overlap.
 std::optional<TimeRange> intersection(const TimeRange &a, const TimeRange &b);
 
+// `range` as its two ends (TimeRange::fromCMTimeRange), or nullopt when its start or its duration is
+// not a numeric time (invalid, indefinite or infinite), e.g. a range passed in through the facade.
+std::optional<TimeRange> numericRange(CMTimeRange range);
+
 // Fraction of the way `t` is through `range` (0 at start, 1 at end), clamped to [0, 1].
 // Computed exactly and converted to double once.
 double fractionThrough(const TimeRange &range, CMTime t);

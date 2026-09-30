@@ -77,8 +77,6 @@ template <class IdType> NSArray<NSNumber *> *toNumbers(const std::vector<IdType>
 /// security scope may be unavailable). Nil if the file cannot be bookmarked.
 NSData *_Nullable makeBookmark(NSString *path);
 bool isRunning(playback::PlaybackState state);
-/// A timeline range as its two ends, or a refusal for an unusable range.
-std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range);
 
 NS_ASSUME_NONNULL_END
 

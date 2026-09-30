@@ -8,6 +8,7 @@
 
 #import "../Render/VEPreviewView+Internal.h"
 
+#include "../Model/SourceProject.h"
 #include "../Render/Scheduler.h"
 
 #include <algorithm>
@@ -20,59 +21,11 @@ using namespace ve::facade;
 
 namespace {
 
-/// First id of the source monitor's private one-clip project (never collides with model ids).
+/// The ids of the source monitor's private one-clip project (never colliding with model ids);
+/// kSourceIds.videoClip is its picture's clip in the still graphs too.
 constexpr uint64_t kSourceProjectFirstId = uint64_t(1) << 56;
-/// Clip id of the source monitor's picture in its still graphs.
-const ClipId kSourceVideoClip{kSourceProjectFirstId + 10};
-
-/// The source monitor's private project: `asset` (same id as in the real project, so the
-/// frame cache and routing are shared) as one clip over the whole media, video on V1 and audio
-/// on A1 (linked), on a sequence at the asset's own frame rate and size, sharpening scaled-down
-/// pictures as the real project says (`sharpen`). Nullopt for stills and media without a positive duration.
-std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbackFrameDuration, bool sharpen) {
-    if (asset.isStill() || !CMTIME_IS_NUMERIC(asset.duration) || asset.duration <= kCMTimeZero) {
-        return std::nullopt;
-    }
-    Project project;
-    project.name = "Source";
-    project.ids = IdGenerator(kSourceProjectFirstId);
-    project.sharpenScaledDownSources = sharpen;
-    project.assets.push_back(asset);
-    const CMTime fd = asset.hasVideo() && isPositive(asset.frameDuration) ? asset.frameDuration : fallbackFrameDuration;
-    const SequenceId sequenceId = project.addSequence("Source", fd, asset.hasVideo() ? std::max(1, asset.width) : 16,
-                                                      asset.hasVideo() ? std::max(1, asset.height) : 9, 1, 1);
-    Sequence &sequence = *project.findSequence(sequenceId);
-    const CMTime length = snapToFrame(asset.duration, fd, SnapMode::Floor);
-    if (length <= kCMTimeZero) {
-        return std::nullopt;
-    }
-    Clip video;
-    video.id = kSourceVideoClip;
-    video.assetId = asset.id;
-    video.trackId = sequence.videoTracks.front().id;
-    video.timelineStart = kCMTimeZero;
-    video.timelineDuration = length;
-    video.sourceIn = kCMTimeZero;
-    Clip audio = video;
-    audio.id = ClipId(kSourceProjectFirstId + 11);
-    audio.trackId = sequence.audioTracks.front().id;
-    // The picture ends where the media's video ends (the audio may run on).
-    const CMTime videoLength = snapToFrame(asset.videoEnd(), fd, SnapMode::Floor);
-    if (videoLength > kCMTimeZero && videoLength < length) {
-        video.timelineDuration = videoLength;
-    }
-    if (asset.hasVideo() && asset.hasAudio()) {
-        video.linkedClipId = audio.id;
-        audio.linkedClipId = video.id;
-    }
-    if (asset.hasVideo()) {
-        sequence.videoTracks.front().clips.push_back(video);
-    }
-    if (asset.hasAudio()) {
-        sequence.audioTracks.front().clips.push_back(audio);
-    }
-    return project;
-}
+const SourceProjectIds kSourceIds{kSourceProjectFirstId, ClipId(kSourceProjectFirstId + 10),
+                                  ClipId(kSourceProjectFirstId + 11)};
 
 } // namespace
 
@@ -97,20 +50,7 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
 - (CMTime)frameTimeForAsset:(VEAssetID)assetID atTime:(CMTime)time {
     VE_ASSERT_MAIN();
     const MediaAsset *asset = _project.findAsset(AssetId(static_cast<AssetId::ValueType>(assetID)));
-    if (asset == nullptr || !CMTIME_IS_NUMERIC(time) || time < kCMTimeZero || asset->isStill()) {
-        return kCMTimeZero;
-    }
-    const CMTime fd = asset->hasVideo() && isPositive(asset->frameDuration) ? asset->frameDuration
-                                                                             : [self activeSequence].frameDuration;
-    CMTime t = snapToFrame(time, fd, SnapMode::Floor);
-    if (CMTIME_IS_NUMERIC(asset->duration) && asset->duration > kCMTimeZero) {
-        const CMTime last = snapToFrame(asset->duration, fd, SnapMode::Floor);
-        const CMTime lastStart = last == asset->duration ? last - fd : last;
-        if (t > lastStart) {
-            t = std::max(kCMTimeZero, lastStart);
-        }
-    }
-    return t;
+    return asset != nullptr ? assetFrameTime(*asset, time, [self activeSequence].frameDuration) : kCMTimeZero;
 }
 
 - (void)sourceMonitorShowAsset:(VEAssetID)assetID atTime:(CMTime)time {
@@ -126,8 +66,8 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
     if (id != _source.asset) {
         [self resetSourceMonitor];
         _source.asset = id;
-        _source.project =
-            makeSourceProject(*asset, [self activeSequence].frameDuration, _project.sharpenScaledDownSources);
+        _source.project = makeSourceProject(*asset, [self activeSequence].frameDuration,
+                                            _project.sharpenScaledDownSources, kSourceIds);
     }
     _source.time = t;
     if (_source.usesController && _source.playback) {
@@ -328,7 +268,7 @@ std::optional<Project> makeSourceProject(const MediaAsset &asset, CMTime fallbac
         graph.height = sequence.height;
     } else if (const MediaAsset *asset = _project.findAsset(_source.asset); asset != nullptr && asset->isStill()) {
         VideoLayer layer;
-        layer.clipId = kSourceVideoClip;
+        layer.clipId = kSourceIds.videoClip;
         layer.assetId = asset->id;
         layer.isStill = true;
         layer.sourceRotationDegrees = asset->rotationDegrees;

@@ -1,5 +1,6 @@
 #include "Project.h"
 
+#include <map>
 #include <utility>
 
 namespace ve {
@@ -82,6 +83,26 @@ SequenceId Project::addSequence(std::string sequenceName, CMTime frameDuration, 
         activeSequenceId = sequenceId;
     }
     return sequenceId;
+}
+
+std::vector<std::pair<AssetId, std::size_t>> assetUseCounts(const Project &project) {
+    std::map<AssetId, std::size_t> counts;
+    for (const Sequence &sequence : project.sequences) {
+        for (const auto *tracks : {&sequence.videoTracks, &sequence.audioTracks}) {
+            for (const Track &track : *tracks) {
+                for (const Clip &clip : track.clips) {
+                    ++counts[clip.assetId];
+                }
+            }
+        }
+    }
+    std::vector<std::pair<AssetId, std::size_t>> uses;
+    uses.reserve(project.assets.size());
+    for (const MediaAsset &asset : project.assets) {
+        auto it = counts.find(asset.id);
+        uses.emplace_back(asset.id, it == counts.end() ? 0 : it->second);
+    }
+    return uses;
 }
 
 } // namespace ve

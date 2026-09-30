@@ -579,6 +579,13 @@ std::optional<TimeRange> intersection(const TimeRange &a, const TimeRange &b) {
     return r;
 }
 
+std::optional<TimeRange> numericRange(CMTimeRange range) {
+    if (!CMTIME_IS_NUMERIC(range.start) || !CMTIME_IS_NUMERIC(range.duration)) {
+        return std::nullopt;
+    }
+    return TimeRange::fromCMTimeRange(range);
+}
+
 double fractionThrough(const TimeRange &range, CMTime t) {
     if (range.isEmpty()) {
         return t < range.start ? 0.0 : 1.0;

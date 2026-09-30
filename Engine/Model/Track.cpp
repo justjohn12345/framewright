@@ -121,4 +121,14 @@ std::optional<std::string> Track::checkInvariants() const {
     return std::nullopt;
 }
 
+int laneCount(const Track &track) {
+    int highest = 0;
+    for (const Clip &clip : track.clips) {
+        for (const EffectSpan &span : clip.spans) {
+            highest = std::max(highest, span.lane);
+        }
+    }
+    return highest + 1;
+}
+
 } // namespace ve

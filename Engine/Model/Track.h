@@ -57,4 +57,8 @@ struct Track {
 // Bit-for-bit equality of every field.
 bool operator==(const Track &a, const Track &b);
 
+// The number of lanes the track's clips use: the highest lane any of their spans is on, plus one
+// (1 for a track without spans: lane 0 counts).
+int laneCount(const Track &track);
+
 } // namespace ve

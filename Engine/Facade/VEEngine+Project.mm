@@ -431,19 +431,9 @@ std::vector<ResolvedBookmark> resolveBookmarks(NSArray<NSData *> *bookmarks) {
                             sharpenScaledDownSources:_project.sharpenScaledDownSources];
 }
 
-/// The model settings `settings` ask for (configured). Values that do not fit the model's integers
-/// are left out of range, so sequenceFormatProblem refuses them.
+/// The model settings `settings` ask for (requestedSequenceFormat).
 static SequenceFormat sequenceFormatFrom(VESequenceSettings *settings) {
-    auto side = [](NSInteger value) {
-        return static_cast<int32_t>(std::clamp<NSInteger>(value, 0, INT32_MAX));
-    };
-    SequenceFormat format;
-    format.width = side(settings.width);
-    format.height = side(settings.height);
-    format.frameDuration = settings.frameDuration;
-    format.audioSampleRate = side(settings.audioSampleRate);
-    format.configured = true;
-    return format;
+    return requestedSequenceFormat(settings.width, settings.height, settings.frameDuration, settings.audioSampleRate);
 }
 
 - (VESequenceSettingsPreview *)previewSequenceSettings:(VESequenceSettings *)settings {

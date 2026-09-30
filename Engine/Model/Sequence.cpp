@@ -2,7 +2,9 @@
 
 #include "MediaAsset.h"
 
+#include <algorithm>
 #include <array>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 
@@ -87,6 +89,20 @@ std::string frameRateName(CMTime frameDuration) {
         text.pop_back();
     }
     return text;
+}
+
+SequenceFormat requestedSequenceFormat(std::int64_t width, std::int64_t height, CMTime frameDuration,
+                                       std::int64_t audioSampleRate) {
+    auto side = [](std::int64_t value) {
+        return static_cast<std::int32_t>(std::clamp<std::int64_t>(value, 0, INT32_MAX));
+    };
+    SequenceFormat format;
+    format.width = side(width);
+    format.height = side(height);
+    format.frameDuration = frameDuration;
+    format.audioSampleRate = side(audioSampleRate);
+    format.configured = true;
+    return format;
 }
 
 std::optional<std::string> sequenceFormatProblem(const SequenceFormat &format) {

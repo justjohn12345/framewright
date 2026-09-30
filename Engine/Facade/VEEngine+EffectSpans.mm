@@ -15,18 +15,6 @@
 using namespace ve;
 using namespace ve::facade;
 
-namespace ve::facade {
-
-/// A timeline range as its two ends, or a refusal for an unusable range.
-std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
-    if (!CMTIME_IS_NUMERIC(range.start) || !CMTIME_IS_NUMERIC(range.duration)) {
-        return std::nullopt;
-    }
-    return std::make_pair(range.start, range.start + range.duration);
-}
-
-} // namespace ve::facade
-
 @implementation VEEngine (EffectSpans)
 
 // MARK: - Effect spans
@@ -95,16 +83,7 @@ std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
 - (NSInteger)laneCountForTrack:(VETrackID)trackID {
     VE_ASSERT_MAIN();
     const Track *track = [self activeSequence].findTrack(TrackId(static_cast<TrackId::ValueType>(trackID)));
-    if (track == nullptr) {
-        return 0;
-    }
-    int highest = 0;
-    for (const Clip &clip : track->clips) {
-        for (const EffectSpan &span : clip.spans) {
-            highest = std::max(highest, span.lane);
-        }
-    }
-    return highest + 1;
+    return track != nullptr ? laneCount(*track) : 0;
 }
 
 - (VEEditResult *)addSpanOfKind:(VESpanKind)kind lane:(NSInteger)lane clip:(VEClipID)clipID range:(CMTimeRange)range {
@@ -114,13 +93,13 @@ std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
                                      message:@"Add a Motion, Opacity or Gain span (transitions have their own calls)."];
     }
-    const auto ends = rangeEnds(range);
+    const auto ends = numericRange(range);
     if (!ends) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The span's range is not a valid time range."];
     }
-    auto command = std::make_unique<AddSpan>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)), *spanKind,
-                                             static_cast<int>(std::clamp<NSInteger>(lane, INT_MIN, INT_MAX)),
-                                             ends->first, ends->second);
+    auto command = std::make_unique<AddSpan>([self sequenceId], ClipId(static_cast<ClipId::ValueType>(clipID)),
+                                             *spanKind, static_cast<int>(std::clamp<NSInteger>(lane, INT_MIN, INT_MAX)),
+                                             ends->start, ends->end);
     AddSpan *raw = command.get();
     return [self pushSpanCommand:std::move(command)
                           spanId:^SpanId {
@@ -132,12 +111,12 @@ std::optional<std::pair<CMTime, CMTime>> rangeEnds(CMTimeRange range) {
 
 - (VEEditResult *)setRangeOfSpan:(VESpanID)spanID range:(CMTimeRange)range {
     VE_ASSERT_MAIN();
-    const auto ends = rangeEnds(range);
+    const auto ends = numericRange(range);
     if (!ends) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidTime message:@"The span's range is not a valid time range."];
     }
     const SpanId id(static_cast<SpanId::ValueType>(spanID));
-    return [self pushSpanCommand:std::make_unique<SetSpanRange>([self sequenceId], id, ends->first, ends->second)
+    return [self pushSpanCommand:std::make_unique<SetSpanRange>([self sequenceId], id, ends->start, ends->end)
                           spanId:^SpanId {
                               return id;
                           }

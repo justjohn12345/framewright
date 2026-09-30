@@ -11,7 +11,6 @@
 #include "../Media/FFmpeg/FFmpegBackend.h"
 #include "../Media/HardwareCaps.h"
 
-#include <map>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -203,22 +202,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
 /// Posts an assets notification when a clip edit changed how often an asset is used
 /// (VEAssetInfo.useCount), so the media bin does not show stale counts.
 - (void)updateUseCounts {
-    std::map<AssetId, size_t> counts;
-    for (const Sequence &sequence : _project.sequences) {
-        for (const auto *tracks : {&sequence.videoTracks, &sequence.audioTracks}) {
-            for (const Track &track : *tracks) {
-                for (const Clip &clip : track.clips) {
-                    ++counts[clip.assetId];
-                }
-            }
-        }
-    }
-    std::vector<std::pair<AssetId, size_t>> current;
-    current.reserve(_project.assets.size());
-    for (const MediaAsset &asset : _project.assets) {
-        auto it = counts.find(asset.id);
-        current.emplace_back(asset.id, it == counts.end() ? 0 : it->second);
-    }
+    std::vector<std::pair<AssetId, size_t>> current = assetUseCounts(_project);
     if (current != _lastUseCounts) {
         _lastUseCounts = std::move(current);
         [self notifyAssetsChanged];

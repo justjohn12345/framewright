@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ve {
@@ -47,5 +48,9 @@ struct Project {
 
 // Bit-for-bit equality of every field, including the id generator state.
 bool operator==(const Project &a, const Project &b);
+
+// How many clips of every sequence use each asset, in the order of `project.assets` (zero for an
+// unused asset).
+std::vector<std::pair<AssetId, std::size_t>> assetUseCounts(const Project &project);
 
 } // namespace ve
