@@ -1648,3 +1648,36 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   1080p Maximum with sharpening on and off and compare the Effects panel crop against the source (the plan's
   check); open the export sheet on the demo project: the Quality picker shows High, and "Maximum keeps fine text
   sharp" shows at 1080p; the sharpening toggle there and in Sequence Settings is one setting (Cmd-Z undoes it).
+
+## Facade layout (VEEngine split, 2026-09-29)
+- `VEEngine.h` declares the class (versions, lifetime, observers) and one category per area; each category is
+  implemented in `Engine/Facade/VEEngine+<Area>.mm`: Project (with SequenceSettings), Snapshots, Media, Edits
+  (with `VEClipParamsBatch`), EffectSpans, Transitions, Undo, Playback (program monitor), SourceMonitor, Export;
+  `VEEngine.mm` keeps init/dealloc, the notification constants, `VE_ASSERT_MAIN`'s failure and the notify
+  helpers. Put a new public method in the category of its area. A category method that takes a completion block
+  must be marked `NS_SWIFT_UI_ACTOR` itself, or Swift imports the block as `@Sendable` (the class attribute does
+  not reach it; see the comment above `@interface VEEngine`).
+- `VEEngine+Internal.h` (private, excluded from the framework's headers by the `*+Internal.h` rule) holds the
+  state and the cross-file private API. State is grouped in structs, each owned by one file and main thread only:
+  `MediaServices _services` (init), `AssetState _assets` (Media), `DocumentState _document` (Project),
+  `UndoState _undo` (Undo), `ProgramMonitorState _program` (Playback), `SourceMonitorState _source`
+  (SourceMonitor), `ExportState _export` (Export), plus `_project` (the model), `_rippleScope` and VEEngine.mm's
+  observers. Other files change another area's struct through that area's private methods (declared in the
+  header's `<Area>Internal` category and implemented in an `@implementation VEEngine (<Area>Internal)` block of
+  the owning file, so the compiler checks them): e.g. `detachProgramFromProject`, `resetSourceMonitor`,
+  `startUndoHistory`, `deferUntilCoalescingEnds:`. Calls on the shared objects (a pool's `beginEpoch`, a
+  controller's `pause`) are made directly. New/Open (`forgetProjectMedia`) is the one place that resets every
+  area, in the order its comments give.
+- Every edit goes through `pushCommand:` / `push:created:note:` / `pushRipple:` (Undo); span edits through
+  `pushSpanCommand:` / `pushSpanEdit:` (EffectSpans); notifications through
+  `postNotification:userInfo:observerMethod:notify:`. Id conversions: `toClipId`, `toTrackId`, `toSpanId`,
+  `toAssetId`; `clampToInt` for NSInteger lanes and steps.
+- Rules are not written in the facade: the transition limits, offsets, range fitting, fade planning and their
+  sentences are in `Engine/Edit/TransitionFitting.h`; placements, split and speed/reverse targets and matching a
+  neighbour's Motion in `Engine/Edit/EditPlans.h`; the source monitor's one-asset project and asset frame times in
+  `Engine/Model/SourceProject.h`; `numericRange` (TimeUtil), `requestedSequenceFormat` (Sequence),
+  `assetUseCounts` (Project) and `laneCount` (Track) in the model. They have doctest coverage (TransitionFitting,
+  EditPlans, SourceProject and ModelQuery tests); new rules go there too, with the facade only converting (toNS,
+  toVE, `makeEditResult`) and managing threads.
+- Kept as it was, noted: the fade note on a clip's own fitted fade reads "Shortened to shortened to ..."
+  (`planFade`; pinned by TransitionFittingTests until the wording is fixed on purpose).
