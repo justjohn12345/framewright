@@ -285,6 +285,56 @@ static char kQueueKey;
     XCTAssertEqual(service.stats().failures, uint64_t(1));
 }
 
+/// Asset ids restart in every project, and two files can have the same size and modification time
+/// (here both nonexistent paths of the fake backend stat as 0/0): a request for another file under an
+/// asset id neither joins the decode in flight of the first file nor is answered by its thumbnail in
+/// memory.
+- (void)testAnotherFileUnderTheSameAssetIsNeverAnsweredByTheFirstFilesThumbnail {
+    auto fake = std::make_shared<FakeBehavior>();
+    fake->probe = [](const std::string &p) { return Result<MediaInfo>(makeFakeInfo(p, "mov", fourcc::H264, false)); };
+    Gate gate;
+    Latch decoding(1);
+    std::atomic<int> seeks{0};
+    fake->onSeek = [&](CMTime) {
+        if (seeks++ == 0) {
+            decoding.countDown();
+            gate.pass();
+        }
+    };
+    auto router = std::make_shared<BackendRouter>();
+    (void)router->registerBackend(std::make_shared<FakeBackend>(fake));
+    ThumbnailService::Config config;
+    config.threads = 2;
+    ThumbnailService service(router, config);
+    Collector c;
+    Latch done(2);
+    c.latch = &done;
+    service.request(ThumbnailRequest{AssetId(1), "/closed-project/a.mov", kCMTimeZero, 64}, _queue,
+                    c.callback(1, &kQueueKey));
+    XCTAssertTrue(decoding.wait(std::chrono::seconds(5)), @"the first file's decode is in flight");
+    service.request(ThumbnailRequest{AssetId(1), "/new-project/b.mov", kCMTimeZero, 64}, _queue,
+                    c.callback(2, &kQueueKey));
+    gate.open();
+    XCTAssertTrue(done.wait(std::chrono::seconds(10)));
+    {
+        std::lock_guard<std::mutex> lock(c.mutex);
+        XCTAssertTrue(c.results[1].at(0).ok());
+        XCTAssertTrue(c.results[2].at(0).ok());
+    }
+    auto stats = service.stats();
+    XCTAssertEqual(stats.coalesced, uint64_t(0), @"the second file did not join the first file's decode");
+    XCTAssertEqual(stats.decodes, uint64_t(2));
+    // In memory: each file answers for itself only.
+    const ThumbnailRequest second{AssetId(1), "/new-project/b.mov", kCMTimeZero, 64};
+    XCTAssertTrue([self thumbnailFrom:service request:second].ok());
+    XCTAssertEqual(service.stats().memoryHits, uint64_t(1));
+    const ThumbnailRequest third{AssetId(1), "/third-project/c.mov", kCMTimeZero, 64};
+    XCTAssertTrue([self thumbnailFrom:service request:third].ok());
+    stats = service.stats();
+    XCTAssertEqual(stats.memoryHits, uint64_t(1), @"a third file under the id was not answered from memory");
+    XCTAssertEqual(stats.decodes, uint64_t(3));
+}
+
 /// Copies a generated file into a fresh scratch directory under `name` (for tests that modify
 /// or rename the source).
 - (std::string)copyOf:(const std::string &)file named:(const std::string &)name {

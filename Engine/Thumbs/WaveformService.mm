@@ -269,7 +269,7 @@ WaveformService::RequestId WaveformService::request(const WaveformRequest &reque
                            "waveform request needs a path and a sample rate that is a multiple of the bucket rate"));
         return 0;
     }
-    const Key key{request.asset, request.trackIndex};
+    const Key key{request.asset, request.trackIndex, request.url};
     const FileIdentity identity = fileIdentity(request.url);
     std::unique_lock<std::mutex> lock(mutex_);
     ++stats_.requests;
@@ -282,14 +282,14 @@ WaveformService::RequestId WaveformService::request(const WaveformRequest &reque
     }
     if (auto it = memory_.find(key); it != memory_.end()) {
         const MemoryEntry &e = it->second;
-        if (e.url == request.url && e.fileSize == identity.size && e.fileModified == identity.modifiedNanoseconds) {
+        if (e.fileSize == identity.size && e.fileModified == identity.modifiedNanoseconds) {
             ++stats_.memoryHits;
             auto peaks = e.peaks;
             lock.unlock();
             complete({Listener{id, queue, std::move(completion), {}}}, peaks);
             return id;
         }
-        memory_.erase(it); // Relinked or changed on disk: recompute.
+        memory_.erase(it); // Changed on disk: recompute.
     }
     Listener listener{id, queue, std::move(completion), std::move(progress)};
     if (auto it = jobs_.find(key); it != jobs_.end() && !it->second->cancelled) {
@@ -338,18 +338,17 @@ bool WaveformService::cancel(RequestId id) {
     return true;
 }
 
-std::shared_ptr<const WaveformPeaks> WaveformService::cached(AssetId asset, int trackIndex) const {
-    std::string url;
+std::shared_ptr<const WaveformPeaks> WaveformService::cached(AssetId asset, const std::string &url,
+                                                            int trackIndex) const {
     uint64_t size = 0;
     int64_t modified = 0;
     std::shared_ptr<const WaveformPeaks> peaks;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = memory_.find(Key{asset, trackIndex});
+        auto it = memory_.find(Key{asset, trackIndex, url});
         if (it == memory_.end()) {
             return nullptr;
         }
-        url = it->second.url;
         size = it->second.fileSize;
         modified = it->second.fileModified;
         peaks = it->second.peaks;
@@ -396,8 +395,14 @@ void WaveformService::workerMain() {
             std::vector<Listener> listeners = std::move(job->listeners);
             job->listeners.clear();
             if (result.ok()) {
-                memory_[job->key] =
-                    MemoryEntry{result.value(), job->request.url, identity.size, identity.modifiedNanoseconds};
+                // One file per (asset, track): the asset was relinked if another path is stored.
+                for (auto m = memory_.begin(); m != memory_.end();) {
+                    const Key &k = m->first;
+                    m = k.asset == job->key.asset && k.trackIndex == job->key.trackIndex && k.url != job->key.url
+                            ? memory_.erase(m)
+                            : std::next(m);
+                }
+                memory_[job->key] = MemoryEntry{result.value(), identity.size, identity.modifiedNanoseconds};
                 ++(fromDisk ? stats_.diskHits : stats_.computed);
             } else if (result.error().code != MediaErrorCode::Cancelled) {
                 ++stats_.failures;

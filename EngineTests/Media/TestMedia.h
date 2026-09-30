@@ -95,6 +95,12 @@ std::string stressMediaDirectory(std::string &error);
 /// Full path of a stress media file (empty if generation failed).
 std::string stressMediaPath(const std::string &file, std::string &error);
 
+/// Writes an AAC (.m4a) file of `seconds` of a sine tone at `frequency` Hz, amplitude `amplitude`, mono at
+/// `sampleRate`, for tests that need audio of a chosen length (a long file whose waveform takes seconds
+/// to compute, a short one). Empty on success, else what failed.
+std::string writeToneAudioFile(const std::string &path, double seconds, double frequency, double amplitude = 0.5,
+                               double sampleRate = 48000);
+
 /// A fresh scratch directory for files a test writes (removed at process exit is not
 /// guaranteed; it lives under NSTemporaryDirectory()).
 std::string scratchDirectory();

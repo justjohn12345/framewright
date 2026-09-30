@@ -8,8 +8,10 @@
 // (hardware accelerated), the track's display rotation is applied, and the result is copied
 // into a CGImage (sRGB, premultiplied BGRA). The PNG is written atomically to the disk cache.
 //
-// Keys. Memory: (asset, time in microseconds, maxDimension, track, source file size and
-// modification time). Disk: a hash of (path, file size, file modification time, time,
+// Keys. Memory: (asset, source path, time in microseconds, maxDimension, track, source file size
+// and modification time); asset ids restart per project, so the path is part of the key and a new
+// project's asset that reuses an id never gets (or joins the decode of) another file's thumbnail,
+// even one of the same size and modification time. Disk: a hash of (path, file size, file modification time, time,
 // maxDimension, format version). A changed or replaced source file therefore never hits a stale
 // thumbnail in either cache, and different projects share thumbnails of the same file.
 //
@@ -119,6 +121,7 @@ class ThumbnailService {
   private:
     struct Key {
         AssetId asset;
+        std::string url; ///< Asset ids restart per project: the file is part of the identity.
         int64_t micros = 0;
         int maxDimension = 0;
         int trackIndex = -1;

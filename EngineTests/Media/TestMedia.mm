@@ -1,11 +1,14 @@
 #include "TestMedia.h"
 
+#import <AVFoundation/AVFoundation.h>
 #import <Foundation/Foundation.h>
 
 #include "../../Engine/Media/MediaTypes.h"
 
 #include <mach/mach.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -409,6 +412,48 @@ std::string stressMediaDirectory(std::string &error) {
 std::string stressMediaPath(const std::string &file, std::string &error) {
     const std::string dir = stressMediaDirectory(error);
     return dir.empty() ? std::string() : (fs::path(dir) / file).string();
+}
+
+std::string writeToneAudioFile(const std::string &path, double seconds, double frequency, double amplitude,
+                               double sampleRate) {
+    @autoreleasepool {
+        NSURL *url = [NSURL fileURLWithPath:@(path.c_str())];
+        [NSFileManager.defaultManager removeItemAtURL:url error:nil];
+        NSDictionary *settings = @{
+            AVFormatIDKey : @(kAudioFormatMPEG4AAC),
+            AVSampleRateKey : @(sampleRate),
+            AVNumberOfChannelsKey : @1,
+            AVEncoderBitRateKey : @64000,
+        };
+        NSError *error = nil;
+        AVAudioFile *file = [[AVAudioFile alloc] initForWriting:url
+                                                       settings:settings
+                                                   commonFormat:AVAudioPCMFormatFloat32
+                                                    interleaved:NO
+                                                          error:&error];
+        if (file == nil) {
+            return "cannot create " + path + ": " + (error.localizedDescription.UTF8String ?: "unknown error");
+        }
+        const AVAudioFrameCount chunk = 1 << 16;
+        AVAudioPCMBuffer *buffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:file.processingFormat
+                                                                 frameCapacity:chunk];
+        const int64_t total = static_cast<int64_t>(std::llround(seconds * sampleRate));
+        const double step = 2 * M_PI * frequency / sampleRate;
+        for (int64_t done = 0; done < total;) {
+            const AVAudioFrameCount n = static_cast<AVAudioFrameCount>(std::min<int64_t>(chunk, total - done));
+            float *samples = buffer.floatChannelData[0];
+            for (AVAudioFrameCount k = 0; k < n; ++k) {
+                samples[k] = static_cast<float>(amplitude * std::sin(step * static_cast<double>(done + k)));
+            }
+            buffer.frameLength = n;
+            if (![file writeFromBuffer:buffer error:&error]) {
+                return "cannot write " + path + ": " + (error.localizedDescription.UTF8String ?: "unknown error");
+            }
+            done += n;
+        }
+        file = nil; // releasing the file finishes it (AVAudioFile's -close needs macOS 15)
+    }
+    return {};
 }
 
 std::string scratchDirectory() {

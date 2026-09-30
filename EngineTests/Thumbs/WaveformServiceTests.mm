@@ -4,12 +4,14 @@
 #import <XCTest/XCTest.h>
 
 #include "../../Engine/Thumbs/WaveformService.h"
+#include "../Audio/AudioTestSupport.h"
 #include "../Media/BurnIn.h"
 #include "../Media/RouterTestSupport.h"
 #include "../Media/TestMedia.h"
 
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 using namespace ve;
 using namespace ve::media;
@@ -51,6 +53,14 @@ long firstLoudBucket(const WaveformPeaks &p, float threshold) {
         }
     }
     return -1;
+}
+
+/// Waits (up to 10 s) until `count` tone decoder reads are held at the behaviour's gate.
+bool waitForBlockedReads(ToneBehavior &behavior, int count) {
+    for (int i = 0; i < 2000 && behavior.blockedReads.load() < count; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return behavior.blockedReads.load() >= count;
 }
 
 } // namespace
@@ -121,7 +131,7 @@ long firstLoudBucket(const WaveformPeaks &p, float threshold) {
         XCTAssertLessThan(p.perChannel[ch][195].max, 0.12f);
     }
     XCTAssertEqual(service.stats().computed, uint64_t(1));
-    XCTAssertEqual(service.cached(AssetId(1)), result.value());
+    XCTAssertEqual(service.cached(AssetId(1), path), result.value());
 }
 
 - (void)testBeepInCompressedAudioAndVideoFiles {
@@ -205,7 +215,7 @@ long firstLoudBucket(const WaveformPeaks &p, float threshold) {
         XCTAssertTrue([self peaksFrom:service request:request].value() == computed);
         XCTAssertEqual(service.stats().memoryHits, uint64_t(1));
         service.purge(AssetId(4));
-        XCTAssertEqual(service.cached(AssetId(4)), nullptr);
+        XCTAssertEqual(service.cached(AssetId(4), path), nullptr);
     }
     XCTAssertTrue(std::filesystem::exists(_dir + "/" + WaveformService({}, {_dir}).diskFileName(request)));
     WaveformService service(BackendRouter::makeDefault(), {_dir});
@@ -231,9 +241,9 @@ long firstLoudBucket(const WaveformPeaks &p, float threshold) {
     const WaveformRequest request{AssetId(9), path};
     auto first = [self peaksFrom:service request:request];
     XCTAssertTrue(first.ok());
-    XCTAssertTrue(service.cached(AssetId(9)) != nullptr);
+    XCTAssertTrue(service.cached(AssetId(9), path) != nullptr);
     std::filesystem::copy_file(other, path, std::filesystem::copy_options::overwrite_existing);
-    XCTAssertEqual(service.cached(AssetId(9)), nullptr, @"stale peaks are not offered");
+    XCTAssertEqual(service.cached(AssetId(9), path), nullptr, @"stale peaks are not offered");
     auto second = [self peaksFrom:service request:request];
     XCTAssertTrue(second.ok());
     XCTAssertEqual(service.stats().computed, uint64_t(2));
@@ -333,6 +343,60 @@ long firstLoudBucket(const WaveformPeaks &p, float threshold) {
     std::lock_guard<std::mutex> lock(c.mutex);
     XCTAssertEqual(c.results[1].at(0).error().code, MediaErrorCode::Cancelled);
     XCTAssertEqual(c.results.size(), size_t(1));
+}
+
+/// Asset ids restart in every project: a request for another file under the id of a running
+/// computation (a new project's asset while the closed project's waveform still computes) must
+/// get its own file's peaks, not join the computation of the other file.
+- (void)testARequestForAnotherFileUnderTheSameAssetDoesNotJoinItsComputation {
+    auto tone = std::make_shared<ToneBehavior>();
+    tone->lengthFrames = 48000 * 3;
+    tone->setSignal("/tone/loud.wav", constantSignal(0.9f, 0.9f));
+    tone->setSignal("/tone/quiet.wav", constantSignal(0.1f, 0.1f));
+    WaveformService service(makeToneRouter(tone), {});
+    WaveCollector c;
+    Latch latch(2);
+    c.latch = &latch;
+    tone->setReadsBlocked(true);
+    service.request(WaveformRequest{AssetId(1), "/tone/loud.wav"}, _queue, c.completion(1));
+    XCTAssertTrue(waitForBlockedReads(*tone, 1), @"the loud file's computation is running");
+    service.request(WaveformRequest{AssetId(1), "/tone/quiet.wav"}, _queue, c.completion(2));
+    tone->setReadsBlocked(false);
+    XCTAssertTrue(latch.wait(std::chrono::seconds(30)));
+    std::lock_guard<std::mutex> lock(c.mutex);
+    const WaveformResult &loud = c.results[1].at(0);
+    const WaveformResult &quiet = c.results[2].at(0);
+    XCTAssertTrue(loud.ok() && quiet.ok());
+    if (loud.ok() && quiet.ok()) {
+        XCTAssertEqual(loud.value()->bucketCount(), size_t(300));
+        XCTAssertEqualWithAccuracy(loud.value()->mono[150].max, 0.9f, 1e-5);
+        XCTAssertEqualWithAccuracy(quiet.value()->mono[150].max, 0.1f, 1e-5, @"the quiet file's own peaks");
+    }
+    XCTAssertEqual(service.stats().computed, uint64_t(2), @"one computation per file");
+}
+
+/// cached() and the memory cache answer only for the file asked about: the peaks of another path
+/// stored under the same asset id are not offered, and storing a new path's peaks for the asset
+/// replaces the previous path's entry (one file per asset and track).
+- (void)testTheMemoryCacheAnswersOnlyForTheRequestedFile {
+    auto tone = std::make_shared<ToneBehavior>();
+    tone->lengthFrames = 48000;
+    tone->setSignal("/tone/loud.wav", constantSignal(0.9f, 0.9f));
+    tone->setSignal("/tone/quiet.wav", constantSignal(0.1f, 0.1f));
+    WaveformService service(makeToneRouter(tone), {});
+    auto loud = [self peaksFrom:service request:WaveformRequest{AssetId(1), "/tone/loud.wav"}];
+    XCTAssertTrue(loud.ok());
+    XCTAssertTrue(service.cached(AssetId(1), "/tone/loud.wav") == loud.value());
+    XCTAssertEqual(service.cached(AssetId(1), "/tone/quiet.wav"), nullptr, @"another file under the same id");
+    XCTAssertEqual(service.cached(AssetId(2), "/tone/loud.wav"), nullptr, @"another asset");
+    auto quiet = [self peaksFrom:service request:WaveformRequest{AssetId(1), "/tone/quiet.wav"}];
+    XCTAssertTrue(quiet.ok());
+    XCTAssertEqual(service.stats().memoryHits, uint64_t(0), @"the loud file's peaks did not answer");
+    if (quiet.ok()) {
+        XCTAssertEqualWithAccuracy(quiet.value()->mono[50].max, 0.1f, 1e-5);
+    }
+    XCTAssertTrue(service.cached(AssetId(1), "/tone/quiet.wav") == quiet.value());
+    XCTAssertEqual(service.cached(AssetId(1), "/tone/loud.wav"), nullptr, @"the relinked asset's old file is dropped");
 }
 
 - (void)testErrors {

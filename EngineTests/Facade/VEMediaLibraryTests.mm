@@ -14,6 +14,7 @@
 
 #include "../../Engine/Media/BackendRouter.h"
 #include "../../Engine/Media/FFmpeg/FFmpegBackend.h"
+#include "../Audio/AudioTestSupport.h"
 #include "../Media/TestMedia.h"
 
 #include <algorithm>
@@ -21,6 +22,7 @@
 #include <set>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace ve;
@@ -212,7 +214,7 @@ std::shared_ptr<media::BackendRouter> makeRouter() {
     XCTAssertTrue([self spinUntil:^BOOL { return !posters.empty() && !waveforms.empty(); } timeout:60]);
     XCTAssertTrue(posters == std::vector<AssetId>{asset.id});
     XCTAssertTrue(waveforms == std::vector<AssetId>{asset.id});
-    XCTAssertTrue([library cachedWaveformForAsset:asset.id] != nullptr);
+    XCTAssertTrue([library cachedWaveformOfAsset:asset] != nullptr);
 
     __block BOOL thumbnailDone = NO;
     [library thumbnailOfAsset:asset
@@ -238,7 +240,7 @@ std::shared_ptr<media::BackendRouter> makeRouter() {
     XCTAssertTrue([self spinUntil:^BOOL { return waveformDone; } timeout:60]);
 
     [library purgeThumbnailsAndWaveformsOfAssets:{asset}];
-    XCTAssertTrue([library cachedWaveformForAsset:asset.id] == nullptr);
+    XCTAssertTrue([library cachedWaveformOfAsset:asset] == nullptr);
 }
 
 - (void)testForgettingTheProjectDropsItsStateAndEarlierResults {
@@ -295,6 +297,120 @@ std::shared_ptr<media::BackendRouter> makeRouter() {
     XCTAssertTrue(waveformDropped);
     XCTAssertEqual(posterCalls, 0);
     XCTAssertEqual(detailCalls, 0);
+}
+
+/// A library over the tone backend (fake audio files, reads held at a gate while
+/// `tone->readsBlocked`), for the waveform lifecycle tests.
+- (VEMediaLibrary *)toneLibrary:(std::shared_ptr<ve::test::ToneBehavior>)tone {
+    return [[VEMediaLibrary alloc] initWithRouter:ve::test::makeToneRouter(std::move(tone)) cacheDirectory:nil];
+}
+
+- (BOOL)waitForBlockedReads:(int)count of:(ve::test::ToneBehavior &)tone {
+    ve::test::ToneBehavior *behavior = &tone;
+    return [self spinUntil:^BOOL { return behavior->blockedReads.load() >= count; } timeout:10];
+}
+
+/// Asset ids restart per project. The closed project's waveform (asset 1, one file) is still
+/// computing when the new project's asset 1 (another file) asks for its waveform: the new asset gets
+/// its own file's peaks, and the memory cache answers for its file only.
+- (void)testANewProjectsAssetUnderAReusedIdGetsItsOwnFilesWaveform {
+    auto tone = std::make_shared<ve::test::ToneBehavior>();
+    tone->lengthFrames = 48000 * 4;
+    tone->setSignal("/tone/closed-project.wav", ve::test::constantSignal(0.9f, 0.9f));
+    tone->setSignal("/tone/new-project.wav", ve::test::constantSignal(0.1f, 0.1f));
+    VEMediaLibrary *library = [self toneLibrary:tone];
+    const MediaAsset closed = [self import:library url:[NSURL fileURLWithPath:@"/tone/closed-project.wav"] as:AssetId(1)];
+    tone->setReadsBlocked(true);
+    [library startPosterAndWaveformForAsset:closed
+                             thumbnailReady:^(AssetId) {
+                               XCTFail(@"an audio file has no poster");
+                             }
+                              waveformReady:^(AssetId) {
+                                XCTFail(@"the closed project's waveform is not reported");
+                              }];
+    XCTAssertTrue([self waitForBlockedReads:1 of:*tone], @"the closed project's waveform is computing");
+    [library forgetThumbnailsAndWaveformsOfAssets:{closed}];
+    [library forgetProjectAssets];
+
+    const MediaAsset reused = [self import:library url:[NSURL fileURLWithPath:@"/tone/new-project.wav"] as:AssetId(1)];
+    __block std::shared_ptr<const thumbs::WaveformPeaks> peaks;
+    __block BOOL done = NO;
+    [library waveformOfAsset:reused
+                  completion:^(const thumbs::WaveformResult *result) {
+                    XCTAssertTrue(result != nullptr && result->ok());
+                    if (result != nullptr && result->ok()) {
+                        peaks = result->value();
+                    }
+                    done = YES;
+                  }];
+    tone->setReadsBlocked(false);
+    XCTAssertTrue([self spinUntil:^BOOL { return done; } timeout:30]);
+    XCTAssertTrue(peaks != nullptr);
+    if (peaks != nullptr) {
+        XCTAssertEqual(peaks->bucketCount(), 400u);
+        XCTAssertEqualWithAccuracy(peaks->mono[200].max, 0.1f, 1e-5, @"the new project's file, not the closed one's");
+    }
+    const auto cached = [library cachedWaveformOfAsset:reused];
+    XCTAssertTrue(cached != nullptr && cached == peaks);
+    XCTAssertTrue([library cachedWaveformOfAsset:closed] == nullptr, @"the closed project's file is not cached");
+}
+
+/// New/Open cancels the closed project's waveform requests (the service computes on one thread, so
+/// the new project's waveforms would wait behind them): the poster pass's and a view's request of an
+/// asset still in the project, and a request of an asset removed from it before (not in the list
+/// the engine forgets, so -forgetProjectAssets ends it). The computation in flight stops at its next
+/// chunk and the queued one never starts.
+- (void)testNewOpenCancelsTheClosedProjectsWaveformRequests {
+    auto tone = std::make_shared<ve::test::ToneBehavior>();
+    tone->lengthFrames = 48000 * 600; // ten minutes each: far more than the reads the test allows
+    tone->setSignal("/tone/a.wav", ve::test::constantSignal(0.5f, 0.5f));
+    tone->setSignal("/tone/removed.wav", ve::test::constantSignal(0.5f, 0.5f));
+    VEMediaLibrary *library = [self toneLibrary:tone];
+    const MediaAsset a = [self import:library url:[NSURL fileURLWithPath:@"/tone/a.wav"] as:AssetId(1)];
+    const MediaAsset removed = [self import:library url:[NSURL fileURLWithPath:@"/tone/removed.wav"] as:AssetId(2)];
+    tone->setReadsBlocked(true);
+    __block int posterPassCalls = 0;
+    [library startPosterAndWaveformForAsset:a
+                             thumbnailReady:^(AssetId) {
+                               posterPassCalls += 1;
+                             }
+                              waveformReady:^(AssetId) {
+                                posterPassCalls += 1;
+                              }];
+    __block int dropped = 0;
+    __block int reported = 0;
+    for (const MediaAsset *asset : {&a, &removed}) {
+        [library waveformOfAsset:*asset
+                      completion:^(const thumbs::WaveformResult *result) {
+                        (result == nullptr ? dropped : reported) += 1;
+                      }];
+    }
+    XCTAssertTrue([self waitForBlockedReads:1 of:*tone], @"asset 1's waveform is computing, asset 2's queued");
+    [library forgetThumbnailsAndWaveformsOfAssets:{a}];
+    [library forgetProjectAssets];
+    tone->setReadsBlocked(false);
+    XCTAssertTrue([self spinUntil:^BOOL { return dropped + reported == 2; } timeout:30]);
+    XCTAssertEqual(dropped, 2);
+    XCTAssertEqual(reported, 0);
+    // The service's one worker takes the new project's request only after the closed project's
+    // work ended, so its completion marks that end.
+    tone->setSignal("/tone/next.wav", ve::test::constantSignal(0.25f, 0.25f));
+    const MediaAsset next = [self import:library url:[NSURL fileURLWithPath:@"/tone/next.wav"] as:AssetId(1)];
+    __block BOOL nextDone = NO;
+    [library waveformOfAsset:next
+                  completion:^(const thumbs::WaveformResult *result) {
+                    XCTAssertTrue(result != nullptr && result->ok());
+                    nextDone = YES;
+                  }];
+    XCTAssertTrue([self spinUntil:^BOOL { return nextDone; } timeout:60]);
+    // The computation in flight read the chunk it was held in (a third of a second), the queued one
+    // nothing; the new project's file was read whole.
+    const int64_t closedFrames = tone->framesRead.load() - tone->lengthFrames;
+    XCTAssertGreaterThanOrEqual(closedFrames, 0);
+    XCTAssertLessThanOrEqual(closedFrames, int64_t(48000), @"the closed project's requests read %lld frames",
+                             static_cast<long long>(closedFrames));
+    XCTAssertEqual(tone->opens.load(), 2, @"the removed asset's queued request never started");
+    XCTAssertEqual(posterPassCalls, 0);
 }
 
 @end

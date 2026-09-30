@@ -142,18 +142,21 @@ typedef void (^VEMediaWaveformCompletion)(const ve::thumbs::WaveformResult *_Nul
               completion:(VEMediaThumbnailCompletion)completion;
 /// The waveform peaks of `asset` (which has sound).
 - (void)waveformOfAsset:(const ve::MediaAsset &)asset completion:(VEMediaWaveformCompletion)completion;
-/// The waveform peaks of `asset` already in memory, or nullptr.
-- (std::shared_ptr<const ve::thumbs::WaveformPeaks>)cachedWaveformForAsset:(ve::AssetId)asset;
+/// The waveform peaks of `asset`'s file (its current path) already in memory, or nullptr. Asset ids
+/// restart per project: peaks computed from another file under the same id are never returned.
+- (std::shared_ptr<const ve::thumbs::WaveformPeaks>)cachedWaveformOfAsset:(const ve::MediaAsset &)asset;
 /// Drops the in-memory thumbnails and waveforms of `assets` (memory pressure).
 - (void)purgeThumbnailsAndWaveformsOfAssets:(const std::vector<ve::MediaAsset> &)assets;
-/// Cancels the pending thumbnails of `assets` and drops their in-memory thumbnails and waveforms
-/// (New/Open: their ids are about to name other media).
+/// Cancels the pending thumbnails and the waveform requests of `assets` and drops their in-memory
+/// thumbnails and waveforms (New/Open: their ids are about to name other media). A cancelled waveform
+/// request completes as dropped (see -forgetProjectAssets) or, for a poster pass, is not reported.
 - (void)forgetThumbnailsAndWaveformsOfAssets:(const std::vector<ve::MediaAsset> &)assets;
 
 // MARK: New/Open and lifetime
 
-/// Forgets the routing, details, missing assets and bookmarks, ends the access to the files and
-/// starts a new project: results of earlier requests are dropped (New/Open).
+/// Forgets the routing, details, missing assets and bookmarks, ends the access to the files, cancels
+/// every waveform request still running (also of assets removed before) and starts a new project:
+/// results of earlier requests are dropped (New/Open).
 - (void)forgetProjectAssets;
 /// Ends the security-scoped access of every file the library kept (also done when it is released).
 - (void)stopAccessingURLs;

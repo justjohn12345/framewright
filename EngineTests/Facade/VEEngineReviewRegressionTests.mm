@@ -1,5 +1,6 @@
 // Regression tests for the facade findings of the 2026-09-23 review (docs/reviews): asset ids
-// that another project reused must never show the previous project's media (E1), an edit made
+// that another project reused must never show the previous project's media (E1; also its waveform,
+// from the 2026-09-30 adversarial review), an edit made
 // while a gesture's coalescing group is open must not join the group (E2), only one monitor
 // plays at a time (E3), and moving both clips of a transition to another track keeps the
 // transition (E4).
@@ -517,6 +518,118 @@ int shownIndex(VEPreviewView *view) {
     VEAssetInfo *info = [reopened assetInfo:asset.assetID];
     XCTAssertEqualObjects(info.path.stringByResolvingSymlinksInPath, moved.path.stringByResolvingSymlinksInPath);
     XCTAssertTrue(reopened.isDirty, @"the new path is not saved yet");
+}
+
+// MARK: - E1: waveforms under a reused asset id (2026-09-30 adversarial review)
+
+/// A long and a short AAC file written once per test run: the long file's waveform takes seconds
+/// to compute (it is still computing when the next project asks for its own asset's waveform), the
+/// short one is 5 s (500 buckets).
++ (NSDictionary<NSString *, NSURL *> *)waveformMedia {
+    static NSDictionary<NSString *, NSURL *> *media;
+    static std::string failure;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+      const std::string dir = ve::test::scratchDirectory();
+      const std::string longPath = dir + "/long-40min.m4a";
+      const std::string shortPath = dir + "/short-5s.m4a";
+      failure = ve::test::writeToneAudioFile(longPath, 40 * 60, 440);
+      if (failure.empty()) {
+          failure = ve::test::writeToneAudioFile(shortPath, 5, 660);
+      }
+      media = @{
+          @"long" : [NSURL fileURLWithPath:@(longPath.c_str())],
+          @"short" : [NSURL fileURLWithPath:@(shortPath.c_str())]
+      };
+    });
+    return failure.empty() ? media : nil;
+}
+
+- (VEAssetInfo *)importURL:(NSURL *)url into:(VEEngine *)engine {
+    XCTestExpectation *done = [self expectationWithDescription:@"import"];
+    __block VEAssetInfo *asset = nil;
+    [engine importMediaAtURLs:@[ url ]
+                   completion:^(NSArray<VEAssetInfo *> *assets, NSArray<NSError *> *errors) {
+                       XCTAssertEqual(errors.count, 0u, @"%@", errors);
+                       asset = assets.firstObject;
+                       [done fulfill];
+                   }];
+    [self waitForExpectations:@[ done ] timeout:60];
+    XCTAssertNotNil(asset);
+    return asset;
+}
+
+- (VEWaveform *)waveformOf:(VEAssetID)assetID in:(VEEngine *)engine {
+    XCTestExpectation *done = [self expectationWithDescription:@"waveform"];
+    __block VEWaveform *waveform = nil;
+    [engine waveformForAsset:assetID
+                  completion:^(VEWaveform *w, NSError *e) {
+                      XCTAssertNil(e);
+                      waveform = w;
+                      [done fulfill];
+                  }];
+    [self waitForExpectations:@[ done ] timeout:120];
+    return waveform;
+}
+
+// Project 1 imports a 40-minute file (its waveform starts computing); New; project 2 imports a 5 s
+// file, which gets the same asset id. Project 2's waveform is its own file's (500 buckets), not the
+// closed project's 40 minutes.
+- (void)testAWaveformAfterNewIsTheNewProjectsFile {
+    NSDictionary<NSString *, NSURL *> *media = [self.class waveformMedia];
+    XCTAssertNotNil(media);
+    VEEngine *engine = [[VEEngine alloc] initWithCacheDirectory:nil]; // no disk cache: the long file computes
+    VEAssetInfo *longAsset = [self importURL:media[@"long"] into:engine];
+    [engine newProjectWithName:@"Second"];
+    VEAssetInfo *shortAsset = [self importURL:media[@"short"] into:engine];
+    XCTAssertEqual(longAsset.assetID, shortAsset.assetID, @"ids restart per project");
+    XCTAssertEqualWithAccuracy(CMTimeGetSeconds(shortAsset.duration), 5.0, 0.1);
+    VEWaveform *waveform = [self waveformOf:shortAsset.assetID in:engine];
+    XCTAssertEqualWithAccuracy(waveform.bucketCount, 500, 5, @"project 2's 5 s file");
+}
+
+// The same start; project 2 waits for its asset's waveform notification and then asks the memory
+// cache (as the app's WaveformCache does first): the cache holds project 2's file or nothing.
+- (void)testTheCachedWaveformAfterNewIsTheNewProjectsFile {
+    NSDictionary<NSString *, NSURL *> *media = [self.class waveformMedia];
+    XCTAssertNotNil(media);
+    VEEngine *engine = [[VEEngine alloc] initWithCacheDirectory:nil];
+    VEAssetInfo *longAsset = [self importURL:media[@"long"] into:engine];
+    [engine newProjectWithName:@"Second"];
+    __block BOOL ready = NO;
+    id token = [NSNotificationCenter.defaultCenter addObserverForName:VEEngineWaveformDidBecomeAvailableNotification
+                                                               object:engine
+                                                                queue:nil
+                                                           usingBlock:^(NSNotification *) {
+                                                             ready = YES;
+                                                           }];
+    VEAssetInfo *shortAsset = [self importURL:media[@"short"] into:engine];
+    XCTAssertEqual(longAsset.assetID, shortAsset.assetID);
+    XCTAssertTrue([self spinUntil:^BOOL { return ready; } timeout:120]);
+    [NSNotificationCenter.defaultCenter removeObserver:token];
+    VEWaveform *cached = [engine cachedWaveformForAsset:shortAsset.assetID];
+    XCTAssertNotNil(cached, @"the notification announced project 2's waveform");
+    XCTAssertEqualWithAccuracy(cached.bucketCount, 500, 5, @"project 2's 5 s file");
+}
+
+// Open: a saved project whose asset 1 is the 5 s file; a new project imports the 40-minute file
+// (asset 1 again); opening the saved project and asking for its asset's waveform gives the 5 s file's.
+- (void)testAWaveformAfterOpenIsTheOpenedProjectsFile {
+    NSDictionary<NSString *, NSURL *> *media = [self.class waveformMedia];
+    XCTAssertNotNil(media);
+    VEEngine *engine = [[VEEngine alloc] initWithCacheDirectory:nil];
+    VEAssetInfo *shortAsset = [self importURL:media[@"short"] into:engine];
+    // The short file's own waveform first (so the long file's request cannot join it).
+    XCTAssertEqualWithAccuracy([self waveformOf:shortAsset.assetID in:engine].bucketCount, 500, 5);
+    NSURL *saved = [self saveProjectOf:engine named:@"short.framewright"];
+    [engine newProjectWithName:@"Long"];
+    VEAssetInfo *longAsset = [self importURL:media[@"long"] into:engine];
+    XCTAssertEqual(longAsset.assetID, shortAsset.assetID);
+    NSError *error = nil;
+    XCTAssertTrue([engine openProjectAtURL:saved error:&error], @"%@", error);
+    XCTAssertEqualWithAccuracy(CMTimeGetSeconds([engine assetInfo:shortAsset.assetID].duration), 5.0, 0.1);
+    VEWaveform *waveform = [self waveformOf:shortAsset.assetID in:engine];
+    XCTAssertEqualWithAccuracy(waveform.bucketCount, 500, 5, @"the opened project's 5 s file");
 }
 
 @end

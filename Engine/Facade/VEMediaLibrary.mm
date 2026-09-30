@@ -143,6 +143,9 @@ NSNumber *keyFor(AssetId asset) {
     NSMutableDictionary<NSNumber *, NSData *> *_bookmarks;
     // Security-scoped URLs accessed for this project (stopAccessingURLs ends the access).
     NSMutableArray<NSURL *> *_accessedURLs;
+    // Waveform requests not completed yet, by asset: New/Open cancels them (the service computes on one
+    // thread, so the new project's waveforms would otherwise wait behind the closed project's).
+    std::map<AssetId, std::set<thumbs::WaveformService::RequestId>> _waveformRequests;
 }
 
 - (instancetype)initWithRouter:(std::shared_ptr<media::BackendRouter>)router cacheDirectory:(nullable NSURL *)cacheDirectory {
@@ -253,12 +256,47 @@ NSNumber *keyFor(AssetId asset) {
         request.asset = id;
         request.url = asset.url;
         VEMediaAssetReady ready = [waveformReady copy];
-        _waveforms->request(request, dispatch_get_main_queue(), [weakSelf, generation, id, ready](auto result) {
-            VEMediaLibrary *strongSelf = weakSelf;
-            if (strongSelf != nil && strongSelf->_generation == generation && result.ok()) {
-                ready(id);
-            }
-        });
+        auto requestId = std::make_shared<thumbs::WaveformService::RequestId>(0);
+        *requestId = _waveforms->request(
+            request, dispatch_get_main_queue(), [weakSelf, generation, id, ready, requestId](auto result) {
+                VEMediaLibrary *strongSelf = weakSelf;
+                if (strongSelf == nil) {
+                    return;
+                }
+                [strongSelf waveformRequest:*requestId ofAssetEnded:id];
+                if (strongSelf->_generation == generation && result.ok()) {
+                    ready(id);
+                }
+            });
+        [self waveformRequest:*requestId ofAssetStarted:id];
+    }
+}
+
+/// Records a waveform request until its completion (the service never completes inline, so the
+/// completion always comes after this).
+- (void)waveformRequest:(thumbs::WaveformService::RequestId)requestId ofAssetStarted:(AssetId)asset {
+    if (requestId != 0) {
+        _waveformRequests[asset].insert(requestId);
+    }
+}
+
+- (void)waveformRequest:(thumbs::WaveformService::RequestId)requestId ofAssetEnded:(AssetId)asset {
+    auto it = _waveformRequests.find(asset);
+    if (it != _waveformRequests.end() && it->second.erase(requestId) != 0 && it->second.empty()) {
+        _waveformRequests.erase(it);
+    }
+}
+
+/// Cancels the waveform requests of `asset` that have not completed (each completes as cancelled).
+- (void)cancelWaveformRequestsOfAsset:(AssetId)asset {
+    auto it = _waveformRequests.find(asset);
+    if (it == _waveformRequests.end()) {
+        return;
+    }
+    const std::set<thumbs::WaveformService::RequestId> requests = std::move(it->second);
+    _waveformRequests.erase(it);
+    for (thumbs::WaveformService::RequestId requestId : requests) {
+        _waveforms->cancel(requestId);
     }
 }
 
@@ -414,19 +452,24 @@ NSNumber *keyFor(AssetId asset) {
     const uint64_t generation = _generation;
     __weak VEMediaLibrary *weakSelf = self;
     VEMediaWaveformCompletion done = [completion copy];
-    _waveforms->request(request, dispatch_get_main_queue(), [weakSelf, generation, done](thumbs::WaveformResult result) {
-        VEMediaLibrary *strongSelf = weakSelf;
-        if (strongSelf == nil || strongSelf->_generation != generation) {
-            done(nullptr);
-        } else {
-            done(&result);
-        }
-    });
+    const AssetId id = asset.id;
+    auto requestId = std::make_shared<thumbs::WaveformService::RequestId>(0);
+    *requestId = _waveforms->request(
+        request, dispatch_get_main_queue(), [weakSelf, generation, done, id, requestId](thumbs::WaveformResult result) {
+            VEMediaLibrary *strongSelf = weakSelf;
+            [strongSelf waveformRequest:*requestId ofAssetEnded:id];
+            if (strongSelf == nil || strongSelf->_generation != generation) {
+                done(nullptr);
+            } else {
+                done(&result);
+            }
+        });
+    [self waveformRequest:*requestId ofAssetStarted:id];
 }
 
-- (std::shared_ptr<const thumbs::WaveformPeaks>)cachedWaveformForAsset:(AssetId)asset {
+- (std::shared_ptr<const thumbs::WaveformPeaks>)cachedWaveformOfAsset:(const MediaAsset &)asset {
     VE_ASSERT_MAIN();
-    return _waveforms->cached(asset);
+    return _waveforms->cached(asset.id, asset.url);
 }
 
 - (void)purgeThumbnailsAndWaveformsOfAssets:(const std::vector<MediaAsset> &)assets {
@@ -442,6 +485,7 @@ NSNumber *keyFor(AssetId asset) {
     for (const MediaAsset &asset : assets) {
         _thumbnails->cancelPending(asset.id);
         _thumbnails->purge(asset.id);
+        [self cancelWaveformRequestsOfAsset:asset.id];
         _waveforms->purge(asset.id);
     }
 }
@@ -455,6 +499,10 @@ NSNumber *keyFor(AssetId asset) {
     _missing.clear();
     [_bookmarks removeAllObjects];
     [self stopAccessingURLs];
+    // Requests of assets no longer in the project (removed before New/Open) end too.
+    while (!_waveformRequests.empty()) {
+        [self cancelWaveformRequestsOfAsset:_waveformRequests.begin()->first];
+    }
     ++_generation;
 }
 

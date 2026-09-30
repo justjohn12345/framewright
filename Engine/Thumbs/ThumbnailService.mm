@@ -262,8 +262,8 @@ ThumbnailService::~ThumbnailService() {
 
 ThumbnailService::Key ThumbnailService::keyFor(const ThumbnailRequest &request) {
     const FileIdentity id = fileIdentity(request.url);
-    return Key{request.asset, toMicros(request.time), request.maxDimension, request.trackIndex, id.size,
-               id.modifiedNanoseconds};
+    return Key{request.asset, request.url, toMicros(request.time), request.maxDimension, request.trackIndex,
+               id.size, id.modifiedNanoseconds};
 }
 
 std::string ThumbnailService::diskFileName(const ThumbnailRequest &request) {

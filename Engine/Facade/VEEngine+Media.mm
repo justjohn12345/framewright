@@ -224,7 +224,11 @@ NSError *makeError(const media::MediaError &error, NSString *context) {
 - (nullable VEWaveform *)cachedWaveformForAsset:(VEAssetID)assetID {
     VE_ASSERT_MAIN();
     const AssetId id = toAssetId(assetID);
-    auto peaks = [_media cachedWaveformForAsset:id];
+    const MediaAsset *asset = _project.findAsset(id);
+    if (asset == nullptr || !asset->hasAudio() || [_media isAssetMissing:id]) {
+        return nil;
+    }
+    auto peaks = [_media cachedWaveformOfAsset:*asset];
     return peaks ? makeWaveform(id, peaks) : nil;
 }
 

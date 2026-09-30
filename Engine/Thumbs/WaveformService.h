@@ -7,8 +7,14 @@
 // average, so it stays within [-1, 1]). Bucket i covers [i, i + 1) / bucketsPerSecond seconds;
 // the last bucket may be partial.
 //
-// Caching: in memory per (asset, track), valid only while the source file keeps the size and
-// modification time it had when the peaks were computed (a replaced file is recomputed), and on
+// Identity: a request is (asset, track, path). Asset ids restart in every project, so the path is
+// part of every key: a request joins a running computation, and a memory entry answers a request
+// or cached(), only for the same file (a new project's asset that reuses an id never gets the
+// peaks of the closed project's file).
+//
+// Caching: in memory per (asset, track, path), one path per (asset, track) (storing the peaks of
+// another path drops the entry of the previous one), valid only while the source file keeps the
+// size and modification time it had when the peaks were computed (a replaced file is recomputed), and on
 // disk under Config::diskCacheDirectory as "<hash>.vewf" (bounded by Config::diskBudgetBytes,
 // least recently used files deleted), a little-endian binary file:
 //   magic "VEWF", u32 version, u64 source size, i64 source mtime (ns), f64 sample rate,
@@ -19,7 +25,7 @@
 //
 // Threading: public methods are thread-safe and non-blocking (request() and cached() stat the
 // source file). Computation runs on Config::threads worker threads (std::thread, each job in its
-// own autorelease pool). Requests for the same (asset, track) share one
+// own autorelease pool). Requests for the same (asset, track, path) share one
 // computation. Progress and completion callbacks are dispatch_async'ed onto the queue passed
 // with the request (never inline); every completion runs exactly once, with the peaks, an
 // error, or MediaErrorCode::Cancelled (cancel(), or destruction before completion). A
@@ -134,8 +140,9 @@ class WaveformService {
     /// already completed. Returns false if the id is unknown or already finished.
     bool cancel(RequestId id);
 
-    /// Peaks already in memory for the asset's file as it is now, or nullptr.
-    std::shared_ptr<const WaveformPeaks> cached(AssetId asset, int trackIndex = -1) const;
+    /// Peaks already in memory for `asset`'s file at `url` as the file is now, or nullptr (also
+    /// when the peaks in memory for `asset` were computed from another path).
+    std::shared_ptr<const WaveformPeaks> cached(AssetId asset, const std::string &url, int trackIndex = -1) const;
     /// Forgets the in-memory peaks of `asset`.
     void purge(AssetId asset);
 
@@ -148,6 +155,7 @@ class WaveformService {
     struct Key {
         AssetId asset;
         int trackIndex = -1;
+        std::string url; ///< Asset ids restart per project: the file is part of the identity.
         friend auto operator<=>(const Key &, const Key &) = default;
     };
     struct Listener {
@@ -181,7 +189,6 @@ class WaveformService {
     std::map<Key, std::shared_ptr<Job>> jobs_; ///< Pending and running.
     struct MemoryEntry {
         std::shared_ptr<const WaveformPeaks> peaks;
-        std::string url;
         uint64_t fileSize = 0;
         int64_t fileModified = 0;
     };
