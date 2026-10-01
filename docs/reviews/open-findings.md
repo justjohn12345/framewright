@@ -392,8 +392,7 @@ Done:
   as 10 s: 3 failures on the old code); the pool's `testTheLastFrameIsHeldPastTheEndOfTheVideo` covers its
   two paths.
 
-- 11, B11, span and transition titles disagreed: "App: one source of span and transition names and
-  icons". Root cause: `ProjectStore.title(of:isAudio:)` (status lines, inspector, Ken Burns readout, drop
+- 11, B11, span and transition titles disagreed: f658892. Root cause: `ProjectStore.title(of:isAudio:)` (status lines, inspector, Ken Burns readout, drop
   notes) knew only the dissolve and fades, while `TimelineViewModel.Span.title` also knew the wipes and the
   iris. App/State/SpanKindDisplay.swift: `SpanKind.title/systemImage(style:transitionKind:)`,
   `TransitionKind.title(style:)` / `sentenceTitle(style:)`, `VEEffectSpan.title/systemImage(onTrackKind:)`;
@@ -401,8 +400,17 @@ Done:
   partner's name), `SpanInspector.systemImage` and the Ken Burns readout's icon. `EffectLanesTimelineTests
   testWipesAndTheIrisAreNamedAlikeEverywhere` (3 failures with the old call sites).
 
+- 12, B12, M4A with linear PCM: "Media: one table of what each container holds". Checked: libavformat's
+  ipod muxer has no tag for PCM (`ffmpeg -c:a pcm_s16le -f ipod` fails writing the header; our FFMuxer
+  refuses it in addStream through avformat_query_codec), so with AppleWriter refusing and FFmpegBackend's
+  validation accepting, the router chose FFmpeg and the writer failed only when it opened. Not reachable
+  from the app (no M4A export is offered). Engine/Media/ContainerRules.h (`checkContainerHolds`,
+  per-stream `checkContainerHoldsVideo/Audio`) replaces the three copies of the rules in AppleWriter,
+  FFmpegBackend::validate and FFMuxer::addStream (which keeps libavformat's own check); the messages are
+  now the same for both backends ("linear PCM requires .mov, .wav or .mkv"). `ExportJobTests
+  testLinearPCMInM4AIsRefusedByEveryWriterUpFront` (5 failures with the old FFmpeg validation).
+
 Not started (key facts):
-- 12, B12, M4A with PCM: the backends' validation disagrees.
 - 13, the dangling links to `2026-09-29-post-lanes-review.md`.
 
 ## Known limits, with reasons

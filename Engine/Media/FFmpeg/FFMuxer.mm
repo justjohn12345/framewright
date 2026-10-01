@@ -1,5 +1,7 @@
 #include "FFMuxer.h"
 
+#include "../ContainerRules.h"
+
 #include "FFmpegSupport.h"
 
 extern "C" {
@@ -158,6 +160,44 @@ struct FFMuxer::Impl {
     }
 };
 
+namespace {
+
+/// The container a libavformat muxer name writes, where ContainerRules.h has its rules.
+std::optional<ContainerFormat> containerForFormat(const std::string &format) {
+    if (format == "mov") {
+        return ContainerFormat::MOV;
+    }
+    if (format == "mp4") {
+        return ContainerFormat::MP4;
+    }
+    if (format == "ipod") {
+        return ContainerFormat::M4A;
+    }
+    if (format == "wav") {
+        return ContainerFormat::WAV;
+    }
+    if (format == "matroska") {
+        return ContainerFormat::MKV;
+    }
+    return std::nullopt;
+}
+
+/// ContainerRules.h for a stream of `f`. A codec the table does not name is checked as a codec with the
+/// same reach: video as H.264 (refused only by the audio-only containers), audio as AAC (refused only by
+/// WAV); libavformat then decides the rest.
+Status checkContainerHoldsStream(const std::string &format, const EncodedStreamFormat &f) {
+    const auto container = containerForFormat(format);
+    if (!container) {
+        return okStatus();
+    }
+    if (f.kind == TrackKind::Audio) {
+        return checkContainerHoldsAudio(*container, audioCodecForFourCC(f.codec).value_or(AudioCodec::AAC));
+    }
+    return checkContainerHoldsVideo(*container, videoCodecForFourCC(f.codec).value_or(VideoCodec::H264));
+}
+
+} // namespace
+
 FFMuxer::FFMuxer() : impl_(std::make_unique<Impl>()) {}
 
 FFMuxer::~FFMuxer() {
@@ -259,13 +299,11 @@ Result<int> FFMuxer::addStream(const EncodedStreamFormat &f) {
     if (id == AV_CODEC_ID_NONE) {
         return makeError(MediaErrorCode::UnsupportedCodec, "no FFmpeg codec for " + fourCCToString(f.codec));
     }
-    // Same container rules as AppleWriter / FFmpegBackend::validate (stricter than libavformat,
-    // which would e.g. put AAC in WAV or ProRes in MP4 that other players reject).
-    const bool pcm = canonicalCodec(f.codec) == fourcc::LinearPCM;
-    if ((f.kind != TrackKind::Audio && (d.format == "wav" || d.format == "ipod")) ||
-        (d.format == "wav" && !pcm) || (d.format == "mp4" && (pcm || id == AV_CODEC_ID_PRORES))) {
+    // The containers' rules every writer applies (ContainerRules.h; stricter than libavformat, which
+    // would e.g. put AAC in WAV or ProRes in MP4 that other players reject), then libavformat's own.
+    if (Status held = checkContainerHoldsStream(d.format, f); !held.ok()) {
         return makeError(MediaErrorCode::UnsupportedCodec, fourCCToString(f.codec) + " cannot be stored in " +
-                                                               d.format);
+                                                               d.format + ": " + held.error().message);
     }
     if (avformat_query_codec(d.ctx->oformat, id, FF_COMPLIANCE_NORMAL) != 1) {
         return makeError(MediaErrorCode::UnsupportedCodec, fourCCToString(f.codec) + " cannot be stored in " +

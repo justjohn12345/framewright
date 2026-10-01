@@ -1,5 +1,7 @@
 #include "AppleWriter.h"
 
+#include "../ContainerRules.h"
+
 #include "../CFRef.h"
 #include "../ColorTags.h"
 #include "AppleSupport.h"
@@ -525,12 +527,6 @@ Status AppleWriter::validate(const EncodeSettings &s) {
         if (!CMTIME_IS_NUMERIC(v.frameDuration) || CMTimeCompare(v.frameDuration, kCMTimeZero) <= 0) {
             return makeError(MediaErrorCode::InvalidArgument, "frame duration must be positive");
         }
-        if (s.container == ContainerFormat::WAV || s.container == ContainerFormat::M4A) {
-            return makeError(MediaErrorCode::InvalidArgument, "container cannot hold video");
-        }
-        if (s.container == ContainerFormat::MP4 && v.codec == VideoCodec::ProRes422) {
-            return makeError(MediaErrorCode::UnsupportedCodec, "ProRes requires a QuickTime (.mov) container");
-        }
         if (v.codec == VideoCodec::AV1) {
             return makeError(MediaErrorCode::UnsupportedCodec, "AVAssetWriter cannot encode AV1");
         }
@@ -541,6 +537,7 @@ Status AppleWriter::validate(const EncodeSettings &s) {
     if (s.container == ContainerFormat::MKV) {
         return makeError(MediaErrorCode::UnsupportedFormat, "AVAssetWriter cannot write Matroska");
     }
+    VE_MEDIA_TRY(checkContainerHolds(s)); // the containers' rules, shared with the FFmpeg writer
     if (s.audio) {
         const AudioEncodeSettings &a = *s.audio;
         if (a.channels < 1 || a.channels > 8 || !(a.sampleRate >= 8000 && a.sampleRate <= 192000) ||
@@ -549,13 +546,6 @@ Status AppleWriter::validate(const EncodeSettings &s) {
         }
         if (a.codec == AudioCodec::LinearPCM && a.pcmBitDepth != 16 && a.pcmBitDepth != 24 && a.pcmBitDepth != 32) {
             return makeError(MediaErrorCode::InvalidArgument, "PCM bit depth must be 16, 24 or 32");
-        }
-        if (s.container == ContainerFormat::WAV && a.codec != AudioCodec::LinearPCM) {
-            return makeError(MediaErrorCode::UnsupportedCodec, "WAV holds linear PCM only");
-        }
-        if ((s.container == ContainerFormat::M4A || s.container == ContainerFormat::MP4) &&
-            a.codec == AudioCodec::LinearPCM) {
-            return makeError(MediaErrorCode::UnsupportedCodec, "linear PCM requires .mov or .wav");
         }
         if (a.codec == AudioCodec::AAC) {
             if (auto problem = appleAACProblem(a)) {

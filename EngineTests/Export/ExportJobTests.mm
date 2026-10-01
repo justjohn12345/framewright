@@ -20,6 +20,9 @@
 #include "../../Engine/Export/ExportJob.h"
 #include "../../Engine/Media/Apple/AppleBackend.h"
 #include "../../Engine/Media/AssetImport.h"
+#include "../../Engine/Media/Apple/AppleWriter.h"
+#include "../../Engine/Media/FFmpeg/FFAudioEncoder.h"
+#include "../../Engine/Media/FFmpeg/FFMuxer.h"
 #include "../../Engine/Media/FFmpeg/FFVideoEncoder.h"
 #include "../../Engine/Media/FFmpeg/FFmpegBackend.h"
 #include "../../Engine/Media/HardwareCaps.h"
@@ -1075,6 +1078,61 @@ static int expectedBurnIn(int64_t f) {
     v.inputPixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
     settings.video = v;
     return settings;
+}
+
+/// Review B12 (general review, 2026-10-01): linear PCM in .m4a. AppleWriter refused it while FFmpegBackend's
+/// validation accepted it, so the router chose FFmpeg for it, whose muxer then refused the stream when the
+/// writer opened (checked below). Both writers and the FFmpeg muxer now apply the containers' rules from one
+/// table (ContainerRules.h), so every writer refuses it up front, and they agree on the other rules too.
+- (void)testLinearPCMInM4AIsRefusedByEveryWriterUpFront {
+    auto router = media::BackendRouter::makeDefault();
+    (void)router->registerBackend(media::ffmpeg::makeFFmpegBackend());
+    auto ffmpeg = media::ffmpeg::makeFFmpegBackend();
+    auto audioOnly = [](media::ContainerFormat container, media::AudioCodec codec) {
+        media::EncodeSettings s;
+        s.container = container;
+        media::AudioEncodeSettings a;
+        a.codec = codec;
+        a.sampleRate = 48000;
+        a.channels = 2;
+        s.audio = a;
+        return s;
+    };
+    const media::EncodeSettings pcmInM4A = audioOnly(media::ContainerFormat::M4A, media::AudioCodec::LinearPCM);
+    const media::Status apple = media::apple::AppleWriter::validate(pcmInM4A);
+    const media::Status ff = media::ffmpeg::FFmpegBackend::validate(pcmInM4A);
+    XCTAssertFalse(apple.ok());
+    XCTAssertFalse(ff.ok(), @"FFmpeg's validation refuses it too");
+    if (!ff.ok()) {
+        XCTAssertEqual(ff.error().code, media::MediaErrorCode::UnsupportedCodec);
+    }
+    XCTAssertFalse(ffmpeg->canWrite(pcmInM4A));
+    XCTAssertTrue(router->writerBackendFor(pcmInM4A).empty(), @"no writer is chosen");
+    XCTAssertFalse(router->makeWriter(pcmInM4A).ok());
+
+    // Why it matters: FFmpeg's muxer for .m4a cannot store the stream (libavformat's ipod muxer has no tag
+    // for PCM; `ffmpeg -c:a pcm_s16le -f ipod` fails writing the header), so a writer routed there failed
+    // only when it opened, with "lpcm cannot be stored in ipod".
+    media::ffmpeg::FFAudioEncoder encoder;
+    XCTAssertTrue(encoder.open(*pcmInM4A.audio).ok());
+    auto format = encoder.outputFormat();
+    XCTAssertTrue(format.ok());
+    media::ffmpeg::FFMuxer muxer;
+    XCTAssertTrue(muxer.openFormat([self output:@"pcm.m4a"], "ipod").ok());
+    if (format.ok()) {
+        XCTAssertFalse(muxer.addStream(format.value()).ok(), @"the .m4a muxer cannot store linear PCM");
+    }
+    muxer.cancel();
+
+    // The writers agree on what each container holds (where both can encode the codecs at all).
+    for (auto container : {media::ContainerFormat::MOV, media::ContainerFormat::MP4, media::ContainerFormat::M4A,
+                           media::ContainerFormat::WAV}) {
+        for (auto codec : {media::AudioCodec::AAC, media::AudioCodec::LinearPCM}) {
+            const media::EncodeSettings s = audioOnly(container, codec);
+            XCTAssertEqual(media::apple::AppleWriter::validate(s).ok(), media::ffmpeg::FFmpegBackend::validate(s).ok(),
+                           @"%s with %s", media::toString(container), media::toString(codec));
+        }
+    }
 }
 
 /// open() never deletes or truncates an existing file (ExportJob writes to a working file and

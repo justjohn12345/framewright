@@ -1,5 +1,7 @@
 #include "FFmpegBackend.h"
 
+#include "../ContainerRules.h"
+
 #include "../ComposedMediaWriter.h"
 #include "FFAudioDecoder.h"
 #include "FFAudioEncoder.h"
@@ -110,27 +112,13 @@ Status FFmpegBackend::validate(const EncodeSettings &s) {
     }
     if (s.video) {
         VE_MEDIA_TRY(FFVideoEncoder::validate(*s.video));
-        if (s.container == ContainerFormat::WAV || s.container == ContainerFormat::M4A) {
-            return makeError(MediaErrorCode::InvalidArgument, "container cannot hold video");
-        }
-        if (s.container == ContainerFormat::MP4 && s.video->codec == VideoCodec::ProRes422) {
-            return makeError(MediaErrorCode::UnsupportedCodec, "ProRes requires a QuickTime (.mov) container");
-        }
-        if (s.video->codec == VideoCodec::AV1 && s.container != ContainerFormat::MP4 &&
-            s.container != ContainerFormat::MKV) {
-            return makeError(MediaErrorCode::UnsupportedCodec, "AV1 is written to MP4 or Matroska (.mkv) only");
-        }
     }
     if (s.audio) {
         VE_MEDIA_TRY(FFAudioEncoder::validate(*s.audio));
-        if (s.container == ContainerFormat::WAV && s.audio->codec != AudioCodec::LinearPCM) {
-            return makeError(MediaErrorCode::UnsupportedCodec, "WAV holds linear PCM only");
-        }
-        if (s.container == ContainerFormat::MP4 && s.audio->codec == AudioCodec::LinearPCM) {
-            return makeError(MediaErrorCode::UnsupportedCodec, "MP4 cannot hold linear PCM");
-        }
     }
-    return okStatus();
+    // The containers' rules, as every writer applies them (the ipod muxer refuses linear PCM in .m4a only
+    // when it writes the header: review B12).
+    return checkContainerHolds(s);
 }
 
 bool FFmpegBackend::canWrite(const EncodeSettings &settings) const {
