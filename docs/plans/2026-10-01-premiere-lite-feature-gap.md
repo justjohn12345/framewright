@@ -30,7 +30,7 @@ separate track.
 | Source and three-point | Source monitor with I/O, Insert and Overwrite at the playhead onto the target tracks (source in, out, record in) | Timeline in/out (four-point, back-timed), replace, fit to fill, match frame, source patching per channel |
 | Keyboard | Space, JKL, arrows, Home/End, I/O, Cmd+K, Delete variants, [ ] gain, zoom, Control-K | Previous/next edit (Up/Down), Shift+arrow steps, trim and nudge keys, typed timecode jumps, customisable shortcuts |
 | Motion and effects | Position, scale, rotation, opacity; Motion, Fade and Gain spans on effect lanes (start and end values, easing, chained spans); Ken Burns and Transform editors | More than two keyframes per span, crop, blend modes, chroma key, masks, blur and other filters, stabilisation, adjustment layers |
-| Transitions | Cross dissolve, wipes, iris, fades to/from black, audio crossfades, asymmetric splits | Push/slide and other common transitions (minor) |
+| Transitions | Cross dissolve, four wipes, iris, fades to/from black, audio constant-power crossfade, asymmetric splits; six fixed kinds with no parameters | Dip to colour, push/slide, zoom, angled and soft-edged wipes, iris shapes, film/additive dissolves, audio fade curves; per-transition settings (direction, softness, border, centre); a default-transition choice (items 27-29) |
 | Speed | Exact constant speed, reverse, Speed/Duration sheet | Freeze frame, speed ramps, frame blending or optical flow |
 | Audio | Clip gain, Gain spans, fades and crossfades, track mute/solo, waveforms, an exact mixer | Meters, pan, track volume, mixer panel, EQ, compression, noise reduction, loudness, voice-over, channel mapping |
 | Titles and graphics | None | Text, lower thirds, shapes, solid colour mattes |
@@ -254,20 +254,120 @@ Motion and Increase Contrast; part of being a credible Mac app. Needs the comman
 Also small and useful later: showing and clearing the thumbnail, waveform and proxy caches (S), and browsing
 earlier saves once backups exist (S-M, with item 8).
 
+### Browsing at scale and transition variety (added at the owner's request, 2026-10-01)
+The owner's observation from use: the media bin and the Effects panel work for a few clips and a dozen tiles
+but will not scale, and six transitions are too few. These three items sit between Tier 1 and Tier 2: they are
+not what makes the app look like a toy on day one, but they are what makes it tiresome by the second real
+project, and both the colour work and every future effect land in the same panels.
+
+**27. Media bin at scale.** M (extends item 10). Not planned.
+- *Today:* one flat list of names and small icons (`MediaBinView`), no folders, sort, filter, search or
+  view options; fine for the demo's seven files, unusable at a few hundred.
+- *What:*
+  - Folders (bins) with drag to file.
+  - Icon and list views, a thumbnail size slider, and hover-scrub on thumbnails (skim a clip by moving the
+    pointer across it).
+  - Sortable list columns: name, duration, resolution, frame rate, codec, date, used count.
+  - A search field and filter chips (video / audio / stills; used / unused; offline).
+  - "Reveal in bin" from a timeline clip, and the reverse ("show uses", later).
+  - Keyboard navigation in the bin: arrows; Return opens the source monitor; I/O mark there.
+- *Elsewhere:* Premiere's Project panel (icon, list and freeform views, hover scrub, search bins); Final Cut's
+  browser with filmstrips, skimming and smart collections; Resolve's media pool with list and thumbnail views.
+- *Needs:* folders in the project model (schema, after the migration freeze, review 1.10); the bin's list from
+  the engine's snapshot with the probe details it already has (codec, rate, size); a thumbnail cache that can
+  serve several sizes; an `@Observable` bin model so a 500-item bin does not re-render on every store change
+  (review 3.6).
+
+**28. An Effects browser instead of a tile list.** M. Not planned.
+- *Today:* the Effects tab lists every transition and lane effect as a tile in two groups. Adding colour
+  correction, crop, blend modes, keying, audio effects and more transitions would make it a long scroll.
+- *What:*
+  - **Organisation:**
+    - A search field.
+    - Collapsible categories: Video Transitions (Dissolves, Wipes, Iris and Shapes, Push and Slide, Zoom),
+      Audio Transitions, Video Effects (Motion, Colour, Crop and Key, Blur and Stylise), Audio Effects,
+      Presets.
+    - A Favourites group and a Recently Used row.
+  - **Applying:**
+    - Hover shows a small animated preview of what a transition or effect does.
+    - Drag onto the timeline, or double-click to apply at the selection or at the cut nearest the playhead,
+      as `+` does today.
+    - "Set as default transition", used by the keyboard shortcut and by a future "apply default transition to
+      selected cuts".
+  - **Presets:** the user saves a configured effect or transition (a Ken Burns move, a grade, a 12-frame dip
+    to white) under a name.
+- *Effect controls scale with it.* The inspector shows a section per applied span or transition, generated from
+  the descriptor tables (review 1.2, under way) rather than written by hand per kind. A clip's applied effects
+  appear as a list with enable/disable and reset (Premiere's Effect Controls panel), not only as lanes.
+- *A design question the colour work must answer:* effect spans live on three effect lanes per clip, and spans on
+  one lane cannot overlap. Lanes read well for timed moves (Ken Burns, fades) but not for a stack of always-on
+  effects (a grade, a crop and a key on the same clip at once). Before grading lands, decide whether whole-clip
+  effects are spans that fill the clip on a lane, a separate per-clip effect stack drawn as one lane, or more
+  lanes. Review 1.9 (splitting `EffectSpan`) is the natural moment.
+- *Elsewhere:* Premiere's Effects panel (search, bins, favourites, presets, default transition) and Effect
+  Controls; Final Cut's Effects and Transitions browsers with live hover previews; Resolve's Effects library.
+- *Needs:* review 1.2 and 1.3 (descriptor and parameter tables, under way), 1.11 (one Swift table for kinds and
+  parameters), and a small preview renderer (the compositor rendering a canned pair of frames into a thumbnail,
+  as Export Frame would).
+
+**29. A transition library with settings.** M-L. Not planned.
+- *Today:* six fixed kinds (`Engine/Model/Transition.h`): cross dissolve, wipe left/right/up/down, iris. Each
+  kind is a shape with no parameters (direction is part of the kind, the soft edge is a constant
+  `kTransitionFeather`). Fades go to black only. Audio has a constant-power crossfade and a linear fade only.
+- *What editors reach for most, in rough order:*
+  1. **Dip to colour.** Dip to black and dip to white through the middle of a cut, not a fade inside one clip;
+     the most used transition after the cross dissolve.
+  2. **Push and Slide.** The incoming picture pushes the outgoing one out of frame, or slides over it, in any
+     of four directions or at an angle.
+  3. **Wipe with settings:** any angle, softness, a border width and colour. One parametric wipe replaces the
+     four fixed ones.
+  4. **Iris and shapes:** circle, diamond, box, cross, with centre position, softness and border; clock wipe
+     and barn door.
+  5. **Zoom / cross zoom:** the outgoing picture scales up as the incoming one scales in, optionally with motion
+     blur.
+  6. **Additive and film dissolves:** dissolves with a different light curve, the second in linear light.
+     These need the colour pipeline decision (review 1.5).
+  7. **Audio:** a crossfade curve choice (constant power, constant gain, exponential), and fades with the same
+     curves.
+  8. **Settings common to all:** alignment on the cut (centred, starting on it, ending on it: the asymmetric
+     split exists today), reverse, duration defaults per kind, and copy and paste of a transition's settings.
+- *Skipped on purpose:* page peels, cubes, flips, 3D, and other novelty transitions that pro editors avoid;
+  Morph Cut / Smooth Cut (AI frame synthesis), until optical flow exists (Tier 3).
+- *Elsewhere:* Premiere's default set (Cross Dissolve, Dip to Black/White, Film Dissolve, Additive Dissolve,
+  Push, Slide, Iris shapes, Wipes, Zoom, Morph Cut); Final Cut's transitions browser; Resolve's Dissolve, Iris,
+  Motion, Shape and Wipe groups with settings in the inspector.
+- *Needs:*
+  - **Engine:** transition kinds as a descriptor table with parameters, the way span kinds are getting one
+    (review 1.2; `kTransitionKinds` exists but carries no parameters). Transition spans keep their parameters,
+    which is easier after splitting `EffectSpan` (review 1.9).
+  - **Shaders:** named uniforms (review 1.4, under way) so a transition can pass an angle, softness, border
+    width and colour, and a centre point. A generic model covers most of the list: a reveal mask (linear for
+    wipes, radial or polygonal for iris shapes, angular for clocks) plus a transform of each side (push, slide,
+    zoom) plus an optional dip colour. Blurred zooms need the float working buffer (review 1.6).
+  - **Audio:** fade curves as a parameter of audio transitions in the mixer.
+  - **Schema:** a version bump; forward compatibility is covered by review 1.1 (done in the current round).
+  - **App:** the Effects browser (28) and generated inspector rows.
+- *Sizing note:* dip to colour and the parametric wipe are S each once transition parameters exist, push and
+  slide M together, the shape iris and clock S-M, zoom M, and audio curves S. Most of the cost is the transition
+  parameter model, which item 28's inspector rows also need.
+
 ## Recommended order
 Each round below is roughly one lead-and-implementers round as the recent ones were. The colour prerequisites
 round (review 1.1-1.5) is under way now; the order starts beside it.
 
 1. **Safety and everyday basics** (beside the colour prerequisites; app-heavy, little engine). Autosave and
    backups (8), relink (9), copy and paste (2), markers (3; after the migration freeze, review 1.10), Export Frame
-   (11), peak meters (7, meters only), bins with list view and search (10). These carry no architectural risk
+   (11), peak meters (7, meters only), bins with list view and search (10, with the media bin at scale, 27). These carry no architectural risk
    and remove the most visible gaps. Markers and bin folders change the schema, so the migration freeze (review
    1.10) should join the current prerequisites round and land first. If the round is too large, bins and markers
    move to round 3.
 2. **Colour slice 1 and the picture tools that share its pipeline.** The rest of the colour prerequisites
    (review 1.6-1.11, including the transition rules owner 1.8), then colour grading slice 1 (planned), HLG
    sources drawn correctly (14), and crop, blend modes and chroma key (20). One shader and uniform rework serves
-   all of them.
+   all of them, and the transition library (29) belongs here too: transition parameters, dip to colour,
+   push/slide, parametric wipes and shapes ride on the same uniform and descriptor work. The Effects browser (28)
+   lands with them, since colour, crop, key and the new transitions would otherwise overflow today's tile list;
+   decide the lanes-versus-effect-stack question (28) before colour spans are designed.
 3. **The editing core, built on the MCP prerequisites.** First review 3.1 (edit commands), 3.2 (edit session),
    3.4 (typed outcomes) and 3.5 (command registry); then trimming (4), timeline in/out with three-point
    editing, lift, extract and replace (5), keyboard navigation and the shortcuts editor (6), freeze frame (11).
