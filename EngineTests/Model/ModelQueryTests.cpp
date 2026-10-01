@@ -4,6 +4,7 @@
 #include "ModelFixtures.h"
 
 #include <climits>
+#include <limits>
 
 using namespace vetest;
 
@@ -95,4 +96,26 @@ TEST_CASE("laneCount is the highest lane a track's spans use, plus one") {
     fx.addSpan(b, SpanKind::Opacity, 3, f30(0), f30(30));
     CHECK(laneCount(fx.track(fx.v1)) == 4);
     CHECK(laneCount(fx.track(fx.v2)) == 1);
+
+    SUBCASE("a span off the model's lanes (an unvalidated track) never makes it overflow or exceed kLaneCount") {
+        // Loading never lets such a span through (ProjectJSONTests, "lanes at the 32-bit limits"):
+        // only a track built in memory without validation has one. highest + 1 used to overflow.
+        Track track = fx.track(fx.v1);
+        REQUIRE(!track.clips.empty());
+        EffectSpan far;
+        far.kind = SpanKind::Opacity;
+        far.lane = std::numeric_limits<int>::max();
+        far.start = f30(0);
+        far.end = f30(10);
+        track.clips.front().spans.push_back(far);
+        CHECK(laneCount(track) == kLaneCount);
+        track.clips.front().spans.back().lane = std::numeric_limits<int>::min();
+        CHECK(laneCount(track) == 4); // the other spans' lanes still count
+        Track empty = fx.track(fx.v2);
+        far.lane = std::numeric_limits<int>::min();
+        Clip clip = track.clips.front();
+        clip.spans = {far};
+        empty.clips = {clip};
+        CHECK(laneCount(empty) == 1);
+    }
 }

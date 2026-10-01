@@ -122,10 +122,10 @@ std::optional<std::string> Track::checkInvariants() const {
 }
 
 int laneCount(const Track &track) {
-    int highest = 0;
+    int highest = kTransitionLane;
     for (const Clip &clip : track.clips) {
         for (const EffectSpan &span : clip.spans) {
-            highest = std::max(highest, span.lane);
+            highest = std::max(highest, std::clamp(span.lane, kTransitionLane, kLastLane));
         }
     }
     return highest + 1;

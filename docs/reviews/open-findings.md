@@ -57,8 +57,7 @@ Done (group A):
 
 Done (groups B and C, from 6864cc0; the commit subjects are named until the next status update gives
 the hash):
-- 9, stuck paused seek under load: "Playback: lastPresented() never loses a presentation; deterministic
-  race tests". Root cause: the frame source published lastPresented() (and the held-back frame) with a
+- 9, stuck paused seek under load: 193c3dd. Root cause: the frame source published lastPresented() (and the held-back frame) with a
   try-lock and dropped the update when a reader held the lock; the renders after it found nothing new, so
   presentedFrameIndex named the previous frame for good while the view showed the new one (reproduced: 1
   failure in 75 loops under CPU load; 0 in 300 after). Now an immutable buffer swapped under the lock.
@@ -67,6 +66,10 @@ the hash):
   six; all twelve are made now). `ProgramFrameProviderTests testCancelledScrubRequestIsMadeAgain`: a test
   timing dependency (its other client shares the provider's lane, where the newest request wins; the main
   thread is now held until that client's frame came).
+- 11, `laneCount` overflow: "Model: laneCount never overflows or exceeds the model's lanes". Loading
+  already bounded lanes (repairSequence moves a span off lanes 0-3 with a warning, the parser refuses a
+  lane beyond 32 bits; now pinned with crafted JSON at INT32_MAX/MIN, -1 and beyond); the overflow was
+  reachable only on an unvalidated in-memory track: `laneCount` clamps each lane to 0...kLastLane.
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
@@ -77,9 +80,6 @@ Found while doing them (open):
   to unlink or trim. Only out-of-sync linked pairs reach it.
 
 Not started (groups B and C), with what a fresh implementer needs:
-- 11, `laneCount` overflow: Engine/Model/Track.cpp:124 returns highest + 1 as int; the parser reads lanes
-  with `node.field("lane").asInt32()` (Engine/Serialize/ProjectJSON.cpp:462). Bound lanes at load (a sane
-  maximum) with a load warning or refusal as the parser treats other invalid values; test with crafted JSON.
 - Nit (a): the adoption composite (Engine/Facade/VEEngine+Edits.mm:142, `withAdoption`) drops
   SetSequenceFormat's report; keep a pointer to the child and add its sentences to the note when it
   conformed clips (the note is built before the push: it needs the result after apply). Nit (b):

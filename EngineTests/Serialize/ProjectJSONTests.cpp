@@ -992,6 +992,35 @@ TEST_CASE("ProjectJSON: loading repairs what it safely can and refuses the rest 
         CHECK(moved->lane == 1); // lane 1 is free after frame 30; the composition does not depend on the lane
         CHECK(anyContains(r.warnings, "lane 4 is not an effect lane (1 to 3); moved to lane 1"));
     }
+    SUBCASE("lanes at the 32-bit limits: moved onto the model's lanes with a warning, or refused beyond them") {
+        // laneCount (highest lane + 1) overflowed on a lane of INT_MAX; no file brings one into the
+        // model: an effect span goes to a free effect lane, a transition to lane 0, and a lane beyond
+        // 32 bits is refused by the parser.
+        const SpanId fadeOut = fx.addFade(fx.b, ClipEdge::Tail, f30(10));
+        for (const std::int64_t lane : {std::int64_t(INT32_MAX), std::int64_t(INT32_MIN), std::int64_t(-1)}) {
+            CAPTURE(lane);
+            json doc = fx.document();
+            spanWithId(RepairFixture::spans(doc, 0), fx.late)["lane"] = lane;
+            spanWithId(RepairFixture::spans(doc, 1), fadeOut)["lane"] = lane;
+            const ProjectLoadResult r = projectFromJson(doc);
+            REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+            CHECK(r.project->sequences[0].findSpan(fx.late)->lane == 1);
+            CHECK(r.project->sequences[0].findSpan(fadeOut)->lane == kTransitionLane);
+            CHECK(anyContains(r.warnings, "lane " + std::to_string(lane) + " is not an effect lane (1 to 3); moved to lane 1"));
+            CHECK(anyContains(r.warnings, "a transition lies on lane 0, found lane " + std::to_string(lane) +
+                                              "; moved to lane 0"));
+            CHECK(laneCount(r.project->sequences[0].videoTracks[0]) == 3);
+            CHECK_FALSE(validateProject(*r.project).has_value());
+        }
+        for (const std::int64_t lane : {std::int64_t(INT32_MAX) + 1, std::int64_t(INT32_MIN) - 1}) {
+            CAPTURE(lane);
+            json doc = fx.document();
+            spanWithId(RepairFixture::spans(doc, 0), fx.late)["lane"] = lane;
+            const ProjectLoadResult r = projectFromJson(doc);
+            CHECK_FALSE(r.ok());
+            CHECK(r.error.find("integer out of 32-bit range") != std::string::npos);
+        }
+    }
     SUBCASE("repaired: two spans starting together on one lane: the later one moves to a free lane") {
         json doc = fx.document();
         json &spans = RepairFixture::spans(doc, 0);

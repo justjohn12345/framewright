@@ -58,7 +58,10 @@ struct Track {
 bool operator==(const Track &a, const Track &b);
 
 // The number of lanes the track's clips use: the highest lane any of their spans is on, plus one
-// (1 for a track without spans: lane 0 counts).
+// (1 for a track without spans: lane 0 counts), so 1...kLaneCount. A valid track's spans lie on
+// lanes 0...kLastLane (validateProject; loading moves a span off them to a free lane with a warning,
+// or refuses the file when none has room); a span of an unvalidated track outside them counts as
+// lane 0 below and as the last lane above, so the count never names a lane the model does not have.
 int laneCount(const Track &track);
 
 } // namespace ve
