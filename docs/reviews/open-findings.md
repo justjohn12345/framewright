@@ -490,10 +490,41 @@ Done:
   the rest pass unchanged (no test touched the structs). Full suite after this item: EngineTests 550 (0
   skips), doctest 342, AppTests 279 (1 known skip), 0 failures, no leftovers.
 
-Not started (in order):
-- 5, the grading placement decision note `docs/reviews/2026-10-01-grading-pipeline-decision.md` (document only,
-  with a measured prototype of an extra full-frame monitor pass, not committed).
-- 6 (if quota allows): high-precision decode for alpha, high-bit-depth and still sources (review media #2).
+- 5, the grading placement decision note: commit "Docs: grading pipeline placement decision". Written as
+  `docs/reviews/2026-10-01-grading-pipeline-decision.md`, status proposed, for the user and the lead to
+  approve. Recommendations: the grade per source in the fragment shader after the YCbCr -> R'G'B' conversion
+  and before coverage, weight and blend, behind function constants (ungraded layers unchanged); grade in
+  linear light (BT.1886 2.4 / sRGB / linear by transfer tag), keep the gamma-encoded blend (no change to
+  existing projects or parity; linear blending only as a later per-sequence option); move `sampleYCbCr`'s
+  `saturate` to the end of the grade for graded sources only; monitors composite into a pooled RGBA16Float
+  intermediate plus an output pass into the framebuffer-only drawable, scopes read the intermediate;
+  measured on an M4 Pro (throwaway XCTest, not committed): the output pass costs 0.024 ms at 1080p and 0.09
+  ms at 2160p, compositing into RGBA16F is not slower than into BGR10A2; honour transfer for the
+  linearisation and, as a separate decision, P3-D65/BT.2020 primaries by a 3x3 in linear light, not PQ/HLG.
+  The lead's two additions are sections 7 (whole-clip effects: a separate ordered per-clip effect stack,
+  timed spans stay on lanes) and 8 (transition parameters: a `TransitionKindInfo` / `TransitionParameterInfo`
+  table; a generic mask + per-side transform + blend-mode shader model; named rows in
+  `VETransitionUniforms` behind function constants).
+
+Not started:
+- 6, high-precision decode for alpha, high-bit-depth and still sources (review media #2). Not started for
+  lack of room in this round, and its format choice follows item 5's sections 4 and 6. Key facts: alpha
+  sources come out as 32BGRA in both backends (`nativePixelFormat` in AppleSupport.mm and
+  FFFrameConverter.mm: any alpha, RGB or palette format -> 32BGRA), so 12-bit ProRes 4444 is cut to 8 bits;
+  stills are drawn into 8-bit sRGB 32BGRA (AppleStillImage.mm, FFStillImage.mm), which also gamut-clips P3
+  HEIC; TextureCache maps only 32BGRA among RGB formats; the compositor premultiplies straight-alpha pictures
+  into RGBA8 before a minifying pre-scale (Compositor.h, "Minification"). Approach: (1) a decode option
+  `DecodeOptions::highPrecision` (the router passes it for alpha, > 8-bit RGB and still sources), resolving
+  to 'l64r' (`kCVPixelFormatType_64RGBALE`, 16-bit unorm; FFmpeg's `AV_PIX_FMT_RGBA64LE` through swscale,
+  ImageIO through a 16-bpc `CGBitmapContext`) or, where values above 1 or wide gamut must survive (P3 stills),
+  'RGhA' (`64RGBAHalf`, a half-float bitmap context in extended sRGB); first check on the device which of the
+  two VideoToolbox's ProRes 4444 decoder delivers natively (else 'y416' would need a packed-AYCbCr shader
+  path); (2) TextureCache maps 'l64r' to rgba16Unorm and 'RGhA' to rgba16Float as `SourceClass::RGBA` (the
+  fragment shader is unchanged); (3) the pre-scale's premultiply target follows the source's precision
+  (RGBA16Float instead of RGBA8); (4) the frame cache key gains the decode format first (review media #7),
+  and the memory budget counts 8 bytes per pixel; (5) tests: a 12-bit ProRes 4444 with alpha (AVAssetWriter)
+  and a 16-bit PNG (CGImageDestination) holding a shallow gradient decode to the high-precision format and
+  keep more than 256 distinct levels through the compositor's RGBA16Float export intermediate.
 
 Next after this round (waiting for the user's go after item 5's decision): splitting `EffectSpan` into effect
 and transition types; the `TransitionRules` consolidation; the float intermediate on monitors.
