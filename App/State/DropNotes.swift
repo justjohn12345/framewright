@@ -99,21 +99,32 @@ extension ProjectStore {
     }
 
     private func transitionDropSentence(_ entry: SpanMemory.Entry, owner: VEClipInfo, withLinked: Bool) -> String {
-        let audio = owner.trackKind == .audio
-        let also = withLinked ? (audio ? " and its linked cross dissolve" : " and its linked crossfade") : ""
+        // Named by kind and place (SpanKindDisplay): "the cross dissolve", "the crossfade", "the fade in",
+        // "the Wipe Left", "the Iris Out" (review B11: a removed iris was "the cross dissolve").
+        let display = entry.span.display(onTrackKind: owner.trackKind)
+        let name = display.transitionKind.sentenceTitle(style: display.style)
+        var also = ""
+        if withLinked {
+            let linked = spanMemory[entry.span.linkedSpanID]
+            let linkedTrack: VETrackKind = owner.trackKind == .audio ? .video : .audio
+            let linkedName = linked.map { linkedEntry -> String in
+                let shown = linkedEntry.span.display(onTrackKind: linkedTrack)
+                return shown.transitionKind.sentenceTitle(style: shown.style)
+            } ?? (linkedTrack == .audio ? "crossfade" : "cross dissolve")
+            also = " and its linked \(linkedName)"
+        }
         switch entry.span.transitionStyle {
         case .fadeIn:
             if let before = touching(owner, atStart: true) {
-                return "Removed the fade in on “\(owner.name)”\(also): “\(before.name)” now touches its start."
+                return "Removed the \(name) on “\(owner.name)”\(also): “\(before.name)” now touches its start."
             }
-            return "Removed the fade in on “\(owner.name)”\(also): it no longer fits the clip."
+            return "Removed the \(name) on “\(owner.name)”\(also): it no longer fits the clip."
         case .fadeOut:
-            return "Removed the fade out on “\(owner.name)”\(also): it no longer fits the clip."
+            return "Removed the \(name) on “\(owner.name)”\(also): it no longer fits the clip."
         default:
-            let what = audio ? "crossfade" : "cross dissolve"
             let partnerID = entry.span.partnerClipID
             let partnerName = clips[partnerID]?.name ?? spanMemory.clipNames[partnerID] ?? "the next clip"
-            let between = "Removed the \(what) between “\(owner.name)” and “\(partnerName)”\(also)"
+            let between = "Removed the \(name) between “\(owner.name)” and “\(partnerName)”\(also)"
             if let after = touching(owner, atStart: false) {
                 if after.clipID != partnerID {
                     // The rest of the owner itself (a split inside the dissolve), or another clip.

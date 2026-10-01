@@ -407,7 +407,7 @@ struct SpanReadout: View {
     var body: some View {
         let parameter = SpanParameter.parameters(for: span.kind).first
         HStack(spacing: 6) {
-            Image(systemName: span.kind == .gain ? "speaker.wave.2" : "circle.lefthalf.filled")
+            Image(systemName: span.systemImage(onTrackKind: span.kind == .gain ? .audio : .video))
             Text(ProjectStore.title(of: span, isAudio: span.kind == .gain))
                 .fontWeight(.semibold)
             if let parameter {

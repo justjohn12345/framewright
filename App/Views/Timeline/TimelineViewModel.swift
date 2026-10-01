@@ -120,27 +120,9 @@ struct TimelineViewModel: Equatable {
             kind == .transition && transitionKind.glyph != nil
         }
 
-        /// The name drawn on the bar (and used in the inspector). A wipe or the iris is named for its
-        /// kind, with In or Out at a free edge (from or to black).
+        /// The name drawn on the bar (and used in the inspector): SpanKind.title(style:transitionKind:).
         var title: String {
-            switch kind {
-            case .motion: return "Motion"
-            case .opacity: return "Fade"
-            case .gain: return "Gain"
-            case .transition:
-                if isShaped {
-                    switch style {
-                    case .crossDissolve: return transitionKind.title
-                    case .fadeIn: return transitionKind.title + " In"
-                    case .fadeOut: return transitionKind.title + " Out"
-                    }
-                }
-                switch style {
-                case .crossDissolve: return isAudio ? "Crossfade" : "Cross Dissolve"
-                case .fadeIn: return "Fade In"
-                case .fadeOut: return "Fade Out"
-                }
-            }
+            kind.title(style: style, transitionKind: transitionKind)
         }
 
         /// The mark drawn before the name of a wipe or the iris (◁ ▷ △ ▽ ◯); nil otherwise.
@@ -150,17 +132,7 @@ struct TimelineViewModel: Equatable {
 
         /// The SF Symbol drawn on the bar.
         var systemImage: String {
-            switch kind {
-            case .motion: return "arrow.up.left.and.arrow.down.right"
-            case .opacity: return "circle.lefthalf.filled"
-            case .gain: return "speaker.wave.2"
-            case .transition:
-                switch style {
-                case .crossDissolve: return isAudio ? "waveform.path" : "square.on.square.dashed"
-                case .fadeIn: return "arrow.up.right"
-                case .fadeOut: return "arrow.down.right"
-                }
-            }
+            kind.systemImage(style: style, transitionKind: transitionKind)
         }
     }
 

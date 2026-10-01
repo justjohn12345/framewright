@@ -512,26 +512,12 @@ final class ProjectStore: ObservableObject {
 
     /// A span of `clip` as the timeline draws it (timeline seconds).
     private static func timelineSpan(_ span: VEEffectSpan, of clip: VEClipInfo) -> TimelineViewModel.Span {
-        let kind: TimelineViewModel.SpanKind
-        switch span.kind {
-        case .transition: kind = .transition
-        case .motion: kind = .motion
-        case .opacity: kind = .opacity
-        case .gain: kind = .gain
-        @unknown default: kind = .motion
-        }
-        let style: TimelineViewModel.TransitionStyle
-        switch span.transitionStyle {
-        case .fadeIn: style = .fadeIn
-        case .fadeOut: style = .fadeOut
-        default: style = .crossDissolve
-        }
-        let cut = style == .fadeIn ? clip.timelineStart : clip.timelineEnd
+        let display = span.display(onTrackKind: clip.trackKind)
+        let cut = display.style == .fadeIn ? clip.timelineStart : clip.timelineEnd
         return TimelineViewModel.Span(id: span.spanID, clipID: clip.clipID, trackID: clip.trackID, lane: span.lane,
-                                      kind: kind, start: span.start.secondsOrZero, end: span.end.secondsOrZero,
-                                      style: style, cut: cut.secondsOrZero, isAudio: clip.trackKind == .audio,
-                                      transitionKind: TransitionKind(engineKind: span.transitionKind,
-                                                                     trackKind: clip.trackKind))
+                                      kind: display.kind, start: span.start.secondsOrZero, end: span.end.secondsOrZero,
+                                      style: display.style, cut: cut.secondsOrZero, isAudio: clip.trackKind == .audio,
+                                      transitionKind: display.transitionKind)
     }
 
     /// Converts seconds to a CMTime on the sequence frame grid.

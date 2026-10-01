@@ -384,8 +384,7 @@ Done:
   fresh xctest processes (prober, backend, decoder); with the old wiring the prober and backend children fail.
   The child is skipped by name in the schemes (it runs only from its parent).
 
-- 10, B10, thumbnails failed at a clip's end: "Media: one last-frame search for the decode pool and
-  thumbnails". Root cause: `ThumbnailService` tried one seek a frame before the track's end, which finds
+- 10, B10, thumbnails failed at a clip's end: 6c0886e. Root cause: `ThumbnailService` tried one seek a frame before the track's end, which finds
   nothing where the track's duration overstates its pictures. `LastFrameSearch` (Engine/Media/LastFrame.h:
   back two frames, at least 0.25 s, doubling, decoding forward to the end) is used by the pool's streams
   (step by step), its scrub path and the thumbnail service. `ThumbnailServiceTests
@@ -393,8 +392,16 @@ Done:
   as 10 s: 3 failures on the old code); the pool's `testTheLastFrameIsHeldPastTheEndOfTheVideo` covers its
   two paths.
 
+- 11, B11, span and transition titles disagreed: "App: one source of span and transition names and
+  icons". Root cause: `ProjectStore.title(of:isAudio:)` (status lines, inspector, Ken Burns readout, drop
+  notes) knew only the dissolve and fades, while `TimelineViewModel.Span.title` also knew the wipes and the
+  iris. App/State/SpanKindDisplay.swift: `SpanKind.title/systemImage(style:transitionKind:)`,
+  `TransitionKind.title(style:)` / `sentenceTitle(style:)`, `VEEffectSpan.title/systemImage(onTrackKind:)`;
+  used by the timeline's spans, `ProjectStore.title`, `timelineSpan`, the drop notes (also the linked
+  partner's name), `SpanInspector.systemImage` and the Ken Burns readout's icon. `EffectLanesTimelineTests
+  testWipesAndTheIrisAreNamedAlikeEverywhere` (3 failures with the old call sites).
+
 Not started (key facts):
-- 11, B11, span and transition titles in two places.
 - 12, B12, M4A with PCM: the backends' validation disagrees.
 - 13, the dangling links to `2026-09-29-post-lanes-review.md`.
 

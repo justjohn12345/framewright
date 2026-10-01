@@ -189,20 +189,10 @@ extension ProjectStore {
             + rangeString(start: range.start, end: CMTimeAdd(range.start, range.duration)) + "."
     }
 
-    /// The title of a span kind ("Motion", "Fade", "Gain"; transitions by their style).
+    /// The title of a span ("Motion", "Fade", "Gain"; a transition by its kind and where it sits: "Cross
+    /// Dissolve", "Wipe Left", "Iris Out", "Crossfade"), on an audio track (`isAudio`) or a video track.
     static func title(of span: VEEffectSpan, isAudio: Bool) -> String {
-        switch span.kind {
-        case .motion: return "Motion"
-        case .opacity: return "Fade"
-        case .gain: return "Gain"
-        case .transition:
-            switch span.transitionStyle {
-            case .fadeIn: return "Fade In"
-            case .fadeOut: return "Fade Out"
-            default: return isAudio ? "Crossfade" : "Cross Dissolve"
-            }
-        @unknown default: return "Span"
-        }
+        span.title(onTrackKind: isAudio ? .audio : .video)
     }
 
     // MARK: Adding

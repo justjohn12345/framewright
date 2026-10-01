@@ -714,6 +714,42 @@ final class EffectLanesTimelineTests: XCTestCase {
                        "Removed the cross dissolve between “clip.mov” and “clip.mov”: “clip.mov” was split inside it.")
     }
 
+    /// Review B11 (general review, 2026-10-01): one source names span and transition kinds. The status
+    /// line of a transition drag (ProjectStore.title) called a wipe "Cross Dissolve", and a removed iris
+    /// was "the cross dissolve", while the timeline named both right.
+    func testWipesAndTheIrisAreNamedAlikeEverywhere() async throws {
+        // The names by kind and place.
+        XCTAssertEqual(TransitionKind.wipeLeft.title(style: .crossDissolve), "Wipe Left")
+        XCTAssertEqual(TransitionKind.wipeUp.title(style: .fadeIn), "Wipe Up In")
+        XCTAssertEqual(TransitionKind.iris.title(style: .fadeOut), "Iris Out")
+        XCTAssertEqual(TransitionKind.crossDissolve.title(style: .crossDissolve), "Cross Dissolve")
+        XCTAssertEqual(TransitionKind.crossDissolve.title(style: .fadeIn), "Fade In")
+        XCTAssertEqual(TransitionKind.audioCrossfade.title(style: .crossDissolve), "Crossfade")
+        XCTAssertEqual(TransitionKind.audioCrossfade.title(style: .fadeOut), "Fade Out")
+        XCTAssertEqual(TransitionKind.iris.sentenceTitle(style: .crossDissolve), "Iris")
+        XCTAssertEqual(TransitionKind.crossDissolve.sentenceTitle(style: .crossDissolve), "cross dissolve")
+        XCTAssertEqual(TimelineViewModel.SpanKind.opacity.title(style: .crossDissolve, transitionKind: .iris), "Fade")
+
+        let (movie, _) = try await fixture.importMedia()
+        let a = try place(movie, at: 0, from: 0.5, to: 1, video: v1)
+        let b = try place(movie, at: 0.5, from: 0.5, to: 1, video: v1)
+        _ = try place(movie, at: 1, from: 0.5, to: 1, video: v1)
+        for (kind, name) in [(TransitionKind.wipeLeft, "Wipe Left"), (.iris, "Iris")] {
+            XCTAssertTrue(store.addTransition(kind, from: a, to: b, frames: 6), store.statusMessage ?? "")
+            let span = try XCTUnwrap(store.clips[a]?.spans.first { $0.kind == .transition })
+            XCTAssertEqual(ProjectStore.title(of: span, isAudio: false), name, "the drag status line's title")
+            XCTAssertEqual(store.timelineModel.spans.first { $0.id == span.spanID }?.title, name, "the bar's title")
+            if kind == .iris { break }
+            store.undo()
+        }
+        // A ripple delete that brings another clip to the iris's clip removes it, named as an iris.
+        store.selection = [b]
+        store.deleteSelection(ripple: true)
+        XCTAssertTrue(store.sequence.transitions.isEmpty)
+        XCTAssertEqual(store.statusMessage,
+                       "Removed the Iris between “clip.mov” and “clip.mov”: “clip.mov” now follows “clip.mov”.")
+    }
+
     /// A head trim past a Motion span folds what it held into the clip's values, and a tail trim
     /// that leaves nothing of a span removes it: both say so.
     func testATrimThatRemovesASpanSaysWhatBecameOfIt() async throws {

@@ -573,12 +573,7 @@ private struct SpanInspector: View {
     }
 
     static func systemImage(_ kind: VESpanKind) -> String {
-        switch kind {
-        case .motion: return "arrow.up.left.and.arrow.down.right"
-        case .opacity: return "circle.lefthalf.filled"
-        case .gain: return "speaker.wave.2"
-        default: return "square.on.square.dashed"
-        }
+        TimelineViewModel.SpanKind(kind).systemImage(style: .crossDissolve, transitionKind: .crossDissolve)
     }
 
     /// The hold-after rule for the span's kind.
