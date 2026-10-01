@@ -42,6 +42,13 @@ TEST_CASE("describeFrames writes the frame count and the seconds as %.2f does") 
     CHECK(describeFrames(0, f30(1)) == "0 frames (0.00 s)");
     CHECK(describeFrames(30, CMTimeMake(1001, 30000)) == "30 frames (1.00 s)");
     CHECK(describeFrames(1, CMTimeMake(1, 8)) == "1 frame (0.12 s)"); // an exact tie rounds to even, as printf does
+    // A frame duration that is not a number of seconds: the count alone (it wrote "10 frames (nan s)").
+    CHECK(describeFrames(10, kCMTimeInvalid) == "10 frames");
+    CHECK(describeFrames(1, kCMTimePositiveInfinity) == "1 frame");
+    CHECK(describeFrames(-3, kCMTimeIndefinite) == "-3 frames");
+    // The largest numeric values: every digit, never a garbled "( s)" (2^63 frames of 2^63 s: 8.5e37 s).
+    const std::string huge = describeFrames(INT64_MAX, CMTimeMake(INT64_MAX, 1));
+    CHECK(huge == std::to_string(INT64_MAX) + " frames (85070591730234615865843651857942052864.00 s)"); // 2^126
     char expected[64];
     for (const CMTime fd : {f30(1), CMTimeMake(1001, 24000), CMTimeMake(1001, 60000), CMTimeMake(1, 25)}) {
         for (std::int64_t n = 0; n <= 900; ++n) {

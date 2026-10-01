@@ -2,16 +2,24 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 
 namespace ve {
 
 std::string describeFrames(std::int64_t frames, CMTime frameDuration) {
+    const std::string count = std::to_string(frames) + (frames == 1 ? " frame" : " frames");
     const double seconds = static_cast<double>(frames) * CMTimeGetSeconds(frameDuration);
-    // Two decimals as printf's "%.2f" writes them, independent of the C locale.
+    if (!std::isfinite(seconds)) {
+        return count; // a frame duration that is not a number of seconds (invalid, indefinite, infinite)
+    }
+    // Two decimals as printf's "%.2f" writes them, independent of the C locale. A numeric CMTime is at most
+    // 2^63 seconds, so |seconds| < 2^126 < 10^38: 39 digits, a sign and ".00" fit.
     char buffer[64];
     const auto converted = std::to_chars(buffer, buffer + sizeof buffer, seconds, std::chars_format::fixed, 2);
-    const std::string secondsText(buffer, converted.ec == std::errc() ? converted.ptr : buffer);
-    return std::to_string(frames) + (frames == 1 ? " frame (" : " frames (") + secondsText + " s)";
+    if (converted.ec != std::errc()) {
+        return count; // not reachable for the reason above; never a garbled "( s)"
+    }
+    return count + " (" + std::string(buffer, converted.ptr) + " s)";
 }
 
 bool isLengthLimit(EditError error) {

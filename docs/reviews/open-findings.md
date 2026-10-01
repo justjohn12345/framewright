@@ -143,11 +143,17 @@ Group C:
   `VE_ENGINE_INTERNAL_HEADER_INCLUDED` make the four classes' `.mm` files `#error` (proved: importing
   VEEngine+Internal.h into VEProgramMonitor.mm, and VEEngine.h into VEMediaLibrary+Internal.h, each stop
   the build). The integration notes' claim about the class tests is corrected.
-- 16, `fadeLimit`'s `excluded` parameter: "TransitionFitting: fadeLimit loses its dead excluded
-  parameter". It could never matter (a fade in is limited only by the tail transition, a fade out only by
+- 16, `fadeLimit`'s `excluded` parameter: 50a1309. It could never matter (a fade in is limited only by the tail transition, a fade out only by
   the fade in and the incoming dissolve: never by the span at its own edge, which is what callers
   excluded): removed with the clip copy; the test that asserted 60 with and without it now checks each
   edge against the other.
+- 17, small items: "Final coordinated classes; describeFrames for any frame duration; two comments".
+  `objc_subclassing_restricted` on VEExporter, VEMediaLibrary, VESourceMonitor and VEProgramMonitor (a
+  subclass fails to compile, checked); `describeFrames` writes the count alone for a frame duration that is
+  not a number of seconds (it wrote "(nan s)") and documents why 64 bytes always hold the seconds (a numeric
+  CMTime is at most 2^63 s, so the "( s)" the review computed for >= 1e62 cannot occur); PausedSeekRig.h
+  names VEProgramMonitor; `-[VEMediaLibrary routing]`/`missingAssets` document that they must not be sent
+  to nil (a null reference).
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
@@ -167,11 +173,6 @@ Not started (groups B and C), with what a fresh implementer needs:
   ~100-101 `- fd`; SourceProject.cpp ~38 `max(1, width)` and ~57 `videoLength > 0`). Replace the fixed
   sleeps at VEMediaLibraryTests.mm:293, VESourceMonitorTests.mm:260 and 327-330, VEProgramMonitorTests.mm:161
   and 295 with completion signals where possible. Report a before/after mutation table.
-- 17, small items: `__attribute__((objc_subclassing_restricted))` on the four extracted classes;
-  `describeFrames` (TransitionFitting.cpp:8-15) needs a larger buffer or an snprintf fallback when to_chars
-  fails or the value is not finite; the stale comment in EngineTests/Playback/PausedSeekRig.h:5 (it is
-  VEProgramMonitor that observes the controller now); document or guard the nil receiver of
-  `-[VEMediaLibrary routing]` and `missingAssets` (C++ references through ObjC messaging).
 - Finishing work not done this round (the lead runs them): ThreadSanitizer over the facade, playback and the
   new tests, and the StressTests scheme (items 1, 2, 5 and 6 touch rendering, export and the conform).
 

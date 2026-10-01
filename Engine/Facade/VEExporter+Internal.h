@@ -44,6 +44,8 @@ typedef void (^VEExporterFinishBlock)(const ve::media::Result<ve::exporting::Exp
                                       BOOL endedRunningExport);
 
 /// Main thread only. At most one export runs at a time.
+/// Final: the engine coordinates it as it is (no subclass can change its contract).
+__attribute__((objc_subclassing_restricted))
 @interface VEExporter : NSObject
 
 /// The running export, or nil.

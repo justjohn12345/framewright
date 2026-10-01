@@ -78,6 +78,8 @@ typedef void (^VEMediaThumbnailCompletion)(const ve::media::Result<ve::thumbs::T
 typedef void (^VEMediaWaveformCompletion)(const ve::thumbs::WaveformResult *_Nullable result);
 
 /// Main thread only; every completion runs on the main queue.
+/// Final: the engine coordinates it as it is (no subclass can change its contract).
+__attribute__((objc_subclassing_restricted))
 @interface VEMediaLibrary : NSObject
 
 /// `router` probes the files and feeds the thumbnail and waveform services, whose disk caches live
@@ -123,13 +125,15 @@ typedef void (^VEMediaWaveformCompletion)(const ve::thumbs::WaveformResult *_Nul
 // MARK: What is known per asset
 
 /// Every asset's routing (handed to exports and to a new playback controller). A reference to the
-/// library's own map, valid until the library next changes: read it, or copy it, at once.
+/// library's own map, valid until the library next changes: read it, or copy it, at once. Never send it
+/// to nil: a message to nil returns a null reference (undefined behaviour to read), not an empty map. The
+/// engine creates its library in -init and keeps it until -dealloc.
 - (const std::map<ve::AssetId, ve::media::RoutedMediaInfo> &)routing;
 /// `asset`'s probe details, or nullopt.
 - (std::optional<ve::facade::AssetDetails>)detailsForAsset:(ve::AssetId)asset;
 - (BOOL)isAssetMissing:(ve::AssetId)asset;
 /// The assets whose files were missing when the project was opened. A reference to the library's
-/// own set, valid until the library next changes.
+/// own set, valid until the library next changes. Never send it to nil (see -routing).
 - (const std::set<ve::AssetId> &)missingAssets;
 
 // MARK: Thumbnails and waveforms

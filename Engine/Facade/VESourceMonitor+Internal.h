@@ -48,6 +48,8 @@ NS_ASSUME_NONNULL_BEGIN
 typedef void (^VESourceMonitorStatusBlock)(VEPlaybackStatus *status);
 
 /// Main thread only.
+/// Final: the engine coordinates it as it is (no subclass can change its contract).
+__attribute__((objc_subclassing_restricted))
 @interface VESourceMonitor : NSObject
 
 /// `router` and `frameCache` are the engine's shared services (the monitor's pool and controller

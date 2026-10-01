@@ -2,7 +2,7 @@
 // doesn't update" report). A PlaybackController over the app's decode configuration (the program
 // pool's budget share, lane base 0, the default 512 MB frame cache unless a test scales it) whose frame
 // source is called only when the controller asks for a redraw (needsDisplay), on one serial queue: the
-// paused program view does exactly that (its display link is stopped; -[VEEngine observeController:]
+// paused program view does exactly that (its display link is stopped; -[VEProgramMonitor observeController]
 // turns needsDisplay into -[VEPreviewView renderOnce]). A test that polled the frame source itself would
 // hide a picture that lands without a redraw request.
 //

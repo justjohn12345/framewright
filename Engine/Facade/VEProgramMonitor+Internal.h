@@ -47,6 +47,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// render loop has followed it).
 typedef void (^VEProgramMonitorStatusBlock)(VEPlaybackStatus *status);
 
+/// Final: the engine coordinates it as it is (no subclass can change its contract).
+__attribute__((objc_subclassing_restricted))
 @interface VEProgramMonitor : NSObject
 
 /// `router` and `frameCache` are the engine's shared services (the monitor's pool and controller
