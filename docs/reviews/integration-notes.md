@@ -1835,3 +1835,15 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   it exports (96 kHz audio); 192 kHz: the export sheet's error says to use PCM or 48 kHz. (6) Place the
   first video clip on a sequence that already holds a still: the status line also says how the still was
   conformed.
+
+## Review of groups B and C (2026-10-01; status in `open-findings.md`)
+- Frame-rate conform (corrects "Fix round 2026-09-30, groups B and C": a sub-frame linked clip that "ends a
+  frame after its start, apart from its group"): such a clip never ended "a fraction of a frame after its
+  picture". Its start is on the grid at or after the group's frame, so alone it played wholly after its
+  picture, none of its own sound (7e2335b). `EdgeConform::startCanGoBack` now brings back the cut the start
+  shares (every end at it keeps media and a frame, and still plays part of what it played), so the sound
+  stays under its picture. An end goes apart only when its one frame still plays part of what the clip
+  played and overlaps the clip it is linked to (`misplacement`); every clip with an edge moved back with its
+  cut or apart is checked again once all edges are decided. Otherwise the change is refused, naming the
+  clip and why ("... has no room for one: it cannot start earlier, and a frame from its start would start
+  after the clip it is linked to ends"; "... cannot keep a frame ... where it plays: it would ...").

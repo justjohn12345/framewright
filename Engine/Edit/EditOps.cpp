@@ -2665,6 +2665,7 @@ struct ConformedClip {
     std::size_t indexOnTrack = 0;
     CMTime mediaEnd = kCMTimeInvalid; // not numeric for a still (no media bounds)
     std::size_t component = 0;        // linked clips share one
+    std::optional<std::size_t> partner; // the clip it is linked to, when it is in the sequence
     std::optional<CMTime> newStart;
     std::optional<CMTime> newEnd;
 };
@@ -2695,6 +2696,7 @@ class EdgeConform {
         for (ConformedClip &c : clips_) {
             if (c.clip->linkedClipId) {
                 if (auto it = indexOf.find(*c.clip->linkedClipId); it != indexOf.end()) {
+                    c.partner = it->second;
                     c.component = std::min(c.component, clips_[it->second].component);
                     clips_[it->second].component = c.component;
                 }
@@ -2762,6 +2764,17 @@ class EdgeConform {
         for (const std::vector<std::size_t> &group : groups_) {
             if (EditResult r = decide(group); !r) {
                 return r;
+            }
+        }
+        // The clips whose edges went where they did not round to (a start back with its cut, an end apart
+        // from its group), now that every edge is decided: each still plays part of what it played and
+        // overlaps the clip it is linked to.
+        for (std::size_t i : displaced_) {
+            if (auto why = misplacement(i, *clips_[i].newStart, *clips_[i].newEnd)) {
+                return EditResult::failure(EditError::OutOfSourceRange,
+                                           name(i) + " cannot keep a frame at " + frameRateName(fd_) +
+                                               " fps where it plays: it would " + *why +
+                                               "; trim or unlink them first.");
             }
         }
         return apply(report);
@@ -2848,23 +2861,75 @@ class EdgeConform {
         return !previous || *clips_[*previous].newEnd <= p;
     }
 
+    static bool overlaps(CMTime from, CMTime to, CMTime otherFrom, CMTime otherTo) {
+        return maxTime(from, otherFrom) < minTime(to, otherTo);
+    }
+    // What clip `i` would do wrong at [from, to) (its new range, after its move), or nullopt: it must still
+    // play part of what it played (its old range, moved with it), and still overlap the clip it is linked to
+    // where they overlapped. That clip's new range is its decided start (none: not yet decided, so not
+    // limited) to `partnerEnd` when given, else to its decided end (none: not limited). An edge that the
+    // conform takes away from where it rounded to keep a frame (a start going back with its cut, an end
+    // apart from its group) is held to this, so a linked clip shorter than a frame never ends up beside
+    // the clip it is linked to, or playing none of its own sound.
+    std::optional<std::string> misplacement(std::size_t i, CMTime from, CMTime to,
+                                            std::optional<CMTime> partnerEnd = std::nullopt) const {
+        const ConformedClip &c = clips_[i];
+        const CMTime shift = shiftOf(i);
+        if (!overlaps(from, to, c.clip->timelineStart + shift, c.clip->timelineEnd() + shift)) {
+            return std::string("play none of its own ") + (c.track->kind == TrackKind::Audio ? "sound" : "picture");
+        }
+        if (!c.partner) {
+            return std::nullopt;
+        }
+        const ConformedClip &o = clips_[*c.partner];
+        if (!overlaps(c.clip->timelineStart, c.clip->timelineEnd(), o.clip->timelineStart, o.clip->timelineEnd())) {
+            return std::nullopt;
+        }
+        if (!partnerEnd) {
+            partnerEnd = o.newEnd;
+        }
+        if (partnerEnd && !(from < *partnerEnd)) {
+            return std::string("start after the clip it is linked to ends");
+        }
+        if (o.newStart && !(*o.newStart < to)) {
+            return std::string("end before the clip it is linked to starts");
+        }
+        return std::nullopt;
+    }
+
     // Whether the start of clip `i`, decided earlier, may go back to `q` for a one-frame clip [q, q + one
-    // frame): the clip still shows part of what it showed (it ended after its old start), its edge group
-    // holds starts only (no clip end moves with it) and every start of it allows `q`. A clip whose start
-    // rounded up leaves itself no frame before the cut it ends at (a sound clip shorter than a frame, linked
-    // to a picture ending on its media's end) keeps one this way, extending its head into its media.
+    // frame), with the rest of its edge group: the clip still shows part of what it showed (it ended after
+    // its old start), every start of the group allows `q`, and every end of it (a cut the start shares: the
+    // clip before it on its track, and clips ending with that one) has media to `q` and keeps a frame
+    // before it, still playing part of what it played and overlapping the clip it is linked to. A clip
+    // whose start rounded up leaves itself no frame before the cut it ends at (a sound clip shorter than a
+    // frame, linked to a picture ending on its media's end) keeps one this way, extending its head into its
+    // media and bringing the cut before it back with it, so that it stays under its picture.
     bool startCanGoBack(std::size_t i, CMTime q) const {
         if (q < kCMTimeZero || !(clips_[i].clip->timelineStart + shiftOf(i) < q + fd_)) {
             return false;
         }
         const std::vector<std::size_t> &group = groups_[groupOf_[2 * i]];
         return std::all_of(group.begin(), group.end(), [&](std::size_t e) {
-            return isHead(e) && startAllows(e / 2, q, group);
+            const std::size_t j = e / 2;
+            if (isHead(e)) {
+                return startAllows(j, q, group);
+            }
+            if (isApart(e)) {
+                return true; // decided apart from the group: it stays
+            }
+            return endAllows(j, q) && !misplacement(j, *clips_[j].newStart, q);
         });
     }
     void moveStartBack(std::size_t i, CMTime q) {
         for (std::size_t e : groups_[groupOf_[2 * i]]) {
-            clips_[e / 2].newStart = q;
+            ConformedClip &c = clips_[e / 2];
+            if (isHead(e)) {
+                c.newStart = q;
+            } else if (!isApart(e)) {
+                c.newEnd = q;
+            }
+            displaced_.push_back(e / 2);
         }
     }
 
@@ -2877,6 +2942,19 @@ class EdgeConform {
             return false;
         }
         return endAllows(i, *c.newStart + fd_);
+    }
+    // The new end of the clip linked to clip `i`, when its end is in `group` (to be decided at `p` or later,
+    // unless decided apart), else its decided end (none: not yet decided).
+    std::optional<CMTime> partnerEndAt(std::size_t i, const std::vector<std::size_t> &group, CMTime p) const {
+        if (!clips_[i].partner) {
+            return std::nullopt;
+        }
+        const std::size_t partner = *clips_[i].partner;
+        const std::size_t end = 2 * partner + 1;
+        if (!isApart(end) && std::find(group.begin(), group.end(), end) != group.end()) {
+            return p;
+        }
+        return clips_[partner].newEnd;
     }
     bool isApart(std::size_t edge) const {
         return std::find(apart_.begin(), apart_.end(), edge) != apart_.end();
@@ -3045,11 +3123,17 @@ class EdgeConform {
         };
         std::size_t shortest = latestStart(); // the clip that needs the latest p to keep a frame
         const CMTime raised = maxTime(p, *clips_[shortest].newStart + fd_);
+        std::map<std::size_t, std::string> notApart; // why a clip without a frame could not end apart
         if (!std::all_of(ends.begin(), ends.end(), [&](std::size_t i) { return endAllows(i, raised); })) {
-            // Such a clip starts a frame before p (see startCanGoBack), or else, when it ends here only with
-            // the clip it is linked to (nothing on its own track starts here) and has media for a frame from
-            // its start, ends there instead, after the clip it is linked to (a sound clip shorter than a frame
-            // keeps its sound in sync, a fraction of a frame longer than its picture).
+            // Such a clip starts a frame before p, bringing the cut at its start back with it when it shares
+            // one (see startCanGoBack), so that it stays under the clip it is linked to. Or else, when it ends
+            // here only with the clip it is linked to (nothing on its own track starts here) and has media for
+            // a frame from its start, it ends there instead, apart from the group, provided that frame still
+            // plays part of what it played and overlaps that clip (see misplacement); otherwise it stays, and
+            // the change is refused below with the reason. Its start being on the grid at or after p, that
+            // frame overlaps the clip it is linked to only when another clip ending here takes the group past
+            // p: a clip apart never ends "a fraction of a frame after its picture" (as 7e2335b had it); alone,
+            // it would start at or after its picture's end.
             std::vector<std::size_t> kept;
             std::size_t left = ends.size(); // ends still in the group (at least one stays)
             for (std::size_t i : ends) {
@@ -3059,8 +3143,15 @@ class EdgeConform {
                     moveStartBack(i, p - fd_);
                     kept.push_back(i);
                 } else if (left > 1 && canEndApart(i, group)) {
-                    clips_[i].newEnd = *clips_[i].newStart + fd_;
+                    const CMTime start = *clips_[i].newStart;
+                    if (auto why = misplacement(i, start, start + fd_, partnerEndAt(i, group, p))) {
+                        notApart[i] = *why;
+                        kept.push_back(i);
+                        continue;
+                    }
+                    clips_[i].newEnd = start + fd_;
                     apart_.push_back(2 * i + 1);
+                    displaced_.push_back(i);
                     --left;
                 } else {
                     kept.push_back(i);
@@ -3073,7 +3164,15 @@ class EdgeConform {
         p = maxTime(p, keepsAFrame);
         for (std::size_t i : ends) {
             if (!endAllows(i, p)) {
-                if (i == shortest || !(*clips_[i].newStart + fd_ < keepsAFrame)) {
+                const bool alone = i == shortest || !(*clips_[i].newStart + fd_ < keepsAFrame);
+                if (const auto why = notApart.find(alone ? i : shortest); why != notApart.end()) {
+                    return EditResult::failure(EditError::OutOfSourceRange,
+                                               name(why->first) + " is shorter than a frame at " + frameRateName(fd_) +
+                                                   " fps and has no room for one: it cannot start earlier, and a "
+                                                   "frame from its start would " +
+                                                   why->second + "; trim or unlink them first.");
+                }
+                if (alone) {
                     return EditResult::failure(EditError::OutOfSourceRange,
                                                name(i) + " is shorter than a frame at " + frameRateName(fd_) +
                                                    " fps and has no media to fill one; trim or remove it first.");
@@ -3195,6 +3294,7 @@ class EdgeConform {
     std::vector<std::vector<std::size_t>> groups_; // the edge groups, in time order (run)
     std::vector<std::size_t> groupOf_;             // by edge: its group's index in groups_
     std::vector<std::size_t> apart_;               // ends decided apart from their group (canEndApart)
+    std::vector<std::size_t> displaced_;           // clips with an edge moved back with its cut or apart
 };
 
 } // namespace

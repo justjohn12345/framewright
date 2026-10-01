@@ -210,6 +210,42 @@ Verification at the end of the round (8a9b6cb plus docs):
   samples. Two-hour project: footprint after the edits +322.9 MB (bound 643 MB), after save and reopen
   +444.9 MB; cold starts 42.2-48.0 ms.
 
+## Review of groups B and C (2026-10-01): status
+Brief: one finding of the review fixed from 8a9b6cb (the subject of its commit is named until the next
+status update gives the hash); the review's other findings are still open, for a later round.
+
+Fixed:
+- A sub-frame linked sound clip played wholly after its picture (a regression of R2, 7e2335b): "Frame-rate
+  conform: a sub-frame linked sound clip stays under its picture, or the change is refused". When a sequence's
+  rate changed, a linked sound clip shorter than a frame whose start shared a cut could not go back a frame,
+  so its end went apart from its picture's, a frame after its start; its start being at or after the
+  picture's new end, it played none of its own sound, after its picture (50 -> 25 fps: p.mov's sound
+  [0.86, 0.88) from source 0.02 went to [0.88, 0.92) from 0.04, under the next clip, and the previous sound
+  grew over where it was). The cut its start shares now comes back with it when every clip at that cut keeps
+  its media and a frame (the sound plays [0.84, 0.88) from source 0, under its picture). An end goes apart
+  only when it still overlaps the clip it is linked to and plays part of what it played; else the change
+  is refused, naming the clip and why. The test that pinned [34, 35) and [35, 36) at 23.976 fps ("... ends
+  after its picture") now expects the refusal: no conform keeps that sound under its picture playing its
+  own sound. New: the regression test from the review's reproducer, and a property test of dual-system,
+  slipped and sub-frame linked sound (the review's generators) between all rate pairs. These two and the
+  changed test fail on 8a9b6cb (4, 111 and 3 failed checks); the existing property test, which now also
+  checks that pairs overlap and clips play part of what they played, passes on both.
+- The review's fuzzer (all 56 rate pairs, 128,800 random sequences in each of its two modes, mixed and
+  sub-frame): sequences where a linked pair's shared end came apart, 1,165 and 3,981 on 8a9b6cb, 0 now;
+  where a linked pair stopped overlapping, 1,546 and 3,983 on 8a9b6cb, 373 and 3 now, all of them pairs
+  that shared no edge (older, below). No sequence conformed without a violation on 8a9b6cb is refused now.
+  Of the conforms with a violation there, 5,013 are refused now (1,040 mixed, 3,973 sub-frame) and 144
+  conform without one; 1,364 refusals there now conform (67 of them with a violation of an older kind
+  below, on clips this fix does not move).
+
+Found while doing it (open, older than R2):
+- Linked pairs that share no edge are conformed edge by edge, so an overlap under about a frame can round
+  away (the 373 and 3 sequences above; also in the review's fuzzer run on 6864cc0).
+- A clip of about a frame or less whose start the grid or its media trims, or that moves with a whole
+  clip at a cut, can play none of what it played (fuzzer `content`: 1,447 mixed and 2,819 sub-frame
+  sequences now, 1,536 and 3,515 on 8a9b6cb; also on 6864cc0). The existing test "a one-frame clip whose
+  start moves up keeps a frame after it" pins one such case (an unlinked clip).
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.

@@ -124,6 +124,25 @@ bool clipsTouch(const Sequence &sequence, const std::vector<std::pair<ClipId, Cl
     });
 }
 
+bool overlapping(CMTime from, CMTime to, CMTime otherFrom, CMTime otherTo) {
+    return maxTime(from, otherFrom) < minTime(to, otherTo);
+}
+
+bool overlapping(const Clip &a, const Clip &b) {
+    return overlapping(a.timelineStart, a.timelineEnd(), b.timelineStart, b.timelineEnd());
+}
+
+// Whether `after` (a clip at speed 1, conformed) still plays part of the source range `before` played.
+bool playsPartOf(const Clip &before, const Clip &after) {
+    return overlapping(before.sourceIn, before.sourceIn + before.timelineDuration, after.sourceIn,
+                       after.sourceIn + after.timelineDuration);
+}
+
+// Whether two linked clips shared an edge (started or ended together).
+bool shareAnEdge(const Clip &a, const Clip &b) {
+    return a.timelineStart == b.timelineStart || a.timelineEnd() == b.timelineEnd();
+}
+
 } // namespace
 
 TEST_CASE("SequenceFormat: the standard frame rates and what a source's rate maps to") {
@@ -930,13 +949,62 @@ TEST_CASE("SetSequenceFormat: a linked sound clip shorter than a frame with no w
     CHECK(fx.project == before);
 }
 
-TEST_CASE("SetSequenceFormat: a linked sound clip shorter than a frame that cannot start earlier ends after its picture") {
+TEST_CASE("SetSequenceFormat: sub-frame linked sound brings the cut at its start back to stay under its picture") {
+    // Review of 2026-10-01 (a regression of R2, 7e2335b): at 50 fps, p.mov's two-frame whole picture
+    // [42, 44) has its sound on A1 for its last frame only, [43, 44) from source frame 1, touching the sound
+    // of v0.mov before it (one frame longer than v0.mov's picture). At 25 fps the A1 cut (43/50 s, 21.5
+    // frames) rounds up to 22/25, the sound's end must take p.mov's end (22/25, its media's end, before
+    // q.mov from its media's start), and the sound had no frame. Its start could not go back alone (it
+    // shares the cut), so its end went apart to 23/25: the sound played [22, 23)/25 from source 0.04-0.08,
+    // none of its own sound, wholly after its picture and under q.mov, while v0.mov's sound grew over
+    // where it was. Now the cut comes back to 21/25 with it: the sound plays [21, 22)/25 from source 0,
+    // under its picture and in sync, and v0.mov's sound ends with its picture.
+    Fixture fx;
+    const CMTime fd = CMTimeMake(1, 50);
+    fx.sequence().frameDuration = fd;
+    auto T = [](std::int64_t frames) { return CMTimeMake(frames, 50); };
+    const AssetId m0 = addMovie(fx, "v0.mov", fd, T(42), T(60));
+    const AssetId m1 = addMovie(fx, "p.mov", fd, T(2), T(4));
+    const AssetId m2 = addMovie(fx, "q.mov", fd, T(30), T(40));
+    const ClipId v0 = putClip(fx, fx.v1, m0, kCMTimeZero, T(42), kCMTimeZero);
+    const ClipId v0Sound = putClip(fx, fx.a1, m0, kCMTimeZero, T(43), kCMTimeZero);
+    fx.link(v0, v0Sound);
+    const ClipId p = putClip(fx, fx.v1, m1, T(42), T(2), kCMTimeZero);
+    const ClipId pSound = putClip(fx, fx.a1, m1, T(43), T(1), T(1));
+    fx.link(p, pSound);
+    const ClipId q = putClip(fx, fx.v1, m2, T(44), T(30), kCMTimeZero);
+    const ClipId qSound = putClip(fx, fx.a1, m2, T(45), T(29), T(1));
+    fx.link(q, qSound);
+    fx.requireValid();
+    SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 25)));
+    const EditResult result = applyReversible(fx.project, command);
+    REQUIRE_MESSAGE(result.ok(), doctest::String(result.message.c_str()));
+    INFO(joined(command.report().sentences));
+    CHECK(fx.clip(p).timelineStart == f25(21));
+    CHECK(fx.clip(p).timelineEnd() == f25(22));
+    CHECK(fx.clip(pSound).timelineStart == f25(21));
+    CHECK(fx.clip(pSound).timelineEnd() == f25(22));
+    CHECK(fx.clip(pSound).sourceIn == kCMTimeZero);
+    CHECK(fx.clip(v0Sound).timelineStart == kCMTimeZero);
+    CHECK(fx.clip(v0Sound).timelineEnd() == f25(21));
+    CHECK(fx.clip(q).timelineStart == f25(22));
+    CHECK(fx.clip(q).sourceIn == kCMTimeZero);
+    CHECK(fx.clip(qSound).timelineStart == f25(23)); // 45/50 s, 22.5 frames, rounds up
+    CHECK(fx.clip(qSound).sourceIn == T(2));
+    for (const auto &[picture, sound] : {std::pair{v0, v0Sound}, std::pair{p, pSound}, std::pair{q, qSound}}) {
+        CHECK(inSync(fx.sequence(), picture, sound));
+    }
+    CHECK(onGrid(fx.sequence(), CMTimeMake(1, 25)));
+}
+
+TEST_CASE("SetSequenceFormat: a linked sound clip shorter than a frame with no frame under its picture is refused") {
     // The last pair at 59.94 fps: the picture [86, 89) from source frame 4 ends on its media's end; its sound,
     // one frame [88, 89) from source frame 6, ends with it. At 23.976 fps the end can only take frame 35
-    // (picture media), where the sound (its start at frame 35 too) has no frame; starting a frame earlier
-    // would show none of its own sound (it would end before its old start). It keeps its frame by ending at
-    // 36, a fraction of a frame after the picture: its media reaches there, nothing follows on its track,
-    // and it stays in sync.
+    // (picture media), where the sound (its start at frame 35 too) has no frame. Starting a frame earlier
+    // would play none of its own sound (it would end before its old start), and ending at 36 would put it
+    // wholly after its picture ([34, 35) and [35, 36): 7e2335b did this, pinned here as right until the
+    // review of 2026-10-01). No conform keeps the sound under its picture playing its own sound: refused,
+    // naming the sound and why; nothing changes.
     Fixture fx;
     const CMTime fd = CMTimeMake(1001, 60000);
     fx.sequence().frameDuration = fd;
@@ -946,17 +1014,14 @@ TEST_CASE("SetSequenceFormat: a linked sound clip shorter than a frame that cann
     const ClipId a = putClip(fx, fx.a1, m, T(88), T(1), T(6));
     fx.link(v, a);
     fx.requireValid();
-    const CMTime newFd = CMTimeMake(1001, 24000);
-    SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, newFd));
-    const EditResult result = applyReversible(fx.project, command);
-    REQUIRE_MESSAGE(result.ok(), doctest::String(result.message.c_str()));
-    auto N = [&](std::int64_t frames) { return CMTimeMultiply(newFd, static_cast<int32_t>(frames)); };
-    CHECK(fx.clip(v).timelineStart == N(34));
-    CHECK(fx.clip(v).timelineEnd() == N(35));
-    CHECK(fx.clip(a).timelineStart == N(35));
-    CHECK(fx.clip(a).timelineEnd() == N(36));
-    CHECK(inSync(fx.sequence(), v, a));
-    CHECK(onGrid(fx.sequence(), newFd));
+    const Project before = fx.project;
+    SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1001, 24000)));
+    const EditResult result = command.apply(fx.project);
+    CHECK(result.error == EditError::OutOfSourceRange);
+    CHECK(result.message == "“m.mov” is shorter than a frame at 23.976 fps and has no room for one: it cannot start "
+                            "earlier, and a frame from its start would start after the clip it is linked to ends; trim "
+                            "or unlink them first.");
+    CHECK(fx.project == before);
 }
 
 TEST_CASE("SetSequenceFormat: an end that comes back to the cut brings the cut it shares on another track with it") {
@@ -1129,6 +1194,11 @@ TEST_CASE("SetSequenceFormat: property: random linked pairs conform touching, al
         CHECK(clipsTouch(conformed, cuts));
         for (const auto &[v, a] : pairs) {
             CHECK(inSync(conformed, v, a));
+            // Each pair still plays together, each clip part of what it played.
+            CHECK(overlapping(*conformed.findClip(v), *conformed.findClip(a)));
+            for (const ClipId id : {v, a}) {
+                CHECK(playsPartOf(fx.clip(id), *conformed.findClip(id)));
+            }
         }
         CHECK(onGrid(conformed, newFd));
         CHECK(problemOf(copy).empty());
@@ -1136,6 +1206,239 @@ TEST_CASE("SetSequenceFormat: property: random linked pairs conform touching, al
     MESSAGE("conformed " << succeeded << ", refused " << refused);
     CHECK(succeeded > 1000);
     CHECK(refused < 30);
+}
+
+namespace {
+
+// Random shots for the conform's property test of linked sound (the review of 2026-10-01's generators):
+// pictures of one or two old frames or more, back to back or with gaps, from sources at the sequence's
+// rate or another standard rate, whole or with handles of whole or partial source frames; each linked
+// to sound that is aligned with it, starts or ends a few frames apart (J/L cuts), is slipped out of the
+// picture's media time, comes from a separate recorder file in sync by its own offset (rolling before
+// the camera), or is shorter than a frame (one old frame) at the head or tail of its picture. Times are
+// in 1/240000 s, which every standard frame duration divides.
+class ShotGenerator {
+  public:
+    explicit ShotGenerator(std::uint64_t seed) : state_(seed) {}
+
+    // Adds the shots of one picture/sound track pair; with `subFrame`, every picture of two old frames or
+    // more gets sound shorter than a frame.
+    void addShots(Fixture &fx, std::vector<std::pair<ClipId, ClipId>> &pairs, TrackId pictureTrack,
+                  TrackId soundTrack, CMTime oldFd, int firstName, bool subFrame) {
+        const auto &rates = standardFrameDurations();
+        const std::int64_t F = units(oldFd);
+        std::int64_t at = percent(30) ? below(4) * F : 0; // the picture track's end so far
+        std::int64_t soundEnd = 0;                        // the sound track's end so far
+        const int count = 2 + static_cast<int>(below(4));
+        for (int i = 0; i < count; ++i) {
+            if (percent(20)) {
+                at += (1 + below(3)) * F;
+            }
+            const std::int64_t frames = percent(15) ? 1 + below(2) : 2 + below(30);
+            const std::int64_t length = frames * F;
+            const auto rate = static_cast<std::size_t>(below(static_cast<std::int64_t>(rates.size())));
+            const CMTime sourceFd = percent(70) ? oldFd : rates[rate];
+            const std::int64_t SF = units(sourceFd);
+            auto handle = [&] { return percent(55) ? 0 : (percent(50) ? below(4) * SF : below(4 * SF)); };
+            const std::int64_t head = handle();
+            const std::int64_t tail = handle();
+            const std::int64_t media = head + length + tail;
+            const int kind = static_cast<int>(below(100));
+            auto offset = [&]() -> std::int64_t {
+                const std::int64_t k = below(10);
+                if (k < 5) {
+                    return 0;
+                }
+                const std::int64_t frameOffset = k < 7 ? (below(5) - 2) * F : below(4 * F) - 2 * F;
+                return (frameOffset / F) * F;
+            };
+            const std::int64_t startOffset = offset();
+            const std::int64_t endOffset = offset();
+            std::int64_t soundStart = std::max(at + startOffset, soundEnd);
+            std::int64_t soundStop = at + length + endOffset;
+            if ((kind >= 85 || subFrame) && frames >= 2) {
+                if (percent(50)) {
+                    soundStart = std::max(at, soundEnd);
+                    soundStop = soundStart + F;
+                } else {
+                    soundStop = at + length;
+                    soundStart = std::max(soundStop - F, soundEnd);
+                }
+            }
+            if (soundStop <= soundStart) {
+                soundStop = soundStart + F;
+            }
+            const std::int64_t extra = below(3) * SF;
+            const std::int64_t soundMedia = media + extra + (percent(30) ? below(SF) : 0);
+            const std::string number = std::to_string(firstName + i);
+            const AssetId movie = addMovie(fx, "m" + number + ".mov", sourceFd, at240k(media), at240k(soundMedia));
+            const ClipId picture = putClip(fx, pictureTrack, movie, at240k(at), at240k(length), at240k(head));
+            const std::int64_t pictureStart = at;
+            at += length;
+            if (kind >= 95) {
+                continue; // no sound
+            }
+            std::optional<ClipId> sound;
+            if (kind < 25) {
+                // A recorder's file, in sync by its own offset: its media's start plays at `zero`.
+                const std::int64_t roll = below(3 * F);
+                const std::int64_t zero = pictureStart - roll - (percent(50) ? below(F) : 0);
+                std::int64_t in = soundStart - zero;
+                if (in < 0) {
+                    soundStart = std::max(zero <= 0 ? 0 : (zero + F - 1) / F * F, soundEnd);
+                    in = soundStart - zero;
+                }
+                const std::int64_t untilStop = soundStop - zero;
+                const std::int64_t recorded = percent(40) ? untilStop : untilStop + below(3 * F);
+                MediaAsset recorder = *fx.project.findAsset(fx.audioOnly);
+                recorder.name = "rec" + number + ".wav";
+                recorder.url = "file:///media/" + recorder.name;
+                recorder.duration = at240k(recorded);
+                const AssetId file = fx.project.addAsset(recorder);
+                if (soundStop > soundStart) {
+                    sound = putClip(fx, soundTrack, file, at240k(soundStart), at240k(soundStop - soundStart),
+                                    at240k(in));
+                }
+            } else {
+                std::int64_t in = head + (soundStart - pictureStart);
+                if (kind < 40) {
+                    const int sign = percent(50) ? 1 : -1;
+                    in += sign * (percent(50) ? F : 1 + below(F - 1)); // slipped
+                }
+                if (in < 0) {
+                    const std::int64_t up = (-in + F - 1) / F * F;
+                    soundStart += up;
+                    in += up;
+                }
+                if (in + (soundStop - soundStart) > soundMedia) {
+                    soundStop = soundStart + (soundMedia - in) / F * F;
+                }
+                if (soundStop > soundStart) {
+                    sound = putClip(fx, soundTrack, movie, at240k(soundStart), at240k(soundStop - soundStart),
+                                    at240k(in));
+                }
+            }
+            if (sound) {
+                fx.link(picture, *sound);
+                pairs.emplace_back(picture, *sound);
+                soundEnd = soundStop;
+            }
+        }
+    }
+
+  private:
+    static std::int64_t units(CMTime frameDuration) {
+        return frameDuration.value * (240000 / frameDuration.timescale);
+    }
+    static CMTime at240k(std::int64_t value) {
+        return CMTimeMake(value, 240000);
+    }
+    std::int64_t below(std::int64_t n) {
+        state_ = state_ * 6364136223846793005ull + 1442695040888963407ull;
+        return n <= 0 ? 0 : static_cast<std::int64_t>((state_ >> 33) % static_cast<std::uint64_t>(n));
+    }
+    bool percent(int p) {
+        return below(100) < p;
+    }
+
+    std::uint64_t state_;
+};
+
+} // namespace
+
+TEST_CASE("SetSequenceFormat: property: dual-system, slipped and sub-frame linked sound stays with its picture") {
+    // The review of 2026-10-01: a linked sound clip shorter than a frame whose end went apart from its
+    // picture's (7e2335b, R2) played wholly after it, none of its own sound. On random shots (see
+    // ShotGenerator) between every pair of standard rates, half with sound shorter than a frame on every
+    // picture, every change that succeeds keeps the cuts touching, the pairs in sync, every edge on the
+    // grid and the project valid; a pair that started or ended together still overlaps; and a clip whose
+    // shared edge went apart from its partner's still overlaps it and plays part of what it played. A
+    // refusal names a clip and changes nothing. Pairs that shared no edge are conformed edge by edge and
+    // are not held to overlapping (an overlap under about a frame can round away), and a clip shorter than
+    // a frame whose start the grid trims is not held to keeping what it played: both are older rules.
+    const auto &rates = standardFrameDurations();
+    int succeeded = 0;
+    int refused = 0;
+    for (const bool subFrame : {false, true}) {
+        for (std::size_t from = 0; from < rates.size(); ++from) {
+            for (std::size_t to = 0; to < rates.size(); ++to) {
+                if (from == to) {
+                    continue;
+                }
+                for (int iteration = 0; iteration < 15; ++iteration) {
+                    const std::uint64_t seed = (subFrame ? 7777ull : 1ull) * 1000003ull + (from * 8 + to) * 7919ull +
+                                               static_cast<std::uint64_t>(iteration) * 104729ull;
+                    ShotGenerator generator(seed);
+                    Fixture fx;
+                    const CMTime oldFd = rates[from];
+                    const CMTime newFd = rates[to];
+                    fx.sequence().frameDuration = oldFd;
+                    std::vector<std::pair<ClipId, ClipId>> pairs;
+                    generator.addShots(fx, pairs, fx.v1, fx.a1, oldFd, 0, subFrame);
+                    if (seed % 3 == 0) {
+                        generator.addShots(fx, pairs, fx.v2, fx.a2, oldFd, 100, subFrame);
+                    }
+                    if (!problemOf(fx.project).empty()) {
+                        continue;
+                    }
+                    CAPTURE(subFrame);
+                    CAPTURE(from);
+                    CAPTURE(to);
+                    CAPTURE(iteration);
+                    std::vector<std::pair<ClipId, ClipId>> cuts;
+                    for (const TrackId track : {fx.v1, fx.a1, fx.v2, fx.a2}) {
+                        const std::vector<Clip> &clips = fx.track(track).clips;
+                        for (std::size_t k = 0; k + 1 < clips.size(); ++k) {
+                            if (clips[k].timelineEnd() == clips[k + 1].timelineStart) {
+                                cuts.emplace_back(clips[k].id, clips[k + 1].id);
+                            }
+                        }
+                    }
+                    Project copy = fx.project;
+                    SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, newFd));
+                    const EditResult result = command.apply(copy);
+                    if (!result.ok()) {
+                        ++refused;
+                        CHECK(result.message.find("“") == 0);
+                        CHECK(copy == fx.project);
+                        continue;
+                    }
+                    ++succeeded;
+                    const Sequence &conformed = *copy.findSequence(fx.seq);
+                    CHECK(clipsTouch(conformed, cuts));
+                    CHECK(onGrid(conformed, newFd));
+                    CHECK(problemOf(copy).empty());
+                    for (const auto &[v, a] : pairs) {
+                        const Clip &picture = fx.clip(v);
+                        const Clip &sound = fx.clip(a);
+                        const Clip &newPicture = *conformed.findClip(v);
+                        const Clip &newSound = *conformed.findClip(a);
+                        // In sync: both moved against their media by the same amount.
+                        const CMTime pictureMove = (newPicture.timelineStart - newPicture.sourceIn) -
+                                                   (picture.timelineStart - picture.sourceIn);
+                        const CMTime soundMove =
+                            (newSound.timelineStart - newSound.sourceIn) - (sound.timelineStart - sound.sourceIn);
+                        CHECK(pictureMove == soundMove);
+                        if (shareAnEdge(picture, sound)) {
+                            CHECK_MESSAGE(overlapping(newPicture, newSound),
+                                          "the pair " << v.value() << "/" << a.value() << " no longer plays together");
+                        }
+                        const bool startApart = picture.timelineStart == sound.timelineStart &&
+                                                !(newPicture.timelineStart == newSound.timelineStart);
+                        const bool endApart = picture.timelineEnd() == sound.timelineEnd() &&
+                                              !(newPicture.timelineEnd() == newSound.timelineEnd());
+                        if (startApart || endApart) {
+                            CHECK(overlapping(newPicture, newSound));
+                            CHECK_MESSAGE(playsPartOf(picture, newPicture), "clip " << v.value());
+                            CHECK_MESSAGE(playsPartOf(sound, newSound), "clip " << a.value());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    MESSAGE("conformed " << succeeded << ", refused " << refused);
+    CHECK(succeeded > 900);
 }
 
 TEST_CASE("SetSequenceFormat: a cross dissolve with not one frame left is removed with a sentence") {
