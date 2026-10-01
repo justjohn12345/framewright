@@ -354,6 +354,64 @@ static bool showsFrame(int shown, int64_t f) {
     [engine attachProgramView:nil];
 }
 
+/// Item 14 of the 2026-10-01 fix round, through the facade: J J (2x reverse) then K then Space plays
+/// forward at 1x, on the program monitor (togglePlay, play) and on the source monitor
+/// (sourceMonitorTogglePlay), which the transport button, the Playback menu and the Space key use.
+- (void)testSpaceAfterAShuttleAndKPlaysForwardAtOneX {
+    VEEngine *engine = [self makeEngine];
+    VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];
+    [self buildSequence:engine asset:asset];
+    auto playsForward = ^(NSString *what, double (^rate)(void), CMTime (^time)(void), BOOL (^playing)(void)) {
+        XCTAssertEqual(rate(), 1.0, @"%@: forward at 1x", what);
+        XCTAssertTrue([self spinUntil:^BOOL { return playing(); } timeout:10], @"%@", what);
+        const CMTime t0 = time();
+        [self spinUntil:^BOOL { return NO; } timeout:0.3];
+        XCTAssertGreaterThan(CMTimeCompare(time(), t0), 0, @"%@: moves forward", what);
+        XCTAssertEqual(rate(), 1.0, @"%@", what);
+    };
+    double (^programRate)(void) = ^{ return engine.playbackRate; };
+    CMTime (^programTime)(void) = ^{ return engine.currentTime; };
+    BOOL (^programPlaying)(void) = ^{ return (BOOL)(engine.playbackState == VEPlaybackStatePlaying); };
+
+    for (int toggle = 0; toggle < 2; ++toggle) {
+        [engine seekToTime:seconds(2.5)];
+        [engine shuttleReverse];
+        [engine shuttleReverse];
+        XCTAssertEqual(engine.playbackRate, -2.0);
+        [engine shuttleStop];
+        XCTAssertEqual(engine.playbackState, VEPlaybackStateStopped);
+        if (toggle) {
+            [engine togglePlay];
+        } else {
+            [engine play];
+        }
+        playsForward(toggle ? @"J J, K, togglePlay" : @"J J, K, play", programRate, programTime, programPlaying);
+        [engine pause];
+    }
+    // L L, K, Space: also 1x (not 2x).
+    [engine seekToTime:seconds(1)];
+    [engine shuttleForward];
+    [engine shuttleForward];
+    XCTAssertEqual(engine.playbackRate, 2.0);
+    [engine shuttleStop];
+    [engine togglePlay];
+    playsForward(@"L L, K, togglePlay", programRate, programTime, programPlaying);
+    [engine pause];
+
+    // The source monitor.
+    [engine sourceMonitorShowAsset:asset.assetID atTime:seconds(5)];
+    [engine sourceMonitorShuttleReverse];
+    [engine sourceMonitorShuttleReverse];
+    XCTAssertEqual(engine.sourceMonitorPlaybackStatus.rate, -2.0);
+    [engine sourceMonitorPause];
+    XCTAssertEqual(engine.sourceMonitorPlaybackState, VEPlaybackStateStopped);
+    [engine sourceMonitorTogglePlay];
+    playsForward(@"source monitor: J J, K, togglePlay", ^{ return engine.sourceMonitorPlaybackStatus.rate; },
+                 ^{ return engine.sourceMonitorTime; },
+                 ^{ return (BOOL)(engine.sourceMonitorPlaybackState == VEPlaybackStatePlaying); });
+    [engine sourceMonitorPause];
+}
+
 - (void)testShuttleRatesAndMute {
     VEEngine *engine = [self makeEngine];
     VEAssetInfo *asset = [self importOne:"h264_1080p30.mp4" into:engine];

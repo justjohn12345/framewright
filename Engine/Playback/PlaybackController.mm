@@ -1341,10 +1341,9 @@ void PlaybackController::play() {
     if (state_ == PlaybackState::Playing || state_ == PlaybackState::Prerolling) {
         return;
     }
-    if (rate_ == 0.0) {
-        rate_ = 1.0;
-    }
-    beginPrerollLocked(displayTime_, rate_);
+    // Play from stopped is forward at 1x, whatever the last shuttle was (J J, then K, then Space plays
+    // forward), as in every NLE. J and L start their own shuttle; setRate() plays at the rate asked.
+    beginPrerollLocked(displayTime_, 1.0);
 }
 
 void PlaybackController::pause() {
@@ -1355,12 +1354,9 @@ void PlaybackController::pause() {
 void PlaybackController::togglePlay() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ == PlaybackState::Playing || state_ == PlaybackState::Prerolling) {
-        pauseLocked();
+        pauseLocked(); // at any rate, in either direction
     } else {
-        if (rate_ == 0.0) {
-            rate_ = 1.0;
-        }
-        beginPrerollLocked(displayTime_, rate_);
+        beginPrerollLocked(displayTime_, 1.0); // forward at 1x, as play()
     }
 }
 

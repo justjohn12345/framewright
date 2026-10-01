@@ -399,6 +399,61 @@ double rmsOver(const audio::NullAudioOutput::Capture &capture, int64_t from, int
     h.controller->pause();
 }
 
+/// Item 14 of the 2026-10-01 fix round: play from stopped is forward at 1x, as in every NLE. J (or J J),
+/// K, then Space played on in reverse: play() and togglePlay() reused the rate the shuttle left. Now
+/// both start at +1 from the playhead; J and L still start their own shuttle, togglePlay() still stops
+/// at any rate in either direction.
+- (void)testPlayFromStoppedIsForwardAtOneXWhateverTheLastShuttle {
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 2.0);
+    buildStandard(h);
+    if (!h.ok()) {
+        XCTFail(@"%s", h.error().c_str());
+        return;
+    }
+    h.load();
+    struct Case {
+        const char *name;
+        int presses;   // J or L presses before K
+        bool reverse;  // J (true) or L
+        bool toggle;   // Space through togglePlay() (true) or play()
+    };
+    const Case cases[] = {
+        {"J, K, togglePlay", 1, true, true},
+        {"J J, K, togglePlay", 2, true, true},
+        {"J J, K, play", 2, true, false},
+        {"L L, K, play", 2, false, false},
+        {"L L, K, togglePlay", 2, false, true},
+    };
+    for (const Case &c : cases) {
+        h.controller->seek(CMTimeMake(5, 1));
+        for (int i = 0; i < c.presses; ++i) {
+            c.reverse ? h.controller->shuttleReverse() : h.controller->shuttleForward();
+        }
+        const double shuttle = (c.reverse ? -1.0 : 1.0) * (c.presses == 1 ? 1.0 : 2.0);
+        XCTAssertEqual(h.controller->rate(), shuttle, @"%s", c.name);
+        XCTAssertTrue(h.waitForState(PlaybackState::Playing), @"%s", c.name);
+        XCTAssertTrue(renderManual(h, 0.1), @"%s", c.name);
+        h.controller->pause(); // K
+        XCTAssertEqual(h.controller->state(), PlaybackState::Stopped, @"%s", c.name);
+        const double stoppedAt = secondsOf(h.controller->currentTime());
+
+        c.toggle ? h.controller->togglePlay() : h.controller->play();
+        XCTAssertEqual(h.controller->rate(), 1.0, @"%s: forward at 1x", c.name);
+        XCTAssertTrue(h.waitForState(PlaybackState::Playing), @"%s", c.name);
+        XCTAssertEqual(h.controller->rate(), 1.0, @"%s", c.name);
+        XCTAssertTrue(renderManual(h, 0.3), @"%s", c.name);
+        XCTAssertGreaterThan(secondsOf(h.controller->clock().now()), stoppedAt + 0.1, @"%s: moves forward", c.name);
+        h.controller->pause();
+    }
+    // Playing in reverse at 2x, togglePlay() stops.
+    h.controller->seek(CMTimeMake(5, 1));
+    h.controller->shuttleReverse();
+    h.controller->shuttleReverse();
+    XCTAssertTrue(h.waitForState(PlaybackState::Playing));
+    h.controller->togglePlay();
+    XCTAssertEqual(h.controller->state(), PlaybackState::Stopped);
+}
+
 - (void)testStepFramesShowsExactFrames {
     PlaybackHarness h(PlaybackHarness::Mode::Realtime, 1.0);
     const Standard s = buildStandard(h);

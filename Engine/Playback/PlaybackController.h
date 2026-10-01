@@ -343,8 +343,11 @@ class PlaybackController {
 
     // MARK: Transport
 
+    /// From stopped (or scrubbing): plays forward at 1x from the playhead, whatever rate a shuttle
+    /// left (the convention of every NLE). Does nothing while playing.
     void play();
     void pause();
+    /// Playing (any rate, either direction): pauses. Otherwise: play().
     void togglePlay();
     void seek(CMTime time, SeekMode mode = SeekMode::Exact);
     /// 0 pauses; otherwise plays at `rate` (clamped to [-8, 8]).

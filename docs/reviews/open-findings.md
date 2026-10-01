@@ -284,7 +284,8 @@ lead's scratchpad as fa-Repro.cpp cases 2-4, fa-Alt.cpp and fa-Fuzz.cpp):
 ## Fix round 2026-10-01 (general review): status
 Brief: the "Bugs found along the way" table and item 1 ("Now") of "Recommended order" in
 `2026-10-01-general-code-review.md` (B1-B6, B8-B12, moving the machine-dependent and soak tests, the
-dangling links), from fecb2a2, items 1-13 in this order. A done item names the subject of its commit
+dangling links), from fecb2a2, items 1-13 in this order; item 14 (Space plays forward at 1x) added by
+the lead during the round and done after item 6. A done item names the subject of its commit
 until a later status update gives the hash. Each fix has a regression test that fails with the
 production change reverted (named in the commit message).
 
@@ -327,8 +328,7 @@ Done:
   once. No engine coupling was added. `VEMediaLibraryTests
   testThumbnailsAndWaveformsFollowTheRoutersPolicyAtRunTime` (two fake backends count decoder opens).
 
-- 6, B6, the undo stack ignored a failed re-apply: "Undo stack: drop the history when a drag cannot put
-  its last step back; report an accumulated step's dropped ids". Root causes: `push()` ignored
+- 6, B6, the undo stack ignored a failed re-apply: 6efa7b6. Root causes: `push()` ignored
   `previous.apply()`'s result after a refused ReplacePrevious step; `AccumulatedSteps::apply` returned a
   bare success. Now the undo side is dropped (as `undo()` does) and the change counted; the accumulated
   step merges its children's ids through a shared `mergeDroppedIds` (EditResult.h; `CompositeCommand`
@@ -337,6 +337,18 @@ Done:
   drag step whose last good step cannot be applied again drops the history", "an accumulated step
   reports its steps' dropped transitions and spans on redo" (both fail on the old code), "redo reports
   what a plain step dropped" (coverage).
+
+- Full suite after items 1-6 (6efa7b6): EngineTests 539 (no skips), doctest 331, AppTests 277 with the
+  1 known skip; 0 failures; 612 s wall including the build.
+- 14, Space after a shuttle played on in reverse: "Playback: play from stopped is forward at 1x".
+  Root cause: `PlaybackController::play()` and `togglePlay()` reused the rate the last shuttle left
+  (falling back to 1 only at 0), so J (or J J), K, Space played backwards (and L L, K, Space at 2x).
+  Both now start at +1 from the playhead; `togglePlay()` still stops at any rate and direction; J, K, L
+  and `setRate:` are unchanged. The source monitor uses the same controller; the transport button, the
+  Playback menu and the Space key all go through `PlaybackActions.togglePlay` to the engine.
+  `PlaybackControllerTests testPlayFromStoppedIsForwardAtOneXWhateverTheLastShuttle` (Manual harness)
+  and `VEEnginePlaybackTests testSpaceAfterAShuttleAndKPlaysForwardAtOneX` (program monitor play and
+  togglePlay, source monitor togglePlay): 13 and 11 failed checks on the old controller.
 
 Not started (key facts):
 - 7, B8, test hygiene (EngineTests scratch directories, AppTests defaults suites, media work outliving
