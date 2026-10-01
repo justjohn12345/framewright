@@ -119,12 +119,17 @@ Group B, continued:
 - Nit (c), `CompositeCommand::canRevert` checked only the last child: d192c0d. `canRevertSteps` (Command.h) reverts the later steps on a copy and
   checks each earlier one against what they leave; `revert()` is const (it changes only the project). The
   undo stack's accumulated group (AccumulatedSteps) had the same check and uses it too.
-- 3, a pool miss per frame under an animated scale: "Compositor: pre-scale into the top-left of pooled
-  textures, at the exact drawn size, for every target". The plane is resampled at its exact drawn size
+- 3, a pool miss per frame under an animated scale: a5ab1de. The plane is resampled at its exact drawn size
   (MPS scaleTransform and clipRect) into a texture pooled at the rounded-up size; the draw samples that
   region (`VESourceUniforms::planeExtent`, clamped half a texel inside it), the unsharp kernel runs over and
   reads within it (`VEUnsharpUniforms::size`). Monitors therefore pre-scale exactly too (they used the 1/32
   steps and resampled, 5 % softer than the export); `Compositor::Stats::scratchAllocations` counts misses.
+- 4, the parity tests compared the export path with itself: "Parity tests: the monitor through its drawable".
+  Every ExportParityTests case renders the monitor into a texture of the program view's drawable format
+  (BGR10A2) and reads it back; bounds from measured maxima (10.6 beside the coloured still: ProRes 4:2:2
+  chroma, bound 12; 2-4 elsewhere, bounds 3-5; were all 14). All comparisons are at the sequence's size,
+  where R5's rule makes the monitor and the export sharpen alike. With monitors made never to sharpen, the
+  new sharpened case fails (12 failures); the old one passed.
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
@@ -137,11 +142,6 @@ Found while doing them (open):
   different amount, which in practice needs a pair slipped out of sync.
 
 Not started (groups B and C), with what a fresh implementer needs:
-- 4, the parity test compares the export path with itself: EngineTests/Export/ExportParityTests.mm ~232
-  renders the "monitor" into a PixelBufferTarget. Render it through a texture target as ProgramView does
-  and read it back (or give monitors exact sizes with item 3's pooling); tighten the loose bound (max block
-  14.0 against a measured 2.1). Note: since 5d8fc6e sharpening differs by target kind by design only in
-  its deciding scale (equal at the sequence's size).
 - 8, garbled transition notes: "Shortened to shortened to ..." (Engine/Edit/TransitionFitting.cpp:230-231,
   `planFade`) and the refused linked fade-in range fit that first notes "was shortened to 0 frames" (the
   head-fade path adds the note at ~148 before the `length < 1` refusal at ~150). Fix both and update the

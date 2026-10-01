@@ -1,12 +1,17 @@
 // An export shows and sounds exactly like the program monitor (phase 7 review test gaps 1 and 2).
 // - Pictures: frames of a sequence with a rotated clip coming in through a dissolve, a still with
 //   alpha over both, and letterboxing (the 16:9 sequence exported at 4:3) are taken from the
-//   PlaybackController's frame source (what VEPreviewView composites) and composited into a 32BGRA
-//   buffer the way the view renders; the same frames are exported (ProRes 422, near lossless) and
-//   decoded to 32BGRA. 16x16-block means may differ only by the codec's error (ProRes 422 halves
-//   the chroma horizontally, which moves the mean of an 8-pixel block beside a saturated red/blue
-//   edge by up to about 20 codes; over 16 pixels, about 11: the bound is 14); another frame differs
-//   far more, which shows the measure tells frames apart.
+//   PlaybackController's frame source (what VEPreviewView composites) and composited into a texture of
+//   the program monitor's drawable format (BGR10A2) the way the view renders, then read back (every test
+//   here renders the monitor this way: through a pixel buffer it was the export's own path, compared with
+//   itself); the same frames are exported (ProRes 422, near lossless) and decoded to 32BGRA. 16x16-block
+//   means may differ only by the codec's error (ProRes 422 halves the chroma horizontally, which moves
+//   the mean of an 8-pixel block beside a saturated red/blue edge by up to about 20 codes; over 16
+//   pixels, about 11: 10.6 measured beside the coloured still, bound 12; 2 to 4 elsewhere, bounds 3 to
+//   5); another frame differs far more, which shows the measure tells frames apart. Every comparison is
+//   at the sequence's size (or the export's frame drawn into a drawable of that size), where the monitor
+//   and the export decide sharpening alike (Compositor.h: the larger of the drawn scale and the
+//   sequence's or the output's).
 // - Sound: the playback mixer's output (captured from a real-time NullAudioOutput) and the offline
 //   renderer's mix are compared sample by sample over a sequence with speed 3/2, a fade in, a 70/30
 //   constant-power crossfade (7 frames before the cut, 3 after), a fade out, two tracks summed, a
@@ -213,14 +218,25 @@ std::vector<double> lumaBlockMeans(CVPixelBufferRef buffer) {
     return out;
 }
 
-/// Renders the harness's current frame (the program monitor's graph and textures) into a 32BGRA buffer of
-/// the pool's size, as the preview view composites it; false when a layer has no picture.
-bool renderMonitorFrame(PlaybackHarness &h, render::Compositor &compositor, media::PixelBufferPool &pool,
-                        media::PixelBuffer &out, render::RenderResult *resultOut = nullptr) {
-    const render::PreviewFrame &frame = h.frame();
-    auto buffer = pool.makeBuffer();
-    if (!buffer.ok()) {
-        return false;
+/// The program monitor's drawable format (VEPreviewView's CAMetalLayer): its compositor is made for it.
+constexpr MTLPixelFormat kMonitorFormat = MTLPixelFormatBGR10A2Unorm;
+
+/// What the program monitor shows of `graph` with `frame`'s textures (the frame the controller presents) in a
+/// `width` x `height` drawable: composited by `compositor` into a texture target of kMonitorFormat, as the
+/// preview view does (not into a pixel buffer, which is the export's own path), and read back as kBlock x
+/// kBlock block means of B, G, R scaled to 0...255. Empty when a layer has no picture.
+std::vector<double> monitorBlockMeans(render::Compositor &compositor, const RenderGraph &graph,
+                                      const render::PreviewFrame &frame, size_t width, size_t height,
+                                      render::RenderResult *resultOut = nullptr) {
+    MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kMonitorFormat
+                                                                                    width:width
+                                                                                   height:height
+                                                                                mipmapped:NO];
+    desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    desc.storageMode = MTLStorageModeShared;
+    id<MTLTexture> drawable = [compositor.device() newTextureWithDescriptor:desc];
+    if (drawable == nil) {
+        return {};
     }
     auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &texture) {
         if (index >= frame.textures.size() || !frame.textures[index]) {
@@ -229,15 +245,44 @@ bool renderMonitorFrame(PlaybackHarness &h, render::Compositor &compositor, medi
         texture = frame.textures[index];
         return true;
     };
-    auto rendered = compositor.renderAndWait(frame.graph, lookup, render::PixelBufferTarget{buffer.value()});
+    auto rendered = compositor.renderAndWait(graph, lookup, render::TextureTarget{drawable, {}, nil});
     if (!rendered.ok() || !rendered->status.ok() || !rendered->skippedLayers.empty()) {
-        return false;
+        return {};
     }
     if (resultOut != nullptr) {
         *resultOut = rendered.value();
     }
-    out = std::move(buffer).value();
-    return true;
+    std::vector<uint32_t> packed(width * height);
+    [drawable getBytes:packed.data() bytesPerRow:width * 4 fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    std::vector<double> out((width / kBlock) * (height / kBlock) * 3, 0.0);
+    for (size_t by = 0; by < height / kBlock; ++by) {
+        for (size_t bx = 0; bx < width / kBlock; ++bx) {
+            double sum[3] = {0, 0, 0};
+            for (size_t y = by * kBlock; y < by * kBlock + kBlock; ++y) {
+                for (size_t x = bx * kBlock; x < bx * kBlock + kBlock; ++x) {
+                    const uint32_t texel = packed[y * width + x]; // B in bits 0-9, G 10-19, R 20-29
+                    for (int c = 0; c < 3; ++c) {
+                        sum[c] += double((texel >> (10 * c)) & 0x3FF) * (255.0 / 1023.0);
+                    }
+                }
+            }
+            for (int c = 0; c < 3; ++c) {
+                out[(by * (width / kBlock) + bx) * 3 + size_t(c)] = sum[c] / double(kBlock * kBlock);
+            }
+        }
+    }
+    return out;
+}
+
+/// The luma codes (8-bit video range, BT.709) of B, G, R block means: what the compositor's conversion writes
+/// into a '420v' plane from the same R'G'B', averaged per block (the conversion is affine).
+std::vector<double> lumaCodesOf(const std::vector<double> &bgr) {
+    std::vector<double> luma(bgr.size() / 3);
+    for (size_t i = 0; i < luma.size(); ++i) {
+        const double y = 0.0722 * bgr[i * 3] + 0.7152 * bgr[i * 3 + 1] + 0.2126 * bgr[i * 3 + 2]; // 0...255
+        luma[i] = 16.0 + 219.0 * y / 255.0;
+    }
+    return luma;
 }
 
 /// Frames `frames` of the movie at `path` decoded to `pixelFormat` (32BGRA by default), keyed by frame
@@ -332,11 +377,9 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         return;
     }
 
-    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
+    auto created = render::Compositor::create(h.device(), {kMonitorFormat});
     XCTAssertTrue(created.ok());
-    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, kOutWidth, kOutHeight);
-    XCTAssertTrue(created.ok() && pool.ok());
-    if (!created.ok() || !pool.ok()) {
+    if (!created.ok()) {
         return;
     }
     render::Compositor &compositor = *created.value();
@@ -361,22 +404,8 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         for (const playback::PresentedLayer &layer : sample.presented.layers) {
             XCTAssertTrue(layer.exact, @"frame %lld: clip %llu has its picture", f, layer.clip.value());
         }
-        const render::PreviewFrame &frame = h.frame();
-        auto buffer = pool->makeBuffer();
-        XCTAssertTrue(buffer.ok());
-        if (!buffer.ok()) {
-            continue;
-        }
-        auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &out) {
-            if (index >= frame.textures.size() || !frame.textures[index]) {
-                return false;
-            }
-            out = frame.textures[index];
-            return true;
-        };
-        auto rendered = compositor.renderAndWait(frame.graph, lookup, render::PixelBufferTarget{buffer.value()});
-        XCTAssertTrue(rendered.ok() && rendered->status.ok() && rendered->skippedLayers.empty(), @"frame %lld", f);
-        monitor[f] = blockMeans(buffer.value().get());
+        monitor[f] = monitorBlockMeans(compositor, h.frame().graph, h.frame(), kOutWidth, kOutHeight);
+        XCTAssertFalse(monitor[f].empty(), @"frame %lld: every layer has its picture", f);
 
         XCTAssertTrue(decoder->decoder->seek(CMTimeMake(f, 30)).ok());
         auto decoded = decoder->decoder->next();
@@ -396,7 +425,9 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
               @"export %.1f), on average %.3f",
               f, kBlock, kBlock, d.maxBlock, (d.worstBlock % (kOutWidth / kBlock)) * kBlock,
               (d.worstBlock / (kOutWidth / kBlock)) * kBlock, d.worstChannel, d.worstA, d.worstB, d.meanBlock);
-        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
+        // The monitor through its drawable against the decoded export: 10.6 measured, at the half-transparent
+        // coloured still (ProRes 422's halved chroma; the same through the export's own path before).
+        XCTAssertLessThan(d.maxBlock, 12.0, @"frame %lld: the export differs from the monitor", f);
         XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
     }
     // The measure tells other frames apart: the same clip 12 frames on (only the burn-in and its
@@ -466,10 +497,9 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
     XCTAssertEqual(result->value().width, 3840);
     XCTAssertEqual(result->value().height, 2160);
 
-    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
-    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, size_t(width), size_t(height));
-    XCTAssertTrue(created.ok() && pool.ok());
-    if (!created.ok() || !pool.ok()) {
+    auto created = render::Compositor::create(h.device(), {kMonitorFormat});
+    XCTAssertTrue(created.ok());
+    if (!created.ok()) {
         return;
     }
     const std::vector<int64_t> frames{0, 3, 4, 8, 11};
@@ -477,10 +507,11 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
     for (int64_t f : frames) {
         h.controller->seek(frames30(f));
         h.presentExact();
-        media::PixelBuffer picture;
-        XCTAssertTrue(renderMonitorFrame(h, *created.value(), *pool, picture), @"frame %lld", f);
-        if (picture) {
-            monitor[f] = blockMeans(picture.get());
+        std::vector<double> shown = monitorBlockMeans(*created.value(), h.frame().graph, h.frame(), size_t(width),
+                                                      size_t(height));
+        XCTAssertFalse(shown.empty(), @"frame %lld", f);
+        if (!shown.empty()) {
+            monitor[f] = std::move(shown);
         }
     }
     const auto exported = decodeFrames(*h.router, request.outputPath, frames, 30);
@@ -492,7 +523,8 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         }
         const Difference d = compare(monitor[f], blockMeans(buffer.get()));
         NSLog(@"PARITY 4K frame %lld: blocks differ by at most %.2f, on average %.3f", f, d.maxBlock, d.meanBlock);
-        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld", f);
+        // The monitor through its drawable against the decoded export: 2.45 measured.
+        XCTAssertLessThan(d.maxBlock, 3.5, @"frame %lld", f);
         XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
     }
     // Frame 3 and frame 4 differ only by the cursor and a word: the measure still tells them apart.
@@ -556,10 +588,9 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
     if (!exportTo(sharpened, true) || !exportTo(plain, false)) {
         return;
     }
-    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
-    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, 1920, 1080);
-    XCTAssertTrue(created.ok() && pool.ok());
-    if (!created.ok() || !pool.ok()) {
+    auto created = render::Compositor::create(h.device(), {kMonitorFormat});
+    XCTAssertTrue(created.ok());
+    if (!created.ok()) {
         return;
     }
     const std::vector<int64_t> frames{0, 4, 9};
@@ -571,13 +602,14 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         for (int64_t f : frames) {
             h.controller->seek(frames30(f));
             h.presentExact();
-            media::PixelBuffer picture;
             render::RenderResult rendered;
-            XCTAssertTrue(renderMonitorFrame(h, *created.value(), *pool, picture, &rendered), @"frame %lld", f);
+            const std::vector<double> shown = monitorBlockMeans(*created.value(), h.frame().graph, h.frame(), 1920, 1080,
+                                                                &rendered);
+            XCTAssertFalse(shown.empty(), @"frame %lld", f);
             XCTAssertEqual(rendered.prescaledPlanes, 1u);
             XCTAssertEqual(rendered.sharpenedPlanes, sharpen ? 1u : 0u, @"the monitor sharpens the luma plane");
-            if (picture) {
-                means[f] = lumaBlockMeans(picture.get());
+            if (!shown.empty()) {
+                means[f] = lumaCodesOf(shown);
             }
         }
         return means;
@@ -600,7 +632,8 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         NSLog(@"PARITY sharpened frame %lld: luma blocks differ by at most %.2f, on average %.3f (unsharpened pair "
               @"%.2f, %.3f; the sharpened monitor against the unsharpened export %.2f, %.3f)",
               f, d.maxBlock, d.meanBlock, plainPair.maxBlock, plainPair.meanBlock, crossed.maxBlock, crossed.meanBlock);
-        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld", f);
+        // The monitor through its drawable against the decoded export: 2.10 measured.
+        XCTAssertLessThan(d.maxBlock, 3.0, @"frame %lld", f);
         XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
         XCTAssertLessThan(plainPair.meanBlock, 1.0, @"frame %lld", f);
         XCTAssertGreaterThan(crossed.meanBlock, d.meanBlock * 2, @"frame %lld: the measure sees the sharpening", f);
@@ -889,11 +922,10 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
         return;
     }
-    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
-    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, 640, 360);
+    auto created = render::Compositor::create(h.device(), {kMonitorFormat});
     auto routed = h.router->probe(request.outputPath);
-    XCTAssertTrue(created.ok() && pool.ok() && routed.ok());
-    if (!created.ok() || !pool.ok() || !routed.ok()) {
+    XCTAssertTrue(created.ok() && routed.ok());
+    if (!created.ok() || !routed.ok()) {
         return;
     }
     media::DecodeOptions bgra;
@@ -963,22 +995,10 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
             XCTAssertEqual(overlayScale, held, @"frame %lld: a hold keeps the keyframe's exact value", f);
             XCTAssertEqual(overlayScale, motionValuesAt(overlayed, frames30(f)).scale);
         }
-        auto render = [&](const auto &graph) -> std::vector<double> {
-            auto buffer = pool->makeBuffer();
-            XCTAssertTrue(buffer.ok());
-            if (!buffer.ok()) {
-                return {};
-            }
-            auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &out) {
-                if (index >= frame.textures.size() || !frame.textures[index]) {
-                    return false;
-                }
-                out = frame.textures[index];
-                return true;
-            };
-            auto rendered = created.value()->renderAndWait(graph, lookup, render::PixelBufferTarget{buffer.value()});
-            XCTAssertTrue(rendered.ok() && rendered->status.ok() && rendered->skippedLayers.empty(), @"frame %lld", f);
-            return blockMeans(buffer.value().get());
+        auto render = [&](const RenderGraph &graph) -> std::vector<double> {
+            std::vector<double> shown = monitorBlockMeans(*created.value(), graph, frame, 640, 360);
+            XCTAssertFalse(shown.empty(), @"frame %lld", f);
+            return shown;
         };
         const std::vector<double> monitor = render(frame.graph);
         // The same frame with V1's animation taken away (its static values; V2 as it is): what the
@@ -1004,7 +1024,8 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         NSLog(@"PARITY animated frame %lld: blocks differ by at most %.2f, on average %.3f; the animation changes "
               @"blocks by up to %.2f",
               f, d.maxBlock, d.meanBlock, animationEffect);
-        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
+        // The monitor through its drawable against the decoded export: 9.4 measured, at the coloured still.
+        XCTAssertLessThan(d.maxBlock, 11.0, @"frame %lld: the export differs from the monitor", f);
         XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
     }
     XCTAssertGreaterThanOrEqual(movingFramesChecked, 5, @"the comparison covered frames the spans move");
@@ -1048,11 +1069,10 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
         return;
     }
-    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
-    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, 640, 360);
+    auto created = render::Compositor::create(h.device(), {kMonitorFormat});
     auto routed = h.router->probe(request.outputPath);
-    XCTAssertTrue(created.ok() && pool.ok() && routed.ok());
-    if (!created.ok() || !pool.ok() || !routed.ok()) {
+    XCTAssertTrue(created.ok() && routed.ok());
+    if (!created.ok() || !routed.ok()) {
         return;
     }
     media::DecodeOptions bgra;
@@ -1094,21 +1114,11 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         } else {
             XCTAssertFalse(fade.has_value(), @"frame %lld is between the fades", f);
         }
-        auto buffer = pool->makeBuffer();
-        XCTAssertTrue(buffer.ok());
-        if (!buffer.ok()) {
+        const std::vector<double> monitor = monitorBlockMeans(*created.value(), frame.graph, frame, 640, 360);
+        XCTAssertFalse(monitor.empty(), @"frame %lld", f);
+        if (monitor.empty()) {
             continue;
         }
-        auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &texture) {
-            if (index >= frame.textures.size() || !frame.textures[index]) {
-                return false;
-            }
-            texture = frame.textures[index];
-            return true;
-        };
-        auto rendered = created.value()->renderAndWait(frame.graph, lookup, render::PixelBufferTarget{buffer.value()});
-        XCTAssertTrue(rendered.ok() && rendered->status.ok() && rendered->skippedLayers.empty(), @"frame %lld", f);
-        const std::vector<double> monitor = blockMeans(buffer.value().get());
         brightness[f] = meanOf(monitor);
 
         XCTAssertTrue(decoder->decoder->seek(frames30(f)).ok());
@@ -1120,7 +1130,8 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         const Difference d = compare(monitor, blockMeans(decoded.value()->image.get()));
         NSLog(@"PARITY fade frame %lld: mean level %.2f; blocks differ by at most %.2f, on average %.3f", f,
               brightness[f], d.maxBlock, d.meanBlock);
-        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
+        // The monitor through its drawable against the decoded export: 1.99 measured.
+        XCTAssertLessThan(d.maxBlock, 3.0, @"frame %lld: the export differs from the monitor", f);
         XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
     }
     // From black and back to it: the picture brightens through the fade in and darkens through the
@@ -1181,11 +1192,10 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
         return;
     }
-    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
-    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, 640, 360);
+    auto created = render::Compositor::create(h.device(), {kMonitorFormat});
     auto routed = h.router->probe(request.outputPath);
-    XCTAssertTrue(created.ok() && pool.ok() && routed.ok());
-    if (!created.ok() || !pool.ok() || !routed.ok()) {
+    XCTAssertTrue(created.ok() && routed.ok());
+    if (!created.ok() || !routed.ok()) {
         return;
     }
     media::DecodeOptions bgra;
@@ -1197,22 +1207,11 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
     }
     // The monitor's picture of `graph` (the frame the controller presents) as 16x16 block means.
     auto monitorBlocks = [&](const render::PreviewFrame &frame) -> std::optional<std::vector<double>> {
-        auto buffer = pool->makeBuffer();
-        if (!buffer.ok()) {
+        std::vector<double> shown = monitorBlockMeans(*created.value(), frame.graph, frame, 640, 360);
+        if (shown.empty()) {
             return std::nullopt;
         }
-        auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &texture) {
-            if (index >= frame.textures.size() || !frame.textures[index]) {
-                return false;
-            }
-            texture = frame.textures[index];
-            return true;
-        };
-        auto rendered = created.value()->renderAndWait(frame.graph, lookup, render::PixelBufferTarget{buffer.value()});
-        if (!rendered.ok() || !rendered->status.ok() || !rendered->skippedLayers.empty()) {
-            return std::nullopt;
-        }
-        return blockMeans(buffer.value().get());
+        return shown;
     };
     std::map<int64_t, std::vector<double>> exported;
     std::map<int64_t, std::vector<double>> monitor;
@@ -1257,7 +1256,8 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         exported[f] = blockMeans(decoded.value()->image.get());
         const Difference d = compare(monitor[f], exported[f]);
         NSLog(@"PARITY shape frame %lld: blocks differ by at most %.2f, on average %.3f", f, d.maxBlock, d.meanBlock);
-        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
+        // The monitor through its drawable against the decoded export: 2.19 measured.
+        XCTAssertLessThan(d.maxBlock, 3.0, @"frame %lld: the export differs from the monitor", f);
         XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
     }
     // Mid-wipe (frame 30, progress 0.55: the edge about 288 px from the right): the right column of
@@ -1446,10 +1446,9 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
                       b.value_or(-1));
     }
     // The monitor shows what the reversed export wrote.
-    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
-    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, 640, 360);
-    XCTAssertTrue(created.ok() && pool.ok());
-    if (!created.ok() || !pool.ok()) {
+    auto created = render::Compositor::create(h.device(), {kMonitorFormat});
+    XCTAssertTrue(created.ok());
+    if (!created.ok()) {
         return;
     }
     for (int64_t f : {0, 7, 15, 29}) {
@@ -1457,23 +1456,12 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         const PlaybackHarness::Sample sample = h.presentExact();
         XCTAssertEqual(sample.presented.frameIndex, f);
         XCTAssertEqual(sample.burnIns.front().value_or(-1), 30 + (n - 1 - f), @"monitor frame %lld", f);
-        const render::PreviewFrame &frame = h.frame();
-        auto buffer = pool->makeBuffer();
-        XCTAssertTrue(buffer.ok());
-        if (!buffer.ok()) {
-            continue;
-        }
-        auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &texture) {
-            if (index >= frame.textures.size() || !frame.textures[index]) {
-                return false;
-            }
-            texture = frame.textures[index];
-            return true;
-        };
-        auto rendered = created.value()->renderAndWait(frame.graph, lookup, render::PixelBufferTarget{buffer.value()});
-        XCTAssertTrue(rendered.ok() && rendered->status.ok() && rendered->skippedLayers.empty(), @"frame %lld", f);
-        const Difference d = compare(blockMeans(buffer.value().get()), blockMeans(backward[size_t(f)].get()));
-        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
+        const std::vector<double> shown = monitorBlockMeans(*created.value(), h.frame().graph, h.frame(), 640, 360);
+        XCTAssertFalse(shown.empty(), @"frame %lld", f);
+        const Difference d = compare(shown, blockMeans(backward[size_t(f)].get()));
+        NSLog(@"PARITY reversed frame %lld: blocks differ by at most %.2f, on average %.3f", f, d.maxBlock, d.meanBlock);
+        // The monitor through its drawable against the decoded export: 2.09 measured.
+        XCTAssertLessThan(d.maxBlock, 3.0, @"frame %lld: the export differs from the monitor", f);
         XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
     }
 
@@ -1659,11 +1647,10 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         return;
     }
     XCTAssertEqual(result->value().frames, 900);
-    auto created = render::Compositor::create(h.device(), {MTLPixelFormatRGBA16Float});
-    auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, 320, 180);
+    auto created = render::Compositor::create(h.device(), {kMonitorFormat});
     auto routed = h.router->probe(request.outputPath);
-    XCTAssertTrue(created.ok() && pool.ok() && routed.ok());
-    if (!created.ok() || !pool.ok() || !routed.ok()) {
+    XCTAssertTrue(created.ok() && routed.ok());
+    if (!created.ok() || !routed.ok()) {
         return;
     }
     media::DecodeOptions bgra;
@@ -1686,21 +1673,9 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         const VideoParams &shown = frame.graph.layers[0].transform;
         XCTAssertTrue(shown == motionValuesAt(placed, frames30(f)), @"frame %lld: the monitor's layer", f);
         auto render = [&](const RenderGraph &graph) -> std::vector<double> {
-            auto buffer = pool->makeBuffer();
-            XCTAssertTrue(buffer.ok());
-            if (!buffer.ok()) {
-                return {};
-            }
-            auto lookup = [&](const VideoLayer &, std::size_t index, render::TextureSet &out) {
-                if (index >= frame.textures.size() || !frame.textures[index]) {
-                    return false;
-                }
-                out = frame.textures[index];
-                return true;
-            };
-            auto rendered = created.value()->renderAndWait(graph, lookup, render::PixelBufferTarget{buffer.value()});
-            XCTAssertTrue(rendered.ok() && rendered->status.ok() && rendered->skippedLayers.empty(), @"frame %lld", f);
-            return blockMeans(buffer.value().get());
+            std::vector<double> shown = monitorBlockMeans(*created.value(), graph, frame, 320, 180);
+            XCTAssertFalse(shown.empty(), @"frame %lld", f);
+            return shown;
         };
         const std::vector<double> monitor = render(frame.graph);
         // What the same picture would look like in the clip's own framing: the move's effect.
@@ -1724,7 +1699,8 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         NSLog(@"PARITY held frame %lld: scale %.4f; blocks differ by at most %.2f, on average %.3f; the framing "
               @"changes blocks by up to %.2f",
               f, shown.scale, d.maxBlock, d.meanBlock, framingEffect);
-        XCTAssertLessThan(d.maxBlock, 14.0, @"frame %lld: the export differs from the monitor", f);
+        // The monitor through its drawable against the decoded export: 3.69 measured.
+        XCTAssertLessThan(d.maxBlock, 5.0, @"frame %lld: the export differs from the monitor", f);
         XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
     }
     XCTAssertEqual(heldFramesChecked, 5);
