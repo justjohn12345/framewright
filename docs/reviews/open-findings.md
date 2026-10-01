@@ -37,8 +37,9 @@ README history table). Still open:
   went away first (2407b2a).
 
 ## Fix round 2026-09-30: status
-Brief: the lead's fix round from 84d9e20 (items 1-18). Scope was cut to group A mid-round (quota); the rest
-is not started. Each done item has regression tests that fail on 84d9e20 (see the commit messages).
+Brief: the lead's fix round from 84d9e20 (items 1-18), then the review of group A (R1-R7). Every item is
+done. Each fix has regression tests that fail before it (see the commit messages; R6 corrects one such
+claim of 5479b1b).
 
 Done (group A):
 - 12, wrong waveform after New/Open: beb0969. The file is part of WaveformService's and ThumbnailService's
@@ -154,8 +155,7 @@ Group C:
   CMTime is at most 2^63 s, so the "( s)" the review computed for >= 1e62 cannot occur); PausedSeekRig.h
   names VEProgramMonitor; `-[VEMediaLibrary routing]`/`missingAssets` document that they must not be sent
   to nil (a null reference).
-- 15, untested rules and weak tests: "Tests: kill the review's 21 mutants; completion signals for the
-  fixed sleeps". Mutants applied one at a time, each against the Edit and Model doctests (C++) or
+- 15, untested rules and weak tests: 8a9b6cb. Mutants applied one at a time, each against the Edit and Model doctests (C++) or
   VESourceMonitorTests, VEProgramMonitorTests, VEExporterTests, VEMediaLibraryTests, VEEnginePlaybackTests,
   VEEngineReviewRegressionTests and VEEngineExportTests (Objective-C++):
 
@@ -200,9 +200,15 @@ Found while doing them (open):
   decided edges keep their media; the refusal is left for a linked clip already moved by another cut by a
   different amount, which in practice needs a pair slipped out of sync.
 
-Not started (groups B and C), with what a fresh implementer needs:
-- Finishing work not done this round (the lead runs them): ThreadSanitizer over the facade, playback and the
-  new tests, and the StressTests scheme (items 1, 2, 5 and 6 touch rendering, export and the conform).
+Verification at the end of the round (8a9b6cb plus docs):
+- Full suite: TEST SUCCEEDED, EngineTests 535 (3 display-link skips), doctest 326, AppTests 273 (the known
+  skip), no warnings in project code.
+- ThreadSanitizer (`-derivedDataPath build/tsan -enableThreadSanitizer YES`, 28 classes: the facade, its
+  classes, playback, the compositor, waveforms, parity, doctest): 223 tests, 0 reports (2 timing tests skip
+  under TSan).
+- StressTests: passed. One-hour exports: 0 timestamp and 0 picture errors, drift +0.230, +0.400 and +0.408
+  samples. Two-hour project: footprint after the edits +322.9 MB (bound 643 MB), after save and reopen
+  +444.9 MB; cold starts 42.2-48.0 ms.
 
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked

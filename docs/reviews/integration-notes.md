@@ -1775,3 +1775,63 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   Open of a saved project. (4) Sequence Settings on whole clips back to back (for example 30 -> 25 fps): the
   confirmation says clips move earlier with their media; after Apply no black frame or audio gap at the
   cuts, picture and sound still in sync.
+
+## Fix round 2026-09-30, groups B and C, and the review of group A (status in `open-findings.md`)
+- Playback diagnostics (item 9): `PlaybackController::lastPresented()` is lossless. The frame source publishes
+  each presented frame as an immutable `PresentedFrame` swapped under `presentedMutex` (and the held-back
+  index beside it); readers copy after unlocking. Do not go back to a try-lock: a paused view renders again
+  only on request, so a lost update stays lost. Tests that race a real AVAudioEngine output make every
+  change they count, however slow the device; tests that share a decode-pool lane between two clients must
+  order them themselves (the newest request wins on one lane, by design).
+- Frame-rate conform (review R1/R2, supersedes the refusal sentence of "Fix round 2026-09-30 (group A)"):
+  `EdgeConform` keeps its edge groups. A start whose separate previous clip ends after the cut brings that
+  end's whole group back (ends keep a frame, a start going back a frame if its own group allows; a cut it
+  shares on another track comes back when its next clip has media from there). A component whose move was
+  decided at zero (a linked clip settled earlier) takes the move when every decided edge keeps its media.
+  A linked clip shorter than a frame whose start rounded up to the cut's frame starts a frame earlier (when
+  it still shows part of its content) or ends a frame after its start, apart from its group (when nothing on
+  its own track starts there). Refusals left: a clip that truly cannot keep a frame (Overlap), a component
+  already moved by another amount (OutOfSourceRange), a shared cut whose next clip has no media to start
+  earlier, and a sub-frame clip next to a picture without media (named both).
+- Export sizes (R3): exact 1920x1080/1280x720 only when `fitRect` of the sequence fills them; otherwise the
+  sequence's aspect at 1080/720 rows (1918x1080 stays 1918x1080).
+- Compositor (R4, R5, item 3): the pixel-exact base placement depends on the sizes only (the clip transform
+  applies about the picture's centre). Pre-scales are decided by the drawn scale and always resample to the
+  drawn size, into the top-left of a pooled texture of a rounded-up size (`VESourceUniforms::planeExtent`,
+  `VEUnsharpUniforms::size`; `Compositor::Stats::scratchAllocations` counts pool misses). Sharpening uses
+  `sharpenAmountAt(max(drawn scale, the sequence's or the output's scale))`. Monitors and exports at the same
+  size are now pixel identical. Known gap: an export smaller than the sequence sharpens while the monitors
+  show the sequence's own scale unsharpened.
+- Parity tests (item 4) render the monitor into a BGR10A2 texture target (the program view's drawable) and
+  read it back; use `monitorBlockMeans` for new cases.
+- Waveforms (R7): a job cancelled after it started stores nothing (`WaveformService::Stats::discarded`).
+- Adoption note (nit a): `push`/`pushRipple` take a `lateNote` block (UndoInternal, run after success); the
+  placement adds the settings change's sentences when it conformed clips already on the sequence.
+- AAC (nit b): `AppleWriter::validate` asks AudioToolbox (AudioConverter, applicable bit rates); the router
+  then writes 8-96 kHz AAC through FFmpeg when Apple cannot; `FFAudioEncoder::validate` checks the native
+  encoder's rates; VEExporter refuses a rate no encoder takes with what to do.
+- Undo (nit c): `Command::revert` is const; `canRevertSteps` (Command.h) checks every step of a composite or
+  an accumulated undo group against what the later steps' reverts leave (on a copy of the project).
+- Facade (items 13, 14): owners write their own state (`markUndoHistoryClean`, `forgetPostedUseCounts`,
+  `startUndoHistory` in init). `VE_ENGINE_HEADER_INCLUDED` / `VE_ENGINE_INTERNAL_HEADER_INCLUDED` make the four
+  coordinated classes' `.mm` files `#error`; the classes are `objc_subclassing_restricted`. New facade-private
+  introspection, for tests: `-[VEMediaLibrary requestsInFlight]`, `-[VESourceMonitor controllerIdleLookahead,
+  controllerMuted, pictureRefreshes]`, `-[VEProgramMonitor controllerIdleLookahead]`.
+- Model: `laneCount` clamps each lane to 0...kLastLane (loading already bounded lanes); `fadeLimit` has no
+  `excluded` parameter; `describeFrames` writes the count alone for a duration that is not a number of
+  seconds; transition notes read "Shortened to N frames ..." and say nothing on a refusal.
+- Found, not changed: `VEExporterTests testAnExportRunsToItsEndAndClearsTheRunningExportBeforeFinish` failed
+  twice with no progress delivered (in runs of several facade classes together; 0 of 40 alone or with its
+  own class): the job drops a progress delivery that finds it finished, so a main queue busy for the whole
+  short export sees none. A test timing dependency, not investigated further.
+- By hand in the app: (1) a 60 fps project with a video clip whose linked sound is one 60 fps frame shorter,
+  then a whole clip after it: Sequence Settings to 25 fps applies (no "shorter than a frame" refusal), the
+  cut has no gap, picture and sound stay in sync; the same with a hand-linked recorder sound that starts
+  before the camera clip. (2) Export a 1919x1080 recording (sequence 1918x1080) at 1080p: the file is
+  1918x1080 with no black column. (3) A Ken Burns move resting at 100 % on a 1273x815 picture in a
+  1272x814 sequence: no half-pixel jump where it starts. (4) A 4K source in a 1080p sequence on a 4K second
+  display: crisp 1:1, toggling "Sharpen scaled-down sources" changes nothing there; in the 1080p program
+  monitor it sharpens. (5) Set a project's sequence audio to 96 kHz (edit the file) and export H.264 with AAC:
+  it exports (96 kHz audio); 192 kHz: the export sheet's error says to use PCM or 48 kHz. (6) Place the
+  first video clip on a sequence that already holds a still: the status line also says how the still was
+  conformed.
