@@ -1376,7 +1376,7 @@ From the user's hands-on testing of the reverse, speed and wipes round.
   smoothly, the frame before and after are clean; export one. An iris and a wipe fade in and fade out stepped
   frame by frame: the fade in's first frame and the fade out's last are black; the iris closes at the clip's end.
 
-## Post-lanes review fix round (review `docs/reviews/2026-09-29-post-lanes-review.md`)
+## Post-lanes review fix round (review `2026-09-29-post-lanes-review.md`, in git history at f486a6a)
 Closed: M1, M2, L1-L9 and test gaps 1-6 and 10. Left open: test gap 7 (reversed long-GOP 4K throughput), 8 (the mode
 switch's own builds and draws, Continue on Next Clip from Ken Burns mode) and 9 (the parity tolerance, kept on
 purpose); see `open-findings.md`.
@@ -1847,3 +1847,40 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   cut or apart is checked again once all edges are decided. Otherwise the change is refused, naming the
   clip and why ("... has no room for one: it cannot start earlier, and a frame from its start would start
   after the clip it is linked to ends"; "... cannot keep a frame ... where it plays: it would ...").
+
+## Fix round 2026-10-01 (general review; status in `open-findings.md`)
+- App state: `ProjectStore.speedSheetModel` is the Speed/Duration sheet's model (made by `showSpeedSheet()`,
+  ended by `closeSpeedSheet()`; `speedSheetClipIDs` is derived). A new sheet's model belongs in the store, never
+  in a view's sheet closure (a store publish rebuilds the window). `ProjectStore.isAudioMuted` is the engine's
+  mute state (the only copy): the transport button and Playback > Mute Audio (a Toggle with a check mark) read
+  and set it.
+- Transport (item 14): from stopped, `play()`/`togglePlay()` start forward at 1x whatever the last shuttle
+  left (PlaybackController, so both monitors); J, K, L and `setRate:` are unchanged.
+- Decode pool: refresh() never writes worker-owned stream fields; it sets mutex-guarded flags the worker
+  consumes at the start of a step (`reopen`, `rearmRepair`). Keep that rule for new fields. ThreadSanitizer
+  does not see `CMTime` struct copies in this build (verified with a canary), so a race on a `CMTime` field
+  needs a field-wise proof build to show up.
+- Media: `swsColorspace` is in FFmpegSupport (decode and encode); `LastFrameSearch` (LastFrame.h) is the
+  one last-frame search (pool streams, pool scrubs, thumbnails); `registerSupplementalVideoDecoders()`
+  (HardwareCaps.h) must run before any new VideoToolbox decode entry point; `checkContainerHolds` and the
+  per-stream checks (ContainerRules.h) are the one table of what each container holds (AppleWriter,
+  FFmpegBackend::validate, FFMuxer::addStream).
+- Thumbnails and waveforms: `Config::routing` is optional; empty (what the library uses) follows the
+  router's default policy at each decode, so "Prefer FFmpeg" applies to them, also at run time. Both
+  services have `waitUntilIdle(timeout)`.
+- Undo: `UndoStack::redo(project, &result)` reports the redone step's dropped ids (the facade does not
+  read them yet); `mergeDroppedIds` (EditResult.h) for any step made of several commands. A refused
+  ReplacePrevious step whose last good step cannot be re-applied drops the undo side.
+- Names and icons of span and transition kinds: App/State/SpanKindDisplay.swift only (a new kind adds its
+  title and icon there).
+- Facade (VEEngine.h addition): `-waitUntilMediaWorkIsIdle:` (Swift `waitUntilMediaWorkIsIdle(timeout:)`),
+  for tests that delete media or caches.
+- Tests: EngineTests' `scratchDirectory()` is removed when its test ends (`bundleScratchDirectory()` for
+  files a run shares; `TEST_RUNNER_FRAMEWRIGHT_KEEP_TEST_SCRATCH=1` keeps them); AppTests use
+  `makeTestDefaults(_:)` for any UserDefaults suite (an absolute-path suite in a directory of the test's
+  own) and `StoreFixture.cleanUp()` waits for the media work. The paused-seek soak and the demo-project run
+  are `PausedSeekSoakTests` (StressTests scheme); `HardwareCapsTests/testChildFirstVideoToolboxUseRegistersVP9`
+  runs only from its parent, in fresh processes.
+- Found, not changed: `ExportJobTests testMemoryIsFlatOver1800FramesAt720pSurvivesPressureAndProgressIsPaced`
+  failed once in five full runs this round on its progress pacing ("delivered 0.013 s after the previous
+  one", bound 0.017 s): a wall-clock assertion, passed in the other runs.

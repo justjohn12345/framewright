@@ -290,128 +290,121 @@ until a later status update gives the hash. Each fix has a regression test that 
 production change reverted (named in the commit message).
 
 Done:
-- 1, B1, the Speed/Duration sheet lost its input: dfd9b24. Root cause: ContentView built the sheet's model inside the sheet closure, so every store publish
-  (the refusal's own status line) redrew the window and replaced it. `ProjectStore.speedSheetModel` is
-  created once by `showSpeedSheet()` (like `exportModel`); `speedSheetClipIDs` is now read-only (derived).
-  `SpeedDurationSheetTests` (the window test fails with the old closure: the field shows "100" again).
-
-- 2, B2, the mute button out of step with the menu: cfa7e98. Root cause: the button kept its own `@State`, read only on appear, while the menu
-  toggled the engine. `ProjectStore.isAudioMuted` reads and writes the engine's state (the only copy) and
-  publishes; the button and the menu (now a Toggle, with a check mark) both use it. `MuteAudioTests`
-  (the button test fails with the old `@State`: the click after a menu mute muted again). The menu's
-  check mark itself is checked by hand: the hosted app's SwiftUI menu did not update its item's state
-  in the test host.
-
-- 3, B3, data race in `DecodePool::refresh()`: 15e97e4. Root cause: refresh() wrote `Stream::repairedAt` under the pool mutex while the
-  worker stepping that stream owns it without the lock. refresh() now sets `rearmRepair` (guarded by the
-  mutex); the worker takes it with `reopen` and clears `repairedAt` itself.
-  `DecodePoolTests testRefreshDuringARepairDoesNotTouchWorkerState` (refresh() from another thread inside
-  a repair's seek) and `testRefreshReArmsTheRepairOfAnEvictedPlayheadFrame` (coverage).
-  Found doing it: ThreadSanitizer does not see `CMTime` struct copies in this build (a 24-byte `CMTime`
-  written from two threads without ordering is not reported; an `int` is), so the old race was invisible
-  to TSan as written. The proof build made every `repairedAt` access a field-wise scalar access (a
-  temporary transform, not committed): TSan reports refresh()'s write against the worker's read in
-  `lost()` on the old code and nothing on the fix. Earlier "0 reports" TSan runs did not cover races on
-  `CMTime` fields.
-
-- 4, B4, the FFmpeg encoder's colour matrix: d436644. Root cause: the encoder's CPU conversion chose BT.601 or else BT.709 coefficients while
-  tagging the requested matrix. `swsColorspace` moved from FFFrameConverter.mm to FFmpegSupport (one
-  mapping for decode and encode). An untagged (Unknown) matrix now follows the decode convention (BT.601
-  below 720 rows) instead of always BT.709; exports always tag BT.709, so no export changes.
-  `FFmpegBackendConformanceTests testSoftwareEncodesConvertWithTheTaggedMatrix` (AV1 patches at four
+- 1, B1, the Speed/Duration sheet lost its input: dfd9b24. Root cause: ContentView built the sheet's model
+  inside the sheet closure, so every store publish (the refusal's own status line) redrew the window and
+  replaced it. `ProjectStore.speedSheetModel` is created once by `showSpeedSheet()` (like `exportModel`);
+  `speedSheetClipIDs` is now read-only (derived). `SpeedDurationSheetTests` (the window test fails with the
+  old closure: the field shows "100" again).
+- 2, B2, the mute button out of step with the menu: cfa7e98. Root cause: the button kept its own `@State`,
+  read only on appear, while the menu toggled the engine. `ProjectStore.isAudioMuted` reads and writes the
+  engine's state (the only copy) and publishes; the button and the menu (now a Toggle, with a check mark) both
+  use it. `MuteAudioTests` (the button test fails with the old `@State`: the click after a menu mute muted
+  again). The menu's check mark itself is checked by hand: the hosted app's SwiftUI menu did not update its
+  item's state in the test host.
+- 3, B3, data race in `DecodePool::refresh()`: 15e97e4. Root cause: refresh() wrote `Stream::repairedAt` under
+  the pool mutex while the worker stepping that stream owns it without the lock. refresh() now sets
+  `rearmRepair` (guarded by the mutex); the worker takes it with `reopen` and clears `repairedAt` itself.
+  `DecodePoolTests testRefreshDuringARepairDoesNotTouchWorkerState` (refresh() from another thread inside a
+  repair's seek) and `testRefreshReArmsTheRepairOfAnEvictedPlayheadFrame` (coverage). Found doing it:
+  ThreadSanitizer does not see `CMTime` struct copies in this build (a 24-byte `CMTime` written from two
+  threads without ordering is not reported; an `int` is), so the old race was invisible to TSan as written.
+  The proof build made every `repairedAt` access a field-wise scalar access (a temporary transform, not
+  committed): TSan reports refresh()'s write against the worker's read in `lost()` on the old code and nothing
+  on the fix. Earlier "0 reports" TSan runs did not cover races on `CMTime` fields.
+- 4, B4, the FFmpeg encoder's colour matrix: d436644. Root cause: the encoder's CPU conversion chose BT.601 or
+  else BT.709 coefficients while tagging the requested matrix. `swsColorspace` moved from FFFrameConverter.mm
+  to FFmpegSupport (one mapping for decode and encode). An untagged (Unknown) matrix now follows the decode
+  convention (BT.601 below 720 rows) instead of always BT.709; exports always tag BT.709, so no export
+  changes. `FFmpegBackendConformanceTests testSoftwareEncodesConvertWithTheTaggedMatrix` (AV1 patches at four
   matrices decoded back: within 1 code; the old line puts BT.2020 up to 12 and 240M up to 4 codes off).
-
-- 5, B5, thumbnails and waveforms ignored "Prefer FFmpeg": 66c4607. Root cause: the preference sets the router's default policy, but the services
-  probed with their own `Config::routing` (a default-constructed policy). `Config::routing` is now
-  optional; empty (the library's choice) means the router's default policy at each decode. The thumbnail
-  service keys its routing memo and idle decoders by file version and policy, so a change applies at
-  once. No engine coupling was added. `VEMediaLibraryTests
+- 5, B5, thumbnails and waveforms ignored "Prefer FFmpeg": 66c4607. Root cause: the preference sets the
+  router's default policy, but the services probed with their own `Config::routing` (a default-constructed
+  policy). `Config::routing` is now optional; empty (the library's choice) means the router's default policy
+  at each decode. The thumbnail service keys its routing memo and idle decoders by file version and policy, so
+  a change applies at once. No engine coupling was added. `VEMediaLibraryTests
   testThumbnailsAndWaveformsFollowTheRoutersPolicyAtRunTime` (two fake backends count decoder opens).
-
-- 6, B6, the undo stack ignored a failed re-apply: 6efa7b6. Root causes: `push()` ignored
-  `previous.apply()`'s result after a refused ReplacePrevious step; `AccumulatedSteps::apply` returned a
-  bare success. Now the undo side is dropped (as `undo()` does) and the change counted; the accumulated
-  step merges its children's ids through a shared `mergeDroppedIds` (EditResult.h; `CompositeCommand`
-  uses it too). `UndoStack::redo` takes an optional `EditResult *` so the redone step's ids can be read
-  (the facade's `redo` still ignores them; nothing reported them on redo before either). Doctests: "a
-  drag step whose last good step cannot be applied again drops the history", "an accumulated step
-  reports its steps' dropped transitions and spans on redo" (both fail on the old code), "redo reports
-  what a plain step dropped" (coverage).
-
-- Full suite after items 1-6 (6efa7b6): EngineTests 539 (no skips), doctest 331, AppTests 277 with the
-  1 known skip; 0 failures; 612 s wall including the build.
-- 14, Space after a shuttle played on in reverse: 42c1d54. Root cause: `PlaybackController::play()` and `togglePlay()` reused the rate the last shuttle left
-  (falling back to 1 only at 0), so J (or J J), K, Space played backwards (and L L, K, Space at 2x).
-  Both now start at +1 from the playhead; `togglePlay()` still stops at any rate and direction; J, K, L
-  and `setRate:` are unchanged. The source monitor uses the same controller; the transport button, the
-  Playback menu and the Space key all go through `PlaybackActions.togglePlay` to the engine.
-  `PlaybackControllerTests testPlayFromStoppedIsForwardAtOneXWhateverTheLastShuttle` (Manual harness)
-  and `VEEnginePlaybackTests testSpaceAfterAShuttleAndKPlaysForwardAtOneX` (program monitor play and
-  togglePlay, source monitor togglePlay): 13 and 11 failed checks on the old controller.
-
-- 7, B8, test runs leaked disk: 5832198. Root causes: `scratchDirectory()` never removed anything; AppTests made
-  persistent `UserDefaults` suites in the app's container (removing a domain does not remove its plist
-  reliably: cfprefsd writes the removal as an empty plist, at once, later or at exit); waveform and
-  thumbnail jobs outlived `StoreFixture.cleanUp()` and created the cache directories again (and the Photos
-  test double put its promise files in the app's tmp). Now: an XCTestObservation removes each test's
-  scratch directories when it ends (`bundleScratchDirectory()` for files a run shares; `TEST_RUNNER_
-  FRAMEWRIGHT_KEEP_TEST_SCRATCH=1` keeps them); `makeTestDefaults` names each suite by an absolute path in
-  a directory of the test's own, removed in teardown (31 sites); `-[VEEngine waitUntilMediaWorkIsIdle:]`
-  (VEEngine.h addition, for tests; the services' `waitUntilIdle`) runs before `cleanUp()` removes the
-  fixture. Measured over a full default run: new entries in `$TMPDIR/FramewrightEngineTests` 221 before,
-  0 after; new plists in the container's Preferences 24 before, 0 after; new entries in the container's
-  tmp 113 before, 0 after. Tests: `ScratchDirectoryTests`, `ThumbnailServiceTests
+- 6, B6, the undo stack ignored a failed re-apply: 6efa7b6. Root causes: `push()` ignored `previous.apply()`'s
+  result after a refused ReplacePrevious step; `AccumulatedSteps::apply` returned a bare success. Now the undo
+  side is dropped (as `undo()` does) and the change counted; the accumulated step merges its children's ids
+  through a shared `mergeDroppedIds` (EditResult.h; `CompositeCommand` uses it too). `UndoStack::redo` takes
+  an optional `EditResult *` so the redone step's ids can be read (the facade's `redo` still ignores them;
+  nothing reported them on redo before either). Doctests: "a drag step whose last good step cannot be applied
+  again drops the history", "an accumulated step reports its steps' dropped transitions and spans on redo"
+  (both fail on the old code), "redo reports what a plain step dropped" (coverage).
+- Full suite after items 1-6 (6efa7b6): EngineTests 539 (no skips), doctest 331, AppTests 277 with the 1 known
+  skip; 0 failures; 612 s wall including the build.
+- 14, Space after a shuttle played on in reverse: 42c1d54. Root cause: `PlaybackController::play()` and
+  `togglePlay()` reused the rate the last shuttle left (falling back to 1 only at 0), so J (or J J), K, Space
+  played backwards (and L L, K, Space at 2x). Both now start at +1 from the playhead; `togglePlay()` still
+  stops at any rate and direction; J, K, L and `setRate:` are unchanged. The source monitor uses the same
+  controller; the transport button, the Playback menu and the Space key all go through
+  `PlaybackActions.togglePlay` to the engine. `PlaybackControllerTests
+  testPlayFromStoppedIsForwardAtOneXWhateverTheLastShuttle` (Manual harness) and `VEEnginePlaybackTests
+  testSpaceAfterAShuttleAndKPlaysForwardAtOneX` (program monitor play and togglePlay, source monitor
+  togglePlay): 13 and 11 failed checks on the old controller.
+- 7, B8, test runs leaked disk: 5832198. Root causes: `scratchDirectory()` never removed anything; AppTests
+  made persistent `UserDefaults` suites in the app's container (removing a domain does not remove its plist
+  reliably: cfprefsd writes the removal as an empty plist, at once, later or at exit); waveform and thumbnail
+  jobs outlived `StoreFixture.cleanUp()` and created the cache directories again (and the Photos test double
+  put its promise files in the app's tmp). Now: an XCTestObservation removes each test's scratch directories
+  when it ends (`bundleScratchDirectory()` for files a run shares; `TEST_RUNNER_
+  FRAMEWRIGHT_KEEP_TEST_SCRATCH=1` keeps them); `makeTestDefaults` names each suite by an absolute path in a
+  directory of the test's own, removed in teardown (31 sites); `-[VEEngine waitUntilMediaWorkIsIdle:]`
+  (VEEngine.h addition, for tests; the services' `waitUntilIdle`) runs before `cleanUp()` removes the fixture.
+  Measured over a full default run: new entries in `$TMPDIR/FramewrightEngineTests` 221 before, 0 after; new
+  plists in the container's Preferences 24 before, 0 after; new entries in the container's tmp 113 before, 0
+  after. Tests: `ScratchDirectoryTests`, `ThumbnailServiceTests
   testWaitUntilIdleWaitsForTheRunningDecodeAndItsDiskCacheFile`, `VEMediaLibraryTests
   testWaitingForTheServicesCoversARunningWaveform`. Existing leftovers on disk were not touched.
-
-- 8, the machine-dependent and soak tests out of the default run: 8019b7e. `PausedSeekTests testClicksOnTheDemoProjectShowTheirFrame`
-  (66 s, reads `~/Movies/Framewright Demo`) and `testClicksOnAScreenRecordingShowTheirFrame` (61 s, 200
-  random real-time clicks) moved to `PausedSeekSoakTests` (same file), selected by the StressTests scheme
-  and skipped by name elsewhere (and without `FRAMEWRIGHT_STRESS=1`); `PausedSeekTests
-  testTwentyClicksOnAScreenRecordingShowTheirFrame` (20 seeded clicks, 6 s) stays in the default run.
-  `PlaybackDriftTests` stays. Default suite: 610 s wall (EngineTests 410 s, AppTests 182 s) at fecb2a2;
-  505 s (EngineTests 299 s, AppTests 187 s) with items 7-10. Both moved tests ran in the StressTests
-  scheme: 0 misses of 200 each (62 s and 66 s).
-
-- 9, B9, supplemental decoders registered only through `HardwareCaps::get()`: 1eabff9. Checked: on this Mac (M4 Pro, macOS 26.6) AV1 needs no
-  registration any more (VTIsHardwareDecodeSupported('av01') is true in a fresh process before it), VP9
-  still does; with the old code a fresh process's AppleProber probe or AppleBackend constructor left VP9
-  unregistered, so a VP9 MP4 probed first was measured as not decodable by VideoToolbox (on older systems
-  AV1 too). `registerSupplementalVideoDecoders()` (HardwareCaps.h, `call_once`) is called by
-  `HardwareCaps::probe`, the AppleBackend constructor, `AppleProber::probe`, `measureHardwareDecode` and both
-  backends' video decoders. `HardwareCapsTests
-  testTheProberAndTheBackendRegisterTheSupplementalDecodersInAFreshProcess` runs its child test in three
-  fresh xctest processes (prober, backend, decoder); with the old wiring the prober and backend children fail.
-  The child is skipped by name in the schemes (it runs only from its parent).
-
-- 10, B10, thumbnails failed at a clip's end: 6c0886e. Root cause: `ThumbnailService` tried one seek a frame before the track's end, which finds
-  nothing where the track's duration overstates its pictures. `LastFrameSearch` (Engine/Media/LastFrame.h:
-  back two frames, at least 0.25 s, doubling, decoding forward to the end) is used by the pool's streams
-  (step by step), its scrub path and the thumbnail service. `ThumbnailServiceTests
-  testTheLastFrameIsFoundWhenTheTrackDurationOverstatesThePictures` (a fake track of 2 s of frames announced
-  as 10 s: 3 failures on the old code); the pool's `testTheLastFrameIsHeldPastTheEndOfTheVideo` covers its
-  two paths.
-
-- 11, B11, span and transition titles disagreed: f658892. Root cause: `ProjectStore.title(of:isAudio:)` (status lines, inspector, Ken Burns readout, drop
-  notes) knew only the dissolve and fades, while `TimelineViewModel.Span.title` also knew the wipes and the
-  iris. App/State/SpanKindDisplay.swift: `SpanKind.title/systemImage(style:transitionKind:)`,
-  `TransitionKind.title(style:)` / `sentenceTitle(style:)`, `VEEffectSpan.title/systemImage(onTrackKind:)`;
-  used by the timeline's spans, `ProjectStore.title`, `timelineSpan`, the drop notes (also the linked
-  partner's name), `SpanInspector.systemImage` and the Ken Burns readout's icon. `EffectLanesTimelineTests
+- 8, the machine-dependent and soak tests out of the default run: 8019b7e. `PausedSeekTests
+  testClicksOnTheDemoProjectShowTheirFrame` (66 s, reads `~/Movies/Framewright Demo`) and
+  `testClicksOnAScreenRecordingShowTheirFrame` (61 s, 200 random real-time clicks) moved to
+  `PausedSeekSoakTests` (same file), selected by the StressTests scheme and skipped by name elsewhere (and
+  without `FRAMEWRIGHT_STRESS=1`); `PausedSeekTests testTwentyClicksOnAScreenRecordingShowTheirFrame` (20
+  seeded clicks, 6 s) stays in the default run. `PlaybackDriftTests` stays. Default suite: 610 s wall
+  (EngineTests 410 s, AppTests 182 s) at fecb2a2; 505 s (EngineTests 299 s, AppTests 187 s) with items 7-10.
+  Both moved tests ran in the StressTests scheme: 0 misses of 200 each (62 s and 66 s).
+- 9, B9, supplemental decoders registered only through `HardwareCaps::get()`: 1eabff9. Checked: on this Mac
+  (M4 Pro, macOS 26.6) AV1 needs no registration any more (VTIsHardwareDecodeSupported('av01') is true in a
+  fresh process before it), VP9 still does; with the old code a fresh process's AppleProber probe or
+  AppleBackend constructor left VP9 unregistered, so a VP9 MP4 probed first was measured as not decodable by
+  VideoToolbox (on older systems AV1 too). `registerSupplementalVideoDecoders()` (HardwareCaps.h, `call_once`)
+  is called by `HardwareCaps::probe`, the AppleBackend constructor, `AppleProber::probe`,
+  `measureHardwareDecode` and both backends' video decoders. `HardwareCapsTests
+  testTheProberAndTheBackendRegisterTheSupplementalDecodersInAFreshProcess` runs its child test in three fresh
+  xctest processes (prober, backend, decoder); with the old wiring the prober and backend children fail. The
+  child is skipped by name in the schemes (it runs only from its parent).
+- 10, B10, thumbnails failed at a clip's end: 6c0886e. Root cause: `ThumbnailService` tried one seek a frame
+  before the track's end, which finds nothing where the track's duration overstates its pictures.
+  `LastFrameSearch` (Engine/Media/LastFrame.h: back two frames, at least 0.25 s, doubling, decoding forward to
+  the end) is used by the pool's streams (step by step), its scrub path and the thumbnail service.
+  `ThumbnailServiceTests testTheLastFrameIsFoundWhenTheTrackDurationOverstatesThePictures` (a fake track of 2
+  s of frames announced as 10 s: 3 failures on the old code); the pool's
+  `testTheLastFrameIsHeldPastTheEndOfTheVideo` covers its two paths.
+- 11, B11, span and transition titles disagreed: f658892. Root cause: `ProjectStore.title(of:isAudio:)`
+  (status lines, inspector, Ken Burns readout, drop notes) knew only the dissolve and fades, while
+  `TimelineViewModel.Span.title` also knew the wipes and the iris. App/State/SpanKindDisplay.swift:
+  `SpanKind.title/systemImage(style:transitionKind:)`, `TransitionKind.title(style:)` /
+  `sentenceTitle(style:)`, `VEEffectSpan.title/systemImage(onTrackKind:)`; used by the timeline's spans,
+  `ProjectStore.title`, `timelineSpan`, the drop notes (also the linked partner's name),
+  `SpanInspector.systemImage` and the Ken Burns readout's icon. `EffectLanesTimelineTests
   testWipesAndTheIrisAreNamedAlikeEverywhere` (3 failures with the old call sites).
+- 12, B12, M4A with linear PCM: bafb725. Checked: libavformat's ipod muxer has no tag for PCM (`ffmpeg -c:a
+  pcm_s16le -f ipod` fails writing the header; our FFMuxer refuses it in addStream through
+  avformat_query_codec), so with AppleWriter refusing and FFmpegBackend's validation accepting, the router
+  chose FFmpeg and the writer failed only when it opened. Not reachable from the app (no M4A export is
+  offered). Engine/Media/ContainerRules.h (`checkContainerHolds`, per-stream `checkContainerHoldsVideo/Audio`)
+  replaces the three copies of the rules in AppleWriter, FFmpegBackend::validate and FFMuxer::addStream (which
+  keeps libavformat's own check); the messages are now the same for both backends ("linear PCM requires .mov,
+  .wav or .mkv"). `ExportJobTests testLinearPCMInM4AIsRefusedByEveryWriterUpFront` (5 failures with the old
+  FFmpeg validation).
+- 13, the dangling links: "Docs: the post-lanes review's links point to git history; round notes".
+  `docs/plans/README.md` and `integration-notes.md` now name the report's commit (f486a6a, removed in
+  50ac8f2); the plan's status says the fix round is done.
 
-- 12, B12, M4A with linear PCM: "Media: one table of what each container holds". Checked: libavformat's
-  ipod muxer has no tag for PCM (`ffmpeg -c:a pcm_s16le -f ipod` fails writing the header; our FFMuxer
-  refuses it in addStream through avformat_query_codec), so with AppleWriter refusing and FFmpegBackend's
-  validation accepting, the router chose FFmpeg and the writer failed only when it opened. Not reachable
-  from the app (no M4A export is offered). Engine/Media/ContainerRules.h (`checkContainerHolds`,
-  per-stream `checkContainerHoldsVideo/Audio`) replaces the three copies of the rules in AppleWriter,
-  FFmpegBackend::validate and FFMuxer::addStream (which keeps libavformat's own check); the messages are
-  now the same for both backends ("linear PCM requires .mov, .wav or .mkv"). `ExportJobTests
-  testLinearPCMInM4AIsRefusedByEveryWriterUpFront` (5 failures with the old FFmpeg validation).
-
-Not started (key facts):
-- 13, the dangling links to `2026-09-29-post-lanes-review.md`.
+Not done: nothing of the brief. Found along the way and left open: the ThreadSanitizer blind spot for `CMTime`
+copies (item 3) and the timing flake of `ExportJobTests
+testMemoryIsFlatOver1800FramesAt720pSurvivesPressureAndProgressIsPaced` (see `integration-notes.md`).
 
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
