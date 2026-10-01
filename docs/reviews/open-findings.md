@@ -281,6 +281,37 @@ lead's scratchpad as fa-Repro.cpp cases 2-4, fa-Alt.cpp and fa-Fuzz.cpp):
 - The Ken Burns overlay (App/State/KenBurns.swift ~932-951) assumes a fitted, centred picture; with the 1:1
   base for pictures within 2 px of the frame it is off by under a pixel.
 
+## Fix round 2026-10-01 (general review): status
+Brief: the "Bugs found along the way" table and item 1 ("Now") of "Recommended order" in
+`2026-10-01-general-code-review.md` (B1-B6, B8-B12, moving the machine-dependent and soak tests, the
+dangling links), from fecb2a2, items 1-13 in this order. A done item names the subject of its commit
+until a later status update gives the hash. Each fix has a regression test that fails with the
+production change reverted (named in the commit message).
+
+Done:
+- 1, B1, the Speed/Duration sheet lost its input: "Speed/Duration sheet: the store keeps the sheet's
+  model". Root cause: ContentView built the sheet's model inside the sheet closure, so every store publish
+  (the refusal's own status line) redrew the window and replaced it. `ProjectStore.speedSheetModel` is
+  created once by `showSpeedSheet()` (like `exportModel`); `speedSheetClipIDs` is now read-only (derived).
+  `SpeedDurationSheetTests` (the window test fails with the old closure: the field shows "100" again).
+
+Not started (key facts):
+- 2, B2, the mute button: `TransportBar` keeps its own `@State muted`; the menu toggles the engine.
+- 3, B3, `DecodePool::refresh()` writes the worker-owned `repairedAt` under the pool mutex.
+- 4, B4, `FFVideoEncoder` converts BT.2020/240M with BT.709 coefficients (`FFFrameConverter::swsColorspace`
+  has the right mapping).
+- 5, B5, `VEMediaLibrary` builds the thumbnail and waveform services without the router's policy.
+- 6, B6, `UndoStack::push` ignores a failed re-apply; `AccumulatedSteps::apply` drops its children's
+  dropped ids.
+- 7, B8, test hygiene (EngineTests scratch directories, AppTests defaults suites, media work outliving
+  `StoreFixture.cleanUp()`).
+- 8, the `~/Movies` demo-project test and the 200-click soak out of the default run.
+- 9, B9, AV1/VP9 decoder registration only through `HardwareCaps::get()`.
+- 10, B10, `ThumbnailService` finds a clip's last frame with one seek.
+- 11, B11, span and transition titles in two places.
+- 12, B12, M4A with PCM: the backends' validation disagrees.
+- 13, the dangling links to `2026-09-29-post-lanes-review.md`.
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.

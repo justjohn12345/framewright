@@ -148,8 +148,12 @@ final class ProjectStore: ObservableObject {
     /// A video dissolve waiting for the user to decide about the linked audio crossfade
     /// (Editing preference "Ask each time"); shown as a confirmation dialog.
     @Published var pendingLinkedTransition: PendingTransition?
-    /// Clips the Speed/Duration sheet edits (nil: the sheet is closed).
-    @Published var speedSheetClipIDs: [VEClipID]?
+    /// The Speed/Duration sheet's model while the sheet is open (Clip > Speed/Duration…). Kept here,
+    /// not built by the view, so a store change that redraws the window keeps the typed speed and a
+    /// refusal's reason (review B1).
+    @Published var speedSheetModel: SpeedDurationModel?
+    /// The clips the Speed/Duration sheet edits (nil: the sheet is closed).
+    var speedSheetClipIDs: [VEClipID]? { speedSheetModel?.clipIDs }
     /// The Export sheet's model while the sheet is open (File > Export…).
     @Published var exportModel: ExportModel?
     /// The Sequence Settings sheet's model while it is open.
@@ -1226,7 +1230,12 @@ final class ProjectStore: ObservableObject {
                 : "Still images have no playback speed; trim them to change their duration."
             return
         }
-        speedSheetClipIDs = chosen.map(\.clipID)
+        speedSheetModel = SpeedDurationModel(store: self, clipIDs: chosen.map(\.clipID))
+    }
+
+    /// Closes the Speed/Duration sheet (OK after a successful Apply, Cancel, Escape).
+    func closeSpeedSheet() {
+        speedSheetModel = nil
     }
 
     // MARK: Reverse

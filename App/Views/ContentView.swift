@@ -63,10 +63,12 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 1100, minHeight: 640)
-        .sheet(isPresented: Binding(get: { store.speedSheetClipIDs != nil },
-                                    set: { if !$0 { store.speedSheetClipIDs = nil } })) {
-            if let ids = store.speedSheetClipIDs {
-                SpeedDurationSheet(model: SpeedDurationModel(store: store, clipIDs: ids))
+        .sheet(isPresented: Binding(get: { store.speedSheetModel != nil },
+                                    set: { if !$0 { store.closeSpeedSheet() } })) {
+            // The store's model, never one built here: the window redraws on every store change
+            // (the refusal's own status line included), which would replace it (review B1).
+            if let model = store.speedSheetModel {
+                SpeedDurationSheet(model: model)
             }
         }
         .sheet(isPresented: Binding(get: { store.sequenceSettingsModel != nil },

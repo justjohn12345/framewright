@@ -215,7 +215,7 @@ final class SpeedDurationModel: ObservableObject {
         let parts = [adjusted, direction, store.notes(of: speedResult), directionResult.flatMap { store.notes(of: $0) }]
         let status = parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
         store.statusMessage = status.isEmpty ? nil : status
-        store.speedSheetClipIDs = nil
+        store.closeSpeedSheet()
         return true
     }
 
@@ -226,7 +226,7 @@ final class SpeedDurationModel: ObservableObject {
     }
 
     func cancel() {
-        store.speedSheetClipIDs = nil
+        store.closeSpeedSheet()
     }
 }
 
