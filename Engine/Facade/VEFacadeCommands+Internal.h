@@ -23,7 +23,7 @@ class ImportAssets final : public Command {
   public:
     explicit ImportAssets(std::vector<MediaAsset> assets);
     EditResult apply(Project &project) override;
-    void revert(Project &project) override;
+    void revert(Project &project) const override;
     std::string name() const override {
         return "Import";
     }
@@ -45,7 +45,7 @@ class RemoveAsset final : public Command {
   public:
     explicit RemoveAsset(AssetId assetId);
     EditResult apply(Project &project) override;
-    void revert(Project &project) override;
+    void revert(Project &project) const override;
     std::string name() const override {
         return "Remove Media";
     }
@@ -65,7 +65,7 @@ class CompositeCommand final : public Command {
   public:
     CompositeCommand(std::string name, std::vector<std::unique_ptr<Command>> children);
     EditResult apply(Project &project) override;
-    void revert(Project &project) override;
+    void revert(Project &project) const override;
     bool canRevert(const Project &project) const override;
     bool isNoOp() const override;
     std::string name() const override {
@@ -93,7 +93,7 @@ class FreshIds final : public Command {
   public:
     FreshIds(std::unique_ptr<Command> inner, uint64_t floor);
     EditResult apply(Project &project) override;
-    void revert(Project &project) override;
+    void revert(Project &project) const override;
     bool canRevert(const Project &project) const override;
     bool isNoOp() const override;
     bool mergeWith(const Command &next) override;

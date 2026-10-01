@@ -36,7 +36,7 @@ EditResult ImportAssets::apply(Project &project) {
     return EditResult::success();
 }
 
-void ImportAssets::revert(Project &project) {
+void ImportAssets::revert(Project &project) const {
     auto &assets = project.assets;
     assets.erase(std::remove_if(assets.begin(), assets.end(),
                                 [&](const MediaAsset &a) {
@@ -80,7 +80,7 @@ EditResult RemoveAsset::apply(Project &project) {
     return EditResult::success();
 }
 
-void RemoveAsset::revert(Project &project) {
+void RemoveAsset::revert(Project &project) const {
     const size_t index = std::min(index_, project.assets.size());
     project.assets.insert(project.assets.begin() + static_cast<std::ptrdiff_t>(index), removed_);
 }
@@ -121,16 +121,15 @@ EditResult CompositeCommand::apply(Project &project) {
 }
 
 bool CompositeCommand::canRevert(const Project &project) const {
-    // The project must be in the state the last child left it in; each earlier child's state
-    // is then restored by the revert of the one after it.
-    return children_.empty() || children_.back()->canRevert(project);
+    // Every child, each against the state the reverts of the later ones leave.
+    return canRevertSteps(children_, project);
 }
 
 bool CompositeCommand::isNoOp() const {
     return std::all_of(children_.begin(), children_.end(), [](const auto &child) { return child->isNoOp(); });
 }
 
-void CompositeCommand::revert(Project &project) {
+void CompositeCommand::revert(Project &project) const {
     for (size_t i = children_.size(); i-- > 0;) {
         children_[i]->revert(project);
     }
@@ -156,7 +155,7 @@ EditResult FreshIds::apply(Project &project) {
     return result;
 }
 
-void FreshIds::revert(Project &project) {
+void FreshIds::revert(Project &project) const {
     inner_->revert(project);
     project.ids = before_;
 }

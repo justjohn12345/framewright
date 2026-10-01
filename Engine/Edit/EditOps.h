@@ -1011,7 +1011,7 @@ class SetSharpenScaledDownSources final : public Command {
   public:
     explicit SetSharpenScaledDownSources(bool sharpen) : sharpen_(sharpen) {}
     EditResult apply(Project &project) override;
-    void revert(Project &project) override;
+    void revert(Project &project) const override;
     bool canRevert(const Project &project) const override;
     bool isNoOp() const override;
     std::string name() const override {

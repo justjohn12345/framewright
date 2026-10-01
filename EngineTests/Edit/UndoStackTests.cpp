@@ -1,4 +1,5 @@
 #include "../../Engine/Edit/UndoStack.h"
+#include "../../Engine/Facade/VEFacadeCommands+Internal.h"
 #include "EditTestSupport.h"
 
 using namespace vetest;
@@ -18,7 +19,7 @@ class Unmergeable final : public Command {
     EditResult apply(Project &project) override {
         return inner_->apply(project);
     }
-    void revert(Project &project) override {
+    void revert(Project &project) const override {
         inner_->revert(project);
     }
     bool canRevert(const Project &project) const override {
@@ -414,6 +415,42 @@ TEST_CASE("applyPatch refuses a sequence that is not in the patch's source state
     REQUIRE(add.apply(fx.project).ok());
     CHECK(move.apply(fx.project).error == EditError::InvariantViolation);
     CHECK_FALSE(move.canRevert(fx.project));
+}
+
+TEST_CASE("A composite and an undo group can revert only if every step can (nit (c) of the 2026-09-30 fix round)") {
+    // Two steps that touch different clips; then the clip only the first step moved is changed outside the
+    // history. The last step alone could still revert, so checking it alone let the first step's revert run
+    // blindly over the changed clip (its patch no longer applies: the undo half happened).
+    Fixture fx;
+    const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 30);
+    const ClipId b = fx.addClip(fx.v2, fx.av30, 0, 30);
+    SUBCASE("a composite") {
+        std::vector<std::unique_ptr<Command>> children;
+        children.push_back(moveTo(fx, a, fx.v1, 40));
+        children.push_back(moveTo(fx, b, fx.v2, 60));
+        ve::facade::CompositeCommand composite("Two moves", std::move(children));
+        REQUIRE(composite.apply(fx.project).ok());
+        CHECK(composite.canRevert(fx.project));
+        fx.sequence().findClip(a)->timelineStart = f30(45);
+        CHECK_FALSE(composite.canRevert(fx.project));
+        fx.sequence().findClip(a)->timelineStart = f30(40);
+        CHECK(composite.canRevert(fx.project));
+        composite.revert(fx.project);
+        CHECK(fx.clip(a).timelineStart == f30(0));
+        CHECK(fx.clip(b).timelineStart == f30(0));
+    }
+    SUBCASE("an undo group of steps that do not merge") {
+        UndoStack stack;
+        stack.beginCoalescing("group", CoalesceMode::Accumulate);
+        REQUIRE(stack.push(fx.project, std::make_unique<Unmergeable>(moveTo(fx, a, fx.v1, 40), "group")).ok());
+        REQUIRE(stack.push(fx.project, std::make_unique<Unmergeable>(moveTo(fx, b, fx.v2, 60), "group")).ok());
+        stack.endCoalescing();
+        REQUIRE(stack.undoCount() == 1);
+        fx.sequence().findClip(a)->timelineStart = f30(45);
+        const Project changed = fx.project;
+        CHECK_FALSE(stack.undo(fx.project));
+        CHECK(fx.project == changed); // nothing half undone
+    }
 }
 
 TEST_CASE("UndoStack: commands that change nothing are not recorded (review finding 8)") {

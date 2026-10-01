@@ -35,14 +35,14 @@ class AccumulatedSteps final : public Command {
         return EditResult::success();
     }
 
-    void revert(Project &project) override {
+    void revert(Project &project) const override {
         for (std::size_t i = steps_.size(); i-- > 0;) {
             steps_[i]->revert(project);
         }
     }
 
     bool canRevert(const Project &project) const override {
-        return steps_.back()->canRevert(project);
+        return canRevertSteps(steps_, project);
     }
 
     bool isNoOp() const override {

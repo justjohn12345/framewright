@@ -3465,7 +3465,7 @@ EditResult SetSharpenScaledDownSources::apply(Project &project) {
     return EditResult::success();
 }
 
-void SetSharpenScaledDownSources::revert(Project &project) {
+void SetSharpenScaledDownSources::revert(Project &project) const {
     project.sharpenScaledDownSources = before_;
 }
 

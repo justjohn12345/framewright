@@ -348,12 +348,32 @@ EditResult SequenceCommand::apply(Project &project) {
     return result;
 }
 
-void SequenceCommand::revert(Project &project) {
+void SequenceCommand::revert(Project &project) const {
     Sequence *sequence = project.findSequence(sequenceId_);
     if (!sequence || !patch_) {
         return;
     }
     (void)applyPatch(*sequence, project.ids, *patch_, PatchDirection::Backward);
+}
+
+bool canRevertSteps(const std::vector<std::unique_ptr<Command>> &steps, const Project &project) {
+    if (steps.empty()) {
+        return true;
+    }
+    if (!steps.back()->canRevert(project)) {
+        return false;
+    }
+    if (steps.size() == 1) {
+        return true;
+    }
+    Project state = project;
+    for (std::size_t i = steps.size(); i-- > 1;) {
+        steps[i]->revert(state);
+        if (!steps[i - 1]->canRevert(state)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool SequenceCommand::canRevert(const Project &project) const {

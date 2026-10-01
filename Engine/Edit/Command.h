@@ -13,6 +13,7 @@
 #include "../Model/Project.h"
 #include "EditResult.h"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -30,8 +31,10 @@ class Command {
     virtual EditResult apply(Project &project) = 0;
 
     // Undoes a successful apply(). Precondition: `project` is in the state apply() left it in
-    // (check with canRevert()); otherwise the project is left unchanged.
-    virtual void revert(Project &project) = 0;
+    // (check with canRevert()); otherwise the project is left unchanged. Changes only `project`, never the
+    // command (const): a composite checks it can undo every step by reverting them on a copy
+    // (canRevertSteps).
+    virtual void revert(Project &project) const = 0;
 
     // Whether revert() can undo this command on `project` (it is in the state apply() left it
     // in). UndoStack checks this before undoing so a history that no longer matches the project
@@ -121,6 +124,12 @@ bool applyPatch(Sequence &sequence, IdGenerator &ids, const SequencePatch &patch
 // patch.
 SequencePatch composePatches(const SequencePatch &first, const SequencePatch &second);
 
+// Whether reverting `steps` last to first undoes them on `project`: the last step can revert it, and each
+// earlier one the state the reverts of the later ones leave (they are reverted on a copy). A step that only
+// checked the last one let an earlier step revert blindly over parts of the project changed outside the
+// history that the last step does not touch.
+bool canRevertSteps(const std::vector<std::unique_ptr<Command>> &steps, const Project &project);
+
 // Runs an edit on a copy of one sequence and commits it only if the result is valid:
 // perform() edits the copy, normalizeSequence() tidies it, validateSequence() must pass, and the
 // edit may not change a locked track (its clips and their spans, or remove it), except for
@@ -131,7 +140,7 @@ SequencePatch composePatches(const SequencePatch &first, const SequencePatch &se
 class SequenceCommand : public Command {
   public:
     EditResult apply(Project &project) final;
-    void revert(Project &project) final;
+    void revert(Project &project) const final;
     bool canRevert(const Project &project) const final;
     bool isNoOp() const final;
     bool mergeWith(const Command &next) final;
