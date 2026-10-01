@@ -399,6 +399,55 @@ bool waitForBlockedReads(ToneBehavior &behavior, int count) {
     XCTAssertEqual(service.cached(AssetId(1), "/tone/loud.wav"), nullptr, @"the relinked asset's old file is dropped");
 }
 
+/// A job cancelled after it started that finishes anyway (its last read was under way) is neither delivered
+/// nor stored (review R7 of the 2026-09-30 fix round): stored, it dropped another path's entry for the
+/// asset and track (one file per asset and track), which after New/Open (asset ids restart) is the new
+/// project's file, computed meanwhile on another worker.
+- (void)testACancelledJobThatFinishesAnywayIsNotStored {
+    auto tone = std::make_shared<ToneBehavior>();
+    tone->lengthFrames = 12000; // a quarter second: one read (fewer frames than a chunk of 32 buckets)
+    tone->setSignal("/tone/old.wav", constantSignal(0.9f, 0.9f));
+    tone->setSignal("/tone/new.wav", constantSignal(0.1f, 0.1f));
+    std::filesystem::remove_all(_dir);
+    WaveformService::Config config;
+    config.diskCacheDirectory = _dir;
+    config.threads = 2;
+    WaveformService service(makeToneRouter(tone), config);
+    // The new file's peaks on disk, and not in memory: its next computation is a disk read (no decoder read).
+    auto first = [self peaksFrom:service request:WaveformRequest{AssetId(1), "/tone/new.wav"}];
+    XCTAssertTrue(first.ok());
+    service.purge(AssetId(1));
+    XCTAssertEqual(service.cached(AssetId(1), "/tone/new.wav"), nullptr);
+
+    // The old project's file (asset 1) computes on one worker, held in its only read; its request is cancelled.
+    tone->setReadsBlocked(true);
+    WaveCollector c;
+    Latch cancelled(1);
+    c.latch = &cancelled;
+    const auto old = service.request(WaveformRequest{AssetId(1), "/tone/old.wav"}, _queue, c.completion(1));
+    XCTAssertTrue(waitForBlockedReads(*tone, 1), @"the old file's computation is running");
+    XCTAssertTrue(service.cancel(old));
+    XCTAssertTrue(cancelled.wait(std::chrono::seconds(10)));
+    // The new project's asset 1 (the new file) comes from the disk cache on the other worker and is stored.
+    auto fresh = [self peaksFrom:service request:WaveformRequest{AssetId(1), "/tone/new.wav"}];
+    XCTAssertTrue(fresh.ok());
+    XCTAssertTrue(service.cached(AssetId(1), "/tone/new.wav") == fresh.value());
+    // The old computation's read returns: it finishes with its peaks, after its cancellation.
+    tone->setReadsBlocked(false);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (service.stats().discarded + service.stats().computed < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    const WaveformService::Stats stats = service.stats();
+    XCTAssertEqual(stats.discarded, uint64_t(1), @"the cancelled job finished with its peaks and dropped them");
+    XCTAssertEqual(stats.computed, uint64_t(1), @"the new file's first computation only");
+    XCTAssertTrue(service.cached(AssetId(1), "/tone/new.wav") == fresh.value(), @"the new file's entry is kept");
+    XCTAssertEqual(service.cached(AssetId(1), "/tone/old.wav"), nullptr, @"the cancelled job's peaks are not stored");
+    std::lock_guard<std::mutex> lock(c.mutex);
+    XCTAssertEqual(c.results[1].size(), size_t(1));
+    XCTAssertEqual(c.results[1].at(0).error().code, MediaErrorCode::Cancelled);
+}
+
 - (void)testErrors {
     WaveformService service(BackendRouter::makeDefault(), {});
     auto missing = [self peaksFrom:service request:WaveformRequest{AssetId(1), "/nonexistent.wav"}];

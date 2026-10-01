@@ -394,7 +394,16 @@ void WaveformService::workerMain() {
             }
             std::vector<Listener> listeners = std::move(job->listeners);
             job->listeners.clear();
-            if (result.ok()) {
+            if (job->cancelled.load(std::memory_order_relaxed)) {
+                // Cancelled after it started (every listener cancelled, or the service stopping) and finished
+                // anyway: nobody gets it, and it is not stored. Storing it would also drop another path's
+                // entry for the asset and track, which after New/Open (asset ids restart) can be the new
+                // project's file. (A result read from or written to the disk cache stays there: that file is
+                // keyed by the source file's identity.)
+                if (result.ok()) {
+                    ++stats_.discarded;
+                }
+            } else if (result.ok()) {
                 // One file per (asset, track): the asset was relinked if another path is stored.
                 for (auto m = memory_.begin(); m != memory_.end();) {
                     const Key &k = m->first;

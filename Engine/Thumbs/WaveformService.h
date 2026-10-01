@@ -124,6 +124,8 @@ class WaveformService {
         uint64_t cancelled = 0;
         uint64_t failures = 0;
         uint64_t diskWriteFailures = 0;
+        /// Results of jobs cancelled after they started that finished anyway (not stored, not delivered).
+        uint64_t discarded = 0;
     };
 
     WaveformService(std::shared_ptr<media::BackendRouter> router, Config config);

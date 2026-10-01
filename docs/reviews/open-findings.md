@@ -100,6 +100,12 @@ Review of group A (84d9e20..6864cc0), regressions R1-R7, fixed before the rest o
   fail on 84d9e20") counted "a one-frame clip whose start moves up keeps a frame after it" as failing on
   84d9e20; it passes there (checked with the doctest harness on an 84d9e20 tree): it is coverage, not a
   regression test.
+- R7 (item 12), a cancelled waveform job that finished anyway stored its peaks: "WaveformService: a job
+  cancelled after it started stores nothing". Stored, it also dropped another path's entry for the asset
+  (the new project's file after New/Open, with more than one worker). Now neither stored nor delivered
+  (`Stats::discarded` counts it). The 40-minute test AAC stays: with 5 minutes and item 12's production
+  change reverted, `testAWaveformAfterNewIsTheNewProjectsFile` passed (the long computation finished
+  before project 2's request), so the shorter file no longer proves that case.
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
