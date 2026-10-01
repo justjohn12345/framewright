@@ -356,7 +356,7 @@ Done:
   after. Tests: `ScratchDirectoryTests`, `ThumbnailServiceTests
   testWaitUntilIdleWaitsForTheRunningDecodeAndItsDiskCacheFile`, `VEMediaLibraryTests
   testWaitingForTheServicesCoversARunningWaveform`. Existing leftovers on disk were not touched.
-- 8, the machine-dependent and soak tests out of the default run: 8019b7e. `PausedSeekTests
+- 8, the machine-dependent and soak tests out of the default run: 527751c. `PausedSeekTests
   testClicksOnTheDemoProjectShowTheirFrame` (66 s, reads `~/Movies/Framewright Demo`) and
   `testClicksOnAScreenRecordingShowTheirFrame` (61 s, 200 random real-time clicks) moved to
   `PausedSeekSoakTests` (same file), selected by the StressTests scheme and skipped by name elsewhere (and
@@ -398,9 +398,16 @@ Done:
   keeps libavformat's own check); the messages are now the same for both backends ("linear PCM requires .mov,
   .wav or .mkv"). `ExportJobTests testLinearPCMInM4AIsRefusedByEveryWriterUpFront` (5 failures with the old
   FFmpeg validation).
-- 13, the dangling links: "Docs: the post-lanes review's links point to git history; round notes".
-  `docs/plans/README.md` and `integration-notes.md` now name the report's commit (f486a6a, removed in
-  50ac8f2); the plan's status says the fix round is done.
+- 13, the dangling links: 5efcc5d. `docs/plans/README.md` and `integration-notes.md` now name the report's
+  commit (f486a6a, removed in 50ac8f2); the plan's status says the fix round is done.
+
+- Final verification (5efcc5d): `xcodebuild -scheme Framewright -configuration Debug clean build`, 0 warnings
+  in project code; full suite: EngineTests 548 (3 display-link skips), doctest 331, AppTests 278 (1 known
+  skip), 0 failures, 513 s wall; no new entries in `$TMPDIR/FramewrightEngineTests`, the container's
+  Preferences or its tmp. ThreadSanitizer (`-derivedDataPath build/tsan -enableThreadSanitizer YES`;
+  DecodePool, ThumbnailService, WaveformService, VEMediaLibrary, VESourceMonitor, VEProgramMonitor,
+  VEExporter, PlaybackController, ExportJob, VEEnginePlayback tests): 138 tests, 0 reports (the 2 timing tests
+  skip under TSan). StressTests ran only PausedSeekSoakTests (item 8).
 
 Not done: nothing of the brief. Found along the way and left open: the ThreadSanitizer blind spot for `CMTime`
 copies (item 3) and the timing flake of `ExportJobTests
