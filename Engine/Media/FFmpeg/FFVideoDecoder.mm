@@ -616,7 +616,7 @@ Status FFVideoDecoder::openImpl(const std::string &path, int trackIndex, const D
     if (options.maxDimension < 0) {
         return makeError(MediaErrorCode::InvalidArgument, "maxDimension must be >= 0");
     }
-    (void)HardwareCaps::get(); // Registers the supplemental AV1/VP9 decoders before any VT use.
+    registerSupplementalVideoDecoders(); // before any VideoToolbox use
     d.options = options;
     d.path = path;
     auto input = openInput(path);

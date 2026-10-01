@@ -167,6 +167,16 @@ EncoderAvailability HardwareCaps::encoderAvailability(uint32_t codecType, int wi
     return a;
 }
 
+void registerSupplementalVideoDecoders() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        // AV1 and VP9 decoders are "supplemental": VT only knows about them after registration.
+        // Registering is idempotent and harmless when the hardware lacks the decoder.
+        VTRegisterSupplementalVideoDecoderIfAvailable(fourcc::AV1);
+        VTRegisterSupplementalVideoDecoderIfAvailable(fourcc::VP9);
+    });
+}
+
 HardwareCaps HardwareCaps::probe() {
     HardwareCaps caps;
     caps.h264.codec = HWCodec::H264;
@@ -180,10 +190,7 @@ HardwareCaps HardwareCaps::probe() {
     caps.vp9.codec = HWCodec::VP9;
     caps.vp9.codecType = fourcc::VP9;
 
-    // AV1 and VP9 decoders are "supplemental": VT only knows about them after registration.
-    // Registering is idempotent and harmless when the hardware lacks the decoder.
-    VTRegisterSupplementalVideoDecoderIfAvailable(fourcc::AV1);
-    VTRegisterSupplementalVideoDecoderIfAvailable(fourcc::VP9);
+    registerSupplementalVideoDecoders(); // VT knows the AV1 and VP9 decoders only after this
 
     for (CodecCapabilities *c : {&caps.h264, &caps.hevc, &caps.prores, &caps.av1, &caps.vp9}) {
         c->hardwareDecode = VTIsHardwareDecodeSupported(c->codecType);

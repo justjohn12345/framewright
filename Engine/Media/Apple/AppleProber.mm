@@ -1,5 +1,7 @@
 #include "AppleProber.h"
 
+#include "../HardwareCaps.h"
+
 #include "AppleStillImage.h"
 #include "AppleSupport.h"
 
@@ -8,6 +10,7 @@ namespace ve::media::apple {
 AppleProber::AppleProber(double loadTimeoutSeconds) : timeout_(loadTimeoutSeconds) {}
 
 Result<MediaInfo> AppleProber::probe(const std::string &path) {
+    registerSupplementalVideoDecoders(); // before VideoToolbox is asked whether it decodes AV1/VP9
     @autoreleasepool {
         VE_MEDIA_TRY(checkReadableFile(path));
 

@@ -616,7 +616,7 @@ Status AppleVideoDecoder::open(const std::string &path, int trackIndex, const De
         return makeError(MediaErrorCode::InvalidArgument, "maxDimension must be >= 0");
     }
     @autoreleasepool {
-        (void)HardwareCaps::get(); // Registers the supplemental AV1/VP9 decoders before any VT use.
+        registerSupplementalVideoDecoders(); // before any VideoToolbox use
         d.options = options;
         d.path = path;
 

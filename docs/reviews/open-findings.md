@@ -364,8 +364,7 @@ Done:
   testWaitUntilIdleWaitsForTheRunningDecodeAndItsDiskCacheFile`, `VEMediaLibraryTests
   testWaitingForTheServicesCoversARunningWaveform`. Existing leftovers on disk were not touched.
 
-- 8, the machine-dependent and soak tests out of the default run: "Tests: the paused-seek soak and the
-  demo project run in the StressTests scheme". `PausedSeekTests testClicksOnTheDemoProjectShowTheirFrame`
+- 8, the machine-dependent and soak tests out of the default run: 8019b7e. `PausedSeekTests testClicksOnTheDemoProjectShowTheirFrame`
   (66 s, reads `~/Movies/Framewright Demo`) and `testClicksOnAScreenRecordingShowTheirFrame` (61 s, 200
   random real-time clicks) moved to `PausedSeekSoakTests` (same file), selected by the StressTests scheme
   and skipped by name elsewhere (and without `FRAMEWRIGHT_STRESS=1`); `PausedSeekTests
@@ -374,8 +373,19 @@ Done:
   505 s (EngineTests 299 s, AppTests 187 s) with items 7-10. Both moved tests ran in the StressTests
   scheme: 0 misses of 200 each (62 s and 66 s).
 
+- 9, B9, supplemental decoders registered only through `HardwareCaps::get()`: "VideoToolbox: register
+  the supplemental decoders from every entry point". Checked: on this Mac (M4 Pro, macOS 26.6) AV1 needs no
+  registration any more (VTIsHardwareDecodeSupported('av01') is true in a fresh process before it), VP9
+  still does; with the old code a fresh process's AppleProber probe or AppleBackend constructor left VP9
+  unregistered, so a VP9 MP4 probed first was measured as not decodable by VideoToolbox (on older systems
+  AV1 too). `registerSupplementalVideoDecoders()` (HardwareCaps.h, `call_once`) is called by
+  `HardwareCaps::probe`, the AppleBackend constructor, `AppleProber::probe`, `measureHardwareDecode` and both
+  backends' video decoders. `HardwareCapsTests
+  testTheProberAndTheBackendRegisterTheSupplementalDecodersInAFreshProcess` runs its child test in three
+  fresh xctest processes (prober, backend, decoder); with the old wiring the prober and backend children fail.
+  The child is skipped by name in the schemes (it runs only from its parent).
+
 Not started (key facts):
-- 9, B9, AV1/VP9 decoder registration only through `HardwareCaps::get()`.
 - 10, B10, `ThumbnailService` finds a clip's last frame with one seek.
 - 11, B11, span and transition titles in two places.
 - 12, B12, M4A with PCM: the backends' validation disagrees.

@@ -333,7 +333,11 @@ schemes:
       # The opt-in stress tests run in the StressTests scheme only.
       targets:
         - name: EngineTests
-          skippedTests: [HourExportStressTests, PausedSeekSoakTests]
+          skippedTests:
+            - HourExportStressTests
+            - PausedSeekSoakTests
+            # Run only in a fresh process by HardwareCapsTests' own test (review B9).
+            - HardwareCapsTests/testChildFirstVideoToolboxUseRegistersVP9
         - name: AppTests
           skippedTests: [TwoHourProjectStressTests]
     profile:
@@ -352,7 +356,11 @@ schemes:
       config: Debug
       targets:
         - name: EngineTests
-          skippedTests: [HourExportStressTests, PausedSeekSoakTests]
+          skippedTests:
+            - HourExportStressTests
+            - PausedSeekSoakTests
+            # Run only in a fresh process by HardwareCapsTests' own test (review B9).
+            - HardwareCapsTests/testChildFirstVideoToolboxUseRegistersVP9
 
   AppTests:
     build:

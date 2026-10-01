@@ -13,7 +13,9 @@ namespace ve::media::apple {
 
 AppleBackend::AppleBackend() : AppleBackend(Options{}) {}
 
-AppleBackend::AppleBackend(Options options) : options_(options) {}
+AppleBackend::AppleBackend(Options options) : options_(options) {
+    registerSupplementalVideoDecoders();
+}
 
 std::string AppleBackend::name() const {
     return "apple";

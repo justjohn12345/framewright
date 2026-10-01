@@ -8,6 +8,14 @@
 
 namespace ve::media {
 
+/// Registers VideoToolbox's supplemental AV1 and VP9 decoders, once per process (thread-safe, cheap after
+/// the first call; harmless where the hardware has no such decoder). VideoToolbox knows those decoders
+/// only after registration, so every entry point that asks VideoToolbox about decoding or opens a
+/// decoder calls it first: the probe below, AppleBackend's constructor, AppleProber, the VideoToolbox
+/// session measurement (measureHardwareDecode) and both backends' video decoders. (It used to happen only
+/// inside HardwareCaps::get(), which the prober never called: review B9.)
+void registerSupplementalVideoDecoders();
+
 enum class HWCodec { H264, HEVC, ProRes, AV1, VP9 };
 const char *toString(HWCodec codec);
 

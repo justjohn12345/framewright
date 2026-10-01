@@ -1,6 +1,7 @@
 #include "AppleSupport.h"
 
 #include "../ColorTags.h"
+#include "../HardwareCaps.h"
 
 #import <VideoToolbox/VideoToolbox.h>
 
@@ -287,6 +288,7 @@ Result<bool> measureHardwareDecode(CMFormatDescriptionRef format, bool allowHard
     if (format == nullptr) {
         return makeError(MediaErrorCode::InvalidArgument, "measureHardwareDecode: no format description");
     }
+    registerSupplementalVideoDecoders(); // an AV1/VP9 session can be created only after registration
     NSDictionary *spec = @{
         (__bridge NSString *)kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder : @(allowHardware),
     };
