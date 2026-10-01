@@ -1721,13 +1721,11 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   candidate (a `planCutTransition` in TransitionFitting.h): `addTransitionFromClip`'s refuse-or-fit decision and
   the fitting of the linked partners' cut, the linked transition's limit in `setDuration:...includingLinked:`,
   and the linked clip's fade in `addTransitionAtEdge:` (the per-clip fade itself is `planFade`).
-- Kept as they were, noted for the next fix round (both pinned by TransitionFittingTests, to be changed on
-  purpose there):
-  - The note on a clip's own fitted fade reads "Shortened to shortened to ..." (`planFade`).
-  - A linked fade in whose range fit is refused first gets the note "The linked transition was shortened to 0
-    frames (0.00 s): ..." and then "The linked transition was not changed: ...": `fitTransitionRange`'s head-fade
-    path adds the shortening note before its `length < 1` refusal (asserted by "fitTransitionRange fits a fade in
-    to its clip").
+- Fixed in the 2026-09-30 fix round (item 8; they were kept as they were by the split): the note on a clip's
+  own fitted fade read "Shortened to shortened to ..." (`planFade`; now "Shortened to ...", as the facade notes
+  its own fitted transitions), and a linked fade in whose range fit is refused first got the note "The linked
+  transition was shortened to 0 frames (0.00 s): ..." before "The linked transition was not changed: ..."
+  (`fitTransitionRange`'s head-fade path now refuses before noting anything).
 
 ## Fix round 2026-09-30 (group A of the lead's brief; status in `open-findings.md`)
 - Media identity (supersedes nothing, adds to "Media identity"): WaveformService keys running jobs and the

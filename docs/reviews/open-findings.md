@@ -124,12 +124,16 @@ Group B, continued:
   region (`VESourceUniforms::planeExtent`, clamped half a texel inside it), the unsharp kernel runs over and
   reads within it (`VEUnsharpUniforms::size`). Monitors therefore pre-scale exactly too (they used the 1/32
   steps and resampled, 5 % softer than the export); `Compositor::Stats::scratchAllocations` counts misses.
-- 4, the parity tests compared the export path with itself: "Parity tests: the monitor through its drawable".
+- 4, the parity tests compared the export path with itself: 20b0225.
   Every ExportParityTests case renders the monitor into a texture of the program view's drawable format
   (BGR10A2) and reads it back; bounds from measured maxima (10.6 beside the coloured still: ProRes 4:2:2
   chroma, bound 12; 2-4 elsewhere, bounds 3-5; were all 14). All comparisons are at the sequence's size,
   where R5's rule makes the monitor and the export sharpen alike. With monitors made never to sharpen, the
   new sharpened case fails (12 failures); the old one passed.
+- 8, garbled transition notes: "Transition notes: no "Shortened to shortened to", no shortening note on a
+  refusal". `planFade`'s own note is "Shortened to N frames (s): reason" (as the facade notes its fitted
+  transitions); `fitTransitionRange`'s head-fade path refuses before noting. TransitionFittingTests' two
+  pinning cases changed (they pinned the wrong text).
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
@@ -142,10 +146,6 @@ Found while doing them (open):
   different amount, which in practice needs a pair slipped out of sync.
 
 Not started (groups B and C), with what a fresh implementer needs:
-- 8, garbled transition notes: "Shortened to shortened to ..." (Engine/Edit/TransitionFitting.cpp:230-231,
-  `planFade`) and the refused linked fade-in range fit that first notes "was shortened to 0 frames" (the
-  head-fade path adds the note at ~148 before the `length < 1` refusal at ~150). Fix both and update the
-  pinning cases in EngineTests/Edit/TransitionFittingTests.cpp (allowed: they pin the wrong text).
 - 13, ownership breaches: Engine/Facade/VEEngine+Project.mm:171 calls `_undo.stack->markClean()` and :273
   `_lastUseCounts.clear()`: route through methods of the owners (Undo, VEEngine.mm). Drop unused includes
   from Engine/Facade/VEEngine+Internal.h (`PlaybackController.h`, `<map>`, `<optional>`, `<set>` if unused);

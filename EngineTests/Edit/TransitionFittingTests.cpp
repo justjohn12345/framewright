@@ -229,10 +229,7 @@ TEST_CASE("fitTransitionRange fits a fade in to its clip") {
     CHECK_FALSE(fit.offsets);
     CHECK(fit.refusal.error == EditError::Overlap);
     CHECK(fit.refusal.message == "It would overlap the transition at the clip's other end.");
-    REQUIRE(fit.notes.size() == 1);
-    CHECK(fit.notes[0] ==
-          "The linked transition was shortened to 0 frames (0.00 s): It would overlap the transition at the clip's "
-          "other end.");
+    CHECK(fit.notes.empty()); // refused: nothing was shortened (it noted "shortened to 0 frames" first)
 }
 
 TEST_CASE("fitTransitionRange fits a tail transition to both sides of its cut") {
@@ -324,8 +321,8 @@ TEST_CASE("planFade fits a fade to its clip or explains why it cannot") {
     plan = planFade(fx.clip(fx.b), fx.track(fx.v1), ClipEdge::Tail, 90, f30(1), true, TransitionKind::CrossDissolve,
                     false);
     REQUIRE(plan.note);
-    // (sic: the facade has always written the clip's own note this way; kept by the refactor)
-    CHECK(*plan.note == "Shortened to shortened to 60 frames (2.00 s): A fade cannot be longer than its clip.");
+    // The clip's own fade, as the facade notes its own fitted transitions (it read "Shortened to shortened to").
+    CHECK(*plan.note == "Shortened to 60 frames (2.00 s): A fade cannot be longer than its clip.");
 
     // An existing transition at that edge; and an audio fade is never a wipe.
     fx.addFade(fx.b, ClipEdge::Tail, f30(5));

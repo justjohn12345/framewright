@@ -145,10 +145,13 @@ TransitionRangeFit fitTransitionRange(const Project &project, const Sequence &se
         std::int64_t length = frameIndexAt(range.duration(), fd, SnapMode::Round);
         if (length > limit.maximumFrames) {
             length = limit.maximumFrames;
-            fit.notes.push_back(who + " was shortened to " + describeFrames(length, fd) + ": " + limit.reason);
         }
         if (length < 1) {
+            // Refused, so nothing was shortened: no note (it used to say "shortened to 0 frames" first).
             return refuse(EditResult::failure(limit.limitError, limit.reason));
+        }
+        if (length < frameIndexAt(range.duration(), fd, SnapMode::Round)) {
+            fit.notes.push_back(who + " was shortened to " + describeFrames(length, fd) + ": " + limit.reason);
         }
         fit.offsets = std::make_pair(kCMTimeZero, timeForFrame(length, fd));
         return fit;
@@ -227,8 +230,9 @@ FadePlan planFade(const Clip &owner, const Track &ownerTrack, ClipEdge edge, std
             return plan;
         }
         length = limit.maximumFrames;
-        // Kept as the facade wrote it: the note on the clip's own fade reads "Shortened to shortened to ...".
-        plan.note = std::string(linked ? "The linked clip's fade was " : "Shortened to ") + "shortened to " +
+        // The clip's own fade as the facade notes its own fitted transitions ("Shortened to ..."), the linked
+        // clip's in a sentence naming it.
+        plan.note = std::string(linked ? "The linked clip's fade was shortened to " : "Shortened to ") +
                     describeFrames(length, frameDuration) + ": " + limit.reason;
     }
     TransitionSpanRequest request;
