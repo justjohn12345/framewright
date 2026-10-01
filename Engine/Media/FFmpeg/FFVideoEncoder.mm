@@ -191,8 +191,9 @@ struct FFVideoEncoder::Impl {
         if (!sws) {
             return makeError(MediaErrorCode::UnsupportedFormat, "sws_getCachedContext failed for encoder input");
         }
-        const int *table = sws_getCoefficients(settings.color.matrix == YCbCrMatrix::BT601 ? SWS_CS_ITU601
-                                                                                           : SWS_CS_ITU709);
+        // The matrix the stream is tagged with (review B4: BT.2020 and 240M were converted with
+        // BT.709's coefficients).
+        const int *table = sws_getCoefficients(swsColorspace(settings.color.matrix, settings.height));
         const bool srcFull = isFullRangeInput();
         sws_setColorspaceDetails(sws.get(), table, srcFull ? 1 : 0, table, settings.color.fullRange ? 1 : 0, 0,
                                  1 << 16, 1 << 16);

@@ -546,6 +546,22 @@ AVColorSpace avColorSpace(YCbCrMatrix v) {
     return AVCOL_SPC_UNSPECIFIED;
 }
 
+int swsColorspace(YCbCrMatrix matrix, int height) {
+    switch (matrix) {
+    case YCbCrMatrix::BT709:
+        return SWS_CS_ITU709;
+    case YCbCrMatrix::BT601:
+        return SWS_CS_ITU601;
+    case YCbCrMatrix::BT2020:
+        return SWS_CS_BT2020;
+    case YCbCrMatrix::SMPTE240M:
+        return SWS_CS_SMPTE240M;
+    case YCbCrMatrix::Unknown:
+        break;
+    }
+    return height >= 720 ? SWS_CS_ITU709 : SWS_CS_ITU601; // Untagged: HD is BT.709, SD BT.601.
+}
+
 ColorInfo colorInfo(const AVCodecParameters *par) {
     ColorInfo c;
     c.primaries = colorPrimaries(par->color_primaries);

@@ -772,6 +772,138 @@ double meanDifference(CVPixelBufferRef a, CVPixelBufferRef b) {
     }
 }
 
+// MARK: Colour matrices of software encodes
+
+/// Review B4 (general review, 2026-10-01): the FFmpeg encoder's CPU conversion (software encoders:
+/// SVT-AV1, prores_ks) used BT.709's coefficients for every matrix but BT.601, while it tagged the
+/// stream with the matrix asked for: a BT.2020 (or 240M) export decoded back with the wrong colours
+/// (BT.2020's saturated red and green 8 to 12 codes off, 240M's up to 4). Patches of known colours are encoded with AV1 at
+/// each matrix and decoded back to BGRA, which converts with the tagged matrix.
+- (void)testSoftwareEncodesConvertWithTheTaggedMatrix {
+    if (!ffmpeg::FFVideoEncoder::isAvailable(VideoCodec::AV1)) {
+        XCTSkip(@"this FFmpeg build has no AV1 encoder (ENABLE_SVTAV1=0)");
+    }
+    // B, G, R of four flat quadrants: saturated primaries show a wrong matrix most.
+    const uint8_t patches[4][3] = {{0, 0, 230}, {0, 220, 0}, {235, 0, 0}, {60, 180, 210}};
+    constexpr int kWidth = 320;
+    constexpr int kHeight = 180;
+    constexpr int kFrames = 4;
+    const CMTime fd = CMTimeMake(1, 25);
+    struct Case {
+        const char *name;
+        ColorInfo color;
+    };
+    const Case cases[] = {
+        {"BT.709", ColorInfo::bt709()},
+        {"BT.601", {ColorPrimaries::BT709, TransferFunction::BT709, YCbCrMatrix::BT601, false}},
+        {"BT.2020", {ColorPrimaries::BT2020, TransferFunction::BT709, YCbCrMatrix::BT2020, false}},
+        {"SMPTE 240M", {ColorPrimaries::BT709, TransferFunction::BT709, YCbCrMatrix::SMPTE240M, false}},
+    };
+    const std::string dir = scratchDirectory();
+    for (const Case &c : cases) {
+        const std::string path = dir + "/matrix_" + std::to_string(static_cast<int>(c.color.matrix)) + ".mkv";
+        VideoEncodeSettings v;
+        v.codec = VideoCodec::AV1;
+        v.width = kWidth;
+        v.height = kHeight;
+        v.frameDuration = fd;
+        v.quality = 0.95;
+        v.maxKeyFrameInterval = 1;
+        v.color = c.color;
+        auto encoder = std::make_unique<ffmpeg::FFVideoEncoder>();
+        auto muxer = std::make_unique<ffmpeg::FFMuxer>();
+        Status opened = encoder->open(v);
+        XCTAssertTrue(opened.ok(), @"%s: %@", c.name, opened.ok() ? @"" : describe(opened.error()));
+        if (!opened.ok()) {
+            continue;
+        }
+        XCTAssertTrue(muxer->openFormat(path, "matroska").ok());
+        auto format = encoder->outputFormat();
+        XCTAssertTrue(format.ok());
+        if (!format.ok()) {
+            continue;
+        }
+        const int stream = muxer->addStream(format.value()).value();
+        XCTAssertTrue(muxer->begin().ok());
+        auto sink = [&muxer, stream](EncodedPacket &&p) -> Status {
+            p.streamIndex = stream;
+            return muxer->writePacket(std::move(p));
+        };
+        auto pool = PixelBufferPool::create(kCVPixelFormatType_32BGRA, kWidth, kHeight);
+        for (int i = 0; i < kFrames; ++i) {
+            auto buffer = pool->makeBuffer();
+            XCTAssertTrue(buffer.ok());
+            if (!buffer.ok()) {
+                break;
+            }
+            CVPixelBufferRef pb = buffer->get();
+            CVPixelBufferLockBaseAddress(pb, 0);
+            auto *base = static_cast<uint8_t *>(CVPixelBufferGetBaseAddress(pb));
+            const size_t stride = CVPixelBufferGetBytesPerRow(pb);
+            for (int y = 0; y < kHeight; ++y) {
+                for (int x = 0; x < kWidth; ++x) {
+                    const uint8_t *bgr = patches[(y < kHeight / 2 ? 0 : 2) + (x < kWidth / 2 ? 0 : 1)];
+                    uint8_t *px = base + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * 4;
+                    px[0] = bgr[0];
+                    px[1] = bgr[1];
+                    px[2] = bgr[2];
+                    px[3] = 255;
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(pb, 0);
+            attachColorInfo(pb, c.color);
+            XCTAssertTrue(encoder->encode(buffer.value(), CMTimeMultiply(fd, i), sink).ok());
+        }
+        XCTAssertTrue(encoder->flush(sink).ok());
+        Status finished = muxer->finish();
+        XCTAssertTrue(finished.ok(), @"%s: %@", c.name, finished.ok() ? @"" : describe(finished.error()));
+
+        auto decoder = self.backendUnderTest->makeVideoDecoder();
+        DecodeOptions options;
+        options.pixelFormat = kCVPixelFormatType_32BGRA;
+        options.allowHardware = false;
+        Status decoding = decoder->open(path, -1, options);
+        XCTAssertTrue(decoding.ok(), @"%s: %@", c.name, decoding.ok() ? @"" : describe(decoding.error()));
+        if (!decoding.ok()) {
+            continue;
+        }
+        auto frame = decoder->next();
+        XCTAssertTrue(frame.ok() && frame.value(), @"%s", c.name);
+        if (!frame.ok() || !frame.value()) {
+            continue;
+        }
+        CVPixelBufferRef out = frame.value()->image.get();
+        XCTAssertEqual(CVPixelBufferGetPixelFormatType(out), (OSType)kCVPixelFormatType_32BGRA);
+        CVPixelBufferLockBaseAddress(out, kCVPixelBufferLock_ReadOnly);
+        const auto *pixels = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddress(out));
+        const size_t outStride = CVPixelBufferGetBytesPerRow(out);
+        for (int q = 0; q < 4; ++q) {
+            // The middle of each quadrant, away from the edges chroma subsampling blurs.
+            const int cx = (q % 2 == 0 ? kWidth / 4 : 3 * kWidth / 4);
+            const int cy = (q < 2 ? kHeight / 4 : 3 * kHeight / 4);
+            double sum[3] = {0, 0, 0};
+            int count = 0;
+            for (int y = cy - 8; y < cy + 8; ++y) {
+                for (int x = cx - 8; x < cx + 8; ++x) {
+                    const uint8_t *px = pixels + static_cast<size_t>(y) * outStride + static_cast<size_t>(x) * 4;
+                    for (int k = 0; k < 3; ++k) {
+                        sum[k] += px[k];
+                    }
+                    ++count;
+                }
+            }
+            for (int k = 0; k < 3; ++k) {
+                const double mean = sum[k] / count;
+                // Measured: within 1 code with the tagged matrix; BT.709's coefficients put BT.2020
+                // up to 12 codes and 240M up to 4 codes off.
+                XCTAssertEqualWithAccuracy(mean, patches[q][k], 2.0, @"%s, patch %d, %s", c.name, q,
+                                           k == 0 ? "blue" : k == 1 ? "green" : "red");
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(out, kCVPixelBufferLock_ReadOnly);
+    }
+}
+
 // MARK: Memory
 
 - (void)testMemoryIsStableAcrossLongDecodesAndSeeks {

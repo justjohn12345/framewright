@@ -143,6 +143,10 @@ YCbCrMatrix yCbCrMatrix(AVColorSpace value);
 AVColorPrimaries avColorPrimaries(ColorPrimaries value);
 AVColorTransferCharacteristic avTransfer(TransferFunction value);
 AVColorSpace avColorSpace(YCbCrMatrix value);
+/// The libswscale coefficient table (SWS_CS_*) for YCbCr of `matrix`, for sws_getCoefficients(). Untagged
+/// (Unknown) pictures follow the engine's convention: BT.709 from 720 rows up, BT.601 below. Every
+/// libswscale conversion between RGB and YCbCr uses it (decode and encode alike).
+int swsColorspace(YCbCrMatrix matrix, int height);
 /// ColorInfo from codec parameters (fullRange from color_range, or from a yuvj* pixel format).
 ColorInfo colorInfo(const AVCodecParameters *par);
 

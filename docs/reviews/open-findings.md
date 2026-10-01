@@ -301,8 +301,7 @@ Done:
   check mark itself is checked by hand: the hosted app's SwiftUI menu did not update its item's state
   in the test host.
 
-- 3, B3, data race in `DecodePool::refresh()`: "Decode pool: refresh() re-arms a repair through a flag
-  the worker consumes". Root cause: refresh() wrote `Stream::repairedAt` under the pool mutex while the
+- 3, B3, data race in `DecodePool::refresh()`: 15e97e4. Root cause: refresh() wrote `Stream::repairedAt` under the pool mutex while the
   worker stepping that stream owns it without the lock. refresh() now sets `rearmRepair` (guarded by the
   mutex); the worker takes it with `reopen` and clears `repairedAt` itself.
   `DecodePoolTests testRefreshDuringARepairDoesNotTouchWorkerState` (refresh() from another thread inside
@@ -314,9 +313,15 @@ Done:
   `lost()` on the old code and nothing on the fix. Earlier "0 reports" TSan runs did not cover races on
   `CMTime` fields.
 
+- 4, B4, the FFmpeg encoder's colour matrix: "FFmpeg encoder: convert with the matrix the stream is
+  tagged with". Root cause: the encoder's CPU conversion chose BT.601 or else BT.709 coefficients while
+  tagging the requested matrix. `swsColorspace` moved from FFFrameConverter.mm to FFmpegSupport (one
+  mapping for decode and encode). An untagged (Unknown) matrix now follows the decode convention (BT.601
+  below 720 rows) instead of always BT.709; exports always tag BT.709, so no export changes.
+  `FFmpegBackendConformanceTests testSoftwareEncodesConvertWithTheTaggedMatrix` (AV1 patches at four
+  matrices decoded back: within 1 code; the old line puts BT.2020 up to 12 and 240M up to 4 codes off).
+
 Not started (key facts):
-- 4, B4, `FFVideoEncoder` converts BT.2020/240M with BT.709 coefficients (`FFFrameConverter::swsColorspace`
-  has the right mapping).
 - 5, B5, `VEMediaLibrary` builds the thumbnail and waveform services without the router's policy.
 - 6, B6, `UndoStack::push` ignores a failed re-apply; `AccumulatedSteps::apply` drops its children's
   dropped ids.

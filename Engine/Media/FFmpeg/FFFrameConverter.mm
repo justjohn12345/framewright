@@ -192,22 +192,6 @@ void copyPlanes(const AVFrame *f, const SourceLayout &s, CVPixelBufferRef out, i
     }
 }
 
-int swsColorspace(YCbCrMatrix matrix, int height) {
-    switch (matrix) {
-    case YCbCrMatrix::BT709:
-        return SWS_CS_ITU709;
-    case YCbCrMatrix::BT601:
-        return SWS_CS_ITU601;
-    case YCbCrMatrix::BT2020:
-        return SWS_CS_BT2020;
-    case YCbCrMatrix::SMPTE240M:
-        return SWS_CS_SMPTE240M;
-    case YCbCrMatrix::Unknown:
-        break;
-    }
-    return height >= 720 ? SWS_CS_ITU709 : SWS_CS_ITU601; // Untagged: HD is BT.709, SD BT.601.
-}
-
 bool isRGB(AVPixelFormat format) {
     const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(format);
     return d != nullptr && (d->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_PAL));
