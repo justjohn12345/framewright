@@ -16,7 +16,7 @@ final class MonitorFrameTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "monitor-frame-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("monitor-frame")
     }
 
     override func tearDown() async throws {

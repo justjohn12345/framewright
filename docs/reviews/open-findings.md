@@ -340,8 +340,7 @@ Done:
 
 - Full suite after items 1-6 (6efa7b6): EngineTests 539 (no skips), doctest 331, AppTests 277 with the
   1 known skip; 0 failures; 612 s wall including the build.
-- 14, Space after a shuttle played on in reverse: "Playback: play from stopped is forward at 1x".
-  Root cause: `PlaybackController::play()` and `togglePlay()` reused the rate the last shuttle left
+- 14, Space after a shuttle played on in reverse: 42c1d54. Root cause: `PlaybackController::play()` and `togglePlay()` reused the rate the last shuttle left
   (falling back to 1 only at 0), so J (or J J), K, Space played backwards (and L L, K, Space at 2x).
   Both now start at +1 from the playhead; `togglePlay()` still stops at any rate and direction; J, K, L
   and `setRate:` are unchanged. The source monitor uses the same controller; the transport button, the
@@ -350,9 +349,23 @@ Done:
   and `VEEnginePlaybackTests testSpaceAfterAShuttleAndKPlaysForwardAtOneX` (program monitor play and
   togglePlay, source monitor togglePlay): 13 and 11 failed checks on the old controller.
 
+- 7, B8, test runs leaked disk: "Tests: leave nothing behind (scratch directories, defaults suites,
+  media work after cleanup)". Root causes: `scratchDirectory()` never removed anything; AppTests made
+  persistent `UserDefaults` suites in the app's container (removing a domain does not remove its plist
+  reliably: cfprefsd writes the removal as an empty plist, at once, later or at exit); waveform and
+  thumbnail jobs outlived `StoreFixture.cleanUp()` and created the cache directories again (and the Photos
+  test double put its promise files in the app's tmp). Now: an XCTestObservation removes each test's
+  scratch directories when it ends (`bundleScratchDirectory()` for files a run shares; `TEST_RUNNER_
+  FRAMEWRIGHT_KEEP_TEST_SCRATCH=1` keeps them); `makeTestDefaults` names each suite by an absolute path in
+  a directory of the test's own, removed in teardown (31 sites); `-[VEEngine waitUntilMediaWorkIsIdle:]`
+  (VEEngine.h addition, for tests; the services' `waitUntilIdle`) runs before `cleanUp()` removes the
+  fixture. Measured over a full default run: new entries in `$TMPDIR/FramewrightEngineTests` 221 before,
+  0 after; new plists in the container's Preferences 24 before, 0 after; new entries in the container's
+  tmp 113 before, 0 after. Tests: `ScratchDirectoryTests`, `ThumbnailServiceTests
+  testWaitUntilIdleWaitsForTheRunningDecodeAndItsDiskCacheFile`, `VEMediaLibraryTests
+  testWaitingForTheServicesCoversARunningWaveform`. Existing leftovers on disk were not touched.
+
 Not started (key facts):
-- 7, B8, test hygiene (EngineTests scratch directories, AppTests defaults suites, media work outliving
-  `StoreFixture.cleanUp()`).
 - 8, the `~/Movies` demo-project test and the 200-click soak out of the default run.
 - 9, B9, AV1/VP9 decoder registration only through `HardwareCaps::get()`.
 - 10, B10, `ThumbnailService` finds a clip's last frame with one seek.

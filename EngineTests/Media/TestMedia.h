@@ -101,9 +101,16 @@ std::string stressMediaPath(const std::string &file, std::string &error);
 std::string writeToneAudioFile(const std::string &path, double seconds, double frequency, double amplitude = 0.5,
                                double sampleRate = 48000);
 
-/// A fresh scratch directory for files a test writes (removed at process exit is not
-/// guaranteed; it lives under NSTemporaryDirectory()).
+/// A fresh scratch directory for files a test writes, under NSTemporaryDirectory()/FramewrightEngineTests.
+/// It is removed when the test that made it ends (one made outside a test: when the test bundle ends),
+/// unless FRAMEWRIGHT_KEEP_TEST_SCRATCH=1 is set in the test process (from xcodebuild:
+/// TEST_RUNNER_FRAMEWRIGHT_KEEP_TEST_SCRATCH=1), for a test that logs a file to look at.
 std::string scratchDirectory();
+/// A scratch directory for files several tests share (written once per run): removed when the test bundle
+/// ends (or kept, as above).
+std::string bundleScratchDirectory();
+/// Removes the scratch directories made since the last call (what the end of a test does).
+void removeScratchDirectories();
 
 /// Resident memory footprint of this process in bytes (task_vm_info.phys_footprint).
 uint64_t physicalFootprint();

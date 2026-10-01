@@ -25,7 +25,7 @@ final class PhotosDropTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        store.defaults = try XCTUnwrap(UserDefaults(suiteName: "photos-\(UUID())"))
+        store.defaults = try makeTestDefaults("photos")
         chosenFolder = fixture.directory.appendingPathComponent("Chosen", isDirectory: true)
         try FileManager.default.createDirectory(at: chosenFolder, withIntermediateDirectories: true)
         folderQuestions = 0
@@ -343,7 +343,7 @@ final class PhotosDropTests: XCTestCase {
     }
 
     func testTheLivePhotoSettingRoundTripsWithTheQuestionsRememberedChoice() throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "live-photo-setting-\(UUID())"))
+        let defaults = try makeTestDefaults("live-photo-setting")
         XCTAssertEqual(LivePhotoImportSetting(defaults: defaults), .ask, "asks by default")
         XCTAssertNil(LivePhotos.rememberedChoice(in: defaults))
         // "Remember my choice" in the question: Settings shows it.

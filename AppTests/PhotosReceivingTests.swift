@@ -24,7 +24,7 @@ final class PhotosReceivingTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        store.defaults = try XCTUnwrap(UserDefaults(suiteName: "photos-receiving-\(UUID())"))
+        store.defaults = try makeTestDefaults("photos-receiving")
         chosenFolder = fixture.directory.appendingPathComponent("Chosen", isDirectory: true)
         try FileManager.default.createDirectory(at: chosenFolder, withIntermediateDirectories: true)
         folderQuestions = []
@@ -710,7 +710,7 @@ final class PhotosReceivingTests: XCTestCase {
     func testQuitNewAndOpenAskWhileMediaIsArriving() async throws {
         let project = try saveProject()
         let documents = DocumentController(store: store,
-                                           defaults: try XCTUnwrap(UserDefaults(suiteName: "docs-\(UUID())")))
+                                           defaults: try makeTestDefaults("docs"))
         var alerts: [String] = []
         var answer = NSApplication.ModalResponse.alertSecondButtonReturn // Keep Waiting
         documents.runAlert = { alert in

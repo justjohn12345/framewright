@@ -139,7 +139,7 @@ final class PaneDividerTests: XCTestCase {
         try fixture.placeMovie(movie, at: 0)
         store.showInSourceMonitor(movie.assetID)
         store.selection = []
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "divider-\(UUID())"))
+        let defaults = try makeTestDefaults("divider")
         let documents = DocumentController(store: store, defaults: defaults)
         let size = NSSize(width: 1400, height: 900)
         let window = makeWindow(size: size)

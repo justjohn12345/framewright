@@ -1,5 +1,6 @@
 #include "ThumbnailService.h"
 
+
 #include "../Media/PixelBuffer.h"
 #include "../Model/TimeUtil.h"
 #include "CacheKey.h"
@@ -362,6 +363,7 @@ void ThumbnailService::cancelPending(AssetId asset) {
         }
         stats_.cancelled += cancelled.size();
     }
+    idleCv_.notify_all(); // the queue may have emptied without a job finishing
     deliver(std::move(cancelled), makeError(MediaErrorCode::Cancelled, "thumbnail request cancelled"));
 }
 
@@ -422,6 +424,7 @@ void ThumbnailService::workerMain() {
         }
         std::shared_ptr<Job> job = std::move(queue_.front());
         queue_.pop_front(); // Running jobs stay in jobs_ (for coalescing) but leave queue_.
+        ++running_;
         lock.unlock();
 
         // std::thread workers have no autorelease pool: drain the Objective-C objects that
@@ -443,7 +446,15 @@ void ThumbnailService::workerMain() {
             deliver(std::move(waiters), result);
         }
         lock.lock();
+        if (--running_ == 0 && queue_.empty()) {
+            idleCv_.notify_all();
+        }
     }
+}
+
+bool ThumbnailService::waitUntilIdle(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return idleCv_.wait_for(lock, timeout, [&] { return queue_.empty() && running_ == 0; });
 }
 
 Result<ThumbnailImage> ThumbnailService::produce(const ThumbnailRequest &request, Worker &worker, bool &fromDisk) {

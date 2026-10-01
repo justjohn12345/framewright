@@ -21,7 +21,7 @@ final class KenBurnsEditorTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "ken-burns-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("ken-burns")
         // The boxes below are in a 1920x1080 sequence (the fixture movie would make it 320x180).
         try fixture.configureSequence()
     }

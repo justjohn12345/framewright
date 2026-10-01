@@ -16,7 +16,7 @@ final class UnlinkSelectionTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "unlink-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("unlink")
     }
 
     override func tearDown() async throws {

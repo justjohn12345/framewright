@@ -530,7 +530,7 @@ int shownIndex(VEPreviewView *view) {
     static std::string failure;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-      const std::string dir = ve::test::scratchDirectory();
+      const std::string dir = ve::test::bundleScratchDirectory(); // shared by the tests of this run
       const std::string longPath = dir + "/long-40min.m4a";
       const std::string shortPath = dir + "/short-5s.m4a";
       failure = ve::test::writeToneAudioFile(longPath, 40 * 60, 440);

@@ -39,6 +39,7 @@
 #include <dispatch/dispatch.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -153,6 +154,11 @@ class WaveformService {
 
     Stats stats() const;
 
+    /// Blocks until no request is queued and no worker is computing (and writing its disk cache file), or `timeout`;
+    /// false on timeout. Callbacks of finished work may still be on their way to their queues. For
+    /// tests (which delete the cache directory afterwards) and orderly shutdown.
+    bool waitUntilIdle(std::chrono::milliseconds timeout);
+
     /// Disk cache file name for a request (exposed for tests and cache management).
     std::string diskFileName(const WaveformRequest &request) const;
 
@@ -188,6 +194,8 @@ class WaveformService {
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
+    std::condition_variable idleCv_; ///< Notified when the last running job finishes.
+    int running_ = 0;                ///< Jobs a worker took from queue_ and has not finished.
     bool stopping_ = false;
     RequestId nextId_ = 1;
     std::deque<std::shared_ptr<Job>> queue_;

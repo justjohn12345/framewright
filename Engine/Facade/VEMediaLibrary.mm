@@ -7,6 +7,7 @@
 #include "../Media/AssetImport.h"
 
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -432,6 +433,20 @@ NSNumber *keyFor(AssetId asset) {
 - (BOOL)isAssetMissing:(AssetId)asset {
     VE_ASSERT_MAIN();
     return _missing.count(asset) > 0;
+}
+
+- (BOOL)waitUntilServicesAreIdle:(NSTimeInterval)timeout {
+    VE_ASSERT_MAIN();
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(static_cast<int64_t>(std::max(0.0, timeout) * 1000));
+    auto left = [&] {
+        return std::max(std::chrono::milliseconds(0), std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                          deadline - std::chrono::steady_clock::now()));
+    };
+    // Neither service starts work for the other, so one wait on each suffices.
+    const bool thumbnails = _thumbnails->waitUntilIdle(left());
+    const bool waveforms = _waveforms->waitUntilIdle(left());
+    return thumbnails && waveforms ? YES : NO;
 }
 
 - (NSUInteger)requestsInFlight {

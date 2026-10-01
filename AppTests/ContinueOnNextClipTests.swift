@@ -15,7 +15,7 @@ final class ContinueOnNextClipTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "continue-next-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("continue-next")
     }
 
     override func tearDown() async throws {

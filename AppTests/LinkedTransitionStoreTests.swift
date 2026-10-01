@@ -16,7 +16,7 @@ final class LinkedTransitionStoreTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "linked-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("linked")
     }
 
     override func tearDown() async throws {

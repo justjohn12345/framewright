@@ -9,16 +9,13 @@ import XCTest
 final class DocumentFlowTests: XCTestCase {
     private var fixture: StoreFixture!
     private var defaults: UserDefaults!
-    private var suiteName = ""
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        suiteName = "DocumentFlowTests-\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: suiteName)
+        defaults = try makeTestDefaults("DocumentFlowTests")
     }
 
     override func tearDown() async throws {
-        defaults?.removePersistentDomain(forName: suiteName)
         fixture?.cleanUp()
     }
 

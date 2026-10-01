@@ -16,7 +16,7 @@ final class EditingPreferencesTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "preferences-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("preferences")
     }
 
     override func tearDown() async throws {
@@ -118,7 +118,7 @@ final class EditingPreferencesTests: XCTestCase {
     }
 
     func testThePreferencesModelMirrorsItsDefaults() throws {
-        let suite = try XCTUnwrap(UserDefaults(suiteName: "preferences-model-\(UUID())"))
+        let suite = try makeTestDefaults("preferences-model")
         let model = EditingPreferencesModel(defaults: suite)
         XCTAssertEqual(model.current, EditingPreferences(), "missing values read as the defaults")
         suite.set(0.5, forKey: EditingPreferences.defaultTransitionSecondsKey)
@@ -134,8 +134,7 @@ final class EditingPreferencesTests: XCTestCase {
         XCTAssertEqual(model.current.durationDisplay, .timecode)
 
         // Another suite: re-read at once.
-        let otherName = "preferences-model-\(UUID())"
-        let other = try XCTUnwrap(UserDefaults(suiteName: otherName))
+        let (otherName, other) = try makeTestDefaultsSuite("preferences-model-other")
         other.set(LinkedCrossfadeMode.never.rawValue, forKey: EditingPreferences.linkedCrossfadeKey)
         model.defaults = other
         XCTAssertEqual(model.current.linkedCrossfade, .never)

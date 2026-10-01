@@ -36,7 +36,7 @@ final class TimelineDropTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "drop-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("drop")
     }
 
     override func tearDown() async throws {

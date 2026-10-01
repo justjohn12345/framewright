@@ -14,7 +14,7 @@ final class ReversedNeighbourMotionTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "reversed-neighbour-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("reversed-neighbour")
     }
 
     override func tearDown() async throws {

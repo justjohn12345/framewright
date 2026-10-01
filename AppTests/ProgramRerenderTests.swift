@@ -14,7 +14,7 @@ final class ProgramRerenderTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "rerender-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("rerender")
     }
 
     override func tearDown() async throws {

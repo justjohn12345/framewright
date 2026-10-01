@@ -18,7 +18,7 @@ final class EffectLanesTimelineTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "lanes-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("lanes")
     }
 
     override func tearDown() async throws {
@@ -213,9 +213,7 @@ final class EffectLanesTimelineTests: XCTestCase {
     }
 
     func testCollapsedLanesPersistInTheLayout() throws {
-        let suite = "lanes-layout-\(UUID())"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let defaults = try makeTestDefaults("lanes-layout")
         let layout = WindowLayoutModel(defaults: defaults)
         XCTAssertEqual(WindowLayoutModel.laneKey(video: true, index: 0), "V1")
         XCTAssertEqual(WindowLayoutModel.laneKey(video: false, index: 1), "A2")

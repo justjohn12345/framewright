@@ -14,7 +14,7 @@ final class ExportModelTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        defaults = try XCTUnwrap(UserDefaults(suiteName: "export-\(UUID())"))
+        defaults = try makeTestDefaults("export")
         fixture.store.defaults = defaults
     }
 

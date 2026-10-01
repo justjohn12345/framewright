@@ -42,7 +42,7 @@ final class TimelineRedrawTests: XCTestCase {
     func testPlayheadMovesDoNotRedrawTheTimeline() async throws {
         try await makeTwentyClipSequence()
         let store = fixture.store
-        let defaults = UserDefaults(suiteName: "redraw-\(UUID())") ?? .standard
+        let defaults = try makeTestDefaults("redraw")
         let documents = DocumentController(store: store, defaults: defaults)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900),
                               styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)

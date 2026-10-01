@@ -487,4 +487,29 @@ std::shared_ptr<media::BackendRouter> makeRouter() {
     XCTAssertEqual(second->opens.load(), 2);
 }
 
+/// Review B8: the engine's -waitUntilMediaWorkIsIdle: (which test fixtures call before deleting the media
+/// and cache directories) is the library's wait on both services: it times out while a waveform reads
+/// and returns once the computation has finished.
+- (void)testWaitingForTheServicesCoversARunningWaveform {
+    auto tone = std::make_shared<ve::test::ToneBehavior>();
+    tone->lengthFrames = 48000 * 2;
+    tone->setSignal("/tone/a.wav", ve::test::constantSignal(0.5f, 0.5f));
+    VEMediaLibrary *library = [self toneLibrary:tone];
+    XCTAssertTrue([library waitUntilServicesAreIdle:0], @"idle before any request");
+    const MediaAsset asset = [self import:library url:[NSURL fileURLWithPath:@"/tone/a.wav"] as:AssetId(1)];
+    tone->setReadsBlocked(true);
+    __block BOOL done = NO;
+    [library waveformOfAsset:asset
+                  completion:^(const thumbs::WaveformResult *result) {
+                    XCTAssertTrue(result != nullptr && result->ok());
+                    done = YES;
+                  }];
+    XCTAssertTrue([self waitForBlockedReads:1 of:*tone], @"the waveform is computing");
+    XCTAssertFalse([library waitUntilServicesAreIdle:0.05], @"a waveform reads");
+    tone->setReadsBlocked(false);
+    XCTAssertTrue([library waitUntilServicesAreIdle:30]);
+    XCTAssertTrue([self spinUntil:^BOOL { return done; } timeout:30], @"its completion still comes on the main queue");
+    XCTAssertEqual(library.requestsInFlight, 0u);
+}
+
 @end

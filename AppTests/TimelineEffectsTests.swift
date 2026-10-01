@@ -15,7 +15,7 @@ final class TimelineEffectsTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "effects-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("effects")
     }
 
     override func tearDown() async throws {

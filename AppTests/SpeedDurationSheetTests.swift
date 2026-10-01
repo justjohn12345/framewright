@@ -71,7 +71,7 @@ final class SpeedDurationSheetTests: XCTestCase {
     /// was typed (a new model would show the clip's speed again) and the reason must still be there.
     func testTheSheetInTheWindowKeepsTheTypedTextAcrossARedraw() async throws {
         _ = try await placeTwoClips()
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "speed-sheet-\(UUID())"))
+        let defaults = try makeTestDefaults("speed-sheet")
         let documents = DocumentController(store: store, defaults: defaults)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900),
                               styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)

@@ -343,6 +343,11 @@ NS_SWIFT_UI_ACTOR
     NS_SWIFT_UI_ACTOR;
 /// The peaks if already in memory, else nil (does not start a computation).
 - (nullable VEWaveform *)cachedWaveformForAsset:(VEAssetID)assetID;
+/// Blocks until the thumbnail and waveform services have no request queued or in progress (the disk
+/// cache file of each finished one written), or until `timeout` seconds pass; NO on timeout. Their
+/// completions may still be on their way to the main queue. For tests, which delete the media files
+/// and the cache directory afterwards (work still running would create the directory again).
+- (BOOL)waitUntilMediaWorkIsIdle:(NSTimeInterval)timeout NS_SWIFT_NAME(waitUntilMediaWorkIsIdle(timeout:));
 
 /// VideoToolbox capabilities.
 @property (nonatomic, readonly) VEHardwareCaps *hardwareCaps;

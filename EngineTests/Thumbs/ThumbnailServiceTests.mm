@@ -533,4 +533,45 @@ static char kQueueKey;
                    MediaErrorCode::InvalidArgument);
 }
 
+/// Review B8 (general review, 2026-10-01): work that outlived a test wrote its disk cache file after the
+/// test had deleted the directory, and so created it again. waitUntilIdle() returns once nothing is
+/// queued or decoding, with the finished thumbnail's PNG written.
+- (void)testWaitUntilIdleWaitsForTheRunningDecodeAndItsDiskCacheFile {
+    auto fake = std::make_shared<FakeBehavior>();
+    fake->probe = [](const std::string &p) { return Result<MediaInfo>(makeFakeInfo(p, "mov", fourcc::H264, false)); };
+    Gate gate;
+    Latch decoding(1);
+    std::atomic<int> seeks{0};
+    fake->onSeek = [&](CMTime) {
+        if (seeks++ == 0) {
+            decoding.countDown();
+            gate.pass();
+        }
+    };
+    auto router = std::make_shared<BackendRouter>();
+    (void)router->registerBackend(std::make_shared<FakeBackend>(fake));
+    ThumbnailService::Config config;
+    config.diskCacheDirectory = _dir;
+    config.threads = 1;
+    ThumbnailService service(router, config);
+    XCTAssertTrue(service.waitUntilIdle(std::chrono::milliseconds(0)), @"idle before any request");
+    Collector c;
+    Latch done(3);
+    c.latch = &done;
+    const ThumbnailRequest first{AssetId(1), "/fake/a.mov", kCMTimeZero, 64};
+    service.request(first, _queue, c.callback(1, &kQueueKey));
+    XCTAssertTrue(decoding.wait(std::chrono::seconds(5)), @"the first decode is in flight");
+    service.request(ThumbnailRequest{AssetId(1), "/fake/a.mov", CMTimeMake(1, 1), 64}, _queue, c.callback(2, &kQueueKey));
+    XCTAssertFalse(service.waitUntilIdle(std::chrono::milliseconds(50)), @"a decode runs and one is queued");
+    // A queued request cancelled while the decode runs: still busy.
+    service.request(ThumbnailRequest{AssetId(2), "/fake/b.mov", kCMTimeZero, 64}, _queue, c.callback(3, &kQueueKey));
+    service.cancelPending(AssetId(2));
+    XCTAssertFalse(service.waitUntilIdle(std::chrono::milliseconds(20)));
+    gate.open();
+    XCTAssertTrue(service.waitUntilIdle(std::chrono::seconds(10)));
+    XCTAssertTrue(std::filesystem::exists(_dir + "/" + ThumbnailService::diskFileName(first)),
+                  @"the finished decode's PNG is written when the service is idle");
+    XCTAssertTrue(done.wait(std::chrono::seconds(10)));
+}
+
 @end

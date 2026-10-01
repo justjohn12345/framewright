@@ -47,8 +47,10 @@ final class FakePromiseProvider: @unchecked Sendable {
             // A real provider completes once: whichever of delivery and cancellation comes first.
             let once = CompletionOnce(completion)
             let delivery = {
-                // Like a promise keeper: a fresh temporary file the receiver takes over.
-                let temporary = FileManager.default.temporaryDirectory
+                // Like a promise keeper: a fresh temporary file the receiver takes over. Next to the
+                // source file (the test's scratch directory, which the test removes), not in the app's
+                // temporary directory, where every run left its copies (review B8).
+                let temporary = file.deletingLastPathComponent()
                     .appendingPathComponent("promise-\(UUID().uuidString).\(file.pathExtension)")
                 do {
                     try FileManager.default.copyItem(at: file, to: temporary)

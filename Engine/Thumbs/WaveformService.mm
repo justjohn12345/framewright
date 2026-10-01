@@ -334,6 +334,7 @@ bool WaveformService::cancel(RequestId id) {
     if (cancelled.empty()) {
         return false;
     }
+    idleCv_.notify_all(); // the queue may have emptied without a job finishing
     complete(std::move(cancelled), cancelledError());
     return true;
 }
@@ -379,6 +380,7 @@ void WaveformService::workerMain() {
         std::shared_ptr<Job> job = std::move(queue_.front());
         queue_.pop_front();
         job->started = true;
+        ++running_;
         lock.unlock();
 
         // std::thread workers have no autorelease pool: drain what decoding autoreleases.
@@ -420,7 +422,15 @@ void WaveformService::workerMain() {
             complete(std::move(listeners), result);
         }
         lock.lock();
+        if (--running_ == 0 && queue_.empty()) {
+            idleCv_.notify_all();
+        }
     }
+}
+
+bool WaveformService::waitUntilIdle(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return idleCv_.wait_for(lock, timeout, [&] { return queue_.empty() && running_ == 0; });
 }
 
 WaveformResult WaveformService::produce(Job &job, bool &fromDisk) {

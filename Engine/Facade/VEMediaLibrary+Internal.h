@@ -165,6 +165,9 @@ __attribute__((objc_subclassing_restricted))
 /// Thumbnail, waveform, poster and details requests whose completions have not run on the main queue yet
 /// (dropped results included): zero once every request made so far has come back.
 @property (nonatomic, readonly) NSUInteger requestsInFlight;
+/// Blocks until the thumbnail and waveform services have nothing queued or in progress, or `timeout`
+/// seconds pass (NO). Completions may still be on their way to the main queue (see requestsInFlight).
+- (BOOL)waitUntilServicesAreIdle:(NSTimeInterval)timeout;
 /// Ends the security-scoped access of every file the library kept (also done when it is released).
 - (void)stopAccessingURLs;
 

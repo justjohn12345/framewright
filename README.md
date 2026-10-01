@@ -188,6 +188,13 @@ only these tests and sets `FRAMEWRIGHT_STRESS=1`; the other schemes skip them, a
 they skip themselves. Their media are generated at test time (`Scripts/make_test_media.swift --stress`
 and the test itself), and the numbers are logged with the prefixes `HOUR EXPORT` and `STRESS 2H`.
 
+EngineTests remove each test's scratch directory (`$TMPDIR/FramewrightEngineTests/<UUID>`) when the
+test ends; `TEST_RUNNER_FRAMEWRIGHT_KEEP_TEST_SCRATCH=1 xcodebuild ...` keeps them (a test that logs a
+file to look at, such as the sharpening exports, says so). AppTests run inside the app, so a
+UserDefaults suite they make is kept in a directory of the test's own (`makeTestDefaults`), removed
+with it; `StoreFixture.cleanUp()` waits for the engine's thumbnail and waveform work before removing
+the fixture's media and caches.
+
 ## Signing
 
 - **Debug** (what `build`/`test` above use) and **Release** are signed ad hoc

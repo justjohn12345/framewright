@@ -15,7 +15,7 @@ final class ReverseClipTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "reverse-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("reverse")
     }
 
     override func tearDown() async throws {

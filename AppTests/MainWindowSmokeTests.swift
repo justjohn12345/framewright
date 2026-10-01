@@ -11,14 +11,18 @@ final class MainWindowSmokeTests: XCTestCase {
     /// the test's temporary directory for manual inspection.
     func testMainWindowBuildsAllPanels() throws {
         let directory = try TestMediaFactory.scratchDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let movie = directory.appendingPathComponent("smoke.mov")
         let tone = directory.appendingPathComponent("smoke.wav")
         try TestMediaFactory.writeMovie(to: movie, frames: 90)
         try TestMediaFactory.writeWAV(to: tone, seconds: 3)
 
         let store = ProjectStore(engine: VEEngine(cacheDirectory: directory.appendingPathComponent("Caches")))
-        let documents = DocumentController(store: store, defaults: UserDefaults(suiteName: "smoke-\(UUID())") ?? .standard)
+        defer {
+            // The engine's media work first: a running job would create the cache directory again.
+            XCTAssertTrue(store.engine.waitUntilMediaWorkIsIdle(timeout: 30))
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let documents = DocumentController(store: store, defaults: try makeTestDefaults("smoke"))
         var imported: [VEAssetInfo] = []
         let importDone = expectation(description: "import")
         store.importMedia([movie, tone]) {
@@ -84,7 +88,7 @@ final class MainWindowSmokeTests: XCTestCase {
         let store = fixture.store
         let (movie, _) = try await fixture.importMedia()
         try fixture.placeMovie(movie, at: 0)
-        let documents = DocumentController(store: store, defaults: UserDefaults(suiteName: "layout-smoke-\(UUID())") ?? .standard)
+        let documents = DocumentController(store: store, defaults: try makeTestDefaults("layout-smoke"))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900),
                               styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false

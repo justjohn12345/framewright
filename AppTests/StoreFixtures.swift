@@ -33,7 +33,11 @@ final class StoreFixture {
         XCTAssertTrue(store.engine.sequence.isConfigured)
     }
 
+    /// Removes the media and the engine's caches. Waits first until the engine's thumbnail and waveform
+    /// work has finished: a job still running would write its cache file and so create the directory
+    /// again (review B8: thousands of directories were left in the app's container).
     func cleanUp() {
+        XCTAssertTrue(store.engine.waitUntilMediaWorkIsIdle(timeout: 30), "thumbnail and waveform work finished")
         try? FileManager.default.removeItem(at: directory)
     }
 

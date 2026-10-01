@@ -39,6 +39,7 @@
 #include <CoreGraphics/CoreGraphics.h>
 #include <dispatch/dispatch.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -114,6 +115,11 @@ class ThumbnailService {
 
     Stats stats() const;
 
+    /// Blocks until no request is queued and no worker is decoding (and writing its disk cache file), or `timeout`;
+    /// false on timeout. Callbacks of finished work may still be on their way to their queues. For
+    /// tests (which delete the cache directory afterwards) and orderly shutdown.
+    bool waitUntilIdle(std::chrono::milliseconds timeout);
+
     /// Disk cache file name for a request (exposed for tests and cache management).
     static std::string diskFileName(const ThumbnailRequest &request);
 
@@ -167,6 +173,8 @@ class ThumbnailService {
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
+    std::condition_variable idleCv_; ///< Notified when the last running job finishes.
+    int running_ = 0;                ///< Jobs a worker took from queue_ and has not finished.
     bool stopping_ = false;
     std::deque<std::shared_ptr<Job>> queue_;
     std::map<Key, std::shared_ptr<Job>> jobs_; ///< Pending and running, for coalescing.

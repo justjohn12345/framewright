@@ -21,7 +21,7 @@ final class WindowLayoutTests: XCTestCase {
     }
 
     private func suite() throws -> UserDefaults {
-        try XCTUnwrap(UserDefaults(suiteName: "layout-\(UUID())"))
+        try makeTestDefaults("layout")
     }
 
     // MARK: Source monitor visibility

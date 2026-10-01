@@ -2,6 +2,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <Foundation/Foundation.h>
+#import <XCTest/XCTest.h>
 
 #include "../../Engine/Media/MediaTypes.h"
 
@@ -456,11 +457,76 @@ std::string writeToneAudioFile(const std::string &path, double seconds, double f
     return {};
 }
 
-std::string scratchDirectory() {
+namespace {
+
+std::mutex &scratchMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+bool keepsScratch() {
+    const char *keep = std::getenv("FRAMEWRIGHT_KEEP_TEST_SCRATCH");
+    return keep != nullptr && *keep != '\0' && std::string(keep) != "0";
+}
+
+/// Scratch directories made since the last test ended (removed when the next one ends).
+std::vector<std::string> &pendingScratch() {
+    static std::vector<std::string> directories;
+    return directories;
+}
+
+/// Scratch directories that last for the whole bundle (bundleScratchDirectory()).
+std::vector<std::string> &bundleScratch() {
+    static std::vector<std::string> directories;
+    return directories;
+}
+
+void removeAll(const std::vector<std::string> &directories) {
+    if (keepsScratch()) {
+        return;
+    }
+    for (const std::string &dir : directories) {
+        std::error_code error;
+        std::filesystem::remove_all(dir, error); // best effort: a file still open elsewhere just stays
+    }
+}
+
+} // namespace
+
+void removeScratchDirectories() {
+    std::vector<std::string> directories;
+    {
+        std::lock_guard<std::mutex> lock(scratchMutex());
+        directories.swap(pendingScratch());
+    }
+    removeAll(directories);
+}
+
+void removeBundleScratchDirectories() {
+    std::vector<std::string> directories;
+    {
+        std::lock_guard<std::mutex> lock(scratchMutex());
+        directories.swap(bundleScratch());
+    }
+    removeAll(directories);
+}
+
+void registerScratchDirectory(const std::string &dir, bool wholeBundle);
+
+std::string makeScratchDirectory(bool wholeBundle) {
     NSString *base = [NSTemporaryDirectory() stringByAppendingPathComponent:@"FramewrightEngineTests"];
     NSString *dir = [base stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    registerScratchDirectory(dir.UTF8String, wholeBundle);
     return dir.UTF8String;
+}
+
+std::string bundleScratchDirectory() {
+    return makeScratchDirectory(true);
+}
+
+std::string scratchDirectory() {
+    return makeScratchDirectory(false);
 }
 
 uint64_t physicalFootprint() {
@@ -473,3 +539,47 @@ uint64_t physicalFootprint() {
 }
 
 } // namespace ve::test
+
+// Removes every scratch directory a test made (scratchDirectory()) when that test ends, and those made
+// outside any test and the bundle's own (bundleScratchDirectory()) when the bundle ends, so test runs leave nothing in $TMPDIR/FramewrightEngineTests
+// (review B8). FRAMEWRIGHT_KEEP_TEST_SCRATCH=1 (from xcodebuild: TEST_RUNNER_FRAMEWRIGHT_KEEP_TEST_SCRATCH=1)
+// keeps them, for a test that logs a file for inspection.
+@interface VETestScratchJanitor : NSObject <XCTestObservation>
+@end
+
+@implementation VETestScratchJanitor
+
+- (void)testCaseDidFinish:(XCTestCase *)testCase {
+    (void)testCase;
+    ve::test::removeScratchDirectories();
+}
+
+- (void)testBundleDidFinish:(NSBundle *)testBundle {
+    (void)testBundle;
+    ve::test::removeScratchDirectories();
+    ve::test::removeBundleScratchDirectories();
+}
+
+@end
+
+namespace ve::test {
+
+void registerScratchDirectory(const std::string &dir, bool wholeBundle) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+      // The observation center is used from the main thread; scratchDirectory() may run on another.
+      void (^add)(void) = ^{
+        [XCTestObservationCenter.sharedTestObservationCenter addTestObserver:[[VETestScratchJanitor alloc] init]];
+      };
+      if (NSThread.isMainThread) {
+          add();
+      } else {
+          dispatch_async(dispatch_get_main_queue(), add);
+      }
+    });
+    std::lock_guard<std::mutex> lock(scratchMutex());
+    (wholeBundle ? bundleScratch() : pendingScratch()).push_back(dir);
+}
+
+} // namespace ve::test
+

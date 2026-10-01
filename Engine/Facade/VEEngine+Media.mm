@@ -232,6 +232,11 @@ NSError *makeError(const media::MediaError &error, NSString *context) {
     return peaks ? makeWaveform(id, peaks) : nil;
 }
 
+- (BOOL)waitUntilMediaWorkIsIdle:(NSTimeInterval)timeout {
+    VE_ASSERT_MAIN();
+    return [_media waitUntilServicesAreIdle:timeout];
+}
+
 - (VEHardwareCaps *)hardwareCaps {
     VE_ASSERT_MAIN();
     return makeHardwareCaps();

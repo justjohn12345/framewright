@@ -11,7 +11,7 @@ final class InspectorModelTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "inspector-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("inspector")
     }
 
     override func tearDown() async throws {

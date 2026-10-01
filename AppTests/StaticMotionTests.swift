@@ -15,7 +15,7 @@ final class StaticMotionTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try StoreFixture()
-        fixture.store.defaults = try XCTUnwrap(UserDefaults(suiteName: "static-motion-\(UUID())"))
+        fixture.store.defaults = try makeTestDefaults("static-motion")
     }
 
     override func tearDown() async throws {
