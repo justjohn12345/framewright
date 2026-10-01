@@ -79,15 +79,17 @@
 // premultiplied colour, each channel within [0, alpha]; alpha is left as the pre-scale made it. The
 // kernel is a plain compute pass over fixed arithmetic, so the program monitor, the solo preview, the
 // output display, the source monitor and the export (each its own Compositor) produce the same planes.
-// Which pictures are sharpened is decided at the scale the picture has in the output of the sequence, never
-// at a monitor's viewport scale: for a pixel-buffer target (an export) its drawn size in the target, for a
-// texture target (a monitor, the solo preview, the output display) its size in the sequence frame, which is
-// what an export at the sequence's size draws. A picture below kMinifyThreshold at that scale is sharpened
-// (its plane pre-scaled to the smaller of its drawn size and its size at that scale, so a monitor showing
-// the sequence larger than its size magnifies what such an export sharpens); a 1080p source in a 1080p
-// sequence is not sharpened in a half-size monitor, a 4K source in that sequence is sharpened in every
-// monitor and export. The pre-scale for a monitor's own minification (resampling quality) is decided at the
-// drawn size as described under "Minification". Cost (testPreviewOf4KSourceTiming): the 4K
+// Which pictures are sharpened: those a target draws below kMinifyThreshold (they are Lanczos pre-scaled to
+// the drawn size; nothing is resampled below what the target draws) and that are minified in the output of
+// the sequence too: for a pixel-buffer target (an export) its drawn size in the target, for a texture target
+// (a monitor, the solo preview, the output display) its size in the sequence frame, which is what an export
+// at the sequence's size draws. The amount is sharpenAmountAt(max(drawn scale, that scale)). So a 1080p
+// source in a 1080p sequence is not sharpened in a half-size monitor; a 4K source in a 1080p sequence is
+// sharpened in a 1080p or smaller monitor and in the 1080p export, and drawn 1:1 unsharpened on a 4K display.
+// Known gap: an export smaller than the sequence (a 4K sequence of 4K sources exported at 1080p) sharpens
+// while the monitors show the sequence's own scale, 1:1 in the sequence, unsharpened. The pre-scale for a
+// monitor's own minification (resampling quality) is decided at the drawn size as described under
+// "Minification". Cost (testPreviewOf4KSourceTiming): the 4K
 // luma plane shown at 1080p gains one 5x5 pass over the 1920x1080 pre-scaled plane, 0.61 -> 0.88 ms
 // of GPU time per frame.
 //

@@ -88,10 +88,15 @@ Review of group A (84d9e20..6864cc0), regressions R1-R7, fixed before the rest o
   each, so 1918x1080 exported 1920x1080 with a black column on each side (1916x1080: 2 px pillars,
   1920x1076: rows). It now snaps only when fitRect of the sequence fills the snapped frame, else keeps the
   aspect (1918x1080, 1916x1080, 1928x1080 at 1080p).
-- R4 (item 5), the 1:1 placement popped during animation: "Compositor: the pixel-exact base placement is
-  decided from the sizes alone". It was decided from the evaluated transform (identity only), so a move
+- R4 (item 5), the 1:1 placement popped during animation: 3188306. It was decided from the evaluated transform (identity only), so a move
   resting at scale 1 drew that frame 1:1 top-left and the next fitted and centred. The base (fit 1, the
   picture's centre) now depends on the sizes only and the clip transform applies about it.
+- R5 (item 6), sharpening lowered the resolution on big displays: "Compositor: never resample below what
+  the target draws; sharpen what both the target and the sequence minify". A 4K source in a 1080p sequence
+  on a 4K display was pre-scaled to 1920x1080, sharpened and magnified. The pre-scale is decided by the
+  drawn scale (as before item 6) and the amount is sharpenAmountAt(max(drawn scale, sequence or output
+  scale)). Known gap (documented in Compositor.h): an export smaller than the sequence (a 4K sequence at
+  1080p) sharpens while the monitors show the sequence's scale unsharpened.
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the

@@ -1756,7 +1756,9 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   the sequence for texture targets (monitors, solo preview, output display) and in the target for pixel-buffer
   targets (exports), never at a monitor's viewport scale; the source monitor (its sequence is the source's
   size) therefore never sharpens. The amount is `Compositor::sharpenAmountAt(scale)`: 0.6 at 0.6 and below,
-  none at 0.75, smoothstep between.
+  none at 0.75, smoothstep between. (Corrected by review fix R5, see "Fix round 2026-09-30, groups B and
+  C": the pre-scale is decided by the drawn scale again, and the amount is sharpenAmountAt(max(drawn scale,
+  that scale)).)
 - Frame rates above 240 fps (`kMaxFramesPerSecond`, Sequence.h) are a time base: `makeMediaAsset` takes the
   track's nominal rate instead (as n/120000), `standardFrameDurationFor` returns nullopt.
 - VEExporter: the job's completion ends the output URL's security-scoped access (after a cancelled job

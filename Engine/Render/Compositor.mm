@@ -454,12 +454,13 @@ struct Compositor::Impl {
         }
     }
 
-    // The textures to sample for `t` drawn at `outputScale` target pixels per source pixel:
-    // planes minified below kMinifyThreshold get a Lanczos pre-scale job (straight-alpha RGBA is
-    // premultiplied first). With `sharpenSetting`, a source at fewer than kMinifyThreshold pixels per
-    // texel at `sharpenScale` (the scale sharpening is decided at: the output's for an export, the
-    // sequence's for a monitor, never a monitor's viewport) has its luma or RGBA plane pre-scaled to the
-    // smaller of its drawn size and its size at that scale, then sharpened.
+    // The textures to sample for `t` drawn at `outputScale` target pixels per source pixel: planes
+    // minified below kMinifyThreshold get a Lanczos pre-scale job to the drawn size (straight-alpha RGBA
+    // is premultiplied first); nothing is ever resampled below what the target draws. With
+    // `sharpenSetting`, the luma or RGBA plane of such a pre-scale is then sharpened by
+    // sharpenAmountAt(max(outputScale, sharpenScale)), `sharpenScale` being the picture's scale in the
+    // sequence (a monitor) or in the export's output: only a picture that both the target and the
+    // sequence or export minify is sharpened.
     Result<SourceBinding> bindSource(const TextureSet &t, const VideoLayer &layer, double outputScale,
                                      double sharpenScale, bool sharpenSetting) {
         SourceBinding binding;
@@ -467,14 +468,14 @@ struct Compositor::Impl {
         binding.planes[1] = t.plane(1);
         const bool rgba = t.sourceClass() == SourceClass::RGBA;
         binding.straightAlpha = rgba && !t.alphaIsPremultiplied(layer.isStill);
-        const double amount = sharpenSetting && unsharp != nil ? Compositor::sharpenAmountAt(sharpenScale) : 0.0;
-        const bool sharpen = amount > 0;
-        if (lanczos == nil || !(outputScale > 0) || (!(outputScale < kMinifyThreshold) && !sharpen)) {
+        if (lanczos == nil || !(outputScale > 0) || !(outputScale < kMinifyThreshold)) {
             return binding;
         }
-        // A monitor drawing larger than the sequence pre-scales to the sequence's size (what an export at
-        // that size sharpens) and magnifies it; otherwise to the drawn size.
-        const double scale = sharpen ? std::min(outputScale, sharpenScale) : outputScale;
+        const double amount = sharpenSetting && unsharp != nil
+                                  ? Compositor::sharpenAmountAt(std::max(outputScale, sharpenScale))
+                                  : 0.0;
+        const bool sharpen = amount > 0;
+        const double scale = outputScale;
         for (std::size_t p = 0; p < t.planeCount(); ++p) {
             id<MTLTexture> plane = t.plane(p);
             const double planeW = double(plane.width);
@@ -936,9 +937,11 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
                                    : std::min(double(viewport.width) / graph.width, double(viewport.height) / graph.height);
     std::size_t drawnLayers = 0;
     im.exactPrescaleSizes = targetBuffer != nullptr;
-    // Sharpening is decided at the output's scale for a pixel-buffer target (an export of the sequence) and
-    // at the sequence's own scale for a texture target (a monitor: its viewport scale never decides), so a
-    // monitor sharpens what an export at the sequence's size sharpens.
+    // The scale sharpening also needs to minify (bindSource takes the larger of it and the drawn scale): the
+    // output's for a pixel-buffer target (an export of the sequence), the sequence's own for a texture
+    // target (a monitor). A monitor therefore sharpens what an export at the sequence's size sharpens when
+    // it draws the picture minified too, never a picture that is not minified in the sequence (1080p in a
+    // 1080p sequence), and never one it draws at 0.75 of its size or more (a 4K source on a 4K display).
     const double sharpenTargetScale = targetBuffer != nullptr ? targetScale : 1.0;
     if (Status built =
             im.buildItems(graph, lookup, colorTexture.pixelFormat, targetScale, sharpenTargetScale, drawnLayers);
