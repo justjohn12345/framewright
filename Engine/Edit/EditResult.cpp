@@ -1,5 +1,7 @@
 #include "EditResult.h"
 
+#include <algorithm>
+
 namespace ve {
 
 const char *nameOf(EditError error) {
@@ -48,6 +50,18 @@ const char *nameOf(EditError error) {
         return "invariant violation";
     }
     return "unknown";
+}
+
+void mergeDroppedIds(EditResult &into, const EditResult &from) {
+    auto add = [](std::vector<SpanId> &ids, const std::vector<SpanId> &more) {
+        for (SpanId id : more) {
+            if (std::find(ids.begin(), ids.end(), id) == ids.end()) {
+                ids.push_back(id);
+            }
+        }
+    };
+    add(into.droppedTransitionIds, from.droppedTransitionIds);
+    add(into.droppedSpanIds, from.droppedSpanIds);
 }
 
 } // namespace ve

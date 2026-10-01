@@ -320,17 +320,25 @@ Done:
   `FFmpegBackendConformanceTests testSoftwareEncodesConvertWithTheTaggedMatrix` (AV1 patches at four
   matrices decoded back: within 1 code; the old line puts BT.2020 up to 12 and 240M up to 4 codes off).
 
-- 5, B5, thumbnails and waveforms ignored "Prefer FFmpeg": "Thumbnails and waveforms: follow the
-  router's routing policy". Root cause: the preference sets the router's default policy, but the services
+- 5, B5, thumbnails and waveforms ignored "Prefer FFmpeg": 66c4607. Root cause: the preference sets the router's default policy, but the services
   probed with their own `Config::routing` (a default-constructed policy). `Config::routing` is now
   optional; empty (the library's choice) means the router's default policy at each decode. The thumbnail
   service keys its routing memo and idle decoders by file version and policy, so a change applies at
   once. No engine coupling was added. `VEMediaLibraryTests
   testThumbnailsAndWaveformsFollowTheRoutersPolicyAtRunTime` (two fake backends count decoder opens).
 
+- 6, B6, the undo stack ignored a failed re-apply: "Undo stack: drop the history when a drag cannot put
+  its last step back; report an accumulated step's dropped ids". Root causes: `push()` ignored
+  `previous.apply()`'s result after a refused ReplacePrevious step; `AccumulatedSteps::apply` returned a
+  bare success. Now the undo side is dropped (as `undo()` does) and the change counted; the accumulated
+  step merges its children's ids through a shared `mergeDroppedIds` (EditResult.h; `CompositeCommand`
+  uses it too). `UndoStack::redo` takes an optional `EditResult *` so the redone step's ids can be read
+  (the facade's `redo` still ignores them; nothing reported them on redo before either). Doctests: "a
+  drag step whose last good step cannot be applied again drops the history", "an accumulated step
+  reports its steps' dropped transitions and spans on redo" (both fail on the old code), "redo reports
+  what a plain step dropped" (coverage).
+
 Not started (key facts):
-- 6, B6, `UndoStack::push` ignores a failed re-apply; `AccumulatedSteps::apply` drops its children's
-  dropped ids.
 - 7, B8, test hygiene (EngineTests scratch directories, AppTests defaults suites, media work outliving
   `StoreFixture.cleanUp()`).
 - 8, the `~/Movies` demo-project test and the 200-click soak out of the default run.

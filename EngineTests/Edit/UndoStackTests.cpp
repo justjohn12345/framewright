@@ -1,5 +1,6 @@
 #include "../../Engine/Edit/UndoStack.h"
 #include "../../Engine/Facade/VEFacadeCommands+Internal.h"
+#include "../Model/SpanReference.h"
 #include "EditTestSupport.h"
 
 using namespace vetest;
@@ -34,6 +35,35 @@ class Unmergeable final : public Command {
 
   private:
     std::unique_ptr<Command> inner_;
+};
+
+// Forwards to `inner` the first time; every later apply is refused without touching the project (as a
+// command whose redo finds the project changed behind the stack's back would be).
+class AppliesOnce final : public Command {
+  public:
+    explicit AppliesOnce(std::unique_ptr<Command> inner, std::string key) : inner_(std::move(inner)) {
+        setCoalescingKey(std::move(key));
+    }
+    EditResult apply(Project &project) override {
+        if (applied_) {
+            return EditResult::failure(EditError::InvariantViolation, "cannot be applied again");
+        }
+        applied_ = true;
+        return inner_->apply(project);
+    }
+    void revert(Project &project) const override {
+        inner_->revert(project);
+    }
+    bool canRevert(const Project &project) const override {
+        return inner_->canRevert(project);
+    }
+    std::string name() const override {
+        return "Applies Once";
+    }
+
+  private:
+    std::unique_ptr<Command> inner_;
+    bool applied_ = false;
 };
 
 } // namespace
@@ -547,4 +577,80 @@ TEST_CASE("UndoStack: push reports the transitions an edit dropped") {
     const EditResult r = stack.push(fx.project, std::make_unique<TrimClipTail>(fx.seq, a, f30(50)));
     REQUIRE(r.ok());
     CHECK(r.droppedTransitionIds == std::vector<SpanId>{t});
+}
+
+// Review B6 (general review, 2026-10-01). A refused step of a drag puts the gesture's last good step back
+// with apply(); push() ignored that apply()'s result, so when it failed the history still listed the
+// gesture's step although the project was back where the gesture started. Now the history is dropped,
+// as undo() does when a step no longer matches the project.
+TEST_CASE("UndoStack: a drag step whose last good step cannot be applied again drops the history") {
+    Fixture fx;
+    const ClipId c = fx.addClip(fx.v1, fx.av30, 0, 30);
+    UndoStack stack;
+    REQUIRE(stack.push(fx.project, moveTo(fx, c, fx.v1, 5)).ok());
+    const Project beforeDrag = fx.project;
+    stack.beginCoalescing("drag");
+    REQUIRE(stack.push(fx.project, std::make_unique<AppliesOnce>(moveTo(fx, c, fx.v1, 10), "drag")).ok());
+    REQUIRE(stack.undoCount() == 2);
+    const std::uint64_t version = stack.changeCount();
+    // A refused step (onto an audio track): the last good step is reverted, the new one refused, and the
+    // last good one cannot be applied again.
+    auto refused = moveTo(fx, c, fx.a1, 20);
+    refused->setCoalescingKey("drag");
+    CHECK(stack.push(fx.project, std::move(refused)).error == EditError::TrackKindMismatch);
+    CHECK(fx.project == beforeDrag);
+    CHECK_FALSE(stack.canUndo());
+    CHECK(stack.undoCount() == 0);
+    CHECK(stack.undoName().empty());
+    CHECK_FALSE(stack.isCoalescing());
+    CHECK(stack.changeCount() > version);
+    CHECK(stack.isDirty());
+}
+
+// Review B6: the step of an Accumulate group whose commands cannot merge (AccumulatedSteps) reported none of
+// its children's dropped transition and span ids on redo, which EditResult promises.
+TEST_CASE("UndoStack: an accumulated step reports its steps' dropped transitions and spans on redo") {
+    Fixture fx;
+    const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
+    const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
+    const SpanId t = fx.addTransition(fx.v1, a, b, 10);
+    // An Opacity span over b's first second (source 10 s to 11 s, timeline frames 60 to 90).
+    SpanTracks fade;
+    fade.opacity = rampTrack(1, 0.3, CMTimeMake(1, 1));
+    const SpanId span = fx.addSpan(b, SpanKind::Opacity, 1, CMTimeMake(10, 1), CMTimeMake(11, 1), fade);
+    fx.requireValid();
+    UndoStack stack;
+    const std::string key = "group";
+    stack.beginCoalescing(key, CoalesceMode::Accumulate);
+    const EditResult trimmed =
+        stack.push(fx.project, std::make_unique<Unmergeable>(std::make_unique<TrimClipTail>(fx.seq, a, f30(50)), key));
+    REQUIRE(trimmed.ok());
+    CHECK(trimmed.droppedTransitionIds == std::vector<SpanId>{t});
+    const EditResult headTrimmed =
+        stack.push(fx.project, std::make_unique<Unmergeable>(std::make_unique<TrimClipHead>(fx.seq, b, f30(100)), key));
+    REQUIRE(headTrimmed.ok());
+    CHECK(headTrimmed.droppedSpanIds == std::vector<SpanId>{span});
+    stack.endCoalescing();
+    REQUIRE(stack.undoCount() == 1);
+    const Project end = fx.project;
+
+    REQUIRE(stack.undo(fx.project));
+    EditResult redone;
+    REQUIRE(stack.redo(fx.project, &redone));
+    CHECK(fx.project == end);
+    CHECK(redone.droppedTransitionIds == std::vector<SpanId>{t});
+    CHECK(redone.droppedSpanIds == std::vector<SpanId>{span});
+}
+
+TEST_CASE("UndoStack: redo reports what a plain step dropped") {
+    Fixture fx;
+    const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
+    const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
+    const SpanId t = fx.addTransition(fx.v1, a, b, 10);
+    UndoStack stack;
+    REQUIRE(stack.push(fx.project, std::make_unique<TrimClipTail>(fx.seq, a, f30(50))).ok());
+    REQUIRE(stack.undo(fx.project));
+    EditResult redone;
+    REQUIRE(stack.redo(fx.project, &redone));
+    CHECK(redone.droppedTransitionIds == std::vector<SpanId>{t});
 }

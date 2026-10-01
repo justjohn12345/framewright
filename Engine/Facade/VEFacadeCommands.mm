@@ -103,19 +103,7 @@ EditResult CompositeCommand::apply(Project &project) {
             }
             return result;
         }
-        // Every child's side effects are the composite's.
-        for (SpanId id : result.droppedTransitionIds) {
-            if (std::find(combined.droppedTransitionIds.begin(), combined.droppedTransitionIds.end(), id) ==
-                combined.droppedTransitionIds.end()) {
-                combined.droppedTransitionIds.push_back(id);
-            }
-        }
-        for (SpanId id : result.droppedSpanIds) {
-            if (std::find(combined.droppedSpanIds.begin(), combined.droppedSpanIds.end(), id) ==
-                combined.droppedSpanIds.end()) {
-                combined.droppedSpanIds.push_back(id);
-            }
-        }
+        mergeDroppedIds(combined, result); // every child's side effects are the composite's
     }
     return combined;
 }

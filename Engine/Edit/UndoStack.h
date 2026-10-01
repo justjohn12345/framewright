@@ -18,7 +18,8 @@
 //
 // History that no longer matches the project (only possible if the project is modified outside
 // the stack) is never replayed onto the wrong state: undo() drops the undo side and redo() the
-// redo side, and both return false.
+// redo side, and both return false; push() drops the undo side when a refused step of a
+// ReplacePrevious group cannot put the group's last good step back.
 //
 // Document-modified tracking: markClean() records the current position; isDirty() reports
 // whether the project differs from that position. changeCount() increases on every change
@@ -52,7 +53,8 @@ class UndoStack {
 
     // Applies `command` to `project` and records it. Returns the command's result (including
     // droppedTransitionIds, droppedSpanIds); on failure nothing is recorded and the project is unchanged (during
-    // ReplacePrevious coalescing the group's previous command stays applied).
+    // ReplacePrevious coalescing the group's previous command stays applied; if it cannot be applied again,
+    // which needs a project changed outside the stack, the undo history is dropped).
     EditResult push(Project &project, std::unique_ptr<Command> command);
 
     bool canUndo() const {
@@ -61,9 +63,10 @@ class UndoStack {
     bool canRedo() const {
         return index_ < commands_.size();
     }
-    // Both end any open coalescing group first. Return false when there is nothing to do.
+    // Both end any open coalescing group first. Return false when there is nothing to do. redo()
+    // puts the redone step's result (the transition and span ids it dropped again) in `redone`.
     bool undo(Project &project);
-    bool redo(Project &project);
+    bool redo(Project &project, EditResult *redone = nullptr);
 
     // Names of the commands undo()/redo() would apply, or empty.
     std::string undoName() const;

@@ -76,4 +76,8 @@ struct EditResult {
     }
 };
 
+// Adds `from`'s dropped transition and span ids to `into`'s, each id once and in order: a step made of
+// several commands (a composite, an accumulated undo group) reports its children's side effects.
+void mergeDroppedIds(EditResult &into, const EditResult &from);
+
 } // namespace ve

@@ -22,7 +22,10 @@ class AccumulatedSteps final : public Command {
         steps_.push_back(std::move(next));
     }
 
+    // Redoes the steps in order. The result reports every step's dropped transition and span ids
+    // (EditResult promises them on redo too).
     EditResult apply(Project &project) override {
+        EditResult combined = EditResult::success();
         for (std::size_t i = 0; i < steps_.size(); ++i) {
             EditResult result = steps_[i]->apply(project);
             if (!result) {
@@ -31,8 +34,9 @@ class AccumulatedSteps final : public Command {
                 }
                 return result;
             }
+            mergeDroppedIds(combined, result);
         }
-        return EditResult::success();
+        return combined;
     }
 
     void revert(Project &project) const override {
@@ -84,7 +88,13 @@ EditResult UndoStack::push(Project &project, std::unique_ptr<Command> command) {
             previous.revert(project);
             result = command->apply(project);
             if (!result) {
-                previous.apply(project); // restore the gesture's last good state
+                // Restore the gesture's last good state. If even that fails (only possible if the
+                // project was changed outside the stack), the project is back where the gesture
+                // started and the step no longer describes it: drop the history, as undo() does.
+                if (!previous.apply(project)) {
+                    dropUndo();
+                    ++changeCount_;
+                }
                 return result;
             }
             if (command->isNoOp()) {
@@ -205,15 +215,18 @@ bool UndoStack::undo(Project &project) {
     return true;
 }
 
-bool UndoStack::redo(Project &project) {
+bool UndoStack::redo(Project &project, EditResult *redone) {
     endCoalescing();
     if (!canRedo()) {
         return false;
     }
-    const EditResult result = commands_[index_]->apply(project);
+    EditResult result = commands_[index_]->apply(project);
     if (!result) {
         dropRedo(); // only possible if the project was modified outside the stack
         return false;
+    }
+    if (redone != nullptr) {
+        *redone = std::move(result);
     }
     ++index_;
     ++changeCount_;
