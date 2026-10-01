@@ -30,10 +30,7 @@ using media::PixelBuffer;
 using media::Result;
 using media::Status;
 
-static_assert(sizeof(VESourceUniforms) == 144, "VESourceUniforms layout must match Shaders.metal");
-static_assert(sizeof(VEDrawUniforms) == 64 + 2 * 144, "VEDrawUniforms layout must match Shaders.metal");
-static_assert(sizeof(VEConvertUniforms) == 64, "VEConvertUniforms layout must match Shaders.metal");
-static_assert(sizeof(VEUnsharpUniforms) == 48, "VEUnsharpUniforms layout must match Shaders.metal");
+// The uniform layouts are checked on both sides of the C / Metal boundary in ShaderTypes.h.
 static_assert(int(VETransitionShapeNone) == int(TransitionKind::CrossDissolve) &&
                   int(VETransitionShapeWipeLeft) == int(TransitionKind::WipeLeft) &&
                   int(VETransitionShapeWipeRight) == int(TransitionKind::WipeRight) &&
@@ -211,7 +208,10 @@ void fillSource(VESourceUniforms &u, const TextureSet &textures, const SourceBin
     u.uvFromFrameX = placement.uvFromFrameX;
     u.uvFromFrameY = placement.uvFromFrameY;
     u.chromaTransform = textures.chromaTransform();
-    u.params = simd_make_float4(float(std::clamp(weight, 0.0, 1.0)), binding.straightAlpha ? 1.0f : 0.0f, 0.0f, 0.0f);
+    u.weight = float(std::clamp(weight, 0.0, 1.0));
+    u.straightAlpha = binding.straightAlpha ? 1u : 0u;
+    u.unused0 = 0;
+    u.unused1 = 0;
     u.planeExtent = binding.extent;
 }
 
@@ -227,15 +227,19 @@ bool isClosingIris(const LayerTransition &transition) {
     return transition.kind == TransitionKind::Iris && transition.role == TransitionRole::FadeOut;
 }
 
-// The progress uniforms of a draw of `transition` (VEDrawUniforms::mix): x the mix (the frame's centre),
-// y and z the frame's exposure interval [progressStart, progressEnd] for a shape (the instant at the mix
-// when the interval is not set), mirrored to [1 - progressEnd, 1 - progressStart] for a closing iris (the
-// opening iris's interval whose reveal is the picture's share); y and z zero for a dissolve, whose
-// uniforms are unchanged.
-simd_float4 progressUniforms(const LayerTransition &transition) {
+// The transition uniforms of a draw of `transition` (VETransitionUniforms). The mix at the frame's centre;
+// for a shape, the frame's exposure interval [progressStart, progressEnd] (the instant at the mix when the
+// interval is not set), mirrored to [1 - progressEnd, 1 - progressStart] for a closing iris (the opening
+// iris's interval whose reveal is the picture's share), the shape and the soft edge, and for a layer
+// drawn alone whether its picture is the revealed one: shown times the reveal m where it is the incoming
+// side (a fade in, or a closing iris over its mirrored interval), times 1 - m otherwise. Everything but
+// the mix is zero for a dissolve, whose draws are unchanged.
+VETransitionUniforms transitionUniforms(const LayerTransition &transition, bool drawnAlone) {
+    VETransitionUniforms u{};
     const double mix = std::clamp(transition.mix, 0.0, 1.0);
+    u.mix = float(mix);
     if (transition.kind == TransitionKind::CrossDissolve) {
-        return simd_make_float4(float(mix), 0.0f, 0.0f, 0.0f);
+        return u;
     }
     double start = transition.progressStart;
     double end = transition.progressEnd;
@@ -249,19 +253,13 @@ simd_float4 progressUniforms(const LayerTransition &transition) {
         end = 1.0 - start;
         start = mirroredStart;
     }
-    return simd_make_float4(float(mix), float(start), float(end), 0.0f);
-}
-
-// The shape uniforms of a draw of `transition` (VEDrawUniforms::reserved); all zero for a dissolve. A
-// layer drawn alone shows its picture times the reveal m where the picture is the incoming side (a fade in,
-// or a closing iris over its mirrored interval) and times 1 - m otherwise.
-simd_float4 shapeUniforms(const LayerTransition &transition, bool drawnAlone) {
-    if (transition.kind == TransitionKind::CrossDissolve) {
-        return simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    }
+    u.progressStart = float(start);
+    u.progressEnd = float(end);
+    u.feather = float(kTransitionFeather);
+    u.shape = VEInt(transition.kind);
     const bool pictureIsRevealed = transition.isIncoming || isClosingIris(transition);
-    return simd_make_float4(float(int(transition.kind)), float(kTransitionFeather),
-                            drawnAlone && pictureIsRevealed ? 1.0f : 0.0f, 0.0f);
+    u.incoming = drawnAlone && pictureIsRevealed ? 1u : 0u;
+    return u;
 }
 
 struct DrawItem {
@@ -289,14 +287,14 @@ struct PrescaleJob {
 
 // The nominal luma range of a YCbCr format's luma plane as unorm values: 16-235 (8-bit video range),
 // 64-940 in the high bits of 16-bit words (10-bit video range), or the whole range (full range).
-simd_float4 lumaRangeOf(OSType pixelFormat) {
+simd_float2 lumaRangeOf(OSType pixelFormat) {
     if (media::isFullRangeYCbCr(pixelFormat)) {
-        return simd_make_float4(0.0f, 1.0f, 0.0f, 0.0f);
+        return simd_make_float2(0.0f, 1.0f);
     }
     if (media::isTenBitPixelFormat(pixelFormat)) {
-        return simd_make_float4(float(64.0 * 64.0 / 65535.0), float(940.0 * 64.0 / 65535.0), 0.0f, 0.0f);
+        return simd_make_float2(float(64.0 * 64.0 / 65535.0), float(940.0 * 64.0 / 65535.0));
     }
-    return simd_make_float4(float(16.0 / 255.0), float(235.0 / 255.0), 0.0f, 0.0f);
+    return simd_make_float2(float(16.0 / 255.0), float(235.0 / 255.0));
 }
 
 // Pooled textures for pre-scaled planes.
@@ -545,10 +543,14 @@ struct Compositor::Impl {
                     return std::move(sharpened).error();
                 }
                 job.sharpened = sharpened.value();
-                job.unsharp.params = simd_make_float4(float(amount),
-                                                      float(Compositor::kSharpenThreshold), rgba ? 0.0f : 1.0f, 0.0f);
-                job.unsharp.range = rgba ? simd_make_float4(0.0f, 1.0f, 0.0f, 0.0f) : lumaRangeOf(t.pixelFormat());
-                job.unsharp.size = simd_make_uint4(std::uint32_t(w), std::uint32_t(h), 0u, 0u);
+                job.unsharp.amount = float(amount);
+                job.unsharp.threshold = float(Compositor::kSharpenThreshold);
+                const simd_float2 range = rgba ? simd_make_float2(0.0f, 1.0f) : lumaRangeOf(t.pixelFormat());
+                job.unsharp.rangeLow = range.x;
+                job.unsharp.rangeHigh = range.y;
+                job.unsharp.width = std::uint32_t(w);
+                job.unsharp.height = std::uint32_t(h);
+                job.unsharp.isLuma = rgba ? 0u : 1u;
                 binding.planes[p] = job.sharpened;
             }
             jobs.push_back(job);
@@ -738,8 +740,7 @@ struct Compositor::Impl {
                 fillSource(item.uniforms.a, t, item.a, pl, weight);
                 item.uniforms.quadRect = simd_make_float4(float(pl.x0), float(pl.y0), float(pl.x1), float(pl.y1));
                 if (isShaped(layer)) {
-                    item.uniforms.mix = progressUniforms(*layer.transition);
-                    item.uniforms.reserved = shapeUniforms(*layer.transition, true);
+                    item.uniforms.transition = transitionUniforms(*layer.transition, true);
                 }
                 item.layerA = item.layerB = i;
                 auto state = pipeline({t.sourceClass() == SourceClass::YCbCrBiPlanar, false, false, format});
@@ -787,8 +788,7 @@ struct Compositor::Impl {
                     y1 = std::max(pa.y1, pb.y1);
                 }
                 item.uniforms.quadRect = simd_make_float4(float(x0), float(y0), float(x1), float(y1));
-                item.uniforms.mix = progressUniforms(*inLayer.transition);
-                item.uniforms.reserved = shapeUniforms(*inLayer.transition, false);
+                item.uniforms.transition = transitionUniforms(*inLayer.transition, false);
                 item.layerA = out;
                 item.layerB = in;
                 auto state = pipeline({ta.sourceClass() == SourceClass::YCbCrBiPlanar, true,
@@ -1079,7 +1079,8 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         const std::size_t w = targetBuffer->width();
         const std::size_t h = targetBuffer->height();
         VEConvertUniforms convert{};
-        convert.size = simd_make_uint4(static_cast<unsigned>(w), static_cast<unsigned>(h), 0, 0);
+        convert.width = static_cast<VEUInt>(w);
+        convert.height = static_cast<VEUInt>(h);
         media::ColorInfo tags = media::ColorInfo::bt709();
         const bool biplanar = format != kCVPixelFormatType_32BGRA;
         CVBufferRef targetRef = targetBuffer->get();
@@ -1094,7 +1095,7 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
                              format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
             const bool tenBit = format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
                                 format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
-            convert.size.z = tenBit ? 1u : 0u;
+            convert.tenBitCodes = tenBit ? 1u : 0u;
             const RGBToYCbCrRows rows = rgbToYCbCrRows(media::YCbCrMatrix::BT709, tags.fullRange, tenBit ? 10 : 8);
             convert.yRow = rows.y;
             convert.cbRow = rows.cb;

@@ -1,7 +1,8 @@
 // Uniform layouts and binding indices shared by Shaders.metal and the Obj-C++ compositor.
 //
-// Every vector member is a 16-byte float4 (or a float4x4), so the C (simd) and Metal layouts
-// agree without relying on packing rules; Compositor.mm static_asserts the sizes.
+// Members are 16-byte float4s (or float4x4s) or groups of 4-byte scalars (float, VEInt, VEUInt) that
+// fill whole 16-byte rows, so the C (simd) and Metal layouts agree without relying on packing rules;
+// the static_asserts at the end check the sizes and offsets on both sides.
 
 #pragma once
 
@@ -9,21 +10,30 @@
 #include <metal_stdlib>
 typedef metal::float4 VEFloat4;
 typedef metal::float4x4 VEFloat4x4;
-typedef metal::uint4 VEUInt4;
+typedef int VEInt;
+typedef uint VEUInt;
+#define VE_OFFSET_OF(type, member) __builtin_offsetof(type, member)
 #else
 #include <simd/simd.h>
+#include <stddef.h>
+#include <stdint.h>
 typedef simd_float4 VEFloat4;
 typedef simd_float4x4 VEFloat4x4;
-typedef simd_uint4 VEUInt4;
+typedef int32_t VEInt;
+typedef uint32_t VEUInt;
+#define VE_OFFSET_OF(type, member) offsetof(type, member)
 #endif
 
-// Buffer and texture binding indices.
+// Buffer binding indices. Each index belongs to one pipeline's functions, and an encoder binds only
+// its own pipeline's: the render pipeline (VEBufferIndexDraw) and the two compute kernels' uniforms
+// share the number 0 without meeting.
 enum VEBufferIndex {
     VEBufferIndexDraw = 0,    // VEDrawUniforms (vertex and fragment)
     VEBufferIndexConvert = 0, // VEConvertUniforms (compute)
     VEBufferIndexUnsharp = 0, // VEUnsharpUniforms (compute)
 };
 
+// Texture binding indices, per pipeline as the buffer indices are.
 enum VETextureIndex {
     VETextureIndexA0 = 0, // source A: luma (YCbCr) or the RGBA texture
     VETextureIndexA1 = 1, // source A: interleaved CbCr (YCbCr only)
@@ -45,7 +55,7 @@ enum VEFunctionConstant {
     VEFunctionConstantSourceBIsYCbCr = 2,
 };
 
-// The shape of a transition draw (VEDrawUniforms::reserved.x), TransitionKind's values
+// The shape of a transition draw (VETransitionUniforms::shape), TransitionKind's values
 // (Compositor.mm static_asserts them): None is the cross dissolve, the uniform mix.
 enum VETransitionShape {
     VETransitionShapeNone = 0,
@@ -56,7 +66,9 @@ enum VETransitionShape {
     VETransitionShapeIris = 5,
 };
 
-// How one source picture is sampled and placed.
+// How one source picture is sampled and placed. (A per-source colour grade will be a sub-struct of its
+// own here, a VEGradeUniforms, applied after the conversion to R'G'B' and before the weight; see
+// docs/reviews/2026-10-01-grading-pipeline-decision.md.)
 struct VESourceUniforms {
     // Maps the sampled (Y, Cb, Cr, 1) plane values (texture unorm, i.e. before range expansion)
     // to gamma-encoded R'G'B'. Folds bit depth, video/full range and the YCbCr matrix.
@@ -69,10 +81,12 @@ struct VESourceUniforms {
     // Chroma plane uv = uv * chromaTransform.xy + chromaTransform.zw (chroma siting and odd
     // sizes; see TextureCache.h). Unused for RGBA sources.
     VEFloat4 chromaTransform;
-    // x: weight (opacity; times the transition weight when drawn without its partner).
-    // y: 1 when an RGBA source has straight (non-premultiplied) alpha, else 0.
-    // z, w: unused.
-    VEFloat4 params;
+    // The layer weight: its opacity, times the transition weight when drawn without its partner.
+    float weight;
+    // 1 when an RGBA source has straight (non-premultiplied) alpha, else 0.
+    VEUInt straightAlpha;
+    VEUInt unused0;
+    VEUInt unused1;
     // The part of each plane's texture the picture fills, in that texture's uv: xy for plane 0 (luma or RGBA),
     // zw for plane 1 (chroma). (1, 1) for a source plane; a pre-scaled plane lies in the top-left w x h of a
     // pooled texture at least that large, and is sampled clamped half a texel inside that region's right and
@@ -80,36 +94,55 @@ struct VESourceUniforms {
     VEFloat4 planeExtent;
 };
 
+// The transition of one draw (RenderGraph.h, LayerTransition; transitionReveal). All zero but `mix` for
+// a cross dissolve, and all zero for a layer without a transition, whose draws are unchanged.
+struct VETransitionUniforms {
+    // The transition's linear progress at the frame's centre (LayerTransition::mix): the dissolve mix
+    // toward source B of a pair draw.
+    float mix;
+    // A shaped transition's exposure interval [progressStart, progressEnd] (LayerTransition::progressStart /
+    // progressEnd; mirrored to [1 - p1, 1 - p0] for a closing iris), over which its edge is averaged
+    // (transitionReveal); zero for a dissolve.
+    float progressStart;
+    float progressEnd;
+    // The soft edge's half width f in sequence pixels (kTransitionFeather); zero for a dissolve.
+    float feather;
+    // The VETransitionShape.
+    VEInt shape;
+    // A single-layer draw of a shaped transition: 1 when it is the incoming picture (drawn where the
+    // reveal m is, times m; also a closing iris), 0 for the outgoing one (times 1 - m). Unused for pair
+    // draws, which show mix(A, B, m) per pixel.
+    VEUInt incoming;
+    VEUInt unused0;
+    VEUInt unused1;
+};
+
 // One draw: an axis-aligned quad in sequence pixels covering the layer (or the pair).
 struct VEDrawUniforms {
     VEFloat4 quadRect;  // x0, y0, x1, y1 in sequence pixels
     VEFloat4 frameSize; // sequence width, height, 1/width, 1/height
-    // x: the transition's linear progress at the frame's centre (LayerTransition::mix): the dissolve mix
-    // toward source B of a pair draw. y, z: a shaped transition's exposure interval [p0, p1]
-    // (LayerTransition::progressStart / progressEnd; mirrored to [1 - p1, 1 - p0] for a closing iris),
-    // over which its edge is averaged (transitionReveal); zero for a dissolve. w: unused.
-    VEFloat4 mix;
-    // A shaped transition (RenderGraph.h, transitionReveal); all zero for a cross dissolve and for a
-    // layer without a transition, whose draws are unchanged. x: the VETransitionShape (as a float);
-    // y: the soft edge's half width f in sequence pixels (kTransitionFeather); z: a single-layer draw
-    // is the incoming picture (1: drawn where the reveal m is, times m; also a closing iris) or the
-    // outgoing one (0: times 1 - m); unused for pair draws, which show mix(A, B, m) per pixel. w: unused.
-    VEFloat4 reserved;
+    struct VETransitionUniforms transition;
     struct VESourceUniforms a;
     struct VESourceUniforms b;
 };
 
 // The unsharp mask of a pre-scaled plane (Compositor.h "Sharpening").
 struct VEUnsharpUniforms {
-    // x: amount; y: threshold t (the mask fades in over |c - blur| in [t, 2t]); z: 1 for a luma
-    // plane (sharpen .r, keep it within [min(range.x, c), max(range.y, c)]), 0 for premultiplied RGBA
-    // (sharpen .rgb within [0, alpha], keep alpha); w: unused.
-    VEFloat4 params;
-    // x, y: the luma plane's nominal range in unorm (16/255 and 235/255 for 8-bit video range...).
-    VEFloat4 range;
-    // x, y: the pre-scaled plane's size in texels (the top-left region of its pooled textures it fills; the
-    // kernel runs over it and reads its neighbours clamped to it). z, w: unused.
-    VEUInt4 size;
+    float amount;
+    // The mask fades in over |c - blur| in [threshold, 2 * threshold].
+    float threshold;
+    // A luma plane's nominal range in unorm (16/255 and 235/255 for 8-bit video range...): the
+    // sharpened luma is kept within [min(rangeLow, c), max(rangeHigh, c)]. Unused for RGBA.
+    float rangeLow;
+    float rangeHigh;
+    // The pre-scaled plane's size in texels (the top-left region of its pooled textures it fills; the
+    // kernel runs over it and reads its neighbours clamped to it).
+    VEUInt width;
+    VEUInt height;
+    // 1 for a luma plane (sharpen .r within the range above), 0 for premultiplied RGBA (sharpen .rgb
+    // within [0, alpha], keep alpha).
+    VEUInt isLuma;
+    VEUInt unused0;
 };
 
 // RGB -> output conversion for the export compute pass.
@@ -118,5 +151,30 @@ struct VEConvertUniforms {
     VEFloat4 yRow;
     VEFloat4 cbRow;
     VEFloat4 crRow;
-    VEUInt4 size; // x, y: output luma size in pixels; z: 1 = 10-bit codes in the high bits of 16-bit words
+    // The output luma size in pixels.
+    VEUInt width;
+    VEUInt height;
+    // 1: the target stores 10-bit codes in the high bits of 16-bit words ('x420'), 0: 8-bit planes.
+    VEUInt tenBitCodes;
+    VEUInt unused0;
 };
+
+// The same layout on both sides: sizes, and the offset of every member that follows a scalar group or
+// starts one.
+static_assert(sizeof(struct VESourceUniforms) == 144, "VESourceUniforms layout");
+static_assert(VE_OFFSET_OF(struct VESourceUniforms, weight) == 112, "VESourceUniforms layout");
+static_assert(VE_OFFSET_OF(struct VESourceUniforms, straightAlpha) == 116, "VESourceUniforms layout");
+static_assert(VE_OFFSET_OF(struct VESourceUniforms, planeExtent) == 128, "VESourceUniforms layout");
+static_assert(sizeof(struct VETransitionUniforms) == 32, "VETransitionUniforms layout");
+static_assert(VE_OFFSET_OF(struct VETransitionUniforms, shape) == 16, "VETransitionUniforms layout");
+static_assert(VE_OFFSET_OF(struct VETransitionUniforms, incoming) == 20, "VETransitionUniforms layout");
+static_assert(sizeof(struct VEDrawUniforms) == 64 + 2 * 144, "VEDrawUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEDrawUniforms, transition) == 32, "VEDrawUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEDrawUniforms, a) == 64, "VEDrawUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEDrawUniforms, b) == 64 + 144, "VEDrawUniforms layout");
+static_assert(sizeof(struct VEUnsharpUniforms) == 32, "VEUnsharpUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEUnsharpUniforms, width) == 16, "VEUnsharpUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEUnsharpUniforms, isLuma) == 24, "VEUnsharpUniforms layout");
+static_assert(sizeof(struct VEConvertUniforms) == 64, "VEConvertUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEConvertUniforms, width) == 48, "VEConvertUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEConvertUniforms, tenBitCodes) == 56, "VEConvertUniforms layout");

@@ -476,9 +476,21 @@ Done:
   EffectSpanTests, KeyframeTests, ModelTests, SchedulerSpanTests, SchedulerTests,
   SequenceFormatRenderTests.mm, ProjectJSONTests.
 
+- 4, named shader uniforms (review render #5): commit "Render: named shader uniforms". `VEDrawUniforms`'
+  packed `mix` and `reserved` lanes are a `VETransitionUniforms` sub-struct (mix, progressStart/End, feather,
+  `VEInt shape`, `VEUInt incoming`); `VESourceUniforms::params` is `float weight` and `VEUInt straightAlpha`;
+  `VEUnsharpUniforms` has amount, threshold, rangeLow/High, width, height and `VEUInt isLuma`;
+  `VEConvertUniforms::size` is width, height and `VEUInt tenBitCodes`. The shaders compare integers instead
+  of decoding floats (`int(x + 0.5)`, `> 0.5`). ShaderTypes.h now `static_assert`s the size and the offset of
+  every scalar group on both sides (C and Metal; checked that the Metal compiler evaluates them), replacing
+  the four size checks in Compositor.mm. The sizes are unchanged except `VEUnsharpUniforms` (48 -> 32 bytes).
+  The shared buffer index 0 is not a hazard (each index belongs to one pipeline's functions, and an encoder
+  binds only its own); kept, with the reason in the header. The place of a future `VEGradeUniforms` is
+  marked in `VESourceUniforms`. No pixel change: CompositorTests, TransitionShapeTests, ExportParityTests and
+  the rest pass unchanged (no test touched the structs). Full suite after this item: EngineTests 550 (0
+  skips), doctest 342, AppTests 279 (1 known skip), 0 failures, no leftovers.
+
 Not started (in order):
-- 4, named shader uniforms (review render #5): sub-structs with real int/uint fields instead of packed float
-  lanes; check the three buffer indices that alias 0.
 - 5, the grading placement decision note `docs/reviews/2026-10-01-grading-pipeline-decision.md` (document only,
   with a measured prototype of an extra full-frame monitor pass, not committed).
 - 6 (if quota allows): high-precision decode for alpha, high-bit-depth and still sources (review media #2).

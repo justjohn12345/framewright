@@ -79,7 +79,7 @@ static float4 sampleYCbCr(texture2d<float> luma, texture2d<float> chroma, float2
 // bleed into the edge of the visible ones.
 static float4 sampleRGBA(texture2d<float> rgba, float2 uv, constant VESourceUniforms &source) {
     constexpr sampler bilinear(address::clamp_to_edge, filter::linear);
-    if (source.params.y < 0.5) {
+    if (source.straightAlpha == 0) {
         return rgba.sample(bilinear, planeUV(uv, source.planeExtent.xy, rgba));
     }
     // The picture's own texels: the top-left extent of the texture.
@@ -172,13 +172,14 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     } else {
         colorA = sampleRGBA(a0, uvA, uniforms.a);
     }
-    colorA *= coverageA * uniforms.a.params.x;
-    const int shape = int(uniforms.reserved.x + 0.5);
+    colorA *= coverageA * uniforms.a.weight;
+    constant VETransitionUniforms &transition = uniforms.transition;
+    const int shape = transition.shape;
     if (!kHasPartner) {
         if (shape != VETransitionShapeNone) {
-            const float m = transitionReveal(shape, uniforms.mix.y, uniforms.mix.z, uniforms.reserved.y,
-                                             in.framePosition, uniforms.frameSize.xy);
-            colorA *= uniforms.reserved.z > 0.5 ? m : 1.0 - m;
+            const float m = transitionReveal(shape, transition.progressStart, transition.progressEnd,
+                                             transition.feather, in.framePosition, uniforms.frameSize.xy);
+            colorA *= transition.incoming != 0 ? m : 1.0 - m;
         }
         return colorA;
     }
@@ -191,12 +192,12 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     } else {
         colorB = sampleRGBA(b0, uvB, uniforms.b);
     }
-    colorB *= coverageB * uniforms.b.params.x;
+    colorB *= coverageB * uniforms.b.weight;
     if (shape == VETransitionShapeNone) {
-        return mix(colorA, colorB, uniforms.mix.x);
+        return mix(colorA, colorB, transition.mix);
     }
-    return mix(colorA, colorB, transitionReveal(shape, uniforms.mix.y, uniforms.mix.z, uniforms.reserved.y,
-                                                in.framePosition, uniforms.frameSize.xy));
+    return mix(colorA, colorB, transitionReveal(shape, transition.progressStart, transition.progressEnd,
+                                                transition.feather, in.framePosition, uniforms.frameSize.xy));
 }
 
 // MARK: - Minification
@@ -221,14 +222,14 @@ kernel void ve_unsharp(texture2d<float, access::read> source [[texture(VETexture
                        texture2d<float, access::write> destination [[texture(VETextureIndexUnsharpDestination)]],
                        constant VEUnsharpUniforms &uniforms [[buffer(VEBufferIndexUnsharp)]],
                        uint2 gid [[thread_position_in_grid]]) {
-    // The pre-scaled plane fills the top-left uniforms.size of its pooled texture.
-    const int width = int(uniforms.size.x);
-    const int height = int(uniforms.size.y);
+    // The pre-scaled plane fills the top-left width x height of its pooled texture.
+    const int width = int(uniforms.width);
+    const int height = int(uniforms.height);
     if (int(gid.x) >= width || int(gid.y) >= height) {
         return;
     }
     const float weights[5] = {1.0, 4.0, 6.0, 4.0, 1.0};
-    const bool luma = uniforms.params.z > 0.5;
+    const bool luma = uniforms.isLuma != 0;
     float4 blur = float4(0.0);
     for (int j = -2; j <= 2; ++j) {
         const int y = clamp(int(gid.y) + j, 0, height - 1);
@@ -241,13 +242,13 @@ kernel void ve_unsharp(texture2d<float, access::read> source [[texture(VETexture
     }
     blur *= 1.0 / 256.0;
     const float4 c = source.read(gid);
-    const float amount = uniforms.params.x;
-    const float t = uniforms.params.y;
+    const float amount = uniforms.amount;
+    const float t = uniforms.threshold;
     const float4 d = c - blur;
     const float4 sharpened = c + amount * d * smoothstep(float4(t), float4(2.0 * t), abs(d));
     if (luma) {
-        const float lo = min(uniforms.range.x, c.r);
-        const float hi = max(uniforms.range.y, c.r);
+        const float lo = min(uniforms.rangeLow, c.r);
+        const float hi = max(uniforms.rangeHigh, c.r);
         destination.write(float4(clamp(sharpened.r, lo, hi), 0.0, 0.0, 1.0), gid);
     } else {
         destination.write(float4(clamp(sharpened.rgb, float3(0.0), float3(c.a)), c.a), gid);
@@ -260,7 +261,7 @@ kernel void ve_convert_to_bgra(texture2d<float, access::read> composite [[textur
                                texture2d<float, access::write> output [[texture(VETextureIndexOut0)]],
                                constant VEConvertUniforms &uniforms [[buffer(VEBufferIndexConvert)]],
                                uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= uniforms.size.x || gid.y >= uniforms.size.y) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height) {
         return;
     }
     const float4 c = composite.read(gid);
@@ -290,7 +291,7 @@ kernel void ve_convert_to_420(texture2d<float, access::read> composite [[texture
                               texture2d<float, access::write> chroma [[texture(VETextureIndexOut1)]],
                               constant VEConvertUniforms &uniforms [[buffer(VEBufferIndexConvert)]],
                               uint2 gid [[thread_position_in_grid]]) {
-    const uint2 size = uniforms.size.xy;
+    const uint2 size = uint2(uniforms.width, uniforms.height);
     const uint2 chromaSize = (size + 1) / 2;
     if (gid.x >= chromaSize.x || gid.y >= chromaSize.y) {
         return;
@@ -307,7 +308,7 @@ kernel void ve_convert_to_420(texture2d<float, access::read> composite [[texture
         const float3 centre = saturate(composite.read(uint2(x0, y)).rgb);
         const float3 right = hasRight ? saturate(composite.read(uint2(x0 + 1, y)).rgb) : centre;
         const float3 left = x0 > 0 ? saturate(composite.read(uint2(x0 - 1, y)).rgb) : centre;
-        const uint tenBit = uniforms.size.z;
+        const uint tenBit = uniforms.tenBitCodes;
         luma.write(float4(quantizePlane(dot(uniforms.yRow.xyz, centre) + uniforms.yRow.w, tenBit)), uint2(x0, y));
         if (hasRight) {
             luma.write(float4(quantizePlane(dot(uniforms.yRow.xyz, right) + uniforms.yRow.w, tenBit)),
@@ -317,7 +318,7 @@ kernel void ve_convert_to_420(texture2d<float, access::read> composite [[texture
         rows += 1.0;
     }
     const float3 filtered = sum / rows;
-    const float cb = quantizePlane(dot(uniforms.cbRow.xyz, filtered) + uniforms.cbRow.w, uniforms.size.z);
-    const float cr = quantizePlane(dot(uniforms.crRow.xyz, filtered) + uniforms.crRow.w, uniforms.size.z);
+    const float cb = quantizePlane(dot(uniforms.cbRow.xyz, filtered) + uniforms.cbRow.w, uniforms.tenBitCodes);
+    const float cr = quantizePlane(dot(uniforms.crRow.xyz, filtered) + uniforms.crRow.w, uniforms.tenBitCodes);
     chroma.write(float4(cb, cr, 0.0, 0.0), gid);
 }
