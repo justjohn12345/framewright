@@ -175,8 +175,8 @@ The build treats warnings as errors (`-Wall -Wextra` for C/Objective-C/C++,
 
 ### Stress tests
 
-Two long-running tests are opt-in: `xcodebuild -scheme StressTests -destination 'platform=macOS' test`
-(about ten minutes on an M-series Mac). `HourExportStressTests` (EngineTests) exports a one-hour 29.97 fps
+The long-running and machine-dependent tests are opt-in: `xcodebuild -scheme StressTests -destination
+'platform=macOS' test` (about twelve minutes on an M-series Mac). `HourExportStressTests` (EngineTests) exports a one-hour 29.97 fps
 sequence (107,892 frames from 44.1 and 48 kHz sources, at several speeds, with dissolves) with the H.264
 preset (AAC, then PCM) and once more at 44.1 kHz, decodes every frame and checks its picture and time, and
 measures the offset between a flash and a beep at the start and at the end: the drift over the hour is a
@@ -186,7 +186,11 @@ on three video and three audio tracks through the facade and measures memory and
 scrubs, play start, the timeline's thumbnails, waveforms and model, save and reopen). The scheme selects
 only these tests and sets `FRAMEWRIGHT_STRESS=1`; the other schemes skip them, and without the variable
 they skip themselves. Their media are generated at test time (`Scripts/make_test_media.swift --stress`
-and the test itself), and the numbers are logged with the prefixes `HOUR EXPORT` and `STRESS 2H`.
+and the test itself), and the numbers are logged with the prefixes `HOUR EXPORT` and `STRESS 2H`. `PausedSeekSoakTests`
+(EngineTests) makes 200 seeded random ruler clicks in real time over generated screen-recording clips
+(about a minute; the default run keeps 20 of them in `PausedSeekTests`) and the same over the user's
+demo project in `~/Movies/Framewright Demo` (`FRAMEWRIGHT_DEMO_PROJECT` overrides; it skips where the
+project is absent); misses are logged as `PAUSED SEEK MISS`.
 
 EngineTests remove each test's scratch directory (`$TMPDIR/FramewrightEngineTests/<UUID>`) when the
 test ends; `TEST_RUNNER_FRAMEWRIGHT_KEEP_TEST_SCRATCH=1 xcodebuild ...` keeps them (a test that logs a

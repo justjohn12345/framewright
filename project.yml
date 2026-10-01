@@ -333,7 +333,7 @@ schemes:
       # The opt-in stress tests run in the StressTests scheme only.
       targets:
         - name: EngineTests
-          skippedTests: [HourExportStressTests]
+          skippedTests: [HourExportStressTests, PausedSeekSoakTests]
         - name: AppTests
           skippedTests: [TwoHourProjectStressTests]
     profile:
@@ -352,7 +352,7 @@ schemes:
       config: Debug
       targets:
         - name: EngineTests
-          skippedTests: [HourExportStressTests]
+          skippedTests: [HourExportStressTests, PausedSeekSoakTests]
 
   AppTests:
     build:
@@ -365,9 +365,11 @@ schemes:
         - name: AppTests
           skippedTests: [TwoHourProjectStressTests]
 
-  # Long-running stress tests (about ten minutes; see README "Stress tests"): a one-hour 29.97 fps
-  # export checked frame and sample exact (EngineTests/Stress) and a two-hour, 400-clip project's
-  # memory and responsiveness through the facade and the app's timeline (AppTests). Only these
+  # Long-running stress tests (about twelve minutes; see README "Stress tests"): a one-hour 29.97 fps
+  # export checked frame and sample exact (EngineTests/Stress), the paused-seek soak (200 random
+  # clicks in real time, and the user's demo project where it is present: PausedSeekSoakTests) and
+  # a two-hour, 400-clip project's memory and responsiveness through the facade and the app's
+  # timeline (AppTests). Only these
   # tests run here; FRAMEWRIGHT_STRESS=1 lets them run (they skip without it). No coverage, so the
   # timings are those of the ordinary Debug build.
   StressTests:
@@ -383,6 +385,6 @@ schemes:
         FRAMEWRIGHT_STRESS: "1"
       targets:
         - name: EngineTests
-          selectedTests: [HourExportStressTests]
+          selectedTests: [HourExportStressTests, PausedSeekSoakTests]
         - name: AppTests
           selectedTests: [TwoHourProjectStressTests]

@@ -349,8 +349,7 @@ Done:
   and `VEEnginePlaybackTests testSpaceAfterAShuttleAndKPlaysForwardAtOneX` (program monitor play and
   togglePlay, source monitor togglePlay): 13 and 11 failed checks on the old controller.
 
-- 7, B8, test runs leaked disk: "Tests: leave nothing behind (scratch directories, defaults suites,
-  media work after cleanup)". Root causes: `scratchDirectory()` never removed anything; AppTests made
+- 7, B8, test runs leaked disk: 5832198. Root causes: `scratchDirectory()` never removed anything; AppTests made
   persistent `UserDefaults` suites in the app's container (removing a domain does not remove its plist
   reliably: cfprefsd writes the removal as an empty plist, at once, later or at exit); waveform and
   thumbnail jobs outlived `StoreFixture.cleanUp()` and created the cache directories again (and the Photos
@@ -365,8 +364,17 @@ Done:
   testWaitUntilIdleWaitsForTheRunningDecodeAndItsDiskCacheFile`, `VEMediaLibraryTests
   testWaitingForTheServicesCoversARunningWaveform`. Existing leftovers on disk were not touched.
 
+- 8, the machine-dependent and soak tests out of the default run: "Tests: the paused-seek soak and the
+  demo project run in the StressTests scheme". `PausedSeekTests testClicksOnTheDemoProjectShowTheirFrame`
+  (66 s, reads `~/Movies/Framewright Demo`) and `testClicksOnAScreenRecordingShowTheirFrame` (61 s, 200
+  random real-time clicks) moved to `PausedSeekSoakTests` (same file), selected by the StressTests scheme
+  and skipped by name elsewhere (and without `FRAMEWRIGHT_STRESS=1`); `PausedSeekTests
+  testTwentyClicksOnAScreenRecordingShowTheirFrame` (20 seeded clicks, 6 s) stays in the default run.
+  `PlaybackDriftTests` stays. Default suite: 610 s wall (EngineTests 410 s, AppTests 182 s) at fecb2a2;
+  505 s (EngineTests 299 s, AppTests 187 s) with items 7-10. Both moved tests ran in the StressTests
+  scheme: 0 misses of 200 each (62 s and 66 s).
+
 Not started (key facts):
-- 8, the `~/Movies` demo-project test and the 200-click soak out of the default run.
 - 9, B9, AV1/VP9 decoder registration only through `HardwareCaps::get()`.
 - 10, B10, `ThumbnailService` finds a clip's last frame with one seek.
 - 11, B11, span and transition titles in two places.

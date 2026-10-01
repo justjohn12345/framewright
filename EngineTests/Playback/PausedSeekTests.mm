@@ -1,9 +1,11 @@
 // Paused seeks on variable-frame-rate, long-GOP sources (the report "sometimes clicking to move the
 // playhead the program output doesn't update", on a project of macOS screen recordings: frames only
 // when the screen changes, gaps of seconds, keyframes up to 11 s apart, clips at 3/5, 3/2, 5/4, 1/10 and
-// 1x). 200 ruler clicks at seeded random places, as the app makes them (scrubTo on mouse down, endScrub
-// on mouse up, the monitor redrawn only when the controller asks: SeekRig), each checked within 2 s:
-// the monitor must show the clicked frame with the exact picture of every layer.
+// 1x). Ruler clicks at seeded random places, as the app makes them (scrubTo on mouse down, endScrub on
+// mouse up, the monitor redrawn only when the controller asks: SeekRig), each checked within 2 s: the
+// monitor must show the clicked frame with the exact picture of every layer. The default run makes 20
+// (PausedSeekTests); the 200-click soak and the user's demo project are PausedSeekSoakTests, in the
+// opt-in StressTests scheme.
 //
 // The mix: anywhere; inside a static gap of a source; on a frame showing the same source frame as the
 // previous click (the picture does not change, but the monitor must still present the new frame); three
@@ -13,6 +15,8 @@
 #import <XCTest/XCTest.h>
 
 #include "PausedSeekRig.h"
+
+#include "../Stress/StressSupport.h"
 
 #include "../../Engine/Media/AssetImport.h"
 #include "../../Engine/Media/FFmpeg/FFmpegBackend.h"
@@ -331,12 +335,13 @@ bool clickAndSettle(SeekRig &rig, int64_t frame, std::chrono::milliseconds looka
 
 @implementation PausedSeekTests
 
-/// The reported case on generated media, so it runs everywhere: 200 clicks over a project of clips of a
-/// screen recording at the reported speeds, with a frame cache that holds about as many of its frames
-/// as the default 512 MB holds of the reported 3832x2154 recordings (about 40). Before the paused
-/// picture was pinned, a picture the scrub path decoded far from the pool's (previous) focus was
-/// evicted as it was put and the monitor kept the previous picture.
-- (void)testClicksOnAScreenRecordingShowTheirFrame {
+/// The reported case on generated media, short enough for the default run: 20 seeded clicks over a
+/// project of clips of a screen recording at the reported speeds, with a frame cache that holds about
+/// as many of its frames as the default 512 MB holds of the reported 3832x2154 recordings (about 40).
+/// Before the paused picture was pinned, a picture the scrub path decoded far from the pool's
+/// (previous) focus was evicted as it was put and the monitor kept the previous picture. The 200-click
+/// soak of the same mix is PausedSeekSoakTests (StressTests scheme).
+- (void)testTwentyClicksOnAScreenRecordingShowTheirFrame {
     std::string error;
     auto built = screencastProject(error);
     XCTAssertTrue(built.has_value(), @"%s", error.c_str());
@@ -351,13 +356,12 @@ bool clickAndSettle(SeekRig &rig, int64_t frame, std::chrono::milliseconds looka
     if (!rig.ok()) {
         return;
     }
-    const SeekReport report = runClicks(rig, 200, 20260929, std::chrono::seconds(2));
+    const SeekReport report = runClicks(rig, 20, 20260929, std::chrono::seconds(2));
     for (const std::string &miss : report.misses) {
         NSLog(@"PAUSED SEEK MISS %s", miss.c_str());
     }
-    NSLog(@"PAUSED SEEKS (screen recording): %s", report.summary().c_str());
+    NSLog(@"PAUSED SEEKS (screen recording, 20 clicks): %s", report.summary().c_str());
     XCTAssertEqual(report.missCount(), 0, @"%s", report.summary().c_str());
-    XCTAssertGreaterThan(rig.cache->stats().evictions, 0u, @"the cache was full: the eviction order mattered");
 }
 
 /// The mechanism of the report, deterministically. The decode pool's focus (what the cache evicts last)
@@ -446,9 +450,52 @@ bool clickAndSettle(SeekRig &rig, int64_t frame, std::chrono::milliseconds looka
     XCTAssertTrue(outcome.shown, @"%s: %s", outcome.category.c_str(), outcome.details.c_str());
 }
 
+@end
+
+/// The long and the machine-dependent paused-seek runs, opt-in (the StressTests scheme, which sets
+/// FRAMEWRIGHT_STRESS=1; the other schemes skip this class by name, and without the variable it skips
+/// itself): 200 random clicks in real time (about a minute), and the user's demo project in
+/// ~/Movies/Framewright Demo (FRAMEWRIGHT_DEMO_PROJECT overrides; skipped where it is absent).
+/// PausedSeekTests keeps a 20-click run of the generated case in the default run.
+@interface PausedSeekSoakTests : XCTestCase
+@end
+
+@implementation PausedSeekSoakTests
+
+/// The reported case on generated media, so it runs everywhere: 200 clicks over a project of clips of a
+/// screen recording at the reported speeds, with a frame cache that holds about as many of its frames
+/// as the default 512 MB holds of the reported 3832x2154 recordings (about 40). Before the paused
+/// picture was pinned, a picture the scrub path decoded far from the pool's (previous) focus was
+/// evicted as it was put and the monitor kept the previous picture.
+- (void)testClicksOnAScreenRecordingShowTheirFrame {
+    VE_REQUIRE_STRESS_TESTS();
+    std::string error;
+    auto built = screencastProject(error);
+    XCTAssertTrue(built.has_value(), @"%s", error.c_str());
+    if (!built) {
+        return;
+    }
+    SeekRig::Options options;
+    // 40 frames of 1280x720 4:2:0 (8 bits) with room for the IOSurface's row padding.
+    options.cacheBudgetBytes = size_t(40) * 1280 * 720 * 3 / 2 + (size_t(2) << 20);
+    SeekRig rig(built->first, built->second, options);
+    XCTAssertTrue(rig.ok(), @"%s", rig.error().c_str());
+    if (!rig.ok()) {
+        return;
+    }
+    const SeekReport report = runClicks(rig, 200, 20260929, std::chrono::seconds(2));
+    for (const std::string &miss : report.misses) {
+        NSLog(@"PAUSED SEEK MISS %s", miss.c_str());
+    }
+    NSLog(@"PAUSED SEEKS (screen recording): %s", report.summary().c_str());
+    XCTAssertEqual(report.missCount(), 0, @"%s", report.summary().c_str());
+    XCTAssertGreaterThan(rig.cache->stats().evictions, 0u, @"the cache was full: the eviction order mattered");
+}
+
 /// The reported project itself (skipped where it is not present): 200 clicks, none may leave the
 /// monitor on another picture for 2 s.
 - (void)testClicksOnTheDemoProjectShowTheirFrame {
+    VE_REQUIRE_STRESS_TESTS();
     const std::string path = demoProjectPath();
     std::ifstream file(path);
     if (!file) {
