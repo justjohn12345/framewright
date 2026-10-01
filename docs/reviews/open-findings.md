@@ -72,20 +72,29 @@ the hash):
   reachable only on an unvalidated in-memory track: `laneCount` clamps each lane to 0...kLastLane.
 
 Review of group A (84d9e20..6864cc0), regressions R1-R7, fixed before the rest of group B:
-- R1 (item 1), a false "shorter than a frame ... the next clip leaves no room" refusal: "Frame-rate conform:
-  an end that rounded up on its own comes back to the cut". A clip's end decided alone (a linked sound
+- R1 (item 1), a false "shorter than a frame ... the next clip leaves no room" refusal: b8a0656. A clip's end decided alone (a linked sound
   clip one source frame shorter than its picture) rounded up past the frame the cut between two whole
   clips takes; the separate previous clip's whole end group now comes back to the cut (its ends keep a
   frame, a start going back if need be; a cut it shares on another track comes back too when its next
   clip has media from there). The Overlap refusal is left for a clip that truly cannot keep a frame.
+- R2 (item 1), in-sync linked clips refused as out of sync, and sub-frame linked sound refused: "Frame-rate
+  conform: linked clips decided earlier move together; sub-frame linked sound keeps a frame". A start
+  decided first (dual-system sound rolling before the camera) fixed its component's move at zero, so the
+  picture's move with its media was refused; the component now moves when every decided edge keeps its
+  media with the move. A linked sound clip shorter than a frame whose start rounded up to the cut's frame
+  starts a frame earlier into its media (when it still shows part of its sound) or ends a fraction of a
+  frame after its picture (when nothing on its track starts there), instead of a refusal naming the
+  picture as "shorter than a frame".
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
   resampling filter (Lanczos pre-scale below 0.75, bilinear above), not sharpening. Pre-scaling every
   minified picture (threshold 1.0) would remove it at some GPU cost in the monitors.
-- Item 1 refuses a frame-rate change where a clip would have to move with its media against a linked clip
-  that was conformed first (linked clips already out of sync, the sound starting earlier): the message says
-  to unlink or trim. Only out-of-sync linked pairs reach it.
+- Item 1's refusal of a clip that would have to move against its linked clip: the claim made here ("only
+  out-of-sync linked pairs reach it") was false for 5479b1b: in-sync dual-system sound
+  starting before its picture reached it (R2). Since R2 the linked clips move together whenever their
+  decided edges keep their media; the refusal is left for a linked clip already moved by another cut by a
+  different amount, which in practice needs a pair slipped out of sync.
 
 Not started (groups B and C), with what a fresh implementer needs:
 - Nit (a): the adoption composite (Engine/Facade/VEEngine+Edits.mm:142, `withAdoption`) drops

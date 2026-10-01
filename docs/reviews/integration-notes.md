@@ -1744,7 +1744,10 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   goes to the frame before and the clips starting there move with their media (in point kept), linked clips
   with them. `SequenceConformReport::clipsMoved`/`largestMove` and a sentence report the moves. A clip that
   would have to move against a linked clip conformed earlier is refused (OutOfSourceRange, "unlink them or
-  trim it first"). Touching clips stay touching, so a cross dissolve keeps its partner.
+  trim it first"). Touching clips stay touching, so a cross dissolve keeps its partner. (Changed by the
+  review fixes R1/R2, see "Fix round 2026-09-30, groups B and C": linked clips decided earlier move along
+  when their edges keep their media, an end that rounded up alone comes back to the cut, a sub-frame linked
+  sound clip keeps a frame; the refusal remains for a clip moved by another cut by a different amount.)
 - Sizes (supersedes "odd sides rounded up to even"): `formatAdoptedFrom` rounds odd sides down; `placeSource`
   draws a picture with no clip transform that covers the frame with under 2 px to spare per axis at exactly
   1:1, top-left anchored. `fitRect` fills an axis whose bars would be under a pixel each. 1080p/720p of a
