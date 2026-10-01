@@ -246,6 +246,41 @@ Found while doing it (open, older than R2):
   sequences now, 1,536 and 3,515 on 8a9b6cb; also on 6864cc0). The existing test "a one-frame clip whose
   start moves up keeps a frame after it" pins one such case (an unlinked clip).
 
+The review's other findings (open, for a later round; the reviewer's reproducers and fuzzer were in the
+lead's scratchpad as fa-Repro.cpp cases 2-4, fa-Alt.cpp and fa-Fuzz.cpp):
+- A linked component already moved by one amount is never re-decided to a larger move that would work
+  (Engine/Edit/EditOps.cpp ~3102: only a component decided at zero takes a move), so in-sync dual-system
+  sound with a short head handle is refused at some rate pairs (23.976 -> 60 fps reproduces it; a shift of
+  -0.016917 s conforms validly). The SequenceFormatTests case "refused: the sound moved with its picture at
+  one cut would have to move again at another" pins a refusal for which a valid conform exists (both clips
+  shifted -1/75 s). The status note's claim that this "in practice needs a pair slipped out of sync" is false
+  (5 of 74 such refusals in the fuzzer involve no slipped pair).
+- A start takes the grid time on the far side without checking that a clip starting there still has a grid
+  end inside its media (EditOps.cpp ~2985-2995): a one-frame picture from its media's start, linked to sound
+  ending on its media's end, is refused at 23.976 -> 24 fps although moving the pair by -0.0000834 s fits.
+  Older than this round.
+- The property test's generator is narrow (same-file pairs, sound starting 0-2 frames later, one track
+  each); the dual-system generator added by the fix above covers part of it.
+- Nothing pins that 44.1 and 48 kHz AAC exports still go through Apple's writer (they do, measured); assert
+  the writer backend at both rates for the four bit rates, MP4 and MOV.
+- The FFmpeg AAC fallback uses `aac_at`, which clamps an unusable bit rate silently: a 32 kHz sequence at the
+  default 256 kb/s exports through FFmpeg (video included) at 192 kb/s, and the size estimate is off. The
+  comments and notes that say Apple takes "22.05-48 kHz at most bit rates" overstate it (22.05/24 kHz take
+  at most 128 kb/s, 32 kHz at most 192).
+- `VE_ENGINE_HEADER_INCLUDED` is defined as 1 in the public VEEngine.h, so Swift imports it as a global Int32;
+  define it without a value.
+- The conform refusal that names both clips names one file twice for a camera clip ("“b.mov” ..., and
+  “b.mov”, which ends with it, ..."); name the track when both come from one asset.
+- A cascaded move can stretch a clip without a word (a one-frame picture became three frames at 24 ->
+  23.976 fps); consider a note or a refusal.
+- Each presented frame costs about 2 + log2(layers) heap allocations on the render thread since the
+  presented-frame buffer became immutable (PlaybackController.mm ~157-165); reuse the swapped-out buffer.
+- Stale comments: Compositor.h ~25-27 (the 1:1 rule), Compositor.mm ~310-317 (`quantize`) and ~423-424
+  (`exactPrescaleSizes`). VEExport.h ~108-111 promises "never a black line", but the fallback branch can still
+  leave one (1080x2408 at 720p; a 2700x1080 sequence at custom width 1002).
+- The Ken Burns overlay (App/State/KenBurns.swift ~932-951) assumes a fitted, centred picture; with the 1:1
+  base for pictures within 2 px of the frame it is off by under a pixel.
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
