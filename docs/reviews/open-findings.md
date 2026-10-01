@@ -419,42 +419,41 @@ Brief: the "Before colour grading" part of the recommended order in `2026-10-01-
 change no behaviour except item 1's, which the brief asks for; the golden files do not change.
 
 Done:
-- 1, preserve unknown span content on save (review core #9): bedbb1b. A span of an unknown kind on an effect lane is now `SpanKind::Unknown` with its kind's name and every
-  other key kept as compact JSON text (`EffectSpan::foreign`, `ForeignSpanContent`); a known span keeps its
-  unknown keys (`fields`) and its unknown parameters' tracks (`tracks`, with the span's length when read). All
-  are written back on save; JSON equality round trip. Rules: an Unknown span has no parameters (renders as
-  nothing), every span edit refuses it ("... from a newer version of Framewright"), it holds its lane (an
-  overlap refusal says so), a clip edit that would cut it drops it (reported in `droppedSpanIds`), one that
-  leaves it whole keeps it; a known span's unknown tracks go when its length changes (`SetSpanRange`,
-  `splitSpan`) and the writer also leaves them out when the length differs from the one read. Loading drops an
-  unknown kind on lane 0 or outside its clip's source range (with a warning) instead of failing the file. The
-  facade never shows an Unknown span (`isShownSpan`: snapshots, `spansForClip/Track`, `spanInfo`). Tests:
-  ProjectJSON "a newer version's span kinds, parameters and keys round trip unchanged", "a span of an unknown
-  kind is kept only where this version allows a span", `ForeignSpanTests.cpp` (3 cases),
-  `VEEngineSpanTests testASpanOfANewerKindIsKeptButNotShown`. Changed existing assertions (they asserted the
-  old dropping): ProjectJSONTests "unknown kinds and keys of spans warn instead of failing" (the two subcases
-  on an unknown kind and parameter) and "unknown fields are ignored and optional fields default" (a span's
-  unknown key is now kept, compared after clearing it). Unknown keys elsewhere (clip, track, sequence,
-  keyframe) are still ignored, as the brief scopes the item to spans.
+- 1, preserve unknown span content on save (review core #9): bedbb1b. A span of an unknown kind on an effect lane
+  is now `SpanKind::Unknown` with its kind's name and every other key kept as compact JSON text
+  (`EffectSpan::foreign`, `ForeignSpanContent`); a known span keeps its unknown keys (`fields`) and its unknown
+  parameters' tracks (`tracks`, with the span's length when read). All are written back on save; JSON equality
+  round trip. Rules: an Unknown span has no parameters (renders as nothing), every span edit refuses it ("... from
+  a newer version of Framewright"), it holds its lane (an overlap refusal says so), a clip edit that would cut it
+  drops it (reported in `droppedSpanIds`), one that leaves it whole keeps it; a known span's unknown tracks go when
+  its length changes (`SetSpanRange`, `splitSpan`) and the writer also leaves them out when the length differs from
+  the one read. Loading drops an unknown kind on lane 0 or outside its clip's source range (with a warning) instead
+  of failing the file. The facade never shows an Unknown span (`isShownSpan`: snapshots, `spansForClip/Track`,
+  `spanInfo`). Tests: ProjectJSON "a newer version's span kinds, parameters and keys round trip unchanged", "a span
+  of an unknown kind is kept only where this version allows a span", `ForeignSpanTests.cpp` (3 cases),
+  `VEEngineSpanTests testASpanOfANewerKindIsKeptButNotShown`. Changed existing assertions (they asserted the old
+  dropping): ProjectJSONTests "unknown kinds and keys of spans warn instead of failing" (the two subcases on an
+  unknown kind and parameter) and "unknown fields are ignored and optional fields default" (a span's unknown key is
+  now kept, compared after clearing it). Unknown keys elsewhere (clip, track, sequence, keyframe) are still
+  ignored, as the brief scopes the item to spans.
 
-- 2, descriptor tables for `SpanKind` and `SpanParameter` (review core #2): eda4028. `SpanKindInfo` (name, display name, track kind as `std::optional<TrackKind>`,
-  parameters as a `std::span`) and `SpanParameterInfo` (name, display name, neutral, range, `SpanComposition`
-  additive or multiplicative) in EffectSpan.cpp, indexed by the enums and `static_assert`ed in order;
-  `kSpanKinds`, `kSpanParameterCount`, `infoOf`, `spanKindNamed`, `spanParameterNamed`, `spanKindFitsTrack`;
-  `nameOf`, `displayNameOf`, `parametersOf`, `kindHasParameter`, `neutralValue`, `isValidSpanValue`,
-  `clampSpanValue` read the tables; the parser's kind and parameter lists; the track rule (EditOps
-  `checkSpanKind`, Validation `effectSpanProblem`, Clip.cpp's picture/sound tests); `composeSpanValue`,
-  `canDecomposeSpanValue`, `decomposeSpanValue`, `extrapolateSpanValue` replace the arithmetic in
-  `composeSpanOnto` (now composing every parameter of any kind onto `clipValueOf`'s field), `spanEdgeMotion`,
+- 2, descriptor tables for `SpanKind` and `SpanParameter` (review core #2): eda4028. `SpanKindInfo` (name, display
+  name, track kind as `std::optional<TrackKind>`, parameters as a `std::span`) and `SpanParameterInfo` (name,
+  display name, neutral, range, `SpanComposition` additive or multiplicative) in EffectSpan.cpp, indexed by the
+  enums and `static_assert`ed in order; `kSpanKinds`, `kSpanParameterCount`, `infoOf`, `spanKindNamed`,
+  `spanParameterNamed`, `spanKindFitsTrack`; `nameOf`, `displayNameOf`, `parametersOf`, `kindHasParameter`,
+  `neutralValue`, `isValidSpanValue`, `clampSpanValue` read the tables; the parser's kind and parameter lists; the
+  track rule (EditOps `checkSpanKind`, Validation `effectSpanProblem`, Clip.cpp's picture/sound tests);
+  `composeSpanValue`, `canDecomposeSpanValue`, `decomposeSpanValue`, `extrapolateSpanValue` replace the arithmetic
+  in `composeSpanOnto` (now composing every parameter of any kind onto `clipValueOf`'s field), `spanEdgeMotion`,
   `fitSpans`' held gain, `planKenBurns`, `planMatchSpanEdge` (now one loop for every kind), `planContinueMotion`
-  and `planMatchMotion`; the refusal texts that named ranges or a parameter at 0 are derived from the tables
-  word for word; the conform sentence's "Motion, Opacity and Gain" comes from the table (`effectKindsName`).
-  Proof of no change: `SpanDescriptorTests.cpp` compares every derived function with a copy of the switch it
-  replaced over all enumerators and a 21-value grid (infinities, NaN, -0 included, bit for bit), the four
-  helpers with the six sites' arithmetic over the grid, and the derived refusal sentences with the old
-  literals; the existing span suites (checked against the independent references of SpanReference.h) pass
-  unchanged. Full suite after this item: EngineTests 549 (0 skips this run), doctest 341, AppTests 278 (1
-  known skip), 0 failures, no leftovers.
+  and `planMatchMotion`; the refusal texts that named ranges or a parameter at 0 are derived from the tables word
+  for word; the conform sentence's "Motion, Opacity and Gain" comes from the table (`effectKindsName`). Proof of no
+  change: `SpanDescriptorTests.cpp` compares every derived function with a copy of the switch it replaced over all
+  enumerators and a 21-value grid (infinities, NaN, -0 included, bit for bit), the four helpers with the six sites'
+  arithmetic over the grid, and the derived refusal sentences with the old literals; the existing span suites
+  (checked against the independent references of SpanReference.h) pass unchanged. Full suite after this item:
+  EngineTests 549 (0 skips this run), doctest 341, AppTests 278 (1 known skip), 0 failures, no leftovers.
 
 - 3, parameters indexed by enum: a813c32. `SpanTracks` holds
   `std::array<KeyframeTrack, kSpanParameterCount> byParameter` with `track(p)` and `operator[](p)`; the six
