@@ -30,10 +30,10 @@ using media::PixelBuffer;
 using media::Result;
 using media::Status;
 
-static_assert(sizeof(VESourceUniforms) == 128, "VESourceUniforms layout must match Shaders.metal");
-static_assert(sizeof(VEDrawUniforms) == 64 + 2 * 128, "VEDrawUniforms layout must match Shaders.metal");
+static_assert(sizeof(VESourceUniforms) == 144, "VESourceUniforms layout must match Shaders.metal");
+static_assert(sizeof(VEDrawUniforms) == 64 + 2 * 144, "VEDrawUniforms layout must match Shaders.metal");
 static_assert(sizeof(VEConvertUniforms) == 64, "VEConvertUniforms layout must match Shaders.metal");
-static_assert(sizeof(VEUnsharpUniforms) == 32, "VEUnsharpUniforms layout must match Shaders.metal");
+static_assert(sizeof(VEUnsharpUniforms) == 48, "VEUnsharpUniforms layout must match Shaders.metal");
 static_assert(int(VETransitionShapeNone) == int(TransitionKind::CrossDissolve) &&
                   int(VETransitionShapeWipeLeft) == int(TransitionKind::WipeLeft) &&
                   int(VETransitionShapeWipeRight) == int(TransitionKind::WipeRight) &&
@@ -199,6 +199,9 @@ Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegr
 // The textures a draw samples for one source: its own planes, or pre-scaled copies.
 struct SourceBinding {
     id<MTLTexture> planes[2] = {nil, nil};
+    // The part of each plane's texture the picture fills (VESourceUniforms::planeExtent): x, y plane 0, z, w
+    // plane 1.
+    simd_float4 extent = simd_make_float4(1.0f, 1.0f, 1.0f, 1.0f);
     bool straightAlpha = false; // RGBA colour not premultiplied (the shader premultiplies per texel)
 };
 
@@ -209,6 +212,7 @@ void fillSource(VESourceUniforms &u, const TextureSet &textures, const SourceBin
     u.uvFromFrameY = placement.uvFromFrameY;
     u.chromaTransform = textures.chromaTransform();
     u.params = simd_make_float4(float(std::clamp(weight, 0.0, 1.0)), binding.straightAlpha ? 1.0f : 0.0f, 0.0f, 0.0f);
+    u.planeExtent = binding.extent;
 }
 
 // Whether the layer's transition is a shaped one (a wipe or the iris): drawn with the per-pixel
@@ -276,6 +280,10 @@ struct PrescaleJob {
     id<MTLTexture> premultiplied; // nil unless the source has straight alpha
     id<MTLTexture> destination;
     id<MTLTexture> sharpened; // nil unless the plane is sharpened (the draw then samples it)
+    // The drawn size the plane is resampled to: the top-left region of `destination` (and `sharpened`), which
+    // are pooled at a size at least that large.
+    std::size_t width = 0;
+    std::size_t height = 0;
     VEUnsharpUniforms unsharp{};
 };
 
@@ -414,7 +422,7 @@ struct Compositor::Impl {
     std::vector<ScratchTexture> scratch; // pre-scale pool
     // Pre-scaled planes at the drawn size (pixel-buffer targets) rather than pooled steps (see
     // quantizeScratchSize); set per render().
-    bool exactPrescaleSizes = false;
+    std::size_t scratchAllocations = 0; // pre-scale textures ever allocated (Stats)
     std::uint64_t buildCounter = 0;      // render() calls, for the pool's per-frame bookkeeping
 
     // A pooled texture of this format and size not yet used by the frame being built.
@@ -439,6 +447,7 @@ struct Compositor::Impl {
         }
         texture.label = @"Framewright pre-scaled plane";
         scratch.push_back({texture, format, width, height, buildCounter});
+        ++scratchAllocations;
         return texture;
     }
 
@@ -486,12 +495,20 @@ struct Compositor::Impl {
             if (sx >= kMinifyThreshold && sy >= kMinifyThreshold) {
                 continue;
             }
+            // Resampled to the drawn size, rounded up to a whole texel, so it is sampled at 1:1 (a 4K picture at
+            // 1080p: 1080 rows, not 1088 resampled onto 1080, which blurred fine text in bands), into the top-left
+            // of a pooled texture whose size is rounded up to 1/16-1/32 steps: a changing drawn size (a Ken Burns
+            // zoom, a live resize) reuses the pool instead of allocating textures every frame.
             const std::size_t w =
-                sx < kMinifyThreshold ? quantizeScratchSize(planeW * sx, plane.width, !exactPrescaleSizes) : plane.width;
+                sx < kMinifyThreshold ? quantizeScratchSize(planeW * sx, plane.width, false) : plane.width;
             const std::size_t h =
-                sy < kMinifyThreshold ? quantizeScratchSize(planeH * sy, plane.height, !exactPrescaleSizes) : plane.height;
+                sy < kMinifyThreshold ? quantizeScratchSize(planeH * sy, plane.height, false) : plane.height;
+            const std::size_t pooledW = sx < kMinifyThreshold ? quantizeScratchSize(planeW * sx, plane.width) : w;
+            const std::size_t pooledH = sy < kMinifyThreshold ? quantizeScratchSize(planeH * sy, plane.height) : h;
             PrescaleJob job;
             job.source = plane;
+            job.width = w;
+            job.height = h;
             MTLPixelFormat format = plane.pixelFormat;
             if (rgba) {
                 // Pre-scaled RGBA is always premultiplied (filtering straight colour would bleed
@@ -506,15 +523,24 @@ struct Compositor::Impl {
                     binding.straightAlpha = false;
                 }
             }
-            auto destination = acquireScratch(format, w, h);
+            auto destination = acquireScratch(format, pooledW, pooledH);
             if (!destination.ok()) {
                 return std::move(destination).error();
             }
             job.destination = destination.value();
             binding.planes[p] = job.destination;
+            const float extentX = float(double(w) / double(pooledW));
+            const float extentY = float(double(h) / double(pooledH));
+            if (p == 0) {
+                binding.extent.x = extentX;
+                binding.extent.y = extentY;
+            } else {
+                binding.extent.z = extentX;
+                binding.extent.w = extentY;
+            }
             // Sharpen the luma plane of YCbCr (plane 0) or the RGBA plane; never chroma.
             if (sharpen && unsharp != nil && (rgba || p == 0)) {
-                auto sharpened = acquireScratch(format, w, h);
+                auto sharpened = acquireScratch(format, pooledW, pooledH);
                 if (!sharpened.ok()) {
                     return std::move(sharpened).error();
                 }
@@ -522,6 +548,7 @@ struct Compositor::Impl {
                 job.unsharp.params = simd_make_float4(float(amount),
                                                       float(Compositor::kSharpenThreshold), rgba ? 0.0f : 1.0f, 0.0f);
                 job.unsharp.range = rgba ? simd_make_float4(0.0f, 1.0f, 0.0f, 0.0f) : lumaRangeOf(t.pixelFormat());
+                job.unsharp.size = simd_make_uint4(std::uint32_t(w), std::uint32_t(h), 0u, 0u);
                 binding.planes[p] = job.sharpened;
             }
             jobs.push_back(job);
@@ -545,7 +572,14 @@ struct Compositor::Impl {
                 [compute endEncoding];
                 source = job.premultiplied;
             }
+            // Into the top-left job.width x job.height of the pooled destination (the rest of it is never read).
+            const MPSScaleTransform transform{double(job.width) / double(source.width),
+                                              double(job.height) / double(source.height), 0.0, 0.0};
+            lanczos.scaleTransform = &transform;
+            lanczos.clipRect = MTLRegionMake2D(0, 0, job.width, job.height);
             [lanczos encodeToCommandBuffer:commandBuffer sourceTexture:source destinationTexture:job.destination];
+            lanczos.scaleTransform = nil;
+            lanczos.clipRect = MPSRectNoClip;
             if (job.sharpened != nil) {
                 id<MTLComputeCommandEncoder> compute = [commandBuffer computeCommandEncoder];
                 compute.label = @"Framewright sharpen";
@@ -555,7 +589,7 @@ struct Compositor::Impl {
                 [compute setBytes:&job.unsharp length:sizeof(job.unsharp) atIndex:VEBufferIndexUnsharp];
                 const NSUInteger tw = unsharp.threadExecutionWidth;
                 const NSUInteger th = std::max<NSUInteger>(1, unsharp.maxTotalThreadsPerThreadgroup / tw);
-                [compute dispatchThreads:MTLSizeMake(job.sharpened.width, job.sharpened.height, 1)
+                [compute dispatchThreads:MTLSizeMake(job.width, job.height, 1)
                     threadsPerThreadgroup:MTLSizeMake(tw, std::min<NSUInteger>(th, 16), 1)];
                 [compute endEncoding];
             }
@@ -936,7 +970,6 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
                                    ? 1.0
                                    : std::min(double(viewport.width) / graph.width, double(viewport.height) / graph.height);
     std::size_t drawnLayers = 0;
-    im.exactPrescaleSizes = targetBuffer != nullptr;
     // The scale sharpening also needs to minify (bindSource takes the larger of it and the drawn scale): the
     // output's for a pixel-buffer target (an export of the sequence), the sequence's own for a texture
     // target (a monitor). A monitor therefore sharpens what an export at the sequence's size sharpens when
@@ -1163,6 +1196,7 @@ Compositor::Stats Compositor::stats() const {
     Stats st;
     st.freeSlots = freeSlotCount();
     st.scratchTextures = im.scratch.size();
+    st.scratchAllocations = im.scratchAllocations;
     for (const ScratchTexture &e : im.scratch) {
         st.scratchBytes += e.texture.allocatedSize;
     }

@@ -116,10 +116,15 @@ Group B, continued:
   writes 8-96 kHz AAC through FFmpeg when Apple cannot; FFAudioEncoder::validate checks the native aac
   encoder's rates; VEExporter refuses a rate no AAC encoder takes (192 kHz, 37 kHz) with what to do. Also:
   an audio rejection no longer retries the writer with the software video encoder (the error named "h264").
-- Nit (c), `CompositeCommand::canRevert` checked only the last child: "Undo: a composite or an undo group
-  reverts only when every step can". `canRevertSteps` (Command.h) reverts the later steps on a copy and
+- Nit (c), `CompositeCommand::canRevert` checked only the last child: d192c0d. `canRevertSteps` (Command.h) reverts the later steps on a copy and
   checks each earlier one against what they leave; `revert()` is const (it changes only the project). The
   undo stack's accumulated group (AccumulatedSteps) had the same check and uses it too.
+- 3, a pool miss per frame under an animated scale: "Compositor: pre-scale into the top-left of pooled
+  textures, at the exact drawn size, for every target". The plane is resampled at its exact drawn size
+  (MPS scaleTransform and clipRect) into a texture pooled at the rounded-up size; the draw samples that
+  region (`VESourceUniforms::planeExtent`, clamped half a texel inside it), the unsharp kernel runs over and
+  reads within it (`VEUnsharpUniforms::size`). Monitors therefore pre-scale exactly too (they used the 1/32
+  steps and resampled, 5 % softer than the export); `Compositor::Stats::scratchAllocations` counts misses.
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
@@ -132,11 +137,6 @@ Found while doing them (open):
   different amount, which in practice needs a pair slipped out of sync.
 
 Not started (groups B and C), with what a fresh implementer needs:
-- 3, per-frame texture allocation under animated scale: the pre-scale takes exact sizes per frame for
-  pixel-buffer targets (`quantizeScratchSize(..., !exactPrescaleSizes)`, `acquireScratch(format, w, h)` at
-  Engine/Render/Compositor.mm ~505/513), so a Ken Burns export misses the pool every frame. Hand out a
-  texture at least as large and render into a sub-region (MPS destination region, sampling uv scaled), or
-  similar; test no pool growth after warm-up with a changing scale into a pixel-buffer target.
 - 4, the parity test compares the export path with itself: EngineTests/Export/ExportParityTests.mm ~232
   renders the "monitor" into a PixelBufferTarget. Render it through a texture target as ProgramView does
   and read it back (or give monitors exact sizes with item 3's pooling); tighten the loose bound (max block

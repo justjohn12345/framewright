@@ -53,13 +53,22 @@ static float edgeCoverage(float2 uv) {
     return coverage.x * coverage.y;
 }
 
+// `uv` over a plane's picture as uv in its texture: the picture fills the top-left `extent` of the texture
+// (VESourceUniforms::planeExtent; (1, 1) for a source plane), and the sample is kept half a texel inside that
+// region's right and bottom edges, as clamp_to_edge keeps it inside a whole texture's (the left and top
+// edges are the texture's own).
+static float2 planeUV(float2 uv, float2 extent, texture2d<float> plane) {
+    const float2 halfTexel = 0.5 / float2(plane.get_width(), plane.get_height());
+    return min(uv * extent, extent - halfTexel);
+}
+
 // Chroma is sampled at the luma position mapped through the source's chroma transform, so
 // left/top/bottom-sited chroma lines up with the luma it belongs to (see TextureCache.h).
 static float4 sampleYCbCr(texture2d<float> luma, texture2d<float> chroma, float2 uv, constant VESourceUniforms &source) {
     constexpr sampler bilinear(address::clamp_to_edge, filter::linear);
-    const float y = luma.sample(bilinear, uv).r;
+    const float y = luma.sample(bilinear, planeUV(uv, source.planeExtent.xy, luma)).r;
     const float2 chromaUV = uv * source.chromaTransform.xy + source.chromaTransform.zw;
-    const float2 cbcr = chroma.sample(bilinear, chromaUV).rg;
+    const float2 cbcr = chroma.sample(bilinear, planeUV(chromaUV, source.planeExtent.zw, chroma)).rg;
     const float3 rgb = saturate((source.colorMatrix * float4(y, cbcr, 1.0)).rgb);
     return float4(rgb, 1.0);
 }
@@ -71,9 +80,10 @@ static float4 sampleYCbCr(texture2d<float> luma, texture2d<float> chroma, float2
 static float4 sampleRGBA(texture2d<float> rgba, float2 uv, constant VESourceUniforms &source) {
     constexpr sampler bilinear(address::clamp_to_edge, filter::linear);
     if (source.params.y < 0.5) {
-        return rgba.sample(bilinear, uv);
+        return rgba.sample(bilinear, planeUV(uv, source.planeExtent.xy, rgba));
     }
-    const int2 size = int2(rgba.get_width(), rgba.get_height());
+    // The picture's own texels: the top-left extent of the texture.
+    const int2 size = max(int2(rint(float2(rgba.get_width(), rgba.get_height()) * source.planeExtent.xy)), int2(1));
     const float2 p = uv * float2(size) - 0.5;
     const float2 f = fract(p);
     const int2 i0 = int2(floor(p));
@@ -211,8 +221,9 @@ kernel void ve_unsharp(texture2d<float, access::read> source [[texture(VETexture
                        texture2d<float, access::write> destination [[texture(VETextureIndexUnsharpDestination)]],
                        constant VEUnsharpUniforms &uniforms [[buffer(VEBufferIndexUnsharp)]],
                        uint2 gid [[thread_position_in_grid]]) {
-    const int width = int(source.get_width());
-    const int height = int(source.get_height());
+    // The pre-scaled plane fills the top-left uniforms.size of its pooled texture.
+    const int width = int(uniforms.size.x);
+    const int height = int(uniforms.size.y);
     if (int(gid.x) >= width || int(gid.y) >= height) {
         return;
     }

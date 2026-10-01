@@ -8,6 +8,7 @@
 #include "../Media/BurnIn.h"
 #include "../Media/RouterTestSupport.h"
 #include "../Media/TestMedia.h"
+#include "../Media/TextCard.h"
 #include "CompositorTestSupport.h"
 
 #include <atomic>
@@ -696,6 +697,69 @@ struct FrameLog {
     // up to 20 (and the fitted scale's resampling everywhere).
     XCTAssertLessThanOrEqual(maxDiff, 4, @"mean difference %.3f", mean);
     XCTAssertLessThan(mean, 1.0);
+}
+
+// Item 3 of the 2026-09-30 fix round: an export pre-scaled each frame to that frame's exact drawn size, so an
+// animated scale (a Ken Burns zoom) missed the texture pool every frame and allocated new textures. The plane
+// is now resampled into the top-left of a pooled texture of a rounded-up size: after one pass of the zoom,
+// a second pass allocates nothing. And the draw and the sharpening read only the picture's own texels: a frame
+// whose plane is smaller than its pooled texture renders the same whatever an earlier frame left in the rest
+// of that texture.
+- (void)testAnAnimatedScaleReusesThePoolAndReadsOnlyThePicturesTexels {
+    const ve::test::GrayImage card = ve::test::renderTextCard(3840, 2160, 40, false);
+    media::PixelBuffer picture = makeBuffer(kCVPixelFormatType_32BGRA, 3840, 2160);
+    XCTAssertTrue(ve::test::fillBGRA(picture.get(), card));
+    const ve::test::GrayImage inverse = ve::test::renderTextCard(3840, 2160, 40, true);
+    media::PixelBuffer other = makeBuffer(kCVPixelFormatType_32BGRA, 3840, 2160);
+    XCTAssertTrue(ve::test::fillBGRA(other.get(), inverse));
+    // A flat mid-grey picture: what its sharpened edge texels become depends on any neighbour read beyond them
+    // (white or black would clamp).
+    const ve::test::GrayImage flat{3840, 2160, std::vector<uint8_t>(size_t(3840) * 2160, 128)};
+    media::PixelBuffer grey = makeBuffer(kCVPixelFormatType_32BGRA, 3840, 2160);
+    XCTAssertTrue(ve::test::fillBGRA(grey.get(), flat));
+    const TextureSet pictureTextures = texturesFor(*_compositor, picture);
+    const TextureSet otherTextures = texturesFor(*_compositor, other);
+    const TextureSet greyTextures = texturesFor(*_compositor, grey);
+    // A 4K picture in a 1080p export, zoomed: drawn at 1920 x scale pixels wide (half its size and up).
+    RenderGraph graph = makeGraph(1920, 1080);
+    graph.sharpenMinified = true;
+    graph.layers.push_back(makeLayer(1));
+    media::PixelBuffer out = makeBuffer(kCVPixelFormatType_32BGRA, 1920, 1080);
+    auto frameAt = [&](double scale, const TextureSet &textures) {
+        graph.layers[0].transform.scale = scale;
+        auto r = renderLayers(*_compositor, graph, {textures}, PixelBufferTarget{out});
+        XCTAssertTrue(r.ok() && r->status.ok() && r->prescaledPlanes == 1u && r->sharpenedPlanes == 1u);
+    };
+    constexpr int kFrames = 40;
+    for (int pass = 0; pass < 2; ++pass) {
+        const std::size_t before = _compositor->stats().scratchAllocations;
+        for (int i = 0; i < kFrames; ++i) {
+            frameAt(1.0 + 0.2 * i / (kFrames - 1), pictureTextures); // drawn 1920 ... 2304 pixels wide
+        }
+        const std::size_t allocated = _compositor->stats().scratchAllocations - before;
+        NSLog(@"PRESCALE pool: pass %d of a %d-frame zoom allocated %zu textures", pass + 1, kFrames, allocated);
+        if (pass == 1) {
+            XCTAssertEqual(allocated, 0u, @"the second pass reuses the pool");
+        }
+    }
+    // A plane 1500x844 lies in a 1536x864 pooled texture (sizes of 1024 to 2047 round up to multiples of 64,
+    // of 512 to 1023 to multiples of 32); a frame drawing a picture 1536x864 fills that texture first, with
+    // white paper or black. Both lie inside the frame, so their right and bottom edges are drawn.
+    auto frameAfter = [&](const TextureSet &earlier) {
+        frameAt(1536.0 / 1920.0, earlier);
+        frameAt(1500.0 / 1920.0, greyTextures);
+        media::PixelBufferLock lock(out.get(), true);
+        const auto *base = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddress(out.get()));
+        const size_t stride = CVPixelBufferGetBytesPerRow(out.get());
+        std::vector<uint8_t> bytes;
+        for (size_t y = 0; y < 1080; ++y) {
+            bytes.insert(bytes.end(), base + y * stride, base + y * stride + 1920 * 4);
+        }
+        return bytes;
+    };
+    const std::vector<uint8_t> afterPicture = frameAfter(pictureTextures);
+    const std::vector<uint8_t> afterOther = frameAfter(otherTextures);
+    XCTAssertTrue(afterPicture == afterOther, @"the frame reads nothing an earlier frame left in its pooled texture");
 }
 
 // Bars under a pixel on each side fill the target: a 3832x2154 sequence (a Retina screen recording) in a

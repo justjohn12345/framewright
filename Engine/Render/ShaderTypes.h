@@ -73,6 +73,11 @@ struct VESourceUniforms {
     // y: 1 when an RGBA source has straight (non-premultiplied) alpha, else 0.
     // z, w: unused.
     VEFloat4 params;
+    // The part of each plane's texture the picture fills, in that texture's uv: xy for plane 0 (luma or RGBA),
+    // zw for plane 1 (chroma). (1, 1) for a source plane; a pre-scaled plane lies in the top-left w x h of a
+    // pooled texture at least that large, and is sampled clamped half a texel inside that region's right and
+    // bottom edges (as clamp_to_edge clamps a whole texture).
+    VEFloat4 planeExtent;
 };
 
 // One draw: an axis-aligned quad in sequence pixels covering the layer (or the pair).
@@ -102,6 +107,9 @@ struct VEUnsharpUniforms {
     VEFloat4 params;
     // x, y: the luma plane's nominal range in unorm (16/255 and 235/255 for 8-bit video range...).
     VEFloat4 range;
+    // x, y: the pre-scaled plane's size in texels (the top-left region of its pooled textures it fills; the
+    // kernel runs over it and reads its neighbours clamped to it). z, w: unused.
+    VEUInt4 size;
 };
 
 // RGB -> output conversion for the export compute pass.

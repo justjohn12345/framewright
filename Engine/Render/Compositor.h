@@ -46,11 +46,12 @@
 // planes of subsampled formats have their own ratio) is first resampled with
 // MPSImageLanczosScale into a pooled texture of about its drawn size, then sampled bilinearly at
 // ~1:1. Straight-alpha RGBA is premultiplied into a pooled RGBA8 texture before resampling.
-// Pooled textures are keyed by (format, size), with sizes rounded up to 1/16-1/32 steps so a
-// live resize reuses them (texture targets: the monitors), and released after 120 frames unused
-// (or releaseScratchMemory()). Pixel-buffer targets (exports, a fixed size) pre-scale to the drawn
-// size itself, rounded up to a whole texel, so their planes are sampled at 1:1 (a 4K picture at
-// 1080p: 1080 rows, not 1088 resampled onto 1080, which blurred fine text in bands).
+// The plane is resampled to its drawn size, rounded up to a whole texel, so it is sampled at 1:1 (a 4K
+// picture at 1080p: 1080 rows, not 1088 resampled onto 1080, which blurred fine text in bands), into the
+// top-left region of a pooled texture keyed by (format, size), with sizes rounded up to 1/16-1/32 steps so
+// a changing drawn size (a Ken Burns zoom in an export, a live resize of a monitor) reuses the pool; the
+// draw samples that region (VESourceUniforms::planeExtent). Pooled textures are released after 120 frames
+// unused (or releaseScratchMemory()).
 // Why this and not the alternatives (measured on this Apple-silicon Mac; standalone numbers are
 // GPU time per plane of a 3840x2160 4:2:0 frame resampled to 1920x1080):
 //   - MPSImageBilinearScale: 0.13 ms for the luma plane, but it does not widen its kernel when
@@ -258,6 +259,7 @@ class Compositor {
         std::size_t freeSlots = 0;       ///< See freeSlotCount().
         std::size_t scratchTextures = 0; ///< Pooled pre-scale textures.
         std::size_t scratchBytes = 0;    ///< Their allocated size.
+        std::size_t scratchAllocations = 0; ///< Pre-scale textures allocated since creation (a pool miss each).
     };
     /// Same thread as render().
     Stats stats() const;
