@@ -142,8 +142,44 @@ struct PlaybackController::Core {
     std::atomic<double> fps{0.0};
     std::atomic<uint64_t> lastClockPresentNanos{0}; // host time of the last clock-driven presentation
 
+    // lastPresented(): the primary source's last presented frame and the frame it holds back. The
+    // render thread must never lose an update (a paused view renders again only on request, and
+    // the renders after it find nothing new to present), nor wait for a reader copying a frame:
+    // the frame is published as an immutable buffer, so the mutex guards only a pointer swap and
+    // an integer on both sides (readers copy the frame after unlocking).
     mutable std::mutex presentedMutex;
-    PresentedFrame presentedInfo;
+    std::shared_ptr<const PresentedFrame> presentedInfo = std::make_shared<const PresentedFrame>(); // presentedMutex
+    int64_t heldBackFrameIndex = -1;                                                              // presentedMutex
+
+    /// Render thread, primary source: `rs.info` becomes lastPresented() (no frame held back). A new
+    /// buffer each time (readers may still be copying the previous one); the previous one is freed
+    /// outside the lock.
+    void publishPresented(RenderState &rs) {
+        std::shared_ptr<const PresentedFrame> published = std::make_shared<const PresentedFrame>(std::move(rs.info));
+        rs.info = PresentedFrame{};
+        {
+            std::lock_guard<std::mutex> lock(presentedMutex);
+            std::swap(presentedInfo, published);
+            heldBackFrameIndex = -1;
+        }
+    }
+    /// Render thread, primary source: the frame at `index` is held back until its pictures land.
+    void publishHeldBack(int64_t index) {
+        std::lock_guard<std::mutex> lock(presentedMutex);
+        heldBackFrameIndex = index;
+    }
+    PresentedFrame lastPresented() const {
+        std::shared_ptr<const PresentedFrame> frame;
+        int64_t heldBack = -1;
+        {
+            std::lock_guard<std::mutex> lock(presentedMutex);
+            frame = presentedInfo;
+            heldBack = heldBackFrameIndex;
+        }
+        PresentedFrame copy = *frame;
+        copy.heldBackFrameIndex = heldBack;
+        return copy;
+    }
 
     // Scrub requests for the paused/scrubbed picture (requestDisplayFramesLocked). While a
     // request of the current display is in flight, the frame source keeps presenting the
@@ -388,9 +424,8 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
         // above are released; the previous frame's stay.
         rs.nextPins.clear();
         rs.nextTextures.clear();
-        if (rs.primary && presentedMutex.try_lock()) { // diagnostics only: never wait for a reader
-            presentedInfo.heldBackFrameIndex = index;
-            presentedMutex.unlock();
+        if (rs.primary) {
+            publishHeldBack(index);
         }
         return false;
     }
@@ -458,9 +493,8 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
     rs.info.clockDriven = d.clockDriven;
     rs.info.hostNanos = nowNanos;
     rs.info.heldBackFrameIndex = -1;
-    if (rs.primary && presentedMutex.try_lock()) { // diagnostics only: never wait for a reader
-        std::swap(presentedInfo, rs.info);
-        presentedMutex.unlock();
+    if (rs.primary) {
+        publishPresented(rs);
     }
     return true;
 }
@@ -1528,8 +1562,7 @@ PlaybackStatus PlaybackController::status() const {
 }
 
 PresentedFrame PlaybackController::lastPresented() const {
-    std::lock_guard<std::mutex> lock(core_->presentedMutex);
-    return core_->presentedInfo;
+    return core_->lastPresented();
 }
 
 PlaybackStats PlaybackController::stats() const {

@@ -16,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <thread>
 
 using namespace ve;
 using namespace ve::media;
@@ -83,6 +84,14 @@ using namespace ve::test;
 // asset 1 at frame 30; another client then asks for asset 1 at frame 90, which cancels the
 // provider's request before it starts. The provider asks again, so the frame it publishes has
 // the picture of frame 30, not a hole.
+//
+// The other client shares the provider's lane on purpose (the only way to cancel its request
+// from outside; in the app every client has lanes of its own). On one lane the newest request
+// wins, so the provider's request made again would interrupt frame 90 if it arrived while 90 is
+// decoding; the provider makes it from the main thread, and the test holds the main thread
+// until frame 90 was delivered. (It spun the run loop instead, so whether the other client got
+// its frame depended on whether the hop to the main thread or the decode of frame 90 finished
+// first: it failed run alone and passed in the full suite.)
 - (void)testCancelledScrubRequestIsMadeAgain {
     auto gate = std::make_shared<Gate>();
     auto firstDecode = std::make_shared<std::atomic<bool>>(true);
@@ -101,14 +110,20 @@ using namespace ve::test;
 
     XCTestExpectation *ready = [self expectationWithDescription:@"ready"];
     provider->show([self graphShowing:AssetId(1) atFrame:30], [ready] { [ready fulfill]; });
-    // Another client (e.g. the source monitor) scrubs the same asset: replaces the pending request.
+    // Another client on the provider's lane asks for the same asset: replaces the pending request.
+    // -1 until it completes; -3 if it was cancelled or failed.
     auto otherFrame = std::make_shared<std::atomic<int>>(-1);
     _pool->requestFrame(AssetId(1), CMTimeMake(90, 30), [otherFrame](Result<ScrubFrame> r) {
-        if (r.ok()) {
-            otherFrame->store(readBurnIn(r->image.get()).value_or(-2));
-        }
+        otherFrame->store(r.ok() ? readBurnIn(r->image.get()).value_or(-2) : -3);
     });
     gate->open();
+    // The main queue is not serviced here, so the provider's request made again (dispatched to
+    // the main thread with its cancellation) waits until the scrub thread delivered frame 90.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (otherFrame->load() == -1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    XCTAssertEqual(otherFrame->load(), 90, @"the other client gets its frame");
     [self waitForExpectations:@[ ready ] timeout:10];
 
     const PreviewFrame frame = [self pull:*provider cache:&_textures];
@@ -121,7 +136,8 @@ using namespace ve::test;
         }
     }
     XCTAssertTrue(_pool->waitUntilIdle(std::chrono::seconds(10)));
-    XCTAssertEqual(otherFrame->load(), 90, @"the other client still gets its frame");
+    XCTAssertEqual(otherFrame->load(), 90, @"the other client still has its frame");
+    XCTAssertEqual(otherResults->load(), 1, @"the decode the gate held completed once");
     XCTAssertGreaterThanOrEqual(_pool->stats().scrubCancelled, 1u, @"the scenario must actually cancel a request");
 }
 

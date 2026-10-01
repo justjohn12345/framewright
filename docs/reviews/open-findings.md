@@ -55,10 +55,20 @@ Done (group A):
   fps; standardFrameDurationFor refuses rates above 240.
 - 18, the exporter's output URL access leak: 2407b2a. The job's completion owns and ends the access.
 
+Done (groups B and C, from 6864cc0; the commit subjects are named until the next status update gives
+the hash):
+- 9, stuck paused seek under load: "Playback: lastPresented() never loses a presentation; deterministic
+  race tests". Root cause: the frame source published lastPresented() (and the held-back frame) with a
+  try-lock and dropped the update when a reader held the lock; the renders after it found nothing new, so
+  presentedFrameIndex named the previous frame for good while the view showed the new one (reproduced: 1
+  failure in 75 loops under CPU load; 0 in 300 after). Now an immutable buffer swapped under the lock.
+  `PlaybackDisplayPathTests testConfigurationChangesOnTheRealOutputRaceTransport`: a test timing
+  dependency (the changes stopped after the transport's 800 ms, so a slow device restart made fewer than
+  six; all twelve are made now). `ProgramFrameProviderTests testCancelledScrubRequestIsMadeAgain`: a test
+  timing dependency (its other client shares the provider's lane, where the newest request wins; the main
+  thread is now held until that client's frame came).
+
 Found while doing them (open):
-- `ProgramFrameProviderTests testCancelledScrubRequestIsMadeAgain` fails when run alone (also at 84d9e20:
-  checked in a worktree): "the other client still gets its frame" (-1). It passes in the full suite, so its
-  outcome depends on timing (the provider's re-request can replace the other client's request).
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
   resampling filter (Lanczos pre-scale below 0.75, bilinear above), not sharpening. Pre-scaling every
   minified picture (threshold 1.0) would remove it at some GPU cost in the monitors.
@@ -67,12 +77,6 @@ Found while doing them (open):
   to unlink or trim. Only out-of-sync linked pairs reach it.
 
 Not started (groups B and C), with what a fresh implementer needs:
-- 9, stuck paused seek under load: `VEEnginePlaybackTests testADissolveBetweenTwoVFRSourcesMixesTheirPicturesAtTheFrameCentre`
-  (EngineTests/Facade/VEEnginePlaybackTests.mm ~1003-1016) saw presentedFrameIndex stay at 56 after a seek
-  to 63 for 20 s in one full-suite run; passes alone. Suspect a residual race in the paused-seek pinning
-  (integration notes, "Paused seeks on VFR sources": `FrameCache::putPinned`, `DecodePool::requestFrame`,
-  `Core::displayPins`, `beginDisplayRequests`). Reproduce under CPU load or with a looped stress variant;
-  root-cause, do not raise the timeout; add diagnostics if it will not reproduce.
 - 11, `laneCount` overflow: Engine/Model/Track.cpp:124 returns highest + 1 as int; the parser reads lanes
   with `node.field("lane").asInt32()` (Engine/Serialize/ProjectJSON.cpp:462). Bound lanes at load (a sane
   maximum) with a load warning or refusal as the parser treats other invalid values; test with crafted JSON.

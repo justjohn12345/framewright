@@ -154,6 +154,61 @@ JitterRun runWithLateCallbacks(ToneRig &rig, bool stampEntryTime) {
           entry.worstRawRegressionMs, static_cast<int>(entry.monotonicHolds), entry.presentedRegressions);
 }
 
+/// lastPresented() read on another thread (the app's stats, a test's polling) while the render
+/// thread presents a paused seek's frame: every presentation and every held-back frame must reach
+/// it. The frame source published them with a try-lock and dropped them when a reader held the
+/// lock; a paused view renders again only on request, and the next renders find nothing new, so
+/// the stats kept naming the previous frame for good (VEEnginePlaybackTests' VFR dissolve case
+/// saw presentedFrameIndex stay on the previous seek's frame for 20 s under load).
+- (void)testLastPresentedIsNeverLostToAConcurrentReader {
+    PlaybackHarness h(PlaybackHarness::Mode::Realtime, 0.0);
+    const AssetId h264 = h.importAsset("h264_1080p30.mp4");
+    if (!h.ok()) {
+        XCTFail(@"%s", h.error().c_str());
+        return;
+    }
+    h.addClip(h.v1, h264, 0, 120, kCMTimeZero);
+    h.load();
+    h.controller->seek(kCMTimeZero);
+    XCTAssertEqual(h.presentExact().presented.frameIndex, 0);
+
+    std::atomic<bool> reading{true};
+    std::atomic<uint64_t> reads{0};
+    std::thread reader([&] {
+        while (reading.load(std::memory_order_relaxed)) {
+            const PresentedFrame presented = h.controller->lastPresented();
+            (void)presented;
+            reads.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+    PlaybackHarness::waitUntil([&] { return reads.load() > 100; });
+    int wrong = 0;
+    int64_t firstWrong = -1;
+    int64_t reported = -1;
+    for (int64_t target = 1; target <= 60; ++target) {
+        const int64_t expected = target * 7 % 120; // 60 different frames of the 120
+        h.controller->seek(CMTimeMake(expected, 30));
+        // Presented (not held back) with its exact pictures, as the paused view shows it once the
+        // request completed; then the source has nothing new, so what lastPresented() says now
+        // stays.
+        const PlaybackHarness::Sample sample = h.presentExact(std::chrono::seconds(5));
+        const bool shown = !sample.burnIns.empty() && sample.burnIns.front().value_or(-1) == expected;
+        if (!shown || sample.presented.frameIndex != expected || sample.presented.heldBackFrameIndex >= 0) {
+            ++wrong;
+            if (firstWrong < 0) {
+                firstWrong = expected;
+                reported = sample.presented.frameIndex;
+            }
+        }
+        XCTAssertFalse(h.present().changed, @"frame %lld: nothing new after it was presented", expected);
+        XCTAssertEqual(h.controller->lastPresented().frameIndex, expected);
+    }
+    reading = false;
+    reader.join();
+    XCTAssertEqual(wrong, 0, @"first at frame %lld: lastPresented named frame %lld", firstWrong, reported);
+    XCTAssertGreaterThan(reads.load(), 1000u, @"the reader must actually race the frame source");
+}
+
 - (void)testMeasuredAVOffsetOnTheRealOutput {
     audio::AudioOutput *device = nullptr;
     bool created = false;
@@ -315,11 +370,16 @@ JitterRun runWithLateCallbacks(ToneRig &rig, bool stampEntryTime) {
     if (!PlaybackHarness::waitUntil([&] { return device->isRunning(); }, std::chrono::seconds(5))) {
         XCTSkip(@"no audio output device");
     }
-    std::atomic<bool> running{true};
+    // All twelve changes are made, however long the device takes to restart: the transport races
+    // them until the last one was made (and for at least 800 ms). The changes used to stop when
+    // the transport's 800 ms were up, so on a slow device (each restart taking over 100 ms, as in
+    // a loaded full-suite run) fewer than six were made and the count below never came.
+    constexpr uint64_t kChanges = 12;
+    std::atomic<bool> changesMade{false};
     std::thread changes([&] {
         // The real handler (engine stop, reconnect, restart, event), on another thread, and the
         // real notification path (observer -> the output's queue).
-        for (int i = 0; running.load() && i < 12; ++i) {
+        for (uint64_t i = 0; i < kChanges; ++i) {
             if (i % 2 == 0) {
                 device->handleConfigurationChange();
             } else {
@@ -327,10 +387,11 @@ JitterRun runWithLateCallbacks(ToneRig &rig, bool stampEntryTime) {
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(40));
         }
+        changesMade = true;
     });
     const auto t0 = std::chrono::steady_clock::now();
     int calls = 0;
-    while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(800)) {
+    while (!changesMade.load() || std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(800)) {
         switch (calls++ % 5) {
         case 0:
             h.controller->play();
@@ -350,9 +411,10 @@ JitterRun runWithLateCallbacks(ToneRig &rig, bool stampEntryTime) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(7));
     }
-    running = false;
     changes.join();
-    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return device->configurationChanges() >= 6; }));
+    // Six handled on the changes thread, six through the notification and the output's queue.
+    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return device->configurationChanges() >= kChanges; }),
+                  @"%llu of %llu configuration changes handled", device->configurationChanges(), kChanges);
     XCTAssertEqual(h.controller->clock().controlViolations(), 0u);
     // Playback still works on the audio clock afterwards.
     h.controller->seek(kCMTimeZero);
