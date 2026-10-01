@@ -203,7 +203,7 @@ std::optional<std::string> effectSpanProblem(const EffectSpan &span, const Clip 
                std::to_string(kLastLane) + ")";
     }
     const bool videoKind = span.kind == SpanKind::Motion || span.kind == SpanKind::Opacity;
-    if (videoKind != (kind == TrackKind::Video)) {
+    if (!span.isUnknownKind() && videoKind != (kind == TrackKind::Video)) {
         return where + ": a " + nameOf(span.kind) + " span on " + nameOf(kind) + " track";
     }
     if (span.edge != ClipEdge::Tail || span.transition != TransitionKind::CrossDissolve) {

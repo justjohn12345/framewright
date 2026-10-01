@@ -66,11 +66,17 @@ enum class SpanKind {
     Motion,     // video: position X/Y, scale, rotation
     Opacity,    // video: opacity (a video fade)
     Gain,       // audio: level in dB
+    // A kind this version does not know, read from a newer version's project file (lanes 1-3, either
+    // kind of track): kept as the file wrote it (ForeignSpanContent) so saving writes it back. It has
+    // no parameters, so it changes no frame and no sample; no span edit accepts it (only deleting or
+    // trimming its clip removes it, see clipSpan). Never created by an edit.
+    Unknown,
 };
 
-// "transition", "motion", "opacity", "gain" (the project file's names).
+// "transition", "motion", "opacity", "gain", "unknown" (the project file's names; an Unknown span is
+// written under its own name, ForeignSpanContent::kindName).
 const char *nameOf(SpanKind kind);
-// "Transition", "Motion", "Opacity", "Gain" (messages).
+// "Transition", "Motion", "Opacity", "Gain", "Unknown" (messages).
 const char *displayNameOf(SpanKind kind);
 
 // The parameters a span can animate.
@@ -101,6 +107,38 @@ double clampSpanValue(SpanParameter parameter, double value);
 std::vector<SpanParameter> parametersOf(SpanKind kind);
 // Whether spans of `kind` animate `parameter`.
 bool kindHasParameter(SpanKind kind, SpanParameter parameter);
+
+// What a newer version of Framewright wrote into a span that this version does not read (review core
+// #9), kept so that loading and saving a project does not strip it (a newer version's colour grades,
+// for example). The model never interprets it: it renders as nothing and no edit changes it.
+struct ForeignSpanContent {
+    // A span of a kind this version does not know (SpanKind::Unknown): the file's name for the kind.
+    // Empty for the known kinds.
+    std::string kindName;
+    // The keys of the span's JSON object this version does not read, as compact JSON text of an object
+    // ("" when there are none). For an Unknown span: every key but "id", "lane", "kind", "start" and
+    // "end" (its tracks included).
+    std::string fields;
+    // A known kind's keyframe tracks of parameters this version does not know (keys of "tracks"), as
+    // compact JSON text of an object ("" when there are none). Their keyframe times are relative to
+    // the span's start and lie within its length when it was read, `tracksLength`, so an edit that
+    // changes the span's length (cutting it, setting its range) drops them (dropForeignTracks), and
+    // they are written back only while the span still has that length.
+    std::string tracks;
+    CMTime tracksLength = kCMTimeInvalid;
+
+    bool empty() const {
+        return kindName.empty() && fields.empty() && tracks.empty();
+    }
+    // Forgets the foreign tracks (the span's length changed).
+    void dropForeignTracks() {
+        tracks.clear();
+        tracksLength = kCMTimeInvalid;
+    }
+};
+
+// Bit-for-bit equality of every field.
+bool operator==(const ForeignSpanContent &a, const ForeignSpanContent &b);
 
 // Keyframe tracks of a span, one per parameter (only the span kind's may be non-empty).
 struct SpanTracks {
@@ -137,9 +175,16 @@ struct EffectSpan {
     // (review L8). The span renders and edits as `transition` (CrossDissolve); choosing a kind
     // (SetTransitionKind) replaces it. Empty otherwise.
     std::string unknownTransitionName;
+    // What a newer version wrote that this one does not read: an Unknown span's kind and content, a
+    // known span's unknown keys and parameters. Empty for every span this version creates.
+    ForeignSpanContent foreign;
 
     bool isTransition() const {
         return kind == SpanKind::Transition;
+    }
+    // A span of a kind from a newer version (SpanKind::Unknown).
+    bool isUnknownKind() const {
+        return kind == SpanKind::Unknown;
     }
 };
 
@@ -195,7 +240,9 @@ enum class SpanCutProblem {
 // (splitTrack): a keyframe at the cut with the value there on both sides, an eased segment's curve
 // divided into its exact parts; a side left without keyframes gets one at its start holding the
 // constant value it had. So the parts show every frame exactly as the span did. Nullopt when `at`
-// is not strictly inside, and on a SpanCutProblem (reported through `problem` when given).
+// is not strictly inside, and on a SpanCutProblem (reported through `problem` when given). An
+// Unknown span cannot be divided (its content is not understood): nullopt, problem None. The parts
+// keep the span's foreign fields but not its foreign tracks (ForeignSpanContent).
 struct SpanSplit {
     EffectSpan left;
     EffectSpan right;
@@ -204,7 +251,8 @@ std::optional<SpanSplit> splitSpan(const EffectSpan &span, CMTime at, SpanCutPro
 
 // The effect span limited to [from, to] (source times): unchanged when it lies inside; the part
 // inside when it crosses an end (divided like splitSpan); nullopt when nothing of it is inside, or
-// on a SpanCutProblem (reported through `problem`, None when the span simply lies outside).
+// on a SpanCutProblem (reported through `problem`, None when the span simply lies outside). An Unknown
+// span that crosses an end cannot be divided: nullopt, problem None (it goes, as one wholly outside).
 std::optional<EffectSpan> clipSpan(const EffectSpan &span, CMTime from, CMTime to, SpanCutProblem *problem = nullptr);
 
 } // namespace ve

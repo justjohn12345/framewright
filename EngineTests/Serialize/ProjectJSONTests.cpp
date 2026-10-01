@@ -599,19 +599,24 @@ TEST_CASE("ProjectJSON: unknown kinds and keys of spans warn instead of failing"
         REQUIRE(loaded.warnings.size() == 1);
         CHECK(contains(loaded.warnings[0], "clips[0].spans[0].transition: unknown transition kind \"wipe\""));
     }
-    SUBCASE("a span of an unknown kind (a newer version) is dropped") {
+    SUBCASE("a span of an unknown kind (a newer version) is kept as it is (review core #9)") {
         spans[1]["kind"] = "blur";
         const ProjectLoadResult loaded = projectFromJson(j);
         REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
-        CHECK(anyContains(loaded.warnings, "spans[1].kind: unknown span kind \"blur\"; the span was dropped"));
-        CHECK(loaded.project->sequences[0].videoTracks[0].clips[0].spans.size() == 2);
+        CHECK(anyContains(loaded.warnings, "spans[1].kind: unknown span kind \"blur\" (from a newer version"));
+        REQUIRE(loaded.project->sequences[0].videoTracks[0].clips[0].spans.size() == 3);
+        CHECK(loaded.project->sequences[0].videoTracks[0].clips[0].spans[1].kind == SpanKind::Unknown);
+        CHECK(projectToJson(*loaded.project) == j);
     }
-    SUBCASE("a track of an unknown parameter is dropped") {
+    SUBCASE("a track of an unknown parameter is kept as it is (review core #9)") {
         spans[1]["tracks"]["skew"] = json::array({{{"time", frames(0)}, {"value", 1.0}}});
         const ProjectLoadResult loaded = projectFromJson(j);
         REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
-        CHECK(anyContains(loaded.warnings, "spans[1].tracks: unknown span parameter \"skew\"; its keyframes were dropped"));
-        CHECK(*loaded.project == fx.project);
+        CHECK(anyContains(loaded.warnings, "spans[1].tracks: unknown span parameter \"skew\" (from a newer version"));
+        CHECK(projectToJson(*loaded.project) == j);
+        Project stripped = *loaded.project;
+        stripped.sequences[0].videoTracks[0].clips[0].spans[1].foreign = ForeignSpanContent{};
+        CHECK(stripped == fx.project);
     }
     SUBCASE("a track of another kind's parameter fails validation") {
         spans[1]["tracks"]["gain"] = json::array({{{"time", frames(0)}, {"value", 1.0}}});
@@ -647,6 +652,128 @@ TEST_CASE("ProjectJSON: unknown kinds and keys of spans warn instead of failing"
         broken["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][1]["tracks"]["x"][1]["curve"] =
             json::array({0.9, 0.0, 0.1, 1.0});
         CHECK(contains(loadError(broken), "invalid timing curve"));
+    }
+}
+
+// A project as a newer version (with colour grading, say) might write it: a span of a kind this
+// version does not know, a parameter it does not know on a known span, and keys it does not know on
+// an effect span and a transition. Clip 0 of V1 covers source frames 30-90; lane 3 is free.
+json withNewerSpanContent(const Fixture &fx) {
+    json j = projectToJson(fx.project);
+    const std::uint64_t id = j["nextId"].get<std::uint64_t>();
+    j["nextId"] = id + 1;
+    json &spans = j["sequences"][0]["videoTracks"][0]["clips"][0]["spans"];
+    spans.push_back(json{{"id", id},
+                         {"lane", 3},
+                         {"kind", "colour"},
+                         {"start", frames(35)},
+                         {"end", frames(70)},
+                         {"tracks",
+                          {{"exposure", json::array({{{"time", frames(0)}, {"value", 0.5}, {"interpolation", "linear"}},
+                                                     {{"time", frames(35)}, {"value", -0.25}}})},
+                           {"temperature", json::array({{{"time", frames(0)}, {"value", 6500}}})}}},
+                         {"look", {{"lut", "teal.cube"}, {"amount", 0.75}}}});
+    spans[1]["tracks"]["blur"] = json::array({{{"time", frames(0)}, {"value", 2.0}, {"interpolation", "springy"}},
+                                              {{"time", frames(40)}, {"value", 0.0}}});
+    spans[2]["colorSpace"] = "linear";
+    spans[0]["softness"] = json{{"amount", 0.5}};
+    return j;
+}
+
+TEST_CASE("ProjectJSON: a newer version's span kinds, parameters and keys round trip unchanged (review core #9)") {
+    const Fixture fx = richFixture();
+    const json written = withNewerSpanContent(fx);
+    const ProjectLoadResult loaded = projectFromJson(written);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    // The unknown kind and parameter are reported, as before they were kept.
+    REQUIRE(loaded.warnings.size() == 2);
+    CHECK(anyContains(loaded.warnings, "spans[3].kind: unknown span kind \"colour\" (from a newer version of "
+                                       "Framewright?); kept as it is and saved with the project, but not shown, "
+                                       "played or editable"));
+    CHECK(anyContains(loaded.warnings, "spans[1].tracks: unknown span parameter \"blur\" (from a newer version of "
+                                       "Framewright?); its keyframes are kept as they are and saved with the project"));
+
+    // Saved: the same document (JSON equality: every key and value), and the text is stable.
+    const Project &project = *loaded.project;
+    CHECK(projectToJson(project) == written);
+    const std::string text = serializeProject(project);
+    const ProjectLoadResult again = parseProject(text);
+    REQUIRE(again.ok());
+    CHECK(*again.project == project);
+    CHECK(serializeProject(*again.project) == text);
+
+    // On the model: the unknown span has no parameters and keeps its kind's name and content.
+    const Clip &clip = project.sequences[0].videoTracks[0].clips[0];
+    REQUIRE(clip.spans.size() == 4);
+    const EffectSpan &colour = clip.spans[3];
+    CHECK(colour.isUnknownKind());
+    CHECK(colour.lane == 3);
+    CHECK(colour.foreign.kindName == "colour");
+    CHECK(colour.tracks.empty());
+    CHECK(parametersOf(colour.kind).empty());
+    CHECK(json::parse(colour.foreign.fields) == json{{"tracks", written["sequences"][0]["videoTracks"][0]["clips"][0]
+                                                                  ["spans"][3]["tracks"]},
+                                                     {"look", {{"lut", "teal.cube"}, {"amount", 0.75}}}});
+    CHECK(json::parse(clip.spans[1].foreign.tracks).contains("blur"));
+    CHECK(identical(clip.spans[1].foreign.tracksLength, f30(40)));
+    CHECK(clip.spans[2].foreign.fields == R"({"colorSpace":"linear"})");
+    CHECK(clip.spans[0].foreign.fields == R"({"softness":{"amount":0.5}})");
+
+    // Without what the newer version added, it is the project this version wrote.
+    Project stripped = project;
+    Clip &strippedClip = stripped.sequences[0].videoTracks[0].clips[0];
+    strippedClip.spans.pop_back();
+    for (EffectSpan &span : strippedClip.spans) {
+        span.foreign = ForeignSpanContent{};
+    }
+    stripped.ids = fx.project.ids;
+    CHECK(stripped == fx.project);
+
+    // It changes no frame: the composed Motion values are those of the project without it.
+    const Clip &plain = fx.project.sequences[0].videoTracks[0].clips[0];
+    for (std::int64_t frame = 0; frame < 60; ++frame) {
+        CHECK(motionValuesAt(clip, f30(frame)) == motionValuesAt(plain, f30(frame)));
+    }
+}
+
+TEST_CASE("ProjectJSON: a span of an unknown kind is kept only where this version allows a span") {
+    const Fixture fx = richFixture();
+    json j = withNewerSpanContent(fx);
+    json &colour = j["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][3];
+    SUBCASE("on lane 0 (transitions only here): dropped with a warning") {
+        colour["lane"] = 0;
+        const ProjectLoadResult r = projectFromJson(j);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(anyContains(r.warnings, "spans[3].kind: unknown span kind \"colour\" on lane 0, which holds transitions "
+                                      "only here; the span was dropped"));
+        CHECK(r.project->sequences[0].videoTracks[0].clips[0].spans.size() == 3);
+    }
+    SUBCASE("outside its clip's source range: dropped with a warning") {
+        colour["end"] = frames(95);
+        const ProjectLoadResult r = projectFromJson(j);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(anyContains(r.warnings, "is outside its clip's source range"));
+        CHECK(anyContains(r.warnings, "the \"colour\" span from a newer version was dropped"));
+        CHECK(r.project->sequences[0].videoTracks[0].clips[0].spans.size() == 3);
+    }
+    SUBCASE("overlapping a span of its lane: moved to a free lane, as any effect span") {
+        colour["lane"] = 1; // meets the Motion span (frames 40-80)
+        const ProjectLoadResult r = projectFromJson(j);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(anyContains(r.warnings, "on lane 1; moved to lane 3"));
+        CHECK(r.project->sequences[0].videoTracks[0].clips[0].spans.back().isUnknownKind());
+    }
+    SUBCASE("on an audio track: kept (this version cannot tell its kind's track)") {
+        json &music = j["sequences"][0]["audioTracks"][1]["clips"][0]["spans"];
+        json moved = colour;
+        moved["lane"] = 2;
+        moved["start"] = timeToJson(CMTimeMake(1, 6));
+        moved["end"] = timeToJson(CMTimeMake(1, 3));
+        music.push_back(moved);
+        j["sequences"][0]["videoTracks"][0]["clips"][0]["spans"].erase(3);
+        const ProjectLoadResult r = projectFromJson(j);
+        REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
+        CHECK(projectToJson(*r.project) == j);
     }
 }
 
@@ -762,7 +889,11 @@ TEST_CASE("ProjectJSON: unknown fields are ignored and optional fields default")
     j["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][1]["label"] = "zoom";
     const ProjectLoadResult withExtras = projectFromJson(j);
     REQUIRE_MESSAGE(withExtras.ok(), doctest::String(withExtras.error.c_str()));
-    CHECK(*withExtras.project == fx.project);
+    // A span's unknown key is kept for saving (review core #9); everything else is the project.
+    Project stripped = *withExtras.project;
+    CHECK(stripped.sequences[0].videoTracks[0].clips[0].spans[1].foreign.fields == R"({"label":"zoom"})");
+    stripped.sequences[0].videoTracks[0].clips[0].spans[1].foreign = ForeignSpanContent{};
+    CHECK(stripped == fx.project);
 
     // Optional fields may be omitted.
     json minimal = projectToJson(fx.project);

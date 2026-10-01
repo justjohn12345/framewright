@@ -302,6 +302,56 @@ VESpanValues values(double x, double scale) {
     }
 }
 
+// A span of a kind from a newer version (review core #9): the engine keeps it for saving, but the app
+// is never shown it, it changes no frame and no edit takes it.
+- (void)testASpanOfANewerKindIsKeptButNotShown {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    const auto [video, audio] = [self place:engine asset:asset at:0 from:0 to:90];
+    (void)audio;
+    VEEditResult *motion = [engine addSpanOfKind:VESpanKindMotion lane:2 clip:video range:framesRange(5, 50)];
+    XCTAssertTrue([engine setValuesOfSpan:motion.span.spanID start:values(10, 1.25) end:values(-30, 0.75)].ok);
+    NSURL *url = [_scratch URLByAppendingPathComponent:@"newer.framewright"];
+    NSError *error = nil;
+    XCTAssertTrue([engine saveProjectToURL:url error:&error], @"%@", error);
+
+    // The file as a newer version would write it: the span is a "colour" span with a key of its own.
+    NSMutableDictionary *document =
+        [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfURL:url]
+                                        options:NSJSONReadingMutableContainers
+                                          error:&error];
+    XCTAssertNotNil(document, @"%@", error);
+    NSMutableDictionary *span = document[@"sequences"][0][@"videoTracks"][0][@"clips"][0][@"spans"][0];
+    XCTAssertEqualObjects(span[@"kind"], @"motion");
+    span[@"kind"] = @"colour";
+    span[@"look"] = @{@"lut" : @"teal.cube"};
+    NSData *newer = [NSJSONSerialization dataWithJSONObject:document options:0 error:&error];
+    XCTAssertTrue([newer writeToURL:url atomically:YES]);
+
+    VEEngine *reopened = [[VEEngine alloc] initWithCacheDirectory:[_scratch URLByAppendingPathComponent:@"Caches2"]];
+    XCTAssertTrue([reopened openProjectAtURL:url error:&error], @"%@", error);
+    const VESpanID colour = motion.span.spanID;
+    XCTAssertNil([reopened spanInfo:colour]);
+    XCTAssertEqual([reopened spansForClip:video].count, 0u);
+    XCTAssertEqual([reopened clipInfo:video].spans.count, 0u);
+    for (int64_t f = 0; f < 90; f += 7) {
+        XCTAssertEqual([[reopened clipInfo:video] videoParamsAtTime:frames30(f)].x, 0, @"frame %lld", f);
+        XCTAssertEqual([[reopened clipInfo:video] videoParamsAtTime:frames30(f)].scale, 1, @"frame %lld", f);
+    }
+    VEEditResult *removal = [reopened removeSpan:colour];
+    XCTAssertFalse(removal.ok);
+    XCTAssertTrue([removal.message containsString:@"newer version"], @"%@", removal.message);
+
+    // Saved again: the span comes back as the newer version wrote it.
+    NSURL *again = [_scratch URLByAppendingPathComponent:@"again.framewright"];
+    XCTAssertTrue([reopened saveProjectToURL:again error:&error], @"%@", error);
+    NSDictionary *saved = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfURL:again]
+                                                          options:0
+                                                            error:&error];
+    NSDictionary *savedSpan = saved[@"sequences"][0][@"videoTracks"][0][@"clips"][0][@"spans"][0];
+    XCTAssertEqualObjects(savedSpan, span);
+}
+
 // MARK: - Ken Burns and matching
 
 - (void)testKenBurnsSetsTheFramingsGivenTheOtherLanes {

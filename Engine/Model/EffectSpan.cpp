@@ -21,6 +21,8 @@ const char *nameOf(SpanKind kind) {
         return "opacity";
     case SpanKind::Gain:
         return "gain";
+    case SpanKind::Unknown:
+        return "unknown";
     }
     return "motion";
 }
@@ -35,6 +37,8 @@ const char *displayNameOf(SpanKind kind) {
         return "Opacity";
     case SpanKind::Gain:
         return "Gain";
+    case SpanKind::Unknown:
+        return "Unknown";
     }
     return "Motion";
 }
@@ -121,6 +125,7 @@ std::vector<SpanParameter> parametersOf(SpanKind kind) {
     case SpanKind::Gain:
         return {SpanParameter::Gain};
     case SpanKind::Transition:
+    case SpanKind::Unknown:
         break;
     }
     return {};
@@ -136,6 +141,7 @@ bool kindHasParameter(SpanKind kind, SpanParameter parameter) {
     case SpanKind::Gain:
         return parameter == SpanParameter::Gain;
     case SpanKind::Transition:
+    case SpanKind::Unknown:
         break;
     }
     return false;
@@ -167,10 +173,15 @@ bool SpanTracks::empty() const {
     return x.empty() && y.empty() && scale.empty() && rotation.empty() && opacity.empty() && gain.empty();
 }
 
+bool operator==(const ForeignSpanContent &a, const ForeignSpanContent &b) {
+    return a.kindName == b.kindName && a.fields == b.fields && a.tracks == b.tracks &&
+           identical(a.tracksLength, b.tracksLength);
+}
+
 bool operator==(const EffectSpan &a, const EffectSpan &b) {
     return a.id == b.id && a.lane == b.lane && a.kind == b.kind && identical(a.start, b.start) &&
            identical(a.end, b.end) && a.edge == b.edge && a.transition == b.transition && a.tracks == b.tracks &&
-           a.unknownTransitionName == b.unknownTransitionName;
+           a.unknownTransitionName == b.unknownTransitionName && a.foreign == b.foreign;
 }
 
 namespace {
@@ -303,7 +314,7 @@ std::optional<SpanSplit> splitSpan(const EffectSpan &span, CMTime at, SpanCutPro
     SpanCutProblem ignored = SpanCutProblem::None;
     SpanCutProblem &why = problem != nullptr ? *problem : ignored;
     why = SpanCutProblem::None;
-    if (span.isTransition() || !isNumeric(at) || !(span.start < at) || !(at < span.end)) {
+    if (span.isTransition() || span.isUnknownKind() || !isNumeric(at) || !(span.start < at) || !(at < span.end)) {
         return std::nullopt;
     }
     const auto relative = checkedSubtract(at, span.start);
@@ -316,6 +327,8 @@ std::optional<SpanSplit> splitSpan(const EffectSpan &span, CMTime at, SpanCutPro
     split.left.end = at;
     split.right.start = at;
     split.right.id = SpanId{};
+    split.left.foreign.dropForeignTracks();
+    split.right.foreign.dropForeignTracks();
     for (const SpanParameter parameter : kSpanParameters) {
         const KeyframeTrack &track = span.tracks.track(parameter);
         if (track.empty()) {
@@ -350,6 +363,9 @@ std::optional<EffectSpan> clipSpan(const EffectSpan &span, CMTime from, CMTime t
     why = SpanCutProblem::None;
     if (span.isTransition() || !(span.start < to) || !(from < span.end) || !(from < to)) {
         return std::nullopt;
+    }
+    if (span.isUnknownKind() && (span.start < from || to < span.end)) {
+        return std::nullopt; // its content cannot be divided: it goes
     }
     EffectSpan clipped = span;
     if (clipped.start < from) {

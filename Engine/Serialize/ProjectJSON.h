@@ -20,8 +20,12 @@
 // "interpolation": "hold" | "linear" | "easeOut" | "easeIn" | "easeInOut" | "bezier", "curve":
 // [x1, y1, x2, y2] (bezier only)}, ...]} (parameters without keyframes left out). Enums are
 // lower-camel strings. Round trips are lossless: projectFromJson(projectToJson(p)) == p bit for
-// bit. Unknown fields are ignored so newer minor additions do not break loading; a span of an
-// unknown kind, or a track of an unknown parameter, is dropped with a warning.
+// bit. Unknown fields are ignored so newer minor additions do not break loading, except in spans:
+// what a newer version wrote there (a span of an unknown kind on an effect lane, a track of an
+// unknown parameter, any other unknown key) is kept on the model as it was read (EffectSpan.h,
+// ForeignSpanContent) and written back on save, so an older build does not strip a newer one's
+// spans; unknown kinds and parameters are reported as warnings. A span of an unknown kind on lane 0,
+// or one outside its clip's source range, is dropped with a warning.
 //
 // Older files are upgraded on load by migrateProjectJson, one schema version at a time. Loading
 // never throws: errors come back as a message naming the offending JSON path; recoverable

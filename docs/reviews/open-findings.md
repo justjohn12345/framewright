@@ -413,6 +413,51 @@ Not done: nothing of the brief. Found along the way and left open: the ThreadSan
 copies (item 3) and the timing flake of `ExportJobTests
 testMemoryIsFlatOver1800FramesAt720pSurvivesPressureAndProgressIsPaced` (see `integration-notes.md`).
 
+## Colour grading prerequisites (2026-10-01): status
+Brief: the "Before colour grading" part of the recommended order in `2026-10-01-general-code-review.md`, from
+18bb9fd (0.1.8), items 1-6 in this order, one commit per item; grading itself is not in this round. Items 1-4
+change no behaviour except item 1's, which the brief asks for; the golden files do not change.
+
+Done:
+- 1, preserve unknown span content on save (review core #9): commit "Model: keep what a newer version wrote in
+  spans". A span of an unknown kind on an effect lane is now `SpanKind::Unknown` with its kind's name and every
+  other key kept as compact JSON text (`EffectSpan::foreign`, `ForeignSpanContent`); a known span keeps its
+  unknown keys (`fields`) and its unknown parameters' tracks (`tracks`, with the span's length when read). All
+  are written back on save; JSON equality round trip. Rules: an Unknown span has no parameters (renders as
+  nothing), every span edit refuses it ("... from a newer version of Framewright"), it holds its lane (an
+  overlap refusal says so), a clip edit that would cut it drops it (reported in `droppedSpanIds`), one that
+  leaves it whole keeps it; a known span's unknown tracks go when its length changes (`SetSpanRange`,
+  `splitSpan`) and the writer also leaves them out when the length differs from the one read. Loading drops an
+  unknown kind on lane 0 or outside its clip's source range (with a warning) instead of failing the file. The
+  facade never shows an Unknown span (`isShownSpan`: snapshots, `spansForClip/Track`, `spanInfo`). Tests:
+  ProjectJSON "a newer version's span kinds, parameters and keys round trip unchanged", "a span of an unknown
+  kind is kept only where this version allows a span", `ForeignSpanTests.cpp` (3 cases),
+  `VEEngineSpanTests testASpanOfANewerKindIsKeptButNotShown`. Changed existing assertions (they asserted the
+  old dropping): ProjectJSONTests "unknown kinds and keys of spans warn instead of failing" (the two subcases
+  on an unknown kind and parameter) and "unknown fields are ignored and optional fields default" (a span's
+  unknown key is now kept, compared after clearing it). Unknown keys elsewhere (clip, track, sequence,
+  keyframe) are still ignored, as the brief scopes the item to spans.
+
+Not started (in order):
+- 2, descriptor tables for `SpanKind` and `SpanParameter` (review core #2): one table per kind (name, display
+  name, track kind, parameters) and per parameter (name, neutral, range, clamp, additive or multiplicative);
+  derive `nameOf`, `parametersOf`, `kindHasParameter`, `isValidSpanValue`, `clampSpanValue`, `neutralValue`,
+  the parser's kind list, the track-kind rule (EditOps `checkSpanKind`, Validation `effectSpanProblem`, Clip.cpp
+  `isPictureSpan`-like test near 528) and `compose`/`decompose` helpers replacing `composeSpanOnto`,
+  `spanEdgeMotion` and the inversions in `planKenBurns`, `planMatchSpanEdge`, `planContinueMotion`,
+  `planMatchMotion`; `kSpanKinds`; the kinds prose in EditOps (~3547). `SpanKind::Unknown` (item 1) is a row
+  with no parameters and any track kind, not in `kSpanKinds`.
+- 3, parameters indexed by enum (`SpanTracks` as `std::array<KeyframeTrack, kParameterCount>`), facade where
+  cheap, `VESpanValues` accessors if straightforward.
+- 4, named shader uniforms (review render #5): sub-structs with real int/uint fields instead of packed float
+  lanes; check the three buffer indices that alias 0.
+- 5, the grading placement decision note `docs/reviews/2026-10-01-grading-pipeline-decision.md` (document only,
+  with a measured prototype of an extra full-frame monitor pass, not committed).
+- 6 (if quota allows): high-precision decode for alpha, high-bit-depth and still sources (review media #2).
+
+Next after this round (waiting for the user's go after item 5's decision): splitting `EffectSpan` into effect
+and transition types; the `TransitionRules` consolidation; the float intermediate on monitors.
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.

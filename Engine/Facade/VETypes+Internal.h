@@ -54,6 +54,11 @@ VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &pr
 VETrackInfo *makeTrackInfo(const Track &track, NSInteger index);
 VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Track &track, const Sequence &sequence,
                              const ClipIndex *index = nullptr);
+// Whether the app is shown `span`: every span but one of a kind from a newer version (SpanKind::Unknown),
+// which the engine keeps as the file wrote it without showing, playing or editing it.
+inline bool isShownSpan(const EffectSpan &span) {
+    return !span.isUnknownKind();
+}
 VETransitionInfo *makeTransitionInfo(const TransitionPlacement &transition);
 VESequenceInfo *makeSequenceInfo(const Sequence &sequence);
 /// The preview of new sequence settings: `report` (nil when refused or nothing was conformed) gives

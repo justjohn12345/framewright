@@ -17,13 +17,13 @@ using namespace ve::facade;
 
 // MARK: - Effect spans
 
-/// The span `spanId` as it is now, or nil.
+/// The span `spanId` as it is now, or nil (also for a span the app is not shown, isShownSpan).
 - (nullable VEEffectSpan *)effectSpanInfo:(SpanId)spanId {
     const Sequence &sequence = [self activeSequence];
     const Clip *clip = nullptr;
     const Track *track = nullptr;
     const EffectSpan *span = sequence.findSpan(spanId, &clip, &track);
-    return span != nullptr ? makeEffectSpan(*span, *clip, *track, sequence) : nil;
+    return span != nullptr && isShownSpan(*span) ? makeEffectSpan(*span, *clip, *track, sequence) : nil;
 }
 
 /// Pushes a span edit; on success the result carries the span `spanId()` names (as it is after the
@@ -61,7 +61,9 @@ using namespace ve::facade;
     NSMutableArray<VEEffectSpan *> *spans = [NSMutableArray array];
     if (clip != nullptr) {
         for (const EffectSpan &span : clip->spans) {
-            [spans addObject:makeEffectSpan(span, *clip, *track, sequence)];
+            if (isShownSpan(span)) {
+                [spans addObject:makeEffectSpan(span, *clip, *track, sequence)];
+            }
         }
     }
     return spans;
@@ -76,7 +78,9 @@ using namespace ve::facade;
         const ClipIndex index(sequence);
         for (const Clip &clip : track->clips) {
             for (const EffectSpan &span : clip.spans) {
-                [spans addObject:makeEffectSpan(span, clip, *track, sequence, &index)];
+                if (isShownSpan(span)) {
+                    [spans addObject:makeEffectSpan(span, clip, *track, sequence, &index)];
+                }
             }
         }
     }

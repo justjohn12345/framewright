@@ -366,6 +366,7 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
         base.gainDb = ve::composeGainDb(_clip, *time, span->id);
         break;
     case ve::SpanKind::Transition:
+    case ve::SpanKind::Unknown:
         return NO;
     }
     *values = base;
@@ -730,6 +731,8 @@ VESpanKind toVE(SpanKind kind) {
         return VESpanKindOpacity;
     case SpanKind::Gain:
         return VESpanKindGain;
+    case SpanKind::Unknown:
+        break; // never shown (isShownSpan)
     }
     return VESpanKindMotion;
 }
@@ -889,7 +892,9 @@ VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &pr
     info.audioParams = audioParamsOf(clip);
     NSMutableArray<VEEffectSpan *> *spans = [NSMutableArray arrayWithCapacity:clip.spans.size()];
     for (const EffectSpan &span : clip.spans) {
-        [spans addObject:makeEffectSpan(span, clip, track, sequence, index)];
+        if (isShownSpan(span)) {
+            [spans addObject:makeEffectSpan(span, clip, track, sequence, index)];
+        }
     }
     info.spans = spans;
     return info;

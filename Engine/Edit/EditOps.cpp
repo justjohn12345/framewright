@@ -998,6 +998,14 @@ EditResult spanNotFound(SpanId id) {
     return EditResult::failure(EditError::SpanNotFound, spanName(id) + " does not exist");
 }
 
+// A span of a kind from a newer version (SpanKind::Unknown) is kept as the file wrote it, never edited.
+EditResult unknownKindRefusal(const EffectSpan &span) {
+    return EditResult::failure(EditError::InvalidArgument,
+                               spanName(span.id) + " is a \"" + span.foreign.kindName +
+                                   "\" span from a newer version of Framewright; this version keeps it as it is "
+                                   "and cannot change it");
+}
+
 // The effect span `spanId` (lanes 1-3), its clip and track, on an editable track.
 EditResult findEffectSpan(Sequence &sequence, SpanId spanId, Track *&track, Clip *&clip, EffectSpan *&span) {
     span = sequence.findSpan(spanId, &clip, &track);
@@ -1007,6 +1015,9 @@ EditResult findEffectSpan(Sequence &sequence, SpanId spanId, Track *&track, Clip
     if (span->isTransition()) {
         return EditResult::failure(EditError::InvalidArgument,
                                    spanName(spanId) + " is a transition; change it with the transition edits");
+    }
+    if (span->isUnknownKind()) {
+        return unknownKindRefusal(*span);
     }
     return requireEditableTrack(track, track->id);
 }
@@ -1024,6 +1035,9 @@ EditResult checkLane(int lane) {
 EditResult checkSpanKind(SpanKind kind, TrackKind trackKind) {
     if (kind == SpanKind::Transition) {
         return EditResult::failure(EditError::InvalidArgument, "a transition is added with the transition edits");
+    }
+    if (kind == SpanKind::Unknown) {
+        return EditResult::failure(EditError::InvalidArgument, "a span of an unknown kind cannot be added");
     }
     const bool video = kind == SpanKind::Motion || kind == SpanKind::Opacity;
     if (video != (trackKind == TrackKind::Video)) {
@@ -1100,7 +1114,9 @@ EditResult checkLaneFree(const Sequence &sequence, const Clip &clip, int lane, C
         if (other.start < end && start < other.end) {
             EditResult refusal = EditResult::failure(
                 EditError::Overlap, "lane " + std::to_string(lane) + " of clip " + idString(clip.id.value()) +
-                                        " already has " + spanName(other.id) + " there");
+                                        " already has " + spanName(other.id) +
+                                        (other.isUnknownKind() ? " (a span from a newer version of Framewright)" : "") +
+                                        " there");
             refusal.freeRange = nearestFreeRange(clip, lane, sequence.frameDuration, frames, except);
             if (refusal.freeRange) {
                 refusal.message += "; the nearest free range is " + describe(refusal.freeRange->start) + " - " +
@@ -1284,7 +1300,9 @@ EditResult SetSpanRange::perform(const Project &, Sequence &sequence, IdGenerato
     moved.start = start;
     moved.end = end;
     if (!(*oldLength == *newLength)) {
-        // A trim: the keyframes stretch over the new length, keeping their places in the span.
+        // A trim: the keyframes stretch over the new length, keeping their places in the span. Tracks
+        // this version does not know cannot be stretched with them: they go (ForeignSpanContent).
+        moved.foreign.dropForeignTracks();
         for (const SpanParameter parameter : kSpanParameters) {
             KeyframeTrack &keys = moved.tracks.track(parameter);
             if (keys.empty()) {
@@ -1456,6 +1474,9 @@ EditResult RemoveSpans::perform(const Project &, Sequence &sequence, IdGenerator
         if (EditResult r = requireEditableTrack(track, track->id); !r) {
             return r;
         }
+        if (span->isUnknownKind()) {
+            return unknownKindRefusal(*span);
+        }
         allTransitions_ = allTransitions_ && span->isTransition();
         std::erase_if(clip->spans, [id](const EffectSpan &s) { return s.id == id; });
         markRemovedOnPurpose(id);
@@ -1511,6 +1532,9 @@ EditResult planMatchSpanEdge(const Sequence &sequence, SpanId spanId, ClipEdge e
     }
     if (span->isTransition()) {
         return EditResult::failure(EditError::InvalidArgument, "a transition has no values to match");
+    }
+    if (span->isUnknownKind()) {
+        return unknownKindRefusal(*span);
     }
     const Clip *neighbour = touchingClip(*track, *clip, edge);
     if (neighbour == nullptr) {

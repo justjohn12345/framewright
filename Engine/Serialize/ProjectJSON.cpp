@@ -53,12 +53,36 @@ json keyframeTrackToJson(const KeyframeTrack &track) {
     return list;
 }
 
+// Compact JSON text kept on the model (ForeignSpanContent) as an object; an empty one for "" (and
+// for text that is not an object, which the parser never stores).
+json foreignObject(const std::string &text) {
+    if (text.empty()) {
+        return json::object();
+    }
+    json value = json::parse(text, nullptr, /*allow_exceptions=*/false);
+    return value.is_object() ? value : json::object();
+}
+
+// Adds the keys of `extra` that `into` does not have.
+void addForeignKeys(json &into, const json &extra) {
+    for (const auto &entry : extra.items()) {
+        if (!into.contains(entry.key())) {
+            into[entry.key()] = entry.value();
+        }
+    }
+}
+
 json spanToJson(const EffectSpan &span) {
     json j{{"id", idToJson(span.id)},
            {"lane", span.lane},
-           {"kind", nameOf(span.kind)},
+           {"kind", span.isUnknownKind() ? span.foreign.kindName : std::string(nameOf(span.kind))},
            {"start", timeToJson(span.start)},
            {"end", timeToJson(span.end)}};
+    // What a newer version wrote that this one does not read goes back as it came (review core #9).
+    addForeignKeys(j, foreignObject(span.foreign.fields));
+    if (span.isUnknownKind()) {
+        return j;
+    }
     if (span.isTransition()) {
         j["edge"] = nameOf(span.edge);
         j["transition"] = span.unknownTransitionName.empty() ? std::string(nameOf(span.transition))
@@ -71,6 +95,12 @@ json spanToJson(const EffectSpan &span) {
         if (!track.empty()) {
             tracks[nameOf(parameter)] = keyframeTrackToJson(track);
         }
+    }
+    // Foreign tracks only while their keyframes still lie within the span (ForeignSpanContent).
+    const auto length = checkedSubtract(span.end, span.start);
+    if (!span.foreign.tracks.empty() && length && CMTIME_IS_NUMERIC(span.foreign.tracksLength) &&
+        *length == span.foreign.tracksLength) {
+        addForeignKeys(tracks, foreignObject(span.foreign.tracks));
     }
     j["tracks"] = std::move(tracks);
     return j;
@@ -440,8 +470,28 @@ ClipEdge parseClipEdge(const Node &node) {
     node.fail("unknown clip edge \"" + s + "\"");
 }
 
-// A span of a kind this version does not know (from a newer one) cannot be kept: nullopt, with a
-// warning.
+// The keys of a span's JSON object this version reads, per kind of span; every other key is kept as
+// foreign content (ForeignSpanContent::fields).
+bool isKnownSpanKey(const std::string &key, const EffectSpan &span) {
+    if (key == "id" || key == "lane" || key == "kind" || key == "start" || key == "end") {
+        return true;
+    }
+    if (span.isUnknownKind()) {
+        return false;
+    }
+    return span.isTransition() ? key == "edge" || key == "transition" : key == "tracks";
+}
+
+// Compact JSON text of an object, for ForeignSpanContent ("" for an empty object).
+std::string foreignText(const json &object) {
+    return object.empty() ? std::string() : object.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
+// A span of a kind this version does not know (from a newer one) is kept as it is (SpanKind::Unknown)
+// when it lies on an effect lane, and so are the unknown keys and parameters of a known span, so
+// that saving writes them back (review core #9); each with a warning but the unknown keys (newer
+// minor additions, ignored silently before they were kept). An unknown kind on lane 0 (transitions
+// only here) cannot be placed: nullopt, with a warning.
 std::optional<EffectSpan> parseSpan(const Node &node, Warnings &warnings) {
     node.requireObject();
     const Node kindNode = node.field("kind");
@@ -452,16 +502,33 @@ std::optional<EffectSpan> parseSpan(const Node &node, Warnings &warnings) {
             kind = candidate;
         }
     }
-    if (!kind) {
-        warnings.push_back(kindNode.path() + ": unknown span kind \"" + kindName + "\"; the span was dropped");
-        return std::nullopt;
-    }
     EffectSpan span;
     span.id = node.field("id").asId<SpanId>();
-    span.kind = *kind;
+    span.kind = kind.value_or(SpanKind::Unknown);
     span.lane = node.field("lane").asInt32();
     span.start = node.field("start").asTime();
     span.end = node.field("end").asTime();
+    if (!kind) {
+        if (span.lane == kTransitionLane) {
+            warnings.push_back(kindNode.path() + ": unknown span kind \"" + kindName +
+                               "\" on lane 0, which holds transitions only here; the span was dropped");
+            return std::nullopt;
+        }
+        span.foreign.kindName = kindName;
+        warnings.push_back(kindNode.path() + ": unknown span kind \"" + kindName +
+                           "\" (from a newer version of Framewright?); kept as it is and saved with the project, "
+                           "but not shown, played or editable");
+    }
+    json unknownFields = json::object();
+    for (const auto &entry : node.value().items()) {
+        if (!isKnownSpanKey(entry.key(), span)) {
+            unknownFields[entry.key()] = entry.value();
+        }
+    }
+    span.foreign.fields = foreignText(unknownFields);
+    if (span.isUnknownKind()) {
+        return span;
+    }
     if (span.isTransition()) {
         span.edge = parseClipEdge(node.field("edge"));
         span.transition = TransitionKind::CrossDissolve;
@@ -486,12 +553,23 @@ std::optional<EffectSpan> parseSpan(const Node &node, Warnings &warnings) {
     if (node.has("tracks")) {
         const Node tracks = node.field("tracks");
         tracks.requireObject();
+        json unknownTracks = json::object();
         for (const auto &entry : tracks.value().items()) {
             const bool known = std::any_of(kSpanParameters.begin(), kSpanParameters.end(),
                                            [&](SpanParameter p) { return entry.key() == nameOf(p); });
             if (!known) {
+                unknownTracks[entry.key()] = entry.value();
                 warnings.push_back(tracks.path() + ": unknown span parameter \"" + entry.key() +
-                                   "\"; its keyframes were dropped");
+                                   "\" (from a newer version of Framewright?); its keyframes are kept as they are "
+                                   "and saved with the project, but not played or editable");
+            }
+        }
+        if (!unknownTracks.empty()) {
+            // Without an exact length the keyframes could not be kept within the span: validation
+            // refuses such a span anyway.
+            if (const auto length = checkedSubtract(span.end, span.start)) {
+                span.foreign.tracks = foreignText(unknownTracks);
+                span.foreign.tracksLength = *length;
             }
         }
         for (const SpanParameter parameter : kSpanParameters) {
@@ -1417,6 +1495,22 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
                     clip.reversed = false;
                     warnings.push_back(clipWhere + ": a still has no direction to reverse; \"reversed\" was cleared");
                 }
+                // A span of an unknown kind (from a newer version) stays only where this version's
+                // rules allow an effect span (its lane is repaired below): kept elsewhere, it would
+                // make validation refuse the whole file.
+                std::erase_if(clip.spans, [&](const EffectSpan &span) {
+                    if (!span.isUnknownKind()) {
+                        return false;
+                    }
+                    EffectSpan placed = span;
+                    placed.lane = kFirstEffectLane;
+                    const auto problem = effectSpanProblem(placed, clip, track.kind);
+                    if (problem) {
+                        warnings.push_back(clipWhere + ": " + *problem + "; the \"" + span.foreign.kindName +
+                                           "\" span from a newer version was dropped");
+                    }
+                    return problem.has_value();
+                });
                 std::vector<SpanId> order;
                 for (const EffectSpan &span : clip.spans) {
                     order.push_back(span.id);
