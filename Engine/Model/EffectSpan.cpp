@@ -1,9 +1,12 @@
 #include "EffectSpan.h"
 
+#include "Track.h"
 #include "Validation.h"
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
+#include <limits>
 
 namespace ve {
 
@@ -11,140 +14,167 @@ const char *nameOf(ClipEdge edge) {
     return edge == ClipEdge::Head ? "head" : "tail";
 }
 
-const char *nameOf(SpanKind kind) {
-    switch (kind) {
-    case SpanKind::Transition:
-        return "transition";
-    case SpanKind::Motion:
-        return "motion";
-    case SpanKind::Opacity:
-        return "opacity";
-    case SpanKind::Gain:
-        return "gain";
-    case SpanKind::Unknown:
-        return "unknown";
-    }
-    return "motion";
-}
+namespace {
 
-const char *displayNameOf(SpanKind kind) {
-    switch (kind) {
-    case SpanKind::Transition:
-        return "Transition";
-    case SpanKind::Motion:
-        return "Motion";
-    case SpanKind::Opacity:
-        return "Opacity";
-    case SpanKind::Gain:
-        return "Gain";
-    case SpanKind::Unknown:
-        return "Unknown";
-    }
-    return "Motion";
-}
+constexpr double kUnbounded = std::numeric_limits<double>::infinity();
 
-const char *nameOf(SpanParameter parameter) {
-    switch (parameter) {
-    case SpanParameter::X:
-        return "x";
-    case SpanParameter::Y:
-        return "y";
-    case SpanParameter::Scale:
-        return "scale";
-    case SpanParameter::Rotation:
-        return "rotation";
-    case SpanParameter::Opacity:
-        return "opacity";
-    case SpanParameter::Gain:
-        return "gain";
-    }
-    return "x";
-}
+constexpr SpanParameterInfo kParameterTable[] = {
+    {SpanParameter::X, "x", "Position X", 0.0, -kUnbounded, kUnbounded, SpanComposition::Additive},
+    {SpanParameter::Y, "y", "Position Y", 0.0, -kUnbounded, kUnbounded, SpanComposition::Additive},
+    {SpanParameter::Scale, "scale", "Scale", 1.0, 0.0, kUnbounded, SpanComposition::Multiplicative},
+    {SpanParameter::Rotation, "rotation", "Rotation", 0.0, -kUnbounded, kUnbounded, SpanComposition::Additive},
+    {SpanParameter::Opacity, "opacity", "Opacity", 1.0, 0.0, 1.0, SpanComposition::Multiplicative},
+    {SpanParameter::Gain, "gain", "Gain", 0.0, -kUnbounded, kUnbounded, SpanComposition::Additive},
+};
 
-const char *displayNameOf(SpanParameter parameter) {
-    switch (parameter) {
-    case SpanParameter::X:
-        return "Position X";
-    case SpanParameter::Y:
-        return "Position Y";
-    case SpanParameter::Scale:
-        return "Scale";
-    case SpanParameter::Rotation:
-        return "Rotation";
-    case SpanParameter::Opacity:
-        return "Opacity";
-    case SpanParameter::Gain:
-        return "Gain";
-    }
-    return "Position X";
-}
+constexpr SpanParameter kMotionParametersOfSpans[] = {SpanParameter::X, SpanParameter::Y, SpanParameter::Scale,
+                                                      SpanParameter::Rotation};
+constexpr SpanParameter kOpacityParameters[] = {SpanParameter::Opacity};
+constexpr SpanParameter kGainParameters[] = {SpanParameter::Gain};
 
-double neutralValue(SpanParameter parameter) {
-    return parameter == SpanParameter::Scale || parameter == SpanParameter::Opacity ? 1.0 : 0.0;
-}
+constexpr SpanKindInfo kKindTable[] = {
+    {SpanKind::Transition, "transition", "Transition", std::nullopt, {}},
+    {SpanKind::Motion, "motion", "Motion", TrackKind::Video, kMotionParametersOfSpans},
+    {SpanKind::Opacity, "opacity", "Opacity", TrackKind::Video, kOpacityParameters},
+    {SpanKind::Gain, "gain", "Gain", TrackKind::Audio, kGainParameters},
+    {SpanKind::Unknown, "unknown", "Unknown", std::nullopt, {}},
+};
 
-bool isValidSpanValue(SpanParameter parameter, double value) {
-    if (!std::isfinite(value)) {
-        return false;
+// Each table is indexed by its enum: row i describes enumerator i.
+constexpr bool parameterTableInOrder() {
+    std::size_t i = 0;
+    for (const SpanParameterInfo &row : kParameterTable) {
+        if (static_cast<std::size_t>(row.parameter) != i || kSpanParameters[i] != row.parameter) {
+            return false;
+        }
+        if (!(row.minimum <= row.neutral && row.neutral <= row.maximum)) {
+            return false;
+        }
+        if (row.neutral != (row.composition == SpanComposition::Additive ? 0.0 : 1.0)) {
+            return false;
+        }
+        ++i;
     }
-    switch (parameter) {
-    case SpanParameter::Scale:
-        return value >= 0.0;
-    case SpanParameter::Opacity:
-        return value >= 0.0 && value <= 1.0;
-    case SpanParameter::X:
-    case SpanParameter::Y:
-    case SpanParameter::Rotation:
-    case SpanParameter::Gain:
-        break;
+    return i == kSpanParameterCount;
+}
+static_assert(parameterTableInOrder(), "kParameterTable must describe SpanParameter in order, neutral within range");
+static_assert(std::size(kParameterTable) == kSpanParameterCount);
+static_assert(static_cast<std::size_t>(SpanKind::Unknown) + 1 == std::size(kKindTable));
+static_assert(static_cast<std::size_t>(kSpanKinds.back()) + 1 == kSpanKinds.size(),
+              "kSpanKinds lists every SpanKind before Unknown, in order");
+
+constexpr bool kindTableInOrder() {
+    for (std::size_t i = 0; i < std::size(kKindTable); ++i) {
+        if (static_cast<std::size_t>(kKindTable[i].kind) != i ||
+            !std::is_sorted(kKindTable[i].parameters.begin(), kKindTable[i].parameters.end())) {
+            return false;
+        }
     }
     return true;
 }
+static_assert(kindTableInOrder(), "kKindTable must describe SpanKind in order, parameters in SpanParameter order");
+
+} // namespace
+
+const SpanKindInfo &infoOf(SpanKind kind) {
+    const auto index = static_cast<std::size_t>(kind);
+    return index < std::size(kKindTable) ? kKindTable[index] : kKindTable[static_cast<std::size_t>(SpanKind::Unknown)];
+}
+
+const SpanParameterInfo &infoOf(SpanParameter parameter) {
+    const auto index = static_cast<std::size_t>(parameter);
+    return index < std::size(kParameterTable) ? kParameterTable[index] : kParameterTable[0];
+}
+
+const char *nameOf(SpanKind kind) {
+    return infoOf(kind).name;
+}
+
+const char *displayNameOf(SpanKind kind) {
+    return infoOf(kind).displayName;
+}
+
+std::optional<SpanKind> spanKindNamed(std::string_view name) {
+    for (const SpanKind kind : kSpanKinds) {
+        if (name == nameOf(kind)) {
+            return kind;
+        }
+    }
+    return std::nullopt;
+}
+
+bool spanKindFitsTrack(SpanKind kind, TrackKind track) {
+    const std::optional<TrackKind> wanted = infoOf(kind).trackKind;
+    return !wanted || *wanted == track;
+}
+
+const char *nameOf(SpanParameter parameter) {
+    return infoOf(parameter).name;
+}
+
+const char *displayNameOf(SpanParameter parameter) {
+    return infoOf(parameter).displayName;
+}
+
+std::optional<SpanParameter> spanParameterNamed(std::string_view name) {
+    for (const SpanParameterInfo &row : kParameterTable) {
+        if (name == row.name) {
+            return row.parameter;
+        }
+    }
+    return std::nullopt;
+}
+
+double neutralValue(SpanParameter parameter) {
+    return infoOf(parameter).neutral;
+}
+
+bool isValidSpanValue(SpanParameter parameter, double value) {
+    const SpanParameterInfo &info = infoOf(parameter);
+    return std::isfinite(value) && value >= info.minimum && value <= info.maximum;
+}
 
 double clampSpanValue(SpanParameter parameter, double value) {
-    switch (parameter) {
-    case SpanParameter::Scale:
-        return std::max(0.0, value);
-    case SpanParameter::Opacity:
-        return std::clamp(value, 0.0, 1.0);
-    case SpanParameter::X:
-    case SpanParameter::Y:
-    case SpanParameter::Rotation:
-    case SpanParameter::Gain:
-        break;
+    const SpanParameterInfo &info = infoOf(parameter);
+    const bool below = std::isfinite(info.minimum);
+    const bool above = std::isfinite(info.maximum);
+    if (below && above) {
+        return std::clamp(value, info.minimum, info.maximum);
+    }
+    if (below) {
+        return std::max(info.minimum, value);
+    }
+    if (above) {
+        return std::min(info.maximum, value);
     }
     return value;
 }
 
 std::vector<SpanParameter> parametersOf(SpanKind kind) {
-    switch (kind) {
-    case SpanKind::Motion:
-        return {SpanParameter::X, SpanParameter::Y, SpanParameter::Scale, SpanParameter::Rotation};
-    case SpanKind::Opacity:
-        return {SpanParameter::Opacity};
-    case SpanKind::Gain:
-        return {SpanParameter::Gain};
-    case SpanKind::Transition:
-    case SpanKind::Unknown:
-        break;
-    }
-    return {};
+    const std::span<const SpanParameter> parameters = infoOf(kind).parameters;
+    return std::vector<SpanParameter>(parameters.begin(), parameters.end());
 }
 
 bool kindHasParameter(SpanKind kind, SpanParameter parameter) {
-    switch (kind) {
-    case SpanKind::Motion:
-        return parameter == SpanParameter::X || parameter == SpanParameter::Y || parameter == SpanParameter::Scale ||
-               parameter == SpanParameter::Rotation;
-    case SpanKind::Opacity:
-        return parameter == SpanParameter::Opacity;
-    case SpanKind::Gain:
-        return parameter == SpanParameter::Gain;
-    case SpanKind::Transition:
-    case SpanKind::Unknown:
-        break;
-    }
-    return false;
+    const std::span<const SpanParameter> parameters = infoOf(kind).parameters;
+    return std::find(parameters.begin(), parameters.end(), parameter) != parameters.end();
+}
+
+double composeSpanValue(SpanParameter parameter, double below, double contribution) {
+    return infoOf(parameter).composition == SpanComposition::Additive ? below + contribution : below * contribution;
+}
+
+bool canDecomposeSpanValue(SpanParameter parameter, double below) {
+    return infoOf(parameter).composition == SpanComposition::Additive || below > 0.0;
+}
+
+double decomposeSpanValue(SpanParameter parameter, double below, double wanted) {
+    return infoOf(parameter).composition == SpanComposition::Additive ? wanted - below : wanted / below;
+}
+
+double extrapolateSpanValue(SpanParameter parameter, double from, double first, double last, double times) {
+    return infoOf(parameter).composition == SpanComposition::Additive ? from + (last - first) * times
+                                                                      : from * std::pow(last / first, times);
 }
 
 KeyframeTrack &SpanTracks::track(SpanParameter parameter) {

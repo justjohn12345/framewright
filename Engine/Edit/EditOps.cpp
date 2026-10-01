@@ -4,11 +4,13 @@
 #include "EditPrimitives.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
 #include <limits>
 #include <map>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -1039,8 +1041,7 @@ EditResult checkSpanKind(SpanKind kind, TrackKind trackKind) {
     if (kind == SpanKind::Unknown) {
         return EditResult::failure(EditError::InvalidArgument, "a span of an unknown kind cannot be added");
     }
-    const bool video = kind == SpanKind::Motion || kind == SpanKind::Opacity;
-    if (video != (trackKind == TrackKind::Video)) {
+    if (!spanKindFitsTrack(kind, trackKind)) {
         return EditResult::failure(EditError::TrackKindMismatch, std::string("a ") + nameOf(kind) +
                                                                      " span cannot go on a clip of " +
                                                                      nameOf(trackKind) + " track");
@@ -1048,15 +1049,46 @@ EditResult checkSpanKind(SpanKind kind, TrackKind trackKind) {
     return EditResult::success();
 }
 
+// "0", "1", "0.5": a range bound as the refusals print it.
+std::string boundName(double bound) {
+    char text[32];
+    std::snprintf(text, sizeof text, "%g", bound);
+    return text;
+}
+
+// What the refusal of an invalid value says about the parameter's range (SpanParameterInfo).
+std::string rangeName(SpanParameter parameter) {
+    const SpanParameterInfo &info = infoOf(parameter);
+    const bool below = std::isfinite(info.minimum);
+    const bool above = std::isfinite(info.maximum);
+    if (below && above) {
+        return "it is within " + boundName(info.minimum) + "..." + boundName(info.maximum);
+    }
+    if (below) {
+        return "it is at least " + boundName(info.minimum);
+    }
+    if (above) {
+        return "it is at most " + boundName(info.maximum);
+    }
+    return "it must be finite";
+}
+
 EditResult checkSpanValue(SpanParameter parameter, double value) {
     if (!isValidSpanValue(parameter, value)) {
-        return EditResult::failure(EditError::InvalidArgument,
-                                   std::string(displayNameOf(parameter)) + " cannot be " + std::to_string(value) +
-                                       (parameter == SpanParameter::Opacity ? " (it is within 0...1)"
-                                        : parameter == SpanParameter::Scale ? " (it is at least 0)"
-                                                                            : " (it must be finite)"));
+        return EditResult::failure(EditError::InvalidArgument, std::string(displayNameOf(parameter)) + " cannot be " +
+                                                                   std::to_string(value) + " (" +
+                                                                   rangeName(parameter) + ")");
     }
     return EditResult::success();
+}
+
+// "scale", "opacity": a parameter named inside a sentence.
+std::string lowercaseName(SpanParameter parameter) {
+    std::string name = displayNameOf(parameter);
+    for (char &c : name) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return name;
 }
 
 EditResult checkInterpolation(KeyframeInterpolation interpolation) {
@@ -1500,23 +1532,29 @@ EditResult planKenBurns(const Clip &clip, const EffectSpan &span, CMTime frameDu
     }
     const VideoParams before = composeMotion(clip, *startTime, span.id);
     const VideoParams after = composeMotion(clip, *endTime, span.id);
-    if (!(before.scale > 0.0) || !(after.scale > 0.0)) {
-        return EditResult::failure(EditError::InvalidArgument,
-                                   "the clip's scale is 0 there without this span, so no framing can be shown");
-    }
-    const std::pair<SpanParameter, std::pair<double, double>> values[] = {
-        {SpanParameter::X, {start.x - before.x, end.x - after.x}},
-        {SpanParameter::Y, {start.y - before.y, end.y - after.y}},
-        {SpanParameter::Scale, {start.scale / before.scale, end.scale / after.scale}},
+    // A framing sets position and scale; each is what the span must add or multiply onto the rest.
+    const std::tuple<SpanParameter, double, double, double, double> framed[] = {
+        {SpanParameter::X, before.x, after.x, start.x, end.x},
+        {SpanParameter::Y, before.y, after.y, start.y, end.y},
+        {SpanParameter::Scale, before.scale, after.scale, start.scale, end.scale},
     };
-    for (const auto &[parameter, pair] : values) {
-        if (EditResult r = checkSpanValue(parameter, pair.first); !r) {
+    for (const auto &[parameter, below, belowEnd, wanted, wantedEnd] : framed) {
+        if (!canDecomposeSpanValue(parameter, below) || !canDecomposeSpanValue(parameter, belowEnd)) {
+            return EditResult::failure(EditError::InvalidArgument, "the clip's " + lowercaseName(parameter) +
+                                                                       " is 0 there without this span, so no "
+                                                                       "framing can be shown");
+        }
+    }
+    for (const auto &[parameter, below, belowEnd, wanted, wantedEnd] : framed) {
+        const double first = decomposeSpanValue(parameter, below, wanted);
+        const double last = decomposeSpanValue(parameter, belowEnd, wantedEnd);
+        if (EditResult r = checkSpanValue(parameter, first); !r) {
             return r;
         }
-        if (EditResult r = checkSpanValue(parameter, pair.second); !r) {
+        if (EditResult r = checkSpanValue(parameter, last); !r) {
             return r;
         }
-        changes.push_back(SpanValueChange{parameter, pair.first, pair.second});
+        changes.push_back(SpanValueChange{parameter, first, last});
     }
     return EditResult::success();
 }
@@ -1569,27 +1607,22 @@ EditResult planMatchSpanEdge(const Sequence &sequence, SpanId spanId, ClipEdge e
         }
         return EditResult::success();
     };
-    if (span->kind == SpanKind::Gain) {
-        const double target = gainDbAt(*neighbour, otherFrame);
-        return propose(SpanParameter::Gain, target - composeGainDb(*clip, *time, span->id));
-    }
-    const VideoParams target = motionValuesAt(*neighbour, otherFrame);
-    const VideoParams others = composeMotion(*clip, *time, span->id);
-    if (span->kind == SpanKind::Opacity) {
-        if (!(others.opacity > 0.0)) {
-            return EditResult::failure(EditError::InvalidArgument,
-                                       "the clip's opacity is 0 there without this span, so no value can match");
+    // What the neighbour shows there, and what the rest of this clip composes to without the span.
+    const VideoParams targetVideo = motionValuesAt(*neighbour, otherFrame);
+    const AudioParams targetAudio{gainDbAt(*neighbour, otherFrame)};
+    const VideoParams othersVideo = composeMotion(*clip, *time, span->id);
+    const AudioParams othersAudio{composeGainDb(*clip, *time, span->id)};
+    const std::span<const SpanParameter> parameters = infoOf(span->kind).parameters;
+    for (const SpanParameter parameter : parameters) {
+        if (!canDecomposeSpanValue(parameter, clipValueOf(othersVideo, othersAudio, parameter))) {
+            return EditResult::failure(EditError::InvalidArgument, "the clip's " + lowercaseName(parameter) +
+                                                                       " is 0 there without this span, so no value "
+                                                                       "can match");
         }
-        return propose(SpanParameter::Opacity, target.opacity / others.opacity);
     }
-    if (!(others.scale > 0.0)) {
-        return EditResult::failure(EditError::InvalidArgument,
-                                   "the clip's scale is 0 there without this span, so no value can match");
-    }
-    for (const auto &[parameter, value] :
-         {std::pair{SpanParameter::X, target.x - others.x}, std::pair{SpanParameter::Y, target.y - others.y},
-          std::pair{SpanParameter::Scale, target.scale / others.scale},
-          std::pair{SpanParameter::Rotation, target.rotationDegrees - others.rotationDegrees}}) {
+    for (const SpanParameter parameter : parameters) {
+        const double value = decomposeSpanValue(parameter, clipValueOf(othersVideo, othersAudio, parameter),
+                                                clipValueOf(targetVideo, targetAudio, parameter));
         if (EditResult r = propose(parameter, value); !r) {
             return r;
         }
@@ -1699,40 +1732,37 @@ EditResult planContinueMotion(const Project &project, const Sequence &sequence, 
     }
     const VideoParams before = composeMotion(*next, *firstTime);
     const VideoParams after = composeMotion(*next, *lastTime);
-    if (!(before.scale > 0.0) || !(after.scale > 0.0)) {
-        return EditResult::failure(EditError::InvalidArgument,
-                                   nextName + " has scale 0 where the move would go, so no span value can show it.");
+    const AudioParams sound = next->audio; // Motion parameters compose onto the picture only
+    const std::span<const SpanParameter> parameters = infoOf(SpanKind::Motion).parameters;
+    for (const SpanParameter parameter : parameters) {
+        if (!canDecomposeSpanValue(parameter, clipValueOf(before, sound, parameter)) ||
+            !canDecomposeSpanValue(parameter, clipValueOf(after, sound, parameter))) {
+            return EditResult::failure(EditError::InvalidArgument, nextName + " has " + lowercaseName(parameter) +
+                                                                       " 0 where the move would go, so no span value "
+                                                                       "can show it.");
+        }
     }
     // The rate of the move: its own start and end values over its length.
-    const double startScale = spanEdgeValue(*span, SpanParameter::Scale, false);
-    const double endScale = spanEdgeValue(*span, SpanParameter::Scale, true);
-    if (!(startScale > 0.0)) {
-        return EditResult::failure(EditError::InvalidArgument,
-                                   "The move starts at scale 0, so it has no zoom rate to continue.");
+    for (const SpanParameter parameter : parameters) {
+        if (!canDecomposeSpanValue(parameter, spanEdgeValue(*span, parameter, false))) {
+            return EditResult::failure(EditError::InvalidArgument, "The move starts at " + lowercaseName(parameter) +
+                                                                       " 0, so it has no zoom rate to continue.");
+        }
     }
     const double k = CMTimeGetSeconds(plan.timelineEnd - plan.timelineStart) / ownSeconds;
-    auto delta = [&](SpanParameter parameter) {
-        return (spanEdgeValue(*span, parameter, true) - spanEdgeValue(*span, parameter, false)) * k;
-    };
     const VideoParams from = motionValuesAt(*clip, clip->timelineEnd());
-    VideoParams to = from;
-    to.x += delta(SpanParameter::X);
-    to.y += delta(SpanParameter::Y);
-    to.rotationDegrees += delta(SpanParameter::Rotation);
-    to.scale *= std::pow(endScale / startScale, k);
-    const std::pair<SpanParameter, std::pair<double, double>> values[] = {
-        {SpanParameter::X, {from.x - before.x, to.x - after.x}},
-        {SpanParameter::Y, {from.y - before.y, to.y - after.y}},
-        {SpanParameter::Scale, {from.scale / before.scale, to.scale / after.scale}},
-        {SpanParameter::Rotation, {from.rotationDegrees - before.rotationDegrees, to.rotationDegrees - after.rotationDegrees}},
-    };
-    for (const auto &[parameter, pair] : values) {
-        for (const double value : {pair.first, pair.second}) {
+    for (const SpanParameter parameter : parameters) {
+        const double here = clipValueOf(from, sound, parameter);
+        const double there = extrapolateSpanValue(parameter, here, spanEdgeValue(*span, parameter, false),
+                                                  spanEdgeValue(*span, parameter, true), k);
+        const double first = decomposeSpanValue(parameter, clipValueOf(before, sound, parameter), here);
+        const double last = decomposeSpanValue(parameter, clipValueOf(after, sound, parameter), there);
+        for (const double value : {first, last}) {
             if (EditResult r = checkSpanValue(parameter, value); !r) {
                 return r;
             }
         }
-        plan.values.push_back(SpanValueChange{parameter, pair.first, pair.second});
+        plan.values.push_back(SpanValueChange{parameter, first, last});
     }
     const KeyframeInterpolation easing = spanInterpolation(*span);
     plan.interpolation = easing == KeyframeInterpolation::Bezier ? KeyframeInterpolation::Linear : easing;
@@ -2625,6 +2655,21 @@ std::string framesName(std::int64_t frames) {
 // "1 clip", "3 clips".
 std::string countName(std::size_t count, const char *one, const char *many) {
     return std::to_string(count) + " " + (count == 1 ? one : many);
+}
+
+// "Motion, Opacity and Gain": the effect span kinds (those with parameters), from the kind table.
+std::string effectKindsName() {
+    std::vector<std::string> names;
+    for (const SpanKind kind : kSpanKinds) {
+        if (!infoOf(kind).parameters.empty()) {
+            names.push_back(displayNameOf(kind));
+        }
+    }
+    std::string text;
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        text += (i == 0 ? "" : i + 1 == names.size() ? " and " : ", ") + names[i];
+    }
+    return text;
 }
 
 // "the cross dissolve between “a.mov” and “b.mov”", "the crossfade between ...", "the fade in at the
@@ -3568,7 +3613,7 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
                                 secondsName(timeForFrame(frames, newFd)) + " now).");
         }
         if (hasEffectSpans) {
-            sentences.push_back("Motion, Opacity and Gain spans stay on their pictures (their times do not change).");
+            sentences.push_back(effectKindsName() + " spans stay on their pictures (their times do not change).");
         }
     }
     if (target.audioSampleRate != old.audioSampleRate) {

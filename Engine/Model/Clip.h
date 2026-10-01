@@ -301,6 +301,10 @@ std::optional<std::pair<ExactTime, ExactTime>> mediaRangeOf(const Clip &clip, CM
 VideoParams composeMotion(const Clip &clip, const ExactTime &time, std::optional<SpanId> except = std::nullopt);
 double composeGainDb(const Clip &clip, const ExactTime &time, std::optional<SpanId> except = std::nullopt);
 
+// The value of `parameter` among a clip's values `video` and `audio` (static or composed): the
+// field of the picture's placement and opacity, or the gain, that the parameter's spans compose onto.
+double clipValueOf(const VideoParams &video, const AudioParams &audio, SpanParameter parameter);
+
 // The Motion the clip shows at timeline time `t` (its static values when `t` has no source time).
 // Scheduler::motionAt and the facade's VEClipInfo motion(at:) both return this.
 VideoParams motionValuesAt(const Clip &clip, CMTime t);

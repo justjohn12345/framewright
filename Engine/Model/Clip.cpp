@@ -1,5 +1,7 @@
 #include "Clip.h"
 
+#include "Track.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -7,17 +9,39 @@ namespace ve {
 
 namespace {
 
-// Applies what the Motion or Opacity span `span` contributes at `time` on top of `values`
-// (composeMotion): offsets add, factors multiply.
-void composeSpanOnto(VideoParams &values, const EffectSpan &span, const ExactTime &time) {
-    if (span.kind == SpanKind::Motion) {
-        values.x += spanContributionAt(span, SpanParameter::X, time);
-        values.y += spanContributionAt(span, SpanParameter::Y, time);
-        values.scale *= spanContributionAt(span, SpanParameter::Scale, time);
-        values.rotationDegrees += spanContributionAt(span, SpanParameter::Rotation, time);
-    } else if (span.kind == SpanKind::Opacity) {
-        values.opacity *= spanContributionAt(span, SpanParameter::Opacity, time);
+// The clip value a span parameter composes onto (its static value; Clip.h, "Composition"): the
+// picture's placement and opacity, or the sound's gain.
+template <typename Video, typename Audio>
+auto &composedValue(Video &video, Audio &audio, SpanParameter parameter) {
+    switch (parameter) {
+    case SpanParameter::X:
+        return video.x;
+    case SpanParameter::Y:
+        return video.y;
+    case SpanParameter::Scale:
+        return video.scale;
+    case SpanParameter::Rotation:
+        return video.rotationDegrees;
+    case SpanParameter::Opacity:
+        return video.opacity;
+    case SpanParameter::Gain:
+        return audio.gainDb;
     }
+    return video.x;
+}
+
+// Applies what `span` contributes at `time` on top of `video` and `audio` (composeMotion,
+// composeGainDb): each of its parameters composed (composeSpanValue: offsets add, factors multiply).
+void composeSpanOnto(VideoParams &video, AudioParams &audio, const EffectSpan &span, const ExactTime &time) {
+    for (const SpanParameter parameter : infoOf(span.kind).parameters) {
+        double &value = composedValue(video, audio, parameter);
+        value = composeSpanValue(parameter, value, spanContributionAt(span, parameter, time));
+    }
+}
+
+// Whether `span`'s kind changes the picture (its spans go on video tracks) or the sound (audio).
+bool changesTrackOfKind(const EffectSpan &span, TrackKind kind) {
+    return infoOf(span.kind).trackKind == kind;
 }
 
 // Calls `apply` for every effect span of `spans` that `include` accepts, lane 1, 2, 3 and within a
@@ -301,7 +325,7 @@ RetimeResult Clip::fitSpans(ClipEdge editedEdge) {
     // Effect spans wholly before the in bound hold their end values over every frame left: those
     // values move into the static values, composed in the composition's order.
     VideoParams heldVideo = video;
-    double heldGainDb = audio.gainDb;
+    AudioParams heldAudio = audio;
     const auto in = ExactTime::from(bounds->first);
     if (!in) {
         return RetimeResult::NotRepresentable;
@@ -311,12 +335,9 @@ RetimeResult Clip::fitSpans(ClipEdge editedEdge) {
         spans, [&](const EffectSpan &span) { return !(bounds->first < span.end); },
         [&](const EffectSpan &span) {
             held = true;
-            composeSpanOnto(heldVideo, span, *in);
-            if (span.kind == SpanKind::Gain) {
-                heldGainDb += spanContributionAt(span, SpanParameter::Gain, *in);
-            }
+            composeSpanOnto(heldVideo, heldAudio, span, *in);
         });
-    if (held && (!isFinite(heldVideo) || !std::isfinite(heldGainDb))) {
+    if (held && (!isFinite(heldVideo) || !std::isfinite(heldAudio.gainDb))) {
         return RetimeResult::HeldValuesOverflow;
     }
 
@@ -396,7 +417,7 @@ RetimeResult Clip::fitSpans(ClipEdge editedEdge) {
     });
     spans = std::move(fitted);
     video = heldVideo;
-    audio.gainDb = heldGainDb;
+    audio.gainDb = heldAudio.gainDb;
     return RetimeResult::Ok;
 }
 
@@ -520,27 +541,34 @@ std::optional<ExactTime> spanEvaluationTime(const Clip &clip, CMTime t) {
     return time;
 }
 
+double clipValueOf(const VideoParams &video, const AudioParams &audio, SpanParameter parameter) {
+    return composedValue(video, audio, parameter);
+}
+
 VideoParams composeMotion(const Clip &clip, const ExactTime &time, std::optional<SpanId> except) {
     VideoParams values = clip.video;
+    AudioParams unused = clip.audio;
     forEachInCompositionOrder(
         clip.spans,
         [&](const EffectSpan &span) {
-            const bool picture = span.kind == SpanKind::Motion || span.kind == SpanKind::Opacity;
-            return picture && !(except && span.id == *except) && spanActsAt(span, time);
+            return changesTrackOfKind(span, TrackKind::Video) && !(except && span.id == *except) &&
+                   spanActsAt(span, time);
         },
-        [&](const EffectSpan &span) { composeSpanOnto(values, span, time); });
+        [&](const EffectSpan &span) { composeSpanOnto(values, unused, span, time); });
     return values;
 }
 
 double composeGainDb(const Clip &clip, const ExactTime &time, std::optional<SpanId> except) {
-    double gainDb = clip.audio.gainDb;
+    VideoParams unused = clip.video;
+    AudioParams values = clip.audio;
     forEachInCompositionOrder(
         clip.spans,
         [&](const EffectSpan &span) {
-            return span.kind == SpanKind::Gain && !(except && span.id == *except) && spanActsAt(span, time);
+            return changesTrackOfKind(span, TrackKind::Audio) && !(except && span.id == *except) &&
+                   spanActsAt(span, time);
         },
-        [&](const EffectSpan &span) { gainDb += spanContributionAt(span, SpanParameter::Gain, time); });
-    return gainDb;
+        [&](const EffectSpan &span) { composeSpanOnto(unused, values, span, time); });
+    return values.gainDb;
 }
 
 VideoParams motionValuesAt(const Clip &clip, CMTime t) {
@@ -584,10 +612,11 @@ std::optional<VideoParams> spanEdgeMotion(const Clip &clip, const EffectSpan &sp
         return std::nullopt;
     }
     VideoParams values = composeMotion(clip, *time, span.id);
-    values.x += spanEdgeValue(span, SpanParameter::X, atEnd);
-    values.y += spanEdgeValue(span, SpanParameter::Y, atEnd);
-    values.scale *= spanEdgeValue(span, SpanParameter::Scale, atEnd);
-    values.rotationDegrees += spanEdgeValue(span, SpanParameter::Rotation, atEnd);
+    AudioParams unused = clip.audio;
+    for (const SpanParameter parameter : infoOf(span.kind).parameters) {
+        double &value = composedValue(values, unused, parameter);
+        value = composeSpanValue(parameter, value, spanEdgeValue(span, parameter, atEnd));
+    }
     return values;
 }
 

@@ -438,15 +438,27 @@ Done:
   unknown key is now kept, compared after clearing it). Unknown keys elsewhere (clip, track, sequence,
   keyframe) are still ignored, as the brief scopes the item to spans.
 
+- 2, descriptor tables for `SpanKind` and `SpanParameter` (review core #2): commit "Model: descriptor tables for
+  span kinds and parameters". `SpanKindInfo` (name, display name, track kind as `std::optional<TrackKind>`,
+  parameters as a `std::span`) and `SpanParameterInfo` (name, display name, neutral, range, `SpanComposition`
+  additive or multiplicative) in EffectSpan.cpp, indexed by the enums and `static_assert`ed in order;
+  `kSpanKinds`, `kSpanParameterCount`, `infoOf`, `spanKindNamed`, `spanParameterNamed`, `spanKindFitsTrack`;
+  `nameOf`, `displayNameOf`, `parametersOf`, `kindHasParameter`, `neutralValue`, `isValidSpanValue`,
+  `clampSpanValue` read the tables; the parser's kind and parameter lists; the track rule (EditOps
+  `checkSpanKind`, Validation `effectSpanProblem`, Clip.cpp's picture/sound tests); `composeSpanValue`,
+  `canDecomposeSpanValue`, `decomposeSpanValue`, `extrapolateSpanValue` replace the arithmetic in
+  `composeSpanOnto` (now composing every parameter of any kind onto `clipValueOf`'s field), `spanEdgeMotion`,
+  `fitSpans`' held gain, `planKenBurns`, `planMatchSpanEdge` (now one loop for every kind), `planContinueMotion`
+  and `planMatchMotion`; the refusal texts that named ranges or a parameter at 0 are derived from the tables
+  word for word; the conform sentence's "Motion, Opacity and Gain" comes from the table (`effectKindsName`).
+  Proof of no change: `SpanDescriptorTests.cpp` compares every derived function with a copy of the switch it
+  replaced over all enumerators and a 21-value grid (infinities, NaN, -0 included, bit for bit), the four
+  helpers with the six sites' arithmetic over the grid, and the derived refusal sentences with the old
+  literals; the existing span suites (checked against the independent references of SpanReference.h) pass
+  unchanged. Full suite after this item: EngineTests 549 (0 skips this run), doctest 341, AppTests 278 (1
+  known skip), 0 failures, no leftovers.
+
 Not started (in order):
-- 2, descriptor tables for `SpanKind` and `SpanParameter` (review core #2): one table per kind (name, display
-  name, track kind, parameters) and per parameter (name, neutral, range, clamp, additive or multiplicative);
-  derive `nameOf`, `parametersOf`, `kindHasParameter`, `isValidSpanValue`, `clampSpanValue`, `neutralValue`,
-  the parser's kind list, the track-kind rule (EditOps `checkSpanKind`, Validation `effectSpanProblem`, Clip.cpp
-  `isPictureSpan`-like test near 528) and `compose`/`decompose` helpers replacing `composeSpanOnto`,
-  `spanEdgeMotion` and the inversions in `planKenBurns`, `planMatchSpanEdge`, `planContinueMotion`,
-  `planMatchMotion`; `kSpanKinds`; the kinds prose in EditOps (~3547). `SpanKind::Unknown` (item 1) is a row
-  with no parameters and any track kind, not in `kSpanKinds`.
 - 3, parameters indexed by enum (`SpanTracks` as `std::array<KeyframeTrack, kParameterCount>`), facade where
   cheap, `VESpanValues` accessors if straightforward.
 - 4, named shader uniforms (review render #5): sub-structs with real int/uint fields instead of packed float

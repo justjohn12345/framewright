@@ -41,8 +41,11 @@
 #include "Transition.h"
 
 #include <array>
+#include <cstddef>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ve {
@@ -61,6 +64,14 @@ inline constexpr int kTransitionLane = 0;
 inline constexpr int kFirstEffectLane = 1;
 inline constexpr int kLastLane = kLaneCount - 1;
 
+// The kind of track a clip lies on (Track.h).
+enum class TrackKind;
+
+// ----- Span kinds and parameters: one descriptor table each -----
+// Everything the engine knows about a kind or a parameter is a row of these tables
+// (EffectSpan.cpp): adding one is adding a row (and an enumerator), and the functions below, the
+// project file's parser, the track rule and the composition read it from there.
+
 enum class SpanKind {
     Transition, // lane 0 only: a cross dissolve / crossfade or a fade (Transition.h)
     Motion,     // video: position X/Y, scale, rotation
@@ -73,11 +84,9 @@ enum class SpanKind {
     Unknown,
 };
 
-// "transition", "motion", "opacity", "gain", "unknown" (the project file's names; an Unknown span is
-// written under its own name, ForeignSpanContent::kindName).
-const char *nameOf(SpanKind kind);
-// "Transition", "Motion", "Opacity", "Gain", "Unknown" (messages).
-const char *displayNameOf(SpanKind kind);
+// The kinds a project file names (every kind but Unknown), in SpanKind order.
+inline constexpr std::array<SpanKind, 4> kSpanKinds{SpanKind::Transition, SpanKind::Motion, SpanKind::Opacity,
+                                                    SpanKind::Gain};
 
 // The parameters a span can animate.
 enum class SpanParameter {
@@ -89,24 +98,84 @@ enum class SpanParameter {
     Gain,     // decibels added to the clip's gain
 };
 
-inline constexpr std::array<SpanParameter, 6> kSpanParameters{SpanParameter::X,        SpanParameter::Y,
-                                                              SpanParameter::Scale,    SpanParameter::Rotation,
-                                                              SpanParameter::Opacity,  SpanParameter::Gain};
+inline constexpr std::size_t kSpanParameterCount = 6;
+inline constexpr std::array<SpanParameter, kSpanParameterCount> kSpanParameters{
+    SpanParameter::X,        SpanParameter::Y,       SpanParameter::Scale,
+    SpanParameter::Rotation, SpanParameter::Opacity, SpanParameter::Gain};
+
+// How a span's value of a parameter applies on top of the value below it (the clip's static value
+// and the spans composed before it; Clip.h, "Composition").
+enum class SpanComposition {
+    Additive,       // an offset, added; neutral 0
+    Multiplicative, // a factor, multiplied; neutral 1
+};
+
+struct SpanParameterInfo {
+    SpanParameter parameter;
+    const char *name;        // the project file's key: "x", "y", "scale", "rotation", "opacity", "gain"
+    const char *displayName; // messages: "Position X", "Position Y", "Scale", "Rotation", "Opacity", "Gain"
+    double neutral;          // the value that changes nothing
+    double minimum;          // the valid range, [minimum, maximum] (infinite bounds: unbounded; values
+    double maximum;          // are always finite)
+    SpanComposition composition;
+};
+
+struct SpanKindInfo {
+    SpanKind kind;
+    const char *name;        // the project file's name ("unknown" for Unknown, which is written under its own)
+    const char *displayName; // messages
+    // The kind of track its spans go on (TrackKind::Video or Audio), or nullopt for either (a
+    // transition; an Unknown span, whose track this version cannot tell).
+    std::optional<TrackKind> trackKind;
+    std::span<const SpanParameter> parameters; // in SpanParameter order; none for Transition and Unknown
+};
+
+const SpanKindInfo &infoOf(SpanKind kind);
+const SpanParameterInfo &infoOf(SpanParameter parameter);
+
+// "transition", "motion", "opacity", "gain", "unknown" (the project file's names; an Unknown span is
+// written under its own name, ForeignSpanContent::kindName).
+const char *nameOf(SpanKind kind);
+// "Transition", "Motion", "Opacity", "Gain", "Unknown" (messages).
+const char *displayNameOf(SpanKind kind);
+// The kind of kSpanKinds named `name` (nameOf), or nullopt (never Unknown).
+std::optional<SpanKind> spanKindNamed(std::string_view name);
+// Whether spans of `kind` may lie on a clip of a `track` track (SpanKindInfo::trackKind).
+bool spanKindFitsTrack(SpanKind kind, TrackKind track);
 
 // "x", "y", "scale", "rotation", "opacity", "gain" (the project file's keys).
 const char *nameOf(SpanParameter parameter);
 // "Position X", "Position Y", "Scale", "Rotation", "Opacity", "Gain" (messages).
 const char *displayNameOf(SpanParameter parameter);
+// The parameter named `name` (nameOf), or nullopt.
+std::optional<SpanParameter> spanParameterNamed(std::string_view name);
 // The value that changes nothing: 0 for X, Y, Rotation and Gain, 1 for Scale and Opacity.
 double neutralValue(SpanParameter parameter);
-// Whether `value` is allowed for `parameter`: finite; scale >= 0; opacity within [0, 1].
+// Whether `value` is allowed for `parameter`: finite and within its range (scale >= 0; opacity
+// within [0, 1]).
 bool isValidSpanValue(SpanParameter parameter, double value);
-// `value` limited to the parameter's range (a custom timing curve may overshoot its keyframes).
+// `value` limited to the parameter's range (a custom timing curve may overshoot its keyframes): a
+// bound below only is max(minimum, value), one above only min(maximum, value), both
+// std::clamp(value, minimum, maximum); unbounded, `value` itself.
 double clampSpanValue(SpanParameter parameter, double value);
 // The parameters of `kind`, in SpanParameter order (none for a transition).
 std::vector<SpanParameter> parametersOf(SpanKind kind);
 // Whether spans of `kind` animate `parameter`.
 bool kindHasParameter(SpanKind kind, SpanParameter parameter);
+
+// ----- Composing values (SpanParameterInfo::composition) -----
+// `contribution` applied on top of `below`: below + contribution (additive) or below * contribution
+// (multiplicative).
+double composeSpanValue(SpanParameter parameter, double below, double contribution);
+// Whether some contribution composed onto `below` can give any wanted value: always for an additive
+// parameter, only above 0 for a multiplicative one (a factor cannot lift 0).
+bool canDecomposeSpanValue(SpanParameter parameter, double below);
+// The contribution that, composed onto `below`, gives `wanted` (the inverse of composeSpanValue):
+// wanted - below, or wanted / below (canDecomposeSpanValue first).
+double decomposeSpanValue(SpanParameter parameter, double below, double wanted);
+// `from` moved on at the rate of a change from `first` to `last`, `times` times over: from + (last -
+// first) * times (additive), from * (last / first)^times (multiplicative; `first` > 0).
+double extrapolateSpanValue(SpanParameter parameter, double from, double first, double last, double times);
 
 // What a newer version of Framewright wrote into a span that this version does not read (review core
 // #9), kept so that loading and saving a project does not strip it (a newer version's colour grades,

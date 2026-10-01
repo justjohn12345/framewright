@@ -202,8 +202,7 @@ std::optional<std::string> effectSpanProblem(const EffectSpan &span, const Clip 
         return where + ": lane " + std::to_string(span.lane) + " is not an effect lane (1 to " +
                std::to_string(kLastLane) + ")";
     }
-    const bool videoKind = span.kind == SpanKind::Motion || span.kind == SpanKind::Opacity;
-    if (!span.isUnknownKind() && videoKind != (kind == TrackKind::Video)) {
+    if (!spanKindFitsTrack(span.kind, kind)) {
         return where + ": a " + nameOf(span.kind) + " span on " + nameOf(kind) + " track";
     }
     if (span.edge != ClipEdge::Tail || span.transition != TransitionKind::CrossDissolve) {

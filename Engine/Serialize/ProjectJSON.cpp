@@ -496,12 +496,7 @@ std::optional<EffectSpan> parseSpan(const Node &node, Warnings &warnings) {
     node.requireObject();
     const Node kindNode = node.field("kind");
     const std::string kindName = kindNode.asString();
-    std::optional<SpanKind> kind;
-    for (const SpanKind candidate : {SpanKind::Transition, SpanKind::Motion, SpanKind::Opacity, SpanKind::Gain}) {
-        if (kindName == nameOf(candidate)) {
-            kind = candidate;
-        }
-    }
+    const std::optional<SpanKind> kind = spanKindNamed(kindName);
     EffectSpan span;
     span.id = node.field("id").asId<SpanId>();
     span.kind = kind.value_or(SpanKind::Unknown);
@@ -555,9 +550,7 @@ std::optional<EffectSpan> parseSpan(const Node &node, Warnings &warnings) {
         tracks.requireObject();
         json unknownTracks = json::object();
         for (const auto &entry : tracks.value().items()) {
-            const bool known = std::any_of(kSpanParameters.begin(), kSpanParameters.end(),
-                                           [&](SpanParameter p) { return entry.key() == nameOf(p); });
-            if (!known) {
+            if (!spanParameterNamed(entry.key())) {
                 unknownTracks[entry.key()] = entry.value();
                 warnings.push_back(tracks.path() + ": unknown span parameter \"" + entry.key() +
                                    "\" (from a newer version of Framewright?); its keyframes are kept as they are "

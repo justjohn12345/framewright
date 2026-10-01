@@ -104,16 +104,18 @@ EditResult planMatchMotion(const Sequence &sequence, ClipId clipId, ClipEdge edg
     Clip neutral = *clip;
     neutral.video = VideoParams{};
     const VideoParams spans = motionValuesAt(neutral, frame);
-    if (!(spans.scale > 0.0) || !(spans.opacity > 0.0)) {
-        return EditResult::failure(EditError::InvalidArgument,
-                                   "The clip's spans make its scale or opacity 0 there, so no static value can match.");
+    for (const MotionParameter parameter : kMotionParameters) {
+        if (!canDecomposeSpanValue(spanParameterOf(parameter), spans.staticValue(parameter))) {
+            return EditResult::failure(EditError::InvalidArgument,
+                                       "The clip's spans make its scale or opacity 0 there, so no static value can match.");
+        }
     }
+    // The static values the spans compose onto to give the neighbour's (decomposeSpanValue).
     VideoParams matched = clip->video;
-    matched.x = target.x - spans.x;
-    matched.y = target.y - spans.y;
-    matched.scale = target.scale / spans.scale;
-    matched.rotationDegrees = target.rotationDegrees - spans.rotationDegrees;
-    matched.opacity = target.opacity / spans.opacity;
+    for (const MotionParameter parameter : kMotionParameters) {
+        matched.setStaticValue(parameter, decomposeSpanValue(spanParameterOf(parameter), spans.staticValue(parameter),
+                                                             target.staticValue(parameter)));
+    }
     if (!(matched.opacity <= 1.0)) {
         return EditResult::failure(EditError::InvalidArgument, "The clip's spans lower its opacity there, so no "
                                                                "static opacity can reach the neighbour's.");
