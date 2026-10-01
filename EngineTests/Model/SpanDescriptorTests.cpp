@@ -349,3 +349,24 @@ TEST_CASE("Span descriptors: refusals derived from the tables read as before") {
     }
 }
 
+TEST_CASE("Span descriptors: a span's tracks are indexed by parameter") {
+    SpanTracks tracks;
+    CHECK(tracks.empty());
+    for (const SpanParameter parameter : kSpanParameters) {
+        tracks[parameter] = {key(kCMTimeZero, static_cast<double>(parameter) + 0.5)};
+    }
+    CHECK_FALSE(tracks.empty());
+    for (const SpanParameter parameter : kSpanParameters) {
+        REQUIRE(tracks.track(parameter).size() == 1);
+        CHECK(tracks[parameter].front().value == static_cast<double>(parameter) + 0.5);
+        CHECK(&tracks[parameter] == &tracks.byParameter[static_cast<std::size_t>(parameter)]);
+    }
+    SpanTracks other = tracks;
+    CHECK(other == tracks);
+    other[SpanParameter::Gain].clear();
+    CHECK_FALSE(other == tracks);
+    for (const SpanParameter parameter : kSpanParameters) {
+        other[parameter].clear();
+    }
+    CHECK(other.empty());
+}

@@ -44,8 +44,13 @@ VETransitionStyle toVE(TransitionRole role);
 VETransitionKind toVE(TransitionKind kind);
 // nullopt for a value outside the enum (from Swift).
 std::optional<TransitionKind> fromVE(VETransitionKind kind);
-/// The value of `parameter` in `values`.
+/// The value of `parameter` in `values` (NaN for a value outside the enum).
 double spanValueIn(const VESpanValues &values, SpanParameter parameter);
+/// Sets the value of `parameter` in `values` (nothing for a value outside the enum).
+void setSpanValueIn(VESpanValues &values, SpanParameter parameter, double value);
+VESpanParameter toVE(SpanParameter parameter);
+/// Nullopt for a value outside the enumeration.
+std::optional<SpanParameter> fromVE(VESpanParameter parameter);
 
 VEAssetInfo *makeAssetInfo(const MediaAsset &asset, const AssetDetails *details, bool missing, NSInteger useCount);
 // `index` (optional): the sequence's clips by id, when many snapshots are made at once (review L9).

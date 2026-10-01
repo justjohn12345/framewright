@@ -616,7 +616,7 @@ TEST_CASE("UndoStack: an accumulated step reports its steps' dropped transitions
     const SpanId t = fx.addTransition(fx.v1, a, b, 10);
     // An Opacity span over b's first second (source 10 s to 11 s, timeline frames 60 to 90).
     SpanTracks fade;
-    fade.opacity = rampTrack(1, 0.3, CMTimeMake(1, 1));
+    fade[SpanParameter::Opacity] = rampTrack(1, 0.3, CMTimeMake(1, 1));
     const SpanId span = fx.addSpan(b, SpanKind::Opacity, 1, CMTimeMake(10, 1), CMTimeMake(11, 1), fade);
     fx.requireValid();
     UndoStack stack;

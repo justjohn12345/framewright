@@ -379,7 +379,7 @@ AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &pro
                 };
                 addCut(timelineOf(gain.start));
                 addCut(timelineOf(gain.end));
-                const KeyframeTrack &keys = gain.tracks.gain;
+                const KeyframeTrack &keys = gain.tracks[SpanParameter::Gain];
                 for (std::size_t k = 0; k < keys.size(); ++k) {
                     const auto source = checkedAdd(gain.start, keys[k].time);
                     if (!source) {

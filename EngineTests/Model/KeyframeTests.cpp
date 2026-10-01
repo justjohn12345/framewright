@@ -316,7 +316,7 @@ TEST_CASE("Spans: a still's spans keep their timeline positions when its start m
     const ClipId id = fx.addClip(fx.v1, fx.still, 30, 90);
     Clip clip = fx.clip(id);
     SpanTracks tracks;
-    tracks.scale = {key(f30(0), 1, KeyframeInterpolation::EaseInOut), key(f30(60), 2)};
+    tracks[SpanParameter::Scale] = {key(f30(0), 1, KeyframeInterpolation::EaseInOut), key(f30(60), 2)};
     EffectSpan span;
     span.id = SpanId{500};
     span.kind = SpanKind::Motion;

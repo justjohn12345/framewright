@@ -1103,7 +1103,7 @@ void migrateSequenceV4ToV5(json &sequenceJson, const Node &sequence, std::uint64
                     video[parameter == MotionParameter::Rotation ? "rotationDegrees" : nameOf(parameter)] =
                         neutralValue(spanParameter);
                     if (parameter == MotionParameter::Opacity) {
-                        opacity.tracks.opacity = std::move(rebased);
+                        opacity.tracks[SpanParameter::Opacity] = std::move(rebased);
                     } else {
                         motion.tracks.track(spanParameter) = std::move(rebased);
                         hasMotion = true;

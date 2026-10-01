@@ -143,9 +143,9 @@ Footprint mapped(const Footprint &f, double s, double ox, double oy) {
     k1.time = CMTimeMake(1, 1);
     k0.value = 0;
     k1.value = 400;
-    move.tracks.x = {k0, k1};
+    move.tracks[SpanParameter::X] = {k0, k1};
     k1.value = -100;
-    move.tracks.y = {k0, k1};
+    move.tracks[SpanParameter::Y] = {k0, k1};
     sequence.findClip(redClip)->spans.push_back(move);
     XCTAssertFalse(validateProject(project).has_value(), @"%s", validateProject(project).value_or("").c_str());
 

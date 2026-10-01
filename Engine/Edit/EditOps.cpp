@@ -3405,10 +3405,10 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
                     if (span.kind != SpanKind::Motion) {
                         continue;
                     }
-                    for (Keyframe &keyframe : span.tracks.x) {
+                    for (Keyframe &keyframe : span.tracks[SpanParameter::X]) {
                         keyframe.value *= k;
                     }
-                    for (Keyframe &keyframe : span.tracks.y) {
+                    for (Keyframe &keyframe : span.tracks[SpanParameter::Y]) {
                         keyframe.value *= k;
                     }
                 }

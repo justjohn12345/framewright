@@ -113,7 +113,7 @@ struct MixFixture {
         Keyframe last = first;
         last.time = CMTimeSubtract(end, start);
         last.value = to;
-        span.tracks.gain = {first, last};
+        span.tracks[SpanParameter::Gain] = {first, last};
         clip.spans.push_back(span);
         clip.sortSpans();
     }

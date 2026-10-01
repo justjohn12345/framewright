@@ -58,11 +58,11 @@ TEST_CASE("Scheduler spans: layers carry the composed Motion at speed 3/2, again
     // 60 frames at 3/2 from source 1 s: frame f shows source second 1 + f / 20.
     const ClipId id = fx.addClip(fx.v1, fx.av30, 0, 60, 30, 1.5);
     SpanTracks move;
-    move.x = rampTrack(0, 300, CMTimeMake(2, 1), KI::EaseOut);
-    move.rotation = rampTrack(0, 45, CMTimeMake(2, 1), KI::EaseOut);
+    move[SpanParameter::X] = rampTrack(0, 300, CMTimeMake(2, 1), KI::EaseOut);
+    move[SpanParameter::Rotation] = rampTrack(0, 45, CMTimeMake(2, 1), KI::EaseOut);
     fx.addSpan(id, SpanKind::Motion, 1, CMTimeMake(3, 2), CMTimeMake(7, 2), move);
     SpanTracks fade;
-    fade.opacity = rampTrack(1, 0, CMTimeMake(1, 1), KI::Linear);
+    fade[SpanParameter::Opacity] = rampTrack(1, 0, CMTimeMake(1, 1), KI::Linear);
     fx.addSpan(id, SpanKind::Opacity, 3, CMTimeMake(2, 1), CMTimeMake(3, 1), fade);
     fx.sequence().findClip(id)->video.opacity = 0.5;
     fx.requireValid();
@@ -133,7 +133,7 @@ TEST_CASE("Scheduler spans: a still's spans are measured from its start") {
     Fixture fx;
     const ClipId still = fx.addClip(fx.v2, fx.still, 40, 60);
     SpanTracks grow;
-    grow.scale = rampTrack(0.5, 1.5, f30(30), KI::EaseIn);
+    grow[SpanParameter::Scale] = rampTrack(0.5, 1.5, f30(30), KI::EaseIn);
     fx.addSpan(still, SpanKind::Motion, 2, f30(15), f30(45), grow);
     fx.requireValid();
     for (int f = 40; f < 100; ++f) {
@@ -261,10 +261,10 @@ TEST_CASE("Scheduler spans: Gain spans add decibels exactly; eased ones in steps
     const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 0, 90, 0);
     fx.sequence().findClip(c)->audio.gainDb = -2;
     SpanTracks ramp;
-    ramp.gain = rampTrack(0, -18, CMTimeMake(1, 1), KI::Linear);
+    ramp[SpanParameter::Gain] = rampTrack(0, -18, CMTimeMake(1, 1), KI::Linear);
     fx.addSpan(c, SpanKind::Gain, 1, CMTimeMake(1, 2), CMTimeMake(3, 2), ramp);
     SpanTracks swell;
-    swell.gain = rampTrack(0, 9, CMTimeMake(1, 1), KI::EaseInOut);
+    swell[SpanParameter::Gain] = rampTrack(0, 9, CMTimeMake(1, 1), KI::EaseInOut);
     fx.addSpan(c, SpanKind::Gain, 2, CMTimeMake(3, 2), CMTimeMake(5, 2), swell);
     fx.requireValid();
     const AudioGraph graph = wholeAudio(fx);
@@ -315,7 +315,7 @@ TEST_CASE("Scheduler spans: a Gain span whose start has no CMTime on the timelin
     const CMTime start = CMTimeMake(kPreciseTimescale + 1, kPreciseTimescale);
     const CMTime end = CMTimeMake(8, 1);
     SpanTracks ramp;
-    ramp.gain = rampTrack(-6, -30, end - start, KI::Linear);
+    ramp[SpanParameter::Gain] = rampTrack(-6, -30, end - start, KI::Linear);
     fx.addSpan(c, SpanKind::Gain, 1, start, end, ramp);
     fx.requireValid();
     REQUIRE_FALSE(fx.clip(c).exactTimelineTimeAt(start)->toTime().has_value());
@@ -361,7 +361,7 @@ TEST_CASE("Scheduler spans: a short plan window of a long eased Gain span cuts o
     Fixture fx;
     const ClipId c = fx.addClip(fx.a1, fx.audioOnly, 0, 900, 0);
     SpanTracks swell;
-    swell.gain = rampTrack(0, 9, CMTimeMake(28, 1), KI::EaseInOut);
+    swell[SpanParameter::Gain] = rampTrack(0, 9, CMTimeMake(28, 1), KI::EaseInOut);
     fx.addSpan(c, SpanKind::Gain, 1, CMTimeMake(1, 1), CMTimeMake(29, 1), swell);
     fx.requireValid();
     const AudioGraph whole = wholeAudio(fx);
@@ -410,7 +410,7 @@ TEST_CASE("Scheduler spans: held values per frame at 29.97 and 999/1000, on a ch
     const ClipId still = fx.addClip(fx.v2, fx.still, 0, 60);
     fx.sequence().findClip(still)->timelineDuration = ntsc(60);
     SpanTracks grow;
-    grow.scale = rampTrack(1, 1.4, f30(20), KI::EaseOut);
+    grow[SpanParameter::Scale] = rampTrack(1, 1.4, f30(20), KI::EaseOut);
     fx.addSpan(still, SpanKind::Motion, 1, f30(5), f30(25), grow);
     fx.requireValid();
     auto add = [&](SpanKind kind, int lane, std::int64_t from, std::int64_t to) {
@@ -491,10 +491,10 @@ TEST_CASE("Scheduler spans: a held gain is flat; a chained eased span ramps from
     const ClipId n = fx.addClip(fx.a1, fx.audioOnly, 120, 60, 300);
     fx.sequence().findClip(c)->audio.gainDb = -1;
     SpanTracks duck;
-    duck.gain = rampTrack(0, -12, CMTimeMake(1, 2));
+    duck[SpanParameter::Gain] = rampTrack(0, -12, CMTimeMake(1, 2));
     fx.addSpan(c, SpanKind::Gain, 1, CMTimeMake(1, 2), CMTimeMake(1, 1), duck);
     SpanTracks swell;
-    swell.gain = rampTrack(0, 8, CMTimeMake(1, 2), KI::EaseInOut);
+    swell[SpanParameter::Gain] = rampTrack(0, 8, CMTimeMake(1, 2), KI::EaseInOut);
     fx.addSpan(c, SpanKind::Gain, 1, CMTimeMake(2, 1), CMTimeMake(5, 2), swell);
     fx.addTailTransition(c, 10, 5); // [110, 125)
     fx.requireValid();

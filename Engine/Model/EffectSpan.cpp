@@ -177,30 +177,8 @@ double extrapolateSpanValue(SpanParameter parameter, double from, double first, 
                                                                       : from * std::pow(last / first, times);
 }
 
-KeyframeTrack &SpanTracks::track(SpanParameter parameter) {
-    switch (parameter) {
-    case SpanParameter::X:
-        return x;
-    case SpanParameter::Y:
-        return y;
-    case SpanParameter::Scale:
-        return scale;
-    case SpanParameter::Rotation:
-        return rotation;
-    case SpanParameter::Opacity:
-        return opacity;
-    case SpanParameter::Gain:
-        return gain;
-    }
-    return x;
-}
-
-const KeyframeTrack &SpanTracks::track(SpanParameter parameter) const {
-    return const_cast<SpanTracks *>(this)->track(parameter);
-}
-
 bool SpanTracks::empty() const {
-    return x.empty() && y.empty() && scale.empty() && rotation.empty() && opacity.empty() && gain.empty();
+    return std::all_of(byParameter.begin(), byParameter.end(), [](const KeyframeTrack &track) { return track.empty(); });
 }
 
 bool operator==(const ForeignSpanContent &a, const ForeignSpanContent &b) {

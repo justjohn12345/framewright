@@ -28,7 +28,7 @@ Fixture richFixture() {
     fx.addFade(still, ClipEdge::Head, f30(12));
     fx.addFade(still, ClipEdge::Tail, f30(20));
     SpanTracks turn;
-    turn.rotation = {key(kCMTimeZero, 0, KeyframeInterpolation::EaseOut), key(f30(60), 45)};
+    turn[SpanParameter::Rotation] = {key(kCMTimeZero, 0, KeyframeInterpolation::EaseOut), key(f30(60), 45)};
     fx.addSpan(still, SpanKind::Motion, 3, f30(30), f30(90), turn);
     const ClipId music = fx.addClip(fx.a2, fx.audioOnly, 0, 90, 0, 1.0 / 3.0);
     Clip &m = *fx.sequence().findClip(music);
@@ -36,18 +36,18 @@ Fixture richFixture() {
     fx.addFade(music, ClipEdge::Head, f30(10));
     fx.addFade(music, ClipEdge::Tail, CMTimeMake(7, 48000));
     SpanTracks duck;
-    duck.gain = {key(kCMTimeZero, 0, KeyframeInterpolation::EaseIn), key(CMTimeMake(1, 3), -12)};
+    duck[SpanParameter::Gain] = {key(kCMTimeZero, 0, KeyframeInterpolation::EaseIn), key(CMTimeMake(1, 3), -12)};
     fx.addSpan(music, SpanKind::Gain, 1, CMTimeMake(1, 6), CMTimeMake(1, 2), duck);
     Clip &vc = *fx.sequence().findClip(v);
     vc.video = VideoParams{12.25, -8.5, 1.1, 33.3, 0.8};
     SpanTracks move;
-    move.x = {key(kCMTimeZero, -120.5, KeyframeInterpolation::EaseInOut), key(f30(40), 240)};
-    const TrackSplit split = splitTrack(move.x, 0, f30(15));
-    move.x = {split.left.front(), split.right.front(), split.right.back()};
-    move.y = {key(kCMTimeZero, 10, KeyframeInterpolation::Hold), key(f30(40), -10)};
+    move[SpanParameter::X] = {key(kCMTimeZero, -120.5, KeyframeInterpolation::EaseInOut), key(f30(40), 240)};
+    const TrackSplit split = splitTrack(move[SpanParameter::X], 0, f30(15));
+    move[SpanParameter::X] = {split.left.front(), split.right.front(), split.right.back()};
+    move[SpanParameter::Y] = {key(kCMTimeZero, 10, KeyframeInterpolation::Hold), key(f30(40), -10)};
     fx.addSpan(v, SpanKind::Motion, 1, f30(40), f30(80), move);
     SpanTracks fade;
-    fade.opacity = {custom(kCMTimeZero, 0.2, TimingCurve{0.3, 0.1, 0.6, 0.95}), key(f30(30), 1)};
+    fade[SpanParameter::Opacity] = {custom(kCMTimeZero, 0.2, TimingCurve{0.3, 0.1, 0.6, 0.95}), key(f30(30), 1)};
     fx.addSpan(v, SpanKind::Opacity, 2, f30(30), f30(60), fade);
     Track &v2 = fx.track(fx.v2);
     v2.muted = true;
@@ -186,17 +186,17 @@ Fixture keyframedGoldenFixture() {
     const KeyframeTrack x4{key(f30(30), -120.5, KeyframeInterpolation::EaseInOut), key(f30(90), 240)};
     const TrackSplit split = splitTrack(x4, 0, f30(50));
     SpanTracks motion;
-    motion.x = {split.left.front(), split.right.front(), split.right.back()};
-    motion.x[0].time = f30(0);
-    motion.x[1].time = f30(20);
-    motion.x[2].time = f30(60);
-    motion.scale = {key(f30(0), 1, KeyframeInterpolation::Hold), key(f30(15), 1.25, KeyframeInterpolation::EaseOut),
+    motion[SpanParameter::X] = {split.left.front(), split.right.front(), split.right.back()};
+    motion[SpanParameter::X][0].time = f30(0);
+    motion[SpanParameter::X][1].time = f30(20);
+    motion[SpanParameter::X][2].time = f30(60);
+    motion[SpanParameter::Scale] = {key(f30(0), 1, KeyframeInterpolation::Hold), key(f30(15), 1.25, KeyframeInterpolation::EaseOut),
                     key(f30(30), 2, KeyframeInterpolation::EaseIn)};
-    motion.rotation = {key(CMTimeMake(601, 600), 0), key(f30(59), 360)};
+    motion[SpanParameter::Rotation] = {key(CMTimeMake(601, 600), 0), key(f30(59), 360)};
     // The span ends on the clip's out point as the exact arithmetic reduces it (3 s).
     fx.addSpan(v, SpanKind::Motion, 1, f30(30), CMTimeMake(3, 1), motion);
     SpanTracks opacity;
-    opacity.opacity = {key(f30(0), 0), key(f30(10), 1)};
+    opacity[SpanParameter::Opacity] = {key(f30(0), 0), key(f30(10), 1)};
     fx.addSpan(v, SpanKind::Opacity, 2, f30(30), CMTimeMake(3, 1), opacity);
     fx.sequence().findClip(v)->video = VideoParams{0, -8.5, 1, 0, 1};
     fx.addFade(music, ClipEdge::Head, f30(10));
@@ -209,7 +209,7 @@ Fixture keyframedGoldenFixture() {
     scale.lane = 1;
     scale.start = n.sourceIn;
     scale.end = *n.exactSourceOut()->toTime();
-    scale.tracks.scale = {key(CMTimeMake(0, 24000), 1.5)}; // re-based: 5005/24000 - 5005/24000
+    scale.tracks[SpanParameter::Scale] = {key(CMTimeMake(0, 24000), 1.5)}; // re-based: 5005/24000 - 5005/24000
     n.spans = {scale};
     fx.requireValid();
     return fx;
@@ -627,7 +627,7 @@ TEST_CASE("ProjectJSON: unknown kinds and keys of spans warn instead of failing"
         const ProjectLoadResult r = projectFromJson(j);
         REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
         CHECK(anyContains(r.warnings, "tracks.y[0].interpolation: unknown keyframe interpolation"));
-        CHECK(r.project->sequences[0].videoTracks[0].clips[0].spans[1].tracks.y[0].interpolation ==
+        CHECK(r.project->sequences[0].videoTracks[0].clips[0].spans[1].tracks[SpanParameter::Y][0].interpolation ==
               KeyframeInterpolation::Linear);
     }
     SUBCASE("a curve on a keyframe that is not custom is ignored (it round trips equal)") {
@@ -863,7 +863,7 @@ TEST_CASE("ProjectJSON: an unknown transition kind is named in the warning and a
 
 TEST_CASE("ProjectJSON: a model keyframe that is not custom cannot carry a curve (it would not round trip)") {
     Fixture fx = richFixture();
-    fx.sequence().videoTracks[0].clips[0].spans[1].tracks.y[0].curve = TimingCurve{0.1, 0.2, 0.3, 0.4};
+    fx.sequence().videoTracks[0].clips[0].spans[1].tracks[SpanParameter::Y][0].curve = TimingCurve{0.1, 0.2, 0.3, 0.4};
     CHECK(contains(problemOf(fx.project), "has a timing curve but is not custom"));
 }
 
@@ -1061,13 +1061,13 @@ struct RepairFixture : Fixture {
         a = addClip(v1, av30, 0, 90, 0);
         b = addClip(v1, av30, 90, 60, 300);
         SpanTracks zoom;
-        zoom.scale = {key(kCMTimeZero, 1, KeyframeInterpolation::EaseInOut), key(f30(30), 2)};
+        zoom[SpanParameter::Scale] = {key(kCMTimeZero, 1, KeyframeInterpolation::EaseInOut), key(f30(30), 2)};
         motion = addSpan(a, SpanKind::Motion, 1, f30(0), f30(30), zoom);
         SpanTracks fade;
-        fade.opacity = {key(kCMTimeZero, 1), key(f30(45), 0.5)};
+        fade[SpanParameter::Opacity] = {key(kCMTimeZero, 1), key(f30(45), 0.5)};
         opacity = addSpan(a, SpanKind::Opacity, 2, f30(15), f30(60), fade);
         SpanTracks pan;
-        pan.x = {key(kCMTimeZero, 0), key(f30(30), 100)};
+        pan[SpanParameter::X] = {key(kCMTimeZero, 0), key(f30(30), 100)};
         late = addSpan(a, SpanKind::Motion, 3, f30(40), f30(70), pan);
         requireValid();
     }
@@ -1485,15 +1485,15 @@ TEST_CASE("ProjectJSON: version 4 to 5 migration rules") {
         CHECK(motion.start == f30(30));
         CHECK(motion.end == f30(90));
         // Cut at the edges with the values there: 30 and 90 at relative 0 and 60.
-        REQUIRE(motion.tracks.x.size() == 2);
-        CHECK(motion.tracks.x[0].time == kCMTimeZero);
-        CHECK(motion.tracks.x[0].value == doctest::Approx(30));
-        CHECK(motion.tracks.x[1].time == f30(60));
-        CHECK(motion.tracks.x[1].value == doctest::Approx(90));
+        REQUIRE(motion.tracks[SpanParameter::X].size() == 2);
+        CHECK(motion.tracks[SpanParameter::X][0].time == kCMTimeZero);
+        CHECK(motion.tracks[SpanParameter::X][0].value == doctest::Approx(30));
+        CHECK(motion.tracks[SpanParameter::X][1].time == f30(60));
+        CHECK(motion.tracks[SpanParameter::X][1].value == doctest::Approx(90));
         const EffectSpan &opacity = clip.spans[1];
         CHECK(opacity.kind == SpanKind::Opacity);
         CHECK(opacity.lane == 2);
-        CHECK(opacity.tracks.opacity == KeyframeTrack{key(f30(10), 0.25, KeyframeInterpolation::Hold)});
+        CHECK(opacity.tracks[SpanParameter::Opacity] == KeyframeTrack{key(f30(10), 0.25, KeyframeInterpolation::Hold)});
         CHECK(motionValuesAt(clip, f30(30)).x == doctest::Approx(60)); // source frame 60
     }
     SUBCASE("opacity keyframes alone go to lane 1") {
@@ -1513,7 +1513,7 @@ TEST_CASE("ProjectJSON: version 4 to 5 migration rules") {
         const ProjectLoadResult r = load(v4Document(json::array({v4Clip(10, 3, 0, 30, 30, {{"video", video}})}), json::array()));
         CHECK(anyContains(r.warnings, "a custom curve took Opacity to"));
         const Clip &clip = onlyClip(*r.project, TrackKind::Video);
-        CHECK(clip.spans[0].tracks.opacity.front().value == 1.0);
+        CHECK(clip.spans[0].tracks[SpanParameter::Opacity].front().value == 1.0);
     }
     SUBCASE("an unknown Motion parameter in version 4 keyframes is dropped with a warning") {
         json video = {{"x", 0.0}, {"y", 0.0}, {"scale", 1.0}, {"rotationDegrees", 0.0}, {"opacity", 1.0}};

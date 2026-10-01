@@ -525,11 +525,11 @@ TEST_CASE("Scheduler: layers carry the clip's Motion and Opacity spans at each f
     // A Motion span over the whole clip (source frames [30, 90)): x linear 0 -> 600, scale holds
     // 1 then 2 at source frame 60; an Opacity span easing out from 1 to 0 over [60, 90).
     SpanTracks motion;
-    motion.x = {key(f30(0), 0, KeyframeInterpolation::Linear), key(f30(60), 600)};
-    motion.scale = {key(f30(0), 1, KeyframeInterpolation::Hold), key(f30(30), 2)};
+    motion[SpanParameter::X] = {key(f30(0), 0, KeyframeInterpolation::Linear), key(f30(60), 600)};
+    motion[SpanParameter::Scale] = {key(f30(0), 1, KeyframeInterpolation::Hold), key(f30(30), 2)};
     fx.addSpan(first, SpanKind::Motion, 1, f30(30), f30(90), motion);
     SpanTracks opacity;
-    opacity.opacity = {key(f30(0), 1, KeyframeInterpolation::EaseOut), key(f30(30), 0)};
+    opacity[SpanParameter::Opacity] = {key(f30(0), 1, KeyframeInterpolation::EaseOut), key(f30(30), 0)};
     fx.addSpan(first, SpanKind::Opacity, 2, f30(60), f30(90), opacity);
     fx.sequence().findClip(first)->video.y = 25;
     fx.requireValid();
@@ -558,7 +558,7 @@ TEST_CASE("Scheduler: layers carry the clip's Motion and Opacity spans at each f
     // The same evaluation for a still, on its time into the clip.
     const ClipId still = fx.addClip(fx.v2, fx.still, 30, 30);
     SpanTracks turn;
-    turn.rotation = {key(f30(0), 0), key(f30(29), 290)};
+    turn[SpanParameter::Rotation] = {key(f30(0), 0), key(f30(29), 290)};
     fx.addSpan(still, SpanKind::Motion, 1, f30(0), f30(30), turn);
     fx.requireValid();
     const RenderGraph withStill = graphAt(fx, 40);
@@ -573,9 +573,9 @@ TEST_CASE("Scheduler: a Motion span over the first 5 s of a 30 s clip holds its 
     const ClipId next = fx.addClip(fx.v1, fx.av30, 900, 60, 900);
     fx.sequence().findClip(clip)->video.rotationDegrees = 12; // the clip's static value
     SpanTracks move;
-    move.x = {key(f30(0), 0, KeyframeInterpolation::EaseInOut), key(f30(150), -240)};
-    move.y = {key(f30(0), 0, KeyframeInterpolation::EaseInOut), key(f30(150), 90)};
-    move.scale = {key(f30(0), 1, KeyframeInterpolation::EaseInOut), key(f30(150), 1.6)};
+    move[SpanParameter::X] = {key(f30(0), 0, KeyframeInterpolation::EaseInOut), key(f30(150), -240)};
+    move[SpanParameter::Y] = {key(f30(0), 0, KeyframeInterpolation::EaseInOut), key(f30(150), 90)};
+    move[SpanParameter::Scale] = {key(f30(0), 1, KeyframeInterpolation::EaseInOut), key(f30(150), 1.6)};
     fx.addSpan(clip, SpanKind::Motion, 1, f30(0), f30(150), move);
     fx.requireValid();
 
@@ -617,7 +617,7 @@ TEST_CASE("Scheduler: a solo graph shows one clip alone, held inside it, at iden
     const ClipId pip = fx.addClip(fx.v2, fx.av30, 30, 60, 300);
     fx.sequence().findClip(pip)->video = VideoParams{690, 324, 0.3, 30, 0.5};
     SpanTracks motion;
-    motion.x = {key(f30(0), 0, KeyframeInterpolation::Linear), key(f30(30), 300)};
+    motion[SpanParameter::X] = {key(f30(0), 0, KeyframeInterpolation::Linear), key(f30(30), 300)};
     fx.addSpan(pip, SpanKind::Motion, 1, f30(300), f30(330), motion);
     fx.track(fx.v2).muted = true;
     const ClipId audio = fx.addClip(fx.a1, fx.av30, 0, 30);

@@ -26,7 +26,7 @@ struct ForeignFixture : Fixture {
         c.foreign.kindName = "colour";
         c.foreign.fields = R"({"tracks":{"exposure":[{"time":{"timescale":30,"value":0},"value":0.5}]}})";
         SpanTracks move;
-        move.x = {key(kCMTimeZero, 0), key(f30(40), 100)};
+        move[SpanParameter::X] = {key(kCMTimeZero, 0), key(f30(40), 100)};
         motion = addSpan(v, SpanKind::Motion, 1, f30(40), f30(80), move);
         EffectSpan &m = *sequence().findSpan(motion);
         m.foreign.fields = R"({"label":"push in"})";
@@ -166,7 +166,7 @@ TEST_CASE("Foreign spans: a known span's unknown tracks go when its length chang
     SUBCASE("a length changed by any other route: the writer leaves the tracks out") {
         EffectSpan &span = *fx.sequence().findSpan(fx.motion);
         span.end = f30(70);
-        span.tracks.x.back().time = f30(30);
+        span.tracks[SpanParameter::X].back().time = f30(30);
         const json saved = projectToJson(fx.project)["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][0];
         CHECK_FALSE(saved["tracks"].contains("blur"));
     }

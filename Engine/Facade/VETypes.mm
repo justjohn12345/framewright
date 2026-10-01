@@ -25,6 +25,18 @@ VESpanValues VESpanValuesUnchanged(void) {
     return VESpanValues{nan, nan, nan, nan, nan, nan};
 }
 
+double VESpanValuesGetValue(VESpanValues values, VESpanParameter parameter) {
+    const auto spanParameter = ve::facade::fromVE(parameter);
+    return spanParameter ? ve::facade::spanValueIn(values, *spanParameter) : std::numeric_limits<double>::quiet_NaN();
+}
+
+void VESpanValuesSetValue(VESpanValues *values, double value, VESpanParameter parameter) {
+    const auto spanParameter = ve::facade::fromVE(parameter);
+    if (values != nullptr && spanParameter) {
+        ve::facade::setSpanValueIn(*values, *spanParameter, value);
+    }
+}
+
 // MARK: - Class extensions (writable for the factories below)
 
 @interface VEAssetInfo ()
@@ -341,7 +353,7 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
                 atEnd:(BOOL)atEnd
         frameDuration:(CMTime)frameDuration {
     const ve::EffectSpan *span = _clip.findSpan(ve::SpanId(static_cast<ve::SpanId::ValueType>(spanID)));
-    if (span == nullptr || values == nullptr || span->kind == ve::SpanKind::Transition ||
+    if (span == nullptr || values == nullptr || ve::infoOf(span->kind).parameters.empty() ||
         !ve::isPositive(frameDuration)) {
         return NO;
     }
@@ -349,25 +361,12 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
     if (!time) {
         return NO;
     }
+    // What the rest of the clip composes to there, for each of the span's parameters.
+    const ve::VideoParams restVideo = ve::composeMotion(_clip, *time, span->id);
+    const ve::AudioParams restAudio{ve::composeGainDb(_clip, *time, span->id)};
     VESpanValues base = VESpanValuesUnchanged();
-    switch (span->kind) {
-    case ve::SpanKind::Motion: {
-        const ve::VideoParams rest = ve::composeMotion(_clip, *time, span->id);
-        base.x = rest.x;
-        base.y = rest.y;
-        base.scale = rest.scale;
-        base.rotationDegrees = rest.rotationDegrees;
-        break;
-    }
-    case ve::SpanKind::Opacity:
-        base.opacity = ve::composeMotion(_clip, *time, span->id).opacity;
-        break;
-    case ve::SpanKind::Gain:
-        base.gainDb = ve::composeGainDb(_clip, *time, span->id);
-        break;
-    case ve::SpanKind::Transition:
-    case ve::SpanKind::Unknown:
-        return NO;
+    for (const ve::SpanParameter parameter : ve::infoOf(span->kind).parameters) {
+        ve::facade::setSpanValueIn(base, parameter, ve::clipValueOf(restVideo, restAudio, parameter));
     }
     *values = base;
     return YES;
@@ -799,45 +798,48 @@ VETransitionStyle toVE(TransitionRole role) {
     return VETransitionStyleCrossDissolve;
 }
 
+namespace {
+
+// VESpanValues' field for each SpanParameter, in SpanParameter order: the one place that names the
+// public struct's fields.
+constexpr double VESpanValues::*kSpanValueFields[] = {&VESpanValues::x,        &VESpanValues::y,
+                                                      &VESpanValues::scale,    &VESpanValues::rotationDegrees,
+                                                      &VESpanValues::opacity,  &VESpanValues::gainDb};
+static_assert(std::size(kSpanValueFields) == kSpanParameterCount, "one VESpanValues field per SpanParameter");
+
+} // namespace
+
 double spanValueIn(const VESpanValues &values, SpanParameter parameter) {
-    switch (parameter) {
-    case SpanParameter::X:
-        return values.x;
-    case SpanParameter::Y:
-        return values.y;
-    case SpanParameter::Scale:
-        return values.scale;
-    case SpanParameter::Rotation:
-        return values.rotationDegrees;
-    case SpanParameter::Opacity:
-        return values.opacity;
-    case SpanParameter::Gain:
-        return values.gainDb;
-    }
-    return std::numeric_limits<double>::quiet_NaN();
+    const auto index = static_cast<std::size_t>(parameter);
+    return index < std::size(kSpanValueFields) ? values.*kSpanValueFields[index]
+                                                : std::numeric_limits<double>::quiet_NaN();
 }
 
-static void setSpanValueIn(VESpanValues &values, SpanParameter parameter, double value) {
-    switch (parameter) {
-    case SpanParameter::X:
-        values.x = value;
-        break;
-    case SpanParameter::Y:
-        values.y = value;
-        break;
-    case SpanParameter::Scale:
-        values.scale = value;
-        break;
-    case SpanParameter::Rotation:
-        values.rotationDegrees = value;
-        break;
-    case SpanParameter::Opacity:
-        values.opacity = value;
-        break;
-    case SpanParameter::Gain:
-        values.gainDb = value;
-        break;
+void setSpanValueIn(VESpanValues &values, SpanParameter parameter, double value) {
+    const auto index = static_cast<std::size_t>(parameter);
+    if (index < std::size(kSpanValueFields)) {
+        values.*kSpanValueFields[index] = value;
     }
+}
+
+// VESpanParameter mirrors SpanParameter value for value.
+static_assert(static_cast<NSInteger>(SpanParameter::X) == VESpanParameterPositionX);
+static_assert(static_cast<NSInteger>(SpanParameter::Y) == VESpanParameterPositionY);
+static_assert(static_cast<NSInteger>(SpanParameter::Scale) == VESpanParameterScale);
+static_assert(static_cast<NSInteger>(SpanParameter::Rotation) == VESpanParameterRotation);
+static_assert(static_cast<NSInteger>(SpanParameter::Opacity) == VESpanParameterOpacity);
+static_assert(static_cast<NSInteger>(SpanParameter::Gain) == VESpanParameterGain);
+static_assert(VESpanParameterGain + 1 == static_cast<NSInteger>(kSpanParameterCount));
+
+VESpanParameter toVE(SpanParameter parameter) {
+    return static_cast<VESpanParameter>(parameter);
+}
+
+std::optional<SpanParameter> fromVE(VESpanParameter parameter) {
+    if (parameter < 0 || parameter >= static_cast<NSInteger>(kSpanParameterCount)) {
+        return std::nullopt;
+    }
+    return static_cast<SpanParameter>(parameter);
 }
 
 std::optional<KeyframeInterpolation> fromVE(VEKeyframeInterpolation interpolation) {

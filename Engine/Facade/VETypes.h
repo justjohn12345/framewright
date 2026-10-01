@@ -110,6 +110,13 @@ typedef struct {
 
 /// Every field NaN (nothing to change).
 FOUNDATION_EXPORT VESpanValues VESpanValuesUnchanged(void);
+/// The field of `values` that holds `parameter` (NaN for a value outside VESpanParameter).
+FOUNDATION_EXPORT double VESpanValuesGetValue(VESpanValues values, VESpanParameter parameter)
+    NS_SWIFT_NAME(VESpanValues.value(self:for:));
+/// Sets the field of `values` that holds `parameter` to `value` (nothing for a value outside
+/// VESpanParameter).
+FOUNDATION_EXPORT void VESpanValuesSetValue(VESpanValues *values, double value, VESpanParameter parameter)
+    NS_SWIFT_NAME(VESpanValues.setValue(self:_:for:));
 
 /// What a transition span does where it sits.
 typedef NS_ENUM(NSInteger, VETransitionStyle) {

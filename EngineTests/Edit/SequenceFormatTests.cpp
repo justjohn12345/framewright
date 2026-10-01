@@ -324,10 +324,10 @@ TEST_CASE("SetSequenceFormat: a size change scales every placement with the fram
     Clip &clip = *fx.sequence().findClip(v);
     clip.video = VideoParams{100.0, -50.0, 0.5, 15.0, 0.75};
     SpanTracks move;
-    move.x = {key(kCMTimeZero, 0), key(f30(30), 240)};
-    move.y = {key(kCMTimeZero, -30), key(f30(30), 60)};
-    move.scale = {key(kCMTimeZero, 1), key(f30(30), 1.5)};
-    move.rotation = {key(kCMTimeZero, 0), key(f30(30), 10)};
+    move[SpanParameter::X] = {key(kCMTimeZero, 0), key(f30(30), 240)};
+    move[SpanParameter::Y] = {key(kCMTimeZero, -30), key(f30(30), 60)};
+    move[SpanParameter::Scale] = {key(kCMTimeZero, 1), key(f30(30), 1.5)};
+    move[SpanParameter::Rotation] = {key(kCMTimeZero, 0), key(f30(30), 10)};
     const SpanId span = fx.addSpan(v, SpanKind::Motion, 1, f30(10), f30(40), move);
     MediaAsset photo = *fx.project.findAsset(fx.still);
     photo.name = "photo.jpg";
@@ -350,11 +350,11 @@ TEST_CASE("SetSequenceFormat: a size change scales every placement with the fram
         const Clip &after = fx.clip(v);
         CHECK(after.video == VideoParams{200.0, -100.0, 0.5, 15.0, 0.75});
         const EffectSpan &moved = *fx.span(span);
-        CHECK(moved.tracks.x[1].value == 480.0);
-        CHECK(moved.tracks.y[0].value == -60.0);
-        CHECK(moved.tracks.y[1].value == 120.0);
-        CHECK(moved.tracks.scale[1].value == 1.5); // factors and degrees do not change
-        CHECK(moved.tracks.rotation[1].value == 10.0);
+        CHECK(moved.tracks[SpanParameter::X][1].value == 480.0);
+        CHECK(moved.tracks[SpanParameter::Y][0].value == -60.0);
+        CHECK(moved.tracks[SpanParameter::Y][1].value == 120.0);
+        CHECK(moved.tracks[SpanParameter::Scale][1].value == 1.5); // factors and degrees do not change
+        CHECK(moved.tracks[SpanParameter::Rotation][1].value == 10.0);
         CHECK(identical(moved.start, f30(10)));
         CHECK(fx.clip(still).video == VideoParams{-40, 80, 0.8, 0, 1});
         CHECK(fx.clip(a).video == VideoParams{}); // sound: untouched
@@ -394,7 +394,7 @@ TEST_CASE("SetSequenceFormat: a frame-rate change moves clip edges to the new gr
     const SpanId fadeIn = fx.addFade(aa, ClipEdge::Head, f30(9));
     const ClipId still = fx.addClip(fx.v2, fx.still, 7, 45);
     SpanTracks zoom;
-    zoom.scale = {key(kCMTimeZero, 1), key(f30(20), 2)};
+    zoom[SpanParameter::Scale] = {key(kCMTimeZero, 1), key(f30(20), 2)};
     const SpanId motion = fx.addSpan(still, SpanKind::Motion, 1, f30(5), f30(25), zoom);
     const SpanId bMotion = fx.addSpan(vb, SpanKind::Motion, 1, f30(310), f30(340), zoom); // B's source times
     fx.requireValid();

@@ -361,7 +361,7 @@ TEST_CASE("Model: validateProject catches broken invariants") {
         const ClipId b = fx.addClip(fx.a1, fx.av30, 30, 30, 300);
         fx.addTransition(fx.a1, a, b, 4);
         SpanTracks gain;
-        gain.gain = {key(kCMTimeZero, 0), key(f30(10), -6)};
+        gain[SpanParameter::Gain] = {key(kCMTimeZero, 0), key(f30(10), -6)};
         fx.addSpan(a, SpanKind::Gain, 1, f30(0), f30(10), gain);
         fx.requireValid();
         auto withRound = [](CMTime t) {
@@ -383,7 +383,7 @@ TEST_CASE("Model: validateProject catches broken invariants") {
                 case 2: clip.sourceIn = modify(clip.sourceIn); break;
                 case 3: dissolve.start = modify(dissolve.start); break;
                 case 4: dissolve.end = modify(dissolve.end); break;
-                case 5: copy.sequence().findClip(a)->spans[1].tracks.gain[1].time = modify(copy.sequence().findClip(a)->spans[1].tracks.gain[1].time); break;
+                case 5: copy.sequence().findClip(a)->spans[1].tracks[SpanParameter::Gain][1].time = modify(copy.sequence().findClip(a)->spans[1].tracks[SpanParameter::Gain][1].time); break;
                 case 9: copy.sequence().findClip(a)->spans[1].end = modify(copy.sequence().findClip(a)->spans[1].end); break;
                 case 6: copy.sequence().frameDuration = modify(copy.sequence().frameDuration); break;
                 case 7: copy.project.findAsset(copy.av30)->duration = modify(copy.project.findAsset(copy.av30)->duration); break;
@@ -557,7 +557,7 @@ TEST_CASE("Model: validateProject catches broken invariants") {
         const ClipId v = fx.addClip(fx.v1, fx.av30, 0, 60, 30); // source frames [30, 90)
         const ClipId a = fx.addClip(fx.a1, fx.av30, 0, 60, 30);
         SpanTracks motion;
-        motion.x = {key(kCMTimeZero, 0), key(f30(30), 100)};
+        motion[SpanParameter::X] = {key(kCMTimeZero, 0), key(f30(30), 100)};
         const SpanId s = fx.addSpan(v, SpanKind::Motion, 1, f30(30), f30(60), motion);
         fx.requireValid();
         EffectSpan &span = *fx.sequence().findSpan(s);
@@ -570,15 +570,15 @@ TEST_CASE("Model: validateProject catches broken invariants") {
         span.end = f30(91);
         expectProblem(fx, "outside its clip's source range");
         span.end = f30(60);
-        span.tracks.x.push_back(key(f30(31), 1));
+        span.tracks[SpanParameter::X].push_back(key(f30(31), 1));
         expectProblem(fx, "within the span");
-        span.tracks.x.pop_back();
-        span.tracks.gain = {key(kCMTimeZero, 1)};
+        span.tracks[SpanParameter::X].pop_back();
+        span.tracks[SpanParameter::Gain] = {key(kCMTimeZero, 1)};
         expectProblem(fx, "has no Gain keyframes");
-        span.tracks.gain.clear();
-        span.tracks.scale = {key(kCMTimeZero, -1)};
+        span.tracks[SpanParameter::Gain].clear();
+        span.tracks[SpanParameter::Scale] = {key(kCMTimeZero, -1)};
         expectProblem(fx, "invalid value");
-        span.tracks.scale.clear();
+        span.tracks[SpanParameter::Scale].clear();
         fx.requireValid();
         fx.addSpan(v, SpanKind::Opacity, 1, f30(50), f30(70));
         expectProblem(fx, "overlap on lane 1");

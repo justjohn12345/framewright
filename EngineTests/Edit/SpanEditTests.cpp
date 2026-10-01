@@ -90,8 +90,8 @@ TEST_CASE("AddSpan adds a neutral span over the frames, in the clip's source tim
         CHECK(track[0].value == neutralValue(p));
         CHECK(track[1].value == neutralValue(p));
     }
-    CHECK(span.tracks.opacity.empty());
-    CHECK(span.tracks.gain.empty());
+    CHECK(span.tracks[SpanParameter::Opacity].empty());
+    CHECK(span.tracks[SpanParameter::Gain].empty());
     for (int f = 0; f < 90; ++f) {
         const VideoParams now = motionValuesAt(fx.clip(fx.v), f30(f));
         CHECK(now.x == before[static_cast<std::size_t>(f)].x);
@@ -106,13 +106,13 @@ TEST_CASE("AddSpan adds a neutral span over the frames, in the clip's source tim
         const EffectSpan &s = fx.get(onFast.createdSpanId());
         CHECK(s.start == f30(20));
         CHECK(s.end == f30(40));
-        CHECK(isRamp(s.tracks.opacity, 1, 1, f30(20)));
+        CHECK(isRamp(s.tracks[SpanParameter::Opacity], 1, 1, f30(20)));
     }
     SUBCASE("a Gain span on an audio clip") {
         AddSpan gain(fx.seq, fx.a, SpanKind::Gain, 2, f30(0), f30(90));
         CHECK(gain.name() == "Add Gain Span");
         applyReversible(fx.project, gain);
-        CHECK(fx.get(gain.createdSpanId()).tracks.gain.size() == 2);
+        CHECK(fx.get(gain.createdSpanId()).tracks[SpanParameter::Gain].size() == 2);
     }
     SUBCASE("a still's spans are measured from its start") {
         const ClipId still = fx.addClip(fx.v2, fx.still, 100, 60);
@@ -211,11 +211,11 @@ TEST_CASE("SetSpanValues sets start and end values; the frames between follow th
     }
     SUBCASE("a keyframe between the ends keeps its place") {
         Clip &clip = *fx.sequence().findClip(fx.v);
-        insertKeyframeKeepingValues(clip.findSpan(id)->tracks.x, 0, f30(10));
-        clip.findSpan(id)->tracks.x[1].value = 100;
+        insertKeyframeKeepingValues(clip.findSpan(id)->tracks[SpanParameter::X], 0, f30(10));
+        clip.findSpan(id)->tracks[SpanParameter::X][1].value = 100;
         fx.requireValid();
         fx.setValues(id, {change(SpanParameter::X, 10, 20)});
-        const KeyframeTrack &x = fx.get(id).tracks.x;
+        const KeyframeTrack &x = fx.get(id).tracks[SpanParameter::X];
         REQUIRE(x.size() == 3);
         CHECK(x[0].value == 10);
         CHECK(x[1].value == 100);
@@ -253,7 +253,7 @@ TEST_CASE("SetSpanRange moves and trims a span; its values keep their places in 
         applyReversible(fx.project, move);
         CHECK(fx.get(id).start == f30(50));
         CHECK(fx.get(id).end == f30(80));
-        CHECK(isRamp(fx.get(id).tracks.x, 0, 90, f30(30)));
+        CHECK(isRamp(fx.get(id).tracks[SpanParameter::X], 0, 90, f30(30)));
         for (int f = 20; f < 50; ++f) {
             CHECK(close(motionValuesAt(fx.clip(fx.v), f30(f)).x, 3.0 * (f - 20)));
         }
@@ -262,7 +262,7 @@ TEST_CASE("SetSpanRange moves and trims a span; its values keep their places in 
     SUBCASE("a trim stretches the values over the new range") {
         SetSpanRange trim(fx.seq, id, f30(10), f30(25));
         applyReversible(fx.project, trim);
-        CHECK(isRamp(fx.get(id).tracks.x, 0, 90, f30(15)));
+        CHECK(isRamp(fx.get(id).tracks[SpanParameter::X], 0, 90, f30(15)));
         for (int f = 10; f < 25; ++f) {
             CHECK(close(motionValuesAt(fx.clip(fx.v), f30(f)).x, 6.0 * (f - 10)));
         }
@@ -346,10 +346,10 @@ TEST_CASE("Span edits undo as whole steps and coalesce in groups") {
                     .ok());
     }
     undo.endCoalescing();
-    CHECK(fx.get(id).tracks.x.front().value == 5);
+    CHECK(fx.get(id).tracks[SpanParameter::X].front().value == 5);
     CHECK(undo.undoCount() == 3);
     REQUIRE(undo.undo(fx.project));
-    CHECK(fx.get(id).tracks.x.front().value == 0);
+    CHECK(fx.get(id).tracks[SpanParameter::X].front().value == 0);
     REQUIRE(undo.undo(fx.project));
     CHECK(fx.get(id).end == f30(60));
     REQUIRE(undo.undo(fx.project));
@@ -357,7 +357,7 @@ TEST_CASE("Span edits undo as whole steps and coalesce in groups") {
     REQUIRE(undo.redo(fx.project));
     REQUIRE(undo.redo(fx.project));
     REQUIRE(undo.redo(fx.project));
-    CHECK(fx.get(id).tracks.x.front().value == 5);
+    CHECK(fx.get(id).tracks[SpanParameter::X].front().value == 5);
     fx.requireValid();
 }
 
@@ -392,13 +392,13 @@ TEST_CASE("planKenBurns sets the framings given the other lanes; spanEdgeMotion 
     // Against the reference: the other lanes at the span's first frame (source 2 s: 0.8 + 0.2 * (1 -
     // 0.5)) and last frame (source frame 119: past the zoom's end, so the 0.8 it holds).
     const double zoomAtStart = *referenceSpanValue(1, 3, 1, 0.8, KeyframeInterpolation::Linear, 2.0);
-    CHECK(close(span.tracks.scale.front().value, 2 / (1.5 * zoomAtStart)));
-    CHECK(close(span.tracks.scale.back().value, 1.25 / (1.5 * 0.8)));
+    CHECK(close(span.tracks[SpanParameter::Scale].front().value, 2 / (1.5 * zoomAtStart)));
+    CHECK(close(span.tracks[SpanParameter::Scale].back().value, 1.25 / (1.5 * 0.8)));
     // From the span's end on (the clip's tail handle here) the end framing holds.
     CHECK(close(motionValuesAt(c, f30(95)).scale, end.scale));
     CHECK(close(motionValuesAt(c, f30(95)).x, end.x));
-    CHECK(close(span.tracks.x.front().value, -100 - 40));
-    CHECK(close(span.tracks.x.back().value, 200 - 40));
+    CHECK(close(span.tracks[SpanParameter::X].front().value, -100 - 40));
+    CHECK(close(span.tracks[SpanParameter::X].back().value, 200 - 40));
     SUBCASE("refused for another kind and where nothing else leaves a scale") {
         const SpanId opacity = fx.add(fx.v, SpanKind::Opacity, 3, 0, 10);
         CHECK_FALSE(planKenBurns(fx.clip(fx.v), fx.get(opacity), fx.sequence().frameDuration, start, end, changes).ok());
@@ -438,9 +438,9 @@ TEST_CASE("planKenBurns on a lane after another move: the held framing is the ne
     REQUIRE(planKenBurns(fx.clip(fx.v), fx.get(second), fd, from, panned, changes).ok());
     fx.setValues(second, changes);
     const EffectSpan &b = fx.get(second);
-    CHECK(close(b.tracks.x.front().value, 0));
-    CHECK(close(b.tracks.y.front().value, 0));
-    CHECK(close(b.tracks.scale.front().value, 1));
+    CHECK(close(b.tracks[SpanParameter::X].front().value, 0));
+    CHECK(close(b.tracks[SpanParameter::Y].front().value, 0));
+    CHECK(close(b.tracks[SpanParameter::Scale].front().value, 1));
     const Clip &c = fx.clip(fx.v);
     // Both moves read back exactly.
     for (const auto &[span, atEnd, want] :
@@ -471,13 +471,13 @@ TEST_CASE("planMatchSpanEdge continues the neighbour at the cut through the span
     fx.sequence().findClip(a)->video = VideoParams{100, 0, 1.5, 10, 0.5};
     fx.sequence().findClip(b)->video = VideoParams{-20, 5, 1.2, 0, 1};
     const SpanId span = fx.addSpan(b, SpanKind::Motion, 1, f30(300), f30(330), SpanTracks{});
-    fx.sequence().findClip(b)->findSpan(span)->tracks.x = rampTrack(0, 50, f30(30));
+    fx.sequence().findClip(b)->findSpan(span)->tracks[SpanParameter::X] = rampTrack(0, 50, f30(30));
     const ClipId m = fx.addClip(fx.a1, fx.audioOnly, 0, 60, 0);
     const ClipId n = fx.addClip(fx.a1, fx.audioOnly, 60, 60, 600);
     fx.sequence().findClip(m)->audio.gainDb = -3;
     fx.sequence().findClip(n)->audio.gainDb = 2;
     const SpanId gain = fx.addSpan(n, SpanKind::Gain, 1, f30(600), f30(660), SpanTracks{});
-    fx.sequence().findClip(n)->findSpan(gain)->tracks.gain = rampTrack(0, -6, f30(60));
+    fx.sequence().findClip(n)->findSpan(gain)->tracks[SpanParameter::Gain] = rampTrack(0, -6, f30(60));
     fx.requireValid();
 
     std::vector<SpanValueChange> changes;
@@ -490,7 +490,7 @@ TEST_CASE("planMatchSpanEdge continues the neighbour at the cut through the span
     CHECK(close(bFirst.y, aLast.y));
     CHECK(close(bFirst.scale, aLast.scale));
     CHECK(close(bFirst.rotationDegrees, aLast.rotationDegrees));
-    CHECK(fx.clip(b).findSpan(span)->tracks.x.back().value == 50); // the end value stays
+    CHECK(fx.clip(b).findSpan(span)->tracks[SpanParameter::X].back().value == 50); // the end value stays
     // Matched already: no changes.
     REQUIRE(planMatchSpanEdge(fx.sequence(), span, ClipEdge::Head, changes).ok());
     CHECK(changes.empty());
@@ -512,7 +512,7 @@ TEST_CASE("planMatchSpanEdge continues the neighbour at the cut through the span
     REQUIRE(planMatchSpanEdge(fx.sequence(), inner, ClipEdge::Tail, changes).ok());
     SetSpanValues matchInner(fx.seq, inner, changes);
     applyReversible(fx.project, matchInner);
-    CHECK(close(fx.clip(a).findSpan(inner)->tracks.opacity.back().value, 0.7));
+    CHECK(close(fx.clip(a).findSpan(inner)->tracks[SpanParameter::Opacity].back().value, 0.7));
     CHECK(close(motionValuesAt(fx.clip(a), f30(59)).opacity, motionValuesAt(fx.clip(b), f30(60)).opacity));
     CHECK(close(motionValuesAt(fx.clip(a), f30(20)).opacity, 0.35)); // held from the span's end
 

@@ -786,7 +786,7 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
     Keyframe ducked;
     ducked.time = CMTimeMake(3, 2);
     ducked.value = -18;
-    duck.gain = {level, ducked};
+    duck[SpanParameter::Gain] = {level, ducked};
     h.addSpan(loud, SpanKind::Gain, 1, CMTimeMake(5, 2), CMTimeMake(4, 1), duck);
     XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
     h.load();
@@ -877,17 +877,17 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
     const ClipId clip = h.addClip(h.v1, movie, 0, 40, CMTimeMake(1, 1));
     h.sequence().findClip(clip)->video.x = 30;
     SpanTracks push;
-    push.scale = {key(frames30(0), 1, KeyframeInterpolation::EaseInOut), key(frames30(39), 2.2, KeyframeInterpolation::Linear)};
-    push.x = {key(frames30(0), 0, KeyframeInterpolation::EaseInOut), key(frames30(39), -150, KeyframeInterpolation::Linear)};
-    push.y = {key(frames30(0), 0, KeyframeInterpolation::Linear), key(frames30(39), 60, KeyframeInterpolation::Linear)};
-    push.rotation = {key(frames30(10), 0, KeyframeInterpolation::Linear), key(frames30(30), 25, KeyframeInterpolation::Linear)};
+    push[SpanParameter::Scale] = {key(frames30(0), 1, KeyframeInterpolation::EaseInOut), key(frames30(39), 2.2, KeyframeInterpolation::Linear)};
+    push[SpanParameter::X] = {key(frames30(0), 0, KeyframeInterpolation::EaseInOut), key(frames30(39), -150, KeyframeInterpolation::Linear)};
+    push[SpanParameter::Y] = {key(frames30(0), 0, KeyframeInterpolation::Linear), key(frames30(39), 60, KeyframeInterpolation::Linear)};
+    push[SpanParameter::Rotation] = {key(frames30(10), 0, KeyframeInterpolation::Linear), key(frames30(30), 25, KeyframeInterpolation::Linear)};
     h.addSpan(clip, SpanKind::Motion, 1, frames30(30), frames30(70), push);
     SpanTracks grow;
-    grow.scale = {key(frames30(0), 1, KeyframeInterpolation::Linear), key(frames30(15), 1.2, KeyframeInterpolation::Linear)};
-    grow.rotation = {key(frames30(0), 0, KeyframeInterpolation::Linear), key(frames30(15), 10, KeyframeInterpolation::Linear)};
+    grow[SpanParameter::Scale] = {key(frames30(0), 1, KeyframeInterpolation::Linear), key(frames30(15), 1.2, KeyframeInterpolation::Linear)};
+    grow[SpanParameter::Rotation] = {key(frames30(0), 0, KeyframeInterpolation::Linear), key(frames30(15), 10, KeyframeInterpolation::Linear)};
     const SpanId growId = h.addSpan(clip, SpanKind::Motion, 2, frames30(45), frames30(60), grow);
     SpanTracks fade;
-    fade.opacity = {key(frames30(0), 1, KeyframeInterpolation::Hold), key(frames30(20), 0.6, KeyframeInterpolation::Linear)};
+    fade[SpanParameter::Opacity] = {key(frames30(0), 1, KeyframeInterpolation::Hold), key(frames30(20), 0.6, KeyframeInterpolation::Linear)};
     h.addSpan(clip, SpanKind::Opacity, 3, frames30(30), frames30(60), fade);
     // V2: the half-transparent still over it, growing in steps (hold) by a Motion span over the
     // still's first 30 frames (a still's span times are its own timeline offsets).
@@ -896,7 +896,7 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
     overlayClip.isStill = true;
     overlayClip.video.x = 150;
     SpanTracks steps;
-    steps.scale = {key(frames30(0), 0.2, KeyframeInterpolation::Hold), key(frames30(10), 0.35, KeyframeInterpolation::Hold),
+    steps[SpanParameter::Scale] = {key(frames30(0), 0.2, KeyframeInterpolation::Hold), key(frames30(10), 0.35, KeyframeInterpolation::Hold),
                    key(frames30(20), 0.5, KeyframeInterpolation::Linear)};
     h.addSpan(overlay, SpanKind::Motion, 1, kCMTimeZero, frames30(30), steps);
     XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
@@ -1588,9 +1588,9 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
     h.sequence().findClip(clip)->speed = Ratio{1, 4};
     const CMTime length = CMTimeMake(5, 4); // the move's 5 s of timeline in source time
     SpanTracks move;
-    move.x = {key(kCMTimeZero, 0), key(length, -120)};
-    move.y = {key(kCMTimeZero, 0), key(length, 50)};
-    move.scale = {key(kCMTimeZero, 1), key(length, 1.6)};
+    move[SpanParameter::X] = {key(kCMTimeZero, 0), key(length, -120)};
+    move[SpanParameter::Y] = {key(kCMTimeZero, 0), key(length, 50)};
+    move[SpanParameter::Scale] = {key(kCMTimeZero, 1), key(length, 1.6)};
     const SpanId span = h.addSpan(clip, SpanKind::Motion, 1, CMTimeMake(5, 4), CMTimeMake(5, 2), move);
     XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
     h.load();
@@ -1734,10 +1734,10 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         return KeyframeTrack{a, b};
     };
     SpanTracks duck;
-    duck.gain = ramp(-12, CMTimeMake(1, 1), KeyframeInterpolation::Linear);
+    duck[SpanParameter::Gain] = ramp(-12, CMTimeMake(1, 1), KeyframeInterpolation::Linear);
     h.addSpan(tone, SpanKind::Gain, 1, CMTimeMake(4, 1), CMTimeMake(5, 1), duck); // source = timeline + 3 s
     SpanTracks swell;
-    swell.gain = ramp(6, CMTimeMake(1, 2), KeyframeInterpolation::EaseInOut);
+    swell[SpanParameter::Gain] = ramp(6, CMTimeMake(1, 2), KeyframeInterpolation::EaseInOut);
     h.addSpan(tone, SpanKind::Gain, 1, CMTimeMake(6, 1), CMTimeMake(13, 2), swell);
     XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
 

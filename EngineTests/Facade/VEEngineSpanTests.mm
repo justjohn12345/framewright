@@ -12,6 +12,7 @@
 #include "../Media/TestMedia.h"
 
 #include <cmath>
+#include <cstring>
 #include <string>
 
 namespace {
@@ -350,6 +351,30 @@ VESpanValues values(double x, double scale) {
                                                             error:&error];
     NSDictionary *savedSpan = saved[@"sequences"][0][@"videoTracks"][0][@"clips"][0][@"spans"][0];
     XCTAssertEqualObjects(savedSpan, span);
+}
+
+// VESpanValues by VESpanParameter (colour grading prerequisites, item 3): every parameter reaches its
+// field; a value outside the enum reads NaN and writes nothing.
+- (void)testSpanValuesAccessorsReachTheNamedFields {
+    VESpanValues values = VESpanValuesUnchanged();
+    VESpanValuesSetValue(&values, 1, VESpanParameterPositionX);
+    VESpanValuesSetValue(&values, 2, VESpanParameterPositionY);
+    VESpanValuesSetValue(&values, 3, VESpanParameterScale);
+    VESpanValuesSetValue(&values, 4, VESpanParameterRotation);
+    VESpanValuesSetValue(&values, 0.5, VESpanParameterOpacity);
+    VESpanValuesSetValue(&values, -6, VESpanParameterGain);
+    XCTAssertEqual(values.x, 1);
+    XCTAssertEqual(values.y, 2);
+    XCTAssertEqual(values.scale, 3);
+    XCTAssertEqual(values.rotationDegrees, 4);
+    XCTAssertEqual(values.opacity, 0.5);
+    XCTAssertEqual(values.gainDb, -6);
+    XCTAssertEqual(VESpanValuesGetValue(values, VESpanParameterRotation), 4);
+    const VESpanValues before = values;
+    VESpanValuesSetValue(&values, 99, static_cast<VESpanParameter>(6));
+    VESpanValuesSetValue(&values, 99, static_cast<VESpanParameter>(-1));
+    XCTAssertEqual(memcmp(&before, &values, sizeof values), 0);
+    XCTAssertTrue(std::isnan(VESpanValuesGetValue(values, static_cast<VESpanParameter>(6))));
 }
 
 // MARK: - Ken Burns and matching

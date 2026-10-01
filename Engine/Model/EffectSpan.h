@@ -209,21 +209,35 @@ struct ForeignSpanContent {
 // Bit-for-bit equality of every field.
 bool operator==(const ForeignSpanContent &a, const ForeignSpanContent &b);
 
-// Keyframe tracks of a span, one per parameter (only the span kind's may be non-empty).
+// Keyframe tracks of a span, one per parameter, indexed by SpanParameter (only the span kind's may be
+// non-empty): a new parameter needs no change here.
 struct SpanTracks {
-    KeyframeTrack x;
-    KeyframeTrack y;
-    KeyframeTrack scale;
-    KeyframeTrack rotation;
-    KeyframeTrack opacity;
-    KeyframeTrack gain;
+    std::array<KeyframeTrack, kSpanParameterCount> byParameter;
 
-    KeyframeTrack &track(SpanParameter parameter);
-    const KeyframeTrack &track(SpanParameter parameter) const;
+    KeyframeTrack &track(SpanParameter parameter) {
+        return byParameter[index(parameter)];
+    }
+    const KeyframeTrack &track(SpanParameter parameter) const {
+        return byParameter[index(parameter)];
+    }
+    KeyframeTrack &operator[](SpanParameter parameter) {
+        return track(parameter);
+    }
+    const KeyframeTrack &operator[](SpanParameter parameter) const {
+        return track(parameter);
+    }
     // No track has keyframes.
     bool empty() const;
 
     friend bool operator==(const SpanTracks &, const SpanTracks &) = default;
+
+  private:
+    // A value outside the enum (never made by the engine) reads and writes the first track rather
+    // than past the end.
+    static std::size_t index(SpanParameter parameter) {
+        const auto i = static_cast<std::size_t>(parameter);
+        return i < kSpanParameterCount ? i : 0;
+    }
 };
 
 struct EffectSpan {

@@ -72,7 +72,7 @@ TEST_CASE("EffectSpan: values at exact times follow the reference for every inte
         CAPTURE(nameOf(interpolation));
         // Source [2 s, 4 s): x from -100 to 300.
         SpanTracks tracks;
-        tracks.x = rampTrack(-100, 300, CMTimeMake(2, 1), interpolation);
+        tracks[SpanParameter::X] = rampTrack(-100, 300, CMTimeMake(2, 1), interpolation);
         const EffectSpan span = motionSpan(CMTimeMake(2, 1), CMTimeMake(4, 1), tracks);
         for (int k = 60; k < 120; ++k) {
             const double reference = *referenceSpanValue(2, 4, -100, 300, interpolation, k / 30.0);
@@ -92,7 +92,7 @@ TEST_CASE("EffectSpan: values at exact times follow the reference for every inte
 
 TEST_CASE("EffectSpan: the limit from the left, the interpolation shown and values kept in range") {
     SpanTracks tracks;
-    tracks.scale = {key(kCMTimeZero, 1, KeyframeInterpolation::Hold), key(f30(10), 2, KeyframeInterpolation::Hold),
+    tracks[SpanParameter::Scale] = {key(kCMTimeZero, 1, KeyframeInterpolation::Hold), key(f30(10), 2, KeyframeInterpolation::Hold),
                     key(f30(20), 3)};
     const EffectSpan span = motionSpan(f30(30), f30(60), tracks);
     // At the hold's jump the value is the new one; the value just before (from the left) the old.
@@ -103,12 +103,12 @@ TEST_CASE("EffectSpan: the limit from the left, the interpolation shown and valu
 
     // Tracks moving differently are shown as Custom.
     SpanTracks mixed;
-    mixed.x = rampTrack(0, 10, f30(30), KeyframeInterpolation::EaseIn);
-    mixed.y = rampTrack(0, 10, f30(30), KeyframeInterpolation::Linear);
+    mixed[SpanParameter::X] = rampTrack(0, 10, f30(30), KeyframeInterpolation::EaseIn);
+    mixed[SpanParameter::Y] = rampTrack(0, 10, f30(30), KeyframeInterpolation::Linear);
     CHECK(spanInterpolation(motionSpan(f30(0), f30(30), mixed)) == KeyframeInterpolation::Bezier);
     // No segment at all: Linear.
     SpanTracks single;
-    single.x = {key(kCMTimeZero, 5)};
+    single[SpanParameter::X] = {key(kCMTimeZero, 5)};
     CHECK(spanInterpolation(motionSpan(f30(0), f30(30), single)) == KeyframeInterpolation::Linear);
 
     // A custom curve from a project file overshooting opacity's range is limited when evaluated.
@@ -119,7 +119,7 @@ TEST_CASE("EffectSpan: the limit from the left, the interpolation shown and valu
     fade.end = f30(60);
     Keyframe up = key(kCMTimeZero, 0.5, KeyframeInterpolation::Bezier);
     up.curve = TimingCurve{0.2, 3.0, 0.8, 3.0};
-    fade.tracks.opacity = {up, key(f30(60), 1)};
+    fade.tracks[SpanParameter::Opacity] = {up, key(f30(60), 1)};
     CHECK(spanValueAt(fade, SpanParameter::Opacity, exact(f30(30))) == 1.0);
     CHECK(spanValueAt(fade, SpanParameter::Opacity, exact(f30(1))) <= 1.0);
 }
@@ -127,10 +127,10 @@ TEST_CASE("EffectSpan: the limit from the left, the interpolation shown and valu
 TEST_CASE("EffectSpan: a split divides the span exactly; every frame shows what it did") {
     // Source [1 s, 3 s): x eases in and out -120 -> 240 with a hold in scale and a linear turn.
     SpanTracks tracks;
-    tracks.x = rampTrack(-120, 240, CMTimeMake(2, 1), KeyframeInterpolation::EaseInOut);
-    tracks.scale = {key(kCMTimeZero, 1, KeyframeInterpolation::Hold), key(f30(45), 1.5, KeyframeInterpolation::EaseOut),
+    tracks[SpanParameter::X] = rampTrack(-120, 240, CMTimeMake(2, 1), KeyframeInterpolation::EaseInOut);
+    tracks[SpanParameter::Scale] = {key(kCMTimeZero, 1, KeyframeInterpolation::Hold), key(f30(45), 1.5, KeyframeInterpolation::EaseOut),
                     key(CMTimeMake(2, 1), 2)};
-    tracks.rotation = {key(f30(10), 0), key(f30(50), 90)};
+    tracks[SpanParameter::Rotation] = {key(f30(10), 0), key(f30(50), 90)};
     const EffectSpan span = motionSpan(CMTimeMake(1, 1), CMTimeMake(3, 1), tracks, 2, SpanId{41});
     const std::vector<CMTime> cuts{f30(31), f30(47), f30(75), f30(89), CMTimeMake(1001 * 50, 30000),
                                    CMTimeMake(44101, 44100)};
@@ -180,14 +180,14 @@ TEST_CASE("EffectSpan: a split divides the span exactly; every frame shows what 
 TEST_CASE("EffectSpan: a side left without keyframes holds the value it had; an overshooting curve is refused") {
     // x moves only in the second half: [1 s, 2 s) of a [0, 2 s) span.
     SpanTracks tracks;
-    tracks.x = {key(CMTimeMake(1, 1), 0), key(CMTimeMake(2, 1), 100)};
+    tracks[SpanParameter::X] = {key(CMTimeMake(1, 1), 0), key(CMTimeMake(2, 1), 100)};
     const EffectSpan span = motionSpan(kCMTimeZero, CMTimeMake(2, 1), tracks);
     const auto split = splitSpan(span, f30(15));
     REQUIRE(split.has_value());
-    REQUIRE(split->left.tracks.x.size() == 1);
-    CHECK(split->left.tracks.x[0].time == kCMTimeZero);
-    CHECK(split->left.tracks.x[0].value == 0);
-    CHECK(split->right.tracks.x.front().value == 0);
+    REQUIRE(split->left.tracks[SpanParameter::X].size() == 1);
+    CHECK(split->left.tracks[SpanParameter::X][0].time == kCMTimeZero);
+    CHECK(split->left.tracks[SpanParameter::X][0].value == 0);
+    CHECK(split->right.tracks[SpanParameter::X].front().value == 0);
 
     EffectSpan fade;
     fade.id = SpanId{3};
@@ -196,7 +196,7 @@ TEST_CASE("EffectSpan: a side left without keyframes holds the value it had; an 
     fade.end = f30(60);
     Keyframe up = key(kCMTimeZero, 0.5, KeyframeInterpolation::Bezier);
     up.curve = TimingCurve{0.2, 3.0, 0.8, 3.0};
-    fade.tracks.opacity = {up, key(f30(60), 1)};
+    fade.tracks[SpanParameter::Opacity] = {up, key(f30(60), 1)};
     SpanCutProblem problem = SpanCutProblem::None;
     CHECK_FALSE(splitSpan(fade, f30(30), &problem).has_value());
     CHECK(problem == SpanCutProblem::CurveOvershoot);
@@ -206,7 +206,7 @@ TEST_CASE("EffectSpan: a side left without keyframes holds the value it had; an 
 
 TEST_CASE("EffectSpan: clipSpan keeps the part inside, evaluated exactly at a new edge") {
     SpanTracks tracks;
-    tracks.x = rampTrack(0, 300, f30(60), KeyframeInterpolation::EaseOut);
+    tracks[SpanParameter::X] = rampTrack(0, 300, f30(60), KeyframeInterpolation::EaseOut);
     const EffectSpan span = motionSpan(f30(30), f30(90), tracks);
     SpanCutProblem problem = SpanCutProblem::CurveOvershoot;
     CHECK(clipSpan(span, f30(0), f30(120), &problem) == span);
@@ -237,27 +237,27 @@ TEST_CASE("EffectSpan: clipSpan keeps the part inside, evaluated exactly at a ne
 
 TEST_CASE("EffectSpan: track validation") {
     SpanTracks tracks;
-    tracks.x = rampTrack(0, 10, f30(30));
+    tracks[SpanParameter::X] = rampTrack(0, 10, f30(30));
     EffectSpan span = motionSpan(f30(0), f30(30), tracks);
     CHECK_FALSE(spanTracksProblem(span).has_value());
     SUBCASE("a parameter of another kind") {
-        span.tracks.gain = rampTrack(0, -6, f30(30));
+        span.tracks[SpanParameter::Gain] = rampTrack(0, -6, f30(30));
         CHECK(spanTracksProblem(span).value_or("").find("a motion span has no Gain keyframes") != std::string::npos);
     }
     SUBCASE("a keyframe past the span's length") {
-        span.tracks.x.back().time = f30(31);
+        span.tracks[SpanParameter::X].back().time = f30(31);
         CHECK(spanTracksProblem(span).value_or("").find("must lie within the span") != std::string::npos);
     }
     SUBCASE("a keyframe before its start") {
-        span.tracks.x.front().time = f30(-1);
+        span.tracks[SpanParameter::X].front().time = f30(-1);
         CHECK(spanTracksProblem(span).value_or("").find("must lie within the span") != std::string::npos);
     }
     SUBCASE("times out of order") {
-        std::swap(span.tracks.x[0], span.tracks.x[1]);
+        std::swap(span.tracks[SpanParameter::X][0], span.tracks[SpanParameter::X][1]);
         CHECK(spanTracksProblem(span).has_value());
     }
     SUBCASE("a value out of range") {
-        span.tracks.scale = {key(kCMTimeZero, -1)};
+        span.tracks[SpanParameter::Scale] = {key(kCMTimeZero, -1)};
         CHECK(spanTracksProblem(span).value_or("").find("invalid value") != std::string::npos);
     }
     SUBCASE("a transition with keyframes") {
@@ -268,7 +268,7 @@ TEST_CASE("EffectSpan: track validation") {
         transition.start = -f30(5);
         transition.end = f30(5);
         CHECK_FALSE(spanTracksProblem(transition).has_value());
-        transition.tracks.x = {key(kCMTimeZero, 1)};
+        transition.tracks[SpanParameter::X] = {key(kCMTimeZero, 1)};
         CHECK(spanTracksProblem(transition).value_or("").find("a transition has no keyframes") != std::string::npos);
     }
 }
@@ -343,16 +343,16 @@ TEST_CASE("Composition: lanes compose in order onto the static values and hold, 
     Clip &clip = *fx.sequence().findClip(id);
     clip.video = VideoParams{10, -5, 1.5, 5, 0.8};
     SpanTracks one;
-    one.x = rampTrack(0, 100, CMTimeMake(2, 1));
-    one.scale = rampTrack(1, 2, CMTimeMake(2, 1), KeyframeInterpolation::EaseInOut);
-    one.rotation = rampTrack(0, 90, CMTimeMake(2, 1), KeyframeInterpolation::EaseInOut);
+    one[SpanParameter::X] = rampTrack(0, 100, CMTimeMake(2, 1));
+    one[SpanParameter::Scale] = rampTrack(1, 2, CMTimeMake(2, 1), KeyframeInterpolation::EaseInOut);
+    one[SpanParameter::Rotation] = rampTrack(0, 90, CMTimeMake(2, 1), KeyframeInterpolation::EaseInOut);
     fx.addSpan(id, SpanKind::Motion, 1, CMTimeMake(1, 1), CMTimeMake(3, 1), one);
     SpanTracks two;
-    two.x = rampTrack(0, -50, CMTimeMake(2, 1));
-    two.scale = rampTrack(1, 0.5, CMTimeMake(2, 1));
+    two[SpanParameter::X] = rampTrack(0, -50, CMTimeMake(2, 1));
+    two[SpanParameter::Scale] = rampTrack(1, 0.5, CMTimeMake(2, 1));
     fx.addSpan(id, SpanKind::Motion, 2, CMTimeMake(2, 1), CMTimeMake(4, 1), two);
     SpanTracks three;
-    three.opacity = rampTrack(1, 0.25, CMTimeMake(2, 1), KeyframeInterpolation::EaseOut);
+    three[SpanParameter::Opacity] = rampTrack(1, 0.25, CMTimeMake(2, 1), KeyframeInterpolation::EaseOut);
     fx.addSpan(id, SpanKind::Opacity, 3, CMTimeMake(3, 2), CMTimeMake(7, 2), three);
     fx.requireValid();
     const Clip &c = fx.clip(id);
@@ -388,10 +388,10 @@ TEST_CASE("Composition: gain spans add decibels to the clip's gain and hold thei
     const ClipId id = fx.addClip(fx.a1, fx.audioOnly, 0, 90);
     fx.sequence().findClip(id)->audio.gainDb = -6;
     SpanTracks duck;
-    duck.gain = rampTrack(0, -12, CMTimeMake(1, 1));
+    duck[SpanParameter::Gain] = rampTrack(0, -12, CMTimeMake(1, 1));
     fx.addSpan(id, SpanKind::Gain, 1, CMTimeMake(1, 2), CMTimeMake(3, 2), duck);
     SpanTracks swell;
-    swell.gain = rampTrack(0, 6, CMTimeMake(1, 1), KeyframeInterpolation::EaseInOut);
+    swell[SpanParameter::Gain] = rampTrack(0, 6, CMTimeMake(1, 1), KeyframeInterpolation::EaseInOut);
     fx.addSpan(id, SpanKind::Gain, 2, CMTimeMake(1, 1), CMTimeMake(2, 1), swell);
     fx.requireValid();
     for (int k = 0; k < 720; ++k) {
@@ -413,9 +413,9 @@ TEST_CASE("Composition: every span holds through a tail handle; a head handle sh
     const SpanId early = fx.addSpan(id, SpanKind::Motion, 2, f30(30), f30(60));
     const SpanId late = fx.addSpan(id, SpanKind::Opacity, 3, f30(45), f30(75));
     Clip &clip = *fx.sequence().findClip(id);
-    clip.findSpan(whole)->tracks.x = rampTrack(0, 60, f30(60));
-    clip.findSpan(early)->tracks.scale = rampTrack(1, 2, f30(30));
-    clip.findSpan(late)->tracks.opacity = rampTrack(0.9, 0.4, f30(30));
+    clip.findSpan(whole)->tracks[SpanParameter::X] = rampTrack(0, 60, f30(60));
+    clip.findSpan(early)->tracks[SpanParameter::Scale] = rampTrack(1, 2, f30(30));
+    clip.findSpan(late)->tracks[SpanParameter::Opacity] = rampTrack(0.9, 0.4, f30(30));
     fx.requireValid();
     const Clip &c = fx.clip(id);
     // Frames past the clip's end (a transition handle) are evaluated at its out point: the span
@@ -463,9 +463,9 @@ TEST_CASE("Hold after: a 5 s move from 5 s on a 30 s clip shows the framing befo
     Fixture fx;
     const ClipId id = fx.addClip(fx.v1, fx.av30, 0, 900, 0);
     SpanTracks move;
-    move.x = rampTrack(0, -200, CMTimeMake(5, 1), KeyframeInterpolation::EaseInOut);
-    move.y = rampTrack(0, 90, CMTimeMake(5, 1), KeyframeInterpolation::EaseInOut);
-    move.scale = rampTrack(1, 1.6, CMTimeMake(5, 1), KeyframeInterpolation::EaseInOut);
+    move[SpanParameter::X] = rampTrack(0, -200, CMTimeMake(5, 1), KeyframeInterpolation::EaseInOut);
+    move[SpanParameter::Y] = rampTrack(0, 90, CMTimeMake(5, 1), KeyframeInterpolation::EaseInOut);
+    move[SpanParameter::Scale] = rampTrack(1, 1.6, CMTimeMake(5, 1), KeyframeInterpolation::EaseInOut);
     const SpanId span = fx.addSpan(id, SpanKind::Motion, 1, CMTimeMake(5, 1), CMTimeMake(10, 1), move);
     fx.requireValid();
     const Clip &c = fx.clip(id);
@@ -497,12 +497,12 @@ TEST_CASE("Hold after: chained spans on one lane compose cumulatively") {
     const ClipId id = fx.addClip(fx.v1, fx.av30, 0, 120, 0);
     fx.sequence().findClip(id)->video = VideoParams{12, -4, 1.25, 3, 0.9};
     SpanTracks a;
-    a.x = rampTrack(0, 100, CMTimeMake(1, 1));
-    a.scale = rampTrack(1, 2, CMTimeMake(1, 1));
+    a[SpanParameter::X] = rampTrack(0, 100, CMTimeMake(1, 1));
+    a[SpanParameter::Scale] = rampTrack(1, 2, CMTimeMake(1, 1));
     fx.addSpan(id, SpanKind::Motion, 1, CMTimeMake(1, 2), CMTimeMake(3, 2), a);
     SpanTracks b;
-    b.x = rampTrack(0, 50, CMTimeMake(1, 1), KeyframeInterpolation::EaseInOut);
-    b.scale = rampTrack(1, 1.5, CMTimeMake(1, 1), KeyframeInterpolation::EaseInOut);
+    b[SpanParameter::X] = rampTrack(0, 50, CMTimeMake(1, 1), KeyframeInterpolation::EaseInOut);
+    b[SpanParameter::Scale] = rampTrack(1, 1.5, CMTimeMake(1, 1), KeyframeInterpolation::EaseInOut);
     const SpanId second = fx.addSpan(id, SpanKind::Motion, 1, CMTimeMake(2, 1), CMTimeMake(3, 1), b);
     fx.requireValid();
     using KI = KeyframeInterpolation;
@@ -535,8 +535,8 @@ TEST_CASE("Hold after: chained spans on one lane compose cumulatively") {
     }
     SUBCASE("the second starts elsewhere: it jumps from the held picture by its start values") {
         Clip &clip = *fx.sequence().findClip(id);
-        clip.findSpan(second)->tracks.x = rampTrack(30, 50, CMTimeMake(1, 1), KI::EaseInOut);
-        clip.findSpan(second)->tracks.scale = rampTrack(0.5, 1.5, CMTimeMake(1, 1), KI::EaseInOut);
+        clip.findSpan(second)->tracks[SpanParameter::X] = rampTrack(30, 50, CMTimeMake(1, 1), KI::EaseInOut);
+        clip.findSpan(second)->tracks[SpanParameter::Scale] = rampTrack(0.5, 1.5, CMTimeMake(1, 1), KI::EaseInOut);
         fx.requireValid();
         const Clip &c = fx.clip(id);
         CHECK(motionValuesAt(c, f30(59)) == VideoParams{112, -4, 2.5, 3, 0.9});
@@ -549,7 +549,7 @@ TEST_CASE("Hold after: Opacity and Gain spans hold their end values; chained Gai
     Fixture fx;
     const ClipId v = fx.addClip(fx.v1, fx.av30, 0, 90, 30); // source [1 s, 4 s)
     SpanTracks dim;
-    dim.opacity = rampTrack(1, 0.4, f30(15));
+    dim[SpanParameter::Opacity] = rampTrack(1, 0.4, f30(15));
     fx.addSpan(v, SpanKind::Opacity, 2, f30(40), f30(55), dim);
     fx.requireValid();
     for (int f = 0; f < 90; ++f) {
@@ -562,10 +562,10 @@ TEST_CASE("Hold after: Opacity and Gain spans hold their end values; chained Gai
     const ClipId a = fx.addClip(fx.a1, fx.audioOnly, 0, 120, 0);
     fx.sequence().findClip(a)->audio.gainDb = -3;
     SpanTracks duck;
-    duck.gain = rampTrack(0, -12, CMTimeMake(1, 2));
+    duck[SpanParameter::Gain] = rampTrack(0, -12, CMTimeMake(1, 2));
     fx.addSpan(a, SpanKind::Gain, 1, CMTimeMake(1, 2), CMTimeMake(1, 1), duck);
     SpanTracks swell; // starts neutral: the level goes on from -15 dB
-    swell.gain = rampTrack(0, 9, CMTimeMake(1, 2), KeyframeInterpolation::EaseOut);
+    swell[SpanParameter::Gain] = rampTrack(0, 9, CMTimeMake(1, 2), KeyframeInterpolation::EaseOut);
     fx.addSpan(a, SpanKind::Gain, 1, CMTimeMake(2, 1), CMTimeMake(5, 2), swell);
     fx.requireValid();
     for (int k = 0; k < 960; ++k) {
@@ -586,18 +586,18 @@ TEST_CASE("Hold after: on a still and at speeds other than 1 the end value holds
     // A still over timeline frames [30, 120): a span over its frames [10, 40) holds 1.5 after.
     const ClipId still = fx.addClip(fx.v1, fx.still, 30, 90);
     SpanTracks grow;
-    grow.scale = rampTrack(0.5, 1.5, f30(30), KeyframeInterpolation::EaseIn);
+    grow[SpanParameter::Scale] = rampTrack(0.5, 1.5, f30(30), KeyframeInterpolation::EaseIn);
     fx.addSpan(still, SpanKind::Motion, 1, f30(10), f30(40), grow);
     // At 3/2 over timeline [0, 60) from source 1 s: a span over source [1.5 s, 2.5 s) (timeline
     // frames [10, 30)) holds x = 80 after; at 1/3 over [0, 90) from source 0: a span over source
     // [0.2 s, 0.6 s) (frames [18, 54)) holds rotation 30.
     const ClipId fast = fx.addClip(fx.v2, fx.av30, 0, 60, 30, 1.5);
     SpanTracks pan;
-    pan.x = rampTrack(0, 80, CMTimeMake(1, 1));
+    pan[SpanParameter::X] = rampTrack(0, 80, CMTimeMake(1, 1));
     fx.addSpan(fast, SpanKind::Motion, 2, CMTimeMake(3, 2), CMTimeMake(5, 2), pan);
     const ClipId slow = fx.addClip(fx.v2, fx.av30, 60, 90, 0, 1.0 / 3);
     SpanTracks turn;
-    turn.rotation = rampTrack(0, 30, CMTimeMake(2, 5));
+    turn[SpanParameter::Rotation] = rampTrack(0, 30, CMTimeMake(2, 5));
     fx.addSpan(slow, SpanKind::Motion, 3, CMTimeMake(1, 5), CMTimeMake(3, 5), turn);
     fx.requireValid();
     for (int f = 30; f < 120; ++f) {
@@ -630,10 +630,10 @@ TEST_CASE("Hold after: a span ending exactly at a cut holds from there, into a s
     const ClipId id = fx.addClip(fx.v1, fx.av30, 0, 60, 30);
     fx.sequence().findClip(id)->video = VideoParams{5, 0, 1.2, 0, 1};
     SpanTracks tail;
-    tail.x = rampTrack(0, 90, f30(30));
+    tail[SpanParameter::X] = rampTrack(0, 90, f30(30));
     fx.addSpan(id, SpanKind::Motion, 1, f30(60), f30(90), tail);
     SpanTracks middle;
-    middle.scale = rampTrack(1, 2, f30(30), KeyframeInterpolation::EaseOut);
+    middle[SpanParameter::Scale] = rampTrack(1, 2, f30(30), KeyframeInterpolation::EaseOut);
     const SpanId half = fx.addSpan(id, SpanKind::Motion, 2, f30(30), f30(60), middle);
     fx.requireValid();
     const Clip &c = fx.clip(id);
@@ -666,17 +666,17 @@ TEST_CASE("Hold after: a trim or split past a span keeps its held value as the c
     fx.sequence().findClip(v)->video = VideoParams{12, -4, 1.25, 3, 0.9};
     fx.sequence().findClip(a)->audio.gainDb = -2;
     SpanTracks first;
-    first.x = rampTrack(0, 100, CMTimeMake(1, 1));
-    first.scale = rampTrack(1, 2, CMTimeMake(1, 1), KeyframeInterpolation::EaseInOut);
+    first[SpanParameter::X] = rampTrack(0, 100, CMTimeMake(1, 1));
+    first[SpanParameter::Scale] = rampTrack(1, 2, CMTimeMake(1, 1), KeyframeInterpolation::EaseInOut);
     const SpanId spanA = fx.addSpan(v, SpanKind::Motion, 1, CMTimeMake(1, 2), CMTimeMake(3, 2), first);
     SpanTracks second;
-    second.x = rampTrack(0, 50, CMTimeMake(1, 1));
+    second[SpanParameter::X] = rampTrack(0, 50, CMTimeMake(1, 1));
     const SpanId spanB = fx.addSpan(v, SpanKind::Motion, 1, CMTimeMake(2, 1), CMTimeMake(3, 1), second);
     SpanTracks fade;
-    fade.opacity = rampTrack(1, 0.5, f30(18));
+    fade[SpanParameter::Opacity] = rampTrack(1, 0.5, f30(18));
     const SpanId spanO = fx.addSpan(v, SpanKind::Opacity, 2, f30(6), f30(24), fade);
     SpanTracks duck;
-    duck.gain = rampTrack(0, -9, f30(9));
+    duck[SpanParameter::Gain] = rampTrack(0, -9, f30(9));
     const SpanId spanG = fx.addSpan(a, SpanKind::Gain, 1, f30(9), f30(18), duck);
     fx.requireValid();
     const Clip video = fx.clip(v);
@@ -717,7 +717,7 @@ TEST_CASE("Hold after: a trim or split past a span keeps its held value as the c
     // A still: its spans move back with a head trim and those left before its start fold in.
     const ClipId still = fx.addClip(fx.v2, fx.still, 0, 90);
     SpanTracks grow;
-    grow.scale = rampTrack(1, 1.5, f30(20));
+    grow[SpanParameter::Scale] = rampTrack(1, 1.5, f30(20));
     fx.addSpan(still, SpanKind::Motion, 1, f30(10), f30(30), grow);
     fx.requireValid();
     Clip stillTrimmed = fx.clip(still);
@@ -731,7 +731,7 @@ TEST_CASE("Hold after: a trim or split past a span keeps its held value as the c
     // Values too large to keep refuse the change and leave the clip as it was.
     Clip huge = video;
     huge.video.x = 1.5e308;
-    huge.findSpan(spanA)->tracks.x = rampTrack(0, 1.5e308, CMTimeMake(1, 1));
+    huge.findSpan(spanA)->tracks[SpanParameter::X] = rampTrack(0, 1.5e308, CMTimeMake(1, 1));
     const Clip hugeBefore = huge;
     CHECK(huge.setTimelineStartKeepingEnd(f30(50)) == RetimeResult::HeldValuesOverflow);
     CHECK(huge == hugeBefore);
@@ -741,7 +741,7 @@ TEST_CASE("Clip spans follow trims: effect spans are clipped exactly, fades shri
     Fixture fx;
     const ClipId id = fx.addClip(fx.v1, fx.av30, 0, 90, 30); // source [1 s, 4 s)
     SpanTracks move;
-    move.x = rampTrack(0, 90, CMTimeMake(3, 1), KeyframeInterpolation::EaseIn);
+    move[SpanParameter::X] = rampTrack(0, 90, CMTimeMake(3, 1), KeyframeInterpolation::EaseIn);
     const SpanId span = fx.addSpan(id, SpanKind::Motion, 1, f30(30), f30(120), move);
     const SpanId before45 = fx.addSpan(id, SpanKind::Opacity, 2, f30(35), f30(44));
     const SpanId across = fx.addSpan(id, SpanKind::Opacity, 3, f30(40), f30(50));

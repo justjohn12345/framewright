@@ -679,12 +679,12 @@ TEST_CASE("SplitClip reports each span it divided with the id of the right piece
     Fixture fx;
     const auto [v, a] = fx.addLinkedPair(0, 90);
     SpanTracks zoom;
-    zoom.scale = {key(kCMTimeZero, 1, KeyframeInterpolation::EaseInOut), key(f30(60), 2)};
+    zoom[SpanParameter::Scale] = {key(kCMTimeZero, 1, KeyframeInterpolation::EaseInOut), key(f30(60), 2)};
     const SpanId across = fx.addSpan(v, SpanKind::Motion, 1, f30(0), f30(60), zoom); // divided at 30
     const SpanId before = fx.addSpan(v, SpanKind::Opacity, 2, f30(0), f30(20));      // wholly left
     const SpanId after = fx.addSpan(v, SpanKind::Motion, 3, f30(40), f30(80));       // wholly right
     SpanTracks duck;
-    duck.gain = {key(kCMTimeZero, 0), key(f30(50), -6)};
+    duck[SpanParameter::Gain] = {key(kCMTimeZero, 0), key(f30(50), -6)};
     const SpanId gain = fx.addSpan(a, SpanKind::Gain, 1, f30(10), f30(60), duck); // divided on the sound
     fx.requireValid();
     SplitClip split(fx.seq, v, f30(30));

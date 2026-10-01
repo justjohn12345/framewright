@@ -42,11 +42,11 @@ struct Moving : Fixture {
         std::tie(v, a) = addLinkedPair(start, 90, 30);
         sequence().findClip(v)->video = VideoParams{12, 0, 1.25, 0, 0.9};
         SpanTracks move;
-        move.x = rampTrack(-100, 200, CMTimeMake(2, 1), KI::EaseInOut);
-        move.scale = rampTrack(1, 1.8, CMTimeMake(2, 1), KI::EaseInOut);
+        move[SpanParameter::X] = rampTrack(-100, 200, CMTimeMake(2, 1), KI::EaseInOut);
+        move[SpanParameter::Scale] = rampTrack(1, 1.8, CMTimeMake(2, 1), KI::EaseInOut);
         motion = addSpan(v, SpanKind::Motion, 1, CMTimeMake(3, 2), CMTimeMake(7, 2), move);
         SpanTracks fade;
-        fade.opacity = rampTrack(1, 0.3, CMTimeMake(3, 2));
+        fade[SpanParameter::Opacity] = rampTrack(1, 0.3, CMTimeMake(3, 2));
         opacity = addSpan(v, SpanKind::Opacity, 2, CMTimeMake(1, 1), CMTimeMake(5, 2), fade);
         requireValid();
     }
@@ -256,7 +256,7 @@ TEST_CASE("Span pictures: a still's spans keep their timeline places through a h
     Fixture fx;
     const ClipId still = fx.addClip(fx.v1, fx.still, 30, 90);
     SpanTracks grow;
-    grow.scale = rampTrack(0.5, 1.25, f30(40));
+    grow[SpanParameter::Scale] = rampTrack(0.5, 1.25, f30(40));
     const SpanId id = fx.addSpan(still, SpanKind::Motion, 1, f30(20), f30(60), grow);
     fx.requireValid();
     auto reference = [](std::int64_t timelineFrame, std::int64_t clipStart) {
@@ -293,8 +293,8 @@ TEST_CASE("Span pictures: a split between and inside two chained spans on one la
         CAPTURE(at);
         Moving fx;
         SpanTracks nudge;
-        nudge.x = rampTrack(0, -50, CMTimeMake(3, 10));
-        nudge.scale = rampTrack(1, 0.9, CMTimeMake(3, 10));
+        nudge[SpanParameter::X] = rampTrack(0, -50, CMTimeMake(3, 10));
+        nudge[SpanParameter::Scale] = rampTrack(1, 0.9, CMTimeMake(3, 10));
         const SpanId chained = fx.addSpan(fx.v, SpanKind::Motion, 1, CMTimeMake(36, 10), CMTimeMake(39, 10), nudge);
         fx.requireValid();
         SplitClip split(fx.seq, fx.v, f30(at));

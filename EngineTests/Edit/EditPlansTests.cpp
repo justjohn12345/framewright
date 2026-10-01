@@ -125,7 +125,7 @@ TEST_CASE("planMatchMotion takes the clip's spans into account") {
     const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60);
     fx.addClip(fx.v1, fx.av30, 60, 60);
     SpanTracks zoom;
-    zoom.scale = {key(kCMTimeZero, 2), key(f30(60), 2)}; // A is shown at twice its static scale
+    zoom[SpanParameter::Scale] = {key(kCMTimeZero, 2), key(f30(60), 2)}; // A is shown at twice its static scale
     fx.addSpan(a, SpanKind::Motion, 1, kCMTimeZero, f30(60), zoom);
     std::optional<VideoParams> values;
     REQUIRE(planMatchMotion(fx.sequence(), a, ClipEdge::Tail, values).ok());
@@ -133,7 +133,7 @@ TEST_CASE("planMatchMotion takes the clip's spans into account") {
     CHECK(values->scale == doctest::Approx(0.5)); // x 2 by the span = the neighbour's 1
 
     SpanTracks hide;
-    hide.opacity = {key(kCMTimeZero, 0), key(f30(60), 0)};
+    hide[SpanParameter::Opacity] = {key(kCMTimeZero, 0), key(f30(60), 0)};
     fx.addSpan(a, SpanKind::Opacity, 2, kCMTimeZero, f30(60), hide);
     const EditResult refused = planMatchMotion(fx.sequence(), a, ClipEdge::Tail, values);
     CHECK(refused.error == EditError::InvalidArgument);
@@ -147,7 +147,7 @@ TEST_CASE("planMatchMotion compares the frames drawn at the cut: the last frame 
     const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60);
     const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60);
     SpanTracks pan;
-    pan.x = {key(kCMTimeZero, 0), key(f30(60), 60)};
+    pan[SpanParameter::X] = {key(kCMTimeZero, 0), key(f30(60), 60)};
     fx.addSpan(a, SpanKind::Motion, 1, kCMTimeZero, f30(60), pan);
     fx.sequence().findClip(b)->video.x = 100;
     std::optional<VideoParams> values;
@@ -183,7 +183,7 @@ TEST_CASE("planMatchMotion refuses what it cannot match") {
 
     // A neighbour more opaque than the clip's spans let it be.
     SpanTracks dim;
-    dim.opacity = {key(kCMTimeZero, 0.5), key(f30(60), 0.5)};
+    dim[SpanParameter::Opacity] = {key(kCMTimeZero, 0.5), key(f30(60), 0.5)};
     fx.addSpan(b, SpanKind::Opacity, 1, kCMTimeZero, f30(60), dim);
     r = planMatchMotion(fx.sequence(), b, ClipEdge::Head, values);
     CHECK(r.error == EditError::InvalidArgument);

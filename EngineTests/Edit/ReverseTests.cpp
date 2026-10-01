@@ -213,7 +213,7 @@ TEST_CASE("Reverse: effect spans keep their timeline frames; a dissolve without 
     const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60, 300);
     const SpanId dissolve = fx.addTransition(fx.v1, a, b, 10);
     SpanTracks move;
-    move.x = {key(kCMTimeZero, 0), key(f30(20), 100)};
+    move[SpanParameter::X] = {key(kCMTimeZero, 0), key(f30(20), 100)};
     const SpanId motion = fx.addSpan(a, SpanKind::Motion, 1, f30(10), f30(30), move);
     fx.requireValid();
     const auto frameOf = [&](const EffectSpan &span) {

@@ -458,9 +458,25 @@ Done:
   unchanged. Full suite after this item: EngineTests 549 (0 skips this run), doctest 341, AppTests 278 (1
   known skip), 0 failures, no leftovers.
 
+- 3, parameters indexed by enum: commit "Model: span tracks indexed by parameter". `SpanTracks` holds
+  `std::array<KeyframeTrack, kSpanParameterCount> byParameter` with `track(p)` and `operator[](p)`; the six
+  named fields are gone, so a new parameter needs no struct or switch edit (its row in the parameter table
+  and an enumerator). Facade: the kind switch in `-[VEClipInfo getBaseValues:...]` is one loop over the
+  kind's parameters (`clipValueOf`); `spanValueIn` / `setSpanValueIn` read a table of `VESpanValues` member
+  pointers (the one place that names the public struct's fields); `toVE(SpanParameter)` /
+  `fromVE(VESpanParameter)` (static_asserted to mirror). Public additions (VETypes.h, additions only):
+  `VESpanValuesGetValue(values, parameter)` and `VESpanValuesSetValue(&values, value, parameter)`, in Swift
+  `values.value(for:)` and `values.setValue(_:for:)`; the `VESpanValues` struct is unchanged and the app does
+  not use the accessors yet (its own parameter table stays, review app #5). JSON and golden files unchanged.
+  Tests: SpanDescriptorTests "a span's tracks are indexed by parameter", `VEEngineSpanTests
+  testSpanValuesAccessorsReachTheNamedFields`, `AppTests/SpanValuesAccessorTests`. Signature-only changes
+  (`tracks.x` -> `tracks[SpanParameter::X]` and the like, made at the compiler's error locations, nothing
+  else): AudioMixerTests.mm, ClipOpsTests, EditPlansTests, ForeignSpanTests, ReverseTests,
+  SequenceFormatTests, SpanEditTests, SpanPictureTests, UndoStackTests, ExportParityTests.mm,
+  EffectSpanTests, KeyframeTests, ModelTests, SchedulerSpanTests, SchedulerTests,
+  SequenceFormatRenderTests.mm, ProjectJSONTests.
+
 Not started (in order):
-- 3, parameters indexed by enum (`SpanTracks` as `std::array<KeyframeTrack, kParameterCount>`), facade where
-  cheap, `VESpanValues` accessors if straightforward.
 - 4, named shader uniforms (review render #5): sub-structs with real int/uint fields instead of packed float
   lanes; check the three buffer indices that alias 0.
 - 5, the grading placement decision note `docs/reviews/2026-10-01-grading-pipeline-decision.md` (document only,
