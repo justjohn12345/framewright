@@ -66,10 +66,18 @@ the hash):
   six; all twelve are made now). `ProgramFrameProviderTests testCancelledScrubRequestIsMadeAgain`: a test
   timing dependency (its other client shares the provider's lane, where the newest request wins; the main
   thread is now held until that client's frame came).
-- 11, `laneCount` overflow: "Model: laneCount never overflows or exceeds the model's lanes". Loading
+- 11, `laneCount` overflow: 5df5ae0. Loading
   already bounded lanes (repairSequence moves a span off lanes 0-3 with a warning, the parser refuses a
   lane beyond 32 bits; now pinned with crafted JSON at INT32_MAX/MIN, -1 and beyond); the overflow was
   reachable only on an unvalidated in-memory track: `laneCount` clamps each lane to 0...kLastLane.
+
+Review of group A (84d9e20..6864cc0), regressions R1-R7, fixed before the rest of group B:
+- R1 (item 1), a false "shorter than a frame ... the next clip leaves no room" refusal: "Frame-rate conform:
+  an end that rounded up on its own comes back to the cut". A clip's end decided alone (a linked sound
+  clip one source frame shorter than its picture) rounded up past the frame the cut between two whole
+  clips takes; the separate previous clip's whole end group now comes back to the cut (its ends keep a
+  frame, a start going back if need be; a cut it shares on another track comes back too when its next
+  clip has media from there). The Overlap refusal is left for a clip that truly cannot keep a frame.
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the

@@ -2752,7 +2752,14 @@ class EdgeConform {
             const CMTime tb = edgeTime(b.front());
             return ta < tb || (ta == tb && a.front() < b.front());
         });
-        for (const std::vector<std::size_t> &group : ordered) {
+        groups_ = std::move(ordered);
+        groupOf_.assign(parent_.size(), 0);
+        for (std::size_t g = 0; g < groups_.size(); ++g) {
+            for (std::size_t e : groups_[g]) {
+                groupOf_[e] = g;
+            }
+        }
+        for (const std::vector<std::size_t> &group : groups_) {
             if (EditResult r = decide(group); !r) {
                 return r;
             }
@@ -2835,6 +2842,66 @@ class EdgeConform {
         return !previous || *clips_[*previous].newEnd <= p;
     }
 
+    // Whether the start of clip `i`, decided earlier, may go back to `q` for a one-frame clip [q, q + one
+    // frame): the clip still shows part of what it showed (it ended after its old start), its edge group
+    // holds starts only (no clip end moves with it) and every start of it allows `q`. A clip whose start
+    // rounded up leaves itself no frame before the cut it ends at (a sound clip shorter than a frame, linked
+    // to a picture ending on its media's end) keeps one this way, extending its head into its media.
+    bool startCanGoBack(std::size_t i, CMTime q) const {
+        if (q < kCMTimeZero || !(clips_[i].clip->timelineStart + shiftOf(i) < q + fd_)) {
+            return false;
+        }
+        const std::vector<std::size_t> &group = groups_[groupOf_[2 * i]];
+        return std::all_of(group.begin(), group.end(), [&](std::size_t e) {
+            return isHead(e) && startAllows(e / 2, q, group);
+        });
+    }
+    void moveStartBack(std::size_t i, CMTime q) {
+        for (std::size_t e : groups_[groupOf_[2 * i]]) {
+            clips_[e / 2].newStart = q;
+        }
+    }
+
+    // Why the end of clip `previous`, decided earlier at a later time, cannot come back to `q` (the start
+    // of the next clip on its track), or nullopt when it can: its whole edge group comes back, so each end
+    // of it must keep a frame before `q` (a start going back if need be, see startCanGoBack; media to `q`
+    // it has, being earlier), and each start of it (a cut on another track) allow `q`. An end that rounded
+    // up on its own (a sound clip one picture frame shorter than the picture it is linked to) comes back
+    // to the cut this way.
+    std::optional<std::string> endCannotComeBack(std::size_t previous, CMTime q) const {
+        const std::vector<std::size_t> &group = groups_[groupOf_[2 * previous + 1]];
+        for (std::size_t e : group) {
+            const std::size_t j = e / 2;
+            if (isHead(e)) {
+                if (!startAllows(j, q, group)) {
+                    return name(previous) + " cannot end before the next clip on its track at " + frameRateName(fd_) +
+                           " fps: " + name(j) + " starts where it ends and has no media to start earlier; trim one "
+                           "of them first.";
+                }
+                continue;
+            }
+            const bool keepsAFrame = *clips_[j].newStart < q || startCanGoBack(j, q - fd_);
+            if (!keepsAFrame) {
+                return name(j) + " is shorter than a frame at " + frameRateName(fd_) +
+                       " fps and the next clip leaves no room for one; trim or remove it first.";
+            }
+        }
+        return std::nullopt;
+    }
+    void bringEndBack(std::size_t previous, CMTime q) {
+        for (std::size_t e : groups_[groupOf_[2 * previous + 1]]) {
+            const std::size_t j = e / 2;
+            if (isHead(e)) {
+                clips_[j].newStart = q;
+                continue;
+            }
+            if (!(*clips_[j].newStart < q)) {
+                moveStartBack(j, q - fd_);
+            }
+            clips_[j].newEnd = q;
+        }
+    }
+
     EditResult decide(const std::vector<std::size_t> &group) {
         std::vector<std::size_t> ends;
         std::vector<std::size_t> starts;
@@ -2898,10 +2965,6 @@ class EdgeConform {
         // The latest grid time at or before the old one that every end's media reaches, unless a clip ending
         // here needs a later one to keep a frame.
         CMTime p = snapToFrame(minTime(reference, t), fd_, SnapMode::Floor);
-        CMTime keepsAFrame = *clips_[ends.front()].newStart + fd_;
-        for (std::size_t i : ends) {
-            keepsAFrame = maxTime(keepsAFrame, *clips_[i].newStart + fd_);
-        }
         for (std::size_t i : ends) {
             const ConformedClip &c = clips_[i];
             if (!isNumeric(c.mediaEnd)) {
@@ -2916,6 +2979,10 @@ class EdgeConform {
             }
             p = minTime(p, timeForFrame(*frame, fd_));
         }
+        CMTime keepsAFrame = *clips_[ends.front()].newStart + fd_;
+        for (std::size_t i : ends) {
+            keepsAFrame = maxTime(keepsAFrame, *clips_[i].newStart + fd_);
+        }
         p = maxTime(p, keepsAFrame);
         for (std::size_t i : ends) {
             if (!endAllows(i, p)) {
@@ -2926,16 +2993,18 @@ class EdgeConform {
         }
         // The starts that have no media from p move there with their media (with the clips linked to them).
         std::vector<std::pair<std::size_t, CMTime>> moves;
+        std::vector<std::size_t> endsBack; // clips before a start whose end comes back to p
         for (std::size_t i : starts) {
             if (const auto previous = separatePrevious(i, group); previous && p < *clips_[*previous].newEnd) {
-                return EditResult::failure(EditError::Overlap,
-                                           name(*previous) + " is shorter than a frame at " + frameRateName(fd_) +
-                                               " fps and the next clip leaves no room for one; trim or remove it "
-                                               "first.");
+                if (auto why = endCannotComeBack(*previous, p)) {
+                    return EditResult::failure(EditError::Overlap, *why);
+                }
+                endsBack.push_back(*previous);
             }
             if (mediaFrom(i, p)) {
                 continue;
             }
+            const CMTime move = p - clips_[i].clip->timelineStart; // its in point then plays at p
             if (shiftDecided(i)) {
                 return EditResult::failure(
                     EditError::OutOfSourceRange,
@@ -2943,7 +3012,10 @@ class EdgeConform {
                         " fps: it has no media before its in point and moving it would put it out of sync with the "
                         "clip it is linked to; unlink them or trim it first.");
             }
-            moves.emplace_back(i, p - clips_[i].clip->timelineStart); // its in point then plays at p
+            moves.emplace_back(i, move);
+        }
+        for (std::size_t previous : endsBack) {
+            bringEndBack(previous, p);
         }
         settle(group, p, moves);
         return EditResult::success();
@@ -3026,6 +3098,8 @@ class EdgeConform {
     std::vector<ConformedClip> clips_;
     std::vector<std::optional<CMTime>> shift_; // by component
     std::vector<std::size_t> parent_;          // edge groups (union-find)
+    std::vector<std::vector<std::size_t>> groups_; // the edge groups, in time order (run)
+    std::vector<std::size_t> groupOf_;             // by edge: its group's index in groups_
 };
 
 } // namespace

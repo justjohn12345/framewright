@@ -61,6 +61,62 @@ AssetId addWholeMedia(Fixture &fx, const std::string &name, std::int64_t frames,
     return fx.project.addAsset(asset);
 }
 
+// A movie asset with picture and sound of the given lengths (exact times), at `frameDuration`.
+AssetId addMovie(Fixture &fx, const std::string &name, CMTime frameDuration, CMTime videoDuration,
+                 CMTime audioDuration) {
+    MediaAsset asset = *fx.project.findAsset(fx.video60);
+    asset.name = name;
+    asset.url = "file:///media/" + name;
+    asset.frameDuration = frameDuration;
+    asset.kind = AssetKind::AudioVideo;
+    asset.videoDuration = videoDuration;
+    asset.duration = audioDuration;
+    asset.audioSampleRate = 48000;
+    asset.audioChannels = 2;
+    return fx.project.addAsset(asset);
+}
+
+// Places a clip at exact times (the fixture's addClip takes 30 fps frames).
+ClipId putClip(Fixture &fx, TrackId track, AssetId asset, CMTime start, CMTime length, CMTime in) {
+    const ClipId id = fx.addClip(track, asset, 0, 1);
+    Clip &c = *fx.sequence().findClip(id);
+    c.timelineStart = start;
+    c.timelineDuration = length;
+    c.sourceIn = in;
+    fx.track(track).sortClips();
+    return id;
+}
+
+// Whether two clips show the same media time wherever both play (linked picture and sound in sync).
+bool inSync(const Sequence &sequence, ClipId a, ClipId b) {
+    const Clip &x = *sequence.findClip(a);
+    const Clip &y = *sequence.findClip(b);
+    const CMTime from = maxTime(x.timelineStart, y.timelineStart);
+    const CMTime to = minTime(x.timelineEnd(), y.timelineEnd());
+    for (const CMTime t : {from, to}) {
+        const auto sx = x.exactSourceTimeAt(t);
+        const auto sy = y.exactSourceTimeAt(t);
+        if (!(sx && sy && *sx == *sy)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Every clip edge of `sequence` on the grid of `frameDuration`.
+bool onGrid(const Sequence &sequence, CMTime frameDuration) {
+    for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
+        for (const Track &track : *list) {
+            for (const Clip &clip : track.clips) {
+                if (!isOnFrameGrid(clip.timelineStart, frameDuration) || !isOnFrameGrid(clip.timelineEnd(), frameDuration)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // Whether every clip of every track ends where the next one on its track starts, where they touched.
 bool clipsTouch(const Sequence &sequence, const std::vector<std::pair<ClipId, ClipId>> &cuts) {
     return std::all_of(cuts.begin(), cuts.end(), [&](const auto &cut) {
@@ -672,6 +728,126 @@ TEST_CASE("SetSequenceFormat: a clip that would have to move against its linked 
     CHECK(result.message == "“b.mov” cannot stay against the clip before it at 25 fps: it has no media before its "
                             "in point and moving it would put it out of sync with the clip it is linked to; unlink "
                             "them or trim it first.");
+    CHECK(fx.project == before);
+}
+
+TEST_CASE("SetSequenceFormat: a linked sound clip's end that rounded up on its own comes back to the cut") {
+    // Review R1 of the fix round: V1 holds a.mov ending on its picture's end, then b.mov from its start; A1
+    // their linked sound, a.mov's one source frame shorter than its picture (so its end is not aligned and is
+    // conformed alone, earlier). The sound's end rounds up past the frame the cut must take (the frame before:
+    // two whole pictures), and came back as a refusal "“a.mov” is shorter than a frame ... the next clip
+    // leaves no room for one", which was false: it ends at the cut now, with its picture.
+    struct Case {
+        const char *name;
+        CMTime oldFd, newFd;
+        std::int64_t pictureFrames, soundFrames, bFrames; // in old frames
+        CMTime cut;
+    };
+    for (const Case &c : {Case{"60 -> 25 fps", CMTimeMake(1, 60), CMTimeMake(1, 25), 91, 90, 60, CMTimeMake(37, 25)},
+                          Case{"120 -> 24 fps", CMTimeMake(1, 120), CMTimeMake(1, 24), 184, 183, 120, CMTimeMake(36, 24)}}) {
+        CAPTURE(c.name);
+        Fixture fx;
+        fx.sequence().frameDuration = c.oldFd;
+        auto T = [&](std::int64_t frames) { return CMTimeMultiply(c.oldFd, static_cast<int32_t>(frames)); };
+        const AssetId a = addMovie(fx, "a.mov", c.oldFd, T(c.pictureFrames), T(c.pictureFrames + 200));
+        const AssetId b = addMovie(fx, "b.mov", c.oldFd, T(c.bFrames), T(c.bFrames + 200));
+        const ClipId av = putClip(fx, fx.v1, a, kCMTimeZero, T(c.pictureFrames), kCMTimeZero);
+        const ClipId aa = putClip(fx, fx.a1, a, kCMTimeZero, T(c.soundFrames), kCMTimeZero);
+        fx.link(av, aa);
+        const ClipId bv = putClip(fx, fx.v1, b, T(c.pictureFrames), T(c.bFrames), kCMTimeZero);
+        const ClipId ba = putClip(fx, fx.a1, b, T(c.pictureFrames), T(c.bFrames), kCMTimeZero);
+        fx.link(bv, ba);
+        fx.requireValid();
+        SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, c.newFd));
+        const EditResult result = applyReversible(fx.project, command);
+        REQUIRE_MESSAGE(result.ok(), doctest::String(result.message.c_str()));
+        INFO(joined(command.report().sentences));
+        for (const ClipId id : {av, aa}) {
+            CHECK(fx.clip(id).timelineEnd() == c.cut);
+        }
+        for (const ClipId id : {bv, ba}) {
+            CHECK(fx.clip(id).timelineStart == c.cut);
+            CHECK(fx.clip(id).sourceIn == kCMTimeZero);
+        }
+        CHECK(inSync(fx.sequence(), av, aa));
+        CHECK(inSync(fx.sequence(), bv, ba));
+        CHECK(onGrid(fx.sequence(), c.newFd));
+    }
+}
+
+TEST_CASE("SetSequenceFormat: an end that comes back to the cut brings the cut it shares on another track with it") {
+    // As in "a linked sound clip's end that rounded up on its own comes back to the cut" (60 -> 25 fps), but
+    // the sound clip before b.mov's sound on A1 is linked to a picture on V2 whose end is a cut: that cut
+    // (1.5 s, rounded up to 38/25 s with them) comes back to 37/25 s too when its next clip has media from
+    // there, or the change is refused with the reason.
+    for (const bool mediaBefore : {true, false}) {
+        CAPTURE(mediaBefore);
+        Fixture fx;
+        fx.sequence().frameDuration = CMTimeMake(1, 60);
+        auto T = [](std::int64_t frames) { return CMTimeMake(frames, 60); };
+        const AssetId a = addMovie(fx, "a.mov", T(1), T(91), T(400));
+        const AssetId b = addMovie(fx, "b.mov", T(1), T(60), T(400));
+        const AssetId x = addMovie(fx, "x.mov", T(1), T(400), T(400));
+        const AssetId z = addMovie(fx, "z.mov", T(1), T(400), T(400));
+        putClip(fx, fx.v1, a, kCMTimeZero, T(91), kCMTimeZero);
+        const ClipId bv = putClip(fx, fx.v1, b, T(91), T(60), kCMTimeZero);
+        const ClipId ba = putClip(fx, fx.a1, b, T(91), T(60), kCMTimeZero);
+        fx.link(bv, ba);
+        const ClipId xv = putClip(fx, fx.v2, x, T(60), T(30), T(10));
+        const ClipId xa = putClip(fx, fx.a1, x, T(60), T(30), T(10));
+        fx.link(xv, xa);
+        const ClipId zv = putClip(fx, fx.v2, z, T(90), T(60), mediaBefore ? T(10) : kCMTimeZero);
+        fx.requireValid();
+        const Project before = fx.project;
+        SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 25)));
+        if (mediaBefore) {
+            const EditResult result = applyReversible(fx.project, command);
+            REQUIRE_MESSAGE(result.ok(), doctest::String(result.message.c_str()));
+            for (const ClipId id : {xv, xa}) {
+                CHECK(fx.clip(id).timelineEnd() == f25(37));
+            }
+            CHECK(fx.clip(zv).timelineStart == f25(37));
+            CHECK(fx.clip(ba).timelineStart == f25(37));
+            CHECK(inSync(fx.sequence(), xv, xa));
+            CHECK(inSync(fx.sequence(), bv, ba));
+            CHECK(onGrid(fx.sequence(), CMTimeMake(1, 25)));
+        } else {
+            // z.mov from its media's start: its start went up to 38/25 s (no media before 1.5 s) and cannot
+            // come back.
+            const EditResult result = command.apply(fx.project);
+            CHECK(result.error == EditError::Overlap);
+            CHECK(result.message == "“x.mov” cannot end before the next clip on its track at 25 fps: “z.mov” starts "
+                                    "where it ends and has no media to start earlier; trim one of them first.");
+            CHECK(fx.project == before);
+        }
+    }
+}
+
+TEST_CASE("SetSequenceFormat: a clip that cannot keep a frame before the next clip's start is refused") {
+    // The Overlap refusal: on A1 a sound clip of two 60 fps frames from its media's start (shorter than a
+    // frame at 25 fps, no media before it) ends 1/60 s before b.mov's sound, whose start the cut between two
+    // whole pictures takes to 37/25 s. Its end, rounded up to 38/25 s, cannot come back there and keep a frame
+    // (its start cannot go back before its media). Refused with the reason; nothing changes.
+    Fixture fx;
+    fx.sequence().frameDuration = CMTimeMake(1, 60);
+    const AssetId a = addMovie(fx, "a.mov", CMTimeMake(1, 60), CMTimeMake(91, 60), CMTimeMake(400, 60));
+    const AssetId b = addMovie(fx, "b.mov", CMTimeMake(1, 60), CMTimeMake(60, 60), CMTimeMake(400, 60));
+    MediaAsset sound = *fx.project.findAsset(fx.audioOnly);
+    sound.name = "blip.m4a";
+    const AssetId blip = fx.project.addAsset(sound);
+    const ClipId av = putClip(fx, fx.v1, a, kCMTimeZero, CMTimeMake(91, 60), kCMTimeZero);
+    putClip(fx, fx.a1, blip, CMTimeMake(88, 60), CMTimeMake(2, 60), kCMTimeZero);
+    const ClipId bv = putClip(fx, fx.v1, b, CMTimeMake(91, 60), CMTimeMake(60, 60), kCMTimeZero);
+    const ClipId ba = putClip(fx, fx.a1, b, CMTimeMake(91, 60), CMTimeMake(60, 60), kCMTimeZero);
+    fx.link(bv, ba);
+    (void)av;
+    fx.requireValid();
+    const Project before = fx.project;
+    SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 25)));
+    const EditResult result = command.apply(fx.project);
+    CHECK(result.error == EditError::Overlap);
+    CHECK(result.message == "“blip.m4a” is shorter than a frame at 25 fps and the next clip leaves no room for one; "
+                            "trim or remove it first.");
     CHECK(fx.project == before);
 }
 
