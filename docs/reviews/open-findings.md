@@ -147,13 +147,48 @@ Group C:
   the fade in and the incoming dissolve: never by the span at its own edge, which is what callers
   excluded): removed with the clip copy; the test that asserted 60 with and without it now checks each
   edge against the other.
-- 17, small items: "Final coordinated classes; describeFrames for any frame duration; two comments".
+- 17, small items: c7233a8.
   `objc_subclassing_restricted` on VEExporter, VEMediaLibrary, VESourceMonitor and VEProgramMonitor (a
   subclass fails to compile, checked); `describeFrames` writes the count alone for a frame duration that is
   not a number of seconds (it wrote "(nan s)") and documents why 64 bytes always hold the seconds (a numeric
   CMTime is at most 2^63 s, so the "( s)" the review computed for >= 1e62 cannot occur); PausedSeekRig.h
   names VEProgramMonitor; `-[VEMediaLibrary routing]`/`missingAssets` document that they must not be sent
   to nil (a null reference).
+- 15, untested rules and weak tests: "Tests: kill the review's 21 mutants; completion signals for the
+  fixed sleeps". Mutants applied one at a time, each against the Edit and Model doctests (C++) or
+  VESourceMonitorTests, VEProgramMonitorTests, VEExporterTests, VEMediaLibraryTests, VEEnginePlaybackTests,
+  VEEngineReviewRegressionTests and VEEngineExportTests (Objective-C++):
+
+  | Mutant | Before | After (killed by) |
+  |---|---|---|
+  | VESourceMonitor setMuted: does nothing | survived | testTheControllerFollowsTheMonitorsStateFromItsCreation |
+  | pauseController does nothing | survived | same |
+  | no lookahead update when the controller is created | survived | same |
+  | resetIfAssetLeft: without `_asset &&` | survived | same |
+  | no routing handed to the controller at its creation | survived | testPlayingWithTheRoutingItWasGivenProbesNothing |
+  | registerAsset:path:routing: not forwarded to the controller | survived | same |
+  | VEExporter without the size < 2 refusal | survived | testRefusalsCreateNoFileAndLeaveNoRunningExport |
+  | details probe without the `_missing` skip | survived | testForgettingTheProjectDropsItsStateAndEarlierResults |
+  | VEProgramMonitor scrub without the numeric guard | survived | testANewGenerationMovesToTheStartAndAnEditKeepsThePlayhead |
+  | TransitionFitting ~115 binary search bound `+ 1` -> `+ 0` | survived | "a cut with 5 frames of handles on each side" |
+  | ~146 fade-in length not clamped | killed | (unchanged) |
+  | ~150 `length < 1` -> `< 0` | killed | (unchanged) |
+  | ~162 `max(0, after)` dropped | survived | "fits a tail transition to both sides" (range ending before the cut) |
+  | ~175 before-cut clamp dropped | killed | (unchanged) |
+  | ~180 after-cut clamp dropped | survived | "a cut with 5 frames of handles on each side" |
+  | ~197 `before > 0 &&` dropped | survived | "fits a tail transition to both sides" (no note on a refusal) |
+  | ~223 planFade `>` -> `>=` | survived | "planFade fits a fade ..." (an exact fit) |
+  | EditPlans ~100 neighbour frame without `- fd` | survived | "planMatchMotion compares the frames drawn at the cut" |
+  | EditPlans ~101 clip frame without `- fd` | survived | same |
+  | SourceProject ~38 `max(1, width)` dropped | survived | "makeSourceProject: sound alone, video alone, ..." |
+  | SourceProject ~57 `videoLength > 0 &&` dropped | survived | same |
+
+  Before: 3 of 21 killed; after: 21 of 21. The fixed sleeps are gone: VEMediaLibraryTests waits for the
+  library's new `requestsInFlight` to reach zero; the "stays off" checks of both monitors read the
+  controller's lookahead flag (`controllerIdleLookahead`, new on both); the program monitor's edit check
+  asserts at once (publishProject is synchronous); the source monitor's "no redraw for the same setting"
+  counts its picture refreshes (`pictureRefreshes`). New, for the mutants: `-[VESourceMonitor
+  controllerMuted]`.
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
@@ -166,13 +201,6 @@ Found while doing them (open):
   different amount, which in practice needs a pair slipped out of sync.
 
 Not started (groups B and C), with what a fresh implementer needs:
-- 15, untested rules and weak tests: the mutation list in the brief (VESourceMonitor setMuted:, pauseController,
-  the lookahead update at controller creation, `_asset &&` in resetIfAssetLeft:, the size < 2 export refusal,
-  the routing forward to the source controller, the `_missing` skip in the details probe, the numeric-scrub
-  guard in VEProgramMonitor ~230; TransitionFitting.cpp ~115/146/150/162/175/180/197/223; EditPlans.cpp
-  ~100-101 `- fd`; SourceProject.cpp ~38 `max(1, width)` and ~57 `videoLength > 0`). Replace the fixed
-  sleeps at VEMediaLibraryTests.mm:293, VESourceMonitorTests.mm:260 and 327-330, VEProgramMonitorTests.mm:161
-  and 295 with completion signals where possible. Report a before/after mutation table.
 - Finishing work not done this round (the lead runs them): ThreadSanitizer over the facade, playback and the
   new tests, and the StressTests scheme (items 1, 2, 5 and 6 touch rendering, export and the conform).
 

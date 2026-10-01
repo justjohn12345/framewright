@@ -141,6 +141,7 @@ NSNumber *keyFor(AssetId asset) {
     dispatch_queue_t _probeQueue;
     // Advanced by forgetProjectAssets: results of requests made for an earlier project are dropped.
     uint64_t _generation;
+    NSUInteger _requestsInFlight; // see -requestsInFlight
 
     std::map<AssetId, media::RoutedMediaInfo> _routing; // handed to every decode path
     std::map<AssetId, AssetDetails> _details;           // probe details not stored in the project file
@@ -250,9 +251,14 @@ NSNumber *keyFor(AssetId asset) {
         request.time = kCMTimeZero;
         request.maxDimension = kPosterMaxDimension;
         VEMediaAssetReady ready = [thumbnailReady copy];
+        ++_requestsInFlight;
         _thumbnails->request(request, dispatch_get_main_queue(), [weakSelf, generation, id, ready](auto result) {
             VEMediaLibrary *strongSelf = weakSelf;
-            if (strongSelf != nil && strongSelf->_generation == generation && result.ok()) {
+            if (strongSelf == nil) {
+                return;
+            }
+            --strongSelf->_requestsInFlight;
+            if (strongSelf->_generation == generation && result.ok()) {
                 ready(id);
             }
         });
@@ -263,12 +269,14 @@ NSNumber *keyFor(AssetId asset) {
         request.url = asset.url;
         VEMediaAssetReady ready = [waveformReady copy];
         auto requestId = std::make_shared<thumbs::WaveformService::RequestId>(0);
+        ++_requestsInFlight;
         *requestId = _waveforms->request(
             request, dispatch_get_main_queue(), [weakSelf, generation, id, ready, requestId](auto result) {
                 VEMediaLibrary *strongSelf = weakSelf;
                 if (strongSelf == nil) {
                     return;
                 }
+                --strongSelf->_requestsInFlight;
                 [strongSelf waveformRequest:*requestId ofAssetEnded:id];
                 if (strongSelf->_generation == generation && result.ok()) {
                     ready(id);
@@ -369,11 +377,16 @@ NSNumber *keyFor(AssetId asset) {
         }
         const AssetId assetId = asset.id;
         const std::string path = asset.url;
+        ++_requestsInFlight;
         dispatch_async(_probeQueue, ^{
             auto routed = std::make_shared<media::Result<media::RoutedMediaInfo>>(router->probe(path));
             dispatch_async(dispatch_get_main_queue(), ^{
                 VEMediaLibrary *strongSelf = weakSelf;
-                if (strongSelf == nil || strongSelf->_generation != generation || !routed->ok()) {
+                if (strongSelf == nil) {
+                    return;
+                }
+                --strongSelf->_requestsInFlight;
+                if (strongSelf->_generation != generation || !routed->ok()) {
                     return;
                 }
                 done(assetId, path, routed->value());
@@ -419,6 +432,11 @@ NSNumber *keyFor(AssetId asset) {
     return _missing.count(asset) > 0;
 }
 
+- (NSUInteger)requestsInFlight {
+    VE_ASSERT_MAIN();
+    return _requestsInFlight;
+}
+
 - (const std::set<AssetId> &)missingAssets {
     VE_ASSERT_MAIN();
     return _missing;
@@ -439,9 +457,13 @@ NSNumber *keyFor(AssetId asset) {
     const uint64_t generation = _generation;
     __weak VEMediaLibrary *weakSelf = self;
     VEMediaThumbnailCompletion done = [completion copy];
+    ++_requestsInFlight;
     _thumbnails->request(request, dispatch_get_main_queue(),
                          [weakSelf, generation, done](media::Result<thumbs::ThumbnailImage> result) {
                              VEMediaLibrary *strongSelf = weakSelf;
+                             if (strongSelf != nil) {
+                                 --strongSelf->_requestsInFlight;
+                             }
                              if (strongSelf == nil || strongSelf->_generation != generation) {
                                  done(nullptr);
                              } else {
@@ -460,9 +482,13 @@ NSNumber *keyFor(AssetId asset) {
     VEMediaWaveformCompletion done = [completion copy];
     const AssetId id = asset.id;
     auto requestId = std::make_shared<thumbs::WaveformService::RequestId>(0);
+    ++_requestsInFlight;
     *requestId = _waveforms->request(
         request, dispatch_get_main_queue(), [weakSelf, generation, done, id, requestId](thumbs::WaveformResult result) {
             VEMediaLibrary *strongSelf = weakSelf;
+            if (strongSelf != nil) {
+                --strongSelf->_requestsInFlight;
+            }
             [strongSelf waveformRequest:*requestId ofAssetEnded:id];
             if (strongSelf == nil || strongSelf->_generation != generation) {
                 done(nullptr);

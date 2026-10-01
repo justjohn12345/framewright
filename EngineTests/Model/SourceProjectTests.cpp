@@ -123,4 +123,20 @@ TEST_CASE("makeSourceProject: sound alone, video alone, and what it refuses") {
     MediaAsset blip = *fx.project.findAsset(fx.av30);
     blip.duration = CMTimeMake(1, 600); // shorter than one frame
     CHECK_FALSE(makeSourceProject(blip, f30(1), true, kIds));
+
+    // Item 15 of the 2026-09-30 fix round: a picture whose size the probe did not give still gets a frame
+    // (1x1, never 0x0), and a video length that is not positive does not shorten the picture to nothing.
+    MediaAsset sizeless = *fx.project.findAsset(fx.av30);
+    sizeless.width = 0;
+    sizeless.height = 0;
+    auto sized = makeSourceProject(sizeless, f30(1), true, kIds);
+    REQUIRE(sized);
+    CHECK(sized->activeSequence()->width == 1);
+    CHECK(sized->activeSequence()->height == 1);
+    MediaAsset noVideoLength = *fx.project.findAsset(fx.av30);
+    noVideoLength.videoDuration = kCMTimeZero;
+    auto whole = makeSourceProject(noVideoLength, f30(1), true, kIds);
+    REQUIRE(whole);
+    REQUIRE(whole->activeSequence()->videoTracks[0].clips.size() == 1);
+    CHECK(whole->activeSequence()->videoTracks[0].clips[0].timelineDuration == noVideoLength.duration);
 }

@@ -162,6 +162,9 @@ __attribute__((objc_subclassing_restricted))
 /// every waveform request still running (also of assets removed before) and starts a new project:
 /// results of earlier requests are dropped (New/Open).
 - (void)forgetProjectAssets;
+/// Thumbnail, waveform, poster and details requests whose completions have not run on the main queue yet
+/// (dropped results included): zero once every request made so far has come back.
+@property (nonatomic, readonly) NSUInteger requestsInFlight;
 /// Ends the security-scoped access of every file the library kept (also done when it is released).
 - (void)stopAccessingURLs;
 

@@ -251,6 +251,12 @@ std::shared_ptr<media::BackendRouter> makeRouter() {
     gone[0].url = [_scratch URLByAppendingPathComponent:@"forget-gone.mp4"].path.fileSystemRepresentation;
     (void)[library locateOpenedAssets:gone bookmarks:@{}];
     XCTAssertTrue([library isAssetMissing:AssetId(6)]);
+    // A missing file is not probed for its details (item 15 of the 2026-09-30 fix round).
+    [library probeDetailsOfAssets:gone
+                       completion:^(AssetId, const std::string &, const media::RoutedMediaInfo &) {
+                         XCTFail(@"a missing asset's details");
+                       }];
+    XCTAssertEqual(library.requestsInFlight, 0u, @"no probe of the missing file was started");
 
     __block int thumbnailCalls = 0;
     __block BOOL thumbnailDropped = NO;
@@ -288,9 +294,9 @@ std::shared_ptr<media::BackendRouter> makeRouter() {
     XCTAssertTrue([library missingAssets].empty());
     XCTAssertFalse([library detailsForAsset:asset.id].has_value());
 
-    XCTAssertTrue([self spinUntil:^BOOL { return thumbnailCalls > 0 && waveformCalls > 0; } timeout:60]);
-    // Give the poster, waveform and details probes time to come back too.
-    [self spinUntil:^BOOL { return NO; } timeout:1.0];
+    // Every request has come back (the poster's, the waveform's and the details probe's included): what
+    // follows is all there will be.
+    XCTAssertTrue([self spinUntil:^BOOL { return library.requestsInFlight == 0; } timeout:60]);
     XCTAssertEqual(thumbnailCalls, 1);
     XCTAssertTrue(thumbnailDropped);
     XCTAssertEqual(waveformCalls, 1);

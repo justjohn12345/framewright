@@ -15,6 +15,7 @@
 
 #import "../../Engine/Facade/VEPreviewView.h"
 
+#include "../../Engine/Media/Apple/AppleBackend.h"
 #include "../../Engine/Media/AssetImport.h"
 #include "../../Engine/Media/BackendRouter.h"
 #include "../../Engine/Media/FFmpeg/FFmpegBackend.h"
@@ -22,6 +23,7 @@
 #include "../Media/BurnIn.h"
 #include "../Media/TestMedia.h"
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <string>
@@ -98,6 +100,37 @@ struct MonitorRig {
     }
 };
 
+/// A backend that counts the probes its prober makes and otherwise is `inner` (named like it, so the
+/// router treats it as `inner`).
+class CountingBackend final : public media::IMediaBackend {
+  public:
+    CountingBackend(std::shared_ptr<media::IMediaBackend> inner, std::shared_ptr<std::atomic<int>> probes)
+        : inner_(std::move(inner)), probes_(std::move(probes)) {}
+    std::string name() const override { return inner_->name(); }
+    std::unique_ptr<media::IMediaProber> makeProber() override {
+        return std::make_unique<CountingProber>(inner_->makeProber(), probes_);
+    }
+    std::unique_ptr<media::IVideoDecoder> makeVideoDecoder() override { return inner_->makeVideoDecoder(); }
+    std::unique_ptr<media::IAudioDecoder> makeAudioDecoder() override { return inner_->makeAudioDecoder(); }
+    std::unique_ptr<media::IMediaWriter> makeWriter() override { return inner_->makeWriter(); }
+    bool canHandle(const media::MediaInfo &info) const override { return inner_->canHandle(info); }
+    bool canWrite(const media::EncodeSettings &settings) const override { return inner_->canWrite(settings); }
+
+  private:
+    struct CountingProber final : media::IMediaProber {
+        CountingProber(std::unique_ptr<media::IMediaProber> prober, std::shared_ptr<std::atomic<int>> probes)
+            : inner(std::move(prober)), count(std::move(probes)) {}
+        media::Result<media::MediaInfo> probe(const std::string &path) override {
+            count->fetch_add(1);
+            return inner->probe(path);
+        }
+        std::unique_ptr<media::IMediaProber> inner;
+        std::shared_ptr<std::atomic<int>> count;
+    };
+    std::shared_ptr<media::IMediaBackend> inner_;
+    std::shared_ptr<std::atomic<int>> probes_;
+};
+
 SourceMonitorConfig monitorConfig() {
     SourceMonitorConfig config;
     config.poolBudgetShare = 0.25;
@@ -171,6 +204,84 @@ SourceMonitorConfig monitorConfig() {
     XCTAssertEqual(CMTimeCompare(monitor.time, kCMTimeZero), 0);
     XCTAssertFalse([monitor timeSteppedByFrames:1].has_value(), @"no private project without an asset");
     XCTAssertEqual(statuses.count, 0u, @"only the controller reports through the status block");
+}
+
+/// The rules of the monitor's own state (item 15 of the 2026-09-30 fix round: each was untested): a monitor
+/// without an asset has nothing to reset; the controller takes the visibility and the mute it is created
+/// under and follows the mute after; pauseController pauses it whatever the view shows.
+- (void)testTheControllerFollowsTheMonitorsStateFromItsCreation {
+    MonitorRig rig;
+    const MediaAsset *asset = rig.addAsset("h264_1080p30.mp4");
+    XCTAssertTrue(asset != nullptr, @"%s", rig.error.c_str());
+    if (asset == nullptr) {
+        return;
+    }
+    VESourceMonitor *monitor = [self makeMonitor:rig statuses:[NSMutableArray array]];
+    XCTAssertFalse([monitor resetIfAssetLeft:rig.project], @"no asset: nothing left the model");
+    Project empty = rig.project;
+    empty.assets.clear();
+    XCTAssertFalse([monitor resetIfAssetLeft:empty], @"no asset: nothing to reset, whatever the model holds");
+    XCTAssertFalse(monitor.controllerMuted, @"no controller");
+    XCTAssertFalse(monitor.controllerIdleLookahead, @"no controller");
+
+    // Hidden when the controller is created: it starts without its stopped lookahead.
+    monitor.visible = NO;
+    [monitor showAsset:*asset atTime:seconds(1) frameDuration:CMTimeMake(1, 30) project:rig.project];
+    XCTAssertTrue([monitor prepareToPlayWithRouting:rig.routing muted:YES]);
+    XCTAssertFalse(monitor.controllerIdleLookahead, @"created hidden: no stopped lookahead");
+    monitor.visible = YES;
+    XCTAssertTrue(monitor.controllerIdleLookahead);
+    XCTAssertTrue(monitor.controllerMuted, @"created muted");
+    [monitor setMuted:NO];
+    XCTAssertFalse(monitor.controllerMuted, @"setMuted: reaches the controller");
+    [monitor setMuted:YES];
+    XCTAssertTrue(monitor.controllerMuted);
+
+    [monitor togglePlay];
+    XCTAssertTrue([self spinUntil:^BOOL { return monitor.controllerRunning; } timeout:10]);
+    [monitor pauseController];
+    XCTAssertTrue([self spinUntil:^BOOL { return !monitor.controllerRunning; } timeout:5],
+                  @"pauseController pauses the running controller");
+}
+
+/// Routing handed to the controller saves its decoders a probe of the file (item 15 of the 2026-09-30 fix
+/// round): neither the routing given at the controller's creation nor routing registered after it may be
+/// dropped; playing then probes nothing.
+- (void)testPlayingWithTheRoutingItWasGivenProbesNothing {
+    auto probes = std::make_shared<std::atomic<int>>(0);
+    MonitorRig rig;
+    rig.router = std::make_shared<media::BackendRouter>();
+    (void)rig.router->registerBackend(std::make_shared<CountingBackend>(media::apple::makeAppleBackend(), probes));
+    (void)rig.router->registerBackend(media::ffmpeg::makeFFmpegBackend());
+    const MediaAsset *first = rig.addAsset("h264_1080p30.mp4");
+    XCTAssertTrue(first != nullptr, @"%s", rig.error.c_str());
+    if (first == nullptr) {
+        return;
+    }
+    VESourceMonitor *monitor = [self makeMonitor:rig statuses:[NSMutableArray array]];
+    [monitor showAsset:*first atTime:seconds(1) frameDuration:CMTimeMake(1, 30) project:rig.project];
+    probes->store(0);
+    XCTAssertTrue([monitor prepareToPlayWithRouting:rig.routing muted:YES]);
+    [monitor togglePlay];
+    XCTAssertTrue([self spinUntil:^BOOL { return CMTimeGetSeconds(monitor.time) > 1.3; } timeout:10]);
+    [monitor pause];
+    XCTAssertEqual(probes->load(), 0, @"the routing given at the controller's creation was used");
+
+    const MediaAsset *later = rig.addAsset("hevc_720p2997.mov");
+    XCTAssertTrue(later != nullptr, @"%s", rig.error.c_str());
+    if (later == nullptr) {
+        return;
+    }
+    const AssetId laterId = later->id;
+    [monitor registerAsset:laterId path:later->url routing:rig.routing.at(laterId)];
+    [monitor showAsset:*rig.project.findAsset(laterId) atTime:seconds(1) frameDuration:CMTimeMake(1, 30)
+               project:rig.project];
+    probes->store(0);
+    XCTAssertTrue([monitor prepareToPlayWithRouting:{} muted:YES]);
+    [monitor togglePlay];
+    XCTAssertTrue([self spinUntil:^BOOL { return CMTimeGetSeconds(monitor.time) > 1.3; } timeout:10]);
+    [monitor pause];
+    XCTAssertEqual(probes->load(), 0, @"the routing registered after the controller existed was used");
 }
 
 - (void)testAStillShowsButDoesNotPlay {
@@ -257,8 +368,8 @@ SourceMonitorConfig monitorConfig() {
     XCTAssertTrue([self spinUntil:^BOOL { return streams() == 0; } timeout:5], @"not allowed: none");
     monitor.visible = NO;
     monitor.visible = YES;
-    [self spinUntil:^BOOL { return NO; } timeout:0.3];
-    XCTAssertEqual(streams(), 0, @"showing the monitor does not override the permission");
+    XCTAssertFalse(monitor.controllerIdleLookahead, @"showing the monitor does not override the permission");
+    XCTAssertEqual(streams(), 0);
     monitor.idleLookaheadAllowed = YES;
     XCTAssertTrue([self spinUntil:^BOOL { return streams() > 0; } timeout:5], @"allowed and shown: it resumes");
 
@@ -323,15 +434,15 @@ SourceMonitorConfig monitorConfig() {
     XCTAssertTrue([self spinUntil:^BOOL { return shownIndex(view) != 45 && view.missingLayerCount == 0; } timeout:20]);
     XCTAssertNil(view.lastError);
 
-    // The sharpening: an unchanged setting draws nothing new; a change redraws with it.
-    [self spinUntil:^BOOL { return NO; } timeout:0.5];
+    // The sharpening: an unchanged setting asks for no new picture; a change redraws with it.
+    const NSUInteger refreshes = monitor.pictureRefreshes;
     const NSUInteger settled = view.renderCount;
     [monitor syncSharpeningWith:rig.project];
-    [self spinUntil:^BOOL { return NO; } timeout:0.5];
-    XCTAssertEqual(view.renderCount, settled, @"the same setting: no redraw");
+    XCTAssertEqual(monitor.pictureRefreshes, refreshes, @"the same setting: no redraw");
     Project plain = rig.project;
     plain.sharpenScaledDownSources = !rig.project.sharpenScaledDownSources;
     [monitor syncSharpeningWith:plain];
+    XCTAssertEqual(monitor.pictureRefreshes, refreshes + 1, @"a changed setting asks for the picture again");
     XCTAssertTrue([self spinUntil:^BOOL { return view.renderCount > settled; } timeout:10],
                   @"a changed setting redraws the picture");
 

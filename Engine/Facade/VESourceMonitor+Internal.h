@@ -126,6 +126,8 @@ __attribute__((objc_subclassing_restricted))
 /// without one.
 - (std::optional<CMTime>)timeSteppedByFrames:(NSInteger)frames;
 - (void)setMuted:(BOOL)muted;
+/// Whether the controller is muted (NO without a controller).
+@property (nonatomic, readonly) BOOL controllerMuted;
 
 // MARK: Lookahead, media and epochs
 
@@ -134,6 +136,11 @@ __attribute__((objc_subclassing_restricted))
 @property (nonatomic, getter=isVisible) BOOL visible;
 /// Whether the stopped lookahead is allowed (default YES; the engine disallows it during an export).
 @property (nonatomic) BOOL idleLookaheadAllowed;
+/// What the controller was last told (visible and allowed); NO without a controller.
+@property (nonatomic, readonly) BOOL controllerIdleLookahead;
+/// How often the monitor has redrawn its picture (a still-provider picture asked for, or the
+/// controller's frame drawn again): a decision that needs no redraw leaves it unchanged.
+@property (nonatomic, readonly) NSUInteger pictureRefreshes;
 /// Registers `asset`'s file with the monitor's pool, and its routing with the pool and the
 /// controller when there is one.
 - (void)registerAsset:(ve::AssetId)asset path:(const std::string &)path;

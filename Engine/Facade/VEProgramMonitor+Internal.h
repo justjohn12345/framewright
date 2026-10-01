@@ -125,6 +125,8 @@ __attribute__((objc_subclassing_restricted))
 
 /// Whether the controller keeps its stopped lookahead (the engine turns it off during an export).
 - (void)setIdleLookahead:(BOOL)enabled;
+/// What the controller was last told (PlaybackController::idleLookahead).
+@property (nonatomic, readonly) BOOL controllerIdleLookahead;
 /// Registers `asset`'s file with the monitor's pool, and its routing with the pool and the
 /// controller.
 - (void)registerAsset:(ve::AssetId)asset path:(const std::string &)path;

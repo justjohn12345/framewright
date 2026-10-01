@@ -193,6 +193,30 @@ TEST_CASE("transitionDurationLimit of a cross dissolve matches the cut's centred
     CHECK(offsetFrames(resizedTransitionOffsets(uneven.placed(share), 23, f30(1))) == span(-5, 18));
 }
 
+// A with 5 frames of media after its out point and B with 5 before its in point (item 15 of the 2026-09-30 fix
+// round): a centred dissolve takes all 10, and a range reaching further on either side is cut to them.
+TEST_CASE("a cut with 5 frames of handles on each side: a dissolve takes all of them, no more") {
+    CutFixture fx(5);
+    MediaAsset shortMedia = *fx.project.findAsset(fx.av30);
+    shortMedia.name = "short.mov";
+    shortMedia.duration = f30(95); // A plays source frames [30, 90): 5 frames after its out point
+    shortMedia.videoDuration = f30(95);
+    const AssetId shortId = fx.project.addAsset(shortMedia);
+    fx.sequence().findClip(fx.a)->assetId = shortId;
+    fx.requireValid();
+    const SpanId dissolve = fx.addTailTransition(fx.a, 2, 2);
+    const TransitionLimit limit = transitionDurationLimit(fx.project, fx.sequence(), fx.placed(dissolve));
+    CHECK(limit.maximumFrames == 10); // every frame of both handles: 5 before the cut, 5 after
+    CHECK(offsetFrames(resizedTransitionOffsets(fx.placed(dissolve), 10, f30(1))) == span(-5, 5));
+
+    // Reaching 20 frames past the cut: cut to A's 5, with the reason.
+    TransitionRangeFit fit = fitTransitionRange(fx.project, fx.sequence(), fx.placed(dissolve), frames(58, 80), false);
+    REQUIRE(fit.offsets);
+    CHECK(offsetFrames(*fit.offsets) == span(-2, 5));
+    REQUIRE(fit.notes.size() == 1);
+    CHECK(fit.notes[0].rfind("The transition was shortened after the cut to 5 frames (0.17 s): ", 0) == 0);
+}
+
 TEST_CASE("transitionDurationLimit of a fade and of a cut that refuses transitions") {
     Fixture fx;
     const ClipId c = fx.addClip(fx.v1, fx.av30, 0, 60);
@@ -264,6 +288,10 @@ TEST_CASE("fitTransitionRange fits a tail transition to both sides of its cut") 
     CHECK(offsetFrames(*fit.offsets) == span(-5, 0));
     REQUIRE(fit.notes.size() == 1);
     CHECK(fit.notes[0] == "The linked transition no longer reaches past the cut, so it now fades out to black.");
+    // Ending before the cut: a fade out still ending on the cut (nothing of the range after it counts).
+    fit = fitTransitionRange(fx.project, fx.sequence(), placed, frames(50, 55), false);
+    REQUIRE(fit.offsets);
+    CHECK(offsetFrames(*fit.offsets) == span(-10, 0));
 
     fit = fitTransitionRange(fx.project, fx.sequence(), placed, frames(61, 70), false);
     CHECK_FALSE(fit.offsets);
@@ -274,6 +302,7 @@ TEST_CASE("fitTransitionRange fits a tail transition to both sides of its cut") 
     CHECK_FALSE(fit.offsets);
     CHECK(fit.refusal.error == EditError::InvalidArgument);
     CHECK(fit.refusal.message == "The transition would cover no frame.");
+    CHECK(fit.notes.empty()); // no "now fades out" for a dissolve that covers nothing
 
     lockTrack(fx, fx.v1);
     fit = fitTransitionRange(fx.project, fx.sequence(), placed, frames(55, 65), false);
@@ -321,6 +350,12 @@ TEST_CASE("planFade fits a fade to its clip or explains why it cannot") {
     CHECK(plan.refusal == "Another clip touches the clip's start, so the cut belongs to that clip: add a transition at "
                           "its end instead.");
 
+    // Exactly B's length: it fits as asked, without fitting or a note.
+    plan = planFade(fx.clip(fx.b), fx.track(fx.v1), ClipEdge::Tail, 60, f30(1), false, TransitionKind::CrossDissolve,
+                    false);
+    REQUIRE(plan.request);
+    CHECK(offsetFrames({plan.request->start, plan.request->end}) == span(-60, 0));
+    CHECK_FALSE(plan.note);
     // Longer than B: refused, or fitted with a note.
     plan = planFade(fx.clip(fx.b), fx.track(fx.v1), ClipEdge::Tail, 90, f30(1), false, TransitionKind::CrossDissolve,
                     false);

@@ -217,6 +217,19 @@ struct Report {
     XCTAssertTrue(refusal.reason == ExportRefusalReason::Unsupported);
     XCTAssertEqualObjects(refusal.message, mkv.validationMessage);
 
+    // A frame size no output can have: a 16 x 16384 sequence at 720p is under 2 pixels wide (item 15 of the
+    // 2026-09-30 fix round).
+    {
+        ExporterRig tall;
+        XCTAssertTrue(tall.addClip([self mediaPath:"h264_1080p30.mp4"], 30, error), @"%s", error.c_str());
+        tall.sequence().width = 16;
+        tall.sequence().height = 16384;
+        refusal = ExportRefusal{};
+        XCTAssertNil([self begin:exporter rig:tall settings:smallH264Settings() url:output report:report refusal:&refusal]);
+        XCTAssertTrue(refusal.reason == ExportRefusalReason::Unsupported);
+        XCTAssertEqualObjects(refusal.message, @"The export frame size is not usable.");
+    }
+
     // ExportJob::start's refusals: an empty sequence, and media that is not there.
     ExporterRig empty;
     refusal = ExportRefusal{};

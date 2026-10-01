@@ -62,6 +62,7 @@ const SourceProjectIds kSourceIds = [] {
     bool _usesController;            // the view shows the controller's picture
     BOOL _visible;                   // see -visible
     BOOL _idleLookaheadAllowed;      // see -idleLookaheadAllowed
+    NSUInteger _pictureRefreshes;    // see -pictureRefreshes
 }
 
 - (instancetype)initWithRouter:(std::shared_ptr<media::BackendRouter>)router
@@ -120,6 +121,7 @@ const SourceProjectIds kSourceIds = [] {
 /// Shows the provider's picture of the asset at _time (black without an asset). `project` is the
 /// model a still asset is looked up in.
 - (void)refreshPictureInProject:(const Project &)project {
+    ++_pictureRefreshes;
     if (_usesController) {
         [_view renderOnce];
         return;
@@ -378,6 +380,11 @@ const SourceProjectIds kSourceIds = [] {
     return std::max(kCMTimeZero, _time + CMTimeMultiply(fd, steps));
 }
 
+- (BOOL)controllerMuted {
+    VE_ASSERT_MAIN();
+    return _playback && _playback->isMuted();
+}
+
 - (void)setMuted:(BOOL)muted {
     VE_ASSERT_MAIN();
     if (_playback) {
@@ -401,6 +408,16 @@ const SourceProjectIds kSourceIds = [] {
 - (BOOL)idleLookaheadAllowed {
     VE_ASSERT_MAIN();
     return _idleLookaheadAllowed;
+}
+
+- (NSUInteger)pictureRefreshes {
+    VE_ASSERT_MAIN();
+    return _pictureRefreshes;
+}
+
+- (BOOL)controllerIdleLookahead {
+    VE_ASSERT_MAIN();
+    return _playback && _playback->idleLookahead();
 }
 
 - (void)setIdleLookaheadAllowed:(BOOL)allowed {

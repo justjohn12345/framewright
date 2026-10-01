@@ -140,6 +140,27 @@ TEST_CASE("planMatchMotion takes the clip's spans into account") {
     CHECK(refused.message == "The clip's spans make its scale or opacity 0 there, so no static value can match.");
 }
 
+TEST_CASE("planMatchMotion compares the frames drawn at the cut: the last frame before it, the first after") {
+    // Item 15 of the 2026-09-30 fix round: both clips animate x by a frame per frame (0 to 60 over their 60
+    // frames). The frame drawn last before the cut is 59, not the end value 60.
+    Fixture fx;
+    const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60);
+    const ClipId b = fx.addClip(fx.v1, fx.av30, 60, 60);
+    SpanTracks pan;
+    pan.x = {key(kCMTimeZero, 0), key(f30(60), 60)};
+    fx.addSpan(a, SpanKind::Motion, 1, kCMTimeZero, f30(60), pan);
+    fx.sequence().findClip(b)->video.x = 100;
+    std::optional<VideoParams> values;
+    // B after A: A's last frame shows x 59.
+    REQUIRE(planMatchMotion(fx.sequence(), b, ClipEdge::Head, values).ok());
+    REQUIRE(values);
+    CHECK(values->x == doctest::Approx(59.0));
+    // A before B: A's spans add 59 at its last frame, so its static x is 100 - 59.
+    REQUIRE(planMatchMotion(fx.sequence(), a, ClipEdge::Tail, values).ok());
+    REQUIRE(values);
+    CHECK(values->x == doctest::Approx(41.0));
+}
+
 TEST_CASE("planMatchMotion refuses what it cannot match") {
     Fixture fx;
     const ClipId a = fx.addClip(fx.v1, fx.av30, 0, 60);

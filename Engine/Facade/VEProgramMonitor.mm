@@ -298,6 +298,11 @@ using namespace ve::facade;
 
 // MARK: - Lookahead, media and epochs
 
+- (BOOL)controllerIdleLookahead {
+    VE_ASSERT_MAIN();
+    return _playback->idleLookahead();
+}
+
 - (void)setIdleLookahead:(BOOL)enabled {
     VE_ASSERT_MAIN();
     _playback->setIdleLookahead(enabled);

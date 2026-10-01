@@ -157,8 +157,15 @@ ProgramMonitorConfig monitorConfig() {
 
     // An edit of the same project: the controller keeps its position.
     rig.project.activeSequence()->videoTracks[0].clips[0].timelineDuration = frames(80);
-    [monitor publishProject:rig.project generation:1];
-    [self spinUntil:^BOOL { return NO; } timeout:0.2];
+    [monitor publishProject:rig.project generation:1]; // synchronous: the controller has the edit now
+    XCTAssertEqual(CMTimeCompare(monitor.currentTime, frames(30)), 0);
+
+    // A scrub to a time that is not a number is ignored (item 15 of the 2026-09-30 fix round): the playhead
+    // stays and the controller does not start scrubbing.
+    [monitor scrubToTime:kCMTimeInvalid];
+    XCTAssertEqual(CMTimeCompare(monitor.currentTime, frames(30)), 0);
+    XCTAssertNotEqual(monitor.playbackState, VEPlaybackStateScrubbing);
+    [monitor scrubToTime:kCMTimeIndefinite];
     XCTAssertEqual(CMTimeCompare(monitor.currentTime, frames(30)), 0);
 
     // Another project generation: its sequence from frame 0.
@@ -292,8 +299,7 @@ ProgramMonitorConfig monitorConfig() {
     XCTAssertTrue([self spinUntil:^BOOL { return streams() > 0; } timeout:5], @"paused: a stopped lookahead");
     [monitor setIdleLookahead:NO];
     XCTAssertTrue([self spinUntil:^BOOL { return streams() == 0; } timeout:5], @"turned off: no decode streams");
-    [self spinUntil:^BOOL { return NO; } timeout:0.3];
-    XCTAssertEqual(streams(), 0, @"and it stays off");
+    XCTAssertFalse(monitor.controllerIdleLookahead, @"and it stays off: the controller was told so");
     [monitor setIdleLookahead:YES];
     XCTAssertTrue([self spinUntil:^BOOL { return streams() > 0; } timeout:5], @"turned on: it resumes");
 }
