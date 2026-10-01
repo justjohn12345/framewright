@@ -101,6 +101,10 @@ struct DecodePool::Stream {
     bool failed = false;          ///< Open failed; stays idle until reopened (or, if transient, retargeted).
     bool failedTransient = false; ///< The failure was transient (isTransient).
     bool reopen = false;          ///< Drop the decoder before the next step.
+    /// refresh() asked to forget `repairedAt` (re-arm the repair of an evicted playhead frame). The
+    /// worker owns `repairedAt` and consumes this flag at the start of its next step, as it does
+    /// `reopen` (refresh() writing `repairedAt` itself raced the worker: review B3).
+    bool rearmRepair = false;
     uint64_t lastServed = 0;
     StreamStats published;
     /// Shared with the decoder (DecodeOptions::interrupt): setTargets() requests it when the
@@ -521,7 +525,11 @@ void DecodePool::workerMain() {
         const CMTime window = lookahead_;
         const size_t streamCount = std::max<size_t>(1, streams_.size());
         const bool reopen = std::exchange(s->reopen, false);
+        const bool rearmRepair = std::exchange(s->rearmRepair, false);
         lock.unlock();
+        if (rearmRepair) {
+            s->repairedAt = kCMTimeInvalid; // busy: the worker owns it now
+        }
 
         StepResult result = StepResult::Progress;
         @autoreleasepool { // std::thread has no pool; decoders and probers autorelease.
@@ -1133,7 +1141,7 @@ void DecodePool::refresh() {
             ++stream->generation;
             stream->idle = false;
             stream->failed = false;
-            stream->repairedAt = kCMTimeInvalid; // re-arm the repair of an evicted playhead frame
+            stream->rearmRepair = true; // the worker re-arms the repair of an evicted playhead frame
         }
     }
     workCv_.notify_all();

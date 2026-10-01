@@ -294,16 +294,27 @@ Done:
   created once by `showSpeedSheet()` (like `exportModel`); `speedSheetClipIDs` is now read-only (derived).
   `SpeedDurationSheetTests` (the window test fails with the old closure: the field shows "100" again).
 
-- 2, B2, the mute button out of step with the menu: "Mute Audio: one state for the menu and the
-  transport button". Root cause: the button kept its own `@State`, read only on appear, while the menu
+- 2, B2, the mute button out of step with the menu: cfa7e98. Root cause: the button kept its own `@State`, read only on appear, while the menu
   toggled the engine. `ProjectStore.isAudioMuted` reads and writes the engine's state (the only copy) and
   publishes; the button and the menu (now a Toggle, with a check mark) both use it. `MuteAudioTests`
   (the button test fails with the old `@State`: the click after a menu mute muted again). The menu's
   check mark itself is checked by hand: the hosted app's SwiftUI menu did not update its item's state
   in the test host.
 
+- 3, B3, data race in `DecodePool::refresh()`: "Decode pool: refresh() re-arms a repair through a flag
+  the worker consumes". Root cause: refresh() wrote `Stream::repairedAt` under the pool mutex while the
+  worker stepping that stream owns it without the lock. refresh() now sets `rearmRepair` (guarded by the
+  mutex); the worker takes it with `reopen` and clears `repairedAt` itself.
+  `DecodePoolTests testRefreshDuringARepairDoesNotTouchWorkerState` (refresh() from another thread inside
+  a repair's seek) and `testRefreshReArmsTheRepairOfAnEvictedPlayheadFrame` (coverage).
+  Found doing it: ThreadSanitizer does not see `CMTime` struct copies in this build (a 24-byte `CMTime`
+  written from two threads without ordering is not reported; an `int` is), so the old race was invisible
+  to TSan as written. The proof build made every `repairedAt` access a field-wise scalar access (a
+  temporary transform, not committed): TSan reports refresh()'s write against the worker's read in
+  `lost()` on the old code and nothing on the fix. Earlier "0 reports" TSan runs did not cover races on
+  `CMTime` fields.
+
 Not started (key facts):
-- 3, B3, `DecodePool::refresh()` writes the worker-owned `repairedAt` under the pool mutex.
 - 4, B4, `FFVideoEncoder` converts BT.2020/240M with BT.709 coefficients (`FFFrameConverter::swsColorspace`
   has the right mapping).
 - 5, B5, `VEMediaLibrary` builds the thumbnail and waveform services without the router's policy.

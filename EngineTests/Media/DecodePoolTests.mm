@@ -328,6 +328,86 @@ struct ScrubLog {
     XCTAssertTrue(covers(*_cache, AssetId(1), 31, 91));
 }
 
+/// refresh() re-arms the repair of a playhead frame evicted again after it was repaired once: the same
+/// target, purged twice, is decoded again after the second purge only because refresh() said so.
+- (void)testRefreshReArmsTheRepairOfAnEvictedPlayheadFrame {
+    DecodePool pool(_fakeRouter, _cache);
+    const AssetId asset(1);
+    const CMTime at = CMTimeMake(31, 30);
+    pool.setTargets({DecodeTarget{asset, "/fake/a.mov", -1, CMTimeMake(1, 1)}});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    _cache->purge(asset);
+    pool.setTargets({DecodeTarget{asset, "/fake/a.mov", -1, at}});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    XCTAssertTrue(_cache->contains(asset, at), @"repaired once");
+    // Evicted again at the same target: the stream repaired there already and has settled.
+    _cache->purge(asset);
+    XCTAssertFalse(_cache->contains(asset, at));
+    pool.refresh();
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    XCTAssertTrue(_cache->contains(asset, at), @"refresh() re-armed the repair");
+}
+
+/// Review B3 (general review, 2026-10-01): refresh() wrote a stream's `repairedAt` under the pool mutex
+/// while the worker stepping that stream owns the field without the lock (export calls refresh() while
+/// other streams step, ExportJob.mm). The worker now consumes a re-arm flag that refresh() sets under the
+/// mutex. Here the frame under a settled stream's target is evicted and the stream made to step again:
+/// it repairs the frame (a seek, then `repairedAt = target`), and while it is inside that seek another
+/// thread calls refresh(). The hand-over uses relaxed atomics only, so it adds no happens-before edge:
+/// under ThreadSanitizer the old code reports the race (refresh()'s write, then the worker's), the fix
+/// none. Repeated for several frames.
+- (void)testRefreshDuringARepairDoesNotTouchWorkerState {
+    std::atomic<int> asked{0};     // seeks the worker has made and waits in (relaxed)
+    std::atomic<int> refreshed{0}; // seeks during which refresh() returned (relaxed)
+    std::atomic<bool> armed{false};
+    _fake->onSeek = [&](CMTime) {
+        if (!armed.load(std::memory_order_relaxed)) {
+            return;
+        }
+        const int index = asked.load(std::memory_order_relaxed) + 1;
+        asked.store(index, std::memory_order_relaxed);
+        const auto deadline = Clock::now() + std::chrono::seconds(2);
+        while (refreshed.load(std::memory_order_relaxed) != index && Clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+    };
+    // One worker: an idle worker passing the stepping worker's clock on through the cache and the pool
+    // mutex would order the accesses for ThreadSanitizer by accident.
+    DecodePool::Config config;
+    config.maxThreads = 1;
+    DecodePool pool(_fakeRouter, _cache, config);
+    std::atomic<bool> stop{false};
+    std::thread refresher([&] {
+        int last = 0;
+        while (!stop.load(std::memory_order_relaxed)) {
+            const int index = asked.load(std::memory_order_relaxed);
+            if (index != last) {
+                last = index;
+                pool.refresh(); // the worker is inside the repair's seek
+                refreshed.store(index, std::memory_order_relaxed);
+            }
+            std::this_thread::yield();
+        }
+    });
+    const AssetId asset(1);
+    constexpr int kRepairs = 6;
+    for (int i = 0; i < kRepairs; ++i) {
+        const CMTime at = CMTimeMake(30 + 20 * i, 30);
+        armed.store(false, std::memory_order_relaxed);
+        pool.setTargets({DecodeTarget{asset, "/fake/a.mov", -1, at}});
+        XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+        _cache->purge(asset); // memory pressure: the frame under the settled target is gone
+        armed.store(true, std::memory_order_relaxed);
+        pool.refresh();       // as export does when a frame it waits for is missing
+        XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+        XCTAssertTrue(_cache->contains(asset, at), @"repair %d", i);
+    }
+    stop.store(true, std::memory_order_relaxed);
+    refresher.join();
+    _fake->onSeek = nullptr;
+    XCTAssertGreaterThanOrEqual(refreshed.load(), kRepairs, @"refresh() ran inside the repairs' seeks");
+}
+
 /// A dissolve between two 4K 10-bit streams (24.9 MB per frame) with the default 512 MB
 /// budget: a 1 s window per stream would need about 1.5 GB. Playback is simulated frame by
 /// frame the way the render thread uses the cache (the shown frames stay pinned until the next
