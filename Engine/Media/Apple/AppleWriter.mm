@@ -5,6 +5,7 @@
 #include "AppleSupport.h"
 
 #import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <VideoToolbox/VideoToolbox.h>
 
 #include <os/log.h>
@@ -13,8 +14,11 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <functional>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <vector>
 
 /// Forwards KVO changes of an AVAssetWriterInput's readyForMoreMediaData to a block.
@@ -143,6 +147,61 @@ NSDictionary *audioOutputSettings(const AudioEncodeSettings &a) {
         AVLinearPCMIsNonInterleaved : @NO,
         AVChannelLayoutKey : channelLayoutData(a.channels),
     };
+}
+
+/// Why Apple's AAC encoder (AudioToolbox's, which AVAssetWriter runs) cannot write `a`, or nullopt: asked of
+/// the encoder itself (an AudioConverter to AAC at the rate and channel count, and its applicable bit rates),
+/// so it holds whatever the system's encoder takes (on macOS 26: 22.05 to 48 kHz at 128 kb/s, lower rates at
+/// lower bit rates only; 96 kHz not at all).
+std::optional<std::string> appleAACProblem(const AudioEncodeSettings &a) {
+    AudioStreamBasicDescription in{};
+    in.mSampleRate = a.sampleRate;
+    in.mFormatID = kAudioFormatLinearPCM;
+    in.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    in.mBitsPerChannel = 32;
+    in.mChannelsPerFrame = static_cast<UInt32>(a.channels);
+    in.mFramesPerPacket = 1;
+    in.mBytesPerFrame = 4 * static_cast<UInt32>(a.channels);
+    in.mBytesPerPacket = in.mBytesPerFrame;
+    AudioStreamBasicDescription out{};
+    out.mSampleRate = a.sampleRate;
+    out.mFormatID = kAudioFormatMPEG4AAC;
+    out.mChannelsPerFrame = static_cast<UInt32>(a.channels);
+    char rate[32];
+    std::snprintf(rate, sizeof rate, "%g kHz", a.sampleRate / 1000.0);
+    AudioConverterRef converter = nullptr;
+    if (AudioConverterNew(&in, &out, &converter) != noErr || converter == nullptr) {
+        return std::string("Apple's AAC encoder does not encode ") + std::to_string(a.channels) + " channel" +
+               (a.channels == 1 ? "" : "s") + " at " + rate;
+    }
+    UInt32 size = 0;
+    std::vector<AudioValueRange> ranges;
+    if (AudioConverterGetPropertyInfo(converter, kAudioConverterApplicableEncodeBitRates, &size, nullptr) == noErr &&
+        size >= sizeof(AudioValueRange)) {
+        ranges.resize(size / sizeof(AudioValueRange));
+        if (AudioConverterGetProperty(converter, kAudioConverterApplicableEncodeBitRates, &size, ranges.data()) !=
+            noErr) {
+            ranges.clear();
+        }
+        ranges.resize(size / sizeof(AudioValueRange));
+    }
+    AudioConverterDispose(converter);
+    if (ranges.empty()) {
+        return std::string("Apple's AAC encoder reports no bit rate at ") + rate;
+    }
+    double lowest = ranges.front().mMinimum;
+    double highest = ranges.front().mMaximum;
+    for (const AudioValueRange &r : ranges) {
+        if (r.mMinimum <= a.bitRate && a.bitRate <= r.mMaximum) {
+            return std::nullopt;
+        }
+        lowest = std::min(lowest, r.mMinimum);
+        highest = std::max(highest, r.mMaximum);
+    }
+    char rates[96];
+    std::snprintf(rates, sizeof rates, "%g to %g kb/s", lowest / 1000.0, highest / 1000.0);
+    return std::string("Apple's AAC encoder takes ") + rates + " at " + rate + " with " + std::to_string(a.channels) +
+           " channel" + (a.channels == 1 ? "" : "s") + ", not " + std::to_string(a.bitRate / 1000) + " kb/s";
 }
 
 /// State shared with the requestMediaDataWhenReady blocks. Held by shared_ptr so a block that
@@ -333,6 +392,8 @@ struct AppleWriter::Impl {
     }
 
     bool createdWithHardware = false;
+    /// The last createWriterAttempt failed on the audio settings (no video encoder choice helps).
+    bool audioRejected = false;
 
     /// Creates the AVAssetWriter with its inputs and starts writing. `hardware` requires the
     /// hardware video encoder (true) or forbids it (false). On failure nothing is left behind
@@ -355,6 +416,7 @@ struct AppleWriter::Impl {
     }
 
     Status createWriterAttempt(bool hardware) {
+        audioRejected = false;
         NSError *error = nil;
         AVAssetWriter *w = [[AVAssetWriter alloc] initWithURL:fileURL(path)
                                                      fileType:fileType(settings.container)
@@ -394,6 +456,7 @@ struct AppleWriter::Impl {
                 const AudioEncodeSettings &a = *settings.audio;
                 NSDictionary *out = audioOutputSettings(a);
                 if (![w canApplyOutputSettings:out forMediaType:AVMediaTypeAudio]) {
+                    audioRejected = true;
                     return makeError(MediaErrorCode::UnsupportedCodec,
                                      std::string("AVAssetWriter cannot apply the ") + toString(a.codec) + " settings");
                 }
@@ -494,6 +557,11 @@ Status AppleWriter::validate(const EncodeSettings &s) {
             a.codec == AudioCodec::LinearPCM) {
             return makeError(MediaErrorCode::UnsupportedCodec, "linear PCM requires .mov or .wav");
         }
+        if (a.codec == AudioCodec::AAC) {
+            if (auto problem = appleAACProblem(a)) {
+                return makeError(MediaErrorCode::UnsupportedCodec, *problem);
+            }
+        }
     }
     return okStatus();
 }
@@ -522,7 +590,7 @@ Status AppleWriter::open(const std::string &path, const EncodeSettings &settings
         // the caller required hardware, the software encoder explicitly. Either way the writer
         // knows which encoder runs.
         Status s = d.createWriter(true);
-        if (!s.ok() && settings.video && !settings.video->requireHardware) {
+        if (!s.ok() && settings.video && !settings.video->requireHardware && !d.audioRejected) {
             const MediaError hardwareError = s.error();
             s = d.createWriter(false);
             if (s.ok()) {

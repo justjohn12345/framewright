@@ -67,6 +67,21 @@ using namespace ve::facade;
     request.sequenceId = project.activeSequenceId;
     request.encode = makeEncodeSettings(settings, size, sequence->audioSampleRate, request.videoBitDepth);
     request.outputPath = outputURL.path.fileSystemRepresentation ?: "";
+    // The sequence's audio rate is what the export writes (8 to 192 kHz); AAC takes fewer rates than PCM
+    // (Apple's encoder 22.05 to 48 kHz at most bit rates, FFmpeg's, the router's fallback, its standard rates up
+    // to 96 kHz). Refused here with what to do, rather than failing once the job opens its writer.
+    if (request.encode.audio && request.encode.audio->codec == media::AudioCodec::AAC && services.router &&
+        services.router->writerBackendFor(request.encode).empty()) {
+        media::EncodeSettings withoutAudio = request.encode;
+        withoutAudio.audio.reset();
+        if (!services.router->writerBackendFor(withoutAudio).empty()) {
+            return refuse(ExportRefusalReason::Unsupported,
+                          [NSString stringWithFormat:@"AAC audio cannot be written at %g kHz, the sequence's audio "
+                                                     @"rate. Choose PCM audio in a QuickTime (MOV) file, or set the "
+                                                     @"sequence's audio to 48 kHz in Sequence Settings.",
+                                                     double(sequence->audioSampleRate) / 1000.0]);
+        }
+    }
 
     const BOOL accessing = [outputURL startAccessingSecurityScopedResource];
     VEExportHandle *handle = makeExportHandle(outputURL, settings);

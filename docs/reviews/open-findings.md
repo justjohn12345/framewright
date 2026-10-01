@@ -107,10 +107,16 @@ Review of group A (84d9e20..6864cc0), regressions R1-R7, fixed before the rest o
   before project 2's request), so the shorter file no longer proves that case.
 
 Group B, continued:
-- Nit (a), the adoption composite dropped SetSequenceFormat's report: "Facade: the adoption's note says
-  how it conformed the clips already there". The placement keeps a pointer to the composite's settings
+- Nit (a), the adoption composite dropped SetSequenceFormat's report: 0fc765c. The placement keeps a pointer to the composite's settings
   child; a new `lateNote` block of push/pushRipple (UndoInternal, called after success) adds the report's
   sentences when it rescaled, retimed or moved clips or changed a transition.
+- Nit (b), sequence audio rates AAC cannot write: "Export: AAC at the sequence's rate is written by an
+  encoder that takes it, or refused up front". Measured: Apple's AAC encoder takes 22.05-48 kHz (8-16 kHz
+  only at low bit rates; 64-96 kHz not at all), FFmpeg's its standard rates up to 96 kHz, PCM any rate.
+  AppleWriter::validate asks AudioToolbox (an AudioConverter and its applicable bit rates), so the router
+  writes 8-96 kHz AAC through FFmpeg when Apple cannot; FFAudioEncoder::validate checks the native aac
+  encoder's rates; VEExporter refuses a rate no AAC encoder takes (192 kHz, 37 kHz) with what to do. Also:
+  an audio rejection no longer retries the writer with the software video encoder (the error named "h264").
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
@@ -123,8 +129,7 @@ Found while doing them (open):
   different amount, which in practice needs a pair slipped out of sync.
 
 Not started (groups B and C), with what a fresh implementer needs:
-- Nit (b): `sequenceFormatProblem` accepts up to 192 kHz (Engine/Model/Sequence.h:74 kMaxSequenceSampleRate) but AAC
-  export tops out at 96 kHz: validate consistently or refuse clearly at export. Nit (c):
+- Nit (c):
   `CompositeCommand::canRevert` (Engine/Facade/VEFacadeCommands.mm:123-126) checks only the last child:
   check all.
 - 3, per-frame texture allocation under animated scale: the pre-scale takes exact sizes per frame for

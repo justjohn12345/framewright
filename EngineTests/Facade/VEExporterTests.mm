@@ -12,6 +12,7 @@
 #import <XCTest/XCTest.h>
 
 #include "../../Engine/Media/AssetImport.h"
+#include "../../Engine/Media/Apple/AppleWriter.h"
 #include "../../Engine/Media/BackendRouter.h"
 #include "../../Engine/Media/FFmpeg/FFmpegBackend.h"
 #include "../../Engine/Media/FrameCache.h"
@@ -238,6 +239,114 @@ struct Report {
     XCTAssertNil(exporter.activeExport);
     XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:output.path]);
     XCTAssertEqual(report->finishCount, 0);
+}
+
+/// An export of `rig` with AAC (or PCM in a MOV) audio at `bitRate`; returns the refusal message, or nil
+/// once the export finished (`result` set).
+- (nullable NSString *)exportAudioOf:(ExporterRig &)rig
+                                 pcm:(BOOL)pcm
+                             bitRate:(NSInteger)bitRate
+                                  to:(NSURL *)output
+                              result:(std::optional<media::Result<exporting::ExportSummary>> *)result {
+    VEExportSettings *settings =
+        [[VEExportSettings alloc] initWithPreset:VEExportPresetH264
+                                       container:pcm ? VEExportContainerMOV : VEExportContainerMP4
+                                      resolution:VEExportResolution720p
+                                     customWidth:0
+                                     rateControl:VEExportRateControlQuality
+                                         quality:0.5
+                                    videoBitRate:8'000'000
+                                      audioCodec:pcm ? VEExportAudioCodecPCM : VEExportAudioCodecAAC
+                                    audioBitRate:bitRate];
+    XCTAssertNil(settings.validationMessage);
+    VEExporter *exporter = [[VEExporter alloc] init];
+    auto report = std::make_shared<Report>();
+    ExportRefusal refusal;
+    VEExportHandle *handle = [self begin:exporter rig:rig settings:settings url:output report:report refusal:&refusal];
+    if (handle == nil) {
+        XCTAssertTrue(refusal.reason == ExportRefusalReason::Unsupported);
+        XCTAssertFalse(exporter.isExporting);
+        return refusal.message ?: @"";
+    }
+    XCTAssertTrue([self spinUntil:^BOOL { return report->finishCount > 0; } timeout:60]);
+    *result = report->result;
+    return nil;
+}
+
+/// The sequence's audio rate (8 to 192 kHz) and AAC (nit (b) of the 2026-09-30 fix round): Apple's AAC encoder
+/// takes 22.05 to 48 kHz (lower rates at low bit rates only), FFmpeg's its standard rates up to 96 kHz, PCM
+/// any rate. The writers say so in their validation (asked of the encoders), so the router writes what Apple
+/// cannot through FFmpeg (96 kHz AAC failed with "AVAssetWriter cannot apply the h264 settings"), and a rate
+/// no AAC encoder takes is refused before the export starts, saying what to do (192 kHz failed once the job
+/// opened its writer, with the same misleading message).
+- (void)testTheSequencesAudioRateIsWrittenOrRefusedWithTheReason {
+    // The writers' validation, with the reason.
+    media::EncodeSettings aac;
+    aac.container = media::ContainerFormat::MP4;
+    aac.audio = media::AudioEncodeSettings{};
+    aac.audio->codec = media::AudioCodec::AAC;
+    aac.audio->channels = 2;
+    aac.audio->bitRate = 128'000;
+    aac.audio->sampleRate = 48000;
+    XCTAssertTrue(media::apple::AppleWriter::validate(aac).ok());
+    aac.audio->sampleRate = 96000;
+    media::Status apple = media::apple::AppleWriter::validate(aac);
+    XCTAssertFalse(apple.ok());
+    XCTAssertEqualObjects(apple.ok() ? @"" : @(apple.error().message.c_str()),
+                          @"Apple's AAC encoder does not encode 2 channels at 96 kHz");
+    XCTAssertTrue(media::ffmpeg::FFmpegBackend::validate(aac).ok(), @"FFmpeg's AAC encoder takes 96 kHz");
+    aac.audio->sampleRate = 16000;
+    apple = media::apple::AppleWriter::validate(aac);
+    XCTAssertEqualObjects(apple.ok() ? @"" : @(apple.error().message.c_str()),
+                          @"Apple's AAC encoder takes 24 to 96 kb/s at 16 kHz with 2 channels, not 128 kb/s");
+    aac.audio->sampleRate = 192000;
+    const media::Status ffmpeg = media::ffmpeg::FFmpegBackend::validate(aac);
+    XCTAssertEqualObjects(ffmpeg.ok() ? @"" : @(ffmpeg.error().message.c_str()),
+                          @"AAC is encoded at 96, 88.2, 64, 48, 44.1, 32, 24, 22.05, 16, 12, 11.025, 8 or 7.35 kHz, not "
+                          @"192 kHz");
+
+    std::string error;
+    std::optional<media::Result<exporting::ExportSummary>> result;
+    // 96 kHz AAC: written (through FFmpeg), at 96 kHz.
+    {
+        ExporterRig rig;
+        XCTAssertTrue(rig.addClip([self mediaPath:"h264_1080p30.mp4"], 10, error), @"%s", error.c_str());
+        rig.sequence().audioSampleRate = 96000;
+        NSURL *output = [_scratch URLByAppendingPathComponent:@"aac-96k.mp4"];
+        XCTAssertNil([self exportAudioOf:rig pcm:NO bitRate:128'000 to:output result:&result]);
+        XCTAssertTrue(result && result->ok(), @"%s", result && !result->ok() ? result->error().description().c_str() : "");
+        auto probed = rig.router->probe(output.path.UTF8String);
+        XCTAssertTrue(probed.ok());
+        if (probed.ok()) {
+            const media::TrackInfo *track = nullptr;
+            for (const media::TrackInfo &t : probed->info.tracks) {
+                if (t.kind == media::TrackKind::Audio) {
+                    track = &t;
+                }
+            }
+            XCTAssertTrue(track != nullptr && track->sampleRate == 96000, @"the file's audio is 96 kHz");
+        }
+    }
+    // 192 kHz and a rate that is no standard one: AAC refused before anything is written, PCM in a MOV written.
+    for (const int rate : {192000, 37000}) {
+        ExporterRig rig;
+        XCTAssertTrue(rig.addClip([self mediaPath:"h264_1080p30.mp4"], 10, error), @"%s", error.c_str());
+        rig.sequence().audioSampleRate = rate;
+        NSURL *output = [_scratch URLByAppendingPathComponent:[NSString stringWithFormat:@"aac-%d.mp4", rate]];
+        result.reset();
+        NSString *refused = [self exportAudioOf:rig pcm:NO bitRate:128'000 to:output result:&result];
+        XCTAssertEqualObjects(refused, ([NSString stringWithFormat:@"AAC audio cannot be written at %g kHz, the "
+                                                                   @"sequence's audio rate. Choose PCM audio in a "
+                                                                   @"QuickTime (MOV) file, or set the sequence's audio "
+                                                                   @"to 48 kHz in Sequence Settings.",
+                                                                   rate / 1000.0]));
+        XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:output.path]);
+        NSURL *pcmOutput = [_scratch URLByAppendingPathComponent:[NSString stringWithFormat:@"pcm-%d.mov", rate]];
+        result.reset();
+        XCTAssertNil([self exportAudioOf:rig pcm:YES bitRate:0 to:pcmOutput result:&result]);
+        XCTAssertTrue(result && result->ok(), @"%d Hz PCM: %s", rate,
+                      result && !result->ok() ? result->error().description().c_str() : "");
+    }
 }
 
 - (void)testAnExportRunsToItsEndAndClearsTheRunningExportBeforeFinish {

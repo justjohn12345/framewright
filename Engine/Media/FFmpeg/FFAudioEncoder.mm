@@ -8,7 +8,9 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 }
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -196,6 +198,33 @@ Status FFAudioEncoder::validate(const AudioEncodeSettings &a) {
     }
     if (a.codec == AudioCodec::AAC && a.bitRate <= 0) {
         return makeError(MediaErrorCode::InvalidArgument, "AAC needs a positive bit rate");
+    }
+    if (a.codec == AudioCodec::AAC) {
+        // open() falls back to FFmpeg's own AAC encoder when AudioToolbox's ("aac_at") refuses: the rates that
+        // one takes are the ones this backend can write.
+        const AVCodec *aac = avcodec_find_encoder_by_name("aac");
+        if (aac == nullptr) {
+            return makeError(MediaErrorCode::UnsupportedCodec, "encoder aac is not in this FFmpeg build");
+        }
+        const void *configs = nullptr;
+        int count = 0;
+        if (avcodec_get_supported_config(nullptr, aac, AV_CODEC_CONFIG_SAMPLE_RATE, 0, &configs, &count) >= 0 &&
+            configs != nullptr && count > 0) {
+            const int *rates = static_cast<const int *>(configs);
+            const int rate = static_cast<int>(a.sampleRate);
+            if (std::find(rates, rates + count, rate) == rates + count) {
+                std::string list;
+                for (int i = 0; i < count; ++i) {
+                    char name[16];
+                    std::snprintf(name, sizeof name, "%g", rates[i] / 1000.0);
+                    list += (i == 0 ? "" : i + 1 == count ? " or " : ", ") + std::string(name);
+                }
+                char asked[16];
+                std::snprintf(asked, sizeof asked, "%g", a.sampleRate / 1000.0);
+                return makeError(MediaErrorCode::UnsupportedCodec,
+                                 "AAC is encoded at " + list + " kHz, not " + asked + " kHz");
+            }
+        }
     }
     return okStatus();
 }
