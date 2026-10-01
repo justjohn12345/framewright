@@ -84,11 +84,14 @@ Review of group A (84d9e20..6864cc0), regressions R1-R7, fixed before the rest o
   starts a frame earlier into its media (when it still shows part of its sound) or ends a fraction of a
   frame after its picture (when nothing on its track starts there), instead of a refusal naming the
   picture as "shorter than a frame".
-- R3 (item 5), the exact-HD snap added black lines: "Export: snap to exact HD only when the picture fills
-  it". `widthForRows` snapped any sequence within 0.5 % of 16:9, but fitRect fills only bars under a pixel
+- R3 (item 5), the exact-HD snap added black lines: 7d240a6. `widthForRows` snapped any sequence within 0.5 % of 16:9, but fitRect fills only bars under a pixel
   each, so 1918x1080 exported 1920x1080 with a black column on each side (1916x1080: 2 px pillars,
   1920x1076: rows). It now snaps only when fitRect of the sequence fills the snapped frame, else keeps the
   aspect (1918x1080, 1916x1080, 1928x1080 at 1080p).
+- R4 (item 5), the 1:1 placement popped during animation: "Compositor: the pixel-exact base placement is
+  decided from the sizes alone". It was decided from the evaluated transform (identity only), so a move
+  resting at scale 1 drew that frame 1:1 top-left and the next fitted and centred. The base (fit 1, the
+  picture's centre) now depends on the sizes only and the clip transform applies about it.
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the

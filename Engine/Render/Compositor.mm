@@ -137,16 +137,19 @@ Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegr
     double fit = std::min(frameWidth / sourceWidth, frameHeight / sourceHeight);
     double cx = frameWidth / 2.0 + params.x;
     double cy = frameHeight / 2.0 + params.y;
-    // Pixel exact: a picture at its fitted place with no clip transform, which covers the frame with
-    // under 2 px to spare on each axis (a frame taken from it with odd sides rounded down, see
-    // formatAdoptedFrom), is drawn at exactly its own size with its top-left pixel on the frame's,
-    // the spare column and row cropped, rather than scaled by a fraction of a pixel (a blur).
-    const bool identity = params.scale == 1.0 && params.rotationDegrees == 0.0 && params.x == 0.0 && params.y == 0.0;
-    if (identity && sourceWidth >= frameWidth && sourceHeight >= frameHeight && sourceWidth - frameWidth < 2.0 &&
+    // Pixel exact: a picture that covers the frame with under 2 px to spare on each axis (a frame taken
+    // from it with odd sides rounded down, see formatAdoptedFrom) has its base place at exactly its own
+    // size with its top-left pixel on the frame's, the spare column and row cropped, rather than scaled
+    // by a fraction of a pixel (a blur). Decided from the sizes alone, never from the clip transform,
+    // which applies about that base (scale about the picture's centre, rotation, offset) for every
+    // value: a Ken Burns or Motion move through scale 1 stays continuous (deciding it from the
+    // animated transform drew that one frame 1:1 and top-left, the next fitted and centred: a jump of
+    // half a pixel and a crop change), and the identity transform is pixel exact.
+    if (sourceWidth >= frameWidth && sourceHeight >= frameHeight && sourceWidth - frameWidth < 2.0 &&
         sourceHeight - frameHeight < 2.0) {
         fit = 1.0;
-        cx = sourceWidth / 2.0;
-        cy = sourceHeight / 2.0;
+        cx = sourceWidth / 2.0 + params.x;
+        cy = sourceHeight / 2.0 + params.y;
     }
     const double sx = sourceWidth * fit * params.scale;
     const double sy = sourceHeight * fit * params.scale;

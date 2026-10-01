@@ -643,6 +643,61 @@ struct FrameLog {
     XCTAssertLessThanOrEqual(maxDiff, 1, @"every frame pixel is the source pixel at the same place");
 }
 
+// Review R4 of the 2026-09-30 fix round: the pixel-exact placement was decided from the evaluated (animated)
+// transform, so a Ken Burns or Motion move resting at scale 1.0 drew that frame 1:1 and top-left, and the
+// next frame (scale 1.0001) fitted and centred: half a pixel of jump and a crop change. Decided from the
+// sizes alone, adjacent frames differ by what a 0.0001 zoom moves (at most 0.064 px at the edges).
+- (void)testAMoveThroughScaleOneOfAPixelExactPictureIsContinuous {
+    const size_t w = 1273, h = 815;
+    media::PixelBuffer source = makeBuffer(kCVPixelFormatType_32BGRA, w, h);
+    {
+        // Smooth detail (period 16 px, at most 40 codes per pixel), so a sub-pixel shift shows in proportion.
+        media::PixelBufferLock lock(source.get(), false);
+        auto *base = static_cast<uint8_t *>(CVPixelBufferGetBaseAddress(source.get()));
+        const size_t stride = CVPixelBufferGetBytesPerRow(source.get());
+        for (size_t y = 0; y < h; ++y) {
+            for (size_t x = 0; x < w; ++x) {
+                const double v = 128.0 + 100.0 * std::sin(double(x) * M_PI / 8.0) * std::cos(double(y) * M_PI / 8.0);
+                uint8_t *p = base + y * stride + x * 4;
+                p[0] = p[1] = p[2] = static_cast<uint8_t>(std::lround(v));
+                p[3] = 255;
+            }
+        }
+    }
+    const size_t fw = 1272, fh = 814;
+    auto renderAt = [&](double scale) {
+        media::PixelBuffer out = makeBuffer(kCVPixelFormatType_32BGRA, fw, fh);
+        RenderGraph g = makeGraph(int32_t(fw), int32_t(fh));
+        VideoLayer layer = makeLayer(1);
+        layer.transform.scale = scale;
+        g.layers.push_back(layer);
+        [self render:g textures:{texturesFor(*_compositor, source)} target:PixelBufferTarget{out}];
+        return out;
+    };
+    media::PixelBuffer still = renderAt(1.0);
+    media::PixelBuffer moving = renderAt(1.0001);
+    media::PixelBufferLock a(still.get(), true);
+    media::PixelBufferLock b(moving.get(), true);
+    const auto *pa = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddress(still.get()));
+    const auto *pb = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddress(moving.get()));
+    const size_t sa = CVPixelBufferGetBytesPerRow(still.get());
+    const size_t sb = CVPixelBufferGetBytesPerRow(moving.get());
+    int maxDiff = 0;
+    double sum = 0;
+    for (size_t y = 0; y < fh; ++y) {
+        for (size_t x = 0; x < fw; ++x) {
+            const int d = std::abs(int(pa[y * sa + x * 4 + 1]) - int(pb[y * sb + x * 4 + 1]));
+            maxDiff = std::max(maxDiff, d);
+            sum += d;
+        }
+    }
+    const double mean = sum / double(fw * fh);
+    // 0.064 px at the edges times 40 codes per pixel is under 3 codes (plus rounding); half a pixel was
+    // up to 20 (and the fitted scale's resampling everywhere).
+    XCTAssertLessThanOrEqual(maxDiff, 4, @"mean difference %.3f", mean);
+    XCTAssertLessThan(mean, 1.0);
+}
+
 // Bars under a pixel on each side fill the target: a 3832x2154 sequence (a Retina screen recording) in a
 // 1920x1080 export fits 1920x1079.25, which rounded left a black bottom row; now the frame fills the
 // target and no edge pixel is black.
