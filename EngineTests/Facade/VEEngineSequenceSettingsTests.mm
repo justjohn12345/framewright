@@ -154,6 +154,13 @@ bool anyContains(NSArray<NSString *> *sentences, NSString *part) {
     XCTAssertTrue([placed.note containsString:@"The sequence takes “hevc_720p2997.mov”'s settings: 1280×720 at "
                                               @"29.97 fps."],
                   @"%@", placed.note);
+    // And what that did to the clips already there (nit (a) of the 2026-09-30 fix round: the composite's
+    // settings change conformed them silently): the settings change's own sentences follow.
+    XCTAssertTrue([placed.note containsString:@"The frame becomes 1280×720 (from 1920×1080)"], @"%@", placed.note);
+    XCTAssertTrue([placed.note containsString:@"The frame rate becomes 29.97 fps (from 30): "], @"%@", placed.note);
+    XCTAssertTrue([placed.note rangeOfString:@"The sequence takes"].location <
+                      [placed.note rangeOfString:@"The frame becomes"].location,
+                  @"%@", placed.note);
     [self assertSequence:engine
                    width:1280
                   height:720

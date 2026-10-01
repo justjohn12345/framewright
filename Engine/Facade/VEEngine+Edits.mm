@@ -30,6 +30,22 @@ std::vector<ClipId> toClipIds(NSArray<NSNumber *> *numbers) {
     return ids;
 }
 
+/// What an adoption's settings change did to the clips already on the sequence (stills or sound placed
+/// before the first video clip): its sentences when it rescaled, retimed or moved clips or changed a
+/// transition, else nil (an empty sequence has nothing to report beyond the adoption itself).
+NSString *_Nullable adoptionConformNote(const SequenceConformReport &report) {
+    const bool conformed = report.clipsRescaled > 0 || report.clipsRetimed > 0 || report.clipsMoved > 0 ||
+                           !report.transitionsShortened.empty() || !report.transitionsRemoved.empty();
+    if (!conformed || report.sentences.empty()) {
+        return nil;
+    }
+    NSMutableArray<NSString *> *sentences = [NSMutableArray arrayWithCapacity:report.sentences.size()];
+    for (const std::string &sentence : report.sentences) {
+        [sentences addObject:toNS(sentence)];
+    }
+    return [sentences componentsJoinedByString:@" "];
+}
+
 } // namespace
 
 @interface VEClipParamsBatch ()
@@ -134,14 +150,22 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
         note = note.length > 0 ? [NSString stringWithFormat:@"%@ %@", taken, note] : taken;
     }
     const SequenceId sequenceId = [self sequenceId];
-    auto withAdoption = [adopted, sequenceId](std::unique_ptr<Command> placement, const char *name) {
+    // The settings change of the last composite built (the ripple retry builds a second one): its report,
+    // read after the push, says how the clips already on the sequence (stills, sound) were conformed.
+    auto conform = std::make_shared<const SetSequenceFormat *>(nullptr);
+    auto withAdoption = [adopted, sequenceId, conform](std::unique_ptr<Command> placement, const char *name) {
         if (!adopted) {
             return placement;
         }
+        auto settings = std::make_unique<SetSequenceFormat>(sequenceId, *adopted, name);
+        *conform = settings.get();
         std::vector<std::unique_ptr<Command>> children;
-        children.push_back(std::make_unique<SetSequenceFormat>(sequenceId, *adopted, name));
+        children.push_back(std::move(settings));
         children.push_back(std::move(placement));
         return std::unique_ptr<Command>(std::make_unique<CompositeCommand>(name, std::move(children)));
+    };
+    NSString * (^conformNote)(void) = ^NSString * {
+        return *conform != nullptr ? adoptionConformNote((*conform)->report()) : nil;
     };
     if (overwrite) {
         auto command = std::make_unique<OverwriteClip>(sequenceId, time, std::move(placements), link);
@@ -150,7 +174,8 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
                   created:^NSArray<NSNumber *> * {
                       return toNumbers(raw->createdClipIds());
                   }
-                     note:note];
+                     note:note
+                 lateNote:conformNote];
     }
     __block InsertClip *raw = nullptr;
     return [self pushRipple:^std::unique_ptr<Command>(RippleScope scope) {
@@ -165,7 +190,8 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
                     created:^NSArray<NSNumber *> * {
                         return raw != nullptr ? toNumbers(raw->createdClipIds()) : @[];
                     }
-                       note:note];
+                       note:note
+                   lateNote:conformNote];
 }
 
 - (VEEditResult *)insertAsset:(VEAssetID)assetID

@@ -145,18 +145,30 @@ using namespace ve::facade;
 - (VEEditResult *)push:(std::unique_ptr<Command>)command
                created:(NSArray<NSNumber *> * (^_Nullable)(void))created
                   note:(nullable NSString *)note {
-    return [self finishPush:[self pushCommand:std::move(command)] created:created note:note];
+    return [self push:std::move(command) created:created note:note lateNote:nil];
+}
+
+- (VEEditResult *)push:(std::unique_ptr<Command>)command
+               created:(NSArray<NSNumber *> * (^_Nullable)(void))created
+                  note:(nullable NSString *)note
+              lateNote:(NSString *_Nullable (^_Nullable)(void))lateNote {
+    return [self finishPush:[self pushCommand:std::move(command)] created:created note:note lateNote:lateNote];
 }
 
 /// The facade's result for a pushed edit: its refusal, or (after notifying the change) its success
-/// with the ids `created` lists and `note`.
+/// with the ids `created` lists and `note` followed by what `lateNote` says now.
 - (VEEditResult *)finishPush:(const EditResult &)result
                      created:(NSArray<NSNumber *> * (^_Nullable)(void))created
-                        note:(nullable NSString *)note {
+                        note:(nullable NSString *)note
+                    lateNote:(NSString *_Nullable (^_Nullable)(void))lateNote {
     if (!result) {
         return toVE(result);
     }
     NSArray<NSNumber *> *ids = created ? created() : @[];
+    NSString *late = lateNote ? lateNote() : nil;
+    if (late.length > 0) {
+        note = note.length > 0 ? [NSString stringWithFormat:@"%@ %@", note, late] : late;
+    }
     [self notifyModelChanged];
     return toVE(result, ids, note);
 }
@@ -179,17 +191,26 @@ using namespace ve::facade;
                        scope:(VERippleScope)rippleScope
                      created:(NSArray<NSNumber *> * (^_Nullable)(void))created
                         note:(nullable NSString *)note {
+    return [self pushRipple:make scope:rippleScope created:created note:note lateNote:nil];
+}
+
+- (VEEditResult *)pushRipple:(std::unique_ptr<Command> (^)(RippleScope scope))make
+                       scope:(VERippleScope)rippleScope
+                     created:(NSArray<NSNumber *> * (^_Nullable)(void))created
+                        note:(nullable NSString *)note
+                    lateNote:(NSString *_Nullable (^_Nullable)(void))lateNote {
     if (rippleScope == VERippleScopeSyncedTracks) {
-        return [self push:make(RippleScope::SyncedTracks) created:created note:note];
+        return [self push:make(RippleScope::SyncedTracks) created:created note:note lateNote:lateNote];
     }
     EditResult result = [self pushCommand:make(RippleScope::AllUnlockedTracks)];
     if (result.error == EditError::Overlap) {
         NSString *fallback = @"Other tracks have clips in the way, so only the edited clips' tracks were rippled.";
         return [self push:make(RippleScope::SyncedTracks)
                   created:created
-                     note:note.length > 0 ? [NSString stringWithFormat:@"%@ %@", note, fallback] : fallback];
+                     note:note.length > 0 ? [NSString stringWithFormat:@"%@ %@", note, fallback] : fallback
+                 lateNote:lateNote];
     }
-    return [self finishPush:result created:created note:note];
+    return [self finishPush:result created:created note:note lateNote:lateNote];
 }
 
 - (void)closeCoalescingIfOpen {

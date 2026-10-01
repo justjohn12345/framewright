@@ -238,6 +238,17 @@ NS_ASSUME_NONNULL_BEGIN
                        scope:(VERippleScope)rippleScope
                      created:(NSArray<NSNumber *> * (^_Nullable)(void))created
                         note:(nullable NSString *)note;
+/// As above, and `lateNote` (called only after the edit succeeded, so it can read the applied
+/// command's report) adds its sentences after `note`'s.
+- (VEEditResult *)push:(std::unique_ptr<ve::Command>)command
+               created:(NSArray<NSNumber *> * (^_Nullable)(void))created
+                  note:(nullable NSString *)note
+              lateNote:(NSString *_Nullable (^_Nullable)(void))lateNote;
+- (VEEditResult *)pushRipple:(std::unique_ptr<ve::Command> (^)(ve::RippleScope scope))make
+                       scope:(VERippleScope)rippleScope
+                     created:(NSArray<NSNumber *> * (^_Nullable)(void))created
+                        note:(nullable NSString *)note
+                    lateNote:(NSString *_Nullable (^_Nullable)(void))lateNote;
 - (void)closeCoalescingIfOpen;
 /// Runs `block` when the open coalescing group ends (flushDeferredImports).
 - (void)deferUntilCoalescingEnds:(dispatch_block_t)block;
