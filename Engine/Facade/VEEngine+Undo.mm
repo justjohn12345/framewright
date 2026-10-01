@@ -225,6 +225,10 @@ using namespace ve::facade;
     [_undo.deferredImports addObject:block];
 }
 
+- (void)markUndoHistoryClean {
+    _undo.stack->markClean();
+}
+
 - (void)startUndoHistory {
     _undo.stack = std::make_unique<UndoStack>();
     _undo.coalescingKey = nil;

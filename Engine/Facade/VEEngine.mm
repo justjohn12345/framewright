@@ -120,7 +120,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
                                                           [weakEngine postSourcePlaybackStatus:status];
                                                         }];
         _rippleScope = VERippleScopeAllTracks;
-        _undo.stack = std::make_unique<UndoStack>();
+        [self startUndoHistory];
         _exporter = [[VEExporter alloc] init];
         _observers = [NSHashTable weakObjectsHashTable];
         // Probe VideoToolbox once off the main thread so the Preferences pane never waits.
@@ -202,6 +202,10 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
         _lastUseCounts = std::move(current);
         [self notifyAssetsChanged];
     }
+}
+
+- (void)forgetPostedUseCounts {
+    _lastUseCounts.clear();
 }
 
 - (void)notifyAssetsChanged {

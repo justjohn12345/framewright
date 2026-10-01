@@ -8,6 +8,10 @@
 
 #import "VEEngine.h"
 
+// Defined wherever the engine's private interface is included (see VE_ENGINE_HEADER_INCLUDED in VEEngine.h):
+// the classes the engine coordinates refuse to compile with it.
+#define VE_ENGINE_INTERNAL_HEADER_INCLUDED 1
+
 #import "VEFacadeSupport+Internal.h"
 #import "VETypes+Internal.h"
 
@@ -17,17 +21,13 @@
 #include "../Media/BackendRouter.h"
 #include "../Media/FrameCache.h"
 #include "../Model/Project.h"
-#include "../Playback/PlaybackController.h"
 
 #include <os/log.h>
 
 #include <algorithm>
 #include <climits>
 #include <cstdint>
-#include <map>
 #include <memory>
-#include <optional>
-#include <set>
 #include <utility>
 #include <vector>
 
@@ -198,6 +198,9 @@ NS_ASSUME_NONNULL_BEGIN
                   notify:(void(NS_NOESCAPE ^)(id<VEEngineObserver> observer))notify;
 - (void)notifyThumbnailForAsset:(ve::AssetId)asset;
 - (void)notifyWaveformForAsset:(ve::AssetId)asset;
+/// Forgets the use counts updateUseCounts last posted (New/Open: the next model change posts the new
+/// project's).
+- (void)forgetPostedUseCounts;
 @end
 
 // VEEngine+Project.mm
@@ -253,9 +256,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// Runs `block` when the open coalescing group ends (flushDeferredImports).
 - (void)deferUntilCoalescingEnds:(dispatch_block_t)block;
 - (void)flushDeferredImports;
-/// A fresh undo history for the project just installed (New/Open): no coalescing group, the id
-/// floor at the project's generator.
+/// A fresh undo history for the project just installed (New/Open, and the engine's first): no coalescing
+/// group, the id floor at the project's generator.
 - (void)startUndoHistory;
+/// The project was saved: the current undo position is the clean one.
+- (void)markUndoHistoryClean;
 @end
 
 // VEEngine+Playback.mm

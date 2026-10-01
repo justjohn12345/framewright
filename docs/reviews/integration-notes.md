@@ -1702,7 +1702,11 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
     thread (<function> called on <thread>)"), except the methods the engine's dealloc calls (`cancel`,
     `stopAccessingURLs`, `disconnectView(s)`). They can be constructed without an engine: `VEExporterTests`,
     `VEMediaLibraryTests`, `VESourceMonitorTests`, `VEProgramMonitorTests`, which import each class's header first
-    and no engine header, so a class header that starts needing the engine fails to compile there. A monitor decodes
+    and no engine header. (That alone would not catch a class header that includes the engine header itself:
+    the test would compile with it. Since the 2026-09-30 round, item 14, `VEEngine.h` defines
+    `VE_ENGINE_HEADER_INCLUDED` and `VEEngine+Internal.h` `VE_ENGINE_INTERNAL_HEADER_INCLUDED`, and each of
+    the four classes' `.mm` stops with `#error` when either is defined after its includes, so the engine's
+    headers cannot reach them directly or through a header.) A monitor decodes
     only assets registered with it (`registerAsset:path:[routing:]`), as the engine does on import and Open.
 - Functions the facade's files share are declared `VE_FACADE_HIDDEN` (hidden visibility) in
   `VEEngine+Internal.h`: shared between the facade's files, not exported from the framework. Use it for any new

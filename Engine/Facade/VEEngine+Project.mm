@@ -168,7 +168,7 @@ constexpr const char *kMediaFolderBookmarkKey = "mediaFolderBookmark";
         return NO;
     }
     _document.url = url;
-    _undo.stack->markClean();
+    [self markUndoHistoryClean];
     _document.metadataDirty = false;
     [self notifyModelChanged];
     return YES;
@@ -270,7 +270,7 @@ constexpr const char *kMediaFolderBookmarkKey = "mediaFolderBookmark";
     [self startUndoHistory];
     _document.url = url;
     _document.loadWarnings = @[];
-    _lastUseCounts.clear();
+    [self forgetPostedUseCounts];
     // Imports waiting for the old project's gesture belong to the old project: run them now
     // (they see the new generation and report the project as closed).
     [self flushDeferredImports];

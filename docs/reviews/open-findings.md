@@ -130,10 +130,20 @@ Group B, continued:
   chroma, bound 12; 2-4 elsewhere, bounds 3-5; were all 14). All comparisons are at the sequence's size,
   where R5's rule makes the monitor and the export sharpen alike. With monitors made never to sharpen, the
   new sharpened case fails (12 failures); the old one passed.
-- 8, garbled transition notes: "Transition notes: no "Shortened to shortened to", no shortening note on a
-  refusal". `planFade`'s own note is "Shortened to N frames (s): reason" (as the facade notes its fitted
+- 8, garbled transition notes: 4e85b44. `planFade`'s own note is "Shortened to N frames (s): reason" (as the facade notes its fitted
   transitions); `fitTransitionRange`'s head-fade path refuses before noting. TransitionFittingTests' two
   pinning cases changed (they pinned the wrong text).
+- Group B verification: full suite at 4e85b44 (`xcodebuild -scheme Framewright ... test`): TEST SUCCEEDED,
+  EngineTests 533 (3 display-link skips), doctest 324, AppTests 273 (the known skip), no warnings.
+
+Group C:
+- 13 and 14, facade ownership: "Facade: owners write their own state; the coordinated classes refuse
+  the engine's headers". `markUndoHistoryClean` (Undo), `forgetPostedUseCounts` (VEEngine.mm) and the
+  engine's init calling `startUndoHistory` replace the cross-file writes; `VEEngine+Internal.h` no longer
+  includes PlaybackController.h, <map>, <optional>, <set>. `VE_ENGINE_HEADER_INCLUDED` (VEEngine.h) and
+  `VE_ENGINE_INTERNAL_HEADER_INCLUDED` make the four classes' `.mm` files `#error` (proved: importing
+  VEEngine+Internal.h into VEProgramMonitor.mm, and VEEngine.h into VEMediaLibrary+Internal.h, each stop
+  the build). The integration notes' claim about the class tests is corrected.
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
@@ -146,14 +156,6 @@ Found while doing them (open):
   different amount, which in practice needs a pair slipped out of sync.
 
 Not started (groups B and C), with what a fresh implementer needs:
-- 13, ownership breaches: Engine/Facade/VEEngine+Project.mm:171 calls `_undo.stack->markClean()` and :273
-  `_lastUseCounts.clear()`: route through methods of the owners (Undo, VEEngine.mm). Drop unused includes
-  from Engine/Facade/VEEngine+Internal.h (`PlaybackController.h`, `<map>`, `<optional>`, `<set>` if unused);
-  optionally stop exposing the class pointers to categories that never use them.
-- 14, enforce "no engine dependency": define a marker macro in VEEngine.h and VEEngine+Internal.h and add
-  `#ifdef ... #error` after the includes of VEExporter.mm, VEMediaLibrary.mm, VESourceMonitor.mm and
-  VEProgramMonitor.mm; prove it fires by including the engine header temporarily; correct the integration
-  notes' claim (a class header that includes the engine header itself compiles in its test).
 - 15, untested rules and weak tests: the mutation list in the brief (VESourceMonitor setMuted:, pauseController,
   the lookahead update at controller creation, `_asset &&` in resetIfAssetLeft:, the size < 2 export refusal,
   the routing forward to the source controller, the `_missing` skip in the details probe, the numeric-scrub

@@ -49,6 +49,11 @@
 #import <FramewrightEngine/VEExport.h>
 #import <FramewrightEngine/VETypes.h>
 
+// Defined wherever this header is included: the classes the engine coordinates (VEExporter,
+// VEMediaLibrary, VESourceMonitor, VEProgramMonitor) refuse to compile with it (#error), so none of them
+// can come to depend on the engine.
+#define VE_ENGINE_HEADER_INCLUDED 1
+
 @class VEEngine;
 @class VEPreviewView;
 

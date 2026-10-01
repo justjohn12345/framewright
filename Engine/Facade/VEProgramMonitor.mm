@@ -14,6 +14,12 @@
 #include <optional>
 #include <utility>
 
+// This class knows nothing of the engine (VEEngine+Internal.h, "Facade layout"): neither its header nor
+// this file may bring in the engine's headers, directly or through another header.
+#if defined(VE_ENGINE_HEADER_INCLUDED) || defined(VE_ENGINE_INTERNAL_HEADER_INCLUDED)
+#error "VEProgramMonitor must not depend on VEEngine: it reaches it only through what the engine passes in"
+#endif
+
 using namespace ve;
 using namespace ve::facade;
 
