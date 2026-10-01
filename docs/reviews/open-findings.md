@@ -419,8 +419,7 @@ Brief: the "Before colour grading" part of the recommended order in `2026-10-01-
 change no behaviour except item 1's, which the brief asks for; the golden files do not change.
 
 Done:
-- 1, preserve unknown span content on save (review core #9): commit "Model: keep what a newer version wrote in
-  spans". A span of an unknown kind on an effect lane is now `SpanKind::Unknown` with its kind's name and every
+- 1, preserve unknown span content on save (review core #9): bedbb1b. A span of an unknown kind on an effect lane is now `SpanKind::Unknown` with its kind's name and every
   other key kept as compact JSON text (`EffectSpan::foreign`, `ForeignSpanContent`); a known span keeps its
   unknown keys (`fields`) and its unknown parameters' tracks (`tracks`, with the span's length when read). All
   are written back on save; JSON equality round trip. Rules: an Unknown span has no parameters (renders as
@@ -438,8 +437,7 @@ Done:
   unknown key is now kept, compared after clearing it). Unknown keys elsewhere (clip, track, sequence,
   keyframe) are still ignored, as the brief scopes the item to spans.
 
-- 2, descriptor tables for `SpanKind` and `SpanParameter` (review core #2): commit "Model: descriptor tables for
-  span kinds and parameters". `SpanKindInfo` (name, display name, track kind as `std::optional<TrackKind>`,
+- 2, descriptor tables for `SpanKind` and `SpanParameter` (review core #2): eda4028. `SpanKindInfo` (name, display name, track kind as `std::optional<TrackKind>`,
   parameters as a `std::span`) and `SpanParameterInfo` (name, display name, neutral, range, `SpanComposition`
   additive or multiplicative) in EffectSpan.cpp, indexed by the enums and `static_assert`ed in order;
   `kSpanKinds`, `kSpanParameterCount`, `infoOf`, `spanKindNamed`, `spanParameterNamed`, `spanKindFitsTrack`;
@@ -458,7 +456,7 @@ Done:
   unchanged. Full suite after this item: EngineTests 549 (0 skips this run), doctest 341, AppTests 278 (1
   known skip), 0 failures, no leftovers.
 
-- 3, parameters indexed by enum: commit "Model: span tracks indexed by parameter". `SpanTracks` holds
+- 3, parameters indexed by enum: a813c32. `SpanTracks` holds
   `std::array<KeyframeTrack, kSpanParameterCount> byParameter` with `track(p)` and `operator[](p)`; the six
   named fields are gone, so a new parameter needs no struct or switch edit (its row in the parameter table
   and an enumerator). Facade: the kind switch in `-[VEClipInfo getBaseValues:...]` is one loop over the
@@ -476,7 +474,7 @@ Done:
   EffectSpanTests, KeyframeTests, ModelTests, SchedulerSpanTests, SchedulerTests,
   SequenceFormatRenderTests.mm, ProjectJSONTests.
 
-- 4, named shader uniforms (review render #5): commit "Render: named shader uniforms". `VEDrawUniforms`'
+- 4, named shader uniforms (review render #5): c59028e. `VEDrawUniforms`'
   packed `mix` and `reserved` lanes are a `VETransitionUniforms` sub-struct (mix, progressStart/End, feather,
   `VEInt shape`, `VEUInt incoming`); `VESourceUniforms::params` is `float weight` and `VEUInt straightAlpha`;
   `VEUnsharpUniforms` has amount, threshold, rangeLow/High, width, height and `VEUInt isLuma`;
@@ -490,7 +488,7 @@ Done:
   the rest pass unchanged (no test touched the structs). Full suite after this item: EngineTests 550 (0
   skips), doctest 342, AppTests 279 (1 known skip), 0 failures, no leftovers.
 
-- 5, the grading placement decision note: commit "Docs: grading pipeline placement decision". Written as
+- 5, the grading placement decision note: df53988. Written as
   `docs/reviews/2026-10-01-grading-pipeline-decision.md`, status proposed, for the user and the lead to
   approve. Recommendations: the grade per source in the fragment shader after the YCbCr -> R'G'B' conversion
   and before coverage, weight and blend, behind function constants (ungraded layers unchanged); grade in
@@ -525,6 +523,11 @@ Not started:
   and the memory budget counts 8 bytes per pixel; (5) tests: a 12-bit ProRes 4444 with alpha (AVAssetWriter)
   and a 16-bit PNG (CGImageDestination) holding a shallow gradient decode to the high-precision format and
   keep more than 256 distinct levels through the compositor's RGBA16Float export intermediate.
+
+- Final verification (df53988): `xcodebuild -scheme Framewright -configuration Debug clean build`, 0 warnings
+  in project code; full suite: EngineTests 550 (3 display-link skips), doctest 342, AppTests 279 (1 known
+  skip), 0 failures; no new entries in `$TMPDIR/FramewrightEngineTests`, the container's Preferences or its
+  tmp.
 
 Next after this round (waiting for the user's go after item 5's decision): splitting `EffectSpan` into effect
 and transition types; the `TransitionRules` consolidation; the float intermediate on monitors.
