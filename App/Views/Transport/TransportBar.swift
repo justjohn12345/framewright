@@ -53,7 +53,6 @@ private struct TransportButtons: View {
     @ObservedObject var store: ProjectStore
     @ObservedObject var playhead: PlayheadModel
     @ObservedObject var sourcePlayhead: PlayheadModel
-    @State private var muted = false
 
     var body: some View {
         let actions = store.playbackActions
@@ -86,20 +85,19 @@ private struct TransportButtons: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            Button {
-                muted.toggle()
-                store.engine.isMuted = muted
-            } label: {
-                Image(systemName: muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+            // The store's (the engine's) state, as the Playback menu shows it (review B2).
+            Button { store.toggleAudioMuted() } label: {
+                Image(systemName: store.isAudioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
             }
-            .help(muted ? "Unmute" : "Mute")
+            .help(store.isAudioMuted ? "Unmute (⌥⌘M)" : "Mute (⌥⌘M)")
+            .accessibilityLabel(store.isAudioMuted ? "Unmute" : "Mute")
+            .accessibilityIdentifier("MuteAudio")
             if !playhead.errorMessage.isEmpty {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)
                     .help(playhead.errorMessage)
             }
         }
-        .onAppear { muted = store.engine.isMuted }
     }
 
     private var currentRate: Double {

@@ -1219,6 +1219,25 @@ final class ProjectStore: ObservableObject {
         }
     }
 
+    // MARK: Audio output
+
+    /// Whether the monitors' sound is muted (Playback > Mute Audio, ⌥⌘M, and the transport bar's
+    /// speaker button). The engine's state is the only copy: the menu's check mark and the button's
+    /// icon both read it here, and both change it here, so they cannot get out of step (review B2).
+    var isAudioMuted: Bool {
+        get { engine.isMuted }
+        set {
+            guard newValue != engine.isMuted else { return }
+            objectWillChange.send()
+            engine.isMuted = newValue
+        }
+    }
+
+    /// Mutes or unmutes the monitors' sound.
+    func toggleAudioMuted() {
+        isAudioMuted.toggle()
+    }
+
     // MARK: Speed
 
     /// Cmd+R: opens the Speed/Duration sheet for the selected clips (not stills).

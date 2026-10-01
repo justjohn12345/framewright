@@ -289,14 +289,20 @@ until a later status update gives the hash. Each fix has a regression test that 
 production change reverted (named in the commit message).
 
 Done:
-- 1, B1, the Speed/Duration sheet lost its input: "Speed/Duration sheet: the store keeps the sheet's
-  model". Root cause: ContentView built the sheet's model inside the sheet closure, so every store publish
+- 1, B1, the Speed/Duration sheet lost its input: dfd9b24. Root cause: ContentView built the sheet's model inside the sheet closure, so every store publish
   (the refusal's own status line) redrew the window and replaced it. `ProjectStore.speedSheetModel` is
   created once by `showSpeedSheet()` (like `exportModel`); `speedSheetClipIDs` is now read-only (derived).
   `SpeedDurationSheetTests` (the window test fails with the old closure: the field shows "100" again).
 
+- 2, B2, the mute button out of step with the menu: "Mute Audio: one state for the menu and the
+  transport button". Root cause: the button kept its own `@State`, read only on appear, while the menu
+  toggled the engine. `ProjectStore.isAudioMuted` reads and writes the engine's state (the only copy) and
+  publishes; the button and the menu (now a Toggle, with a check mark) both use it. `MuteAudioTests`
+  (the button test fails with the old `@State`: the click after a menu mute muted again). The menu's
+  check mark itself is checked by hand: the hosted app's SwiftUI menu did not update its item's state
+  in the test host.
+
 Not started (key facts):
-- 2, B2, the mute button: `TransportBar` keeps its own `@State muted`; the menu toggles the engine.
 - 3, B3, `DecodePool::refresh()` writes the worker-owned `repairedAt` under the pool mutex.
 - 4, B4, `FFVideoEncoder` converts BT.2020/240M with BT.709 coefficients (`FFFrameConverter::swsColorspace`
   has the right mapping).

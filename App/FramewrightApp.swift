@@ -183,7 +183,8 @@ struct AppCommands: Commands {
             Button("Go to Start  Home") { store.playbackActions.goToStart() }
             Button("Go to End  End") { store.playbackActions.goToEnd() }
             Divider()
-            Button("Mute Audio") { store.engine.isMuted.toggle() }
+            // A check mark while muted; the transport bar's speaker button reads the same state.
+            Toggle("Mute Audio", isOn: Binding(get: { store.isAudioMuted }, set: { store.isAudioMuted = $0 }))
                 .keyboardShortcut("m", modifiers: [.command, .option])
         }
         CommandGroup(after: .toolbar) {
