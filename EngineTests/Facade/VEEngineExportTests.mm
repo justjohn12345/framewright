@@ -13,6 +13,7 @@
 
 #include "../../Engine/Media/BackendRouter.h"
 #include "../../Engine/Media/FFmpeg/FFmpegBackend.h"
+#include "../../Engine/Render/Compositor.h"
 #include "../Media/BurnIn.h"
 #include "../Media/TestMedia.h"
 #include "../Media/TextCard.h"
@@ -191,6 +192,39 @@ CMTime seconds(double s) {
     s = [[self settingsFor:VEExportPresetH264 resolution:VEExportResolution1080p] outputSizeForSequenceWidth:1940
                                                                                                       height:1080];
     XCTAssertEqual(s.width, 1940, @"1 %% wider than 16:9: the aspect is kept");
+}
+
+/// Snapping to exact HD never adds black lines (review R3 of the 2026-09-30 fix round): a 1919x1080 recording
+/// (1918x1080 after the adoption's round-down) exported at 1080p was 1920x1080 with a black column on each
+/// side, though it was pixel exact before; 1916x1080 got 2 px pillars and 1920x1076 2 px rows. The snap is
+/// taken only when the sequence's picture fills the snapped frame; every size below is checked against
+/// the compositor's own fitting (fitRect: the picture covers the whole output).
+- (void)testExactHDSizesNeverAddBlackLines {
+    struct Case {
+        NSInteger width, height;
+        VEExportResolution resolution;
+        CGFloat expectedWidth, expectedHeight;
+    };
+    const Case cases[] = {
+        {1918, 1080, VEExportResolution1080p, 1918, 1080}, {1916, 1080, VEExportResolution1080p, 1916, 1080},
+        {1920, 1076, VEExportResolution1080p, 1928, 1080}, {3832, 2154, VEExportResolution1080p, 1920, 1080},
+        {1918, 1080, VEExportResolution720p, 1280, 720},   {1916, 1080, VEExportResolution720p, 1278, 720},
+        {1920, 1076, VEExportResolution720p, 1284, 720},   {3832, 2154, VEExportResolution720p, 1280, 720},
+        {1920, 1080, VEExportResolution1080p, 1920, 1080}, {1920, 1080, VEExportResolution720p, 1280, 720},
+    };
+    for (const Case &c : cases) {
+        const CGSize s = [[self settingsFor:VEExportPresetH264 resolution:c.resolution] outputSizeForSequenceWidth:c.width
+                                                                                                         height:c.height];
+        XCTAssertEqual(s.width, c.expectedWidth, @"%ldx%ld at %s", long(c.width), long(c.height),
+                       c.resolution == VEExportResolution1080p ? "1080p" : "720p");
+        XCTAssertEqual(s.height, c.expectedHeight, @"%ldx%ld", long(c.width), long(c.height));
+        const ve::render::PixelRect fitted = ve::render::fitRect(double(c.width), double(c.height),
+                                                                 std::int32_t(s.width), std::int32_t(s.height));
+        XCTAssertTrue(fitted.x == 0 && fitted.y == 0 && fitted.width == std::int32_t(s.width) &&
+                          fitted.height == std::int32_t(s.height),
+                      @"%ldx%ld in %gx%g: the picture covers the output (drawn at %d,%d %dx%d)", long(c.width),
+                      long(c.height), s.width, s.height, fitted.x, fitted.y, fitted.width, fitted.height);
+    }
 }
 
 /// The user's case end to end: a 3832x2154 screen recording placed on a new sequence (which adopts its size)

@@ -5,6 +5,7 @@
 
 #include "../Media/FFmpeg/FFVideoEncoder.h"
 #include "../Media/HardwareCaps.h"
+#include "../Render/Compositor.h"
 
 #include <algorithm>
 #include <chrono>
@@ -25,13 +26,17 @@ NSInteger roundToEven(double value) {
     return static_cast<NSInteger>(std::lround(value / 2.0)) * 2;
 }
 
-// The width of a `height`-row output of a sequence of aspect `aspect`: 16:9 exactly (1920 for 1080 rows)
-// when the sequence is within half a percent of it (a 3832x2154 screen recording is 0.07 % wider), else
-// the aspect's width rounded to even. The compositor fills the remaining sub-pixel difference (fitRect).
+// The width of a `height`-row output (1080 or 720) of a sequence of aspect `aspect`: 16:9 exactly (1920
+// for 1080 rows) when the sequence's picture fills that frame (fitRect stretches an axis whose bars would
+// be under a pixel on each side: a 3832x2154 screen recording, 0.07 % wider than 16:9), so snapping never
+// draws a black line; else the aspect's width rounded to even, which the picture fills (a 1918x1080
+// sequence exports 1918x1080, pixel exact, not 1920x1080 with a black column on each side).
 NSInteger widthForRows(NSInteger height, double aspect) {
-    constexpr double kWide = 16.0 / 9.0;
-    if (std::fabs(aspect / kWide - 1.0) <= 0.005) {
-        return height * 16 / 9;
+    const NSInteger wide = height * 16 / 9;
+    const ve::render::PixelRect fitted = ve::render::fitRect(aspect * double(height), double(height),
+                                                     static_cast<std::int32_t>(wide), static_cast<std::int32_t>(height));
+    if (fitted.width == wide && fitted.height == height) {
+        return wide;
     }
     return roundToEven(double(height) * aspect);
 }

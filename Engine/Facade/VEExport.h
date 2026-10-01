@@ -105,8 +105,10 @@ typedef NS_ENUM(NSInteger, VEExportAudioCodec) {
 @property (nonatomic, readonly, copy) NSString *fileExtension;
 
 /// The output frame size for a sequence of `width` x `height` (even sides, at most 16384; zero
-/// when the sequence size or the custom width is not usable). 1080p and 720p of a sequence within
-/// half a percent of 16:9 are exactly 1920x1080 and 1280x720.
+/// when the sequence size or the custom width is not usable). 1080p and 720p are exactly 1920x1080
+/// and 1280x720 when the sequence's picture fills that frame with under a pixel to spare on each side
+/// (3832x2154), else 1080 or 720 rows at the sequence's aspect (1918x1080 stays 1918x1080), so the
+/// output never has a black line.
 - (CGSize)outputSizeForSequenceWidth:(NSInteger)width height:(NSInteger)height;
 
 /// Why this combination cannot be exported ("ProRes is written to QuickTime (MOV) files only."),

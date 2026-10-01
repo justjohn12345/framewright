@@ -77,14 +77,18 @@ Review of group A (84d9e20..6864cc0), regressions R1-R7, fixed before the rest o
   clips takes; the separate previous clip's whole end group now comes back to the cut (its ends keep a
   frame, a start going back if need be; a cut it shares on another track comes back too when its next
   clip has media from there). The Overlap refusal is left for a clip that truly cannot keep a frame.
-- R2 (item 1), in-sync linked clips refused as out of sync, and sub-frame linked sound refused: "Frame-rate
-  conform: linked clips decided earlier move together; sub-frame linked sound keeps a frame". A start
+- R2 (item 1), in-sync linked clips refused as out of sync, and sub-frame linked sound refused: 7e2335b. A start
   decided first (dual-system sound rolling before the camera) fixed its component's move at zero, so the
   picture's move with its media was refused; the component now moves when every decided edge keeps its
   media with the move. A linked sound clip shorter than a frame whose start rounded up to the cut's frame
   starts a frame earlier into its media (when it still shows part of its sound) or ends a fraction of a
   frame after its picture (when nothing on its track starts there), instead of a refusal naming the
   picture as "shorter than a frame".
+- R3 (item 5), the exact-HD snap added black lines: "Export: snap to exact HD only when the picture fills
+  it". `widthForRows` snapped any sequence within 0.5 % of 16:9, but fitRect fills only bars under a pixel
+  each, so 1918x1080 exported 1920x1080 with a black column on each side (1916x1080: 2 px pillars,
+  1920x1076: rows). It now snaps only when fitRect of the sequence fills the snapped frame, else keeps the
+  aspect (1918x1080, 1916x1080, 1928x1080 at 1080p).
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
