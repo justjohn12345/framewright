@@ -27,6 +27,12 @@ os_log_t thumbLog() {
     return log;
 }
 
+/// The part of a routing decision's memo key that names the policy it was made under.
+std::string policyKey(const RoutingPolicy &policy) {
+    return (policy.preferBackendName ? "prefer=" + *policy.preferBackendName : std::string("prefer=-")) +
+           (policy.allowHardware ? ",hw" : ",sw");
+}
+
 int64_t toMicros(CMTime t) {
     if (!CMTIME_IS_NUMERIC(t)) {
         return 0;
@@ -472,9 +478,9 @@ Result<ThumbnailImage> ThumbnailService::produce(const ThumbnailRequest &request
     return image;
 }
 
-Result<std::shared_ptr<const RoutedMediaInfo>> ThumbnailService::route(const std::string &url) {
-    const FileIdentity id = fileIdentity(url);
-    const std::string key = url + "|" + std::to_string(id.size) + "|" + std::to_string(id.modifiedNanoseconds);
+Result<std::shared_ptr<const RoutedMediaInfo>> ThumbnailService::route(const std::string &url,
+                                                                       const RoutingPolicy &policy,
+                                                                       const std::string &key) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (auto it = routes_.find(key); it != routes_.end()) {
@@ -482,7 +488,7 @@ Result<std::shared_ptr<const RoutedMediaInfo>> ThumbnailService::route(const std
             return it->second.routed;
         }
     }
-    auto routed = router_->probe(url, config_.routing); // Errors are not remembered.
+    auto routed = router_->probe(url, policy); // Errors are not remembered.
     if (!routed.ok()) {
         return std::move(routed).error();
     }
@@ -501,7 +507,13 @@ Result<std::shared_ptr<const RoutedMediaInfo>> ThumbnailService::route(const std
 }
 
 Result<ThumbnailImage> ThumbnailService::decode(const ThumbnailRequest &request, Worker &worker) {
-    auto routed = route(request.url);
+    // The policy now (the router's default unless the config fixes one): routing decisions and idle
+    // decoders are kept per file version and policy, so a changed preference takes effect at once.
+    const RoutingPolicy policy = config_.routing ? *config_.routing : router_->defaultPolicy();
+    const FileIdentity id = fileIdentity(request.url);
+    const std::string routeKey = request.url + "|" + std::to_string(id.size) + "|" +
+                                 std::to_string(id.modifiedNanoseconds) + "|" + policyKey(policy);
+    auto routed = route(request.url, policy, routeKey);
     if (!routed.ok()) {
         return std::move(routed).error();
     }
@@ -511,9 +523,6 @@ Result<ThumbnailImage> ThumbnailService::decode(const ThumbnailRequest &request,
     if (track == nullptr || track->kind == TrackKind::Audio) {
         return makeError(MediaErrorCode::NoSuchTrack, "no video track for a thumbnail in " + request.url);
     }
-    const FileIdentity id = fileIdentity(request.url);
-    const std::string routeKey =
-        request.url + "|" + std::to_string(id.size) + "|" + std::to_string(id.modifiedNanoseconds);
 
     // Check out an idle decoder for this (file, track, size), or open one.
     std::unique_ptr<DecoderSlot> slot;

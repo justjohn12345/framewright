@@ -111,7 +111,10 @@ class WaveformService {
         /// Analysis sample rate; must be a multiple of bucketsPerSecond.
         double sampleRate = 48000;
         int threads = 1;
-        media::RoutingPolicy routing{};
+        /// Routing for every computation. Empty (the default): the router's default policy when each
+        /// computation starts, so the app's "Prefer FFmpeg for decode" setting is followed, also when
+        /// it changes while the service runs.
+        std::optional<media::RoutingPolicy> routing{};
     };
 
     using RequestId = uint64_t;

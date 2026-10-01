@@ -167,6 +167,8 @@ NSNumber *keyFor(AssetId asset) {
             waveConfig.diskCacheDirectory =
                 toStd([cacheDirectory URLByAppendingPathComponent:@"Waveforms" isDirectory:YES].path);
         }
+        // Config::routing stays empty: the services take the router's default policy at each decode, so
+        // they follow "Prefer FFmpeg for decode" (the engine sets it on the router) when it changes.
         _thumbnails = std::make_unique<thumbs::ThumbnailService>(_router, thumbConfig);
         _waveforms = std::make_unique<thumbs::WaveformService>(_router, waveConfig);
         _probeQueue = dispatch_queue_create(

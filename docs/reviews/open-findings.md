@@ -313,16 +313,22 @@ Done:
   `lost()` on the old code and nothing on the fix. Earlier "0 reports" TSan runs did not cover races on
   `CMTime` fields.
 
-- 4, B4, the FFmpeg encoder's colour matrix: "FFmpeg encoder: convert with the matrix the stream is
-  tagged with". Root cause: the encoder's CPU conversion chose BT.601 or else BT.709 coefficients while
+- 4, B4, the FFmpeg encoder's colour matrix: d436644. Root cause: the encoder's CPU conversion chose BT.601 or else BT.709 coefficients while
   tagging the requested matrix. `swsColorspace` moved from FFFrameConverter.mm to FFmpegSupport (one
   mapping for decode and encode). An untagged (Unknown) matrix now follows the decode convention (BT.601
   below 720 rows) instead of always BT.709; exports always tag BT.709, so no export changes.
   `FFmpegBackendConformanceTests testSoftwareEncodesConvertWithTheTaggedMatrix` (AV1 patches at four
   matrices decoded back: within 1 code; the old line puts BT.2020 up to 12 and 240M up to 4 codes off).
 
+- 5, B5, thumbnails and waveforms ignored "Prefer FFmpeg": "Thumbnails and waveforms: follow the
+  router's routing policy". Root cause: the preference sets the router's default policy, but the services
+  probed with their own `Config::routing` (a default-constructed policy). `Config::routing` is now
+  optional; empty (the library's choice) means the router's default policy at each decode. The thumbnail
+  service keys its routing memo and idle decoders by file version and policy, so a change applies at
+  once. No engine coupling was added. `VEMediaLibraryTests
+  testThumbnailsAndWaveformsFollowTheRoutersPolicyAtRunTime` (two fake backends count decoder opens).
+
 Not started (key facts):
-- 5, B5, `VEMediaLibrary` builds the thumbnail and waveform services without the router's policy.
 - 6, B6, `UndoStack::push` ignores a failed re-apply; `AccumulatedSteps::apply` drops its children's
   dropped ids.
 - 7, B8, test hygiene (EngineTests scratch directories, AppTests defaults suites, media work outliving

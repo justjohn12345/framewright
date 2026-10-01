@@ -475,7 +475,7 @@ void WaveformService::reportProgress(Job &job, double fraction) {
 }
 
 WaveformResult WaveformService::compute(Job &job) {
-    auto routed = router_->probe(job.request.url, config_.routing);
+    auto routed = router_->probe(job.request.url, config_.routing ? *config_.routing : router_->defaultPolicy());
     if (!routed.ok()) {
         return std::move(routed).error();
     }

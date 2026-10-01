@@ -17,7 +17,8 @@
 //
 // Bounds: the memory cache by Config::memoryBudgetBytes (LRU), the disk cache by
 // Config::diskBudgetBytes (least recently used files deleted, see DiskCacheBudget), the routing
-// memo by Config::maxRoutes entries (LRU), idle decoders by Config::maxIdleDecoders.
+// memo (per file version and routing policy) by Config::maxRoutes entries (LRU), idle decoders by
+// Config::maxIdleDecoders.
 //
 // Coalescing: requests with the same memory key share one decode; every waiter is called.
 //
@@ -78,7 +79,10 @@ class ThumbnailService {
         /// Open decoders kept for reuse (per (path, track, maxDimension)); timeline strips ask
         /// for many times of one asset in a row.
         int maxIdleDecoders = 4;
-        media::RoutingPolicy routing{};
+        /// Routing for every decode. Empty (the default): the router's default policy at the time of
+        /// each decode, so the app's "Prefer FFmpeg for decode" setting is followed, also when it
+        /// changes while the service runs (routing decisions and idle decoders are kept per policy).
+        std::optional<media::RoutingPolicy> routing{};
     };
 
     struct Stats {
@@ -153,7 +157,9 @@ class ThumbnailService {
     media::Result<ThumbnailImage> decode(const ThumbnailRequest &request, Worker &worker);
     static media::Result<ThumbnailImage> render(Worker &worker, const media::PixelBuffer &frame, int maxDimension,
                                                 int rotationDegrees);
-    media::Result<std::shared_ptr<const media::RoutedMediaInfo>> route(const std::string &url);
+    media::Result<std::shared_ptr<const media::RoutedMediaInfo>> route(const std::string &url,
+                                                                      const media::RoutingPolicy &policy,
+                                                                      const std::string &routeKey);
     void insertMemory(const Key &key, const ThumbnailImage &image); // mutex_ held
 
     const std::shared_ptr<media::BackendRouter> router_;

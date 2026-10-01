@@ -15,6 +15,7 @@
 #include "../../Engine/Media/BackendRouter.h"
 #include "../../Engine/Media/FFmpeg/FFmpegBackend.h"
 #include "../Audio/AudioTestSupport.h"
+#include "../Media/RouterTestSupport.h"
 #include "../Media/TestMedia.h"
 
 #include <algorithm>
@@ -417,6 +418,73 @@ std::shared_ptr<media::BackendRouter> makeRouter() {
                              static_cast<long long>(closedFrames));
     XCTAssertEqual(tone->opens.load(), 2, @"the removed asset's queued request never started");
     XCTAssertEqual(posterPassCalls, 0);
+}
+
+/// Review B5 (general review, 2026-10-01): thumbnails and waveforms ignored "Prefer FFmpeg for decode".
+/// The preference sets the router's default policy (VEEngine+Media.mm), but the library built its
+/// thumbnail and waveform services with a fixed default `Config::routing`, so they always routed as if
+/// nothing were preferred. They now follow the router's policy at each decode, also when it changes at
+/// run time. Two fake backends that both accept the file count their decoder opens.
+- (void)testThumbnailsAndWaveformsFollowTheRoutersPolicyAtRunTime {
+    auto makeFake = [](const char *name) {
+        auto fake = std::make_shared<ve::test::FakeBehavior>();
+        fake->name = name;
+        fake->probe = [name](const std::string &p) {
+            return media::Result<media::MediaInfo>(ve::test::makeFakeInfo(p, "mov", media::fourcc::H264, true, 0, name));
+        };
+        return fake;
+    };
+    auto first = makeFake("first");
+    auto second = makeFake("second");
+    auto router = std::make_shared<media::BackendRouter>();
+    (void)router->registerBackend(std::make_shared<ve::test::FakeBackend>(first));
+    (void)router->registerBackend(std::make_shared<ve::test::FakeBackend>(second));
+    VEMediaLibrary *library = [[VEMediaLibrary alloc] initWithRouter:router cacheDirectory:nil];
+    // Two files (the waveform cache answers per file), present so the services can stat them.
+    MediaAsset assets[2];
+    for (int i = 0; i < 2; ++i) {
+        NSURL *url = [_scratch URLByAppendingPathComponent:[NSString stringWithFormat:@"clip%d.mov", i]];
+        XCTAssertTrue([[NSData dataWithBytes:"x" length:1] writeToURL:url atomically:YES]);
+        assets[i] = [self import:library url:url as:AssetId(i + 1)];
+    }
+    auto thumbnailAndWaveform = [&](const MediaAsset &asset, int frame) {
+        __block BOOL thumbnailDone = NO;
+        __block BOOL waveformDone = NO;
+        [library thumbnailOfAsset:asset
+                           atTime:CMTimeMake(frame, 30)
+                     maxDimension:64
+                       completion:^(const media::Result<thumbs::ThumbnailImage> *result) {
+                         XCTAssertTrue(result != nullptr && result->ok());
+                         thumbnailDone = YES;
+                       }];
+        [library waveformOfAsset:asset
+                      completion:^(const thumbs::WaveformResult *result) {
+                        XCTAssertTrue(result != nullptr && result->ok());
+                        waveformDone = YES;
+                      }];
+        XCTAssertTrue([self spinUntil:^BOOL { return thumbnailDone && waveformDone; } timeout:30]);
+    };
+
+    // "Prefer FFmpeg" sets the router's default policy; here the preferred backend is the second.
+    media::RoutingPolicy preferSecond;
+    preferSecond.preferBackendName = "second";
+    router->setDefaultPolicy(preferSecond);
+    thumbnailAndWaveform(assets[0], 10);
+    XCTAssertEqual(second->opens.load(), 2, @"the thumbnail's and the waveform's decoders are the preferred backend's");
+    XCTAssertEqual(first->opens.load(), 0);
+
+    // The preference changes while the library runs.
+    media::RoutingPolicy preferFirst;
+    preferFirst.preferBackendName = "first";
+    router->setDefaultPolicy(preferFirst);
+    thumbnailAndWaveform(assets[1], 20);
+    XCTAssertEqual(first->opens.load(), 2, @"the new preference is followed at once");
+    XCTAssertEqual(second->opens.load(), 2);
+    // The first file again, at another time: its earlier routing decision (made for the second) is not
+    // reused under the new policy.
+    thumbnailAndWaveform(assets[0], 40);
+    XCTAssertEqual(first->opens.load(), 3, @"the thumbnail follows the new preference for a file routed before");
+    XCTAssertEqual(second->opens.load(), 2);
 }
 
 @end
