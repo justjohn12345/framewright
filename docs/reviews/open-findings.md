@@ -137,13 +137,17 @@ Group B, continued:
   EngineTests 533 (3 display-link skips), doctest 324, AppTests 273 (the known skip), no warnings.
 
 Group C:
-- 13 and 14, facade ownership: "Facade: owners write their own state; the coordinated classes refuse
-  the engine's headers". `markUndoHistoryClean` (Undo), `forgetPostedUseCounts` (VEEngine.mm) and the
+- 13 and 14, facade ownership: 6ae6323. `markUndoHistoryClean` (Undo), `forgetPostedUseCounts` (VEEngine.mm) and the
   engine's init calling `startUndoHistory` replace the cross-file writes; `VEEngine+Internal.h` no longer
   includes PlaybackController.h, <map>, <optional>, <set>. `VE_ENGINE_HEADER_INCLUDED` (VEEngine.h) and
   `VE_ENGINE_INTERNAL_HEADER_INCLUDED` make the four classes' `.mm` files `#error` (proved: importing
   VEEngine+Internal.h into VEProgramMonitor.mm, and VEEngine.h into VEMediaLibrary+Internal.h, each stop
   the build). The integration notes' claim about the class tests is corrected.
+- 16, `fadeLimit`'s `excluded` parameter: "TransitionFitting: fadeLimit loses its dead excluded
+  parameter". It could never matter (a fade in is limited only by the tail transition, a fade out only by
+  the fade in and the incoming dissolve: never by the span at its own edge, which is what callers
+  excluded): removed with the clip copy; the test that asserted 60 with and without it now checks each
+  edge against the other.
 
 Found while doing them (open):
 - The remaining step at the 0.75 threshold (6.9 % of the edge measure between scales 1/240 apart) is the
@@ -163,9 +167,6 @@ Not started (groups B and C), with what a fresh implementer needs:
   ~100-101 `- fd`; SourceProject.cpp ~38 `max(1, width)` and ~57 `videoLength > 0`). Replace the fixed
   sleeps at VEMediaLibraryTests.mm:293, VESourceMonitorTests.mm:260 and 327-330, VEProgramMonitorTests.mm:161
   and 295 with completion signals where possible. Report a before/after mutation table.
-- 16, `fadeLimit`'s dead `excluded` parameter: Engine/Edit/TransitionFitting.cpp:42-48 (and
-  TransitionFittingTests.cpp ~113-115 asserts 60 with and without it): remove it and the copy, or show a
-  case where it matters.
 - 17, small items: `__attribute__((objc_subclassing_restricted))` on the four extracted classes;
   `describeFrames` (TransitionFitting.cpp:8-15) needs a larger buffer or an snprintf fallback when to_chars
   fails or the value is not finite; the stale comment in EngineTests/Playback/PausedSeekRig.h:5 (it is

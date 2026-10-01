@@ -110,9 +110,17 @@ TEST_CASE("fadeLimit: the clip's length less its other fade and an incoming cros
     CHECK(limit.maximumFrames == 45);
     CHECK(limit.limitError == EditError::Overlap);
     CHECK(limit.reason == "It would overlap the transition at the clip's other end.");
-    // The fade being resized does not count against itself.
-    CHECK(fadeLimit(*a, fx.track(fx.v1), ClipEdge::Head, f30(1), fadeIn).maximumFrames == 60);
-    CHECK(fadeLimit(*a, fx.track(fx.v1), ClipEdge::Head, f30(1)).maximumFrames == 60); // a fade in counts only for a fade out
+    // The fade being resized does not count against itself: only the other edge's spans count (a fade in
+    // limits a fade out, never a fade in).
+    CHECK(fadeLimit(*a, fx.track(fx.v1), ClipEdge::Head, f30(1)).maximumFrames == 60);
+    // And a fade out resized with a fade in present: limited by the fade in, not by itself.
+    const SpanId fadeOut = fx.addFade(fx.a, ClipEdge::Tail, f30(20));
+    CHECK(fadeLimit(fx.clip(fx.a), fx.track(fx.v1), ClipEdge::Tail, f30(1)).maximumFrames == 45);
+    CHECK(fadeLimit(fx.clip(fx.a), fx.track(fx.v1), ClipEdge::Head, f30(1)).maximumFrames == 40);
+    // (The fade out is taken away again for the cases below; the fade in stays.)
+    std::vector<EffectSpan> &spans = fx.sequence().findClip(fx.a)->spans;
+    std::erase_if(spans, [&](const EffectSpan &s) { return s.id == fadeOut; });
+    REQUIRE(fx.clip(fx.a).findSpan(fadeIn) != nullptr);
 
     // A 20-frame dissolve out of A reaches 10 frames into B: B's fade out may use the other 50.
     fx.addTransition(fx.v1, fx.a, fx.b, 20);

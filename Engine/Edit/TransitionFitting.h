@@ -40,10 +40,9 @@ const char *fadeTargetName(TrackKind trackKind);
 // The longest fade (whole frames of `frameDuration`) `clip` (on `track`) takes at `edge`: its length
 // less its other lane-0 span's part inside it and, for a fade out, less the part inside it of a cross
 // dissolve coming into it; and why not longer (limitError Overlap or InvalidArgument, and the
-// sentence). `excluded`, when valid, is a lane-0 span of the clip that does not count (the fade being
-// resized). `maximum` is the length in time (zero when no frame fits).
-TransitionLimit fadeLimit(const Clip &clip, const Track &track, ClipEdge edge, CMTime frameDuration,
-                          SpanId excluded = {});
+// sentence). Only spans at the other edge count, so the fade being resized never counts against itself.
+// `maximum` is the length in time (zero when no frame fits).
+TransitionLimit fadeLimit(const Clip &clip, const Track &track, ClipEdge edge, CMTime frameDuration);
 
 // The offsets (EffectSpan::start, end) `transition` gets at a length of `frames` whole frames: a
 // centred cross dissolve stays centred, an uneven one keeps its share before the cut in proportion

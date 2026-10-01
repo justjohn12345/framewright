@@ -39,13 +39,10 @@ const char *fadeTargetName(TrackKind trackKind) {
     return trackKind == TrackKind::Video ? "black" : "silence";
 }
 
-TransitionLimit fadeLimit(const Clip &clip, const Track &track, ClipEdge edge, CMTime frameDuration, SpanId excluded) {
-    std::optional<Clip> without;
-    if (excluded) {
-        without = clip;
-        std::erase_if(without->spans, [&](const EffectSpan &s) { return s.id == excluded; });
-    }
-    const Clip &owner = without ? *without : clip;
+TransitionLimit fadeLimit(const Clip &clip, const Track &track, ClipEdge edge, CMTime frameDuration) {
+    // A fade in is limited by the clip's tail transition, a fade out by its fade in and the dissolve coming
+    // into the clip: never by the span at its own edge (the fade being resized, if any).
+    const Clip &owner = clip;
     CMTime taken = kCMTimeZero;
     CMTime incoming = kCMTimeZero;
     if (edge == ClipEdge::Head) {
@@ -96,7 +93,7 @@ TransitionLimit transitionDurationLimit(const Project &project, const Sequence &
     if (transition.role != TransitionRole::CrossDissolve) {
         // The fade's own length does not count against it.
         const ClipEdge edge = transition.role == TransitionRole::FadeIn ? ClipEdge::Head : ClipEdge::Tail;
-        return fadeLimit(*transition.owner, *transition.track, edge, fd, transition.span->id);
+        return fadeLimit(*transition.owner, *transition.track, edge, fd);
     }
     TransitionLimit limit;
     EditResult why = EditResult::success();
@@ -141,7 +138,7 @@ TransitionRangeFit fitTransitionRange(const Project &project, const Sequence &se
         if (range.start != owner.timelineStart) {
             return refuse(EditResult::failure(EditError::InvalidTime, "A fade in starts at its clip's start."));
         }
-        const TransitionLimit limit = fadeLimit(owner, *transition.track, ClipEdge::Head, fd, transition.span->id);
+        const TransitionLimit limit = fadeLimit(owner, *transition.track, ClipEdge::Head, fd);
         std::int64_t length = frameIndexAt(range.duration(), fd, SnapMode::Round);
         if (length > limit.maximumFrames) {
             length = limit.maximumFrames;
@@ -192,7 +189,7 @@ TransitionRangeFit fitTransitionRange(const Project &project, const Sequence &se
         }
     }
     if (after == 0) {
-        const TransitionLimit limit = fadeLimit(owner, *transition.track, ClipEdge::Tail, fd, transition.span->id);
+        const TransitionLimit limit = fadeLimit(owner, *transition.track, ClipEdge::Tail, fd);
         if (before > limit.maximumFrames) {
             before = limit.maximumFrames;
             fit.notes.push_back(who + " was shortened to " + describeFrames(before, fd) + ": " + limit.reason);
