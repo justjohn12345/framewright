@@ -11,6 +11,7 @@ and keeps a status line at its top saying what landed and where the deviations a
 | `2026-09-24-effect-lanes-done.md` | Done. Spans on lanes, transitions on lane 0, hold after, schema v5; reviewed and fixed (see `docs/reviews`). D1 compact rows and D3 window frame restore remain open. |
 | `2026-09-29-export-sharpness-done.md` | Done. Export quality High by default with the custom entry and the fine-text note; sequences adopt their first video clip, Sequence Settings sheet (schema 7); sharpening after the minification pre-scale, exports pre-scaled to the drawn size. Deviations in `docs/reviews/integration-notes.md`. |
 | `2026-09-29-mcp-server.md` | Proposed, not scheduled: driving the app from an AI agent over MCP. |
+| `2026-10-01-premiere-lite-feature-gap.md` | Research, not scheduled: the features working editors expect that Framewright lacks, in three tiers, with a proposed order of rounds around the planned work. |
 | `2026-09-27-reverse-speed-wipes-done.md` | Done. Reverse (schema 6), speed in the inspector, wipe and iris transitions; reviewed 2026-09-29 (the post-lanes review; the report is in git history at f486a6a, removed in 50ac8f2), every finding fixed in 47b1a45..eb4d3d5 except the test gaps listed in `docs/reviews/open-findings.md`. |
 
 Rounds that had no plan file (they were briefs to one implementer, recorded in `docs/reviews/integration-notes.md`):
@@ -44,5 +45,8 @@ exposure-integrated transition edges) and the iris fades on black.
    off by default with a Preferences switch and a status-line indicator.
 4. **Per-project Ken Burns mode memory** (the mode is remembered per session today).
 5. **Notarization** once a Developer ID identity exists (the Distribution configuration is ready for it).
+
+What editors would expect beyond this list (titles, copy and paste, markers, trimming, audio meters, autosave and
+more), tiered and interleaved with items 1-3, is in `2026-10-01-premiere-lite-feature-gap.md` (research, not scheduled).
 
 A plan file is written when a feature is scheduled, agreed with the user, and then handed to an implementer.
