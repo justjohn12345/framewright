@@ -574,4 +574,25 @@ static char kQueueKey;
     XCTAssertTrue(done.wait(std::chrono::seconds(10)));
 }
 
+/// Review B10 (general review, 2026-10-01): the thumbnail service looked for a clip's last frame with one seek,
+/// a frame before the track's end, so a track whose duration overstates its pictures (10 s announced, 2 s of
+/// frames here) gave no thumbnail at its end. It now searches as the decode pool does (LastFrameSearch).
+- (void)testTheLastFrameIsFoundWhenTheTrackDurationOverstatesThePictures {
+    auto fake = std::make_shared<FakeBehavior>();
+    fake->frames = 60; // 2 s at 30 fps; makeFakeInfo announces a 10 s track
+    fake->probe = [](const std::string &p) { return Result<MediaInfo>(makeFakeInfo(p, "mov", fourcc::H264, false)); };
+    auto router = std::make_shared<BackendRouter>();
+    (void)router->registerBackend(std::make_shared<FakeBackend>(fake));
+    ThumbnailService service(router, {});
+    for (CMTime t : {CMTimeMake(1, 1), CMTimeMakeWithSeconds(9.99, 600), CMTimeMake(5, 1), CMTimeMake(30, 1)}) {
+        auto image = [self thumbnailFrom:service request:ThumbnailRequest{AssetId(1), "/fake/short.mov", t, 288}];
+        XCTAssertTrue(image.ok(), @"%.2f s: %s", CMTimeGetSeconds(t), image.ok() ? "" : image.error().description().c_str());
+        if (image.ok()) {
+            const int expected = CMTimeGetSeconds(t) < 2 ? static_cast<int>(CMTimeGetSeconds(t) * 30) : 59;
+            XCTAssertEqual(readBurnIn(toPixelBuffer(image->get()).get()), std::optional<int>(expected), @"%.2f s",
+                           CMTimeGetSeconds(t));
+        }
+    }
+}
+
 @end

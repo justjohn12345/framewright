@@ -1,5 +1,6 @@
 #include "ThumbnailService.h"
 
+#include "../Media/LastFrame.h"
 
 #include "../Media/PixelBuffer.h"
 #include "../Model/TimeUtil.h"
@@ -569,9 +570,13 @@ Result<ThumbnailImage> ThumbnailService::decode(const ThumbnailRequest &request,
         return slot->decoder->next();
     };
     auto frame = decodeAt(still ? kCMTimeZero : time);
-    if (frame.ok() && !frame.value() && !still && isPositive(track->frameDuration) && isNumeric(track->duration)) {
-        const CMTime last = track->startTime + track->duration - track->frameDuration;
-        frame = decodeAt(maxTime(last, kCMTimeZero));
+    if (frame.ok() && !frame.value() && !still) {
+        // At or past the end of the pictures (a track whose duration overstates them included): the last
+        // frame, searched for as the decode pool does (review B10: one seek a frame before the track's end
+        // found nothing there).
+        frame = LastFrameSearch::run(*slot->decoder,
+                                     LastFrameSearch::searchFrom(time, track->startTime, track->duration),
+                                     track->frameDuration);
     }
     if (!frame.ok()) {
         return std::move(frame).error(); // The decoder is dropped; it may be in a bad state.

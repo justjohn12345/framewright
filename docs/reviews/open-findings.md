@@ -373,8 +373,7 @@ Done:
   505 s (EngineTests 299 s, AppTests 187 s) with items 7-10. Both moved tests ran in the StressTests
   scheme: 0 misses of 200 each (62 s and 66 s).
 
-- 9, B9, supplemental decoders registered only through `HardwareCaps::get()`: "VideoToolbox: register
-  the supplemental decoders from every entry point". Checked: on this Mac (M4 Pro, macOS 26.6) AV1 needs no
+- 9, B9, supplemental decoders registered only through `HardwareCaps::get()`: 1eabff9. Checked: on this Mac (M4 Pro, macOS 26.6) AV1 needs no
   registration any more (VTIsHardwareDecodeSupported('av01') is true in a fresh process before it), VP9
   still does; with the old code a fresh process's AppleProber probe or AppleBackend constructor left VP9
   unregistered, so a VP9 MP4 probed first was measured as not decodable by VideoToolbox (on older systems
@@ -385,8 +384,16 @@ Done:
   fresh xctest processes (prober, backend, decoder); with the old wiring the prober and backend children fail.
   The child is skipped by name in the schemes (it runs only from its parent).
 
+- 10, B10, thumbnails failed at a clip's end: "Media: one last-frame search for the decode pool and
+  thumbnails". Root cause: `ThumbnailService` tried one seek a frame before the track's end, which finds
+  nothing where the track's duration overstates its pictures. `LastFrameSearch` (Engine/Media/LastFrame.h:
+  back two frames, at least 0.25 s, doubling, decoding forward to the end) is used by the pool's streams
+  (step by step), its scrub path and the thumbnail service. `ThumbnailServiceTests
+  testTheLastFrameIsFoundWhenTheTrackDurationOverstatesThePictures` (a fake track of 2 s of frames announced
+  as 10 s: 3 failures on the old code); the pool's `testTheLastFrameIsHeldPastTheEndOfTheVideo` covers its
+  two paths.
+
 Not started (key facts):
-- 10, B10, `ThumbnailService` finds a clip's last frame with one seek.
 - 11, B11, span and transition titles in two places.
 - 12, B12, M4A with PCM: the backends' validation disagrees.
 - 13, the dangling links to `2026-09-29-post-lanes-review.md`.

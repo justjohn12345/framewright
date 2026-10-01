@@ -1,6 +1,7 @@
 #include "DecodePool.h"
 
 #include "../Model/TimeUtil.h"
+#include "LastFrame.h"
 
 #include <os/log.h>
 
@@ -677,8 +678,8 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
     // clip that runs past the end of the video (a container whose audio lasts longer, a track
     // duration that overstates the pictures) shows the last picture, in playback and export alike,
     // instead of a missing layer. If the range has no frame (the seek landed at or after the end),
-    // the last frame is searched for first: seek back 2 frames (at least 0.25 s) before where the
-    // stream ended, doubling the step, and decode forward to the end.
+    // the last frame is searched for first, one seek per step (LastFrameSearch: back 2 frames, at least
+    // 0.25 s, from where the stream ended, doubling the step, decoding forward to the end).
     auto reachedEnd = [&]() {
         s.eof = true;
         if (s.lastDecoded) {
@@ -701,12 +702,9 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
             s.findingEnd = false; // nothing before either: the stream has no frames
             return StepResult::Settled;
         }
-        CMTime step = s.findingEnd && isPositive(s.tailStep) ? s.tailStep + s.tailStep : kCMTimeInvalid;
-        if (!isNumeric(step)) {
-            step = isPositive(s.frameDuration) ? s.frameDuration + s.frameDuration : kCMTimeZero;
-            step = maxTime(step, CMTimeMake(1, 4));
-        }
-        const CMTime probe = clampToZero(from - step);
+        const CMTime step = s.findingEnd && isPositive(s.tailStep) ? LastFrameSearch::nextStep(s.tailStep)
+                                                                   : LastFrameSearch::firstStep(s.frameDuration);
+        const CMTime probe = LastFrameSearch::probe(from, step);
         s.tailStep = step;
         s.tailProbe = probe;
         return seekTo(probe, true);
@@ -1042,42 +1040,13 @@ Result<ScrubFrame> DecodePool::serviceScrub(const ScrubKey &key, const std::shar
         }
         return d.decoder->next();
     };
-    // Past the end: the last frame, as a scrub to the end of a clip expects. It is found like the
-    // streams find it (step()): seek back from the track's end (or `time`) by 2 frames (at least
-    // 0.25 s), doubling the step until a frame comes out, and decode forward to the end.
-    auto lastFrame = [&](CMTime from) -> Result<std::optional<VideoFrame>> {
-        CMTime step = maxTime(isPositive(fd) ? fd + fd : kCMTimeZero, CMTimeMake(1, 4));
-        for (;;) {
-            const CMTime probe = clampToZero(from - step);
-            if (Status st = d.decoder->seek(probe); !st.ok()) {
-                return std::move(st).error();
-            }
-            std::optional<VideoFrame> last;
-            for (;;) {
-                auto n = d.decoder->next();
-                if (!n.ok()) {
-                    return std::move(n).error();
-                }
-                if (!n.value()) {
-                    break;
-                }
-                last = std::move(n).value();
-            }
-            if (last || !(probe > kCMTimeZero)) {
-                return last;
-            }
-            from = probe;
-            step = step + step;
-        }
-    };
+    // Past the end: the last frame, as a scrub to the end of a clip expects (LastFrameSearch, as the
+    // streams find it in step()).
     auto frame = decodeAt(time);
     bool pastEnd = false;
     if (frame.ok() && !frame.value() && track->kind != TrackKind::Still) {
-        CMTime from = time;
-        if (isNumeric(track->duration)) {
-            from = minTime(from, (isNumeric(track->startTime) ? track->startTime : kCMTimeZero) + track->duration);
-        }
-        frame = lastFrame(from);
+        frame = LastFrameSearch::run(*d.decoder, LastFrameSearch::searchFrom(time, track->startTime, track->duration),
+                                     fd);
         pastEnd = true;
     }
     if (!frame.ok()) {
