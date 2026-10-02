@@ -17,11 +17,15 @@ using namespace ve::facade;
 
 // MARK: - Effect spans
 
-/// The span `spanId` as it is now, or nil (also for a span the app is not shown, isShownSpan).
+/// The span (either kind) `spanId` as it is now, or nil (also for a span the app is not shown,
+/// isShownSpan).
 - (nullable VEEffectSpan *)effectSpanInfo:(SpanId)spanId {
     const Sequence &sequence = [self activeSequence];
     const Clip *clip = nullptr;
     const Track *track = nullptr;
+    if (const TransitionSpan *transition = sequence.findTransition(spanId, &clip, &track)) {
+        return makeEffectSpan(*transition, *clip, *track, sequence);
+    }
     const EffectSpan *span = sequence.findSpan(spanId, &clip, &track);
     return span != nullptr && isShownSpan(*span) ? makeEffectSpan(*span, *clip, *track, sequence) : nil;
 }
@@ -60,11 +64,12 @@ using namespace ve::facade;
     const Clip *clip = track ? track->find(id) : nullptr;
     NSMutableArray<VEEffectSpan *> *spans = [NSMutableArray array];
     if (clip != nullptr) {
-        for (const std::vector<EffectSpan> *list : {&clip->transitions, &clip->spans}) {
-            for (const EffectSpan &span : *list) {
-                if (isShownSpan(span)) {
-                    [spans addObject:makeEffectSpan(span, *clip, *track, sequence)];
-                }
+        for (const TransitionSpan &span : clip->transitions) {
+            [spans addObject:makeEffectSpan(span, *clip, *track, sequence)];
+        }
+        for (const EffectSpan &span : clip->spans) {
+            if (isShownSpan(span)) {
+                [spans addObject:makeEffectSpan(span, *clip, *track, sequence)];
             }
         }
     }
@@ -79,11 +84,12 @@ using namespace ve::facade;
     if (track != nullptr) {
         const ClipIndex index(sequence);
         for (const Clip &clip : track->clips) {
-            for (const std::vector<EffectSpan> *list : {&clip.transitions, &clip.spans}) {
-                for (const EffectSpan &span : *list) {
-                    if (isShownSpan(span)) {
-                        [spans addObject:makeEffectSpan(span, clip, *track, sequence, &index)];
-                    }
+            for (const TransitionSpan &span : clip.transitions) {
+                [spans addObject:makeEffectSpan(span, clip, *track, sequence, &index)];
+            }
+            for (const EffectSpan &span : clip.spans) {
+                if (isShownSpan(span)) {
+                    [spans addObject:makeEffectSpan(span, clip, *track, sequence, &index)];
                 }
             }
         }
@@ -239,14 +245,18 @@ using namespace ve::facade;
     const Sequence &sequence = [self activeSequence];
     const Clip *clip = nullptr;
     const Track *track = nullptr;
-    const EffectSpan *span = sequence.findSpan(id, &clip, &track);
-    if (span == nullptr) {
+    const bool transition = sequence.findTransition(id) != nullptr;
+    const EffectSpan *span = transition ? nullptr : sequence.findSpan(id, &clip, &track);
+    if (!transition && span == nullptr) {
         return [VEEditResult failureWithCode:VEEditErrorSpanNotFound message:@"The span no longer exists."];
     }
     const std::optional<KeyframeInterpolation> easing = fromVE(interpolation);
     if (!easing || *easing == KeyframeInterpolation::Bezier) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
                                      message:@"Choose hold, linear or an ease for the Ken Burns move."];
+    }
+    if (transition) {
+        return toVE(kenBurnsNeedsMotionSpan());
     }
     std::vector<SpanValueChange> changes;
     if (EditResult planned = planKenBurns(*clip, *span, sequence.frameDuration, MotionFraming{start.x, start.y, start.scale},

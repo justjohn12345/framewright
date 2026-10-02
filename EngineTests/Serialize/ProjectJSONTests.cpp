@@ -74,10 +74,10 @@ Fixture richFixtureV6() {
     const ClipId reversed = fx.addClip(fx.v2, fx.av24, 300, 30, 48, 0.5);
     fx.sequence().findClip(reversed)->reversed = true;
     Sequence &sequence = fx.sequence();
-    sequence.videoTracks[0].clips[0].transitionAt(ClipEdge::Tail)->transition = TransitionKind::WipeLeft;
+    sequence.videoTracks[0].clips[0].transitionAt(ClipEdge::Tail)->kind = TransitionKind::WipeLeft;
     Clip &still = sequence.videoTracks[1].clips[1];
-    still.transitionAt(ClipEdge::Head)->transition = TransitionKind::Iris;
-    still.transitionAt(ClipEdge::Tail)->transition = TransitionKind::WipeDown;
+    still.transitionAt(ClipEdge::Head)->kind = TransitionKind::Iris;
+    still.transitionAt(ClipEdge::Tail)->kind = TransitionKind::WipeDown;
     fx.requireValid();
     return fx;
 }
@@ -592,9 +592,9 @@ TEST_CASE("ProjectJSON: unknown kinds and keys of spans warn instead of failing"
         REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
         Project stripped = *loaded.project;
         TransitionSpan &span = stripped.sequences[0].videoTracks[0].clips[0].transitions[0];
-        CHECK(span.transition == TransitionKind::CrossDissolve);
-        CHECK(span.unknownTransitionName == "wipe");
-        span.unknownTransitionName.clear();
+        CHECK(span.kind == TransitionKind::CrossDissolve);
+        CHECK(span.unknownKindName == "wipe");
+        span.unknownKindName.clear();
         CHECK(stripped == fx.project);
         REQUIRE(loaded.warnings.size() == 1);
         CHECK(contains(loaded.warnings[0], "clips[0].spans[0].transition: unknown transition kind \"wipe\""));
@@ -719,14 +719,14 @@ TEST_CASE("ProjectJSON: a newer version's span kinds, parameters and keys round 
     CHECK(json::parse(clip.spans[0].foreign.tracks).contains("blur"));
     CHECK(identical(clip.spans[0].foreign.tracksLength, f30(40)));
     CHECK(clip.spans[1].foreign.fields == R"({"colorSpace":"linear"})");
-    CHECK(clip.transitions[0].foreign.fields == R"({"softness":{"amount":0.5}})");
+    CHECK(clip.transitions[0].foreignFields == R"({"softness":{"amount":0.5}})");
 
     // Without what the newer version added, it is the project this version wrote.
     Project stripped = project;
     Clip &strippedClip = stripped.sequences[0].videoTracks[0].clips[0];
     strippedClip.spans.pop_back();
     for (TransitionSpan &span : strippedClip.transitions) {
-        span.foreign = ForeignSpanContent{};
+        span.foreignFields.clear();
     }
     for (EffectSpan &span : strippedClip.spans) {
         span.foreign = ForeignSpanContent{};
@@ -791,11 +791,11 @@ TEST_CASE("ProjectJSON: every transition kind round trips on a cut and on a free
         Sequence &sequence = fx.sequence();
         Clip &dissolveOwner = sequence.videoTracks[0].clips[0];
         REQUIRE(dissolveOwner.transitionAt(ClipEdge::Tail) != nullptr);
-        dissolveOwner.transitionAt(ClipEdge::Tail)->transition = kind; // across the cut
+        dissolveOwner.transitionAt(ClipEdge::Tail)->kind = kind; // across the cut
         Clip &still = sequence.videoTracks[1].clips[1];
         REQUIRE(still.isStill);
-        still.transitionAt(ClipEdge::Head)->transition = kind; // a fade in
-        still.transitionAt(ClipEdge::Tail)->transition = kind; // a fade out
+        still.transitionAt(ClipEdge::Head)->kind = kind; // a fade in
+        still.transitionAt(ClipEdge::Tail)->kind = kind; // a fade out
         fx.requireValid();
         const std::string text = serializeProject(fx.project);
         CHECK(contains(text, std::string("\"transition\": \"") + nameOf(kind) + "\""));
@@ -821,12 +821,11 @@ TEST_CASE("ProjectJSON: an unknown transition kind is named in the warning and a
         CHECK(contains(loaded.warnings[0], "unknown transition kind \"clockWipe\""));
         CHECK(contains(loaded.warnings[0], "shown as a cross dissolve and saved as \"clockWipe\""));
         const TransitionSpan &span = loaded.project->sequences[0].videoTracks[0].clips[0].transitions[0];
-        REQUIRE(span.isTransition());
-        CHECK(span.transition == TransitionKind::CrossDissolve); // what it renders and edits as
-        CHECK(span.unknownTransitionName == "clockWipe");
+        CHECK(span.kind == TransitionKind::CrossDissolve); // what it renders and edits as
+        CHECK(span.unknownKindName == "clockWipe");
         // Everything else is the project as written.
         Project stripped = *loaded.project;
-        stripped.sequences[0].videoTracks[0].clips[0].transitions[0].unknownTransitionName.clear();
+        stripped.sequences[0].videoTracks[0].clips[0].transitions[0].unknownKindName.clear();
         CHECK(stripped == fx.project);
         // Saved and loaded again: the name comes back, not "crossDissolve".
         const json saved = projectToJson(*loaded.project);
@@ -839,13 +838,13 @@ TEST_CASE("ProjectJSON: an unknown transition kind is named in the warning and a
         Project edited = *loaded.project;
         SetTransitionKind kind(edited.sequences[0].id, span.id, TransitionKind::WipeUp);
         REQUIRE(kind.apply(edited).ok());
-        const EffectSpan *chosen = edited.sequences[0].findSpan(span.id);
+        const TransitionSpan *chosen = edited.sequences[0].findTransition(span.id);
         REQUIRE(chosen != nullptr);
-        CHECK(chosen->transition == TransitionKind::WipeUp);
-        CHECK(chosen->unknownTransitionName.empty());
+        CHECK(chosen->kind == TransitionKind::WipeUp);
+        CHECK(chosen->unknownKindName.empty());
         CHECK(projectToJson(edited)["sequences"][0]["videoTracks"][0]["clips"][0]["spans"][0]["transition"] == "wipeUp");
         kind.revert(edited);
-        CHECK(edited.sequences[0].findSpan(span.id)->unknownTransitionName == "clockWipe");
+        CHECK(edited.sequences[0].findTransition(span.id)->unknownKindName == "clockWipe");
     }
     SUBCASE("a wipe on an audio track's fade becomes a cross dissolve (audio has no shapes)") {
         json j = projectToJson(fx.project);
@@ -861,7 +860,7 @@ TEST_CASE("ProjectJSON: an unknown transition kind is named in the warning and a
     SUBCASE("validation refuses a shaped kind on an audio track") {
         Fixture edited = richFixture();
         Clip &music = edited.sequence().audioTracks[1].clips[0];
-        music.transitionAt(ClipEdge::Head)->transition = TransitionKind::WipeUp;
+        music.transitionAt(ClipEdge::Head)->kind = TransitionKind::WipeUp;
         const auto problem = validateProject(edited.project);
         REQUIRE(problem.has_value());
         CHECK(contains(*problem, "not a Wipe Up")); // the kind's display name (review L9)
@@ -916,7 +915,7 @@ TEST_CASE("ProjectJSON: unknown fields are ignored and optional fields default")
     const Clip &vfr = loaded.project->findSequence(fx.seq)->videoTracks[1].clips[0];
     CHECK(vfr.video == VideoParams{});
     CHECK(vfr.audio == AudioParams{});
-    CHECK(loaded.project->findSequence(fx.seq)->videoTracks[0].clips[0].transitions[0].transition ==
+    CHECK(loaded.project->findSequence(fx.seq)->videoTracks[0].clips[0].transitions[0].kind ==
           TransitionKind::CrossDissolve);
 }
 
@@ -980,7 +979,7 @@ TEST_CASE("ProjectJSON: the checked-in version 4 project (keyframes, fades, a tr
     CHECK(loaded.project->ids.nextValue() == 28);
     // The transition kept its id and became a tail span of its outgoing clip, centred (6 + 6).
     const Clip &v = loaded.project->sequences[0].videoTracks[0].clips[0];
-    const EffectSpan *transition = v.transitionAt(ClipEdge::Tail);
+    const TransitionSpan *transition = v.transitionAt(ClipEdge::Tail);
     REQUIRE(transition != nullptr);
     CHECK(transition->id == SpanId{15});
     CHECK(transition->start == -f30(6));
@@ -1012,7 +1011,7 @@ TEST_CASE("ProjectJSON: a version 4 fade out reaching into an incoming crossfade
     const Clip *clip = sequence.findClip(ClipId{14});
     REQUIRE(clip != nullptr);
     CHECK(clipFadeLength(*clip, ClipEdge::Tail) == f30(55)); // 60 - ceil(10 / 2)
-    const EffectSpan *crossfade = sequence.findSpan(SpanId{16});
+    const TransitionSpan *crossfade = sequence.findTransition(SpanId{16});
     REQUIRE(crossfade != nullptr);
     CHECK(crossfade->end == f30(5));
     CHECK(anyContains(loaded.warnings, "the fade out (57/30 "));
@@ -1049,7 +1048,7 @@ TEST_CASE("ProjectJSON: a version 4 fade out against an odd-length crossfade kee
     const Clip *clip = sequence.findClip(ClipId{14});
     REQUIRE(clip != nullptr);
     CHECK(clipFadeLength(*clip, ClipEdge::Tail) == f30(54)); // 60 - ceil(11 / 2)
-    const EffectSpan *crossfade = sequence.findSpan(SpanId{16});
+    const TransitionSpan *crossfade = sequence.findTransition(SpanId{16});
     REQUIRE(crossfade != nullptr);
     CHECK(crossfade->end == f30(6));
     CHECK(loaded.warnings.size() == 1); // the migration's own, and nothing left for the loader to prune
@@ -1115,7 +1114,7 @@ TEST_CASE("ProjectJSON: loading repairs what it safely can and refuses the rest 
         json doc = fx.document();
         const ProjectLoadResult r = projectFromJson(doc);
         REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
-        CHECK(r.project->sequences[0].findSpan(fadeIn) == nullptr);
+        CHECK(r.project->sequences[0].findTransition(fadeIn) == nullptr);
         CHECK(anyContains(r.warnings, "was removed: "));
         CHECK(anyContains(r.warnings, "touches the start of clip " + std::to_string(fx.b.value())));
         CHECK_FALSE(validateProject(*r.project).has_value());
@@ -1143,7 +1142,7 @@ TEST_CASE("ProjectJSON: loading repairs what it safely can and refuses the rest 
             const ProjectLoadResult r = projectFromJson(doc);
             REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
             CHECK(r.project->sequences[0].findSpan(fx.late)->lane == 1);
-            CHECK(r.project->sequences[0].findSpan(fadeOut)->lane == kTransitionLane);
+            CHECK(r.project->sequences[0].findTransition(fadeOut)->lane == kTransitionLane);
             CHECK(anyContains(r.warnings, "lane " + std::to_string(lane) + " is not an effect lane (1 to 3); moved to lane 1"));
             CHECK(anyContains(r.warnings, "a transition lies on lane 0, found lane " + std::to_string(lane) +
                                               "; moved to lane 0"));
@@ -1390,7 +1389,7 @@ TEST_CASE("ProjectJSON: a version 5 file with version 6 content opens with a war
                                        "version: kept, and the project is saved as version 7"));
     const Sequence &sequence = loaded.project->sequences[0];
     CHECK(sequence.findClip(ClipId{15})->reversed);
-    CHECK(sequence.findSpan(SpanId{14})->transition == TransitionKind::WipeLeft);
+    CHECK(sequence.findTransition(SpanId{14})->kind == TransitionKind::WipeLeft);
     // Saved in the current version, with both.
     const json saved = projectToJson(*loaded.project);
     CHECK(saved.at("schemaVersion") == kProjectSchemaVersion);

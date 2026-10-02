@@ -47,20 +47,20 @@ TEST_CASE("SplitClip inside a transition range is refused unless allowed") {
         applyReversible(fx.project, left);
         // The tail span moved to the right piece, which now owns the cut.
         const Clip *owner = nullptr;
-        REQUIRE(fx.sequence().findSpan(fx.t, &owner) != nullptr);
+        REQUIRE(fx.sequence().findTransition(fx.t, &owner) != nullptr);
         CHECK(owner->id == left.createdClipIds()[0]);
         SplitClip right(fx.seq, fx.b, f30(70));
         const EditResult r = applyReversible(fx.project, right);
         CHECK(r.droppedTransitionIds.empty());
-        CHECK(fx.span(fx.t) != nullptr);
+        CHECK(fx.transition(fx.t) != nullptr);
     }
     SUBCASE("allowed: the transition is dropped and reported") {
         SplitClip split(fx.seq, fx.a, f30(55), SplitOptions{true, true});
         const EditResult r = applyReversible(fx.project, split);
         CHECK(r.droppedTransitionIds == std::vector<SpanId>{fx.t});
-        CHECK(fx.span(fx.t) == nullptr);
+        CHECK(fx.transition(fx.t) == nullptr);
         split.revert(fx.project);
-        CHECK(fx.span(fx.t) != nullptr);
+        CHECK(fx.transition(fx.t) != nullptr);
     }
     SUBCASE("allowed on the incoming clip: the dissolve over it goes too") {
         SplitClip split(fx.seq, fx.b, f30(65), SplitOptions{true, true});
@@ -139,8 +139,8 @@ TEST_CASE("Fades always fit the clip after edits that shorten it") {
         CHECK(fadeOut(fx, c) == kCMTimeZero);
         CHECK(fadeIn(fx, right) == kCMTimeZero);
         CHECK(fadeOut(fx, right) == f30(60));
-        CHECK(fx.clip(c).findSpan(in) != nullptr);
-        CHECK(fx.clip(right).findSpan(out) != nullptr);
+        CHECK(fx.clip(c).findTransition(in) != nullptr);
+        CHECK(fx.clip(right).findTransition(out) != nullptr);
     }
     SUBCASE("an insert inside a fade splits the clip: the piece's fade is shortened to fit it") {
         InsertClip insert(fx.seq, f30(30), {place(fx.a1, fx.audioOnly, 600, 630)});
@@ -194,8 +194,8 @@ TEST_CASE("Fades always fit the clip after edits that shorten it") {
         CHECK(fadeIn(fx, c) == f30(200));
         CHECK(fadeOut(fx, c) == f30(100));
         // The spans keep their ids: the fades were changed, not replaced.
-        CHECK(fx.clip(c).findSpan(in) != nullptr);
-        CHECK(fx.clip(c).findSpan(out) != nullptr);
+        CHECK(fx.clip(c).findTransition(in) != nullptr);
+        CHECK(fx.clip(c).findTransition(out) != nullptr);
         SetClipsParams swap(fx.seq, change(f30(100), f30(200)));
         applyReversible(fx.project, swap);
         CHECK(fadeIn(fx, c) == f30(100));
@@ -218,7 +218,7 @@ TEST_CASE("A fade out never removes the crossfade coming into its clip (review M
     const ClipId b = fx.addClip(fx.a1, fx.audioOnly, 60, 90, 300);
     const SpanId crossfade = fx.addTransition(fx.a1, a, b, 30);
     fx.requireValid();
-    REQUIRE(fx.span(crossfade)->end == f30(15));
+    REQUIRE(fx.transition(crossfade)->end == f30(15));
     auto fadeOutOf = [&](ClipId clip, CMTime length) {
         ClipParamsChange change;
         change.clipId = clip;
@@ -230,12 +230,12 @@ TEST_CASE("A fade out never removes the crossfade coming into its clip (review M
         const EditResult r = applyRefused(fx.project, tooLong, EditError::Overlap);
         CHECK(r.message.find("crossfade coming into clip") != std::string::npos);
         CHECK(r.message.find("75/30") != std::string::npos);
-        CHECK(fx.span(crossfade) != nullptr);
+        CHECK(fx.transition(crossfade) != nullptr);
         SetClipsParams fits(fx.seq, fadeOutOf(b, f30(75)));
         const EditResult ok = applyReversible(fx.project, fits);
         CHECK(ok.droppedTransitionIds.empty());
         CHECK(fadeOut(fx, b) == f30(75));
-        CHECK(fx.span(crossfade) != nullptr);
+        CHECK(fx.transition(crossfade) != nullptr);
     }
     SUBCASE("a tail trim shortens the fade out to leave the crossfade its frames") {
         SetClipsParams fade(fx.seq, fadeOutOf(b, f30(70)));
@@ -243,7 +243,7 @@ TEST_CASE("A fade out never removes the crossfade coming into its clip (review M
         TrimClipTail trim(fx.seq, b, f30(140)); // B is 80 frames now
         const EditResult r = applyReversible(fx.project, trim);
         CHECK(r.droppedTransitionIds.empty());
-        CHECK(fx.span(crossfade) != nullptr);
+        CHECK(fx.transition(crossfade) != nullptr);
         CHECK(fadeOut(fx, b) == f30(65));
     }
     SUBCASE("a trim leaving no room removes the fade out (reported), never the crossfade") {
@@ -252,7 +252,7 @@ TEST_CASE("A fade out never removes the crossfade coming into its clip (review M
         const SpanId out = fx.clip(b).transitionAt(ClipEdge::Tail)->id;
         TrimClipTail trim(fx.seq, b, f30(75)); // B is 15 frames: all under the crossfade
         const EditResult r = applyReversible(fx.project, trim);
-        CHECK(fx.span(crossfade) != nullptr);
+        CHECK(fx.transition(crossfade) != nullptr);
         CHECK(fadeOut(fx, b) == kCMTimeZero);
         CHECK(r.droppedTransitionIds == std::vector<SpanId>{out});
     }
@@ -270,21 +270,21 @@ TEST_CASE("SetTransitionKind changes a video transition's kind, undoably, and no
     for (const TransitionKind kind : kTransitionKinds) {
         CAPTURE(nameOf(kind));
         for (const SpanId id : {fx.t, videoCut, fade}) {
-            const EffectSpan before = *fx.span(id);
-            const EffectSpan audioBefore = *fx.span(audioCut);
+            const TransitionSpan before = *fx.transition(id);
+            const TransitionSpan audioBefore = *fx.transition(audioCut);
             const TransitionRole roleBefore = findTransition(fx.sequence(), id)->role;
             SetTransitionKind edit(fx.seq, id, kind);
             applyReversible(fx.project, edit);
-            const EffectSpan &after = *fx.span(id);
-            CHECK(after.transition == kind);
+            const TransitionSpan &after = *fx.transition(id);
+            CHECK(after.kind == kind);
             CHECK(identical(after.start, before.start));
             CHECK(identical(after.end, before.end));
             CHECK(after.edge == before.edge);
-            CHECK(*fx.span(audioCut) == audioBefore); // the crossfade has no kind
+            CHECK(*fx.transition(audioCut) == audioBefore); // the crossfade has no kind
             CHECK(findTransition(fx.sequence(), id)->role == roleBefore);
         }
     }
-    CHECK(fx.span(fx.t)->transition == TransitionKind::Iris);
+    CHECK(fx.transition(fx.t)->kind == TransitionKind::Iris);
     CHECK(findTransition(fx.sequence(), fade)->role == TransitionRole::FadeOut);
 }
 

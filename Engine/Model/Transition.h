@@ -1,4 +1,4 @@
-// Transitions: what a lane-0 effect span (EffectSpan.h, SpanKind::Transition) does.
+// Transitions: what a TransitionSpan (EffectSpan.h; lane 0 of a clip, Clip::transitions) does.
 //
 // A transition is a span on lane 0 of the clip that owns it. Where it sits decides its role:
 // - At the clip's tail (ClipEdge::Tail) it covers the timeline range [cut + start, cut + end]

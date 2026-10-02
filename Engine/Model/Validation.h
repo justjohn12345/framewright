@@ -42,7 +42,7 @@ std::optional<std::string> videoParamsProblem(const VideoParams &params);
 std::optional<std::string> effectSpanProblem(const EffectSpan &span, const Clip &clip, TrackKind kind);
 
 enum class TransitionIssueKind {
-    Structure,           // not a lane-0 transition span, keyframes, offsets on the wrong side of the edge
+    Structure,           // a shaped audio transition, offsets on the wrong side of the edge
     NotAdjacent,         // a span running past the owner's end but no clip touches that end
     BadDuration,         // empty, times not exact, or a cross dissolve off the sequence frame grid
     TooLong,             // longer than the clip it lies in (the owner, or the next clip)
@@ -64,7 +64,7 @@ struct TransitionIssue {
 // the owner's and the next clip's lengths and media (handles), and no overlap with the owner's
 // other lane-0 span or the next clip's tail span.
 std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const Track &track, const Clip &owner,
-                                                   const EffectSpan &span, CMTime frameDuration);
+                                                   const TransitionSpan &span, CMTime frameDuration);
 
 // Removes the lane-0 spans of `sequence` that are not valid transitions (checkTransitionSpan), as
 // every edit does after it ran (normalizeSequence) and loading does: two transitions that meet (a

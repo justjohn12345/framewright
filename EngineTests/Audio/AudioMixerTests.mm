@@ -84,10 +84,8 @@ struct MixFixture {
             !(t.find(from)->timelineEnd() == t.find(to)->timelineStart)) {
             throw std::logic_error("addTransition: the clips do not meet on the track");
         }
-        EffectSpan span;
+        TransitionSpan span;
         span.id = project.ids.make<SpanId>();
-        span.lane = kTransitionLane;
-        span.kind = SpanKind::Transition;
         span.edge = ClipEdge::Tail;
         span.start = CMTimeMake(-(frames / 2), 30);
         span.end = CMTimeMake(frames - frames / 2, 30);
@@ -120,10 +118,8 @@ struct MixFixture {
 
     // A lane-0 fade of `length` at `edge` of `clip` (head: fade in; tail: fade out ending on its end).
     void addFade(Clip &clip, ClipEdge edge, CMTime length) {
-        EffectSpan span;
+        TransitionSpan span;
         span.id = project.ids.make<SpanId>();
-        span.lane = kTransitionLane;
-        span.kind = SpanKind::Transition;
         span.edge = edge;
         span.start = edge == ClipEdge::Head ? kCMTimeZero : CMTimeMultiply(length, -1);
         span.end = edge == ClipEdge::Head ? length : kCMTimeZero;

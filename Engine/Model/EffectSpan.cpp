@@ -188,8 +188,12 @@ bool operator==(const ForeignSpanContent &a, const ForeignSpanContent &b) {
 
 bool operator==(const EffectSpan &a, const EffectSpan &b) {
     return a.id == b.id && a.lane == b.lane && a.kind == b.kind && identical(a.start, b.start) &&
-           identical(a.end, b.end) && a.edge == b.edge && a.transition == b.transition && a.tracks == b.tracks &&
-           a.unknownTransitionName == b.unknownTransitionName && a.foreign == b.foreign;
+           identical(a.end, b.end) && a.tracks == b.tracks && a.foreign == b.foreign;
+}
+
+bool operator==(const TransitionSpan &a, const TransitionSpan &b) {
+    return a.id == b.id && a.edge == b.edge && identical(a.start, b.start) && identical(a.end, b.end) &&
+           a.kind == b.kind && a.unknownKindName == b.unknownKindName && a.foreignFields == b.foreignFields;
 }
 
 namespace {
@@ -240,7 +244,7 @@ double spanEdgeValue(const EffectSpan &span, SpanParameter parameter, bool atEnd
 }
 
 bool spanActsAt(const EffectSpan &span, const ExactTime &time) {
-    return !span.isTransition() && time.compare(span.start) >= 0;
+    return time.compare(span.start) >= 0;
 }
 
 double spanContributionAt(const EffectSpan &span, SpanParameter parameter, const ExactTime &time) {
@@ -254,7 +258,7 @@ double spanContributionAt(const EffectSpan &span, SpanParameter parameter, const
 }
 
 double spanContributionFromLeft(const EffectSpan &span, SpanParameter parameter, const ExactTime &time) {
-    if (span.isTransition() || time.compare(span.start) <= 0) {
+    if (time.compare(span.start) <= 0) {
         return neutralValue(parameter);
     }
     if (time.compare(span.end) > 0) {
@@ -280,12 +284,6 @@ KeyframeInterpolation spanInterpolation(const EffectSpan &span) {
 
 std::optional<std::string> spanTracksProblem(const EffectSpan &span) {
     const std::string where = std::string(displayNameOf(span.kind)) + " span " + std::to_string(span.id.value());
-    if (span.isTransition()) {
-        if (!span.tracks.empty()) {
-            return where + ": a transition has no keyframes";
-        }
-        return std::nullopt;
-    }
     const auto start = ExactTime::from(span.start);
     const auto end = ExactTime::from(span.end);
     const auto length = start && end ? end->minus(*start) : std::nullopt;
@@ -322,7 +320,7 @@ std::optional<SpanSplit> splitSpan(const EffectSpan &span, CMTime at, SpanCutPro
     SpanCutProblem ignored = SpanCutProblem::None;
     SpanCutProblem &why = problem != nullptr ? *problem : ignored;
     why = SpanCutProblem::None;
-    if (span.isTransition() || span.isUnknownKind() || !isNumeric(at) || !(span.start < at) || !(at < span.end)) {
+    if (span.isUnknownKind() || !isNumeric(at) || !(span.start < at) || !(at < span.end)) {
         return std::nullopt;
     }
     const auto relative = checkedSubtract(at, span.start);
@@ -369,7 +367,7 @@ std::optional<EffectSpan> clipSpan(const EffectSpan &span, CMTime from, CMTime t
     SpanCutProblem ignored = SpanCutProblem::None;
     SpanCutProblem &why = problem != nullptr ? *problem : ignored;
     why = SpanCutProblem::None;
-    if (span.isTransition() || !(span.start < to) || !(from < span.end) || !(from < to)) {
+    if (!(span.start < to) || !(from < span.end) || !(from < to)) {
         return std::nullopt;
     }
     if (span.isUnknownKind() && (span.start < from || to < span.end)) {

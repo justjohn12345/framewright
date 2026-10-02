@@ -83,13 +83,11 @@ TEST_CASE("Model: derived source times are exact even when no CMTime can hold th
 TEST_CASE("Model: lane-0 fades shrink to fit when a clip gets shorter") {
     Clip clip;
     clip.timelineDuration = CMTimeMake(30, 30);
-    EffectSpan in;
+    TransitionSpan in;
     in.id = SpanId{1};
-    in.lane = kTransitionLane;
-    in.kind = SpanKind::Transition;
     in.edge = ClipEdge::Head;
     in.end = CMTimeMake(20, 30);
-    EffectSpan out = in;
+    TransitionSpan out = in;
     out.id = SpanId{2};
     out.edge = ClipEdge::Tail;
     out.start = CMTimeMake(-10, 30);
@@ -109,7 +107,7 @@ TEST_CASE("Model: lane-0 fades shrink to fit when a clip gets shorter") {
     SUBCASE("a fade gives way to a cross dissolve at the other end, whichever edge was edited") {
         Clip both;
         both.timelineDuration = CMTimeMake(30, 30);
-        EffectSpan dissolve = out;
+        TransitionSpan dissolve = out;
         dissolve.start = CMTimeMake(-12, 30);
         dissolve.end = CMTimeMake(12, 30);
         both.transitions = {in, dissolve};
@@ -202,11 +200,11 @@ TEST_CASE("Model: sequence lookups and transition placement") {
     CHECK(s.trackOfClip(a)->id == fx.v1);
     const Clip *owner = nullptr;
     const Track *track = nullptr;
-    const EffectSpan *span = s.findSpan(t, &owner, &track);
+    const TransitionSpan *span = s.findTransition(t, &owner, &track);
     REQUIRE(span != nullptr);
     CHECK(owner->id == a);
     CHECK(track->id == fx.v1);
-    CHECK(s.findSpan(SpanId{999}) == nullptr);
+    CHECK(s.findTransition(SpanId{999}) == nullptr);
     CHECK(touchingClip(*track, fx.clip(a), ClipEdge::Tail)->id == b);
     CHECK(touchingClip(*track, fx.clip(b), ClipEdge::Head)->id == a);
     CHECK(touchingClip(*track, fx.clip(a), ClipEdge::Head) == nullptr);
@@ -318,10 +316,8 @@ TEST_CASE("Model: validateProject catches broken invariants") {
     }
     SUBCASE("non-finite or out-of-range video parameters, non-finite gain, bad fades") {
         auto fade = [](ClipEdge edge, CMTime start, CMTime end) {
-            EffectSpan span;
+            TransitionSpan span;
             span.id = SpanId{edge == ClipEdge::Head ? 900u : 901u};
-            span.lane = kTransitionLane;
-            span.kind = SpanKind::Transition;
             span.edge = edge;
             span.start = start;
             span.end = end;
@@ -376,7 +372,7 @@ TEST_CASE("Model: validateProject catches broken invariants") {
             for (int field = 0; field < 10; ++field) {
                 Fixture copy = fx;
                 Clip &clip = *copy.sequence().findClip(a);
-                EffectSpan &dissolve = *clip.transitionAt(ClipEdge::Tail);
+                TransitionSpan &dissolve = *clip.transitionAt(ClipEdge::Tail);
                 switch (field) {
                 case 0: clip.timelineStart = modify(clip.timelineStart); break;
                 case 1: clip.timelineDuration = modify(clip.timelineDuration); break;
@@ -506,7 +502,7 @@ TEST_CASE("Model: validateProject catches broken invariants") {
         expectProblem(fx, "no clip touches that end");
         fx.sequence().findClip(b)->timelineStart = f30(60);
         fx.requireValid();
-        EffectSpan &t = *fx.sequence().findClip(a)->transitionAt(ClipEdge::Tail);
+        TransitionSpan &t = *fx.sequence().findClip(a)->transitionAt(ClipEdge::Tail);
         t.end = f30(61);
         expectProblem(fx, "longer than clip");
         t.end = f30(5);
@@ -527,9 +523,6 @@ TEST_CASE("Model: validateProject catches broken invariants") {
         fx.addTailTransition(a, 2, 0);
         expectProblem(fx, "more than one transition at its tail");
         fx.sequence().findClip(a)->transitions.pop_back();
-        fx.sequence().findClip(a)->transitions[0].lane = 1;
-        expectProblem(fx, "lane 0 only");
-        fx.sequence().findClip(a)->transitions[0].lane = 0;
         fx.requireValid();
         fx.addSpan(a, SpanKind::Motion, 0, f30(30), f30(40));
         expectProblem(fx, "lane 0 holds transitions only");

@@ -180,10 +180,8 @@ class ExportRig {
             !(clip(from).timelineEnd() == clip(to).timelineStart)) {
             throw std::logic_error("addTransition: the clips do not meet at a cut on the track");
         }
-        EffectSpan span;
+        TransitionSpan span;
         span.id = project.ids.make<SpanId>();
-        span.lane = kTransitionLane;
-        span.kind = SpanKind::Transition;
         span.edge = ClipEdge::Tail;
         span.start = CMTimeMake(-(frames / 2), 30);
         span.end = CMTimeMake(frames - frames / 2, 30);
@@ -192,10 +190,8 @@ class ExportRig {
     }
     // A lane-0 fade of `frames` at `edge` of `id` (head: from silence or black; tail: to it).
     void addFade(ClipId id, ClipEdge edge, int64_t frames) {
-        EffectSpan span;
+        TransitionSpan span;
         span.id = project.ids.make<SpanId>();
-        span.lane = kTransitionLane;
-        span.kind = SpanKind::Transition;
         span.edge = edge;
         span.start = edge == ClipEdge::Head ? kCMTimeZero : CMTimeMake(-frames, 30);
         span.end = edge == ClipEdge::Head ? CMTimeMake(frames, 30) : kCMTimeZero;

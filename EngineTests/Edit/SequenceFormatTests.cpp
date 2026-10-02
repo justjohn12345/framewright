@@ -423,10 +423,10 @@ TEST_CASE("SetSequenceFormat: a frame-rate change moves clip edges to the new gr
     CHECK(report.transitionsKept == 3);
     CHECK(report.transitionsShortened.empty());
     CHECK(report.transitionsRemoved.empty());
-    CHECK(identical(fx.span(dissolve)->start, -f25(5)));
-    CHECK(identical(fx.span(dissolve)->end, f25(5)));
-    CHECK(identical(fx.span(fadeOut)->start, -f25(15)));
-    CHECK(identical(fx.span(fadeIn)->end, f25(9)));
+    CHECK(identical(fx.transition(dissolve)->start, -f25(5)));
+    CHECK(identical(fx.transition(dissolve)->end, f25(5)));
+    CHECK(identical(fx.transition(fadeOut)->start, -f25(15)));
+    CHECK(identical(fx.transition(fadeIn)->end, f25(9)));
     // An effect span stays on its pictures. A still's "source" time is the time into the clip, so when
     // its start moves (7/30 s -> 6/25 s, 1/150 s earlier) its span's times move the other way and it
     // keeps its timeline frames; a movie clip's spans keep their source times (see the next case).
@@ -470,10 +470,8 @@ TEST_CASE("SetSequenceFormat: transitions that no longer fit are shortened or re
     const AssetId shortId = fx.project.addAsset(shortMedia);
     const ClipId a = add60(fx.v1, shortId, 0, 120, kCMTimeZero);
     const ClipId b = add60(fx.v1, fx.video60, 120, 120, CMTimeMake(360, 60)); // media [6, 8) of 10 s
-    EffectSpan span;
+    TransitionSpan span;
     span.id = fx.project.ids.make<SpanId>();
-    span.lane = kTransitionLane;
-    span.kind = SpanKind::Transition;
     span.edge = ClipEdge::Tail;
     span.start = CMTimeMake(-10, 60);
     span.end = CMTimeMake(10, 60);
@@ -481,10 +479,8 @@ TEST_CASE("SetSequenceFormat: transitions that no longer fit are shortened or re
     const SpanId dissolve = span.id;
     // V2: C [0, 6) at 60 fps (0.1 s) with a fade in of 5 frames and nothing after it.
     const ClipId c = add60(fx.v2, fx.video60, 0, 6, kCMTimeZero);
-    EffectSpan fade;
+    TransitionSpan fade;
     fade.id = fx.project.ids.make<SpanId>();
-    fade.lane = kTransitionLane;
-    fade.kind = SpanKind::Transition;
     fade.edge = ClipEdge::Head;
     fade.start = kCMTimeZero;
     fade.end = CMTimeMake(5, 60);
@@ -499,16 +495,16 @@ TEST_CASE("SetSequenceFormat: transitions that no longer fit are shortened or re
     CHECK(fx.clip(a).timelineEnd() == CMTimeMake(48, 24));
     CHECK(fx.clip(b).timelineEnd() == CMTimeMake(96, 24));
     // The dissolve: 10 frames before the cut fit, after it A's 0.2 s of media give 4 whole frames.
-    REQUIRE(fx.span(dissolve) != nullptr);
-    CHECK(identical(fx.span(dissolve)->start, CMTimeMake(-10, 24)));
-    CHECK(identical(fx.span(dissolve)->end, CMTimeMake(4, 24)));
+    REQUIRE(fx.transition(dissolve) != nullptr);
+    CHECK(identical(fx.transition(dissolve)->start, CMTimeMake(-10, 24)));
+    CHECK(identical(fx.transition(dissolve)->end, CMTimeMake(4, 24)));
     CHECK(report.transitionsShortened == std::vector<SpanId>{dissolve, fade.id});
     CHECK(anyContains(report.sentences, "The cross dissolve between “short.mov” and “video60.mkv” is shortened "
                                         "from 20 frames to 14 frames: “short.mov” has no more media after its out "
                                         "point."));
     // C: 0.1 s is 2.4 frames at 24 fps -> 2 frames; its 5-frame fade in keeps 2 (the clip's length).
     CHECK(fx.clip(c).timelineDuration == CMTimeMake(2, 24));
-    const EffectSpan *fadeIn = fx.clip(c).transitionAt(ClipEdge::Head);
+    const TransitionSpan *fadeIn = fx.clip(c).transitionAt(ClipEdge::Head);
     REQUIRE(fadeIn != nullptr);
     CHECK(identical(fadeIn->end, CMTimeMake(2, 24)));
     CHECK(anyContains(report.sentences, "The fade in at the start of “video60.mkv” is shortened from 5 frames to 2 "
@@ -537,8 +533,8 @@ TEST_CASE("SetSequenceFormat: an end on the media's end takes the cut to the fra
     CHECK(fx.clip(b).timelineStart == f25(37));
     CHECK(fx.clip(b).sourceIn == bBefore.sourceIn + (f25(37) - f30(45))); // a trim: B's head shows 0.02 s more
     CHECK(command.report().clipsMoved == 0);
-    REQUIRE(fx.span(fade) != nullptr);
-    CHECK(identical(fx.span(fade)->start, -f25(6)));
+    REQUIRE(fx.transition(fade) != nullptr);
+    CHECK(identical(fx.transition(fade)->start, -f25(6)));
     CHECK(command.report().transitionsKept == 1);
 }
 
@@ -1461,7 +1457,7 @@ TEST_CASE("SetSequenceFormat: a cross dissolve with not one frame left is remove
     INFO(joined(report.sentences));
     CHECK(fx.clip(a).timelineEnd() == f25(38));
     CHECK(fx.clip(b).timelineStart == f25(38));
-    CHECK(fx.span(dissolve) == nullptr);
+    CHECK(fx.transition(dissolve) == nullptr);
     CHECK(report.transitionsRemoved == std::vector<SpanId>{dissolve});
     CHECK(result.droppedTransitionIds.empty()); // removed on purpose, named in the report
     CHECK(anyContains(report.sentences, "The cross dissolve between “ends.mov” and “av30.mov” is removed: not one "

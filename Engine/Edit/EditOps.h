@@ -526,8 +526,9 @@ class RemoveSpans final : public SequenceCommand {
 };
 
 // The timeline range an effect span covers (exact where representable, else rounded), or the
-// range a transition span covers; nullopt on overflow.
+// range a transition span covers (placeTransition); nullopt on overflow.
 std::optional<TimeRange> spanTimelineRange(const Clip &clip, const EffectSpan &span, const Track &track);
+std::optional<TimeRange> spanTimelineRange(const Clip &clip, const TransitionSpan &span, const Track &track);
 
 // The free timeline ranges (whole frames, in order) of `lane` of `clip`: its frames that no span of
 // the lane covers, `except` left out (the span being moved).
@@ -545,6 +546,9 @@ struct MotionFraming {
     double y = 0.0;
     double scale = 1.0;
 };
+
+// The refusal of a Ken Burns move on a span that is not a Motion span (planKenBurns; a transition).
+EditResult kenBurnsNeedsMotionSpan();
 
 // The Position X, Position Y and Scale start and end values of the Motion span `span` of `clip`
 // that make the picture show the framing `start` at the span's start (its first frame) and reach
@@ -663,7 +667,7 @@ CMTime clipFadeLength(const Clip &clip, ClipEdge edge);
 // ----- Transitions (lane-0 spans, Transition.h) -----
 
 // A transition span to add: on `clipId` at `edge`, covering [start, end] relative to that edge
-// (EffectSpan::start/end: a tail span [-before, after] around the cut at the clip's end, a head span
+// (TransitionSpan::start/end: a tail span [-before, after] around the cut at the clip's end, a head span
 // [0, length]).
 struct TransitionSpanRequest {
     ClipId clipId{};
@@ -699,7 +703,7 @@ class AddTransitionSpans final : public SequenceCommand {
     std::vector<SpanId> created_;
 };
 
-// New offsets for a transition span (EffectSpan::start/end relative to its edge).
+// New offsets for a transition span (TransitionSpan::start/end relative to its edge).
 struct TransitionRangeChange {
     SpanId spanId{};
     CMTime start = kCMTimeZero;
@@ -729,7 +733,7 @@ class SetTransitionRanges final : public SequenceCommand {
 // Sets the kind of a video transition span (Transition.h: a cross dissolve, a wipe or the iris),
 // whatever its role: across a cut, or a fade to or from black at a free edge. Its range, its role and
 // its linked audio transition are unchanged (audio has no kinds: a crossfade or a fade). A kind
-// from a newer version's file (EffectSpan::unknownTransitionName) is replaced. Refused:
+// from a newer version's file (TransitionSpan::unknownKindName) is replaced. Refused:
 // TransitionNotFound (no transition span with that id, an effect span's id included),
 // TrackKindMismatch (a wipe or the iris on an audio track; Cross Dissolve, what every audio
 // transition is, succeeds and changes nothing, review L9), TrackLocked. Giving it the kind it has
@@ -767,7 +771,7 @@ class ClipIndex {
     // The clip `id` and its track, or {nullptr, nullptr}.
     std::pair<const Clip *, const Track *> find(ClipId id) const;
     // linkedTransition for the lane-0 `span` of `owner` on `track` (all of this sequence).
-    std::optional<SpanId> linkedTransition(const Track &track, const Clip &owner, const EffectSpan &span) const;
+    std::optional<SpanId> linkedTransition(const Track &track, const Clip &owner, const TransitionSpan &span) const;
 
   private:
     std::unordered_map<ClipId, std::pair<const Clip *, const Track *>> clips_;
@@ -826,7 +830,7 @@ struct TransitionLimit {
 TransitionLimit transitionLimit(const Project &project, SequenceId sequenceId, ClipId fromClipId, ClipId toClipId,
                                 SpanId existing = {});
 
-// The tail-span offsets (EffectSpan::start, end) of a transition of `frames` whole frames centred on
+// The tail-span offsets (TransitionSpan::start, end) of a transition of `frames` whole frames centred on
 // its cut: floor(frames / 2) frames before it, the rest after (how version 4 drew transitions).
 std::pair<CMTime, CMTime> centredTransitionOffsets(std::int64_t frames, CMTime frameDuration);
 

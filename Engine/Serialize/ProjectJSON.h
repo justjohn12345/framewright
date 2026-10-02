@@ -12,7 +12,8 @@
 // derived; "reversed": true (left out when false) marks a clip that plays its media backwards (its
 // times are clip times, Clip.h "Reverse"). Its "video" object holds the static Motion values and
 // "audio" its "gainDb"; "spans"
-// (left out when empty) lists its effect spans (EffectSpan.h): {"id", "lane", "kind": "transition"
+// (left out when empty) lists its spans in one list, its transitions (Clip::transitions, lane 0) then
+// its effect spans (EffectSpan.h): {"id", "lane", "kind": "transition"
 // | "motion" | "opacity" | "gain", "start", "end"} plus, for a transition, "edge": "head" | "tail"
 // and "transition": "crossDissolve" | "wipeLeft" | "wipeRight" | "wipeUp" | "wipeDown" | "iris", and
 // for an effect span "tracks": {"x" | "y" | "scale" |

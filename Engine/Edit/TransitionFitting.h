@@ -44,7 +44,7 @@ const char *fadeTargetName(TrackKind trackKind);
 // `maximum` is the length in time (zero when no frame fits).
 TransitionLimit fadeLimit(const Clip &clip, const Track &track, ClipEdge edge, CMTime frameDuration);
 
-// The offsets (EffectSpan::start, end) `transition` gets at a length of `frames` whole frames: a
+// The offsets (TransitionSpan::start, end) `transition` gets at a length of `frames` whole frames: a
 // centred cross dissolve stays centred, an uneven one keeps its share before the cut in proportion
 // (rounded down), a fade keeps its edge.
 std::pair<CMTime, CMTime> resizedTransitionOffsets(const TransitionPlacement &transition, std::int64_t frames,

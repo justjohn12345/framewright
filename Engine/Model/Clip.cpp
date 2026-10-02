@@ -50,7 +50,7 @@ template <typename Include, typename Apply>
 void forEachInCompositionOrder(const std::vector<EffectSpan> &spans, Include include, Apply apply) {
     for (int lane = kFirstEffectLane; lane <= kLastLane; ++lane) {
         for (const EffectSpan &span : spans) {
-            if (span.lane == lane && !span.isTransition() && include(span)) {
+            if (span.lane == lane && include(span)) {
                 apply(span);
             }
         }
@@ -425,14 +425,25 @@ void Clip::sortSpans() {
 }
 
 const EffectSpan *Clip::findSpan(SpanId spanId) const {
-    for (const std::vector<EffectSpan> *list : {&transitions, &spans}) {
-        for (const EffectSpan &span : *list) {
-            if (span.id == spanId) {
-                return &span;
-            }
+    for (const EffectSpan &span : spans) {
+        if (span.id == spanId) {
+            return &span;
         }
     }
     return nullptr;
+}
+
+const TransitionSpan *Clip::findTransition(SpanId spanId) const {
+    for (const TransitionSpan &span : transitions) {
+        if (span.id == spanId) {
+            return &span;
+        }
+    }
+    return nullptr;
+}
+
+TransitionSpan *Clip::findTransition(SpanId spanId) {
+    return const_cast<TransitionSpan *>(static_cast<const Clip *>(this)->findTransition(spanId));
 }
 
 EffectSpan *Clip::findSpan(SpanId spanId) {

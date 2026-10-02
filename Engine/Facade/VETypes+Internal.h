@@ -59,6 +59,9 @@ VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &pr
 VETrackInfo *makeTrackInfo(const Track &track, NSInteger index);
 VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Track &track, const Sequence &sequence,
                              const ClipIndex *index = nullptr);
+// A transition as the app sees every span (VEEffectSpan, kind VESpanKindTransition, lane 0).
+VEEffectSpan *makeEffectSpan(const TransitionSpan &span, const Clip &clip, const Track &track,
+                             const Sequence &sequence, const ClipIndex *index = nullptr);
 // Whether the app is shown `span`: every span but one of a kind from a newer version (SpanKind::Unknown),
 // which the engine keeps as the file wrote it without showing, playing or editing it.
 inline bool isShownSpan(const EffectSpan &span) {

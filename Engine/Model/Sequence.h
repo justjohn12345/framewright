@@ -133,9 +133,17 @@ struct Sequence {
     const Track *trackOfClip(ClipId clipId) const;
     Track *trackOfClip(ClipId clipId);
 
-    // The span with `spanId` on any clip, or nullptr; `owner` / `track` receive where it lives.
+    // The effect span with `spanId` on any clip, or nullptr; `owner` / `track` receive where it lives.
     const EffectSpan *findSpan(SpanId spanId, const Clip **owner = nullptr, const Track **track = nullptr) const;
     EffectSpan *findSpan(SpanId spanId, Clip **owner = nullptr, Track **track = nullptr);
+    // The transition with `spanId` on any clip, or nullptr; `owner` / `track` receive where it lives.
+    const TransitionSpan *findTransition(SpanId spanId, const Clip **owner = nullptr,
+                                         const Track **track = nullptr) const;
+    TransitionSpan *findTransition(SpanId spanId, Clip **owner = nullptr, Track **track = nullptr);
+    // Whether a clip of the sequence has a span (either kind) with `spanId`.
+    bool hasSpan(SpanId spanId) const {
+        return findSpan(spanId) != nullptr || findTransition(spanId) != nullptr;
+    }
 };
 
 // Bit-for-bit equality of every field.
@@ -153,7 +161,7 @@ CMTime incomingTransitionInside(const Track &track, const Clip &clip);
 struct TransitionPlacement {
     const Track *track = nullptr;
     const Clip *owner = nullptr;
-    const EffectSpan *span = nullptr;
+    const TransitionSpan *span = nullptr;
     TransitionRole role = TransitionRole::FadeOut;
     // CrossDissolve: the clip touching the owner's end (nullptr when none touches it: the span is
     // then invalid, see checkTransitionSpan).
@@ -164,7 +172,7 @@ struct TransitionPlacement {
 
 // Where the lane-0 span `span` of `owner` (on `track`) acts. Nullopt when the times cannot be
 // added (only for invalid spans).
-std::optional<TransitionPlacement> placeTransition(const Track &track, const Clip &owner, const EffectSpan &span);
+std::optional<TransitionPlacement> placeTransition(const Track &track, const Clip &owner, const TransitionSpan &span);
 
 // The transition acting at timeline time `t` on `track`: the tail span of the clip at `t` or of the
 // clip touching its start, or its head span, whose range contains `t`; nullopt when none does.

@@ -54,7 +54,7 @@ TransitionLimit fadeLimit(const Clip &clip, const Track &track, ClipEdge edge, C
     CMTime taken = kCMTimeZero;
     CMTime incoming = kCMTimeZero;
     if (edge == ClipEdge::Head) {
-        if (const EffectSpan *tail = owner.transitionAt(ClipEdge::Tail)) {
+        if (const TransitionSpan *tail = owner.transitionAt(ClipEdge::Tail)) {
             taken = -tail->start;
         }
     } else {

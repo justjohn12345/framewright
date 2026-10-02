@@ -85,7 +85,7 @@ LayerTransition makeTransition(const TransitionPlacement &placement, CMTime t, C
                                ClipId partner, std::size_t partnerIndex) {
     LayerTransition transition;
     transition.transitionId = placement.span->id;
-    transition.kind = placement.span->transition;
+    transition.kind = placement.span->kind;
     transition.role = placement.role;
     transition.mix = frameFraction(placement.range, t, frameDuration, Ratio{1, 2});
     const auto [startStep, endStep] = exposureSteps(placement.role);
@@ -281,7 +281,7 @@ AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &pro
             // The cross dissolve into this clip (owned by the clip touching its start).
             std::optional<TransitionPlacement> head;
             if (const Clip *previous = touchingClip(track, clip, ClipEdge::Head)) {
-                if (const EffectSpan *span = previous->transitionAt(ClipEdge::Tail)) {
+                if (const TransitionSpan *span = previous->transitionAt(ClipEdge::Tail)) {
                     head = placeTransition(track, *previous, *span);
                     if (head && head->role != TransitionRole::CrossDissolve) {
                         head.reset();
@@ -301,7 +301,7 @@ AudioGraph Scheduler::audioGraphFor(const Sequence &sequence, const Project &pro
             std::optional<TimeRange> fadeInRange;
             std::optional<TimeRange> fadeOutRange;
             for (const ClipEdge edge : {ClipEdge::Head, ClipEdge::Tail}) {
-                const EffectSpan *span = clip.transitionAt(edge);
+                const TransitionSpan *span = clip.transitionAt(edge);
                 const auto placement = span ? placeTransition(track, clip, *span) : std::nullopt;
                 if (!placement) {
                     continue;

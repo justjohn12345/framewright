@@ -71,7 +71,7 @@ TEST_CASE("Locked tracks: transitions on a locked track cannot change as a side 
     // Locking and unlocking are always possible.
     SetTrackFlags rename(fx.seq, fx.a1, TrackFlagsUpdate{true, true, true, std::string("Locked")});
     applyReversible(fx.project, rename);
-    CHECK(fx.span(t) != nullptr);
+    CHECK(fx.transition(t) != nullptr);
     // A span edit on the locked track is refused too.
     SetTransitionRanges resize(fx.seq, {{t, -f30(6), f30(6)}});
     applyRefused(fx.project, resize, EditError::TrackLocked);

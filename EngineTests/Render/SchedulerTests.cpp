@@ -429,7 +429,7 @@ TEST_CASE("Scheduler: fade envelopes are exactly linear per segment because fade
     const SpanId in = fx.addFade(c, ClipEdge::Head, f30(20));
     const SpanId out = fx.addFade(c, ClipEdge::Tail, f30(20));
     CHECK(problemOf(fx.project).find("meets the fade in") != std::string::npos);
-    fx.sequence().findSpan(out)->start = -f30(10);
+    fx.sequence().findTransition(out)->start = -f30(10);
     ClipParamsChange overlapping{c, std::nullopt, std::nullopt};
     overlapping.fadeOut = f30(20);
     SetClipsParams overlap(fx.seq, {overlapping});
@@ -700,7 +700,7 @@ TEST_CASE("Scheduler: a shaped transition carries its kind to the layers; the so
     for (const TransitionKind kind : kTransitionKinds) {
         CAPTURE(nameOf(kind));
         for (const SpanId id : {videoCut, fadeIn, fadeOut}) {
-            fx.sequence().findSpan(id)->transition = kind;
+            fx.sequence().findTransition(id)->kind = kind;
         }
         fx.requireValid();
         const RenderGraph cut = graphAt(fx, 57);

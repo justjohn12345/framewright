@@ -136,11 +136,9 @@ Project fadedStillProject(TransitionKind kind, int64_t frames, int64_t fadeFrame
     clip.timelineStart = kCMTimeZero;
     clip.timelineDuration = CMTimeMake(frames, 30);
     for (const ClipEdge edge : {ClipEdge::Head, ClipEdge::Tail}) {
-        EffectSpan span;
+        TransitionSpan span;
         span.id = project.ids.make<SpanId>();
-        span.lane = kTransitionLane;
-        span.kind = SpanKind::Transition;
-        span.transition = kind;
+        span.kind = kind;
         span.edge = edge;
         span.start = edge == ClipEdge::Head ? kCMTimeZero : CMTimeMake(-fadeFrames, 30);
         span.end = edge == ClipEdge::Head ? CMTimeMake(fadeFrames, 30) : kCMTimeZero;

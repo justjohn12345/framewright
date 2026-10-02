@@ -277,7 +277,7 @@ void removeDissolvesWithNewPartners(Sequence &sequence, const std::vector<std::p
     for (const auto &[id, partner] : before) {
         Clip *owner = nullptr;
         Track *track = nullptr;
-        const EffectSpan *span = sequence.findSpan(id, &owner, &track);
+        const TransitionSpan *span = sequence.findTransition(id, &owner, &track);
         if (span == nullptr) {
             continue;
         }
@@ -333,7 +333,7 @@ EditResult SequenceCommand::apply(Project &project) {
     droppedTransitions_.clear();
     droppedSpans_.clear();
     for (const SpanRecord &record : spanRecords(*sequence)) {
-        if (working.findSpan(record.id) != nullptr ||
+        if (working.hasSpan(record.id) ||
             std::find(removedOnPurpose_.begin(), removedOnPurpose_.end(), record.id) != removedOnPurpose_.end()) {
             continue;
         }

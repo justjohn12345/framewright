@@ -1,7 +1,7 @@
 // Effect spans: time ranges on a clip's lanes, each with start and end values for what it changes.
 //
 // Lanes. Every clip has up to kLaneCount lanes (the track draws them under the clip). Lane 0 holds
-// the clip's transitions (SpanKind::Transition, see Transition.h), lanes 1-3 its effect spans
+// the clip's transitions (TransitionSpan, see Transition.h), lanes 1-3 its effect spans
 // (Motion and Opacity on video tracks, Gain on audio tracks). Spans of one clip on one lane never
 // overlap; spans on different lanes may, and their effects compose (Clip.h, motionValuesAt).
 //
@@ -10,9 +10,10 @@
 // clip). A trim therefore leaves a span on its pictures (one that cuts through a span clips it,
 // the value at the new edge evaluated exactly; extending the clip again does not restore what was
 // cut), a speed change moves it on the timeline with its pictures, and a split divides it exactly
-// (splitSpan). A span lies within its clip's used source range. A transition span's start and end
-// are sequence-time offsets from the edge it is attached to instead (Transition.h), because a
-// transition stays on its cut and on the frame grid whatever the clip's speed.
+// (splitSpan). A span lies within its clip's used source range. A transition (TransitionSpan, lane 0)
+// is a type of its own: its start and end are sequence-time offsets from the edge it is attached to
+// instead (Transition.h), because a transition stays on its cut and on the frame grid whatever the
+// clip's speed.
 //
 // Values. A span holds keyframe tracks (Keyframes.h) for the parameters of its kind only, with
 // times relative to its start: normally a keyframe at 0 (the start value) and one at the span's
@@ -73,7 +74,7 @@ enum class TrackKind;
 // project file's parser, the track rule and the composition read it from there.
 
 enum class SpanKind {
-    Transition, // lane 0 only: a cross dissolve / crossfade or a fade (Transition.h)
+    Transition, // the project file's kind of a TransitionSpan (lane 0); never an EffectSpan's
     Motion,     // video: position X/Y, scale, rotation
     Opacity,    // video: opacity (a video fade)
     Gain,       // audio: level in dB
@@ -240,31 +241,19 @@ struct SpanTracks {
     }
 };
 
+// An effect span: lanes 1-3 of a clip.
 struct EffectSpan {
     SpanId id;
     int lane = kFirstEffectLane;
-    SpanKind kind = SpanKind::Motion;
-    // Effect spans: [start, end) in the clip's source-time base (exact model times, start < end).
-    // Transition spans: offsets in sequence time from the edge: a tail span covers
-    // [clip end + start, clip end + end] (start <= 0 <= end), a head span
-    // [clip start, clip start + end] (start == 0 < end).
+    SpanKind kind = SpanKind::Motion; // never SpanKind::Transition (lane-0 spans are TransitionSpans)
+    // [start, end) in the clip's source-time base (exact model times, start < end).
     CMTime start = kCMTimeZero;
     CMTime end = kCMTimeZero;
-    ClipEdge edge = ClipEdge::Tail;                     // transition spans only (Tail for effect spans)
-    TransitionKind transition = TransitionKind::CrossDissolve; // transition spans only
-    SpanTracks tracks;                                  // effect spans only; times relative to `start`
-    // Transition spans read from a project file whose kind this version does not know (a newer
-    // version's): the file's name for it, kept so saving writes it back instead of "crossDissolve"
-    // (review L8). The span renders and edits as `transition` (CrossDissolve); choosing a kind
-    // (SetTransitionKind) replaces it. Empty otherwise.
-    std::string unknownTransitionName;
+    SpanTracks tracks; // times relative to `start`
     // What a newer version wrote that this one does not read: an Unknown span's kind and content, a
     // known span's unknown keys and parameters. Empty for every span this version creates.
     ForeignSpanContent foreign;
 
-    bool isTransition() const {
-        return kind == SpanKind::Transition;
-    }
     // A span of a kind from a newer version (SpanKind::Unknown).
     bool isUnknownKind() const {
         return kind == SpanKind::Unknown;
@@ -275,8 +264,32 @@ struct EffectSpan {
 bool operator==(const EffectSpan &a, const EffectSpan &b);
 
 // A lane-0 span: a transition or a fade at an edge of its clip (Transition.h), kept in
-// Clip::transitions apart from the effect spans in Clip::spans.
-using TransitionSpan = EffectSpan;
+// Clip::transitions apart from the clip's effect spans (Clip::spans). Its start and end are offsets
+// in sequence time from the edge it is attached to, because a transition stays on its cut and on the
+// frame grid whatever the clip's speed: a tail span covers [clip end + start, clip end + end]
+// (start <= 0 <= end), a head span [clip start, clip start + end] (start == 0 < end). It has no
+// keyframes; its kind's parameters will be its own (grading decision, section 8).
+struct TransitionSpan {
+    // Every transition lies on lane 0.
+    static constexpr int lane = kTransitionLane;
+
+    SpanId id;
+    ClipEdge edge = ClipEdge::Tail;
+    CMTime start = kCMTimeZero;
+    CMTime end = kCMTimeZero;
+    TransitionKind kind = TransitionKind::CrossDissolve;
+    // Read from a project file whose kind this version does not know (a newer version's): the file's
+    // name for it, kept so saving writes it back instead of "crossDissolve" (review L8). The span
+    // renders and edits as `kind` (CrossDissolve); choosing a kind (SetTransitionKind) replaces it.
+    // Empty otherwise.
+    std::string unknownKindName;
+    // The keys of the span's JSON object this version does not read (a newer version's), as compact
+    // JSON text of an object, written back on save ("" when there are none; review core #9).
+    std::string foreignFields;
+};
+
+// Bit-for-bit equality of every field.
+bool operator==(const TransitionSpan &a, const TransitionSpan &b);
 
 // The value of `parameter` of an effect span at `time` (the clip's source-time base): its track
 // evaluated at `time - start` (holding before the first and after the last keyframe), limited to
@@ -291,7 +304,7 @@ double spanValueFromLeft(const EffectSpan &span, SpanParameter parameter, const 
 double spanEdgeValue(const EffectSpan &span, SpanParameter parameter, bool atEnd);
 
 // Whether the effect span contributes at `time` (the clip's source-time base): from its start on,
-// through its range and after its end (where it holds its end value). Never for a transition span.
+// through its range and after its end (where it holds its end value).
 bool spanActsAt(const EffectSpan &span, const ExactTime &time);
 
 // The value of `parameter` the effect span contributes at `time`: nothing (the neutral value)
@@ -311,7 +324,7 @@ KeyframeInterpolation spanInterpolation(const EffectSpan &span);
 
 // Why the tracks of the effect span `span` are invalid (a track of a parameter its kind does not
 // have, keyframe times not exact and increasing, a keyframe before 0 or after the span's length,
-// values outside the parameter's range, curves), or nullopt. Transition spans must have no tracks.
+// values outside the parameter's range, curves), or nullopt.
 std::optional<std::string> spanTracksProblem(const EffectSpan &span);
 
 // Why an effect span could not be cut (splitSpan, clipSpan).

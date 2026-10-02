@@ -116,7 +116,7 @@ class RandomEditor {
             if (pick(2) == 0) {
                 return std::make_unique<RemoveSpans>(fx_.seq, std::vector<SpanId>{t});
             }
-            const bool head = s.findSpan(t)->edge == ClipEdge::Head;
+            const bool head = s.findTransition(t)->edge == ClipEdge::Head;
             const CMTime length = f30(1 + frame(30));
             return std::make_unique<SetTransitionRanges>(
                 fx_.seq, std::vector<TransitionRangeChange>{
@@ -230,8 +230,14 @@ class RandomEditor {
         for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
             for (const Track &track : fx_.sequence().tracks(kind)) {
                 for (const Clip &clip : track.clips) {
-                    for (const EffectSpan &span : transitions ? clip.transitions : clip.spans) {
-                        ids.push_back(span.id);
+                    if (transitions) {
+                        for (const TransitionSpan &span : clip.transitions) {
+                            ids.push_back(span.id);
+                        }
+                    } else {
+                        for (const EffectSpan &span : clip.spans) {
+                            ids.push_back(span.id);
+                        }
                     }
                 }
             }
@@ -310,16 +316,14 @@ void runRandomEdits(std::uint64_t seed, int steps) {
         REQUIRE_MESSAGE(!problem, doctest::String((name + ": " + problem.value_or("")).c_str()));
         CHECK_FALSE(hasInexactTime(fx.project));
         for (const SpanId dropped : result.droppedTransitionIds) {
-            const EffectSpan *before = states.back().findSequence(fx.seq)->findSpan(dropped);
-            REQUIRE(before != nullptr);
-            CHECK(before->isTransition());
-            CHECK(fx.sequence().findSpan(dropped) == nullptr);
+            const TransitionSpan *before = states.back().findSequence(fx.seq)->findTransition(dropped);
+            REQUIRE(before != nullptr); // a transition
+            CHECK_FALSE(fx.sequence().hasSpan(dropped));
         }
         for (const SpanId dropped : result.droppedSpanIds) {
             const EffectSpan *before = states.back().findSequence(fx.seq)->findSpan(dropped);
-            REQUIRE(before != nullptr);
-            CHECK_FALSE(before->isTransition());
-            CHECK(fx.sequence().findSpan(dropped) == nullptr);
+            REQUIRE(before != nullptr); // an effect span
+            CHECK_FALSE(fx.sequence().hasSpan(dropped));
         }
         states.push_back(fx.project);
         jsonStates.push_back(toJsonString(fx.project));

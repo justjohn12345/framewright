@@ -894,19 +894,20 @@ VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &pr
     info.audioParams = audioParamsOf(clip);
     NSMutableArray<VEEffectSpan *> *spans =
         [NSMutableArray arrayWithCapacity:clip.transitions.size() + clip.spans.size()];
-    for (const std::vector<EffectSpan> *list : {&clip.transitions, &clip.spans}) {
-        for (const EffectSpan &span : *list) {
-            if (isShownSpan(span)) {
-                [spans addObject:makeEffectSpan(span, clip, track, sequence, index)];
-            }
+    for (const TransitionSpan &span : clip.transitions) {
+        [spans addObject:makeEffectSpan(span, clip, track, sequence, index)];
+    }
+    for (const EffectSpan &span : clip.spans) {
+        if (isShownSpan(span)) {
+            [spans addObject:makeEffectSpan(span, clip, track, sequence, index)];
         }
     }
     info.spans = spans;
     return info;
 }
 
-VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Track &track, const Sequence &sequence,
-                             const ClipIndex *index) {
+VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Track &track, const Sequence &,
+                             const ClipIndex *) {
     VEEffectSpan *info = [[VEEffectSpan alloc] initInternal];
     info.spanID = static_cast<VESpanID>(span.id.value());
     info.clipID = static_cast<VEClipID>(clip.id.value());
@@ -927,22 +928,43 @@ VEEffectSpan *makeEffectSpan(const EffectSpan &span, const Clip &clip, const Tra
     }
     info.startValues = startValues;
     info.endValues = endValues;
-    info.interpolation = span.isTransition() ? VEKeyframeInterpolationLinear : toVE(spanInterpolation(span));
+    info.interpolation = toVE(spanInterpolation(span));
     info.transitionStyle = VETransitionStyleCrossDissolve;
-    info.transitionKind = span.isTransition() ? toVE(span.transition) : VETransitionKindCrossDissolve;
+    info.transitionKind = VETransitionKindCrossDissolve;
     info.shareBeforeCut = kCMTimeZero;
     info.shareAfterCut = kCMTimeZero;
-    if (span.isTransition()) {
-        if (const auto placement = placeTransition(track, clip, span)) {
-            info.transitionStyle = toVE(placement->role);
-            info.partnerClipID = placement->partner ? static_cast<VEClipID>(placement->partner->id.value()) : 0;
-            info.shareBeforeCut = placement->cut - placement->range.start;
-            info.shareAfterCut = placement->range.end - placement->cut;
-        }
-        const auto linked = index != nullptr ? index->linkedTransition(track, clip, span)
-                                             : linkedTransition(sequence, span.id);
-        info.linkedSpanID = linked ? static_cast<VESpanID>(linked->value()) : 0;
+    return info;
+}
+
+VEEffectSpan *makeEffectSpan(const TransitionSpan &span, const Clip &clip, const Track &track,
+                             const Sequence &sequence, const ClipIndex *index) {
+    VEEffectSpan *info = [[VEEffectSpan alloc] initInternal];
+    info.spanID = static_cast<VESpanID>(span.id.value());
+    info.clipID = static_cast<VEClipID>(clip.id.value());
+    info.trackID = static_cast<VETrackID>(track.id.value());
+    info.lane = TransitionSpan::lane;
+    info.kind = toVE(SpanKind::Transition);
+    info.clipRelativeStart = span.start;
+    info.clipRelativeEnd = span.end;
+    const std::optional<TimeRange> range = spanTimelineRange(clip, span, track);
+    info.start = range ? range->start : kCMTimeInvalid;
+    info.end = range ? range->end : kCMTimeInvalid;
+    info.duration = range ? range->duration() : kCMTimeInvalid;
+    info.startValues = VESpanValuesUnchanged();
+    info.endValues = VESpanValuesUnchanged();
+    info.interpolation = VEKeyframeInterpolationLinear;
+    info.transitionStyle = VETransitionStyleCrossDissolve;
+    info.transitionKind = toVE(span.kind);
+    info.shareBeforeCut = kCMTimeZero;
+    info.shareAfterCut = kCMTimeZero;
+    if (const auto placement = placeTransition(track, clip, span)) {
+        info.transitionStyle = toVE(placement->role);
+        info.partnerClipID = placement->partner ? static_cast<VEClipID>(placement->partner->id.value()) : 0;
+        info.shareBeforeCut = placement->cut - placement->range.start;
+        info.shareAfterCut = placement->range.end - placement->cut;
     }
+    const auto linked = index != nullptr ? index->linkedTransition(track, clip, span) : linkedTransition(sequence, span.id);
+    info.linkedSpanID = linked ? static_cast<VESpanID>(linked->value()) : 0;
     return info;
 }
 
@@ -969,7 +991,7 @@ VETransitionInfo *makeTransitionInfo(const TransitionPlacement &transition) {
     info.transitionID = static_cast<VETransitionID>(transition.span->id.value());
     info.trackID = static_cast<VETrackID>(transition.track->id.value());
     info.style = toVE(transition.role);
-    info.kind = toVE(transition.span->transition);
+    info.kind = toVE(transition.span->kind);
     switch (transition.role) {
     case TransitionRole::CrossDissolve:
         info.fromClipID = owner;
@@ -1039,7 +1061,7 @@ VESequenceInfo *makeSequenceInfo(const Sequence &sequence) {
     for (const auto *list : {&sequence.videoTracks, &sequence.audioTracks}) {
         for (const Track &track : *list) {
             for (const Clip &clip : track.clips) {
-                const EffectSpan *tail = clip.transitionAt(ClipEdge::Tail);
+                const TransitionSpan *tail = clip.transitionAt(ClipEdge::Tail);
                 const auto placement = tail ? placeTransition(track, clip, *tail) : std::nullopt;
                 if (placement && placement->role == TransitionRole::CrossDissolve && placement->partner) {
                     [transitions addObject:makeTransitionInfo(*placement)];

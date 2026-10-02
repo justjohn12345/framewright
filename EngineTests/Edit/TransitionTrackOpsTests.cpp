@@ -30,7 +30,7 @@ TEST_CASE("AddTransitionSpans puts a centred dissolve on the outgoing clip's tai
     CHECK(placed->role == TransitionRole::CrossDissolve);
     CHECK(placed->range.start == f30(55));
     CHECK(placed->range.end == f30(65));
-    const EffectSpan &span = *fx.span(id);
+    const TransitionSpan &span = *fx.transition(id);
     CHECK(span.lane == kTransitionLane);
     CHECK(span.edge == ClipEdge::Tail);
     CHECK(fx.clip(fx.b).transitions.empty()); // the incoming clip owns nothing across the cut
@@ -227,7 +227,7 @@ TEST_CASE("SetTransitionRanges resizes, slides the split and changes the role; R
 
     RemoveSpans remove(fx.seq, {t});
     applyReversible(fx.project, remove);
-    CHECK(fx.span(t) == nullptr);
+    CHECK(fx.transition(t) == nullptr);
     RemoveSpans again(fx.seq, {t});
     applyRefused(fx.project, again, EditError::SpanNotFound);
 }
@@ -251,29 +251,29 @@ TEST_CASE("Edits that break a cut remove its transition; undo restores it") {
     SUBCASE("trimming the outgoing clip away from the cut") {
         TrimClipTail trim(fx.seq, fx.a, f30(50));
         const EditResult r = applyReversible(fx.project, trim);
-        CHECK(fx.span(t) == nullptr);
+        CHECK(fx.transition(t) == nullptr);
         CHECK(r.droppedTransitionIds == std::vector<SpanId>{t});
     }
     SUBCASE("removing a clip") {
         RemoveClips remove(fx.seq, {fx.b});
         applyReversible(fx.project, remove);
-        CHECK(fx.span(t) == nullptr);
+        CHECK(fx.transition(t) == nullptr);
     }
     SUBCASE("ripple delete keeps transitions whose clips stay adjacent") {
         const ClipId c = fx.addClip(fx.v1, fx.av30, 150, 30, 900);
         RippleDelete ripple(fx.seq, {c});
         applyReversible(fx.project, ripple);
-        CHECK(fx.span(t) != nullptr);
+        CHECK(fx.transition(t) != nullptr);
     }
     SUBCASE("trimming the incoming clip's head shortens its handle below the transition") {
         TrimClipHead trim(fx.seq, fx.b, f30(70));
         applyReversible(fx.project, trim);
-        CHECK(fx.span(t) == nullptr);
+        CHECK(fx.transition(t) == nullptr);
     }
     SUBCASE("unrelated edits keep it") {
         SetVideoParams params(fx.seq, fx.a, VideoParams{1, 2, 1, 0, 0.5});
         applyReversible(fx.project, params);
-        CHECK(fx.span(t) != nullptr);
+        CHECK(fx.transition(t) != nullptr);
     }
     SUBCASE("a fade out stays when the cut breaks: it needs no neighbour") {
         SetTransitionRanges fade(fx.seq, {{t, -f30(10), kCMTimeZero}});
@@ -289,10 +289,10 @@ TEST_CASE("Edits that break a cut remove its transition; undo restores it") {
         fx.requireValid();
         TrimClipHead gap(fx.seq, fx.a, f30(30)); // A now starts at 30
         applyReversible(fx.project, gap);
-        CHECK(fx.span(in) != nullptr);
+        CHECK(fx.transition(in) != nullptr);
         MoveClip touch(fx.seq, c, fx.v1, kCMTimeZero); // [0, 30) touches A's start
         const EditResult r = applyReversible(fx.project, touch);
-        CHECK(fx.span(in) == nullptr);
+        CHECK(fx.transition(in) == nullptr);
         CHECK(r.droppedTransitionIds == std::vector<SpanId>{in});
     }
 }
@@ -306,7 +306,7 @@ TEST_CASE("A fade in goes, reported, when an insert, ripple, overwrite or tail e
     const SpanId fade = fx.addFade(b, ClipEdge::Head, f30(10));
     fx.requireValid();
     auto droppedOnly = [&](const EditResult &r) {
-        CHECK(fx.span(fade) == nullptr);
+        CHECK(fx.transition(fade) == nullptr);
         CHECK(r.droppedTransitionIds == std::vector<SpanId>{fade});
     };
     SUBCASE("an insert at B's start: the new clip touches it") {
@@ -340,32 +340,32 @@ TEST_CASE("A dissolve whose partner clip changes is removed and reported, not mo
         RippleDelete ripple(fx.seq, {fx.b});
         const EditResult r = applyReversible(fx.project, ripple);
         CHECK(fx.clip(c).timelineStart == f30(60));
-        CHECK(fx.span(t) == nullptr);
+        CHECK(fx.transition(t) == nullptr);
         CHECK(r.droppedTransitionIds == std::vector<SpanId>{t});
     }
     SUBCASE("inserting at the cut: the new clip touches A") {
         InsertClip insert(fx.seq, f30(60), {place(fx.v1, fx.av30, 600, 630)});
         const EditResult r = applyReversible(fx.project, insert);
-        CHECK(fx.span(t) == nullptr);
+        CHECK(fx.transition(t) == nullptr);
         CHECK(r.droppedTransitionIds == std::vector<SpanId>{t});
     }
     SUBCASE("overwriting the start of B: the new clip touches A") {
         OverwriteClip overwrite(fx.seq, f30(60), {place(fx.v1, fx.av30, 600, 630)});
         const EditResult r = applyReversible(fx.project, overwrite);
-        CHECK(fx.span(t) == nullptr);
+        CHECK(fx.transition(t) == nullptr);
         CHECK(r.droppedTransitionIds == std::vector<SpanId>{t});
     }
     SUBCASE("splitting B keeps it: B's left piece keeps B's id") {
         SplitClip split(fx.seq, fx.b, f30(90));
         const EditResult r = applyReversible(fx.project, split);
-        REQUIRE(fx.span(t) != nullptr);
+        REQUIRE(fx.transition(t) != nullptr);
         CHECK(findTransition(fx.sequence(), t)->partner->id == fx.b);
         CHECK(r.droppedTransitionIds.empty());
     }
     SUBCASE("splitting A keeps it: its right piece owns it, the partner is still B") {
         SplitClip split(fx.seq, fx.a, f30(30));
         const EditResult r = applyReversible(fx.project, split);
-        REQUIRE(fx.span(t) != nullptr);
+        REQUIRE(fx.transition(t) != nullptr);
         CHECK(findTransition(fx.sequence(), t)->partner->id == fx.b);
         CHECK(r.droppedTransitionIds.empty());
     }
@@ -380,8 +380,8 @@ TEST_CASE("A dissolve whose partner clip changes is removed and reported, not mo
         fx.requireValid();
         RippleDelete ripple(fx.seq, {fx.b});
         const EditResult r = applyReversible(fx.project, ripple);
-        CHECK(fx.span(t) == nullptr);
-        CHECK(fx.span(crossfade) == nullptr);
+        CHECK(fx.transition(t) == nullptr);
+        CHECK(fx.transition(crossfade) == nullptr);
         CHECK(r.droppedTransitionIds.size() == 2);
     }
 }
@@ -406,11 +406,12 @@ TEST_CASE("ClipIndex finds each transition's linked one as linkedTransition does
     for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
         for (const Track &track : *list) {
             for (const Clip &clip : track.clips) {
-                for (const std::vector<EffectSpan> *spans : {&clip.transitions, &clip.spans}) {
-                    for (const EffectSpan &span : *spans) {
-                        CHECK(index.linkedTransition(track, clip, span) == linkedTransition(sequence, span.id));
-                        transitions += span.isTransition() ? 1 : 0;
-                    }
+                for (const TransitionSpan &span : clip.transitions) {
+                    CHECK(index.linkedTransition(track, clip, span) == linkedTransition(sequence, span.id));
+                    ++transitions;
+                }
+                for (const EffectSpan &span : clip.spans) {
+                    CHECK_FALSE(linkedTransition(sequence, span.id).has_value());
                 }
             }
         }
@@ -585,8 +586,8 @@ TEST_CASE("RemoveSpans removes a linked pair as one reversible step") {
     RemoveSpans both(fx.seq, {fx.dissolve, fx.crossfade});
     applyReversible(fx.project, both);
     CHECK(both.name() == "Remove Transitions");
-    CHECK(fx.span(fx.dissolve) == nullptr);
-    CHECK(fx.span(fx.crossfade) == nullptr);
+    CHECK(fx.transition(fx.dissolve) == nullptr);
+    CHECK(fx.transition(fx.crossfade) == nullptr);
     SUBCASE("refused as a whole") {
         LinkedPairFixture other;
         RemoveSpans missing(other.seq, {other.dissolve, SpanId{999}});

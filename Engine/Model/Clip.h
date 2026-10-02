@@ -206,9 +206,16 @@ struct Clip {
     // Orders the spans: the transitions head then tail, the effect spans by lane, each lane by start.
     void sortSpans();
 
-    // The span (a transition or an effect span) with `id`, or nullptr.
+    // The effect span with `id`, or nullptr.
     const EffectSpan *findSpan(SpanId spanId) const;
     EffectSpan *findSpan(SpanId spanId);
+    // The transition with `id`, or nullptr.
+    const TransitionSpan *findTransition(SpanId spanId) const;
+    TransitionSpan *findTransition(SpanId spanId);
+    // Whether the clip has a span (either kind) with `id`.
+    bool hasSpan(SpanId spanId) const {
+        return findSpan(spanId) != nullptr || findTransition(spanId) != nullptr;
+    }
     // The lane-0 transition span at `edge`, or nullptr.
     const TransitionSpan *transitionAt(ClipEdge edge) const;
     TransitionSpan *transitionAt(ClipEdge edge);

@@ -11,6 +11,7 @@
 #include <limits>
 #include <map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace ve {
@@ -81,6 +82,19 @@ void addForeignKeys(json &into, const json &extra) {
     }
 }
 
+json spanToJson(const TransitionSpan &span) {
+    json j{{"id", idToJson(span.id)},
+           {"lane", TransitionSpan::lane},
+           {"kind", nameOf(SpanKind::Transition)},
+           {"start", timeToJson(span.start)},
+           {"end", timeToJson(span.end)},
+           {"edge", nameOf(span.edge)},
+           {"transition", span.unknownKindName.empty() ? std::string(nameOf(span.kind)) : span.unknownKindName}};
+    // What a newer version wrote that this one does not read goes back as it came (review core #9).
+    addForeignKeys(j, foreignObject(span.foreignFields));
+    return j;
+}
+
 json spanToJson(const EffectSpan &span) {
     json j{{"id", idToJson(span.id)},
            {"lane", span.lane},
@@ -90,12 +104,6 @@ json spanToJson(const EffectSpan &span) {
     // What a newer version wrote that this one does not read goes back as it came (review core #9).
     addForeignKeys(j, foreignObject(span.foreign.fields));
     if (span.isUnknownKind()) {
-        return j;
-    }
-    if (span.isTransition()) {
-        j["edge"] = nameOf(span.edge);
-        j["transition"] = span.unknownTransitionName.empty() ? std::string(nameOf(span.transition))
-                                                             : span.unknownTransitionName;
         return j;
     }
     json tracks = json::object();
@@ -312,20 +320,73 @@ ClipEdge parseClipEdge(const Node &node) {
 }
 
 // The keys of a span's JSON object this version reads, per kind of span; every other key is kept as
-// foreign content (ForeignSpanContent::fields).
-bool isKnownSpanKey(const std::string &key, const EffectSpan &span) {
+// foreign content (TransitionSpan::foreignFields, ForeignSpanContent::fields): those of every span,
+// and "edge" and "transition" of a transition or "tracks" of a known effect span.
+enum class SpanKeys { Transition, Effect, Unknown };
+bool isKnownSpanKey(const std::string &key, SpanKeys keys) {
     if (key == "id" || key == "lane" || key == "kind" || key == "start" || key == "end") {
         return true;
     }
-    if (span.isUnknownKind()) {
-        return false;
+    switch (keys) {
+    case SpanKeys::Transition:
+        return key == "edge" || key == "transition";
+    case SpanKeys::Effect:
+        return key == "tracks";
+    case SpanKeys::Unknown:
+        break;
     }
-    return span.isTransition() ? key == "edge" || key == "transition" : key == "tracks";
+    return false;
 }
+
+// The keys of `node` this version does not read, as compact JSON text.
+std::string unknownSpanKeys(const Node &node, SpanKeys keys);
 
 // Compact JSON text of an object, for ForeignSpanContent ("" for an empty object).
 std::string foreignText(const json &object) {
     return object.empty() ? std::string() : object.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
+std::string unknownSpanKeys(const Node &node, SpanKeys keys) {
+    json unknownFields = json::object();
+    for (const auto &entry : node.value().items()) {
+        if (!isKnownSpanKey(entry.key(), keys)) {
+            unknownFields[entry.key()] = entry.value();
+        }
+    }
+    return foreignText(unknownFields);
+}
+
+// One element of a clip's "spans": a transition (lane 0) or an effect span, and the lane the file
+// gave it (a transition's lane is repaired to 0 by repairSequence, with a warning).
+struct ParsedSpan {
+    std::variant<TransitionSpan, EffectSpan> span;
+    int lane = 0;
+};
+
+// A transition: its edge and kind. A kind this version does not know (a newer version's) is shown and
+// edited as a cross dissolve but kept by name, so saving the project does not rewrite it (review L8).
+TransitionSpan parseTransitionSpan(const Node &node, Warnings &warnings) {
+    TransitionSpan span;
+    span.id = node.field("id").asId<SpanId>();
+    span.start = node.field("start").asTime();
+    span.end = node.field("end").asTime();
+    span.foreignFields = unknownSpanKeys(node, SpanKeys::Transition);
+    span.edge = parseClipEdge(node.field("edge"));
+    if (node.has("transition")) {
+        const Node transitionNode = node.field("transition");
+        const std::string name = transitionNode.asString();
+        if (const auto known = transitionKindNamed(name)) {
+            span.kind = *known;
+        } else if (name.empty()) {
+            warnings.push_back(transitionNode.path() + ": an empty transition kind; using a cross dissolve");
+        } else {
+            span.unknownKindName = name;
+            warnings.push_back(transitionNode.path() + ": unknown transition kind \"" + name +
+                               "\" (from a newer version of Framewright?); shown as a cross dissolve and saved as \"" +
+                               name + "\"");
+        }
+    }
+    return span;
 }
 
 // A span of a kind this version does not know (from a newer one) is kept as it is (SpanKind::Unknown)
@@ -333,15 +394,21 @@ std::string foreignText(const json &object) {
 // that saving writes them back (review core #9); each with a warning but the unknown keys (newer
 // minor additions, ignored silently before they were kept). An unknown kind on lane 0 (transitions
 // only here) cannot be placed: nullopt, with a warning.
-std::optional<EffectSpan> parseSpan(const Node &node, Warnings &warnings) {
+std::optional<ParsedSpan> parseSpan(const Node &node, Warnings &warnings) {
     node.requireObject();
     const Node kindNode = node.field("kind");
     const std::string kindName = kindNode.asString();
     const std::optional<SpanKind> kind = spanKindNamed(kindName);
+    // The keys every span has, checked in this order: kind, id, lane, start, end.
+    const SpanId id = node.field("id").asId<SpanId>();
+    const int lane = node.field("lane").asInt32();
+    if (kind == SpanKind::Transition) {
+        return ParsedSpan{parseTransitionSpan(node, warnings), lane};
+    }
     EffectSpan span;
-    span.id = node.field("id").asId<SpanId>();
+    span.id = id;
     span.kind = kind.value_or(SpanKind::Unknown);
-    span.lane = node.field("lane").asInt32();
+    span.lane = lane;
     span.start = node.field("start").asTime();
     span.end = node.field("end").asTime();
     if (!kind) {
@@ -355,36 +422,9 @@ std::optional<EffectSpan> parseSpan(const Node &node, Warnings &warnings) {
                            "\" (from a newer version of Framewright?); kept as it is and saved with the project, "
                            "but not shown, played or editable");
     }
-    json unknownFields = json::object();
-    for (const auto &entry : node.value().items()) {
-        if (!isKnownSpanKey(entry.key(), span)) {
-            unknownFields[entry.key()] = entry.value();
-        }
-    }
-    span.foreign.fields = foreignText(unknownFields);
+    span.foreign.fields = unknownSpanKeys(node, span.isUnknownKind() ? SpanKeys::Unknown : SpanKeys::Effect);
     if (span.isUnknownKind()) {
-        return span;
-    }
-    if (span.isTransition()) {
-        span.edge = parseClipEdge(node.field("edge"));
-        span.transition = TransitionKind::CrossDissolve;
-        if (node.has("transition")) {
-            // A kind this version does not know (a newer version's) is shown and edited as a cross
-            // dissolve but kept by name, so saving the project does not rewrite it (review L8).
-            const Node transitionNode = node.field("transition");
-            const std::string name = transitionNode.asString();
-            if (const auto known = transitionKindNamed(name)) {
-                span.transition = *known;
-            } else if (name.empty()) {
-                warnings.push_back(transitionNode.path() + ": an empty transition kind; using a cross dissolve");
-            } else {
-                span.unknownTransitionName = name;
-                warnings.push_back(transitionNode.path() + ": unknown transition kind \"" + name +
-                                   "\" (from a newer version of Framewright?); shown as a cross dissolve and saved as \"" +
-                                   name + "\"");
-            }
-        }
-        return span;
+        return ParsedSpan{span, lane};
     }
     if (node.has("tracks")) {
         const Node tracks = node.field("tracks");
@@ -412,7 +452,7 @@ std::optional<EffectSpan> parseSpan(const Node &node, Warnings &warnings) {
             }
         }
     }
-    return span;
+    return ParsedSpan{span, lane};
 }
 
 // The spans of each clip in the order the file lists them (one list there, two containers on the
@@ -457,9 +497,14 @@ Clip parseClip(const Node &node, Warnings &warnings, SpanFileOrder &order) {
         const Node spans = node.field("spans");
         std::vector<FileSpan> &listed = order[clip.id];
         for (std::size_t i = 0, n = spans.arraySize(); i < n; ++i) {
-            if (auto span = parseSpan(spans.element(i), warnings)) {
-                listed.push_back(FileSpan{span->isTransition(), span->lane});
-                (span->isTransition() ? clip.transitions : clip.spans).push_back(std::move(*span));
+            if (auto parsed = parseSpan(spans.element(i), warnings)) {
+                if (auto *transition = std::get_if<TransitionSpan>(&parsed->span)) {
+                    listed.push_back(FileSpan{true, parsed->lane});
+                    clip.transitions.push_back(std::move(*transition));
+                } else {
+                    listed.push_back(FileSpan{false, parsed->lane});
+                    clip.spans.push_back(std::get<EffectSpan>(std::move(parsed->span)));
+                }
             }
         }
     }
@@ -636,11 +681,14 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
                         return std::nullopt;
                     }
                 }
-                for (const std::vector<EffectSpan> *spans : {&clip.transitions, &clip.spans}) {
-                    for (const EffectSpan &span : *spans) {
-                        if (modelTimeProblem(span.start, "time") || modelTimeProblem(span.end, "time")) {
-                            return std::nullopt;
-                        }
+                for (const TransitionSpan &span : clip.transitions) {
+                    if (modelTimeProblem(span.start, "time") || modelTimeProblem(span.end, "time")) {
+                        return std::nullopt;
+                    }
+                }
+                for (const EffectSpan &span : clip.spans) {
+                    if (modelTimeProblem(span.start, "time") || modelTimeProblem(span.end, "time")) {
+                        return std::nullopt;
                     }
                 }
             }
@@ -682,24 +730,8 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
                         dropped[i] = true;
                     }
                 }
-                // The spans that stay, in the file's order (both kinds).
-                std::vector<EffectSpan *> order;
-                if (const auto listed = fileOrder.find(clip.id); listed != fileOrder.end()) {
-                    std::size_t nextTransition = 0;
-                    std::size_t nextEffect = 0;
-                    for (const FileSpan &entry : listed->second) {
-                        if (entry.transition && nextTransition < clip.transitions.size()) {
-                            order.push_back(&clip.transitions[nextTransition++]);
-                        } else if (!entry.transition && nextEffect < clip.spans.size()) {
-                            const std::size_t index = nextEffect++;
-                            if (!dropped[index]) {
-                                order.push_back(&clip.spans[index]);
-                            }
-                        }
-                    }
-                }
-                // Lanes, in the file's order: each effect span keeps its lane unless that is not an
-                // effect lane or an earlier span of the lane overlaps it.
+                // Lanes, in the file's order (both kinds): a transition lies on lane 0; each effect span
+                // keeps its lane unless that is not an effect lane or an earlier span of the lane overlaps it.
                 std::vector<const EffectSpan *> placed;
                 auto overlapping = [&](const EffectSpan &span, int lane) -> const EffectSpan * {
                     for (const EffectSpan *other : placed) {
@@ -709,22 +741,40 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
                     }
                     return nullptr;
                 };
-                for (EffectSpan *entry : order) {
-                    EffectSpan &span = *entry;
-                    const std::string spanWhere = clipWhere + ": span " + std::to_string(span.id.value());
-                    if (span.isTransition()) {
-                        if (span.lane != kTransitionLane) {
-                            warnings.push_back(spanWhere + ": a transition lies on lane 0, found lane " +
-                                               std::to_string(span.lane) + "; moved to lane 0");
-                            span.lane = kTransitionLane;
+                std::vector<SpanId> fileIds; // of the spans that stay
+                const auto listed = fileOrder.find(clip.id);
+                const std::vector<FileSpan> noSpans;
+                std::size_t nextTransition = 0;
+                std::size_t nextEffect = 0;
+                for (const FileSpan &entry : listed != fileOrder.end() ? listed->second : noSpans) {
+                    if (entry.transition) {
+                        if (nextTransition >= clip.transitions.size()) {
+                            continue;
                         }
-                        if (track.kind == TrackKind::Audio && span.transition != TransitionKind::CrossDissolve) {
+                        TransitionSpan &transition = clip.transitions[nextTransition++];
+                        fileIds.push_back(transition.id);
+                        const std::string spanWhere = clipWhere + ": span " + std::to_string(transition.id.value());
+                        if (entry.lane != kTransitionLane) {
+                            warnings.push_back(spanWhere + ": a transition lies on lane 0, found lane " +
+                                               std::to_string(entry.lane) + "; moved to lane 0");
+                        }
+                        if (track.kind == TrackKind::Audio && transition.kind != TransitionKind::CrossDissolve) {
                             warnings.push_back(spanWhere + ": an audio transition is a crossfade or a fade, not \"" +
-                                               nameOf(span.transition) + "\"; using a cross dissolve");
-                            span.transition = TransitionKind::CrossDissolve;
+                                               nameOf(transition.kind) + "\"; using a cross dissolve");
+                            transition.kind = TransitionKind::CrossDissolve;
                         }
                         continue;
                     }
+                    if (nextEffect >= clip.spans.size()) {
+                        continue;
+                    }
+                    const std::size_t index = nextEffect++;
+                    if (dropped[index]) {
+                        continue;
+                    }
+                    EffectSpan &span = clip.spans[index];
+                    fileIds.push_back(span.id);
+                    const std::string spanWhere = clipWhere + ": span " + std::to_string(span.id.value());
                     const bool effectLane = kFirstEffectLane <= span.lane && span.lane <= kLastLane;
                     const EffectSpan *blocker = effectLane ? overlapping(span, span.lane) : nullptr;
                     if (!effectLane || blocker != nullptr) {
@@ -747,10 +797,6 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
                     }
                     placed.push_back(&span);
                 }
-                std::vector<SpanId> fileIds;
-                for (const EffectSpan *span : order) {
-                    fileIds.push_back(span->id);
-                }
                 for (std::size_t i = clip.spans.size(); i-- > 0;) {
                     if (dropped[i]) {
                         clip.spans.erase(clip.spans.begin() + static_cast<std::ptrdiff_t>(i));
@@ -759,10 +805,11 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
                 clip.sortSpans();
                 // Sorted: lane 0 (head, then tail), then lanes 1-3 by start.
                 std::vector<SpanId> sortedIds;
-                for (const std::vector<EffectSpan> *spans : {&clip.transitions, &clip.spans}) {
-                    for (const EffectSpan &span : *spans) {
-                        sortedIds.push_back(span.id);
-                    }
+                for (const TransitionSpan &transition : clip.transitions) {
+                    sortedIds.push_back(transition.id);
+                }
+                for (const EffectSpan &span : clip.spans) {
+                    sortedIds.push_back(span.id);
                 }
                 const bool sorted = sortedIds == fileIds;
                 if (!sorted) {

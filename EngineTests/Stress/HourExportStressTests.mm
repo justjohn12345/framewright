@@ -148,10 +148,8 @@ void link(HourProject &h, ClipId a, ClipId b) {
 
 /// A lane-0 span of `clip`: a centred cross dissolve (Tail, [-half, +half]) or a fade.
 void addTransitionSpan(HourProject &h, ClipId clip, ClipEdge edge, CMTime start, CMTime end) {
-    EffectSpan span;
+    TransitionSpan span;
     span.id = h.project.ids.make<SpanId>();
-    span.lane = kTransitionLane;
-    span.kind = SpanKind::Transition;
     span.edge = edge;
     span.start = start;
     span.end = end;

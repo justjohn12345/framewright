@@ -260,17 +260,6 @@ TEST_CASE("EffectSpan: track validation") {
         span.tracks[SpanParameter::Scale] = {key(kCMTimeZero, -1)};
         CHECK(spanTracksProblem(span).value_or("").find("invalid value") != std::string::npos);
     }
-    SUBCASE("a transition with keyframes") {
-        EffectSpan transition;
-        transition.id = SpanId{2};
-        transition.lane = kTransitionLane;
-        transition.kind = SpanKind::Transition;
-        transition.start = -f30(5);
-        transition.end = f30(5);
-        CHECK_FALSE(spanTracksProblem(transition).has_value());
-        transition.tracks[SpanParameter::X] = {key(kCMTimeZero, 1)};
-        CHECK(spanTracksProblem(transition).value_or("").find("a transition has no keyframes") != std::string::npos);
-    }
 }
 
 TEST_CASE("EffectSpan: lane rules and placement are validated per clip") {
@@ -291,16 +280,14 @@ TEST_CASE("EffectSpan: lane rules and placement are validated per clip") {
         fx.addSpan(v, SpanKind::Opacity, 3, f30(30), f30(120));
         fx.requireValid();
     }
-    SUBCASE("lane 0 holds transitions only; transitions lie on lane 0 only; lanes end at 3") {
+    SUBCASE("lane 0 holds transitions only; lanes end at 3") {
         fx.sequence().findClip(v)->spans[0].lane = 0;
         CHECK(problem().find("lane 0 holds transitions only") != std::string::npos);
         fx.sequence().findClip(v)->spans[0].lane = 4;
         CHECK(problem().find("is not an effect lane") != std::string::npos);
         fx.sequence().findClip(v)->spans[0].lane = 1;
-        const SpanId fade = fx.addFade(v, ClipEdge::Head, f30(10));
+        fx.addFade(v, ClipEdge::Head, f30(10));
         fx.requireValid();
-        fx.sequence().findClip(v)->findSpan(fade)->lane = 2;
-        CHECK(problem().find("a transition lies on lane 0 only") != std::string::npos);
     }
     SUBCASE("kinds belong to their track's kind") {
         fx.addSpan(a, SpanKind::Motion, 1, f30(0), f30(30));
@@ -453,9 +440,6 @@ TEST_CASE("Composition: every span holds through a tail handle; a head handle sh
     CHECK(close(spanContributionFromLeft(*c.findSpan(early), SpanParameter::Scale, exact(f30(45))), 1.5));
     CHECK(spanContributionFromLeft(*c.findSpan(early), SpanParameter::Scale, exact(f30(60))) == 2);
     CHECK(spanContributionFromLeft(*c.findSpan(early), SpanParameter::Scale, exact(f30(61))) == 2);
-    // A transition span never contributes.
-    const SpanId fade = fx.addFade(id, ClipEdge::Tail, f30(10));
-    CHECK_FALSE(spanActsAt(*fx.clip(id).findSpan(fade), exact(f30(80))));
 }
 
 TEST_CASE("Hold after: a 5 s move from 5 s on a 30 s clip shows the framing before, moves, then holds its end") {

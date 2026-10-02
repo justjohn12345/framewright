@@ -318,10 +318,8 @@ void PlaybackHarness::addTransition(TrackId track, ClipId from, ClipId to, int64
 }
 
 SpanId PlaybackHarness::addTailTransition(ClipId clip, int64_t before, int64_t after) {
-    EffectSpan span;
+    TransitionSpan span;
     span.id = project.ids.make<SpanId>();
-    span.lane = kTransitionLane;
-    span.kind = SpanKind::Transition;
     span.edge = ClipEdge::Tail;
     span.start = -frames30(before);
     span.end = frames30(after);
@@ -332,10 +330,8 @@ SpanId PlaybackHarness::addTailTransition(ClipId clip, int64_t before, int64_t a
 }
 
 SpanId PlaybackHarness::addFade(ClipId clip, ClipEdge edge, int64_t frames) {
-    EffectSpan span;
+    TransitionSpan span;
     span.id = project.ids.make<SpanId>();
-    span.lane = kTransitionLane;
-    span.kind = SpanKind::Transition;
     span.edge = edge;
     span.start = edge == ClipEdge::Head ? kCMTimeZero : -frames30(frames);
     span.end = edge == ClipEdge::Head ? frames30(frames) : kCMTimeZero;

@@ -1165,9 +1165,9 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
     const SpanId fadeIn = h.addFade(a, ClipEdge::Head, 10);
     const SpanId wipe = h.addTailTransition(a, 5, 5);
     const SpanId iris = h.addFade(b, ClipEdge::Tail, 10);
-    h.sequence().findSpan(fadeIn)->transition = TransitionKind::WipeRight;
-    h.sequence().findSpan(wipe)->transition = TransitionKind::WipeLeft;
-    h.sequence().findSpan(iris)->transition = TransitionKind::Iris;
+    h.sequence().findTransition(fadeIn)->kind = TransitionKind::WipeRight;
+    h.sequence().findTransition(wipe)->kind = TransitionKind::WipeLeft;
+    h.sequence().findTransition(iris)->kind = TransitionKind::Iris;
     XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
     h.load();
 

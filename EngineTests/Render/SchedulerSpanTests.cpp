@@ -390,10 +390,8 @@ TEST_CASE("Scheduler spans: held values per frame at 29.97 and 999/1000, on a ch
     clip.timelineDuration = ntsc(120);
     clip.sourceIn = CMTimeMake(44101, 44100);
     clip.speed = Ratio{999, 1000};
-    EffectSpan dissolve;
+    TransitionSpan dissolve;
     dissolve.id = fx.project.ids.make<SpanId>();
-    dissolve.lane = kTransitionLane;
-    dissolve.kind = SpanKind::Transition;
     dissolve.edge = ClipEdge::Tail;
     dissolve.start = -ntsc(6);
     dissolve.end = ntsc(4);

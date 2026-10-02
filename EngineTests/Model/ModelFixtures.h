@@ -240,10 +240,8 @@ struct Fixture {
 
     // A tail transition span on `clip`: `before` frames inside it, `after` past its end.
     SpanId addTailTransition(ClipId clip, std::int64_t before, std::int64_t after) {
-        EffectSpan span;
+        TransitionSpan span;
         span.id = project.ids.make<SpanId>();
-        span.lane = kTransitionLane;
-        span.kind = SpanKind::Transition;
         span.edge = ClipEdge::Tail;
         span.start = -f30(before);
         span.end = f30(after);
@@ -255,10 +253,8 @@ struct Fixture {
 
     // A lane-0 fade of `length` at `edge` of `clip` (head: fade in; tail: fade out ending on the cut).
     SpanId addFade(ClipId clip, ClipEdge edge, CMTime length) {
-        EffectSpan span;
+        TransitionSpan span;
         span.id = project.ids.make<SpanId>();
-        span.lane = kTransitionLane;
-        span.kind = SpanKind::Transition;
         span.edge = edge;
         span.start = edge == ClipEdge::Head ? kCMTimeZero : -length;
         span.end = edge == ClipEdge::Head ? length : kCMTimeZero;
@@ -285,6 +281,9 @@ struct Fixture {
 
     const EffectSpan *span(SpanId id) const {
         return sequence().findSpan(id);
+    }
+    const TransitionSpan *transition(SpanId id) const {
+        return sequence().findTransition(id);
     }
 
     void requireValid() const {

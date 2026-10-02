@@ -244,11 +244,15 @@ Track *Sequence::trackOfClip(ClipId clipId) {
     return const_cast<Track *>(static_cast<const Sequence *>(this)->trackOfClip(clipId));
 }
 
-const EffectSpan *Sequence::findSpan(SpanId spanId, const Clip **owner, const Track **track) const {
-    for (const std::vector<Track> *list : {&videoTracks, &audioTracks}) {
+namespace {
+
+// The span `find(clip)` returns on any clip of `sequence`, with where it lives.
+template <typename Span, typename Find>
+const Span *findOnAnyClip(const Sequence &sequence, Find find, const Clip **owner, const Track **track) {
+    for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
         for (const Track &t : *list) {
             for (const Clip &clip : t.clips) {
-                if (const EffectSpan *span = clip.findSpan(spanId)) {
+                if (const Span *span = find(clip)) {
                     if (owner != nullptr) {
                         *owner = &clip;
                     }
@@ -263,6 +267,13 @@ const EffectSpan *Sequence::findSpan(SpanId spanId, const Clip **owner, const Tr
     return nullptr;
 }
 
+} // namespace
+
+const EffectSpan *Sequence::findSpan(SpanId spanId, const Clip **owner, const Track **track) const {
+    return findOnAnyClip<EffectSpan>(
+        *this, [spanId](const Clip &clip) { return clip.findSpan(spanId); }, owner, track);
+}
+
 EffectSpan *Sequence::findSpan(SpanId spanId, Clip **owner, Track **track) {
     const Clip *constOwner = nullptr;
     const Track *constTrack = nullptr;
@@ -274,6 +285,24 @@ EffectSpan *Sequence::findSpan(SpanId spanId, Clip **owner, Track **track) {
         *track = const_cast<Track *>(constTrack);
     }
     return const_cast<EffectSpan *>(span);
+}
+
+const TransitionSpan *Sequence::findTransition(SpanId spanId, const Clip **owner, const Track **track) const {
+    return findOnAnyClip<TransitionSpan>(
+        *this, [spanId](const Clip &clip) { return clip.findTransition(spanId); }, owner, track);
+}
+
+TransitionSpan *Sequence::findTransition(SpanId spanId, Clip **owner, Track **track) {
+    const Clip *constOwner = nullptr;
+    const Track *constTrack = nullptr;
+    const TransitionSpan *span = static_cast<const Sequence *>(this)->findTransition(spanId, &constOwner, &constTrack);
+    if (owner != nullptr) {
+        *owner = const_cast<Clip *>(constOwner);
+    }
+    if (track != nullptr) {
+        *track = const_cast<Track *>(constTrack);
+    }
+    return const_cast<TransitionSpan *>(span);
 }
 
 const Clip *touchingClip(const Track &track, const Clip &clip, ClipEdge edge) {
@@ -304,10 +333,7 @@ CMTime incomingTransitionInside(const Track &track, const Clip &clip) {
     return tail != nullptr && kCMTimeZero < tail->end ? tail->end : kCMTimeZero;
 }
 
-std::optional<TransitionPlacement> placeTransition(const Track &track, const Clip &owner, const EffectSpan &span) {
-    if (!span.isTransition()) {
-        return std::nullopt;
-    }
+std::optional<TransitionPlacement> placeTransition(const Track &track, const Clip &owner, const TransitionSpan &span) {
     TransitionPlacement placement;
     placement.track = &track;
     placement.owner = &owner;

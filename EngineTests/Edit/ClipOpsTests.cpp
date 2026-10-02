@@ -302,8 +302,8 @@ TEST_CASE("OverwriteClip splits a clip it lands inside") {
     CHECK(clipFadeLength(fx.clip(a), ClipEdge::Tail) == kCMTimeZero);
     CHECK(clipFadeLength(fx.clip(right), ClipEdge::Head) == kCMTimeZero);
     CHECK(clipFadeLength(fx.clip(right), ClipEdge::Tail) == f30(6));
-    CHECK(fx.clip(a).findSpan(in) != nullptr);
-    CHECK(fx.clip(right).findSpan(out) != nullptr);
+    CHECK(fx.clip(a).findTransition(in) != nullptr);
+    CHECK(fx.clip(right).findTransition(out) != nullptr);
 }
 
 TEST_CASE("OverwriteClip trims clips it overlaps and removes clips it covers") {
@@ -489,10 +489,10 @@ TEST_CASE("MoveClip drops a transition whose cut it breaks; undo restores it") {
     fx.requireValid();
     MoveClip move(fx.seq, b, fx.v1, f30(200));
     const EditResult r = applyReversible(fx.project, move);
-    CHECK(fx.span(t) == nullptr);
+    CHECK(fx.transition(t) == nullptr);
     CHECK(r.droppedTransitionIds == std::vector<SpanId>{t});
     move.revert(fx.project);
-    CHECK(fx.span(t) != nullptr);
+    CHECK(fx.transition(t) != nullptr);
 }
 
 // ---------------------------------------------------------------------------------------------

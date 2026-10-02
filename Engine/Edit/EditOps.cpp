@@ -337,14 +337,14 @@ EditResult transitionIssueToResult(const TransitionIssue &issue) {
 std::vector<TransitionPlacement> transitionsOn(const Track &track, const Clip &clip) {
     std::vector<TransitionPlacement> result;
     for (const ClipEdge edge : {ClipEdge::Head, ClipEdge::Tail}) {
-        if (const EffectSpan *span = clip.transitionAt(edge)) {
+        if (const TransitionSpan *span = clip.transitionAt(edge)) {
             if (auto placement = placeTransition(track, clip, *span)) {
                 result.push_back(*placement);
             }
         }
     }
     if (const Clip *previous = touchingClip(track, clip, ClipEdge::Head)) {
-        if (const EffectSpan *span = previous->transitionAt(ClipEdge::Tail)) {
+        if (const TransitionSpan *span = previous->transitionAt(ClipEdge::Tail)) {
             auto placement = placeTransition(track, *previous, *span);
             if (placement && placement->role == TransitionRole::CrossDissolve) {
                 result.push_back(*placement);
@@ -1011,13 +1011,13 @@ EditResult unknownKindRefusal(const EffectSpan &span) {
 
 // The effect span `spanId` (lanes 1-3), its clip and track, on an editable track.
 EditResult findEffectSpan(Sequence &sequence, SpanId spanId, Track *&track, Clip *&clip, EffectSpan *&span) {
+    if (sequence.findTransition(spanId) != nullptr) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   spanName(spanId) + " is a transition; change it with the transition edits");
+    }
     span = sequence.findSpan(spanId, &clip, &track);
     if (span == nullptr) {
         return spanNotFound(spanId);
-    }
-    if (span->isTransition()) {
-        return EditResult::failure(EditError::InvalidArgument,
-                                   spanName(spanId) + " is a transition; change it with the transition edits");
     }
     if (span->isUnknownKind()) {
         return unknownKindRefusal(*span);
@@ -1141,7 +1141,7 @@ EditResult spanSourceRange(const Sequence &sequence, const Clip &clip, CMTime ti
 EditResult checkLaneFree(const Sequence &sequence, const Clip &clip, int lane, CMTime start, CMTime end,
                          const TimeRange &frames, SpanId except) {
     for (const EffectSpan &other : clip.spans) {
-        if (other.isTransition() || other.lane != lane || other.id == except) {
+        if (other.lane != lane || other.id == except) {
             continue;
         }
         if (other.start < end && start < other.end) {
@@ -1173,11 +1173,12 @@ Keyframe keyframeAt(CMTime time, double value, KeyframeInterpolation interpolati
 
 } // namespace
 
-std::optional<TimeRange> spanTimelineRange(const Clip &clip, const EffectSpan &span, const Track &track) {
-    if (span.isTransition()) {
-        const auto placement = placeTransition(track, clip, span);
-        return placement ? std::optional<TimeRange>(placement->range) : std::nullopt;
-    }
+std::optional<TimeRange> spanTimelineRange(const Clip &clip, const TransitionSpan &span, const Track &track) {
+    const auto placement = placeTransition(track, clip, span);
+    return placement ? std::optional<TimeRange>(placement->range) : std::nullopt;
+}
+
+std::optional<TimeRange> spanTimelineRange(const Clip &clip, const EffectSpan &span, const Track &) {
     const auto start = clip.exactTimelineTimeAt(span.start);
     const auto end = clip.exactTimelineTimeAt(span.end);
     if (!start || !end) {
@@ -1189,7 +1190,7 @@ std::optional<TimeRange> spanTimelineRange(const Clip &clip, const EffectSpan &s
 std::vector<TimeRange> freeLaneRanges(const Clip &clip, int lane, CMTime frameDuration, SpanId except) {
     std::vector<TimeRange> occupied;
     for (const EffectSpan &span : clip.spans) {
-        if (span.isTransition() || span.lane != lane || span.id == except) {
+        if (span.lane != lane || span.id == except) {
             continue;
         }
         const auto start = clip.exactTimelineTimeAt(span.start);
@@ -1500,19 +1501,23 @@ EditResult RemoveSpans::perform(const Project &, Sequence &sequence, IdGenerator
     for (const SpanId id : spanIds_) {
         Clip *clip = nullptr;
         Track *track = nullptr;
-        const EffectSpan *span = sequence.findSpan(id, &clip, &track);
-        if (span == nullptr) {
+        const TransitionSpan *transition = sequence.findTransition(id, &clip, &track);
+        const EffectSpan *span = transition == nullptr ? sequence.findSpan(id, &clip, &track) : nullptr;
+        if (transition == nullptr && span == nullptr) {
             return spanNotFound(id);
         }
         if (EditResult r = requireEditableTrack(track, track->id); !r) {
             return r;
         }
-        if (span->isUnknownKind()) {
+        if (span != nullptr && span->isUnknownKind()) {
             return unknownKindRefusal(*span);
         }
-        allTransitions_ = allTransitions_ && span->isTransition();
-        std::erase_if(clip->transitions, [id](const TransitionSpan &s) { return s.id == id; });
-        std::erase_if(clip->spans, [id](const EffectSpan &s) { return s.id == id; });
+        allTransitions_ = allTransitions_ && transition != nullptr;
+        if (transition != nullptr) {
+            std::erase_if(clip->transitions, [id](const TransitionSpan &s) { return s.id == id; });
+        } else {
+            std::erase_if(clip->spans, [id](const EffectSpan &s) { return s.id == id; });
+        }
         markRemovedOnPurpose(id);
     }
     return EditResult::success();
@@ -1520,11 +1525,15 @@ EditResult RemoveSpans::perform(const Project &, Sequence &sequence, IdGenerator
 
 // ----- Ken Burns and matching a neighbour -----
 
+EditResult kenBurnsNeedsMotionSpan() {
+    return EditResult::failure(EditError::InvalidArgument, "the Ken Burns move needs a Motion span");
+}
+
 EditResult planKenBurns(const Clip &clip, const EffectSpan &span, CMTime frameDuration, MotionFraming start,
                         MotionFraming end, std::vector<SpanValueChange> &changes) {
     changes.clear();
     if (span.kind != SpanKind::Motion) {
-        return EditResult::failure(EditError::InvalidArgument, "the Ken Burns move needs a Motion span");
+        return kenBurnsNeedsMotionSpan();
     }
     // The framings are read back the same way (spanEdgeMotion).
     const auto startTime = spanEdgeFrameTime(clip, span, frameDuration, false);
@@ -1566,12 +1575,12 @@ EditResult planMatchSpanEdge(const Sequence &sequence, SpanId spanId, ClipEdge e
     changes.clear();
     const Clip *clip = nullptr;
     const Track *track = nullptr;
+    if (sequence.findTransition(spanId) != nullptr) {
+        return EditResult::failure(EditError::InvalidArgument, "a transition has no values to match");
+    }
     const EffectSpan *span = sequence.findSpan(spanId, &clip, &track);
     if (span == nullptr) {
         return spanNotFound(spanId);
-    }
-    if (span->isTransition()) {
-        return EditResult::failure(EditError::InvalidArgument, "a transition has no values to match");
     }
     if (span->isUnknownKind()) {
         return unknownKindRefusal(*span);
@@ -1649,10 +1658,10 @@ EditResult planContinueMotion(const Project &project, const Sequence &sequence, 
     const Clip *clip = nullptr;
     const Track *track = nullptr;
     const EffectSpan *span = sequence.findSpan(spanId, &clip, &track);
-    if (span == nullptr) {
+    if (span == nullptr && sequence.findTransition(spanId) == nullptr) {
         return spanNotFound(spanId);
     }
-    if (span->kind != SpanKind::Motion) {
+    if (span == nullptr || span->kind != SpanKind::Motion) { // a transition, or another kind
         return EditResult::failure(EditError::InvalidArgument,
                                    "Continue on Next Clip carries a Motion span's move on to the next clip.");
     }
@@ -1816,7 +1825,7 @@ EditResult ContinueMotionSpan::perform(const Project &project, Sequence &sequenc
 // ----- Audio fades -----
 
 CMTime clipFadeLength(const Clip &clip, ClipEdge edge) {
-    const EffectSpan *span = clip.transitionAt(edge);
+    const TransitionSpan *span = clip.transitionAt(edge);
     if (span == nullptr) {
         return kCMTimeZero;
     }
@@ -1836,7 +1845,7 @@ EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime len
                                                                " does not fit clip " + idString(clip.id.value()) +
                                                                " (" + describe(clip.timelineDuration) + ")");
     }
-    EffectSpan *span = clip.transitionAt(edge);
+    TransitionSpan *span = clip.transitionAt(edge);
     if (edge == ClipEdge::Tail && span != nullptr && kCMTimeZero < span->end) {
         if (length == kCMTimeZero) {
             return EditResult::success(); // a cross dissolve is not a fade
@@ -1872,7 +1881,7 @@ EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime len
         }
     }
     const CMTime other = edge == ClipEdge::Head ? [&] {
-        const EffectSpan *tail = clip.transitionAt(ClipEdge::Tail);
+        const TransitionSpan *tail = clip.transitionAt(ClipEdge::Tail);
         return tail != nullptr ? -tail->start : kCMTimeZero;
     }()
                                                 : clipFadeLength(clip, ClipEdge::Head);
@@ -1889,10 +1898,8 @@ EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime len
         return notRepresentable(clip.id, clip.timelineStart);
     }
     if (span == nullptr) {
-        EffectSpan fade;
+        TransitionSpan fade;
         fade.id = ids.make<SpanId>();
-        fade.lane = kTransitionLane;
-        fade.kind = SpanKind::Transition;
         fade.edge = edge;
         clip.transitions.push_back(fade);
         span = &clip.transitions.back();
@@ -1913,8 +1920,8 @@ EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime len
 std::optional<TransitionPlacement> findTransition(const Sequence &sequence, SpanId spanId) {
     const Clip *owner = nullptr;
     const Track *track = nullptr;
-    const EffectSpan *span = sequence.findSpan(spanId, &owner, &track);
-    if (span == nullptr || !span->isTransition()) {
+    const TransitionSpan *span = sequence.findTransition(spanId, &owner, &track);
+    if (span == nullptr) {
         return std::nullopt;
     }
     return placeTransition(*track, *owner, *span);
@@ -1930,20 +1937,20 @@ namespace {
 
 // Validates the transition spans of `clip` after an edit put `span` there.
 EditResult checkPlacedTransition(const Project &project, const Sequence &sequence, const Track &track,
-                                 const Clip &clip, const EffectSpan &span) {
+                                 const Clip &clip, const TransitionSpan &span) {
     if (auto issue = checkTransitionSpan(project, track, clip, span, sequence.frameDuration)) {
         return transitionIssueToResult(*issue);
     }
     // The clip's transition at its other edge must still fit beside it (a tail span checks the fade
     // in at the clip's start; a fade in is checked from the tail span's side).
-    if (const EffectSpan *other = clip.transitionAt(span.edge == ClipEdge::Head ? ClipEdge::Tail : ClipEdge::Head)) {
+    if (const TransitionSpan *other = clip.transitionAt(span.edge == ClipEdge::Head ? ClipEdge::Tail : ClipEdge::Head)) {
         if (auto issue = checkTransitionSpan(project, track, clip, *other, sequence.frameDuration)) {
             return transitionIssueToResult(*issue);
         }
     }
     // The clip before it may reach into this clip (a cross dissolve), which this span must not meet.
     if (const Clip *previous = touchingClip(track, clip, ClipEdge::Head)) {
-        if (const EffectSpan *incoming = previous->transitionAt(ClipEdge::Tail)) {
+        if (const TransitionSpan *incoming = previous->transitionAt(ClipEdge::Tail)) {
             if (auto issue = checkTransitionSpan(project, track, *previous, *incoming, sequence.frameDuration)) {
                 return transitionIssueToResult(*issue);
             }
@@ -1978,17 +1985,15 @@ EditResult AddTransitionSpans::perform(const Project &project, Sequence &sequenc
                                        std::string("clip ") + idString(clip->id.value()) + " already has a transition at its " +
                                            (request.edge == ClipEdge::Head ? "start" : "end"));
         }
-        EffectSpan span;
+        TransitionSpan span;
         span.id = ids.make<SpanId>();
-        span.lane = kTransitionLane;
-        span.kind = SpanKind::Transition;
         span.edge = request.edge;
-        span.transition = request.kind;
+        span.kind = request.kind;
         span.start = request.start;
         span.end = request.end;
         clip->transitions.push_back(span);
         clip->sortSpans();
-        if (EditResult r = checkPlacedTransition(project, sequence, *track, *clip, *clip->findSpan(span.id)); !r) {
+        if (EditResult r = checkPlacedTransition(project, sequence, *track, *clip, *clip->findTransition(span.id)); !r) {
             return r;
         }
         created_.push_back(span.id);
@@ -2021,8 +2026,8 @@ EditResult SetTransitionRanges::perform(const Project &project, Sequence &sequen
     for (const TransitionRangeChange &change : changes_) {
         Clip *clip = nullptr;
         Track *track = nullptr;
-        EffectSpan *span = sequence.findSpan(change.spanId, &clip, &track);
-        if (span == nullptr || !span->isTransition()) {
+        TransitionSpan *span = sequence.findTransition(change.spanId, &clip, &track);
+        if (span == nullptr) {
             return EditResult::failure(EditError::TransitionNotFound,
                                        "transition " + idString(change.spanId.value()) + " does not exist");
         }
@@ -2181,10 +2186,8 @@ EditResult SetClipReversed::perform(const Project &project, Sequence &sequence, 
             return notRepresentable(clip.id, clip.timelineStart);
         }
         // Effect spans keep their timeline frames: their clip times move with the in point.
+        // (Transitions are offsets from the clip's edges: unchanged.)
         for (EffectSpan &span : clip.spans) {
-            if (span.isTransition()) {
-                continue; // offsets from the clip's edges: unchanged
-            }
             auto moved = [&](CMTime t) -> std::optional<CMTime> {
                 const auto exact = ExactTime::from(t);
                 const auto shifted = exact ? exact->plus(*shift) : std::nullopt;
@@ -2210,8 +2213,8 @@ SetTransitionKind::SetTransitionKind(SequenceId sequenceId, SpanId spanId, Trans
 EditResult SetTransitionKind::perform(const Project &project, Sequence &sequence, IdGenerator &) {
     Clip *clip = nullptr;
     Track *track = nullptr;
-    EffectSpan *span = sequence.findSpan(spanId_, &clip, &track);
-    if (span == nullptr || !span->isTransition()) {
+    TransitionSpan *span = sequence.findTransition(spanId_, &clip, &track);
+    if (span == nullptr) {
         return EditResult::failure(EditError::TransitionNotFound,
                                    "transition " + idString(spanId_.value()) + " does not exist");
     }
@@ -2226,8 +2229,8 @@ EditResult SetTransitionKind::perform(const Project &project, Sequence &sequence
                                    std::string("An audio transition is a crossfade or a fade; it cannot be a ") +
                                        displayNameOf(kind_) + ".");
     }
-    span->transition = kind_;
-    span->unknownTransitionName.clear(); // a kind chosen replaces one from a newer version's file
+    span->kind = kind_;
+    span->unknownKindName.clear(); // a kind chosen replaces one from a newer version's file
     if (EditResult r = checkPlacedTransition(project, sequence, *track, *clip, *span); !r) {
         return r;
     }
@@ -2238,13 +2241,13 @@ namespace {
 
 // linkedTransition for the lane-0 `span` of `owner` on `track`, with `find` looking clips up by id.
 template <typename Find>
-std::optional<SpanId> linkedTransitionOf(const Track &track, const Clip &owner, const EffectSpan &span, Find find) {
+std::optional<SpanId> linkedTransitionOf(const Track &track, const Clip &owner, const TransitionSpan &span, Find find) {
     const auto transition = placeTransition(track, owner, span);
     if (!transition || !owner.linkedClipId) {
         return std::nullopt;
     }
     const auto [partnerOwner, partnerTrack] = find(*owner.linkedClipId);
-    const EffectSpan *candidate = partnerOwner != nullptr ? partnerOwner->transitionAt(span.edge) : nullptr;
+    const TransitionSpan *candidate = partnerOwner != nullptr ? partnerOwner->transitionAt(span.edge) : nullptr;
     if (candidate == nullptr || partnerTrack == nullptr) {
         return std::nullopt;
     }
@@ -2267,8 +2270,8 @@ std::optional<SpanId> linkedTransitionOf(const Track &track, const Clip &owner, 
 std::optional<SpanId> linkedTransition(const Sequence &sequence, SpanId spanId) {
     const Clip *owner = nullptr;
     const Track *track = nullptr;
-    const EffectSpan *span = sequence.findSpan(spanId, &owner, &track);
-    if (span == nullptr || !span->isTransition()) {
+    const TransitionSpan *span = sequence.findTransition(spanId, &owner, &track);
+    if (span == nullptr) {
         return std::nullopt;
     }
     return linkedTransitionOf(*track, *owner, *span, [&](ClipId id) {
@@ -2292,10 +2295,7 @@ std::pair<const Clip *, const Track *> ClipIndex::find(ClipId id) const {
     return it != clips_.end() ? it->second : std::make_pair<const Clip *, const Track *>(nullptr, nullptr);
 }
 
-std::optional<SpanId> ClipIndex::linkedTransition(const Track &track, const Clip &owner, const EffectSpan &span) const {
-    if (!span.isTransition()) {
-        return std::nullopt;
-    }
+std::optional<SpanId> ClipIndex::linkedTransition(const Track &track, const Clip &owner, const TransitionSpan &span) const {
     return linkedTransitionOf(track, owner, span, [this](ClipId id) { return find(id); });
 }
 
@@ -2379,7 +2379,7 @@ std::optional<TransitionSideLimits> transitionSideLimits(const Project &project,
         why = EditResult::failure(EditError::TrackLocked, "Track “" + track->name + "” is locked.");
         return std::nullopt;
     }
-    const EffectSpan *tail = owner->transitionAt(ClipEdge::Tail);
+    const TransitionSpan *tail = owner->transitionAt(ClipEdge::Tail);
     if (tail && tail->id != existing) {
         why = EditResult::failure(EditError::AlreadyExists, "This cut already has a transition.");
         return std::nullopt;
@@ -2396,12 +2396,12 @@ std::optional<TransitionSideLimits> transitionSideLimits(const Project &project,
     CMTime taken = kCMTimeZero;
     EditError roomError = EditError::InvalidArgument;
     std::string roomReason = "A transition cannot be longer than the clips it joins.";
-    if (const EffectSpan *head = owner->transitionAt(ClipEdge::Head)) {
+    if (const TransitionSpan *head = owner->transitionAt(ClipEdge::Head)) {
         taken = head->end;
         roomError = EditError::Overlap;
         roomReason = "It would overlap the fade at the clip's start.";
     } else if (const Clip *previous = touchingClip(*track, *owner, ClipEdge::Head)) {
-        if (const EffectSpan *incoming = previous->transitionAt(ClipEdge::Tail); incoming && kCMTimeZero < incoming->end) {
+        if (const TransitionSpan *incoming = previous->transitionAt(ClipEdge::Tail); incoming && kCMTimeZero < incoming->end) {
             taken = incoming->end;
             roomError = EditError::Overlap;
             roomReason = "It would overlap the neighbouring transition.";
@@ -2431,7 +2431,7 @@ std::optional<TransitionSideLimits> transitionSideLimits(const Project &project,
     CMTime nextTaken = kCMTimeZero;
     EditError nextError = EditError::InvalidArgument;
     std::string nextReason = "A transition cannot be longer than the clips it joins.";
-    if (const EffectSpan *nextTail = next->transitionAt(ClipEdge::Tail)) {
+    if (const TransitionSpan *nextTail = next->transitionAt(ClipEdge::Tail)) {
         nextTaken = -nextTail->start;
         nextError = EditError::Overlap;
         nextReason = "It would overlap the neighbouring transition.";
@@ -2679,12 +2679,12 @@ std::string effectKindsName() {
 
 // "the cross dissolve between “a.mov” and “b.mov”", "the crossfade between ...", "the fade in at the
 // start of “a.mov”", "the Wipe Left fade out at the end of “a.mov”".
-std::string transitionName(const Project &project, const Track &track, const Clip &owner, const EffectSpan &span) {
+std::string transitionName(const Project &project, const Track &track, const Clip &owner, const TransitionSpan &span) {
     const auto placement = placeTransition(track, owner, span);
     const bool audio = track.kind == TrackKind::Audio;
     std::string kind;
-    if (!audio && span.transition != TransitionKind::CrossDissolve) {
-        kind = std::string(displayNameOf(span.transition)) + " ";
+    if (!audio && span.kind != TransitionKind::CrossDissolve) {
+        kind = std::string(displayNameOf(span.kind)) + " ";
     }
     if (placement && placement->role == TransitionRole::CrossDissolve && placement->partner != nullptr) {
         const std::string what = audio ? "crossfade" : (kind.empty() ? "cross dissolve" : kind + "transition");
@@ -2709,7 +2709,7 @@ struct TransitionFrames {
 };
 
 // Sets the lane-0 span's offsets to `frames` on the grid.
-void setTransitionFrames(EffectSpan &span, TransitionFrames frames, CMTime frameDuration) {
+void setTransitionFrames(TransitionSpan &span, TransitionFrames frames, CMTime frameDuration) {
     if (span.edge == ClipEdge::Head) {
         span.start = kCMTimeZero;
         span.end = timeForFrame(frames.after, frameDuration);
@@ -3493,7 +3493,7 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
             for (Track &track : *list) {
                 for (Clip &clip : track.clips) {
                     for (const ClipEdge edge : {ClipEdge::Head, ClipEdge::Tail}) {
-                        EffectSpan *span = clip.transitionAt(edge);
+                        TransitionSpan *span = clip.transitionAt(edge);
                         if (span == nullptr) {
                             continue;
                         }

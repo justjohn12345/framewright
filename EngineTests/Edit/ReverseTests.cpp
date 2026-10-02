@@ -237,7 +237,7 @@ TEST_CASE("Reverse: effect spans keep their timeline frames; a dissolve without 
     SetClipReversed reverse(fx.seq, a, true);
     const EditResult r = applyReversible(fx.project, reverse);
     CHECK(r.droppedTransitionIds == std::vector<SpanId>{dissolve});
-    CHECK(fx.span(dissolve) == nullptr);
+    CHECK(fx.transition(dissolve) == nullptr);
     const auto after = frameOf(*fx.span(motion));
     CHECK(identical(after.first, before.first));
     CHECK(identical(after.second, before.second));
@@ -245,13 +245,13 @@ TEST_CASE("Reverse: effect spans keep their timeline frames; a dissolve without 
         CHECK(motionValuesAt(fx.clip(a), f30(f)) == motionBefore[static_cast<std::size_t>(f)]);
     }
     reverse.revert(fx.project);
-    CHECK(fx.span(dissolve) != nullptr);
+    CHECK(fx.transition(dissolve) != nullptr);
 
     // B reversed keeps it: its media before the cut's handle (frame 295) becomes media after its
     // range's end (frame 365).
     SetClipReversed reverseB(fx.seq, b, true);
     CHECK(applyReversible(fx.project, reverseB).droppedTransitionIds.empty());
-    CHECK(fx.span(dissolve) != nullptr);
+    CHECK(fx.transition(dissolve) != nullptr);
 }
 
 TEST_CASE("Reverse: split, trims and speed changes keep a reversed clip's pictures") {
