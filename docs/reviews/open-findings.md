@@ -995,6 +995,41 @@ Done:
   testControlKAddsAMotionSpanAtThePlayhead` gained "Copy Grade", "Paste Grade", "Reset Grade" (the brief adds
   them to the context menu). AppTests 285 (1 known skip), 0 failures.
 
+- 7, the luma waveform: 067746f. Engine: `Engine/Render/LumaWaveform.h` (a compute pass and a display pass
+  in the engine's metallib, encoded into the caller's command buffer): `ve_waveform_accumulate` reads the
+  monitor's RGBA16Float working texture over the frame's whole width and up to 360 evenly spaced rows, and
+  counts each pixel's luma (BT.709 weights on the R'G'B' the monitor shows, limited to [0, 1]) in its column
+  (512 across the frame) at its level (256 from 0 to 100 IRE) with device atomics; `ve_waveform_fragment`
+  draws the counts (column across, level up, each target row the brightest of the levels it covers so no
+  level falls between rows; trace brightness 1 - exp(-count * 48 / samples per column), green, over a
+  graticule every 10 IRE, brighter at 0, 50, 100). The working frame reader (facade-private) now also gets
+  the frame's rectangle in the working texture (`WorkingFrameReader` gained a `const PixelRect &frame`
+  argument: the viewport limited to the target), so letterbox bars are not counted. `VEWaveformView` (new
+  public class, `VEWaveformView.h`, in the umbrella header): an NSView with its own CAMetalLayer (BGRA8,
+  sRGB); its reader counts the frame and draws into its next drawable, presented with the program frame's
+  command buffer, on the program monitor's render thread (no other thread, no CPU readback); it does nothing
+  without a size, once gone, or when no drawable is free. `VEProgramMonitor` installs the reader on the
+  program view (and on a program view attached later), clears it when detached, and renders the program view
+  once on attach and on a waveform resize. Public additions: `VEWaveformView` (`device`, `drawCount`,
+  `lastError`); VEEngine.h `attachWaveformView(_:)` and `waveformView`. App: View > Show Waveform (a Toggle,
+  remembered by the window layout, `layout.showsWaveform`; Reset Window Layout hides it), a 260 pt panel
+  right of the program monitor (`WaveformPanel`: the view, a 100/50/0 scale, a close button), attached
+  while shown and detached when SwiftUI removes it (`WaveformViewRepresentable.dismantleNSView`). It follows
+  the playhead (paused frames, seeks, edits: every program render) and plays along (every played frame);
+  SwiftUI does no per-frame work for it. Cost (M4 Pro, median of 60 frames after warm-up, `LumaWaveformTests
+  testTheWaveformsCost`): GPU 0.12-0.28 ms per frame for 1080p and 2160p frames, a varied picture and flat
+  grey (every sample of a column on one counter) alike; encoding on the render thread 0.009 ms; against 16.7
+  ms per frame at 60 fps. Tests: `LumaWaveformTests` (6: a ramp gives a diagonal and every column counts its
+  4 x 90 pixels; flat grey gives a single line, pure red its luma level 54 with negative values limited;
+  only the frame's rectangle counts, clipped to the texture, an empty one encodes nothing; the display
+  draws the trace and the graticule and nothing before an accumulate; the view drawn by the program monitor
+  through the engine, its mean level falling from 105 to 59 of 255 with exposure -2 (it shows the graded
+  picture) and nothing drawn once detached; the cost) and `WaveformPanelTests` (2: the layout remembers it,
+  Reset hides it, the View menu's action; shown in a window, its view is the engine's and is drawn with the
+  program monitor's frames; hidden, the engine lets go of it). Existing tests changed by the reader's
+  signature only (named): `CompositorWorkingBufferTests` (two reader lambdas) and `HighPrecisionDecodeTests`
+  (one reader lambda) take the new `const PixelRect &` argument; the timeline redraw tests pass unchanged.
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
