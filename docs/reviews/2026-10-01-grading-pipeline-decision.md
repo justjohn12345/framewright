@@ -1,6 +1,8 @@
 # Grading pipeline: placement decision (2026-10-01)
 
-Status: **proposed**, for the user and the lead to approve. Nothing here is implemented. It answers the
+Status: **approved by the user, 2026-10-01**: sections 1-6 and 8 as recommended; section 7 amended (see the
+decision at the end of section 7: the base grade is a property of the clip, not a stack effect). Nothing here
+is implemented yet. It answers the
 questions of theme 5 in `2026-10-01-general-code-review.md` ("decide and write down where grading sits") for
 the colour grading plan (`docs/plans/README.md`, Planned item 2), and adds two related questions the lead
 raised: where whole-clip effects live, and how transitions get parameters.
@@ -223,6 +225,40 @@ How it interacts with the rest:
   item 1's foreign-content rule. Option (a) needs no schema change but carries the fill-the-clip burden.
   Option (c), more lanes, would make lane order semantic and would grow the timeline rows (D1 compact rows)
   for effects that have no time.
+
+### Decision (user, 2026-10-01): the base grade is a clip property
+The user chose a simpler model for grading than the effect stack recommended above. A clip has a grade, as it
+has a position and a scale; there is no "colour effect" to add.
+
+**Editing a grade:**
+- Select a clip (or clips) and open the colour tools, which edit that grade.
+- **One clip selected:** the panel shows and edits its grade.
+- **Several clips selected:** each control shows its value where the clips agree and "mixed" where they
+  differ. Moving a control sets that one parameter on all of them and leaves their other parameters alone, as
+  the inspector already does for several selected clips.
+
+**Reusing a grade:** Copy Grade, Paste Grade and Reset are how a grade is reused across clips. "Match previous
+clip" can come later.
+
+**How the major editors do it:**
+- DaVinci Resolve grades the current clip only, and spreads a grade by copying it, by groups or with a
+  timeline grade.
+- Premiere's Lumetri panel edits one clip's Lumetri Color, spread by Paste Attributes, presets or adjustment
+  layers.
+- Final Cut uses clip effects and Paste Attributes.
+
+None of them merges different grades; each grades one clip and copies.
+
+**Consequences for the design above:**
+- The grade is a fixed set of parameters on the clip (`Clip::grade`, from the parameter descriptor table).
+  Composition order: decode and convert, the clip's grade, then Motion, Opacity and the blend.
+- The file format gains the clip's grade fields (schema 8). Unknown grade parameters are kept under item 1's
+  foreign-content rule.
+- A grade that changes over time is left for later. When wanted, it is a timed Colour span on a lane that
+  composes on top of the clip's grade through the parameter table's rules.
+- The ordered effect stack is deferred, not rejected. It comes back when crop, keying and blur arrive, since
+  those are always-on effects whose order matters. Splitting `EffectSpan` (review 1.9) still comes first and
+  keeps that option cheap.
 
 ## 8. Transition parameters
 
