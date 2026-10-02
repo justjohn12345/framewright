@@ -1731,7 +1731,7 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   transition was shortened to 0 frames (0.00 s): ..." before "The linked transition was not changed: ..."
   (`fitTransitionRange`'s head-fade path now refuses before noting anything).
 
-## Fix round 2026-09-30 (group A of the lead's brief; status in `open-findings.md`)
+## Fix round 2026-09-30 (group A of the lead's brief; status in `open-findings.md` at 400ded1)
 - Media identity (supersedes nothing, adds to "Media identity"): WaveformService keys running jobs and the
   memory cache by (asset, track, path) and `cached()` takes the path; ThumbnailService's memory and coalescing
   key includes the path. `-[VEMediaLibrary cachedWaveformOfAsset:]` takes the asset (its current path);
@@ -1776,7 +1776,7 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   confirmation says clips move earlier with their media; after Apply no black frame or audio gap at the
   cuts, picture and sound still in sync.
 
-## Fix round 2026-09-30, groups B and C, and the review of group A (status in `open-findings.md`)
+## Fix round 2026-09-30, groups B and C, and the review of group A (status in `open-findings.md` at 400ded1)
 - Playback diagnostics (item 9): `PlaybackController::lastPresented()` is lossless. The frame source publishes
   each presented frame as an immutable `PresentedFrame` swapped under `presentedMutex` (and the held-back
   index beside it); readers copy after unlocking. Do not go back to a try-lock: a paused view renders again
@@ -1836,7 +1836,7 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   first video clip on a sequence that already holds a still: the status line also says how the still was
   conformed.
 
-## Review of groups B and C (2026-10-01; status in `open-findings.md`)
+## Review of groups B and C (2026-10-01; status in `open-findings.md` at 400ded1)
 - Frame-rate conform (corrects "Fix round 2026-09-30, groups B and C": a sub-frame linked clip that "ends a
   frame after its start, apart from its group"): such a clip never ended "a fraction of a frame after its
   picture". Its start is on the grid at or after the group's frame, so alone it played wholly after its
@@ -1848,7 +1848,7 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   clip and why ("... has no room for one: it cannot start earlier, and a frame from its start would start
   after the clip it is linked to ends"; "... cannot keep a frame ... where it plays: it would ...").
 
-## Fix round 2026-10-01 (general review; status in `open-findings.md`)
+## Fix round 2026-10-01 (general review; status in `open-findings.md` at 400ded1)
 - App state: `ProjectStore.speedSheetModel` is the Speed/Duration sheet's model (made by `showSpeedSheet()`,
   ended by `closeSpeedSheet()`; `speedSheetClipIDs` is derived). A new sheet's model belongs in the store, never
   in a view's sheet closure (a store publish rebuilds the window). `ProjectStore.isAudioMuted` is the engine's
@@ -1885,7 +1885,7 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   failed once in five full runs this round on its progress pacing ("delivered 0.013 s after the previous
   one", bound 0.017 s): a wall-clock assertion, passed in the other runs.
 
-## Colour grading prerequisites round 2 (2026-10-01; status in `open-findings.md`)
+## Colour grading prerequisites round 2 (2026-10-01; status in `open-findings.md` at 400ded1)
 - Project file migrations are frozen (`Engine/Serialize/ProjectMigrations.cpp`): a schema bump adds a
   namespace `toV8` with its own copies of whatever it reads or writes (never the live model or parser), raises
   `kLastMigrationTarget` with `kProjectSchemaVersion` (a `static_assert` ties them), and records a
@@ -1919,7 +1919,7 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   command, coalescable for sliders), and the six kinds are not yet presets of fewer kinds (decision section 8,
   "Kinds as presets").
 
-## Colour grading slice 1 (2026-10-02; status in `open-findings.md`)
+## Colour grading slice 1 (2026-10-02; status in `open-findings.md` at 400ded1)
 - D1/D2 (supersedes "Two disagreements between callers are kept and wait for a decision" in the round 2
   notes): one rule everywhere: when a fade and a cross dissolve on one clip no longer both fit, the fade
   gives way and the dissolve keeps its length. The frame-rate conform fits dissolves first with the fades
@@ -1975,7 +1975,7 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   7. Save and reopen a graded project: the grades come back; open the file in a text editor: `"grade"` only on
      the graded clips, `"schemaVersion": 8`.
 
-## Scopes and colour grading slice 2 (2026-10-02; status in `open-findings.md`)
+## Scopes and colour grading slice 2 (2026-10-02; status in `open-findings.md` at 400ded1)
 - Scopes: `VEWaveformView` is the program monitor's scope view (the class kept its slice 1 name), with `mode`
   (waveform, histogram, vectorscope) and `histogramStyle`. A new scope follows `Histogram.h` or `Vectorscope.h`: a
   counts pass over the reader's frame rectangle of the RGBA16Float working texture, which also counts the

@@ -41,40 +41,27 @@ is cheaper than fixing them alongside the features.
 
 | Group | State |
 |---|---|
-| 0. Bugs and test hygiene | **Done** (0.1.8, fecb2a2..bde9dd9) |
-| 1. Before colour grading | **Done** except 1.11 (Swift tables, with the grading UI): two prerequisite rounds, bedbb1b..7b1b1ad and ae6283e..d4c385d; decision note approved |
-| 2. Before nested sequences | Not started |
+| 0. Bugs and test hygiene | **Done** in 0.1.8 (dfd9b24..bde9dd9) except B7 (open, with 2.4) |
+| 1. Before colour grading | **Done** except 1.11 (Swift tables): two prerequisite rounds, bedbb1b..7b1b1ad and 74de129..d4c385d; decision note approved (70bfd65, ae6283e). Grading slices 1 and 2 shipped since (0.1.9) |
+| 2. Before nested sequences | 2.5 done with 1.7 (d77e2e7); the rest not started |
 | 3. Before the MCP server | Not started |
 | 4. Structural, any time | Not started |
-| 5. Tests and docs | Partly done (hygiene, slow tests moved); the rest not started |
+| 5. Tests and docs | Partly done in 0.1.8 (hygiene, slow tests moved); 5.1-5.10 not started |
 | 6. Smaller open items | Open; tracked in `open-findings.md` |
 
 ---
 
-## 0. Bugs and test hygiene (done in 0.1.8)
-All fixed with regression tests that fail on the old code. Status and commits are in `open-findings.md`, "Fix round
-2026-10-01 (general review)".
+## 0. Bugs and test hygiene
+**Done in 0.1.8** (dfd9b24..bde9dd9) except B7: B1-B6 and B8-B12 fixed with regression tests that fail on the old
+code, a user report added (Space after a reverse shuttle kept playing in reverse: 42c1d54), the `~/Movies`
+demo-project test and the 61 s soak moved to StressTests, the dead doc links fixed. The bug table and the round's
+status notes are in git history (this file and `open-findings.md` at 400ded1).
+
+Open:
 
 | # | Bug | Where | Status |
 |---|---|---|---|
-| B1 | Speed/Duration sheet's model rebuilt on every window re-render: a refused Apply lost the typed speed and the reason | `App/Views/ContentView.swift:66-71` | fixed: the model lives on the store |
-| B2 | Mute button kept its own state, out of step with Playback > Mute Audio | `TransportBar.swift:56`, `FramewrightApp.swift:186` | fixed: one state, menu check mark |
-| B3 | Data race: `DecodePool::refresh()` wrote a worker-owned field (`repairedAt`) | `Engine/Media/DecodePool.mm:1136` | fixed (verified): mutex-guarded re-arm flag |
-| B4 | FFmpeg encoder converted BT.2020/240M with BT.709 coefficients | `FFVideoEncoder.mm:194` | fixed: shared `swsColorspace` |
-| B5 | Thumbnails and waveforms ignored "Prefer FFmpeg" | `VEMediaLibrary.mm:160-171` | fixed: follow the router's policy at run time |
-| B6 | Undo stack ignored a failed re-apply; `AccumulatedSteps` dropped children's ids | `Engine/Edit/UndoStack.cpp:87,25-36` | fixed |
 | B7 | Ids reused after undo, contrary to `Ids.h` (only the facade's `FreshIds` keeps the promise) | `Ids.h:3-5`, `Command.cpp:145` | **open:** see 2.4 |
-| B8 | Tests leaked about 7 GB in `$TMPDIR`, plus about 3,000 defaults suites and 11,000 temp directories in the real app's container | `TestMedia.mm:459`, `StoreFixtures.swift:36` | fixed: a full run leaves no files; leftovers deleted |
-| B9 | AV1/VP9 VideoToolbox decoder registration was a side effect the prober never triggered | `HardwareCaps.mm:185` | fixed: explicit `call_once` at every entry point |
-| B10 | Thumbnails found a clip's last frame with one seek (no search) | `ThumbnailService.mm:552` | fixed: one shared `LastFrameSearch` |
-| B11 | Span and transition titles disagreed (a Wipe edge read "Cross Dissolve") | `SpanEditing.swift:193` | fixed: `SpanKindDisplay.swift` |
-| B12 | M4A with PCM: Apple refused it, FFmpeg's validation accepted it, and the export failed at open | `AppleWriter.mm`, `FFmpegBackend.mm` | fixed: one `ContainerRules.h` table |
-| — | Space after a reverse shuttle kept playing in reverse (user report) | `PlaybackController.mm:1339` | fixed: play from stopped is forward at 1x |
-
-Also done:
-- **Moved to StressTests:** the `~/Movies` demo-project test and the 61 s random soak (EngineTests run time 410 s →
-  290 s).
-- **Dead doc links:** fixed.
 
 ---
 
@@ -82,81 +69,35 @@ Also done:
 Colour grading means a Colour span kind (exposure, contrast, temperature, tint, saturation; later wheels, curves,
 LUTs), applied per clip in linear light, with scopes.
 
-**Status (2026-10-02):** 1.1-1.10 done; 1.11 goes with the grading UI. Details and test evidence are in
-`open-findings.md` ("Colour grading prerequisites" and "… round 2"). The pipeline decisions are in
-`2026-10-01-grading-pipeline-decision.md` (approved). Beyond this list, the transition kinds also gained a
-descriptor table with typed parameters (f8361eb), the groundwork for the transition library.
+**Done:** 1.1-1.10 in two prerequisite rounds, bedbb1b..7b1b1ad and 74de129..d4c385d (the items' full text is in
+this file at 400ded1, the rounds' status notes in `open-findings.md` at 400ded1):
+- 1.1 Preserve unknown span content on save: bedbb1b.
+- 1.2 Descriptor tables for span kinds and parameters: eda4028.
+- 1.3 Parameters indexed by enum: a813c32.
+- 1.4 Named shader uniforms: c59028e.
+- 1.5 Where grading sits in the pipeline: decided in `2026-10-01-grading-pipeline-decision.md` (df53988), approved
+  2026-10-01 (70bfd65, ae6283e).
+- 1.6 Float working buffer on monitors: 47f0dc9 (RGBA16Float, kept by the user's decision of 2026-10-02).
+- 1.7 High-precision decode: d77e2e7 (with 2.5, the decode format in the frame cache key).
+- 1.8 One owner for transition and fade rules: 1c70af7 (`TransitionRules`); the disagreements D1 and D2 made one
+  rule (the fade gives way) in 96e2cd5.
+- 1.9 `EffectSpan` split from `TransitionSpan`: 4da7893, 520e7c0.
+- 1.10 Frozen migrations with golden files per version: 74de129.
 
-**1.1 Preserve unknown span content on save.** S. **Done** (bedbb1b). (core #9)
-- **Today:** an unknown transition kind is kept by name, but unknown span kinds, parameters and fields are dropped
-  and lost on save (`ProjectJSON.cpp:455-496`).
-- **Why first:** a project with grades opened and saved in a pre-grading build would silently lose them.
+Beyond the list, the transition kinds gained a descriptor table with typed parameters (f8361eb). Colour grading
+itself shipped in slices 1 and 2 (0.1.9): the base grade is a property of the clip, not a span kind (decision
+section 7).
 
-**1.2 Descriptor tables for span kinds and parameters.** M. **Done** (eda4028). (core #2)
-- **Today:** one new kind or parameter touches about 15 C++ sites. The track-kind rule is written three times
-  (`EditOps.cpp:1028`, `Validation.cpp:205`, `Clip.cpp:528`). Whether a parameter adds or multiplies is spelled out in
-  six places, inverted in four planners (`planKenBurns`, `planMatchSpanEdge`, `planContinueMotion`,
-  `planMatchMotion`). The parser keeps its own kind list (`ProjectJSON.cpp:450`); a kind missing from it is silently
-  dropped on load.
-- **Fix:** one table per kind (name, track kind, parameters) and per parameter (neutral value, range, additive or
-  multiplicative), with `compose`/`decompose` helpers derived from it.
-
-**1.3 Parameters indexed by enum.** M. **Done** (a813c32).
-- **Today:** `SpanTracks` holds six named `KeyframeTrack` fields reached through switches. On the facade side,
-  `VESpanValues` is a flat public struct mirrored by `spanValueIn`/`setSpanValueIn` and kind switches (render #9).
-- **Fix:** storage indexed by `SpanParameter`; facade accessors keyed by parameter.
-
-**1.4 Named shader uniforms.** S-M. **Done** (c59028e). (render #5)
-- **Today:** `VEDrawUniforms::reserved` is fully used (shape, feather, a flag), and enums travel as floats
-  (`int(x + 0.5)`). Straight alpha hides in `params.y`, 10-bit in `VEConvertUniforms::size.z`, and three buffer
-  indices alias 0.
-- **Fix:** named sub-structs with real int fields, and a `VEGradeUniforms` slot per source.
-
-**1.5 Decide where grading sits in the pipeline.** Decision. **Done**: approved 2026-10-01 (df53988, 70bfd65, ae6283e).
-(render #3)
-- **The questions:**
-  - grading in linear light or gamma, relative to today's deliberately gamma-encoded blend (`Compositor.h:31-34`);
-  - where the decode-time `saturate` clamp (`Shaders.metal:72`) moves;
-  - what working format monitors need;
-  - which colour tags to honour.
-
-**1.6 Float working buffer on monitors.** M. **Done** (47f0dc9): RGBA16Float, kept by decision on 2026-10-02. (render #3)
-- **Today:** monitors blend straight into a framebuffer-only BGR10A2 drawable (`VEPreviewView.mm:217,342`), while
-  export blends into an `RGBA16Float` intermediate. Scopes cannot read the drawable, and the two paths blend at
-  different precision.
-- **Fix:** composite into a pooled float intermediate, then add an output stage.
-
-**1.7 High-precision decode.** M-L. **Done** (d77e2e7), with the decode format in the frame cache key (2.5 done with it). (media #2)
-- **Today:** alpha, RGB and still sources come out as 8-bit `32BGRA`, 12-bit ProRes 4444 included
-  (`AppleSupport.mm:348`, `FFFrameConverter.mm:227`), against the converter's own "never truncate" rule. Stills are
-  flattened to 8-bit sRGB: P3 HEIC is gamut-clipped, and FFmpeg ignores ICC profiles. Transfer and primaries tags are
-  attached but never read.
-
-**1.8 One owner for transition and fade rules.** L. **Done** (1c70af7): `TransitionRules::edgeRoom`/`fadeRoom`.
-The two remaining disagreements (D1, D2) are decided: the fade gives way everywhere, and the frame-rate
-conform changes to match in the first grading round. (core #3)
-- **Today:** the rules live in at least six places: `checkTransitionSpan`, `pruneInvalidTransitions`,
-  `Clip::fitSpans`, `setClipFade`, `transitionSideLimits`, `fadeLimit`, a trial-and-error loop in
-  `SetSequenceFormat`, and a copy in the v4→v5 migration. The copies have already disagreed once (review L9).
-- **Why it matters here:** a Colour span shares lanes and limits with these rules.
-- **Fix:** one `TransitionRules::edgeRoom` that all of them call.
-
-**1.9 Split `EffectSpan` into effect and transition types.** L. **Done** (4da7893, 520e7c0): `TransitionSpan` in `Clip::transitions`. (core #1)
-- **Today:** one struct with two time bases and dummy fields, and every span routine forks on `isTransition()`.
-- **Why it matters here:** grading adds non-scalar parameters (wheels, curves, LUT references) that should not live
-  next to transition fields.
-
-**1.10 Freeze the migrations.** M. **Done** (74de129): `ProjectMigrations`, with golden fixtures per version. (core #8)
-- **Today:** the migrations use the live writer and model helpers (`ProjectJSON.cpp:1143`, `rebasedTrack`,
-  `migrateClipV1`), so the first schema change for colour spans would silently alter how a v4 file loads.
-- **Fix:** freeze each step, with golden JSON per version.
+Open:
 
 **1.11 Swift kind and parameter tables.** M. (app #5, #6)
 - **Today:**
   - `InspectorParameter` and `SpanParameter` repeat each other's tables;
   - there are two span-range editors and two formatters;
   - per-kind metadata is spread over about 10 switches.
-- **Status:** item B11 started a single kind table (`SpanKindDisplay.swift`).
+- **Status:** item B11 started a single kind table (`SpanKindDisplay.swift`), and the Colour rows read their names,
+  units, neutral values and ranges from the engine's grade table (8d16b30); `InspectorParameter`
+  (`InspectorModel.swift`) and `SpanParameter` (`SpanEditing.swift`) still repeat each other.
 - **Fix:** extend it with parameters and defaults so grading rows come from one place.
 
 ---
@@ -187,9 +128,7 @@ A nested sequence is a sequence used as a clip in another, live, trimmed and sta
 - **Today:** undo restores the id generator, so ids can be reused unless the facade's wrapper intervenes.
 - **Fix:** a stack-level high-water mark, or move `FreshIds` into `Engine/Edit`.
 
-**2.5 Frame cache key.** S-M. **Done** with 1.7 (d77e2e7): `FrameKey{asset, decode format}`. (media #7)
-- **Today:** frames are keyed by (epoch, asset) only. Two video tracks of one asset, or different decode options,
-  would cross-serve frames. This also matters for 1.7's higher-precision decode.
+**2.5 Frame cache key.** **Done** with 1.7 (d77e2e7): `FrameKey{asset, decode format}`. (media #7)
 
 **2.6 One sequence format, one validity rule.** S-M. (core #6)
 - **Today:** `Sequence` repeats `SequenceFormat`'s fields. Load-time validation only checks positivity, so a file can
@@ -351,7 +290,8 @@ These don't block a specific feature but make every change cheaper.
   - **Today:** 28 test methods are over 100 lines; ExportParityTests repeats a 25-line block nine times; tests are
     filed by review id instead of feature.
 - **5.9 Docs restructure.** M.
-  - **Today:** `integration-notes.md` is an 1,849-line chronological log, and `open-findings.md` carries done items.
+  - **Today:** `integration-notes.md` is a 2,000-line chronological log. (`open-findings.md` no longer carries
+    done rounds since 2026-10-02.)
   - **Fix:** `docs/architecture-rules.md` (edited in place), `docs/testing.md`, round logs moved to
     `docs/reviews/rounds/`.
 - **5.10 Release script guard rails.** S.
@@ -361,7 +301,7 @@ These don't block a specific feature but make every change cheaper.
 ---
 
 ## 6. Smaller open items
-Tracked in `open-findings.md`:
+Tracked in `open-findings.md` ("Left open by the 2026-09-30 to 2026-10-02 rounds" and the post-lanes review):
 - two kinds of frame-rate change refused although a valid result exists;
 - short linked clips that share no cut can lose their overlap by under a frame;
 - a 32 kHz AAC export written at 192 kb/s;
