@@ -2,6 +2,7 @@
 
 #include "../Media/ColorTags.h"
 #include "../Media/MediaTypes.h"
+#include "ColorGrade.h"
 #include "ColorMath.h"
 #include "ShaderTypes.h"
 
@@ -97,10 +98,13 @@ struct PipelineKey {
     bool hasPartner = false;
     bool bIsYCbCr = false;
     MTLPixelFormat format = MTLPixelFormatInvalid;
+    // The sources' grades (VEFunctionConstantSourceAHasGrade / ...BHasGrade).
+    bool aIsGraded = false;
+    bool bIsGraded = false;
 
     std::uint64_t packed() const {
-        return (static_cast<std::uint64_t>(format) << 3) | (aIsYCbCr ? 1u : 0u) | (hasPartner ? 2u : 0u) |
-               (hasPartner && bIsYCbCr ? 4u : 0u);
+        return (static_cast<std::uint64_t>(format) << 5) | (aIsYCbCr ? 1u : 0u) | (hasPartner ? 2u : 0u) |
+               (hasPartner && bIsYCbCr ? 4u : 0u) | (aIsGraded ? 8u : 0u) | (hasPartner && bIsGraded ? 16u : 0u);
     }
 };
 
@@ -202,8 +206,16 @@ struct SourceBinding {
     bool straightAlpha = false; // RGBA colour not premultiplied (the shader premultiplies per texel)
 };
 
+// Whether the layer's picture is graded: a grade with a value that is not neutral (ClipGrade.h). An ungraded
+// layer runs the pipeline without the grade, exactly as before grading existed.
+bool isGraded(const VideoLayer &layer) {
+    return !isNeutralGrade(layer.grade);
+}
+
+// The source uniforms of `layer`'s picture: its sampling and placement, its weight, and (when graded) its
+// grade, linearised by the picture's transfer tag (gradeTransferFor; an untagged still as sRGB).
 void fillSource(VESourceUniforms &u, const TextureSet &textures, const SourceBinding &binding,
-                const Placement &placement, double weight) {
+                const Placement &placement, double weight, const VideoLayer &layer) {
     u.colorMatrix = textures.colorMatrix();
     u.uvFromFrameX = placement.uvFromFrameX;
     u.uvFromFrameY = placement.uvFromFrameY;
@@ -213,6 +225,8 @@ void fillSource(VESourceUniforms &u, const TextureSet &textures, const SourceBin
     u.unused0 = 0;
     u.unused1 = 0;
     u.planeExtent = binding.extent;
+    u.grade = isGraded(layer) ? gradeUniformsFor(layer.grade, gradeTransferFor(textures.transfer(), layer.isStill))
+                              : VEGradeUniforms{};
 }
 
 // Whether the layer's transition is a shaped one (a wipe or the iris): drawn with the per-pixel
@@ -626,9 +640,13 @@ struct Compositor::Impl {
         bool a = key.aIsYCbCr;
         bool partner = key.hasPartner;
         bool b = key.hasPartner && key.bIsYCbCr;
+        bool aGraded = key.aIsGraded;
+        bool bGraded = key.hasPartner && key.bIsGraded;
         [constants setConstantValue:&a type:MTLDataTypeBool atIndex:VEFunctionConstantSourceAIsYCbCr];
         [constants setConstantValue:&partner type:MTLDataTypeBool atIndex:VEFunctionConstantHasPartner];
         [constants setConstantValue:&b type:MTLDataTypeBool atIndex:VEFunctionConstantSourceBIsYCbCr];
+        [constants setConstantValue:&aGraded type:MTLDataTypeBool atIndex:VEFunctionConstantSourceAHasGrade];
+        [constants setConstantValue:&bGraded type:MTLDataTypeBool atIndex:VEFunctionConstantSourceBHasGrade];
         NSError *error = nil;
         id<MTLFunction> fragment = [library newFunctionWithName:@"ve_layer_fragment" constantValues:constants error:&error];
         if (fragment == nil) {
@@ -800,13 +818,14 @@ struct Compositor::Impl {
                     return std::move(binding).error();
                 }
                 item.a = binding.value();
-                fillSource(item.uniforms.a, t, item.a, pl, weight);
+                fillSource(item.uniforms.a, t, item.a, pl, weight, layer);
                 item.uniforms.quadRect = simd_make_float4(float(pl.x0), float(pl.y0), float(pl.x1), float(pl.y1));
                 if (isShaped(layer)) {
                     item.uniforms.transition = transitionUniforms(*layer.transition, true);
                 }
                 item.layerA = item.layerB = i;
-                auto state = pipeline({t.sourceClass() == SourceClass::YCbCrBiPlanar, false, false, format});
+                auto state =
+                    pipeline({t.sourceClass() == SourceClass::YCbCrBiPlanar, false, false, format, isGraded(layer), false});
                 if (!state.ok()) {
                     return std::move(state).error();
                 }
@@ -840,8 +859,8 @@ struct Compositor::Impl {
                 }
                 item.a = bindingA.value();
                 item.b = bindingB.value();
-                fillSource(item.uniforms.a, ta, item.a, pa, pa.visible ? outLayer.opacity : 0.0);
-                fillSource(item.uniforms.b, tb, item.b, pb, pb.visible ? inLayer.opacity : 0.0);
+                fillSource(item.uniforms.a, ta, item.a, pa, pa.visible ? outLayer.opacity : 0.0, outLayer);
+                fillSource(item.uniforms.b, tb, item.b, pb, pb.visible ? inLayer.opacity : 0.0, inLayer);
                 double x0 = pa.visible ? pa.x0 : pb.x0, y0 = pa.visible ? pa.y0 : pb.y0;
                 double x1 = pa.visible ? pa.x1 : pb.x1, y1 = pa.visible ? pa.y1 : pb.y1;
                 if (pa.visible && pb.visible) {
@@ -855,7 +874,8 @@ struct Compositor::Impl {
                 item.layerA = out;
                 item.layerB = in;
                 auto state = pipeline({ta.sourceClass() == SourceClass::YCbCrBiPlanar, true,
-                                       tb.sourceClass() == SourceClass::YCbCrBiPlanar, format});
+                                       tb.sourceClass() == SourceClass::YCbCrBiPlanar, format, isGraded(outLayer),
+                                       isGraded(inLayer)});
                 if (!state.ok()) {
                     return std::move(state).error();
                 }
@@ -960,12 +980,14 @@ Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device,
     }
     impl->textureCache = std::move(cache).value();
 
-    // Every target is composited in kIntermediateFormat; a prepared format also gets its output pass.
+    // Every target is composited in kIntermediateFormat; a prepared format also gets its output pass. Every
+    // layer pipeline is made here (graded and not), so a first graded frame never waits for a compile.
     impl->pipelines.reserve(32);
     if (preparedFormats.size() > 0) {
-        for (int bits = 0; bits < 8; ++bits) {
-            PipelineKey key{(bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0, kIntermediateFormat};
-            if (!key.hasPartner && key.bIsYCbCr) {
+        for (int bits = 0; bits < 32; ++bits) {
+            PipelineKey key{(bits & 1) != 0,  (bits & 2) != 0, (bits & 4) != 0, kIntermediateFormat,
+                            (bits & 8) != 0, (bits & 16) != 0};
+            if (!key.hasPartner && (key.bIsYCbCr || key.bIsGraded)) {
                 continue;
             }
             auto state = impl->pipeline(key);

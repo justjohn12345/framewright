@@ -85,6 +85,15 @@ bool layoutFor(OSType format, FormatLayout &out) {
     }
 }
 
+media::TransferFunction transferOf(CVPixelBufferRef buffer) {
+    CFRef<CFTypeRef> value =
+        CFRef<CFTypeRef>::adopt(CVBufferCopyAttachment(buffer, kCVImageBufferTransferFunctionKey, nullptr));
+    if (value && CFGetTypeID(value.get()) == CFStringGetTypeID()) {
+        return media::transferFunctionFromCV(static_cast<CFStringRef>(value.get()));
+    }
+    return media::TransferFunction::Unknown;
+}
+
 media::YCbCrMatrix matrixOf(CVPixelBufferRef buffer) {
     CFRef<CFTypeRef> value =
         CFRef<CFTypeRef>::adopt(CVBufferCopyAttachment(buffer, kCVImageBufferYCbCrMatrixKey, nullptr));
@@ -345,6 +354,7 @@ Result<TextureSet> TextureCache::textures(const PixelBuffer &buffer, TextureAcce
     }
 
     set.alphaMode_ = layout.sourceClass == SourceClass::RGBA ? alphaModeOf(pb) : AlphaMode::Premultiplied;
+    set.transfer_ = transferOf(pb);
     if (layout.sourceClass == SourceClass::YCbCrBiPlanar) {
         YCbCrEncoding encoding;
         encoding.matrix = matrixOf(pb);

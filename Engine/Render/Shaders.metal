@@ -3,7 +3,8 @@
 //
 // Compositing model (see Compositor.h): every layer is drawn as a quad covering its footprint
 // in sequence pixels; the fragment shader maps each output position back to source uv
-// (inverse affine), samples bilinearly, converts YCbCr to gamma-encoded R'G'B', applies an
+// (inverse affine), samples bilinearly, converts YCbCr to gamma-encoded R'G'B', grades a graded
+// source (ColorGrade.h; function constants select it per source), applies an
 // anti-aliased edge coverage and the layer weight, and returns premultiplied colour for
 // ONE / ONE_MINUS_SOURCE_ALPHA blending. A dissolve pair is drawn in one pass as
 // mix(A, B, m) of the two premultiplied samples, so the crossfade is exact over transparency; m is the
@@ -12,6 +13,7 @@
 
 #include <metal_stdlib>
 #include "ShaderTypes.h"
+#include "ColorGrade.h"
 
 using namespace metal;
 
@@ -21,6 +23,13 @@ constant bool kSourceAIsYCbCr [[function_constant(VEFunctionConstantSourceAIsYCb
 constant bool kHasPartner [[function_constant(VEFunctionConstantHasPartner)]];
 constant bool kSourceBIsYCbCr [[function_constant(VEFunctionConstantSourceBIsYCbCr)]];
 constant bool kSourceBHasChroma = kHasPartner && kSourceBIsYCbCr;
+// A graded source (ColorGrade.h): its R'G'B' stays unclamped through the grade, which clamps at its end.
+// Absent (older pipelines, tests that specialise only the three above), a source is ungraded.
+constant bool kSourceAHasGradeValue [[function_constant(VEFunctionConstantSourceAHasGrade)]];
+constant bool kSourceBHasGradeValue [[function_constant(VEFunctionConstantSourceBHasGrade)]];
+constant bool kSourceAHasGrade = is_function_constant_defined(kSourceAHasGradeValue) && kSourceAHasGradeValue;
+constant bool kSourceBHasGrade =
+    kHasPartner && is_function_constant_defined(kSourceBHasGradeValue) && kSourceBHasGradeValue;
 
 struct VELayerVertexOut {
     float4 position [[position]];
@@ -64,13 +73,22 @@ static float2 planeUV(float2 uv, float2 extent, texture2d<float> plane) {
 
 // Chroma is sampled at the luma position mapped through the source's chroma transform, so
 // left/top/bottom-sited chroma lines up with the luma it belongs to (see TextureCache.h).
-static float4 sampleYCbCr(texture2d<float> luma, texture2d<float> chroma, float2 uv, constant VESourceUniforms &source) {
+// An ungraded source's R'G'B' is limited to [0, 1] here; a graded one (`graded`) keeps the values below
+// black and above white for its grade, which limits its result (grading decision, section 3).
+static float4 sampleYCbCr(texture2d<float> luma, texture2d<float> chroma, float2 uv, constant VESourceUniforms &source,
+                          bool graded) {
     constexpr sampler bilinear(address::clamp_to_edge, filter::linear);
     const float y = luma.sample(bilinear, planeUV(uv, source.planeExtent.xy, luma)).r;
     const float2 chromaUV = uv * source.chromaTransform.xy + source.chromaTransform.zw;
     const float2 cbcr = chroma.sample(bilinear, planeUV(chromaUV, source.planeExtent.zw, chroma)).rg;
-    const float3 rgb = saturate((source.colorMatrix * float4(y, cbcr, 1.0)).rgb);
-    return float4(rgb, 1.0);
+    const float3 converted = (source.colorMatrix * float4(y, cbcr, 1.0)).rgb;
+    return float4(graded ? converted : saturate(converted), 1.0);
+}
+
+// A texel or sample as the blend may see it: limited to [0, 1] for an ungraded source; for a graded one
+// only its alpha is (its colour goes through the grade, which limits it).
+static float4 limitSample(float4 c, bool graded) {
+    return graded ? float4(c.rgb, saturate(c.a)) : saturate(c);
 }
 
 // Premultiplied sources are filtered by the sampler. Straight-alpha sources are filtered by hand
@@ -79,11 +97,11 @@ static float4 sampleYCbCr(texture2d<float> luma, texture2d<float> chroma, float2
 // bleed into the edge of the visible ones. Values are limited to [0, 1] as sampleYCbCr limits R'G'B'
 // (grading decision, section 3: an ungraded source keeps the clamp): a no-op for unorm textures, it
 // keeps an extended-range still ('RGhA') and its float pre-scale's Lanczos overshoot to what the
-// blend has always seen.
-static float4 sampleRGBA(texture2d<float> rgba, float2 uv, constant VESourceUniforms &source) {
+// blend has always seen. A graded source (`graded`) keeps its colour for the grade; its alpha is limited.
+static float4 sampleRGBA(texture2d<float> rgba, float2 uv, constant VESourceUniforms &source, bool graded) {
     constexpr sampler bilinear(address::clamp_to_edge, filter::linear);
     if (source.straightAlpha == 0) {
-        return saturate(rgba.sample(bilinear, planeUV(uv, source.planeExtent.xy, rgba)));
+        return limitSample(rgba.sample(bilinear, planeUV(uv, source.planeExtent.xy, rgba)), graded);
     }
     // The picture's own texels: the top-left extent of the texture.
     const int2 size = max(int2(rint(float2(rgba.get_width(), rgba.get_height()) * source.planeExtent.xy)), int2(1));
@@ -92,10 +110,10 @@ static float4 sampleRGBA(texture2d<float> rgba, float2 uv, constant VESourceUnif
     const int2 i0 = int2(floor(p));
     const int2 lo = clamp(i0, int2(0), size - 1);
     const int2 hi = clamp(i0 + 1, int2(0), size - 1);
-    float4 t00 = saturate(rgba.read(uint2(lo.x, lo.y)));
-    float4 t10 = saturate(rgba.read(uint2(hi.x, lo.y)));
-    float4 t01 = saturate(rgba.read(uint2(lo.x, hi.y)));
-    float4 t11 = saturate(rgba.read(uint2(hi.x, hi.y)));
+    float4 t00 = limitSample(rgba.read(uint2(lo.x, lo.y)), graded);
+    float4 t10 = limitSample(rgba.read(uint2(hi.x, lo.y)), graded);
+    float4 t01 = limitSample(rgba.read(uint2(lo.x, hi.y)), graded);
+    float4 t11 = limitSample(rgba.read(uint2(hi.x, hi.y)), graded);
     t00.rgb *= t00.a;
     t10.rgb *= t10.a;
     t01.rgb *= t01.a;
@@ -161,6 +179,17 @@ static float transitionReveal(int shape, float p0, float p1, float feather, floa
     return saturate(1.0 - covered / sweep);
 }
 
+// A graded source's premultiplied sample, graded (ColorGrade.h) and limited to [0, 1]: the grade sees the
+// unpremultiplied colour (divided by alpha, kept at 0 where alpha is 0) and the result is premultiplied
+// again; opaque YCbCr samples have alpha 1.
+static float4 gradeSample(float4 premultiplied, constant VEGradeUniforms &grade) {
+    const float alpha = premultiplied.a;
+    const float3 colour = alpha > 0.0 ? premultiplied.rgb / alpha : float3(0.0);
+    const float3 graded = saturate(veGrade(colour, grade.gain.x, grade.gain.y, grade.gain.z, grade.saturation,
+                                           grade.contrast, grade.contrastSlope, grade.transfer));
+    return float4(graded * alpha, alpha);
+}
+
 fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
                                   constant VEDrawUniforms &uniforms [[buffer(VEBufferIndexDraw)]],
                                   texture2d<float> a0 [[texture(VETextureIndexA0)]],
@@ -171,9 +200,12 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     const float coverageA = edgeCoverage(uvA);
     float4 colorA;
     if (kSourceAIsYCbCr) {
-        colorA = sampleYCbCr(a0, a1, uvA, uniforms.a);
+        colorA = sampleYCbCr(a0, a1, uvA, uniforms.a, kSourceAHasGrade);
     } else {
-        colorA = sampleRGBA(a0, uvA, uniforms.a);
+        colorA = sampleRGBA(a0, uvA, uniforms.a, kSourceAHasGrade);
+    }
+    if (kSourceAHasGrade) {
+        colorA = gradeSample(colorA, uniforms.a.grade);
     }
     colorA *= coverageA * uniforms.a.weight;
     constant VETransitionUniforms &transition = uniforms.transition;
@@ -191,9 +223,12 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     const float coverageB = edgeCoverage(uvB);
     float4 colorB;
     if (kSourceBIsYCbCr) {
-        colorB = sampleYCbCr(b0, b1, uvB, uniforms.b);
+        colorB = sampleYCbCr(b0, b1, uvB, uniforms.b, kSourceBHasGrade);
     } else {
-        colorB = sampleRGBA(b0, uvB, uniforms.b);
+        colorB = sampleRGBA(b0, uvB, uniforms.b, kSourceBHasGrade);
+    }
+    if (kSourceBHasGrade) {
+        colorB = gradeSample(colorB, uniforms.b.grade);
     }
     colorB *= coverageB * uniforms.b.weight;
     if (shape == VETransitionShapeNone) {
@@ -201,6 +236,24 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     }
     return mix(colorA, colorB, transitionReveal(shape, transition.progressStart, transition.progressEnd,
                                                 transition.feather, in.framePosition, uniforms.frameSize.xy));
+}
+
+// MARK: - The grade over a list of values (for the tests)
+
+// Grades `count` R'G'B' values of `input` (float4 each, w ignored) with `grade` into `output` (float4, w 0),
+// unclamped: the same function the fragment shader runs on a graded source (ColorGrade.h), so the tests can
+// hold it to the CPU reference value by value. Not used for rendering.
+kernel void ve_grade_samples(device const float4 *input [[buffer(0)]],
+                             device float4 *output [[buffer(1)]],
+                             constant VEGradeUniforms &grade [[buffer(2)]],
+                             constant uint &count [[buffer(3)]],
+                             uint gid [[thread_position_in_grid]]) {
+    if (gid >= count) {
+        return;
+    }
+    const float3 graded = veGrade(input[gid].rgb, grade.gain.x, grade.gain.y, grade.gain.z, grade.saturation,
+                                  grade.contrast, grade.contrastSlope, grade.transfer);
+    output[gid] = float4(graded, 0.0);
 }
 
 // MARK: - Minification

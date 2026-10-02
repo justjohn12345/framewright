@@ -89,13 +89,17 @@ double clampGradeValue(GradeParameter parameter, double value) {
     return value < info.minimum ? info.minimum : value > info.maximum ? info.maximum : value;
 }
 
-bool ClipGrade::isNeutral() const {
+bool isNeutralGrade(const GradeValues &values) {
     for (const GradeParameter parameter : kGradeParameters) {
-        if ((*this)[parameter] != neutralValue(parameter)) {
+        if (values[static_cast<std::size_t>(parameter)] != neutralValue(parameter)) {
             return false;
         }
     }
     return true;
+}
+
+bool ClipGrade::isNeutral() const {
+    return isNeutralGrade(values);
 }
 
 std::optional<std::string> gradeProblem(const ClipGrade &grade) {

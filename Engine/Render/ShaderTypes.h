@@ -55,6 +55,31 @@ enum VEFunctionConstant {
     VEFunctionConstantSourceAIsYCbCr = 0,
     VEFunctionConstantHasPartner = 1,
     VEFunctionConstantSourceBIsYCbCr = 2,
+    // The source has a grade (VEGradeUniforms; ColorGrade.h): graded after its conversion, unclamped until
+    // the end of the grade. Without it a source is drawn exactly as before grading existed.
+    VEFunctionConstantSourceAHasGrade = 3,
+    VEFunctionConstantSourceBHasGrade = 4,
+};
+
+// The transfer curve a graded source is linearised by (VEGradeUniforms::transfer; ColorGrade.h).
+enum VEGradeTransfer {
+    VEGradeTransferBT1886 = 0, // pure 2.4 power: BT.709, BT.601, SMPTE 240M and untagged video
+    VEGradeTransferSRGB = 1,   // the sRGB curve: sRGB-tagged sources and stills
+    VEGradeTransferLinear = 2, // identity
+};
+
+// A source's colour grade (ColorGrade.h, gradeUniformsFor). Read only when the source's grade function
+// constant is set.
+struct VEGradeUniforms {
+    // xyz: the linear-light channel gains, 2^exposure times the luminance-normalised white-balance gains;
+    // w unused (0).
+    VEFloat4 gain;
+    float saturation;
+    float contrast;
+    // The contrast curve's linear segment below epsilon: f(epsilon) / epsilon.
+    float contrastSlope;
+    // The VEGradeTransfer.
+    VEInt transfer;
 };
 
 // The shape of a transition draw (VETransitionUniforms::shape), TransitionKind's values
@@ -68,9 +93,7 @@ enum VETransitionShape {
     VETransitionShapeIris = 5,
 };
 
-// How one source picture is sampled and placed. (A per-source colour grade will be a sub-struct of its
-// own here, a VEGradeUniforms, applied after the conversion to R'G'B' and before the weight; see
-// docs/reviews/2026-10-01-grading-pipeline-decision.md.)
+// How one source picture is sampled, graded and placed.
 struct VESourceUniforms {
     // Maps the sampled (Y, Cb, Cr, 1) plane values (texture unorm, i.e. before range expansion)
     // to gamma-encoded R'G'B'. Folds bit depth, video/full range and the YCbCr matrix.
@@ -94,6 +117,10 @@ struct VESourceUniforms {
     // pooled texture at least that large, and is sampled clamped half a texel inside that region's right and
     // bottom edges (as clamp_to_edge clamps a whole texture).
     VEFloat4 planeExtent;
+    // The source's colour grade, applied after the conversion to R'G'B' and before the coverage, the weight
+    // and the blend (docs/reviews/2026-10-01-grading-pipeline-decision.md, section 1); all zero and unread
+    // for an ungraded source.
+    struct VEGradeUniforms grade;
 };
 
 // The transition of one draw (RenderGraph.h, LayerTransition; transitionReveal). All zero but `mix` for
@@ -164,17 +191,21 @@ struct VEConvertUniforms {
 
 // The same layout on both sides: sizes, and the offset of every member that follows a scalar group or
 // starts one.
-static_assert(sizeof(struct VESourceUniforms) == 144, "VESourceUniforms layout");
+static_assert(sizeof(struct VEGradeUniforms) == 32, "VEGradeUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEGradeUniforms, saturation) == 16, "VEGradeUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEGradeUniforms, transfer) == 28, "VEGradeUniforms layout");
+static_assert(sizeof(struct VESourceUniforms) == 176, "VESourceUniforms layout");
 static_assert(VE_OFFSET_OF(struct VESourceUniforms, weight) == 112, "VESourceUniforms layout");
 static_assert(VE_OFFSET_OF(struct VESourceUniforms, straightAlpha) == 116, "VESourceUniforms layout");
 static_assert(VE_OFFSET_OF(struct VESourceUniforms, planeExtent) == 128, "VESourceUniforms layout");
+static_assert(VE_OFFSET_OF(struct VESourceUniforms, grade) == 144, "VESourceUniforms layout");
 static_assert(sizeof(struct VETransitionUniforms) == 32, "VETransitionUniforms layout");
 static_assert(VE_OFFSET_OF(struct VETransitionUniforms, shape) == 16, "VETransitionUniforms layout");
 static_assert(VE_OFFSET_OF(struct VETransitionUniforms, incoming) == 20, "VETransitionUniforms layout");
-static_assert(sizeof(struct VEDrawUniforms) == 64 + 2 * 144, "VEDrawUniforms layout");
+static_assert(sizeof(struct VEDrawUniforms) == 64 + 2 * 176, "VEDrawUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEDrawUniforms, transition) == 32, "VEDrawUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEDrawUniforms, a) == 64, "VEDrawUniforms layout");
-static_assert(VE_OFFSET_OF(struct VEDrawUniforms, b) == 64 + 144, "VEDrawUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEDrawUniforms, b) == 64 + 176, "VEDrawUniforms layout");
 static_assert(sizeof(struct VEUnsharpUniforms) == 32, "VEUnsharpUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEUnsharpUniforms, width) == 16, "VEUnsharpUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEUnsharpUniforms, isLuma) == 24, "VEUnsharpUniforms layout");

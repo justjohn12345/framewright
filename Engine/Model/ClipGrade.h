@@ -68,15 +68,21 @@ bool isValidGradeValue(GradeParameter parameter, double value);
 // `value` limited to the parameter's range (the neutral value for NaN).
 double clampGradeValue(GradeParameter parameter, double value);
 
+// A grade's values, indexed by GradeParameter (what the renderer needs of a clip's grade).
+using GradeValues = std::array<double, kGradeParameterCount>;
+
+// Whether every value is its parameter's neutral value (no grade).
+bool isNeutralGrade(const GradeValues &values);
+
 struct ClipGrade {
     // The values, indexed by GradeParameter; every one neutral by default.
-    std::array<double, kGradeParameterCount> values = neutralValues();
+    GradeValues values = neutralValues();
     // The entries of the file's "grade" this version does not read (a newer version's parameters), as
     // compact JSON text of an object, written back on save ("" when there are none; the foreign-content
     // rule of review core #9). They change nothing here.
     std::string foreign;
 
-    static constexpr std::array<double, kGradeParameterCount> neutralValues() {
+    static constexpr GradeValues neutralValues() {
         return {0.0, 1.0, 0.0, 0.0, 1.0};
     }
 

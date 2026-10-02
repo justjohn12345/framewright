@@ -10,7 +10,8 @@
 //                                                                        it where sampled, Shaders.metal)
 // Anything else is rejected with MediaErrorCode::UnsupportedFormat.
 //
-// Colour: a TextureSet carries the YCbCr -> R'G'B' matrix for its buffer, chosen from the
+// Colour: a TextureSet carries the buffer's transfer function tag (for a graded picture's
+// linearisation) and the YCbCr -> R'G'B' matrix for its buffer, chosen from the
 // buffer's kCVImageBufferYCbCrMatrixKey attachment (BT.709, BT.601, BT.2020 non-constant
 // luminance, SMPTE 240M) and the pixel format's range and bit depth. Untagged buffers use
 // BT.709 when the height is >= 720 and BT.601 below (the usual HD/SD convention).
@@ -34,6 +35,7 @@
 #pragma once
 
 #include "../Media/CFRef.h"
+#include "../Media/MediaTypes.h"
 #include "../Media/PixelBuffer.h"
 #include "../Media/Result.h"
 
@@ -111,6 +113,9 @@ class TextureSet {
     /// Chroma uv = luma uv * xy + zw (see VESourceUniforms.chromaTransform); (1, 1, 0, 0) for
     /// RGBA and 4:4:4.
     simd_float4 chromaTransform() const noexcept { return chromaTransform_; }
+    /// The buffer's transfer function tag (kCVImageBufferTransferFunctionKey; Unknown when untagged): the
+    /// curve a graded picture is linearised by (ColorGrade.h, gradeTransferFor).
+    media::TransferFunction transfer() const noexcept { return transfer_; }
     /// The buffer the textures alias.
     const media::PixelBuffer &pixelBuffer() const noexcept { return buffer_; }
 
@@ -127,6 +132,7 @@ class TextureSet {
     OSType pixelFormat_ = 0;
     simd_float4x4 colorMatrix_ = matrix_identity_float4x4;
     AlphaMode alphaMode_ = AlphaMode::Unspecified;
+    media::TransferFunction transfer_ = media::TransferFunction::Unknown;
     ChromaSiting chromaSiting_ = ChromaSiting::Center;
     simd_float4 chromaTransform_ = {1.0f, 1.0f, 0.0f, 0.0f};
 };

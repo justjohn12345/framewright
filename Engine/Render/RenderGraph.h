@@ -124,6 +124,9 @@ struct VideoLayer {
     // (Scheduler::motionAt).
     VideoParams transform;
     double opacity = 1.0; // the clip's opacity at this frame (transition weight is separate)
+    // The clip's colour grade (ClipGrade.h); neutral (no grade) by default. The compositor grades the
+    // picture with it after its conversion to R'G'B' (ColorGrade.h) unless every value is neutral.
+    GradeValues grade = ClipGrade::neutralValues();
     std::optional<LayerTransition> transition;
 };
 
