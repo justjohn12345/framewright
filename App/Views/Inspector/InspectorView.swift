@@ -4,8 +4,15 @@ import FramewrightEngine
 
 /// Properties of the selection: the selected span (an effect span's range, interpolation, lane and
 /// start and end values; a transition's duration and shares of its cut), or the selected clips'
-/// video and audio parameters (multi-selection edits apply to every selected clip of the matching
-/// kind), a single clip's speed, or the selected media.
+/// video, colour (the clip's grade) and audio parameters (multi-selection edits apply to every
+/// selected clip of the matching kind; a parameter that differs between them shows "Mixed"), a
+/// single clip's speed, or the selected media.
+///
+/// The Colour section sits beside Video because a grade is a property of the clip, as its Motion is
+/// (grading decision, section 7): the same rows, multi-selection rules and undo behaviour, built from
+/// the same parameter table (`InspectorParameter`, whose Colour rows come from the engine's grade
+/// table). A separate Colour tab would duplicate this machinery for five sliders; slice 2's wheels,
+/// curves and scopes may want one.
 ///
 /// Every clip parameter can be dragged (slider: one undo step per drag), typed with or without its
 /// unit (Return applies it, clamped to the parameter's range) and nudged from its field with
@@ -71,6 +78,22 @@ struct InspectorView: View {
                             Spacer()
                         }
                     }
+                }
+            }
+            if inspector.isAvailable(.exposure) {
+                ParameterSection(store: store, inspector: inspector, section: .colour,
+                                 subtitle: inspector.videoTargets.count > 1 ? "\(inspector.videoTargets.count) video clips" : nil) {
+                    HStack {
+                        Button("Copy") { store.copyGrade() }
+                            .help("Copy the grade of the selected clip (⌥⌘C)")
+                            .accessibilityIdentifier("CopyGrade")
+                        Button("Paste") { store.pasteGrade() }
+                            .disabled(!store.canPasteGrade)
+                            .help("Give the selected clips the copied grade (⌥⌘V)")
+                            .accessibilityIdentifier("PasteGrade")
+                        Spacer()
+                    }
+                    .controlSize(.small)
                 }
             }
             if inspector.isAvailable(.gain) {

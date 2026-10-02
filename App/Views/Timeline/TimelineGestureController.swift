@@ -865,8 +865,9 @@ final class TimelineGestureController: ObservableObject {
     /// Delete This Transition Only and Transition Duration…; an effect span Set Interpolation, Move
     /// to Lane and Remove; a clip Delete, Ripple Delete, Link/Unlink, Speed/Duration…, Reverse Clip
     /// (checked when the selection plays backwards) and, for a
-    /// video clip, Add Ken Burns… and Add Motion Span (at the playhead, on the clicked clip). Nothing
-    /// during a drag or over empty space.
+    /// video clip, Add Ken Burns… and Add Motion Span (at the playhead, on the clicked clip) and Copy
+    /// Grade, Paste Grade and Reset Grade (on the selection's video clips). Nothing during a drag or over
+    /// empty space.
     func contextMenuItems(at location: CGPoint) -> [ContextMenuItem] {
         guard drag == .idle, !store.isGestureActive else { return [] }
         let store = self.store
@@ -913,6 +914,10 @@ final class TimelineGestureController: ObservableObject {
                 items.append(ContextMenuItem(title: "Add Motion Span", isEnabled: enabled) {
                     store.addMotionSpanAtPlayhead(clip: id, mode: .transform)
                 })
+                items.append(.separator)
+                items.append(ContextMenuItem(title: "Copy Grade", isEnabled: store.canCopyGrade) { store.copyGrade() })
+                items.append(ContextMenuItem(title: "Paste Grade", isEnabled: store.canPasteGrade) { store.pasteGrade() })
+                items.append(ContextMenuItem(title: "Reset Grade", isEnabled: store.canResetGrade) { store.resetGrade() })
             }
             return items
         case .lane, .track, .none:

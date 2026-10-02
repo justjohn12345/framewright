@@ -160,6 +160,8 @@ final class ProjectStore: ObservableObject {
     @Published var sequenceSettingsModel: SequenceSettingsModel?
     /// An export is running (the engine's `isExporting`, republished).
     @Published private(set) var isExporting = false
+    /// Whether Copy Grade has copied a grade (the engine keeps it; Paste Grade gives it to clips).
+    @Published private(set) var hasCopiedGrade = false
     /// The Ken Burns editor drawn on the program monitor while a Motion span is selected (nil
     /// otherwise, or after the user closed it for that span).
     @Published private(set) var kenBurns: KenBurnsModel?
@@ -1277,6 +1279,60 @@ final class ProjectStore: ObservableObject {
         }
         inspector.endNudgeBurst()
         return report(engine.setReversed(reversed, forClips: clips.map { NSNumber(value: $0.clipID) }))
+    }
+
+    // MARK: Grade
+
+    /// The selected clips that can have a grade: those on video tracks.
+    var gradeTargets: [VEClipInfo] { selectedClips.filter { $0.trackKind == .video } }
+
+    /// Copy Grade applies: a clip on a video track is selected.
+    var canCopyGrade: Bool { !gradeTargets.isEmpty }
+    /// Paste Grade applies: a grade was copied and a clip on a video track is selected.
+    var canPasteGrade: Bool { hasCopiedGrade && !gradeTargets.isEmpty }
+    /// Reset Grade applies: a selected clip has a grade.
+    var canResetGrade: Bool { gradeTargets.contains { $0.hasGrade } }
+
+    /// Clip > Copy Grade: copies the grade of the selected video clip (the earliest one when several are
+    /// selected), every value, for Paste Grade. The status line says whose.
+    func copyGrade() {
+        guard !isGestureActive else { return }
+        guard let clip = gradeTargets.first else {
+            statusMessage = "Select a video clip to copy its grade."
+            return
+        }
+        guard engine.copyGrade(ofClip: clip.clipID) else {
+            statusMessage = "The clip's grade could not be copied."
+            return
+        }
+        hasCopiedGrade = true
+        statusMessage = clip.hasGrade ? "Copied the grade of “\(clip.name)”." : "Copied “\(clip.name)”, which has no grade."
+    }
+
+    /// Clip > Paste Grade: gives every selected video clip the copied grade (one undo step).
+    @discardableResult
+    func pasteGrade() -> Bool {
+        guard !isGestureActive else { return false }
+        let clips = gradeTargets
+        guard !clips.isEmpty else {
+            statusMessage = "Select the video clips to paste the grade onto."
+            return false
+        }
+        inspector.endNudgeBurst()
+        return report(engine.pasteGrade(ontoClips: clips.map { NSNumber(value: $0.clipID) }))
+    }
+
+    /// Clip > Reset Grade: removes the grade of every selected video clip (one undo step).
+    @discardableResult
+    func resetGrade() -> Bool {
+        guard !isGestureActive else { return false }
+        let clips = gradeTargets
+        guard !clips.isEmpty else {
+            statusMessage = "Select the video clips whose grade to reset."
+            return false
+        }
+        inspector.endNudgeBurst()
+        return report(engine.resetGrade(ofClips: clips.map { NSNumber(value: $0.clipID) }))
     }
 
     /// File > Export…: opens the Export sheet (not during a gesture).

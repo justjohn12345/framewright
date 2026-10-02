@@ -5,6 +5,7 @@ import FramewrightEngine
 /// A section of the inspector.
 enum InspectorSection: String, CaseIterable {
     case video
+    case colour
     case audio
     case speed
     case transition
@@ -12,6 +13,7 @@ enum InspectorSection: String, CaseIterable {
     var title: String {
         switch self {
         case .video: return "Video"
+        case .colour: return "Colour"
         case .audio: return "Audio"
         case .speed: return "Speed"
         case .transition: return "Transition"
@@ -20,10 +22,13 @@ enum InspectorSection: String, CaseIterable {
 }
 
 /// An editable parameter of the inspector, in display units: pixels (position), percent
-/// (scale, opacity, speed), degrees (rotation), decibels (gain) and sequence frames (fades,
-/// transition duration; shown per the duration preference).
+/// (scale, opacity, speed), degrees (rotation), decibels (gain), sequence frames (fades,
+/// transition duration; shown per the duration preference) and the grade's own units (stops, ×,
+/// none: the engine's grade parameter table, `VEGradeParameterInfo`, gives the Colour rows'
+/// names, units, neutral values and ranges).
 enum InspectorParameter: String, CaseIterable, Identifiable {
     case positionX, positionY, scale, rotation, opacity
+    case exposure, contrast, temperature, tint, saturation
     case gain, fadeIn, fadeOut
     case speed
     case transitionDuration
@@ -33,13 +38,57 @@ enum InspectorParameter: String, CaseIterable, Identifiable {
     var section: InspectorSection {
         switch self {
         case .positionX, .positionY, .scale, .rotation, .opacity: return .video
+        case .exposure, .contrast, .temperature, .tint, .saturation: return .colour
         case .gain, .fadeIn, .fadeOut: return .audio
         case .speed: return .speed
         case .transitionDuration: return .transition
         }
     }
 
+    /// The engine's grade parameter of a Colour row (nil for the others).
+    var gradeParameter: VEGradeParameter? {
+        switch self {
+        case .exposure: return .exposure
+        case .contrast: return .contrast
+        case .temperature: return .temperature
+        case .tint: return .tint
+        case .saturation: return .saturation
+        case .positionX, .positionY, .scale, .rotation, .opacity, .gain, .fadeIn, .fadeOut, .speed,
+             .transitionDuration:
+            return nil
+        }
+    }
+
+    /// The engine's row of a Colour parameter: display name, unit, neutral value and range.
+    var gradeInfo: VEGradeParameterInfo? {
+        gradeParameter.flatMap { Self.gradeInfos[$0] }
+    }
+
+    /// The engine's grade parameter table, read once.
+    private static let gradeInfos: [VEGradeParameter: VEGradeParameterInfo] = {
+        var infos: [VEGradeParameter: VEGradeParameterInfo] = [:]
+        for number in VEGradeParameterInfo.allParameters {
+            if let parameter = VEGradeParameter(rawValue: number.intValue), let info = VEGradeParameterInfo.info(for: parameter) {
+                infos[parameter] = info
+            }
+        }
+        return infos
+    }()
+
+    /// How far one Up/Down nudge in the field moves the value (Shift: ten times as far): one display
+    /// unit, but a tenth of a stop of exposure and a hundredth of contrast and saturation.
+    var nudgeStep: Double {
+        switch self {
+        case .exposure: return 0.1
+        case .contrast, .saturation: return 0.01
+        default: return 1
+        }
+    }
+
     var label: String {
+        if let info = gradeInfo {
+            return info.displayName
+        }
         switch self {
         case .positionX: return "Position X"
         case .positionY: return "Position Y"
@@ -51,17 +100,22 @@ enum InspectorParameter: String, CaseIterable, Identifiable {
         case .fadeOut: return "Fade Out"
         case .speed: return "Speed"
         case .transitionDuration: return "Duration"
+        case .exposure, .contrast, .temperature, .tint, .saturation: return rawValue // the engine's name above
         }
     }
 
     /// Unit shown after the number (durations use the duration preference instead).
     var unit: String {
+        if let info = gradeInfo {
+            return info.unit
+        }
         switch self {
         case .positionX, .positionY: return "px"
         case .scale, .opacity, .speed: return "%"
         case .rotation: return "°"
         case .gain: return "dB"
         case .fadeIn, .fadeOut, .transitionDuration: return ""
+        case .exposure, .contrast, .temperature, .tint, .saturation: return ""
         }
     }
 
@@ -72,7 +126,9 @@ enum InspectorParameter: String, CaseIterable, Identifiable {
         case .scale, .opacity: return ["%"]
         case .rotation: return ["°", "deg", "degree", "degrees"]
         case .gain: return ["db"]
-        case .speed, .fadeIn, .fadeOut, .transitionDuration: return []
+        case .exposure: return ["stop", "stops"]
+        case .contrast, .saturation: return ["×", "x"]
+        case .speed, .fadeIn, .fadeOut, .transitionDuration, .temperature, .tint: return []
         }
     }
 
@@ -88,7 +144,9 @@ enum InspectorParameter: String, CaseIterable, Identifiable {
         case .scale: return .scale
         case .rotation: return .rotation
         case .opacity: return .opacity
-        case .gain, .fadeIn, .fadeOut, .speed, .transitionDuration: return nil
+        case .gain, .fadeIn, .fadeOut, .speed, .transitionDuration, .exposure, .contrast, .temperature, .tint,
+             .saturation:
+            return nil
         }
     }
 
@@ -97,11 +155,16 @@ enum InspectorParameter: String, CaseIterable, Identifiable {
         self == .scale || self == .opacity ? 100 : 1
     }
 
-    /// The value a reset restores (transition duration: the default duration preference).
+    /// The value a reset restores (transition duration: the default duration preference; a Colour
+    /// row: its neutral value).
     var defaultValue: Double {
+        if let info = gradeInfo {
+            return info.neutralValue
+        }
         switch self {
         case .scale, .opacity, .speed: return 100
         case .positionX, .positionY, .rotation, .gain, .fadeIn, .fadeOut, .transitionDuration: return 0
+        case .exposure, .contrast, .temperature, .tint, .saturation: return 0
         }
     }
 
@@ -147,7 +210,10 @@ extension VEKeyframeInterpolation {
 ///
 /// Targets: video parameters apply to every selected clip on a video track, audio parameters to
 /// every selected clip on an audio track, each change as one undoable batch
-/// (`VEEngine.applyClipParams`). The Video values are the clips' static values, what their effect
+/// (`VEEngine.applyClipParams`). The Colour rows edit the grade of every selected clip on a video
+/// track (the clip's grade, ClipGrade.h): each shows its value where the clips agree and "Mixed"
+/// where they differ, and a change sets that one parameter on all of them, leaving their other
+/// grade parameters (`VEEngine.setGradeValue`); the section's Reset removes their grades. The Video values are the clips' static values, what their effect
 /// spans compose onto; they do not follow the playhead. With a single video clip (`motionTarget`)
 /// the Match menu copies a neighbour's framing onto them.
 /// Speed applies to a single clip (or linked pair); the Speed/Duration sheet handles several. The
@@ -266,7 +332,7 @@ final class InspectorModel: ObservableObject {
 
     func isAvailable(_ parameter: InspectorParameter) -> Bool {
         switch parameter.section {
-        case .video: return !videoTargets.isEmpty
+        case .video, .colour: return !videoTargets.isEmpty
         case .audio: return !audioTargets.isEmpty
         case .speed: return speedTarget != nil
         case .transition: return transition != nil
@@ -278,7 +344,7 @@ final class InspectorModel: ObservableObject {
     /// The parameter's value on the first target (display units), or nil when unavailable.
     func value(_ parameter: InspectorParameter) -> Double? {
         switch parameter.section {
-        case .video: return videoTargets.first.map { value(parameter, of: $0) }
+        case .video, .colour: return videoTargets.first.map { value(parameter, of: $0) }
         case .audio: return audioTargets.first.map { value(parameter, of: $0) }
         case .speed: return speedTarget.map { value(parameter, of: $0) }
         case .transition: return transition.map { Double(store.frames($0.duration)) }
@@ -289,7 +355,7 @@ final class InspectorModel: ObservableObject {
     func isMixed(_ parameter: InspectorParameter) -> Bool {
         let clips: [VEClipInfo]
         switch parameter.section {
-        case .video: clips = videoTargets
+        case .video, .colour: clips = videoTargets
         case .audio: clips = audioTargets
         case .speed, .transition: return false
         }
@@ -314,11 +380,16 @@ final class InspectorModel: ObservableObject {
         case .fadeOut: return Double(store.frames(audio.fadeOutDuration))
         case .speed: return Double(clip.speedNumerator) / Double(max(clip.speedDenominator, 1)) * 100
         case .transitionDuration: return 0
+        case .exposure, .contrast, .temperature, .tint, .saturation:
+            return parameter.gradeParameter.map { clip.grade.value(for: $0) } ?? 0
         }
     }
 
     /// Values a typed entry is clamped to.
     func range(_ parameter: InspectorParameter) -> ClosedRange<Double> {
+        if let info = parameter.gradeInfo {
+            return info.minimum ... info.maximum
+        }
         switch parameter {
         case .positionX, .positionY: return -10000 ... 10000
         case .scale: return 0 ... 10000
@@ -330,6 +401,7 @@ final class InspectorModel: ObservableObject {
         case .speed: return 1 ... 10000
         case .transitionDuration:
             return 1 ... Double(max(1, transitionLimit?.maximumFrames ?? 1))
+        case .exposure, .contrast, .temperature, .tint, .saturation: return 0 ... 0 // gradeInfo above
         }
     }
 
@@ -344,6 +416,9 @@ final class InspectorModel: ObservableObject {
 
     /// The slider's span (typed values may go beyond it).
     func sliderRange(_ parameter: InspectorParameter) -> ClosedRange<Double> {
+        if parameter.gradeInfo != nil {
+            return range(parameter)
+        }
         switch parameter {
         case .positionX: return -Double(max(store.sequence.width, 1)) ... Double(max(store.sequence.width, 1))
         case .positionY: return -Double(max(store.sequence.height, 1)) ... Double(max(store.sequence.height, 1))
@@ -357,6 +432,7 @@ final class InspectorModel: ObservableObject {
         case .speed: return 10 ... 400
         case .transitionDuration:
             return 1 ... Double(max(2, transitionLimit?.maximumFrames ?? 2))
+        case .exposure, .contrast, .temperature, .tint, .saturation: return 0 ... 0 // range above
         }
     }
 
@@ -472,7 +548,7 @@ final class InspectorModel: ObservableObject {
             engine.beginCoalescing(withKey: group, mode: .accumulate)
             store.nudgeGroup = group
         }
-        apply(parameter, mode: .burst(group)) { $0 + steps }
+        apply(parameter, mode: .burst(group)) { $0 + steps * parameter.nudgeStep }
         scheduleBurstEnd(group)
     }
 
@@ -550,6 +626,10 @@ final class InspectorModel: ObservableObject {
             for clip in audioTargets { batch.setAudioParams(VEAudioParamsDefault(), forClip: clip.clipID) }
             guard batch.count > 0 else { return }
             handle(engine.applyClipParams(batch), mode: .single, clampNote: nil)
+        case .colour:
+            let clips = videoTargets.map { NSNumber(value: $0.clipID) }
+            guard !clips.isEmpty else { return }
+            handle(engine.resetGrade(ofClips: clips), mode: .single, clampNote: nil)
         case .speed:
             reset(InspectorParameter.speed)
         case .transition:
@@ -858,7 +938,7 @@ final class InspectorModel: ObservableObject {
 
     private func targetKey(_ parameter: InspectorParameter) -> String {
         switch parameter.section {
-        case .video: return videoTargets.map { String($0.clipID) }.joined(separator: ",")
+        case .video, .colour: return videoTargets.map { String($0.clipID) }.joined(separator: ",")
         case .audio: return audioTargets.map { String($0.clipID) }.joined(separator: ",")
         case .speed: return speedTarget.map { String($0.clipID) } ?? ""
         case .transition: return transition.map { String($0.transitionID) } ?? ""
@@ -882,6 +962,8 @@ final class InspectorModel: ObservableObject {
         switch parameter.section {
         case .video, .audio:
             applyClipParameter(parameter, mode: mode, transform: transform)
+        case .colour:
+            applyGrade(parameter, mode: mode, transform: transform)
         case .speed:
             guard let clip = speedTarget else { return }
             let bounds = range(.speed)
@@ -932,6 +1014,21 @@ final class InspectorModel: ObservableObject {
         guard batch.count > 0 else { return }
         let note = clamped ? limitNote(parameter, range(parameter)) : nil
         handle(perform(mode) { self.engine.applyClipParams(batch) }, mode: mode, clampNote: note)
+    }
+
+    /// A Colour row: one value set on every selected video clip (`VEEngine.setGradeValue`), the
+    /// parameter's new value from the first clip's (so a nudge of a mixed parameter starts from the
+    /// value the row shows), clamped to the engine's range. The clips' other grade parameters stay.
+    private func applyGrade(_ parameter: InspectorParameter, mode: Mode, transform: (Double) -> Double) {
+        guard let grade = parameter.gradeParameter, let current = value(parameter) else { return }
+        let requested = transform(current)
+        let bounds = range(parameter)
+        let newValue = min(bounds.upperBound, max(bounds.lowerBound, requested))
+        let note = abs(newValue - requested) > 1e-9 ? limitNote(parameter, bounds) : nil
+        let clips = videoTargets.map { NSNumber(value: $0.clipID) }
+        guard !clips.isEmpty else { return }
+        handle(perform(mode) { self.engine.setGradeValue(newValue, for: grade, clips: clips) }, mode: mode,
+               clampNote: note)
     }
 
     /// Why `ratio` is not a clip speed the engine takes (1 % to 10000 %, compared exactly), or nil.

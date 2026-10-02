@@ -156,6 +156,17 @@ struct AppCommands: Commands {
             Button("Continue on Next Clip") { store.continueMotionOnNextClip() }
                 .disabled(!store.canContinueMotionOnNextClip)
             Divider()
+            // The grade of the selected video clips (their linked sound is left out): copied from the
+            // earliest, pasted onto all, reset on all; each change one undo step.
+            Button("Copy Grade") { store.copyGrade() }
+                .keyboardShortcut("c", modifiers: [.command, .option])
+                .disabled(!store.canCopyGrade)
+            Button("Paste Grade") { store.pasteGrade() }
+                .keyboardShortcut("v", modifiers: [.command, .option])
+                .disabled(!store.canPasteGrade)
+            Button("Reset Grade") { store.resetGrade() }
+                .disabled(!store.canResetGrade)
+            Divider()
             Button("Raise Gain 1 dB  ]") { store.nudgeGain(1) }
                 .disabled(store.selection.isEmpty)
             Button("Lower Gain 1 dB  [") { store.nudgeGain(-1) }
