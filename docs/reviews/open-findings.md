@@ -531,6 +531,55 @@ Not started:
 Next after this round (waiting for the user's go after item 5's decision): splitting `EffectSpan` into effect
 and transition types; the `TransitionRules` consolidation; the float intermediate on monitors.
 
+## Colour grading prerequisites round 2 (2026-10-01): status
+Brief: the second prerequisites round from ae6283e, after the grading decision was approved
+(`2026-10-01-grading-pipeline-decision.md`), items 1-6 in this order, each committed when its tests pass;
+grading itself is not in this round. Existing golden files and tests unchanged (item 4's signature-only
+changes are named there).
+
+Done:
+- 1, freeze the migrations (review 1.10, core #8): 74de129. The steps moved out of ProjectJSON.cpp into
+  `Engine/Serialize/ProjectMigrations.cpp` (private header `ProjectMigrations.h`), one namespace per target
+  version (`toV2` ... `toV7`), each with its own copies of what it used from the model and the current
+  parser/writer when frozen: version 1's speed rules (`approximateRatio`, [0.01, 100], denominator 1000) and
+  `canonicalProbedTime`; version 2's asset kind names; for 4 -> 5 the keyframe reader (interpolation names,
+  curve rules), the keyframe split and curve split (`splitTrack`, `splitCurve`), the exact-time rule, the
+  five parameters' names, neutral values, ranges and display names, the lanes, the transition names accepted
+  when frozen (the six of today: a version 4 file naming a wipe still keeps it), version 5's span order,
+  span bounds and span writer; version 6's transition display names; the time writer and `describe` of
+  every version. The steps depend only on TimeUtil's exact arithmetic and the JSON reader `Node`, now in
+  `Engine/Serialize/JsonNode.h` (shared with the parser; its time form is that of every version).
+  One visitor (`forEachSequence` / `forEachTrack` / `forEachClip`) and one error policy for all steps,
+  the parser's: a list that is not an array or an element that is not an object fails with its path; the
+  5 -> 6 and 6 -> 7 steps used to skip those silently (raw `json::find`) and leave the parser to fail.
+  `migrateProjectJson` gained an overload with a target version (ProjectJSON.h, addition); the warning
+  about version 6 content in an older file names the target version (the version the project is saved as),
+  as before for a full load. Golden fixtures (additions, `EngineTests/Serialize/golden/*.migrated.json`):
+  every checked-in older file migrated to version 7, `{"migratedTo": 7, "warnings", "document"}`, recorded
+  with the pre-freeze code at ae6283e; three new inputs exercise every warning a step gives
+  (`project-v1-adjusted.json`: rounded times, epochs, a duration off the grid, overlapping fades;
+  `project-v4-adjusted.json`: unknown Motion parameter, interpolation and transition kind, a curve on a
+  linear keyframe, Scale and Opacity limited at a clip's edge, fades meeting crossfades or a touching clip,
+  a video clip's fades, an iris; `project-v5-adjusted.json`: version 6 content). Proof of no change: the
+  migrated documents and warnings of all eleven inputs are byte-identical before and after (a scratch tool
+  linking the old and the new ProjectJSON); 4,000 randomly damaged copies of the inputs load identically
+  (same project, warnings or error) except 11 files with two errors, which now report the structural
+  error the visitor meets first instead of the parser's first (both fail). A mutation of one frozen name
+  (the iris) fails three of the golden cases. Tests: `MigrationGoldenTests.cpp` (7 cases: each input
+  against its golden; the adjusted inputs reach their warnings; a golden document loads as the project its
+  older file loads as; every checked-in input has a golden; migrating in parts equals at once; the target
+  version is checked; the same malformed track, clip or span fails with the same message in a version 1,
+  4, 5, 6 and 7 file). Full suite after this item (`xcodebuild -scheme Framewright -destination
+  'platform=macOS' test`): EngineTests 550 (0 display-link skips), doctest 349 (342 + 7), AppTests 279 (1
+  known skip); one failure, the known wall-clock pacing assertion of `ExportJobTests
+  testMemoryIsFlatOver1800FramesAt720pSurvivesPressureAndProgressIsPaced` (0.0155 s against 0.017 s; noted
+  as found-not-changed on 2026-10-01), which passed when run again alone. No files left in
+  `$TMPDIR/FramewrightEngineTests`, the container's tmp or Preferences; the run adds one empty
+  UUID-named directory at the container's root, as every earlier run did (326 there, the oldest from
+  before this round).
+
+Next: item 2 (the float working buffer on the monitors).
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
