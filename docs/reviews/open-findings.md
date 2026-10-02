@@ -1062,6 +1062,71 @@ first parity test's) is the codec's chroma error beside a saturated edge, with l
   `VEGradeSelection.identical`), else disabled in the Clip menu, context menu and inspector
   (`CopyGradeEnablingTests`, 3; a doctest). Suite: EngineTests 589, doctest 394, AppTests 293 (1 known skip).
 
+## Scopes and colour grading slice 2 (2026-10-02): status
+Brief: Part A (scopes: a mode menu, the histogram, a wide panel, the clipping indicator), then Part B (wheels,
+curves, LUTs, hue curves, the vectorscope), from cc6ac7d. Each item is committed when its tests pass; this
+section is kept current after every item.
+
+Done:
+- A1-A4, the scope panel, the histogram and clipping: dbff2ac (engine), ff39830 (app).
+  - Engine: `VEWaveformView` is now the program monitor's scope view (the name is slice 1's; VEEngine.h's
+    `attachWaveformView:` is unchanged) with `mode` (`VEScopeModeWaveform`, `VEScopeModeHistogram`) and
+    `histogramStyle` (`RGBAndLuma`, Lightroom's overlay with the luma bars' tops as a white line; `Luma`;
+    `Parade`); a mode or style change asks the program monitor for a frame. `Engine/Render/Histogram.h`: a
+    counts pass over every pixel of the frame in the monitor's RGBA16Float working texture (64-pixel tiles,
+    each counted in threadgroup memory, each thread keeping a run per channel, a SIMD group sharing a bin adds
+    one sum, so a flat picture costs one threadgroup atomic per SIMD group and channel), a finish pass for the
+    tallest bars between the end bins (the display's scale: a clipped spike reaches the top without
+    flattening the rest), a display pass. Letterbox bars are not counted (the reader's frame rectangle). The
+    waveform draws one column per pixel column of its view (up to 2048; `LumaWaveform::encodeAccumulate` with
+    `columns`), so with the panel at the picture's aspect a waveform column is a picture column.
+  - Clipping: a pixel is clipped white when a channel is at or above 1 - 2^-12 and black when one is at or
+    below 2^-12 (`kVEScopeClipTolerance`: on the half-float working texture exactly "stored as 1 or more"; the
+    YCbCr matrix's residue at video black counts as black, 10-bit code 1 does not), a photo app's rule (a
+    saturated primary is clipped at both ends). Every scope counts it on the samples it reads (one
+    `simd_sum` per SIMD group into two device counters; no extra read of the frame), into a slot of
+    `ScopeStatsRing` (8 slots, a sequence-lock read when the command buffer completes, so a reused slot reports
+    nothing rather than another frame's counts); the view publishes `clippedHighlightFraction` /
+    `clippedShadowFraction` and calls `clippingHandler` on the main thread at most every 0.1 s, always with
+    the latest counts. The monitor overlay: `VEEngine.showsClippingOverlay` (VEEngine.h addition), a function
+    constant of the output pass (`VEFunctionConstantClippingOverlay`; the plain output pass is now specialised
+    with it off), red where a channel is clipped white, blue where one is clipped black, only inside the frame
+    (never the letterbox bars), only on the program monitor (not the output display, snapshots or export).
+  - App: View > Show Scopes (was Show Waveform), View > Scope (Waveform, Histogram), View > Show Clipping on
+    Program Monitor. `ScopePanel` (slice 1's `WaveformPanel` is a typealias): a header with the mode menu, the
+    histogram's style, the indicator ("down-triangle 1.2 %" in blue for shadows, "up-triangle 0.4 %" in red for
+    highlights, with tooltips), the overlay button, a placement menu (Automatic, Beside the Monitor, Below the
+    Monitor) and the close button; the IRE scale for the waveform. `ScopeLayout` (pure, tested): the scope has
+    the sequence's aspect at the width the user drags on its divider (default 480 pt, 160-2400 stored,
+    limited by the area while the monitor keeps 240 x 135); Automatic puts it beside the monitor when that
+    leaves the picture larger (a height-limited monitor: the usual wide window), else below. The layout
+    remembers the mode, style, placement and width (`layout.scopeMode`, `.histogramStyle`, `.scopePlacement`,
+    `.scopeWidth`); the overlay is for the moment (off at every launch; Reset Window Layout also turns it
+    off). The program monitor sits in one ZStack with the panel, so it keeps its view when the panel comes,
+    goes or moves (tested).
+  - Measured (M4 Pro, median of 60 frames after warm-up, `ScopeTests testTheScopesCost`, into a 1200 x 676
+    panel): histogram 0.10-0.14 ms (1080p picture), 0.20 ms (1080p flat grey), 0.31-0.37 ms (2160p picture and
+    flat grey; 1.6 ms flat before the per-thread runs); waveform with 1200 columns 0.06-0.08 ms (1080p), 0.13
+    ms (2160p). The frame the scopes read is the monitor's drawable size, so in the app it is at most the
+    monitor's pixels.
+  - Tests: `ScopeTests` (12: flat grey a spike per channel, a ramp a flat histogram, pure red only in red's top
+    level, letterbox bars and frames outside the texture, tiles that do not divide the frame, the tallest bars,
+    the display in each style, exact clipped shares from the histogram's and the waveform's passes, the
+    tolerance at both ends, the ring dropping a reused slot, the overlay on a monitor and not on bars or an
+    export, the view in histogram mode through the engine with the clipping published on the main thread and
+    a mode change drawing by itself, the cost), `ScopePanelTests` (5: the layout's memory and reset, the
+    arrangement for wide, tall, narrow and tiny areas and 4:3, the divider's drag, the indicator's text, the
+    overlay reaching the engine, the panel in a window at the layout's width and the picture's aspect, beside
+    and below, the program monitor's view kept). Existing tests unchanged. Full suite after Part A
+    (`xcodebuild -scheme Framewright -destination 'platform=macOS' test`): TEST SUCCEEDED, EngineTests 601
+    (no display-link skips this run), doctest 394, AppTests 298 (1 known skip); no files left in
+    `$TMPDIR/FramewrightEngineTests`, the container's tmp (the smoke test's PNG and the saved state, as before)
+    or Preferences.
+
+Next, in the brief's order of value: B1 wheels, B2 curves, B4 LUTs, B3 hue curves, B5 vectorscope.
+Not in this round (next): P3/BT.2020 primaries (a separate decision), HDR export, HLG tone mapping, grades that
+change over time, match colour.
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
