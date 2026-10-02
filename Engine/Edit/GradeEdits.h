@@ -7,7 +7,7 @@
 //   In a coalescing group (ReplacePrevious, a control drag) each step replaces the last: every step
 //   says "set exposure to 1.2 on these clips", relative to the state before the gesture.
 // - summarizeGrades tells, per parameter, the value the clips of a selection agree on, or that they
-//   differ ("mixed").
+//   differ ("mixed"), and whether their whole grades are identical (Copy Grade of several clips).
 // - gradeTargets picks the clips of a selection that can have a grade (those on video tracks): a
 //   selection of linked picture and sound grades the pictures.
 //
@@ -77,6 +77,10 @@ struct GradeSummary {
     std::array<bool, kGradeParameterCount> mixed{};
     // Whether any of `clips` has a grade (not neutral).
     bool anyGraded = false;
+    // Whether every one of `clips` has the same whole grade: each value and the entries a newer version
+    // wrote (ClipGrade::foreign), which Copy Grade copies too. False when there are no clips; true for
+    // one clip.
+    bool identical = false;
 
     const std::optional<double> &valueOf(GradeParameter parameter) const {
         return values[static_cast<std::size_t>(parameter)];

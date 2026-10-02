@@ -85,7 +85,8 @@ struct InspectorView: View {
                                  subtitle: inspector.videoTargets.count > 1 ? "\(inspector.videoTargets.count) video clips" : nil) {
                     HStack {
                         Button("Copy") { store.copyGrade() }
-                            .help("Copy the grade of the selected clip (⌥⌘C)")
+                            .disabled(!store.canCopyGrade)
+                            .help("Copy the grade of the selected clip, or the grade the selected clips share (⌥⌘C)")
                             .accessibilityIdentifier("CopyGrade")
                         Button("Paste") { store.pasteGrade() }
                             .disabled(!store.canPasteGrade)

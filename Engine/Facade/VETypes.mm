@@ -79,6 +79,7 @@ void VEGradeParamsSetValue(VEGradeParams *params, double value, VEGradeParameter
 @property (nonatomic, readwrite, copy) NSArray<NSNumber *> *clipIDs;
 @property (nonatomic, readwrite) VEGradeParams values;
 @property (nonatomic, readwrite) BOOL anyGraded;
+@property (nonatomic, readwrite, getter=isIdentical) BOOL identical;
 - (instancetype)initWithMixed:(const std::array<bool, ve::kGradeParameterCount> &)mixed;
 @end
 
@@ -1016,6 +1017,7 @@ VEGradeSelection *makeGradeSelection(const GradeSummary &summary) {
     }
     selection.values = values;
     selection.anyGraded = summary.anyGraded;
+    selection.identical = summary.identical;
     return selection;
 }
 

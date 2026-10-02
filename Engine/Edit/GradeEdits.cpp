@@ -119,9 +119,16 @@ EditResult SetClipGrade::perform(const Project &, Sequence &sequence, IdGenerato
 GradeSummary summarizeGrades(const Sequence &sequence, const std::vector<ClipId> &clipIds) {
     GradeSummary summary;
     summary.clips = gradeTargets(sequence, clipIds);
+    summary.identical = !summary.clips.empty();
+    const ClipGrade *firstGrade = nullptr;
     for (std::size_t n = 0; n < summary.clips.size(); ++n) {
         const ClipGrade &grade = sequence.findClip(summary.clips[n])->grade;
         summary.anyGraded = summary.anyGraded || !grade.isNeutral();
+        if (n == 0) {
+            firstGrade = &grade;
+        } else if (grade != *firstGrade) {
+            summary.identical = false;
+        }
         for (const GradeParameter parameter : kGradeParameters) {
             const auto i = static_cast<std::size_t>(parameter);
             if (n == 0) {

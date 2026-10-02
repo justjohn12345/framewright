@@ -156,8 +156,9 @@ struct AppCommands: Commands {
             Button("Continue on Next Clip") { store.continueMotionOnNextClip() }
                 .disabled(!store.canContinueMotionOnNextClip)
             Divider()
-            // The grade of the selected video clips (their linked sound is left out): copied from the
-            // earliest, pasted onto all, reset on all; each change one undo step.
+            // The grade of the selected video clips (their linked sound is left out): copied from one clip,
+            // or from several with identical grades (`canCopyGrade`), pasted onto all, reset on all; each
+            // change one undo step.
             Button("Copy Grade") { store.copyGrade() }
                 .keyboardShortcut("c", modifiers: [.command, .option])
                 .disabled(!store.canCopyGrade)

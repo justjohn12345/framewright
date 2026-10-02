@@ -1,6 +1,6 @@
 // Grade edits (GradeEdits.h): SetClipGrade on one or several clips (only the parameters given; a
 // whole grade for Paste and Reset), its refusals, no-op and undo, coalescing a control drag into one
-// undo step, and the selection questions (summarizeGrades, gradeTargets).
+// undo step, and the selection questions (summarizeGrades with its identical grades, gradeTargets).
 
 #include "../Model/ModelFixtures.h"
 
@@ -205,4 +205,38 @@ TEST_CASE("Grade edits: a selection's values agree or are mixed") {
         }
     }
     CHECK(gradeTargets(fx.sequence(), {fx.c, fx.sound, fx.c, fx.a}) == std::vector<ClipId>{fx.c, fx.a});
+}
+
+TEST_CASE("Grade edits: a selection's grades are identical only when every value and foreign entry agrees") {
+    GradedClips fx;
+    // One clip is identical to itself; nothing to compare is not identical.
+    CHECK(summarizeGrades(fx.sequence(), {fx.a}).identical);
+    CHECK(summarizeGrades(fx.sequence(), {fx.b, fx.sound}).identical); // the sound is left out
+    CHECK_FALSE(summarizeGrades(fx.sequence(), {fx.sound}).identical);
+    CHECK_FALSE(summarizeGrades(fx.sequence(), {}).identical);
+    // Different values.
+    CHECK_FALSE(summarizeGrades(fx.sequence(), {fx.a, fx.b}).identical);
+    CHECK_FALSE(summarizeGrades(fx.sequence(), {fx.a, fx.c}).identical); // a graded clip and an ungraded one
+
+    // The same values: identical, whatever the order.
+    fx.sequence().findClip(fx.c)->grade = fx.grade(fx.a);
+    CHECK(summarizeGrades(fx.sequence(), {fx.a, fx.c}).identical);
+    CHECK(summarizeGrades(fx.sequence(), {fx.c, fx.sound, fx.a}).identical);
+
+    // The same values but different entries of a newer version: every value agrees, the grades do not
+    // (Copy Grade would copy one clip's entries and not the other's).
+    fx.sequence().findClip(fx.c)->grade = fx.grade(fx.b);
+    fx.sequence().findClip(fx.c)->grade.foreign = R"({"lift":[0.2,0.0,0.0]})";
+    const GradeSummary differentForeign = summarizeGrades(fx.sequence(), {fx.b, fx.c});
+    for (const GradeParameter parameter : kGradeParameters) {
+        CHECK_FALSE(differentForeign.isMixed(parameter));
+    }
+    CHECK_FALSE(differentForeign.identical);
+    fx.sequence().findClip(fx.c)->grade.foreign = fx.grade(fx.b).foreign;
+    CHECK(summarizeGrades(fx.sequence(), {fx.b, fx.c}).identical);
+
+    // Ungraded clips are identical (Copy Grade copies "no grade").
+    fx.sequence().findClip(fx.a)->grade = ClipGrade{};
+    fx.sequence().findClip(fx.c)->grade = ClipGrade{};
+    CHECK(summarizeGrades(fx.sequence(), {fx.a, fx.c}).identical);
 }

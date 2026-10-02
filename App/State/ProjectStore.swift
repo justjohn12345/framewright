@@ -1305,19 +1305,39 @@ final class ProjectStore: ObservableObject {
     /// The selected clips that can have a grade: those on video tracks.
     var gradeTargets: [VEClipInfo] { selectedClips.filter { $0.trackKind == .video } }
 
-    /// Copy Grade applies: a clip on a video track is selected.
-    var canCopyGrade: Bool { !gradeTargets.isEmpty }
+    /// Copy Grade applies: exactly one video clip is selected, or several whose grades are identical
+    /// (every value and what a newer version wrote, compared by the engine), so what is copied is the
+    /// grade of every one of them. Several clips with different grades: there is no one grade to copy.
+    /// The Clip menu, the clip's context menu and the inspector's Copy button all use this.
+    var canCopyGrade: Bool { copyableGradeSource != nil }
+
+    /// The clip whose grade Copy Grade copies (see `canCopyGrade`), or nil when it does not apply.
+    private var copyableGradeSource: VEClipInfo? {
+        let targets = gradeTargets
+        guard let first = targets.first else { return nil }
+        if targets.count == 1 {
+            return first
+        }
+        let grades = engine.grade(ofClips: targets.map { NSNumber(value: $0.clipID) })
+        return grades.isIdentical ? first : nil
+    }
     /// Paste Grade applies: a grade was copied and a clip on a video track is selected.
     var canPasteGrade: Bool { hasCopiedGrade && !gradeTargets.isEmpty }
     /// Reset Grade applies: a selected clip has a grade.
     var canResetGrade: Bool { gradeTargets.contains { $0.hasGrade } }
 
-    /// Clip > Copy Grade: copies the grade of the selected video clip (the earliest one when several are
-    /// selected), every value, for Paste Grade. The status line says whose.
+    /// Clip > Copy Grade: copies the grade of the selected video clip, or the grade several selected
+    /// video clips share (`canCopyGrade`), every value, for Paste Grade. The status line says whose; with
+    /// several clips whose grades differ nothing is copied and the status line says why.
     func copyGrade() {
         guard !isGestureActive else { return }
-        guard let clip = gradeTargets.first else {
+        let targets = gradeTargets
+        guard !targets.isEmpty else {
             statusMessage = "Select a video clip to copy its grade."
+            return
+        }
+        guard let clip = copyableGradeSource else {
+            statusMessage = "The selected clips have different grades: select one clip to copy its grade."
             return
         }
         guard engine.copyGrade(ofClip: clip.clipID) else {
@@ -1325,7 +1345,12 @@ final class ProjectStore: ObservableObject {
             return
         }
         hasCopiedGrade = true
-        statusMessage = clip.hasGrade ? "Copied the grade of “\(clip.name)”." : "Copied “\(clip.name)”, which has no grade."
+        if targets.count > 1 {
+            statusMessage = clip.hasGrade ? "Copied the grade of the \(targets.count) selected clips."
+                : "Copied the \(targets.count) selected clips, which have no grade."
+        } else {
+            statusMessage = clip.hasGrade ? "Copied the grade of “\(clip.name)”." : "Copied “\(clip.name)”, which has no grade."
+        }
     }
 
     /// Clip > Paste Grade: gives every selected video clip the copied grade (one undo step).

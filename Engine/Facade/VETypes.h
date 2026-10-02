@@ -243,6 +243,10 @@ FOUNDATION_EXPORT void VEGradeParamsSetValue(VEGradeParams *params, double value
 @property (nonatomic, readonly) VEGradeParams values;
 /// Whether any of the clips has a grade (a value that is not neutral).
 @property (nonatomic, readonly) BOOL anyGraded;
+/// Whether every clip has the same whole grade: each value and what a newer version wrote that this one
+/// keeps (both of which copyGradeOfClip: copies), so copying any of them copies the same grade. YES for
+/// one clip, NO without clips. Equal values with different entries of a newer version are not identical.
+@property (nonatomic, readonly, getter=isIdentical) BOOL identical;
 /// Whether the clips differ in `parameter` (NO without clips or for a value outside the enum).
 - (BOOL)isMixed:(VEGradeParameter)parameter NS_SWIFT_NAME(isMixed(_:));
 - (instancetype)init NS_UNAVAILABLE;

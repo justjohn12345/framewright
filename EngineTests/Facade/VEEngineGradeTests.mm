@@ -133,6 +133,9 @@ CMTime frames30(int64_t n) {
     XCTAssertFalse([selection isMixed:VEGradeParameterSaturation]);
     XCTAssertEqual(selection.values.saturation, 1);
     XCTAssertTrue(selection.anyGraded);
+    XCTAssertFalse(selection.identical, @"different exposures");
+    XCTAssertTrue(([engine gradeOfClips:@[ @(first.first), @(first.second) ]].identical), @"one clip (its sound left out)");
+    XCTAssertFalse([engine gradeOfClips:@[ @(first.second) ]].identical, @"no clip that can have a grade");
 
     // A multi-clip set of saturation, the linked sound in the selection: one undo step, exposures kept.
     const uint64_t before = engine.changeCount;
@@ -150,6 +153,10 @@ CMTime frames30(int64_t n) {
     selection = [engine gradeOfClips:@[ @(first.first), @(second.first) ]];
     XCTAssertFalse([selection isMixed:VEGradeParameterSaturation]);
     XCTAssertEqual(selection.values.saturation, 0.5);
+    XCTAssertFalse(selection.identical, @"the exposures still differ");
+    XCTAssertTrue([engine setGradeValue:1 forParameter:VEGradeParameterExposure clips:@[ @(second.first) ]].ok);
+    XCTAssertTrue(([engine gradeOfClips:@[ @(first.first), @(second.first) ]].identical), @"every value agrees");
+    XCTAssertTrue([engine undo]);
 
     XCTAssertTrue([engine undo]);
     XCTAssertEqual([engine clipInfo:first.first].grade.saturation, 1);
