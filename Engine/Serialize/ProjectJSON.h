@@ -1,6 +1,6 @@
 // Project file serialization (JSON via nlohmann/json).
 //
-// Format (schema version 7): a top-level object with "schemaVersion" (kProjectSchemaVersion),
+// Format (schema version 8): a top-level object with "schemaVersion" (kProjectSchemaVersion),
 // "name", "nextId", "activeSequenceId", "assets", "sequences" and "sharpenScaledDownSources"
 // (Project.h). A sequence holds its settings ("frameDuration", "width", "height",
 // "audioSampleRate", and "configured": false while a new project's sequence waits for its first
@@ -11,7 +11,9 @@
 // (whole sequence frames), "sourceIn" and "speed" as {"num", "den"}; its source out point is
 // derived; "reversed": true (left out when false) marks a clip that plays its media backwards (its
 // times are clip times, Clip.h "Reverse"). Its "video" object holds the static Motion values and
-// "audio" its "gainDb"; "spans"
+// "audio" its "gainDb"; "grade" (a clip on a video track; left out when every value is neutral and
+// nothing foreign is kept) its colour grade, {"exposure" | "contrast" | "temperature" | "tint" |
+// "saturation": number} with the values that are not neutral (ClipGrade.h); "spans"
 // (left out when empty) lists its spans in one list, its transitions (Clip::transitions, lane 0) then
 // its effect spans (EffectSpan.h): {"id", "lane", "kind": "transition"
 // | "motion" | "opacity" | "gain", "start", "end"} plus, for a transition, "edge": "head" | "tail"
@@ -28,7 +30,8 @@
 // unknown parameter, a transition parameter of an unknown name or choice, any other unknown key) is
 // kept on the model as it was read (EffectSpan.h, ForeignSpanContent, TransitionSpan) and written back
 // on save, so an older build does not strip a newer one's spans; unknown kinds and parameters are
-// reported as warnings. A span of an unknown kind on lane 0,
+// reported as warnings. The same holds for a clip's grade: an unknown grade parameter is kept
+// (ClipGrade::foreign) with a warning; a grade value outside its range is limited to it, with a warning. A span of an unknown kind on lane 0,
 // or one outside its clip's source range, is dropped with a warning.
 //
 // Older files are upgraded on load by migrateProjectJson, one schema version at a time. Loading
@@ -52,7 +55,7 @@
 
 namespace ve {
 
-inline constexpr int kProjectSchemaVersion = 7;
+inline constexpr int kProjectSchemaVersion = 8;
 
 nlohmann::json projectToJson(const Project &project);
 
@@ -104,6 +107,8 @@ ProjectLoadResult parseProject(std::string_view text);
 //           and iris transition kinds; a version 5 file has neither.
 //   6 -> 7: every sequence gets "configured": true (an existing project's settings are chosen: it
 //           never adopts a clip's) and the project "sharpenScaledDownSources": true (the default).
+//   7 -> 8: nothing to convert. Version 8 added clips' "grade" (absent: no grade); a version 7 file
+//           has none (one that has it anyway keeps it, with a warning).
 // The steps are frozen (ProjectMigrations.h): a later schema version adds a step and never changes
 // how an older file is converted.
 std::optional<std::string> migrateProjectJson(nlohmann::json &document, int fromVersion,
@@ -111,7 +116,7 @@ std::optional<std::string> migrateProjectJson(nlohmann::json &document, int from
 
 // As above, but stops at `toVersion` (fromVersion <= toVersion <= kProjectSchemaVersion), which is
 // also the version a warning about newer content says the project is saved as. The golden
-// migration tests use it to compare each older file with its fixture migrated to version 7.
+// migration tests use it to compare each older file with its fixtures migrated to versions 7 and 8.
 std::optional<std::string> migrateProjectJson(nlohmann::json &document, int fromVersion, int toVersion,
                                               std::vector<std::string> &warnings);
 

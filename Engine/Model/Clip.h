@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include "ClipGrade.h"
 #include "EffectSpan.h"
 #include "Ids.h"
 #include "TimeUtil.h"
@@ -135,6 +136,9 @@ struct Clip {
     std::optional<ClipId> linkedClipId; // symmetric: the partner links back
     VideoParams video;
     AudioParams audio;
+    // The clip's colour grade (ClipGrade.h); neutral (no grade) by default, and on every clip of an
+    // audio track.
+    ClipGrade grade;
     // Lane 0: transitions and fades, at most one per edge, the head's first (sortSpans).
     std::vector<TransitionSpan> transitions;
     // Lanes 1-3: effect spans, by lane, each lane by start (sortSpans).

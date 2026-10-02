@@ -342,7 +342,7 @@ TEST_CASE("ProjectJSON: format details") {
     const Fixture fx = richFixture();
     const json j = projectToJson(fx.project);
     CHECK(j.at("schemaVersion") == kProjectSchemaVersion);
-    CHECK(kProjectSchemaVersion == 7);
+    CHECK(kProjectSchemaVersion == 8);
     // Version 7: the sequence's "configured" and the project's "sharpenScaledDownSources", always written.
     CHECK(j.at("sharpenScaledDownSources") == true);
     CHECK(j.at("sequences")[0].at("configured") == true);
@@ -1225,7 +1225,7 @@ TEST_CASE("ProjectJSON: the checked-in version 5 project loads with every clip f
     CHECK_FALSE(migrateProjectJson(document, 5, warnings).has_value());
     CHECK(warnings.empty());
     json expectedDocument = json::parse(text);
-    expectedDocument["schemaVersion"] = 7;
+    expectedDocument["schemaVersion"] = 8;
     expectedDocument["sharpenScaledDownSources"] = true;
     for (json &sequence : expectedDocument.at("sequences")) {
         sequence["configured"] = true;
@@ -1255,7 +1255,7 @@ TEST_CASE("ProjectJSON: the checked-in version 6 project opens configured, with 
     CHECK_FALSE(migrateProjectJson(document, 6, warnings).has_value());
     CHECK(warnings.empty());
     json expectedDocument = json::parse(text);
-    expectedDocument["schemaVersion"] = 7;
+    expectedDocument["schemaVersion"] = 8;
     expectedDocument["sharpenScaledDownSources"] = true;
     for (json &sequence : expectedDocument.at("sequences")) {
         sequence["configured"] = true;
@@ -1272,14 +1272,20 @@ Fixture richFixtureV7() {
     return fx;
 }
 
-TEST_CASE("ProjectJSON: the checked-in version 7 project matches the current writer byte for byte") {
+TEST_CASE("ProjectJSON: the checked-in version 7 project matches the current writer byte for byte but for its version") {
     const Fixture expected = richFixtureV7();
     const std::string path = goldenPath("project-v7.json");
     const std::string written = serializeProject(expected.project) + "\n";
     // The golden file is checked in and never written by the test: a missing one is a failure
     // (readFile requires it), so a test run cannot bless its own output.
     const std::string text = readFile(path);
-    CHECK(text == written);
+    // Schema 8 writes a clip's grade only when it has one: a project without grades is written as
+    // version 7 wrote it, but for the version number.
+    std::string asVersion8 = text;
+    const std::string version7 = "\"schemaVersion\": 7,";
+    REQUIRE(asVersion8.find(version7) != std::string::npos);
+    asVersion8.replace(asVersion8.find(version7), version7.size(), "\"schemaVersion\": 8,");
+    CHECK(asVersion8 == written);
     const ProjectLoadResult loaded = parseProject(text);
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
     CHECK(loaded.warnings.empty());
@@ -1288,6 +1294,50 @@ TEST_CASE("ProjectJSON: the checked-in version 7 project matches the current wri
     CHECK(contains(text, "\"transition\": \"wipeLeft\""));
     CHECK(contains(text, "\"configured\": true"));
     CHECK(contains(text, "\"sharpenScaledDownSources\": false"));
+}
+
+// The version 7 fixture with what version 8 added: grades on three clips of video tracks (every
+// parameter on the first, a negative exposure alone on the second, the still turned grey).
+Fixture richFixtureV8() {
+    Fixture fx = richFixtureV7();
+    ClipGrade &all = fx.sequence().findClip(ClipId{11})->grade;
+    all[GradeParameter::Exposure] = 0.5;
+    all[GradeParameter::Contrast] = 1.25;
+    all[GradeParameter::Temperature] = -20.0;
+    all[GradeParameter::Tint] = 7.5;
+    all[GradeParameter::Saturation] = 0.75;
+    fx.sequence().findClip(ClipId{15})->grade[GradeParameter::Exposure] = -1.5;
+    REQUIRE(fx.sequence().findClip(ClipId{16})->isStill);
+    fx.sequence().findClip(ClipId{16})->grade[GradeParameter::Saturation] = 0.0;
+    fx.requireValid();
+    return fx;
+}
+
+TEST_CASE("ProjectJSON: the checked-in version 8 project matches the current writer byte for byte") {
+    const Fixture expected = richFixtureV8();
+    const std::string written = serializeProject(expected.project) + "\n";
+    // Checked in, never written by the test (readFile requires it).
+    const std::string text = readFile(goldenPath("v8/project-v8.json"));
+    CHECK(text == written);
+    const ProjectLoadResult loaded = parseProject(text);
+    REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
+    CHECK(loaded.warnings.empty());
+    CHECK(*loaded.project == expected.project);
+    CHECK(contains(text, "\"schemaVersion\": 8"));
+    CHECK(contains(text, "\"grade\": {"));
+    // Only the graded clips have a grade, and only their values that are not neutral are written.
+    const json document = json::parse(text);
+    int graded = 0;
+    for (const json &sequence : document.at("sequences")) {
+        for (const char *kind : {"videoTracks", "audioTracks"}) {
+            for (const json &track : sequence.at(kind)) {
+                for (const json &clip : track.at("clips")) {
+                    graded += clip.contains("grade") ? 1 : 0;
+                }
+            }
+        }
+    }
+    CHECK(graded == 3);
 }
 
 TEST_CASE("ProjectJSON: the sequence settings' configured flag and the sharpen setting round trip") {
@@ -1384,9 +1434,9 @@ TEST_CASE("ProjectJSON: a version 5 file with version 6 content opens with a war
     }
     REQUIRE(loaded.warnings.size() == 2);
     CHECK(anyContains(loaded.warnings, "\"reversed\" is a version 6 feature in a project of an earlier version: "
-                                       "kept, and the project is saved as version 7"));
+                                       "kept, and the project is saved as version 8"));
     CHECK(anyContains(loaded.warnings, "a Wipe Left transition is a version 6 feature in a project of an earlier "
-                                       "version: kept, and the project is saved as version 7"));
+                                       "version: kept, and the project is saved as version 8"));
     const Sequence &sequence = loaded.project->sequences[0];
     CHECK(sequence.findClip(ClipId{15})->reversed);
     CHECK(sequence.findTransition(SpanId{14})->kind == TransitionKind::WipeLeft);

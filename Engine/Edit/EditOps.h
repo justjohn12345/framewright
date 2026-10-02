@@ -781,7 +781,7 @@ class ClipIndex {
 };
 
 // Whether the cut from `fromClipId` to `toClipId` is a through edit: both clips play the same
-// asset at the same speed with the same static parameters and no effect spans, and the second
+// asset at the same speed with the same static parameters (Motion, gain, grade) and no effect spans, and the second
 // continues exactly where the first stops in the source (a plain split). Both sides of a
 // transition there show (or play) the same media, so it has no visible (audible) effect. Two
 // pieces of one still are a through edit when neither has effect spans.

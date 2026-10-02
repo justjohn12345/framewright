@@ -102,6 +102,12 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
     if (!std::isfinite(clip.audio.gainDb)) {
         return where + ": non-finite gain";
     }
+    if (auto problem = gradeProblem(clip.grade)) {
+        return where + ": " + *problem;
+    }
+    if (track.kind != TrackKind::Video && !clip.grade.isEmpty()) {
+        return where + ": a clip on an audio track has no grade";
+    }
     int heads = 0;
     int tails = 0;
     for (const TransitionSpan &span : clip.transitions) {

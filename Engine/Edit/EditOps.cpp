@@ -2308,7 +2308,8 @@ bool isThroughEdit(const Sequence &sequence, ClipId fromClipId, ClipId toClipId)
         CMTimeCompare(from->timelineEnd(), to->timelineStart) != 0 || from->isStill != to->isStill ||
         from->reversed != to->reversed ||
         !(from->speedRatio() == to->speedRatio()) || !(from->video == to->video) ||
-        !(from->audio.gainDb == to->audio.gainDb) || from->hasEffectSpans() || to->hasEffectSpans()) {
+        !(from->audio.gainDb == to->audio.gainDb) || !(from->grade == to->grade) || from->hasEffectSpans() ||
+        to->hasEffectSpans()) {
         return false;
     }
     if (from->isStill) {

@@ -153,6 +153,20 @@ json assetToJson(const MediaAsset &asset) {
                 {"hardwareDecode", asset.hardwareDecode}};
 }
 
+// A clip's grade: the values that are not neutral, then the entries this version does not read (a
+// newer version's parameters) as they came. Written only when not empty (ClipGrade::isEmpty), so a
+// clip without a grade writes what version 7 wrote.
+json gradeToJson(const ClipGrade &grade) {
+    json j = json::object();
+    for (const GradeParameter parameter : kGradeParameters) {
+        if (grade[parameter] != neutralValue(parameter)) {
+            j[nameOf(parameter)] = grade[parameter];
+        }
+    }
+    addForeignKeys(j, foreignObject(grade.foreign));
+    return j;
+}
+
 json clipToJson(const Clip &clip) {
     json j{{"id", idToJson(clip.id)},
                 {"assetId", idToJson(clip.assetId)},
@@ -167,6 +181,9 @@ json clipToJson(const Clip &clip) {
                 {"audio", audioParamsToJson(clip.audio)}};
     if (clip.reversed) {
         j["reversed"] = true;
+    }
+    if (!clip.grade.isEmpty()) {
+        j["grade"] = gradeToJson(clip.grade);
     }
     if (!clip.transitions.empty() || !clip.spans.empty()) {
         // One list in the file: lane 0 (the transitions, head then tail), then lanes 1-3.
@@ -498,6 +515,42 @@ std::optional<ParsedSpan> parseSpan(const Node &node, Warnings &warnings) {
     return ParsedSpan{span, lane};
 }
 
+// A clip's "grade": an object of the parameters it sets (GradeParameterInfo::name: a number each; a
+// parameter left out is neutral). A value outside its parameter's range is limited to it, with a
+// warning; an entry this version does not know (a newer version's parameter) is kept as it is and
+// written back on save (ClipGrade::foreign), with a warning. A value that is not a number fails the
+// load with its path.
+ClipGrade parseGrade(const Node &node, Warnings &warnings) {
+    node.requireObject();
+    ClipGrade grade;
+    json foreign = json::object();
+    for (const auto &entry : node.value().items()) {
+        const std::string &key = entry.key();
+        const Node valueNode(entry.value(), node.path() + "." + key);
+        const auto parameter = gradeParameterNamed(key);
+        if (!parameter) {
+            foreign[key] = entry.value();
+            warnings.push_back(valueNode.path() + ": unknown grade parameter \"" + key +
+                               "\" (from a newer version of Framewright?); kept as it is and saved with the project, "
+                               "but not applied or editable");
+            continue;
+        }
+        const double value = valueNode.asDouble();
+        if (!isValidGradeValue(*parameter, value)) {
+            const double limited = clampGradeValue(*parameter, value);
+            const GradeParameterInfo &info = infoOf(*parameter);
+            warnings.push_back(valueNode.path() + ": " + info.displayName + " " + entry.value().dump() +
+                               " is outside its range [" + json(info.minimum).dump() + ", " +
+                               json(info.maximum).dump() + "]; limited to " + json(limited).dump());
+            grade[*parameter] = limited;
+        } else {
+            grade[*parameter] = value;
+        }
+    }
+    grade.foreign = foreignText(foreign);
+    return grade;
+}
+
 // The spans of each clip in the order the file lists them (one list there, two containers on the
 // model), with the lane the file gave each: repairSequence reports and repairs in that order.
 struct FileSpan {
@@ -536,6 +589,9 @@ Clip parseClip(const Node &node, Warnings &warnings, SpanFileOrder &order) {
     if (node.has("audio")) {
         clip.audio = parseAudioParams(node.field("audio"));
     }
+    if (node.has("grade")) {
+        clip.grade = parseGrade(node.field("grade"), warnings);
+    }
     if (node.has("spans")) {
         const Node spans = node.field("spans");
         std::vector<FileSpan> &listed = order[clip.id];
@@ -566,7 +622,14 @@ Track parseTrack(const Node &node, Warnings &warnings, SpanFileOrder &order) {
     if (node.has("clips")) {
         const Node clips = node.field("clips");
         for (std::size_t i = 0, n = clips.arraySize(); i < n; ++i) {
-            track.clips.push_back(parseClip(clips.element(i), warnings, order));
+            const Node clipNode = clips.element(i);
+            Clip clip = parseClip(clipNode, warnings, order);
+            // A grade is for pictures (validateSequence): one on a clip of an audio track is dropped.
+            if (track.kind != TrackKind::Video && !clip.grade.isEmpty()) {
+                warnings.push_back(clipNode.path() + ".grade: a clip on an audio track has no grade; dropped");
+                clip.grade = ClipGrade{};
+            }
+            track.clips.push_back(std::move(clip));
         }
     }
     return track;

@@ -141,8 +141,15 @@ TEST_CASE("Migration goldens: a golden document loads as the project its older f
         REQUIRE_MESSAGE(fromOlder.ok(), doctest::String(fromOlder.error.c_str()));
         REQUIRE_MESSAGE(fromGolden.ok(), doctest::String(fromGolden.error.c_str()));
         CHECK(*fromOlder.project == *fromGolden.project);
-        // The older file's warnings are the migration's, then what loading the result reports.
+        // The older file's warnings are the migration's, then what loading the result reports. Loading
+        // saves as the current version, which a warning about newer content names.
         std::vector<std::string> expected = warningsOf(golden);
+        const std::string savedAs = "saved as version " + std::to_string(kFrozenAtVersion);
+        for (std::string &warning : expected) {
+            if (const auto at = warning.find(savedAs); at != std::string::npos) {
+                warning.replace(at, savedAs.size(), "saved as version " + std::to_string(kProjectSchemaVersion));
+            }
+        }
         expected.insert(expected.end(), fromGolden.warnings.begin(), fromGolden.warnings.end());
         CHECK(fromOlder.warnings == expected);
     }

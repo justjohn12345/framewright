@@ -148,8 +148,8 @@ bool operator==(const Clip &a, const Clip &b) {
            identical(a.timelineStart, b.timelineStart) && identical(a.timelineDuration, b.timelineDuration) &&
            identical(a.sourceIn, b.sourceIn) && a.speed == b.speed && a.isStill == b.isStill &&
            a.reversed == b.reversed &&
-           a.linkedClipId == b.linkedClipId && a.video == b.video && a.audio == b.audio && a.transitions == b.transitions &&
-           a.spans == b.spans;
+           a.linkedClipId == b.linkedClipId && a.video == b.video && a.audio == b.audio && a.grade == b.grade &&
+           a.transitions == b.transitions && a.spans == b.spans;
 }
 
 std::optional<ExactTime> Clip::exactSourceTimeAt(CMTime t) const {

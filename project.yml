@@ -149,6 +149,9 @@ targets:
       - path: EngineTests
         excludes:
           - "**/.gitkeep"
+          # The version 8 migration goldens share their names with the version 7 ones beside them;
+          # the tests read every golden from the source tree (__FILE__), so they need no bundle copy.
+          - "Serialize/golden/v8/**"
     dependencies:
       - target: FramewrightEngine
       - sdk: Metal.framework

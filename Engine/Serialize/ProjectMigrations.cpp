@@ -1254,6 +1254,32 @@ void migrate(json &document, const StepContext &) {
 
 } // namespace toV7
 
+// ===== 7 -> 8 =====
+
+namespace toV8 {
+
+// Version 8 added a clip's "grade" (its colour correction; absent means no grade). A version 7 file
+// has none, so only the version number changes. One that has it anyway (written by hand, or by a
+// build between the two) keeps it, with a warning naming each clip, as the 5 -> 6 step does for
+// version 6 content; the project is then saved in the current version.
+void migrate(json &document, const StepContext &context) {
+    Node(document, "").requireObject();
+    const std::string feature = ": \"grade\" is a version 8 feature in a project of an earlier version: kept, and the "
+                                "project is saved as version " +
+                                std::to_string(context.targetVersion);
+    forEachSequence(document, [&](json &sequence, const Node &node) {
+        forEachTrack(sequence, node, [&](json &track, const Node &trackNode, bool, std::size_t) {
+            forEachClip(track, trackNode, [&](json &clip, const Node &clipNode) {
+                if (clip.find("grade") != clip.end()) {
+                    context.warnings.push_back(clipNode.path() + feature);
+                }
+            });
+        });
+    });
+}
+
+} // namespace toV8
+
 struct MigrationStep {
     int fromVersion;
     void (*apply)(json &document, const StepContext &context);
@@ -1262,7 +1288,7 @@ struct MigrationStep {
 // One entry per schema version bump, in order: entry i upgrades fromVersion to fromVersion + 1.
 constexpr MigrationStep kMigrations[] = {
     {1, toV2::migrate}, {2, toV3::migrate}, {3, toV4::migrate},
-    {4, toV5::migrate}, {5, toV6::migrate}, {6, toV7::migrate},
+    {4, toV5::migrate}, {5, toV6::migrate}, {6, toV7::migrate}, {7, toV8::migrate},
 };
 
 constexpr bool migrationsInOrder() {
