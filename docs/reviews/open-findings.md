@@ -1285,12 +1285,42 @@ Done:
   trace in a bar's box, the ring, the skin line and black outside the square, the view's reader in vectorscope
   mode, the cost); `ScopePanelTests` (the mode reaches the view, the menu lists three).
 
+Final verification (at dd1ba18 plus docs):
+- `xcodebuild -scheme Framewright -configuration Debug clean build`: 0 warnings in project code (the one
+  warning is Xcode's appintentsmetadataprocessor).
+- Full suite (`xcodebuild -scheme Framewright -destination 'platform=macOS' test`): EngineTests 629 (baseline
+  589), doctest 439 (baseline 394), AppTests 308 (baseline 293; 1 known skip). Two failures, neither in the code
+  of this round: `ExportParityTests testAReversedClipPlaysTheSoundTheExportWrites` (an audio-timing comparison;
+  passed in 3 of 3 reruns alone and in every earlier full run of this round) and `WaveformPanelTests
+  testTheShownPanelIsDrawnWithTheProgramMonitorsFramesAndLetGoWhenHidden`: the Mac's screen locked at 13:30:40
+  (display asleep), before AppTests ran, and from then on the hosted test windows were not laid out (the scope
+  view had size 0, so it never drew; reproduced 3 of 3 while locked, and `ScopePanelTests` took 10 s instead of
+  1.4 s for the same reason). The same test passed in the full runs after Part A, B1, B2 and B4 and in a
+  targeted run at 13:26 with the final code. To do by the lead: run `-only-testing:AppTests/WaveformPanelTests`
+  (or the whole suite) with the screen unlocked. Nothing left in `$TMPDIR/FramewrightEngineTests` or the
+  container's tmp (the smoke test's PNG and the saved state, as before); no new file in Preferences (the app's
+  own plist is rewritten by the test host's launch, as before; it now holds `layout.inspectorTab` = "colour" and
+  `layout.scopeMode`, which no test writes: every test layout is in memory or in `makeTestDefaults`, so someone
+  ran a build of this round's app).
+- ThreadSanitizer (`-derivedDataPath build/tsan -enableThreadSanitizer YES`; 41 classes: Compositor,
+  CompositorPreviewView, CompositorSharpen, CompositorWorkingBuffer, TransitionShape, TransitionSoftness,
+  TextureCache, HighPrecisionDecode, ColorGradeRender, ColorGradeExtendedRender, LumaWaveform, Scope,
+  Vectorscope, PlaybackController, PlaybackDisplayPath, PlaybackDrift, PlaybackLookahead, PlaybackPreviewSolo,
+  PlaybackTransport, PausedSeek, ProgramFrameProvider, the fourteen VEEngine* classes with the grade wheel,
+  curve and LUT classes, VEExporter, VEMediaLibrary, VEProgramMonitor, VESourceMonitor, ExportJob, and the
+  doctests): 326 tests, 0 reports (5 skipped: the 3 display-link tests, the screen being locked, and the 2
+  timing tests that skip under TSan).
+- StressTests: passed. One-hour exports: 0 timestamp and 0 picture errors in all three, drift +0.230, +0.400
+  and +0.408 samples (last round the same). Two-hour project: footprint growth after the edits +338.9 MB (593.4
+  -> 932.3 MB; last numbers +283 to +375 MB), after save and reopen 1055.7 MB; cold starts 41.4, 42.0 and 58.7
+  ms (33-60 ms before); 0 dropped, 0 late. Paused seeks: 0 misses of 200 on both sources.
+
 Deviations:
 - B1 and B2 are one commit: B2's model and shader work began in the files B1 had changed before B1 was
   committed (B1 had passed its own tests and a full suite: EngineTests 610, doctest 404, AppTests 302), and
   splitting the shared files afterwards was riskier than committing both.
 
-Next: the final verification (full suite, ThreadSanitizer, StressTests).
+Done: every item of the brief (A1-A4, B1-B5).
 Not in this round (next): P3/BT.2020 primaries (a separate decision), HDR export, HLG tone mapping, grades that
 change over time, match colour.
 
