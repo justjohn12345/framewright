@@ -1248,12 +1248,35 @@ Done:
     `testAGradeIsSavedAndOpened` (`"schemaVersion": 9`). Full suite after B4: TEST SUCCEEDED, EngineTests 621 (3
     display-link skips), doctest 434, AppTests 306 (1 known skip).
 
+- B3, hue curves: 86edc23.
+  - Model: `GradeHueCurve` (Saturation, Hue, Luma; "hueCurveSaturation", "hueCurveHue", "hueCurveLuma"), 1-16
+    points with x in [0, 1) (hue as a fraction of the circle: the angle of BT.709 chroma, Cb across, Cr up, as a
+    vectorscope shows it), y 0-1 with 0.5 neutral; a periodic monotone cubic (Fritsch-Butland tangents: no
+    overshoot, a flat run stays flat; a first Catmull-Rom version overshot by 0.09 far from a narrow dip, caught
+    by a test); identity (none, or every y 0.5) stored as none. Flat keys (schema 9 needs no new version).
+  - Effect (linear light, after saturation, before the wheels): the hue turns by (y - 0.5) x 120 degrees, the
+    chroma scales by 2y, the colour by 2^((y - 0.5) x 2), each fading out below a chroma of 0.05 (a grey is
+    untouched); luminance kept through the turn and the saturation. Tables: rows 10-12, periodic lookup.
+  - Facade (additions): `VEGradeHueCurve`, `VEGradeHueCurveSample` (Swift `VEGradeCurveInfo.sampleHue`),
+    `VEGradeSelection` `hueCurve(_:)` (ObjC `pointsForHueCurve:`) / `isHueCurveMixed(_:)`, `VEClipInfo`
+    `gradeHueCurvePoints(_:)`, VEEngine.h `setGradeHueCurve(_:for:clips:)`; `resetGradeCurves(ofClips:)` now
+    resets the hue curves too (its comment says so).
+  - App: the curve editor's channel is a menu of seven (`CurveChannel`); a hue curve shows a band of hues and
+    the neutral middle line, starts with no points, and loses its last point back to the identity.
+  - Tests: doctests `ClipGradeHueCurveTests` (3), `ColorGradeHueCurveTests` (2: a grey untouched; desaturate,
+    double, turn by 60 degrees and scale by a stop, keeping luminance and chroma where they should; other hues
+    alone; the fade near grey; finite outputs; the periodic lookup); XCTests `ColorGradeExtendedRenderTests`
+    (+2: GPU against CPU, shown values within 3.4e-5, bound 5e-5; unlimited 2.7e-4 for a sub-black output, bound
+    5e-4, explained in the test (green rebuilt by subtraction near zero, then the encoding's unbounded slope at
+    0), where the shader limits both to 0; a rendered picture equals the reference within 1e-4),
+    `VEEngineGradeCurveTests testHueCurves`; AppTests `CurveEditorTests` (+2).
+
 Deviations:
 - B1 and B2 are one commit: B2's model and shader work began in the files B1 had changed before B1 was
   committed (B1 had passed its own tests and a full suite: EngineTests 610, doctest 404, AppTests 302), and
   splitting the shared files afterwards was riskier than committing both.
 
-Next, in the brief's order of value: B3 hue curves, B5 vectorscope.
+Next: B5 vectorscope, then the final verification (full suite, ThreadSanitizer, StressTests).
 Not in this round (next): P3/BT.2020 primaries (a separate decision), HDR export, HLG tone mapping, grades that
 change over time, match colour.
 
