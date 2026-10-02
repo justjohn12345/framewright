@@ -652,7 +652,19 @@ Done:
   tone mapped (as before). Full suite after this item (before the test fix above): EngineTests 563, the
   only failure that test, AppTests 279 (1 known skip), doctest 349.
 
-Next: item 4 (split `EffectSpan` into effect and transition types).
+In progress:
+- 4, split `EffectSpan` into effect and transition types (review 1.9). Step 1 done: 4da7893, a clip keeps
+  its transitions apart (`Clip::transitions`, lane 0, at most one per edge; `Clip::spans`, lanes 1-3), the
+  element type still `EffectSpan` behind a `TransitionSpan` alias. The project file keeps one "spans" list
+  (the parser routes, the writer writes the transitions first as the sorted list had them, repairSequence
+  repairs and warns in the file's order). Full suite green after it (EngineTests 564, doctest 349, AppTests
+  279 with 1 known skip). Tests changed (container only: they put transitions into, took them out of, or
+  indexed them in `Clip::spans`): AudioMixerTests.mm, ClipOpsTests, EditPropertyTests, EffectsEditTests,
+  ReverseTests (transitions compared like spans), SequenceFormatTests, TransitionFadeEditTests,
+  TransitionFittingTests, TransitionTrackOpsTests, ExportJobTests.mm, ModelFixtures.h, ModelTests,
+  PlaybackTestSupport.mm, SchedulerSpanTests, TransitionShapeTests.mm, ProjectJSONTests,
+  HourExportStressTests.mm. Next: step 2, `TransitionSpan` a type of its own (no lane, tracks or effect
+  kind; `EffectSpan` without edge, transition kind and `isTransition()`).
 
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
