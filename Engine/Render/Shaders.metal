@@ -674,6 +674,112 @@ fragment float4 ve_histogram_fragment(VEOutputVertexOut in [[stage_in]],
     return float4(colour, 1.0);
 }
 
+// MARK: - Vectorscope (Vectorscope.h)
+
+// A sample's BT.709 chroma (Cb, Cr) from its R'G'B' (limited to [0, 1]).
+static inline float2 vectorscopeChroma(float3 rgb) {
+    const float y = dot(float3(0.2126, 0.7152, 0.0722), rgb);
+    return float2((rgb.b - y) * (1.0 / 1.8556), (rgb.r - y) * (1.0 / 1.5748));
+}
+
+// One thread per sampled pixel (every column of `sampleRows` evenly spaced rows): its chroma's bin is counted;
+// a SIMD group whose samples share a bin (a flat picture) adds them with one atomic. The samples also go into
+// the clipping counters.
+kernel void ve_vectorscope_accumulate(texture2d<float, access::read> working [[texture(VETextureIndexWorking)]],
+                                      device atomic_uint *counts [[buffer(VEBufferIndexScopeCounts)]],
+                                      constant VEVectorscopeUniforms &u [[buffer(VEBufferIndexScopeUniforms)]],
+                                      device atomic_uint *stats [[buffer(VEBufferIndexScopeStats)]],
+                                      uint2 gid [[thread_position_in_grid]]) {
+    const uint width = uint(u.frame.z);
+    const uint height = uint(u.frame.w);
+    const bool active = gid.x < width && gid.y < u.sampleRows && height != 0;
+    float3 sample = float3(0.5);
+    uint bin = 0;
+    if (active) {
+        const uint row = min(height - 1, uint((float(gid.y) + 0.5) * float(height) / float(u.sampleRows)));
+        sample = working.read(uint2(uint(u.frame.x) + gid.x, uint(u.frame.y) + row)).rgb;
+        const float2 chroma = vectorscopeChroma(saturate(sample));
+        const float last = float(kVEVectorscopeBins - 1);
+        const uint column = uint(clamp(rint((chroma.x + 0.5) * last), 0.0, last));
+        const uint level = uint(clamp(rint((chroma.y + 0.5) * last), 0.0, last));
+        bin = level * kVEVectorscopeBins + column;
+    }
+    const uint first = simd_broadcast_first(bin);
+    if (simd_all(!active || bin == first)) {
+        const uint n = simd_sum(active ? 1u : 0u);
+        if (simd_is_first() && n != 0) {
+            atomic_fetch_add_explicit(&counts[first], n, memory_order_relaxed);
+        }
+    } else if (active) {
+        atomic_fetch_add_explicit(&counts[bin], 1u, memory_order_relaxed);
+    }
+    countClipping(stats, sample, active);
+}
+
+// The distance from `p` to the segment a-b.
+static inline float distanceToSegment(float2 p, float2 a, float2 b) {
+    const float2 ab = b - a;
+    const float t = saturate(dot(p - a, ab) / max(dot(ab, ab), 1.0e-6));
+    return length(p - (a + t * ab));
+}
+
+// The vectorscope drawn in a square centred in the target: Cb across (blue to the right), Cr up (red up), the
+// full chroma range -0.5 ... 0.5 filling the square. The trace: 1 - exp(-count * gain), white-green. The
+// graticule: the ring at chroma 0.5, the crosshair, a box around each 75 % colour bar's chroma (red, magenta,
+// blue, cyan, green, yellow) and the skin tone line from the centre to the ring.
+fragment float4 ve_vectorscope_fragment(VEOutputVertexOut in [[stage_in]],
+                                        device const uint *counts [[buffer(VEBufferIndexScopeCounts)]],
+                                        constant VEVectorscopeUniforms &u [[buffer(VEBufferIndexScopeUniforms)]]) {
+    const float2 size = max(u.target.xy, float2(1.0));
+    const float side = min(size.x, size.y);
+    const float2 origin = (size - side) * 0.5;
+    const float2 p = in.position.xy - origin;
+    if (p.x < 0.0 || p.y < 0.0 || p.x >= side || p.y >= side) {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+    const float scale = side; // pixels per chroma unit (the square spans 1)
+    const float2 chroma = float2(p.x / side - 0.5, 0.5 - p.y / side);
+    // The bins this pixel covers: the brightest of them, so no count falls between pixels.
+    const float binsPerPixel = float(kVEVectorscopeBins) / side;
+    const float last = float(kVEVectorscopeBins - 1);
+    const int c0 = int(clamp(floor((chroma.x + 0.5) * last - 0.5 * binsPerPixel + 0.5), 0.0, last));
+    const int c1 = int(clamp(floor((chroma.x + 0.5) * last + 0.5 * binsPerPixel + 0.5), 0.0, last));
+    const int r0 = int(clamp(floor((chroma.y + 0.5) * last - 0.5 * binsPerPixel + 0.5), 0.0, last));
+    const int r1 = int(clamp(floor((chroma.y + 0.5) * last + 0.5 * binsPerPixel + 0.5), 0.0, last));
+    uint count = 0;
+    for (int r = r0; r <= r1; ++r) {
+        for (int c = c0; c <= c1; ++c) {
+            count = max(count, counts[uint(r) * kVEVectorscopeBins + uint(c)]);
+        }
+    }
+    const float trace = 1.0 - exp(-float(count) * u.gain);
+    // The graticule (distances in pixels).
+    float grid = 0.0;
+    const float radius = length(chroma) * scale;
+    if (abs(radius - 0.5 * scale) < 0.75) {
+        grid = 0.22; // the outer ring
+    }
+    if ((abs(chroma.x) * scale < 0.5 || abs(chroma.y) * scale < 0.5) && radius < 0.5 * scale) {
+        grid = max(grid, 0.12); // the crosshair
+    }
+    const float boxHalf = 0.025 * scale;
+    for (uint k = 0; k < 6; ++k) {
+        const float4 pair = u.targets[k / 2];
+        const float2 target = (k % 2 == 0) ? pair.xy : pair.zw;
+        const float2 d = abs(chroma - target) * scale;
+        const float edge = max(d.x, d.y);
+        if (abs(edge - boxHalf) < 0.75) {
+            grid = max(grid, 0.45);
+        }
+    }
+    const float2 skin = u.skinLine.xy * 0.5;
+    if (distanceToSegment(chroma * scale, float2(0.0), skin * scale) < 0.6) {
+        grid = max(grid, 0.3);
+    }
+    const float3 colour = max(float3(grid), float3(0.75, 1.0, 0.8) * trace);
+    return float4(colour, 1.0);
+}
+
 // MARK: - Export conversion (RGBA16Float composite -> target pixel buffer planes)
 
 kernel void ve_convert_to_bgra(texture2d<float, access::read> composite [[texture(VETextureIndexComposite)]],

@@ -9,6 +9,7 @@
 #include "../Render/Histogram.h"
 #include "../Render/LumaWaveform.h"
 #include "../Render/ScopeStats.h"
+#include "../Render/Vectorscope.h"
 
 #include <cstdint>
 #include <vector>
@@ -41,6 +42,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// The counts of the last histogram in `channel` (zeros before the first).
 - (std::array<std::uint32_t, ve::render::Histogram::kBins>)histogramCountsForTesting:(ve::render::HistogramChannel)channel;
+
+/// The counts of the last vectorscope (Vectorscope::countsSnapshot; zeros before the first).
+- (std::vector<std::uint32_t>)vectorscopeCountsForTesting;
 
 /// The clipping counts of the last completed frame (all zero before the first).
 - (ve::render::ClipStats)clipStatsForTesting;

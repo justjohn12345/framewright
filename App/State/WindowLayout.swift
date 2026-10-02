@@ -26,8 +26,8 @@ enum InspectorTab: String, CaseIterable, Identifiable {
 /// Layout (see `ContentView`): the media bin (left), the monitors and the transport bar (centre),
 /// the inspector with its Inspector/Effects tabs (right), and the timeline below them. The program
 /// monitor takes the whole centre unless the source monitor is shown (View > Show Source Monitor,
-/// Shift+Cmd+2; hidden until media is opened in it); the scope panel (View > Show Scopes: the waveform
-/// or the histogram, `scopeMode`) sits beside or below it when shown, wide and short, as wide as the user
+/// Shift+Cmd+2; hidden until media is opened in it); the scope panel (View > Show Scopes: the waveform,
+/// the histogram or the vectorscope, `scopeMode`) sits beside or below it when shown, wide and short, as wide as the user
 /// dragged it (`scopeWidth`; `ScopeLayout` places it). The split between the monitors and the
 /// timeline belongs to the user (review D2): `timelineHeight` is always a stored value, set once on
 /// first launch from the tracks' rows without their lanes (`adoptInitialTimelineHeight`; a layout

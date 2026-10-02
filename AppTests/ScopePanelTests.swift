@@ -225,6 +225,10 @@ final class ScopePanelTests: XCTestCase {
         await settle(host)
         XCTAssertEqual(scope.mode, .histogram)
         XCTAssertEqual(scope.histogramStyle, .parade)
+        store.layout.scopeMode = .vectorscope
+        await settle(host)
+        XCTAssertEqual(scope.mode, .vectorscope)
+        XCTAssertEqual(ScopeMode.allCases.map(\.title), ["Waveform", "Histogram", "Vectorscope"])
         XCTAssertTrue(scopeViews(in: host).first === scope, "the same view in every mode")
 
         // Below the monitor: under the picture, centred, still the picture's aspect.

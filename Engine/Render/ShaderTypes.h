@@ -327,6 +327,29 @@ struct VEHistogramUniforms {
     VEUInt unused2;
 };
 
+// A vectorscope of a frame (Vectorscope.h): its accumulate kernel counts the samples of the working texture by
+// their BT.709 chroma (Cb across, Cr up, each -0.5 to 0.5) in a kVEVectorscopeBins x kVEVectorscopeBins grid
+// (row r, column c: Cr from the bottom, Cb from the left); its display pass draws the counts in a square
+// centred in the target, over the graticule.
+#define kVEVectorscopeBins 256u
+struct VEVectorscopeUniforms {
+    // The frame in the working texture: x, y, width, height in texels.
+    VEFloat4 frame;
+    // The display target's width and height in pixels; zw unused (0).
+    VEFloat4 target;
+    // The 75 % colour bars' chroma (Cb, Cr), the graticule's targets: red and magenta, blue and cyan, green and
+    // yellow (xy, zw of each).
+    VEFloat4 targets[3];
+    // The skin tone line's direction (cos, sin of its angle from the Cb axis); zw unused (0).
+    VEFloat4 skinLine;
+    // Rows of the frame sampled (evenly spaced; the kernel's grid is frame width x sampleRows).
+    VEUInt sampleRows;
+    // Display: the trace's brightness per count (1 - exp(-count * gain)).
+    float gain;
+    VEUInt unused0;
+    VEUInt unused1;
+};
+
 // The same layout on both sides: sizes, and the offset of every member that follows a scalar group or
 // starts one.
 static_assert(sizeof(struct VEGradeUniforms) == 192, "VEGradeUniforms layout");
@@ -360,4 +383,7 @@ static_assert(sizeof(struct VEWaveformUniforms) == 48, "VEWaveformUniforms layou
 static_assert(VE_OFFSET_OF(struct VEWaveformUniforms, columns) == 32, "VEWaveformUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEWaveformUniforms, gain) == 44, "VEWaveformUniforms layout");
 static_assert(sizeof(struct VEHistogramUniforms) == 48, "VEHistogramUniforms layout");
+static_assert(sizeof(struct VEVectorscopeUniforms) == 112, "VEVectorscopeUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEVectorscopeUniforms, targets) == 32, "VEVectorscopeUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEVectorscopeUniforms, sampleRows) == 96, "VEVectorscopeUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEHistogramUniforms, style) == 32, "VEHistogramUniforms layout");

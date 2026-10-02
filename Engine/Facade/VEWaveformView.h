@@ -9,6 +9,9 @@ typedef NS_ENUM(NSInteger, VEScopeMode) {
     VEScopeModeWaveform = 0,
     /// How many pixels have each level, from black (left) to white (right), in a VEHistogramStyle.
     VEScopeModeHistogram = 1,
+    /// Each pixel's chroma (Cb across, blue to the right; Cr up, red up) in a square, over a graticule with the
+    /// 75 % colour bars' targets and the skin tone line.
+    VEScopeModeVectorscope = 2,
 };
 
 /// How the histogram is drawn (VEScopeModeHistogram).
@@ -22,7 +25,8 @@ typedef NS_ENUM(NSInteger, VEHistogramStyle) {
     VEHistogramStyleParade = 2,
 };
 
-/// The program monitor's scope: a luma waveform or a histogram of the picture the program monitor shows
+/// The program monitor's scope: a luma waveform, a histogram or a vectorscope of the picture the program monitor
+/// shows
 /// (graded, as composited, letterbox bars left out), and the share of its pixels that are clipped. (The
 /// class kept its slice 1 name; `mode` chooses the scope.)
 ///
@@ -33,12 +37,15 @@ typedef NS_ENUM(NSInteger, VEHistogramStyle) {
 /// (brighter at 0, 50 and 100). Histogram: every pixel's R, G, B and luma, black at the left, white at the
 /// right, in `histogramStyle`, scaled so the tallest bar between the end levels fills the height (a spike of
 /// clipped black or white reaches the top without flattening the rest), with lines at 25, 50 and 75 %.
+/// Vectorscope: each pixel's BT.709 chroma of up to 540 evenly spaced rows, in a square centred in the view
+/// (chroma -0.5 to 0.5 on each axis), with the ring at chroma 0.5, boxes at the 75 % colour bars' chroma and the
+/// skin tone line (123 degrees from the Cb axis).
 ///
 /// Clipping: a pixel counts as clipped white when one of its channels is at or above 100 % and as clipped
 /// black when one is at or below 0 % (within a quarter of a 10-bit code): a channel there has lost its
 /// detail, as a photo app's clipping warning shows (a saturated colour can be both). Counted on the pixels
-/// the scope reads (the waveform samples up to 360 evenly spaced rows of every column, the histogram every
-/// pixel), so it costs no extra read of the frame.
+/// the scope reads (the waveform samples up to 360 evenly spaced rows of every column, the vectorscope up to 540,
+/// the histogram every pixel), so it costs no extra read of the frame.
 ///
 /// Attach it with -[VEEngine attachWaveformView:]. It is drawn by the program monitor's render thread with
 /// every frame the program monitor shows, playing or paused, from the frame as composited (the working

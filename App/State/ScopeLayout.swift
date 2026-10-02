@@ -6,6 +6,7 @@ import Foundation
 enum ScopeMode: String, CaseIterable, Identifiable {
     case waveform
     case histogram
+    case vectorscope
 
     var id: String { rawValue }
 
@@ -13,6 +14,7 @@ enum ScopeMode: String, CaseIterable, Identifiable {
         switch self {
         case .waveform: return "Waveform"
         case .histogram: return "Histogram"
+        case .vectorscope: return "Vectorscope"
         }
     }
 
@@ -20,6 +22,7 @@ enum ScopeMode: String, CaseIterable, Identifiable {
         switch self {
         case .waveform: return .waveform
         case .histogram: return .histogram
+        case .vectorscope: return .vectorscope
         }
     }
 }

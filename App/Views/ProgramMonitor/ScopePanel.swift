@@ -15,7 +15,7 @@ final class ScopeClippingModel: ObservableObject {
 }
 
 /// The program monitor's scopes (View > Show Scopes), beside or below the program monitor (`ScopeLayout`):
-/// a header with the scope menu (Waveform, Histogram), the histogram's style, the clipping indicator, the
+/// a header with the scope menu (Waveform, Histogram, Vectorscope), the histogram's style, the clipping indicator, the
 /// monitor's clipping overlay, the placement menu and the close button; under it the scope, at the
 /// picture's aspect, with the waveform's IRE scale on its left. The engine draws the scope with every frame
 /// the program monitor shows (`VEWaveformView`), so it follows the playhead and plays along, showing the
@@ -68,7 +68,7 @@ struct ScopePanel: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .fixedSize()
-            .help("The scope: luma per picture column, or how many pixels have each level")
+            .help("The scope: luma per picture column, how many pixels have each level, or their colours (chroma)")
             .accessibilityIdentifier("ScopeMode")
             if layout.scopeMode == .histogram {
                 Picker("Histogram", selection: $layout.histogramStyle) {
@@ -121,7 +121,7 @@ struct ScopePanel: View {
         .padding(.leading, ScopeLayout.scaleWidth)
     }
 
-    /// The waveform's 100, 50 and 0 IRE beside the graticule's brighter lines; nothing for the histogram.
+    /// The waveform's 100, 50 and 0 IRE beside the graticule's brighter lines; nothing for the other scopes.
     private var scale: some View {
         GeometryReader { area in
             if layout.scopeMode == .waveform {

@@ -22,6 +22,7 @@ struct WaveformState {
     std::mutex mutex;
     std::unique_ptr<ve::render::LumaWaveform> waveform; // under mutex
     std::unique_ptr<ve::render::Histogram> histogram;   // under mutex
+    std::unique_ptr<ve::render::Vectorscope> vectorscope; // under mutex
     // `begin` under mutex; `read` from completion handlers (thread-safe; the ring lives as long as the state).
     std::unique_ptr<ve::render::ScopeStatsRing> stats;
     CAMetalLayer *layer = nil;                    // under mutex
@@ -131,11 +132,13 @@ void WaveformState::receive(const ve::render::ClipStats &frameStats, const std::
     settings.columns = kMaxWaveformColumns;
     auto waveform = ve::render::LumaWaveform::create(_device, settings);
     auto histogram = ve::render::Histogram::create(_device);
+    auto vectorscope = ve::render::Vectorscope::create(_device);
     auto stats = ve::render::ScopeStatsRing::create(_device);
-    const ve::media::MediaError *failure = !waveform.ok()    ? &waveform.error()
-                                       : !histogram.ok() ? &histogram.error()
-                                       : !stats.ok()     ? &stats.error()
-                                                         : nullptr;
+    const ve::media::MediaError *failure = !waveform.ok()      ? &waveform.error()
+                                           : !histogram.ok()   ? &histogram.error()
+                                           : !vectorscope.ok() ? &vectorscope.error()
+                                           : !stats.ok()       ? &stats.error()
+                                                               : nullptr;
     if (failure != nullptr) {
         _lastError = [NSError errorWithDomain:@"VEWaveformView"
                                          code:2
@@ -146,6 +149,7 @@ void WaveformState::receive(const ve::render::ClipStats &frameStats, const std::
     std::lock_guard<std::mutex> lock(_state->mutex);
     _state->waveform = std::move(waveform).value();
     _state->histogram = std::move(histogram).value();
+    _state->vectorscope = std::move(vectorscope).value();
     _state->stats = std::move(stats).value();
     _state->layer = _metalLayer;
 }
@@ -179,7 +183,7 @@ void WaveformState::receive(const ve::render::ClipStats &frameStats, const std::
 }
 
 - (void)setMode:(VEScopeMode)mode {
-    if (mode != VEScopeModeWaveform && mode != VEScopeModeHistogram) {
+    if (mode != VEScopeModeWaveform && mode != VEScopeModeHistogram && mode != VEScopeModeVectorscope) {
         return;
     }
     if (_state->mode.exchange(mode) != mode && _needsFrame != nil) {
@@ -269,7 +273,7 @@ void WaveformState::receive(const ve::render::ClipStats &frameStats, const std::
     std::shared_ptr<WaveformState> state = _state;
     return [state](id<MTLCommandBuffer> commandBuffer, id<MTLTexture> working, const ve::render::PixelRect &frame) {
         std::lock_guard<std::mutex> lock(state->mutex);
-        if (!state->waveform || !state->histogram || !state->stats ||
+        if (!state->waveform || !state->histogram || !state->vectorscope || !state->stats ||
             (state->layer == nil && state->targetProvider == nil)) {
             return;
         }
@@ -295,7 +299,13 @@ void WaveformState::receive(const ve::render::ClipStats &frameStats, const std::
         }
         ve::render::ScopeStatsSlot slot;
         bool drawn = false;
-        if (state->mode.load() == VEScopeModeHistogram) {
+        const NSInteger mode = state->mode.load();
+        if (mode == VEScopeModeVectorscope) {
+            const std::uint32_t rows = ve::render::Vectorscope::sampleRowsFor(frame, workingWidth, workingHeight);
+            slot = state->stats->begin(commandBuffer, std::uint64_t(counted.width) * rows);
+            drawn = state->vectorscope->encodeAccumulate(commandBuffer, working, frame, &slot) &&
+                    state->vectorscope->encodeDisplay(commandBuffer, target);
+        } else if (mode == VEScopeModeHistogram) {
             slot = state->stats->begin(commandBuffer, std::uint64_t(counted.width) * std::uint64_t(counted.height));
             drawn = state->histogram->encodeAccumulate(commandBuffer, working, frame, &slot) &&
                     state->histogram->encodeDisplay(commandBuffer, target,
@@ -364,6 +374,11 @@ void WaveformState::receive(const ve::render::ClipStats &frameStats, const std::
 - (std::array<std::uint32_t, ve::render::Histogram::kBins>)histogramCountsForTesting:(ve::render::HistogramChannel)channel {
     std::lock_guard<std::mutex> lock(_state->mutex);
     return _state->histogram ? _state->histogram->counts(channel) : std::array<std::uint32_t, ve::render::Histogram::kBins>{};
+}
+
+- (std::vector<std::uint32_t>)vectorscopeCountsForTesting {
+    std::lock_guard<std::mutex> lock(_state->mutex);
+    return _state->vectorscope ? _state->vectorscope->countsSnapshot() : std::vector<std::uint32_t>{};
 }
 
 - (ve::render::ClipStats)clipStatsForTesting {
