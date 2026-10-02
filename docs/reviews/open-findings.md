@@ -1030,6 +1030,30 @@ Done:
   signature only (named): `CompositorWorkingBufferTests` (two reader lambdas) and `HighPrecisionDecodeTests`
   (one reader lambda) take the new `const PixelRect &` argument; the timeline redraw tests pass unchanged.
 
+Final verification (fd48a8e plus docs):
+- `xcodebuild -scheme Framewright -configuration Debug clean build`: 0 warnings in project code (the one
+  warning is Xcode's appintentsmetadataprocessor). Full suite (`xcodebuild -scheme Framewright -destination
+  'platform=macOS' test`): TEST SUCCEEDED, EngineTests 589 (baseline 567; no display-link skips this run),
+  doctest 393 (baseline 365), AppTests 287 (baseline 279; 1 known skip). No files left in
+  `$TMPDIR/FramewrightEngineTests`, the container's tmp (the main-window smoke test overwrites its
+  FramewrightMainWindow.png, as before) or Preferences; each test run (also partial runs) adds one empty
+  UUID-named directory at the container's root, the known pattern (8 there now).
+- ThreadSanitizer (`-derivedDataPath build/tsan -enableThreadSanitizer YES`; 35 classes: Compositor,
+  CompositorPreviewView, CompositorSharpen, CompositorWorkingBuffer, TransitionShape, TransitionSoftness,
+  TextureCache, HighPrecisionDecode, ColorGradeRender, LumaWaveform, PlaybackController, PlaybackDisplayPath,
+  PlaybackDrift, PlaybackLookahead, PlaybackPreviewSolo, PlaybackTransport, PausedSeek, ProgramFrameProvider,
+  the eleven VEEngine* classes with VEEngineGrade, VEExporter, VEMediaLibrary, VEProgramMonitor,
+  VESourceMonitor, ExportJob, and the doctests): 286 tests, 0 reports (the 2 timing tests skip under TSan).
+- StressTests: passed. One-hour exports: 0 timestamp and 0 picture errors in all three, drift +0.230, +0.400 and
+  +0.408 samples (last round the same). Two-hour project: footprint growth after the edits +315.0 MB (483.4 ->
+  798.4 MB; last numbers +283 to +375 MB), after save and reopen 921.7 MB; cold starts 33.1, 34.1 and 59.6 ms
+  (34-60 ms before); 0 dropped, 0 late. Paused seeks: 0 misses of 200 on both sources. (Xcode's Thread
+  Performance Checker logs a QoS inversion in the media probe's AVFoundation key loading in every run, also
+  before this round; not changed.)
+
+Not done: nothing of the brief. Questions for the lead: none blocking; the parity test's red/blue bound (12, the
+first parity test's) is the codec's chroma error beside a saturated edge, with luma held to 1.5 codes.
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.

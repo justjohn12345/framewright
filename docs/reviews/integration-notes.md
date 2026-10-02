@@ -1918,3 +1918,54 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   (`VETransitionInfo` does not carry them and there is no edit that sets one: add a `SetTransitionParameter`
   command, coalescable for sliders), and the six kinds are not yet presets of fewer kinds (decision section 8,
   "Kinds as presets").
+
+## Colour grading slice 1 (2026-10-02; status in `open-findings.md`)
+- D1/D2 (supersedes "Two disagreements between callers are kept and wait for a decision" in the round 2
+  notes): one rule everywhere: when a fade and a cross dissolve on one clip no longer both fit, the fade
+  gives way and the dissolve keeps its length. The frame-rate conform fits dissolves first with the fades
+  set aside, then each fade with `TransitionRules::conformFadeFramesBesideDissolves`. A fade out shorter
+  than half a frame keeps its frame inside its clip.
+- The grade is a clip property (decision section 7): `Clip::grade` (`Engine/Model/ClipGrade.h`), five
+  parameters from the `GradeParameterInfo` table; neutral is "no grade". A new grade parameter: an
+  enumerator and a table row (name, display name, unit, neutral, range), a field of `VEGradeParams` and its
+  `static_assert`ed mirror in VETypes.mm, its arithmetic in `ColorGrade.h` (shared by Metal and the C++
+  reference, both tested) and `gradeUniformsFor`, a slot in `VEGradeUniforms` (whole 16-byte rows,
+  `static_assert`ed offsets), and an `InspectorParameter` case (its name, unit and range come from the
+  engine). Only clips on video tracks have a grade (validation; loading drops one on a sound clip).
+- Schema 8: the file writes `"grade"` only when a clip has one, so ungraded projects write what version 7
+  wrote but the version. `toV8` converts nothing (frozen). Version 8 migration goldens live in
+  `EngineTests/Serialize/golden/v8/` (excluded from the test bundle in project.yml: their names repeat the
+  version 7 goldens'; every golden is read from the source tree). A schema 9 step follows the same pattern
+  (a `v9/` directory, goldens derived from the v8 ones by the step's rule and checked against the engine).
+- Edits: `Engine/Edit/GradeEdits.h` (`SetClipGrade` with a `GradeChange`: the values given, and for a
+  whole grade the foreign entries; `summarizeGrades`, `gradeTargets`). Facade: `VEEngine (Grade)` in
+  `VEEngine+Grade.mm`; the copied grade is a value on the engine (`_copiedGrade`, it outlives New/Open).
+  Grade calls take a selection and leave out clips on audio tracks.
+- Rendering: `VideoLayer::grade` (from the scheduler); the compositor grades a source when its grade is not
+  neutral (function constants `VEFunctionConstantSourceAHasGrade` / `...BHasGrade`, 20 prepared layer
+  pipelines), linearising by `TextureSet::transfer()`. Ungraded layers run the code they ran before. A
+  graded source skips the conversion's clamp; the grade clamps its result. The source monitor and
+  thumbnails show the media ungraded.
+- Scopes: the working frame reader (facade-private) now receives the frame's rectangle; `LumaWaveform`
+  (Engine/Render) is the compute and display pair; `VEWaveformView` draws on the program monitor's render
+  thread into its own drawable. A later scope (vectorscope, histogram: slice 2) can follow the same shape:
+  a counts pass over the working frame inside the reader and a display pass into the scope view's drawable.
+- What to check by hand in the app:
+  1. Grade one clip: select a video clip, move Exposure, Contrast, Temperature, Tint and Saturation in the
+     inspector's Colour section; the program monitor follows during the drag; one Undo undoes the drag;
+     type "1.5 stops", "1.2×"; each row's reset and the section's Reset.
+  2. Several clips with mixed values: grade two clips differently, select both (with their linked sound):
+     the differing rows show "Mixed", the agreeing ones a value; moving a mixed row gives both the same value
+     and keeps their other parameters; one Undo.
+  3. Copy/paste: Clip > Copy Grade (⌥⌘C) on a graded clip, select others, Paste Grade (⌥⌘V); the same from
+     the clip's right-click menu; Reset Grade; Copy Grade, File > New, Paste Grade onto a new clip.
+  4. A graded dissolve: two clips with different grades and a cross dissolve between them: each side keeps
+     its own grade through the dissolve; a black clip graded with exposure +5 stays black.
+  5. Export matches the monitor: export the graded sequence (H.264 or ProRes) and compare with the program
+     monitor frame by frame (the colours and the dissolve).
+  6. The waveform: View > Show Waveform: the panel right of the program monitor follows the playhead when
+     paused, plays along during playback without dropping frames, moves down when exposure is lowered, does
+     not count letterbox bars (a 4:3 clip in a 16:9 sequence); its close button and Reset Window Layout hide
+     it; reopening the app remembers it.
+  7. Save and reopen a graded project: the grades come back; open the file in a text editor: `"grade"` only on
+     the graded clips, `"schemaVersion": 8`.
