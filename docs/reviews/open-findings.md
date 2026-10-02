@@ -797,10 +797,21 @@ Final verification (f8361eb plus docs):
   project, last round +444.9 MB); cold starts 42.2, 42.8 and 59.4 ms (34-60 ms); 0 dropped, 0 late. Paused
   seeks: 0 misses of 200 on both sources.
 
-Not done: nothing of the brief. Open for the lead: whether the monitors' working texture should be
-RGBA32Float (item 2: single layers exact, twice the memory); D1 and D2 (item 5: which of a fade and a
-dissolve gives way, kept as they were); kinds as presets and the facade's parameter API (item 6, the UI
-round).
+Not done: nothing of the brief. Round accepted by the lead 2026-10-02 (full suite EngineTests 567, doctest 365,
+AppTests 279; goldens: 14 added, none changed; `VEEngine.h` unchanged) and pushed.
+
+Decisions taken by the user, 2026-10-02:
+- **Working texture:** stays RGBA16Float. Half float already carries the display's 10-bit precision;
+  RGBA32Float would double the memory for no visible gain.
+- **D1 and D2: one rule.** When a fade and a dissolve on the same clip no longer both fit, the fade gives way
+  and the dissolve keeps its length, everywhere. Today trims and pruning already do this; the frame-rate
+  conform shortens the dissolve instead, so the conform changes to match. Its tests "D1 …" and "D2 …" change
+  with it. **Not implemented yet**; scheduled with the first grading round.
+
+Still open: kinds as presets and the facade's parameter API (item 6, the UI round). Also, each full test run
+leaves one empty per-process temporary directory (`<UUID>-<pid>-<hex>`) at the app container's root; 339
+were removed by hand on 2026-10-02. The cause (probably an item-replacement or temporary directory the test
+host asks Foundation for and never removes) is not fixed.
 
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked

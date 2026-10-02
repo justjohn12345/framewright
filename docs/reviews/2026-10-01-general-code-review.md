@@ -42,7 +42,7 @@ is cheaper than fixing them alongside the features.
 | Group | State |
 |---|---|
 | 0. Bugs and test hygiene | **Done** (0.1.8, fecb2a2..bde9dd9) |
-| 1. Before colour grading | **In progress:** a prerequisites round started 2026-10-01 (items 1.1-1.4 and the decision note 1.5); the rest wait for the decision |
+| 1. Before colour grading | **Done** except 1.11 (Swift tables, with the grading UI): two prerequisite rounds, bedbb1b..7b1b1ad and ae6283e..d4c385d; decision note approved |
 | 2. Before nested sequences | Not started |
 | 3. Before the MCP server | Not started |
 | 4. Structural, any time | Not started |
@@ -82,12 +82,17 @@ Also done:
 Colour grading means a Colour span kind (exposure, contrast, temperature, tint, saturation; later wheels, curves,
 LUTs), applied per clip in linear light, with scopes.
 
-**1.1 Preserve unknown span content on save.** S. *In the current round.* (core #9)
+**Status (2026-10-02):** 1.1-1.10 done; 1.11 goes with the grading UI. Details and test evidence are in
+`open-findings.md` ("Colour grading prerequisites" and "… round 2"). The pipeline decisions are in
+`2026-10-01-grading-pipeline-decision.md` (approved). Beyond this list, the transition kinds also gained a
+descriptor table with typed parameters (f8361eb), the groundwork for the transition library.
+
+**1.1 Preserve unknown span content on save.** S. **Done** (bedbb1b). (core #9)
 - **Today:** an unknown transition kind is kept by name, but unknown span kinds, parameters and fields are dropped
   and lost on save (`ProjectJSON.cpp:455-496`).
 - **Why first:** a project with grades opened and saved in a pre-grading build would silently lose them.
 
-**1.2 Descriptor tables for span kinds and parameters.** M. *In the current round.* (core #2)
+**1.2 Descriptor tables for span kinds and parameters.** M. **Done** (eda4028). (core #2)
 - **Today:** one new kind or parameter touches about 15 C++ sites. The track-kind rule is written three times
   (`EditOps.cpp:1028`, `Validation.cpp:205`, `Clip.cpp:528`). Whether a parameter adds or multiplies is spelled out in
   six places, inverted in four planners (`planKenBurns`, `planMatchSpanEdge`, `planContinueMotion`,
@@ -96,18 +101,18 @@ LUTs), applied per clip in linear light, with scopes.
 - **Fix:** one table per kind (name, track kind, parameters) and per parameter (neutral value, range, additive or
   multiplicative), with `compose`/`decompose` helpers derived from it.
 
-**1.3 Parameters indexed by enum.** M. *In the current round.*
+**1.3 Parameters indexed by enum.** M. **Done** (a813c32).
 - **Today:** `SpanTracks` holds six named `KeyframeTrack` fields reached through switches. On the facade side,
   `VESpanValues` is a flat public struct mirrored by `spanValueIn`/`setSpanValueIn` and kind switches (render #9).
 - **Fix:** storage indexed by `SpanParameter`; facade accessors keyed by parameter.
 
-**1.4 Named shader uniforms.** S-M. *In the current round.* (render #5)
+**1.4 Named shader uniforms.** S-M. **Done** (c59028e). (render #5)
 - **Today:** `VEDrawUniforms::reserved` is fully used (shape, feather, a flag), and enums travel as floats
   (`int(x + 0.5)`). Straight alpha hides in `params.y`, 10-bit in `VEConvertUniforms::size.z`, and three buffer
   indices alias 0.
 - **Fix:** named sub-structs with real int fields, and a `VEGradeUniforms` slot per source.
 
-**1.5 Decide where grading sits in the pipeline.** Decision. *In the current round, as a design note for approval.*
+**1.5 Decide where grading sits in the pipeline.** Decision. **Done**: approved 2026-10-01 (df53988, 70bfd65, ae6283e).
 (render #3)
 - **The questions:**
   - grading in linear light or gamma, relative to today's deliberately gamma-encoded blend (`Compositor.h:31-34`);
@@ -115,31 +120,33 @@ LUTs), applied per clip in linear light, with scopes.
   - what working format monitors need;
   - which colour tags to honour.
 
-**1.6 Float working buffer on monitors.** M. Waits for 1.5. (render #3)
+**1.6 Float working buffer on monitors.** M. **Done** (47f0dc9): RGBA16Float, kept by decision on 2026-10-02. (render #3)
 - **Today:** monitors blend straight into a framebuffer-only BGR10A2 drawable (`VEPreviewView.mm:217,342`), while
   export blends into an `RGBA16Float` intermediate. Scopes cannot read the drawable, and the two paths blend at
   different precision.
 - **Fix:** composite into a pooled float intermediate, then add an output stage.
 
-**1.7 High-precision decode.** M-L. Waits for 1.5. (media #2)
+**1.7 High-precision decode.** M-L. **Done** (d77e2e7), with the decode format in the frame cache key (2.5 done with it). (media #2)
 - **Today:** alpha, RGB and still sources come out as 8-bit `32BGRA`, 12-bit ProRes 4444 included
   (`AppleSupport.mm:348`, `FFFrameConverter.mm:227`), against the converter's own "never truncate" rule. Stills are
   flattened to 8-bit sRGB: P3 HEIC is gamut-clipped, and FFmpeg ignores ICC profiles. Transfer and primaries tags are
   attached but never read.
 
-**1.8 One owner for transition and fade rules.** L. (core #3)
+**1.8 One owner for transition and fade rules.** L. **Done** (1c70af7): `TransitionRules::edgeRoom`/`fadeRoom`.
+The two remaining disagreements (D1, D2) are decided: the fade gives way everywhere, and the frame-rate
+conform changes to match in the first grading round. (core #3)
 - **Today:** the rules live in at least six places: `checkTransitionSpan`, `pruneInvalidTransitions`,
   `Clip::fitSpans`, `setClipFade`, `transitionSideLimits`, `fadeLimit`, a trial-and-error loop in
   `SetSequenceFormat`, and a copy in the v4→v5 migration. The copies have already disagreed once (review L9).
 - **Why it matters here:** a Colour span shares lanes and limits with these rules.
 - **Fix:** one `TransitionRules::edgeRoom` that all of them call.
 
-**1.9 Split `EffectSpan` into effect and transition types.** L. (core #1)
+**1.9 Split `EffectSpan` into effect and transition types.** L. **Done** (4da7893, 520e7c0): `TransitionSpan` in `Clip::transitions`. (core #1)
 - **Today:** one struct with two time bases and dummy fields, and every span routine forks on `isTransition()`.
 - **Why it matters here:** grading adds non-scalar parameters (wheels, curves, LUT references) that should not live
   next to transition fields.
 
-**1.10 Freeze the migrations.** M. (core #8)
+**1.10 Freeze the migrations.** M. **Done** (74de129): `ProjectMigrations`, with golden fixtures per version. (core #8)
 - **Today:** the migrations use the live writer and model helpers (`ProjectJSON.cpp:1143`, `rebasedTrack`,
   `migrateClipV1`), so the first schema change for colour spans would silently alter how a v4 file loads.
 - **Fix:** freeze each step, with golden JSON per version.
@@ -180,7 +187,7 @@ A nested sequence is a sequence used as a clip in another, live, trimmed and sta
 - **Today:** undo restores the id generator, so ids can be reused unless the facade's wrapper intervenes.
 - **Fix:** a stack-level high-water mark, or move `FreshIds` into `Engine/Edit`.
 
-**2.5 Frame cache key.** S-M. (media #7)
+**2.5 Frame cache key.** S-M. **Done** with 1.7 (d77e2e7): `FrameKey{asset, decode format}`. (media #7)
 - **Today:** frames are keyed by (epoch, asset) only. Two video tracks of one asset, or different decode options,
   would cross-serve frames. This also matters for 1.7's higher-precision decode.
 
