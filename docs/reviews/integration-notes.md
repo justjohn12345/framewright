@@ -1955,10 +1955,15 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
      inspector's Colour section; the program monitor follows during the drag; one Undo undoes the drag;
      type "1.5 stops", "1.2×"; each row's reset and the section's Reset.
   2. Several clips with mixed values: grade two clips differently, select both (with their linked sound):
-     the differing rows show "Mixed", the agreeing ones a value; moving a mixed row gives both the same value
-     and keeps their other parameters; one Undo.
+     the differing rows show an empty field with the grey "Mixed" placeholder (also a field that keeps the
+     focus after Return, when Undo or a new selection makes the values differ), the agreeing ones a value;
+     moving a mixed row gives both the same value and keeps their other parameters; one Undo; typing a value
+     into the placeholder sets both, an empty Return changes nothing.
   3. Copy/paste: Clip > Copy Grade (⌥⌘C) on a graded clip, select others, Paste Grade (⌥⌘V); the same from
-     the clip's right-click menu; Reset Grade; Copy Grade, File > New, Paste Grade onto a new clip.
+     the clip's right-click menu; Reset Grade; Copy Grade, File > New, Paste Grade onto a new clip. Copy
+     Grade is disabled (menu, context menu, inspector) for several clips with different grades and enabled
+     for several with identical ones (`ProjectStore.canCopyGrade` over the engine's
+     `VEGradeSelection.identical`, which also compares the entries a newer version wrote).
   4. A graded dissolve: two clips with different grades and a cross dissolve between them: each side keeps
      its own grade through the dissolve; a black clip graded with exposure +5 stays black.
   5. Export matches the monitor: export the graded sequence (H.264 or ProRes) and compare with the program

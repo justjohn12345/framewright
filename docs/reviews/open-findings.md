@@ -1054,6 +1054,14 @@ Final verification (fd48a8e plus docs):
 Not done: nothing of the brief. Questions for the lead: none blocking; the parity test's red/blue bound (12, the
 first parity test's) is the codec's chroma error beside a saturated edge, with luma held to 1.5 codes.
 
+- Two UI fixes from the user's hands-on test: 1a89480, a focused inspector field the user has not typed into
+  now follows the model (Return keeps the focus, so after Undo or a new selection the previous value stayed as
+  editable text where the clips now differ instead of the empty field with the grey "Mixed" placeholder; every
+  multi-clip row: Motion, Opacity, Colour, Gain; `MixedValueFieldTests`, 3); 89f5413, Copy Grade only for one
+  video clip or several with identical grades (values and foreign entries, the engine's new
+  `VEGradeSelection.identical`), else disabled in the Clip menu, context menu and inspector
+  (`CopyGradeEnablingTests`, 3; a doctest). Suite: EngineTests 589, doctest 394, AppTests 293 (1 known skip).
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
