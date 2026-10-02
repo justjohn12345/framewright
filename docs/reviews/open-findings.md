@@ -737,7 +737,70 @@ Done:
   playhead moves, bound 2; the canvas still settling after its thumbnails), which passed 3 of 3 when run
   again alone (0 draws); this item changes nothing the app's timeline draws.
 
-Next: item 6 (the transition descriptor table), quota allowing; then the final verification.
+- 6, transition descriptor tables (decision section 8): f8361eb. `Transition.h`: `TransitionKindInfo` (name,
+  display name, track: `nullopt` for either or `TrackKind::Video`, mask family `TransitionMask` None / Linear /
+  Radial, parameters) and `TransitionParameterInfo` (name, display name, `TransitionParameterType` Scalar /
+  Angle / Point / Colour / Enum, default, range per component, an Enum's choices), each checked by
+  `static_assert`s (rows in enum order, defaults valid, only the unmasked kind on either track). A
+  `TransitionSpan` carries `TransitionParameters` (static values indexed by the parameter enum, as `SpanTracks`
+  is; unset means the table's default) and `foreignParameters`. One parameter, as the decision asks for no new
+  transitions: `Softness`, the half width of the shaped kinds' soft edge, default 2 sequence pixels (the
+  `kTransitionFeather` every wipe and iris had; now its alias), range 0-1000, honoured end to end (the
+  scheduler puts it on `LayerTransition::softness`, the compositor into the existing `feather` uniform; no
+  shader change). The table now answers what was written out in several places: the names (`nameOf`,
+  `displayNameOf`, `transitionKindNamed`; a value outside the enum is still "unknown"), the track rule
+  (`transitionKindFitsTrack`: checkTransitionSpan, the audio repair on load, SetTransitionKind,
+  `transitionKindOnTrack`), and the compositor's shaped / closing-iris tests (`isShapedTransition`, the
+  Radial mask). File: `"parameters": {"softness": 4}` on a transition, left out when the span sets none, so
+  every existing file reads and writes byte for byte as before (the goldens pass unchanged); forms per type in
+  `Engine/Serialize/TransitionValueJSON.h` (a number; [x, y]; [r, g, b, a]; a choice's name). Unknown names
+  are kept with a warning, an unknown kind's parameters all kept silently, an unknown Enum choice kept with a
+  warning (the default plays); a value of the wrong JSON shape fails the load with its path; validation
+  refuses a value out of range or a parameter the kind does not have (as it refuses an effect span's
+  keyframes of another kind's parameter). Edits: SetTransitionKind to another kind keeps the parameters the
+  new kind has (a wipe's softness carries over to the iris) and drops the rest and the foreign ones (they
+  described the old kind); the same kind changes nothing. The audio repair on load ("using a cross
+  dissolve") drops what a cross dissolve does not have and says so ("(without its Edge Softness)"), keeping
+  the foreign ones. Not done (approach): kinds as presets (one Wipe kind by angle, the old names as file
+  aliases) changes the facade's `VETransitionKind` and the app's panel, so it belongs with the UI round; the
+  facade has no parameter API yet (VETransitionInfo, a coalescable SetTransitionParameter edit); the other
+  types have their forms and validity tested but no parameter uses them yet.
+  Proof: default output unchanged (the feather uniform is `float(2.0)` as before; TransitionShapeTests,
+  ExportParityTests and the migration render tests pass unchanged). New tests: `TransitionParameterTests` (6
+  doctest cases: the kind table against the names and rules of before, the parameter table and validity,
+  every type's form, errors and round trip, `TransitionParameters`, file round trip / unknown names / unknown
+  kind / wrong shape / validation / audio repair, SetTransitionKind with undo) and `TransitionSoftnessTests`
+  (3 XCTests: every shape at softness 0, 12 and 40 against the reveal reference with that f, the band 2f
+  columns wide at an instant; the scheduler hands both layers of a cut and a fade's layer their span's
+  softness or the default, and the scheduled frames draw it; the dissolve ignores it). Mutation check: the
+  compositor using the constant again and the scheduler not passing the value fail 2 of the 3 XCTests.
+  Full suite after this item: TEST SUCCEEDED, EngineTests 567, doctest 365, AppTests 279 (1 known skip), no
+  display-link skips; no files left in `$TMPDIR/FramewrightEngineTests`, the container's tmp and Preferences
+  unchanged.
+
+Final verification (f8361eb plus docs):
+- `xcodebuild -scheme Framewright -configuration Debug clean build`: 0 warnings in project code. Full suite (the
+  run after item 6): TEST SUCCEEDED, EngineTests 567 (baseline 550; no display-link skips), doctest 365
+  (baseline 342), AppTests 279 (1 known skip). Every full run of the round adds one empty UUID-named
+  directory at the app container's root (349 there now; the pattern predates the round: AppTests' host); no
+  other leftovers.
+- ThreadSanitizer (`-derivedDataPath build/tsan -enableThreadSanitizer YES`; 33 classes: Compositor,
+  CompositorPreviewView, CompositorSharpen, CompositorWorkingBuffer, TransitionShape, TransitionSoftness,
+  TextureCache, HighPrecisionDecode, PlaybackController, PlaybackDisplayPath, PlaybackDrift,
+  PlaybackLookahead, PlaybackPreviewSolo, PlaybackTransport, PausedSeek, ProgramFrameProvider, the ten
+  VEEngine* classes, VEExporter, VEMediaLibrary, VEProgramMonitor, VESourceMonitor, FacadeCommands,
+  ExportJob, doctest): 265 tests, 0 reports (the 2 timing tests skip under TSan). TSan does not see `CMTime`
+  struct-copy races (round 2026-10-01, item 3).
+- StressTests: passed. One-hour exports: 0 timestamp and 0 picture errors in all three, drift +0.230, +0.400
+  and +0.408 samples (last round the same). Two-hour project: footprint growth after the edits +286.5 MB
+  (last numbers +283 to +375 MB; bound 643 MB), after save and reopen 866.3 MB (+415.9 MB over the built
+  project, last round +444.9 MB); cold starts 42.2, 42.8 and 59.4 ms (34-60 ms); 0 dropped, 0 late. Paused
+  seeks: 0 misses of 200 on both sources.
+
+Not done: nothing of the brief. Open for the lead: whether the monitors' working texture should be
+RGBA32Float (item 2: single layers exact, twice the memory); D1 and D2 (item 5: which of a fade and a
+dissolve gives way, kept as they were); kinds as presets and the facade's parameter API (item 6, the UI
+round).
 
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked

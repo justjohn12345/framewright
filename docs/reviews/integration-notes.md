@@ -1884,3 +1884,37 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
 - Found, not changed: `ExportJobTests testMemoryIsFlatOver1800FramesAt720pSurvivesPressureAndProgressIsPaced`
   failed once in five full runs this round on its progress pacing ("delivered 0.013 s after the previous
   one", bound 0.017 s): a wall-clock assertion, passed in the other runs.
+
+## Colour grading prerequisites round 2 (2026-10-01; status in `open-findings.md`)
+- Project file migrations are frozen (`Engine/Serialize/ProjectMigrations.cpp`): a schema bump adds a
+  namespace `toV8` with its own copies of whatever it reads or writes (never the live model or parser), raises
+  `kLastMigrationTarget` with `kProjectSchemaVersion` (a `static_assert` ties them), and records a
+  `golden/*.migrated.json` for every older fixture with the code before the bump (`MigrationGoldenTests`). The
+  JSON reader `Node` (`JsonNode.h`) is shared by the parser and the steps; its error policy is theirs.
+- Monitors composite into a pooled RGBA16Float working texture and an output pass writes the drawable (export
+  keeps its own intermediate). A scope reads the working picture through
+  `-[VEPreviewView setWorkingFrameReader:]` (VEPreviewView+Internal.h, facade-private;
+  `ve::render::WorkingFrameReader`, called on the render thread with the command buffer and the working
+  texture, between the two passes). `TextureTarget::compositeDirectlyForTesting` is for tests only.
+- Decoding: `DecodeOptions::highPrecision` asks for 'l64r' (more than 8 bits) or 'RGhA' (wide-gamut stills,
+  extended-range sRGB); the program and source monitors and export set it. `FrameCache` is keyed by
+  `FrameKey{AssetId, DecodeFormat}`: a new pool takes its key from `DecodePool::frameKey()`, never a bare
+  asset id, so pools of different formats never share frames.
+- Spans: lane-0 spans are `TransitionSpan` in `Clip::transitions` (`findTransition`, `transitionAt`); effect
+  spans are `EffectSpan` in `Clip::spans` (`findSpan`). A transition id is never found by `findSpan`.
+- Transition and fade room: `TransitionRules::edgeRoom` / `fadeRoom` (TransitionRules.h) are the one place
+  that computes it; new transition rules go there, not into a caller. Two disagreements between callers are
+  kept and wait for a decision (D1, D2 in the status).
+- Transition descriptor tables (Transition.h): a kind is a row of `TransitionKindInfo` (name, display name,
+  track, mask family, parameters); a parameter a row of `TransitionParameterInfo` (name, display name, type,
+  default, range, choices). A new parameter: an enumerator and a row, the kinds that have it, then
+  `LayerTransition` (a resolved field, filled by the scheduler from `TransitionParameters::valueOf`) and a
+  named field of `VETransitionUniforms` in whole 16-byte rows with its `static_assert`ed offset. The file
+  writes `"parameters": {...}` only when a span sets one; unknown names and Enum choices are kept
+  (`TransitionSpan::foreignParameters`). Rules: a span sets only its kind's parameters (validation refuses
+  others); `SetTransitionKind` to another kind keeps the parameters the new kind has and drops the others
+  and the foreign ones; the audio repair on load drops what a cross dissolve does not have.
+- Not there yet, for the round that shows parameters in the UI: the facade has no parameter API
+  (`VETransitionInfo` does not carry them and there is no edit that sets one: add a `SetTransitionParameter`
+  command, coalescable for sliders), and the six kinds are not yet presets of fewer kinds (decision section 8,
+  "Kinds as presets").
