@@ -879,6 +879,35 @@ Done:
   document loads as the project its older file loads as" (the expected warnings name the current version as
   the version the project is saved as, as "migrating in parts" already did for its parts). Doctests 380.
 
+- 3, edit commands and the facade API: 139f4ef. Edit rules in `Engine/Edit/GradeEdits.h` (a new file beside
+  EditOps, which is 3,600 lines): `GradeChange` (the values to set, nullopt keeps the clip's own; for a whole
+  grade the foreign entries too: `of(parameter, value)`, `whole(grade)`), `SetClipGrade` (one or several
+  clips, one undo step; sets only the parameters given; refused as a whole for no clips or values, a value out
+  of range or not finite ("Saturation must be a number from 0 to 2 (not 2.5)."), a missing, duplicated or
+  locked clip, or a clip on an audio track (TrackKindMismatch); a change that changes nothing records no
+  step; undo names "Change <parameter>", "Change Grade", or the caller's ("Paste Grade", "Reset Grade")),
+  `summarizeGrades` (per parameter the value the selection's picture clips agree on, or mixed) and
+  `gradeTargets`. Coalescing is the existing one: a control drag is `setGradeValue` steps in one
+  ReplacePrevious group (or Accumulate) and makes one undo step. Facade: `VEEngine (Grade)` in
+  `VEEngine+Grade.mm`; the copied grade is `_copiedGrade` (a value; it outlives New and Open). The four
+  extracted classes are untouched. Public additions (additions only), VETypes.h: `VEGradeParameter`,
+  `VEGradeParams`, `VEGradeParamsNeutral()`, `VEGradeParamsUnchanged()`, `VEGradeParamsGetValue` /
+  `VEGradeParamsSetValue` (Swift `value(for:)` / `setValue(_:for:)`), `VEGradeParameterInfo` (the engine's
+  table: name, display name, unit, neutral, range; `allParameters`, `info(for:)`), `VEGradeSelection`
+  (`clipIDs`, `values` with NaN where mixed, `isMixed(_:)`, `anyGraded`), `VEClipInfo.grade` and
+  `.hasGrade`; VEEngine.h: `setGrade(_:forClips:)` (NaN fields unchanged), `setGradeValue(_:for:clips:)`,
+  `grade(ofClips:)`, `copyGrade(ofClip:)`, `hasCopiedGrade`, `copiedGrade`, `pasteGrade(ontoClips:)`,
+  `resetGrade(ofClips:)`. The calls take a selection: clips on audio tracks are left out (linked sound in
+  a selection grades its pictures); none left is refused (TrackKindMismatch). Tests: `GradeEditTests.cpp`
+  (5 doctest cases: one and several clips keep what differs, several parameters, whole grades, every
+  refusal changing nothing, no-op, a drag in both coalescing modes is one step, mixed and agreeing
+  summaries) and `VEEngineGradeTests` (6 XCTests: the table from the engine, a multi-clip set with linked
+  sound in the selection and the mixed query, a coalesced control drag, copy/paste/reset with undo and
+  across New, refusals, save and open). Full suite after this item: TEST SUCCEEDED, EngineTests 573 (3
+  display-link skips), doctest 385, AppTests 279 (1 known skip); no files left in
+  `$TMPDIR/FramewrightEngineTests`, the container's tmp or Preferences (one UUID-named directory at the
+  container's root, the known pattern).
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
