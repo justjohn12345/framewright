@@ -628,7 +628,7 @@ Status AppleVideoDecoder::open(const std::string &path, int trackIndex, const De
             if (trackIndex > 0) {
                 return makeError(MediaErrorCode::NoSuchTrack, "still images have one track (0)");
             }
-            auto image = decodeStillImage(path, options.maxDimension);
+            auto image = decodeStillImage(path, options.maxDimension, options.highPrecision);
             if (!image.ok()) {
                 return std::move(image).error();
             }
@@ -666,7 +666,8 @@ Status AppleVideoDecoder::open(const std::string &path, int trackIndex, const De
         d.info = makeTrackInfo(d.track, resolved);
         const VideoFormatDetails details =
             videoFormatDetails((__bridge CMFormatDescriptionRef)d.track.formatDescriptions.firstObject);
-        d.outFormat = options.pixelFormat != 0 ? options.pixelFormat : nativePixelFormat(details);
+        d.outFormat =
+            options.pixelFormat != 0 ? options.pixelFormat : nativePixelFormat(details, options.highPrecision);
         if (options.maxDimension > 0) {
             int w = details.width;
             int h = details.height;

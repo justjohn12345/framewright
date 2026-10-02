@@ -199,7 +199,7 @@ bool isRGB(AVPixelFormat format) {
 
 } // namespace
 
-OSType nativePixelFormat(AVPixelFormat format, bool fullRange) {
+OSType nativePixelFormat(AVPixelFormat format, bool fullRange, bool highPrecision) {
     const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(format);
     if (d == nullptr) {
         return fullRange ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
@@ -210,7 +210,7 @@ OSType nativePixelFormat(AVPixelFormat format, bool fullRange) {
     }
     if ((d->flags & (AV_PIX_FMT_FLAG_ALPHA | AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_PAL)) || d->nb_components == 2 ||
         d->nb_components == 4) {
-        return kCVPixelFormatType_32BGRA;
+        return highPrecision && d->comp[0].depth > 8 ? kHighPrecisionRGBAFormat : kCVPixelFormatType_32BGRA;
     }
     if (d->nb_components >= 3 && isSubsampling(d, 1, 0)) {
         return fullRange ? kCVPixelFormatType_422YpCbCr10BiPlanarFullRange
@@ -229,6 +229,9 @@ OSType nativePixelFormat(AVPixelFormat format, bool fullRange) {
 }
 
 AVPixelFormat avPixelFormatForCV(OSType format) {
+    if (format == kHighPrecisionRGBAFormat) {
+        return AV_PIX_FMT_RGBA64LE; // not in libavutil's VideoToolbox table
+    }
     return av_map_videotoolbox_format_to_pixfmt(format);
 }
 

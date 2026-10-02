@@ -4,13 +4,17 @@
 //   8-bit biplanar YCbCr   '420v' '420f' '422v' '422f' '444v' '444f'   Y r8Unorm,  CbCr rg8Unorm
 //   10-bit biplanar YCbCr  'x420' 'xf20' 'x422' 'xf22' 'x444' 'xf44'   Y r16Unorm, CbCr rg16Unorm
 //   32BGRA                 'BGRA'                                        bgra8Unorm (see Alpha below)
+//   16-bit RGBA            'l64r' (64RGBALE)                             rgba16Unorm (as BGRA)
+//   half-float RGBA        'RGhA' (64RGBAHalf, extended-range sRGB)     rgba16Float (as BGRA; values
+//                                                                        outside [0, 1] are limited to
+//                                                                        it where sampled, Shaders.metal)
 // Anything else is rejected with MediaErrorCode::UnsupportedFormat.
 //
 // Colour: a TextureSet carries the YCbCr -> R'G'B' matrix for its buffer, chosen from the
 // buffer's kCVImageBufferYCbCrMatrixKey attachment (BT.709, BT.601, BT.2020 non-constant
 // luminance, SMPTE 240M) and the pixel format's range and bit depth. Untagged buffers use
 // BT.709 when the height is >= 720 and BT.601 below (the usual HD/SD convention).
-// Alpha (BGRA only; YCbCr pictures are opaque): the buffer's kCVImageBufferAlphaChannelModeKey
+// Alpha (RGBA formats only; YCbCr pictures are opaque): the buffer's kCVImageBufferAlphaChannelModeKey
 // attachment says whether its colour is premultiplied by alpha (PremultipliedAlpha) or not
 // (StraightAlpha); TextureSet::alphaMode() reports it, Unspecified when untagged, and producers
 // that know better may override it with setAlphaMode(). The compositor resolves Unspecified

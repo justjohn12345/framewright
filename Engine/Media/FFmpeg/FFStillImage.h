@@ -30,6 +30,11 @@ TrackInfo stillTrackInfo(const DecodedStill &still);
 /// size, but never more than kMaxImageDimension per side), into an IOSurface-backed 32BGRA
 /// buffer with premultiplied alpha (tagged kCVImageBufferAlphaChannelMode_PremultipliedAlpha),
 /// tagged BT.709 primaries / sRGB transfer: the same output as AppleVideoDecoder for stills.
-Result<PixelBuffer> renderStill(const DecodedStill &still, int maxDimension);
+/// With `highPrecision` (DecodeOptions::highPrecision), a picture deeper than 8 bits or in a
+/// wide-gamut space (its embedded ICC profile, else its cICP tags: Display P3, BT.2020) is converted
+/// to 16-bit RGBA instead, handed to CoreGraphics in that space (sRGB without one) and stored as the
+/// Apple decoder stores such a still ('RGhA' for wide gamut, else 'l64r'; StillDrawing.h): the profile
+/// is honoured.
+Result<PixelBuffer> renderStill(const DecodedStill &still, int maxDimension, bool highPrecision);
 
 } // namespace ve::media::ffmpeg

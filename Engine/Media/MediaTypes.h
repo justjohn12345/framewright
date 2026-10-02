@@ -5,6 +5,7 @@
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
 
+#include <compare>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -177,11 +178,24 @@ struct DecodeOptions {
     ///   10+-bit 4:2:0        -> 'x420' / 'xf20'   (kCVPixelFormatType_420YpCbCr10BiPlanar{Video,Full}Range)
     ///   4:2:2 (e.g. ProRes)  -> 'x422' / 'xf22'   (kCVPixelFormatType_422YpCbCr10BiPlanar{Video,Full}Range)
     ///   4:4:4 without alpha  -> 'x444' / 'xf44'   (kCVPixelFormatType_444YpCbCr10BiPlanar{Video,Full}Range)
-    ///   ProRes 4444 (alpha)  -> 'BGRA'
-    ///   stills               -> 'BGRA'
+    ///   ProRes 4444 (alpha)  -> 'BGRA' ('l64r' with highPrecision)
+    ///   other alpha or RGB   -> 'BGRA' ('l64r' with highPrecision when deeper than 8 bits)
+    ///   stills               -> 'BGRA' ('RGhA' with highPrecision when deeper than 8 bits or wide gamut)
     /// Video vs full range follows the source. Any other value requests that format and the
     /// backend converts (in the decoder where possible).
     OSType pixelFormat = 0;
+    /// Keep more than 8 bits, and a still's wide gamut, where the source has them (grading
+    /// decision, sections 4 and 6), instead of the 8-bit sRGB 'BGRA' above (used when pixelFormat
+    /// is 0; YCbCr sources are unaffected, they keep their own depth either way):
+    ///   - alpha and RGB video deeper than 8 bits (12-bit ProRes 4444, 16-bit RGB) -> 'l64r'
+    ///     (kHighPrecisionRGBAFormat: 16-bit unorm RGBA, straight alpha as the 'BGRA' output);
+    ///   - stills deeper than 8 bits (16-bit PNG, 10-bit HEIC) or in a wide-gamut colour space (a
+    ///     Display P3 photo, an Adobe RGB TIFF) -> 'RGhA' (kExtendedRGBAFormat: half-float RGBA,
+    ///     premultiplied, colour-matched to extended-range sRGB, so colours outside sRGB are kept as
+    ///     values below 0 or above 1 instead of being clipped; tagged sRGB);
+    ///   - every other source (8-bit sRGB stills, 8-bit alpha video) keeps 'BGRA', bit for bit.
+    /// The decode pools of the monitors and the export set it; thumbnails do not.
+    bool highPrecision = false;
     /// If > 0, frames are scaled (preserving aspect ratio, even dimensions) so that neither
     /// side exceeds this many pixels. Intended for thumbnails; 0 = full size (stills are still
     /// limited to kMaxImageDimension).
@@ -191,6 +205,27 @@ struct DecodeOptions {
     /// Optional cancellation shared with the owner (see DecodeInterrupt in Interfaces.h).
     std::shared_ptr<DecodeInterrupt> interrupt;
 };
+
+/// The deep RGBA formats of DecodeOptions::highPrecision.
+constexpr OSType kHighPrecisionRGBAFormat = kCVPixelFormatType_64RGBALE; // 'l64r'
+constexpr OSType kExtendedRGBAFormat = kCVPixelFormatType_64RGBAHalf;    // 'RGhA'
+
+/// The decode settings that change the pictures a decode produces (DecodeOptions without the
+/// hardware choice and the cancellation): part of the frame cache's key, so that frames decoded
+/// with different settings never answer each other's lookups (review media #7).
+struct DecodeFormat {
+    OSType pixelFormat = 0;
+    int maxDimension = 0;
+    bool highPrecision = false;
+
+    friend bool operator==(const DecodeFormat &, const DecodeFormat &) = default;
+    friend auto operator<=>(const DecodeFormat &, const DecodeFormat &) = default;
+};
+
+/// The DecodeFormat of `options`.
+inline DecodeFormat decodeFormatOf(const DecodeOptions &options) {
+    return DecodeFormat{options.pixelFormat, options.maxDimension, options.highPrecision};
+}
 
 /// Options for IAudioDecoder::open. Output is always 32-bit float, interleaved, native endian.
 struct AudioOptions {

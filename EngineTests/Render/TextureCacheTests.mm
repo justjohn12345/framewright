@@ -173,7 +173,7 @@ struct FormatCase {
 }
 
 - (void)testUnsupportedFormatsFailWithTheFormatName {
-    for (OSType format : {kCVPixelFormatType_422YpCbCr8, kCVPixelFormatType_32ARGB, kCVPixelFormatType_64RGBAHalf,
+    for (OSType format : {kCVPixelFormatType_422YpCbCr8, kCVPixelFormatType_32ARGB, kCVPixelFormatType_64ARGB,
                           kCVPixelFormatType_420YpCbCr8Planar}) {
         media::PixelBuffer buffer = makeBuffer(format, 32, 32);
         XCTAssertTrue(buffer, @"cannot allocate %s", fourCCString(format).c_str());

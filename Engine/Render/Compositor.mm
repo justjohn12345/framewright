@@ -518,8 +518,12 @@ struct Compositor::Impl {
             MTLPixelFormat format = plane.pixelFormat;
             if (rgba) {
                 // Pre-scaled RGBA is always premultiplied (filtering straight colour would bleed
-                // the colour of transparent texels); RGBA8 keeps compute writes portable.
-                format = MTLPixelFormatRGBA8Unorm;
+                // the colour of transparent texels); RGBA8 keeps compute writes portable, and a deep
+                // picture ('l64r', 'RGhA': DecodeOptions::highPrecision) keeps its precision, and an
+                // extended-range one its values, in RGBA16Float.
+                const bool deep = plane.pixelFormat == MTLPixelFormatRGBA16Unorm ||
+                                  plane.pixelFormat == MTLPixelFormatRGBA16Float;
+                format = deep ? MTLPixelFormatRGBA16Float : MTLPixelFormatRGBA8Unorm;
                 if (binding.straightAlpha) {
                     auto premultiplied = acquireScratch(format, plane.width, plane.height);
                     if (!premultiplied.ok()) {

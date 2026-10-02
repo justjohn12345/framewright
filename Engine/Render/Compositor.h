@@ -45,7 +45,9 @@
 // Premiere's default non-linear compositing), not in linear light. Opacity and dissolves are
 // therefore "video" blends; a linear-light path would linearise before and re-encode after
 // blending. sRGB-encoded stills are treated as having the BT.709 transfer (the curves differ
-// slightly near black). Wide-gamut or HDR sources are not converted (out of scope, see PLAN).
+// slightly near black). Wide-gamut or HDR video is not converted (out of scope, see PLAN); a
+// wide-gamut still decoded with DecodeOptions::highPrecision arrives in extended-range sRGB and is
+// limited to [0, 1] where it is sampled, which is what decoding it to 8-bit sRGB gave.
 //
 // Weights: a layer's weight is its opacity; a layer in a transition drawn without its partner
 // (partner missing or malformed) also gets its transition weight (LayerTransition::weight()).
@@ -58,7 +60,8 @@
 // than 0.75 target pixels per texel (along either axis, counting the viewport scale; chroma
 // planes of subsampled formats have their own ratio) is first resampled with
 // MPSImageLanczosScale into a pooled texture of about its drawn size, then sampled bilinearly at
-// ~1:1. Straight-alpha RGBA is premultiplied into a pooled RGBA8 texture before resampling.
+// ~1:1. Straight-alpha RGBA is premultiplied into a pooled RGBA8 texture (RGBA16Float for the deep 'l64r'
+// and 'RGhA' pictures) before resampling, and RGBA pre-scales are stored in that format.
 // The plane is resampled to its drawn size, rounded up to a whole texel, so it is sampled at 1:1 (a 4K
 // picture at 1080p: 1080 rows, not 1088 resampled onto 1080, which blurred fine text in bands), into the
 // top-left region of a pooled texture keyed by (format, size), with sizes rounded up to 1/16-1/32 steps so

@@ -76,11 +76,14 @@ static float4 sampleYCbCr(texture2d<float> luma, texture2d<float> chroma, float2
 // Premultiplied sources are filtered by the sampler. Straight-alpha sources are filtered by hand
 // (the same bilinear footprint, edges clamped) with every texel premultiplied first: filtering
 // straight colour and premultiplying afterwards would let the colour of fully transparent texels
-// bleed into the edge of the visible ones.
+// bleed into the edge of the visible ones. Values are limited to [0, 1] as sampleYCbCr limits R'G'B'
+// (grading decision, section 3: an ungraded source keeps the clamp): a no-op for unorm textures, it
+// keeps an extended-range still ('RGhA') and its float pre-scale's Lanczos overshoot to what the
+// blend has always seen.
 static float4 sampleRGBA(texture2d<float> rgba, float2 uv, constant VESourceUniforms &source) {
     constexpr sampler bilinear(address::clamp_to_edge, filter::linear);
     if (source.straightAlpha == 0) {
-        return rgba.sample(bilinear, planeUV(uv, source.planeExtent.xy, rgba));
+        return saturate(rgba.sample(bilinear, planeUV(uv, source.planeExtent.xy, rgba)));
     }
     // The picture's own texels: the top-left extent of the texture.
     const int2 size = max(int2(rint(float2(rgba.get_width(), rgba.get_height()) * source.planeExtent.xy)), int2(1));
@@ -89,10 +92,10 @@ static float4 sampleRGBA(texture2d<float> rgba, float2 uv, constant VESourceUnif
     const int2 i0 = int2(floor(p));
     const int2 lo = clamp(i0, int2(0), size - 1);
     const int2 hi = clamp(i0 + 1, int2(0), size - 1);
-    float4 t00 = rgba.read(uint2(lo.x, lo.y));
-    float4 t10 = rgba.read(uint2(hi.x, lo.y));
-    float4 t01 = rgba.read(uint2(lo.x, hi.y));
-    float4 t11 = rgba.read(uint2(hi.x, hi.y));
+    float4 t00 = saturate(rgba.read(uint2(lo.x, lo.y)));
+    float4 t10 = saturate(rgba.read(uint2(hi.x, lo.y)));
+    float4 t01 = saturate(rgba.read(uint2(lo.x, hi.y)));
+    float4 t11 = saturate(rgba.read(uint2(hi.x, hi.y)));
     t00.rgb *= t00.a;
     t10.rgb *= t10.a;
     t01.rgb *= t01.a;
@@ -202,8 +205,8 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
 
 // MARK: - Minification
 
-// Straight-alpha RGBA -> premultiplied RGBA8, before a straight-alpha picture is resampled for
-// minification (see Compositor.h).
+// Straight-alpha RGBA -> premultiplied RGBA8 (RGBA16Float for a deep picture), before a straight-alpha
+// picture is resampled for minification (see Compositor.h).
 kernel void ve_premultiply(texture2d<float, access::read> source [[texture(0)]],
                            texture2d<float, access::write> destination [[texture(1)]],
                            uint2 gid [[thread_position_in_grid]]) {

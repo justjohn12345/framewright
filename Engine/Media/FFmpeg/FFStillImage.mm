@@ -3,6 +3,7 @@
 #include "../CFRef.h"
 #include "../ColorTags.h"
 #include "../Interfaces.h"
+#include "../StillDrawing.h"
 
 #include <CoreGraphics/CoreGraphics.h>
 
@@ -45,6 +46,101 @@ inline void sourceFor(int orientation, int x, int y, int w, int h, int &sx, int 
     const bool flipV = orientation == 3 || orientation == 4 || orientation == 6 || orientation == 7;
     sx = flipU ? w - 1 - u : u;
     sy = flipV ? h - 1 - v : v;
+}
+
+// The colour space the frame says it is in: its embedded ICC profile, else its coding-independent
+// tags (a PNG's cICP chunk, which FFmpeg reports instead of the ICC profile when both are present) when
+// they name a space CoreGraphics has; null otherwise (treated as sRGB, as before).
+CFRef<CGColorSpaceRef> embeddedColorSpace(const AVFrame *frame) {
+    if (const AVFrameSideData *side = av_frame_get_side_data(frame, AV_FRAME_DATA_ICC_PROFILE);
+        side != nullptr && side->size > 0) {
+        CFRef<CFDataRef> data = CFRef<CFDataRef>::adopt(
+            CFDataCreate(kCFAllocatorDefault, side->data, static_cast<CFIndex>(side->size)));
+        if (data) {
+            if (CGColorSpaceRef space = CGColorSpaceCreateWithICCData(data.get())) {
+                return CFRef<CGColorSpaceRef>::adopt(space);
+            }
+        }
+    }
+    CFStringRef name = nullptr;
+    const bool srgbCurve = frame->color_trc == AVCOL_TRC_IEC61966_2_1;
+    const bool videoCurve = frame->color_trc == AVCOL_TRC_BT709 || frame->color_trc == AVCOL_TRC_BT2020_10 ||
+                            frame->color_trc == AVCOL_TRC_BT2020_12;
+    if (frame->color_primaries == AVCOL_PRI_SMPTE432 && srgbCurve) {
+        name = kCGColorSpaceDisplayP3;
+    } else if (frame->color_primaries == AVCOL_PRI_BT2020 && srgbCurve) {
+        name = kCGColorSpaceITUR_2020_sRGBGamma;
+    } else if (frame->color_primaries == AVCOL_PRI_BT2020 && videoCurve) {
+        name = kCGColorSpaceITUR_2020;
+    } else if (frame->color_primaries == AVCOL_PRI_BT709 && srgbCurve) {
+        name = kCGColorSpaceSRGB;
+    }
+    return name != nullptr ? CFRef<CGColorSpaceRef>::adopt(CGColorSpaceCreateWithName(name)) : CFRef<CGColorSpaceRef>();
+}
+
+// The picture as 16-bit straight RGBA in display orientation and size, handed to CoreGraphics in
+// `space` (its ICC profile, or sRGB) and stored by drawStillImage (high precision).
+Result<PixelBuffer> renderStillThroughCoreGraphics(const DecodedStill &still, int dispWidth, int dispHeight,
+                                                   int scaledWidth, int scaledHeight, CGColorSpaceRef space) {
+    const AVFrame *frame = still.frame.get();
+    const auto srcFormat = static_cast<AVPixelFormat>(frame->format);
+    const bool scaling = scaledWidth != frame->width || scaledHeight != frame->height;
+    SwsPtr sws(sws_getContext(frame->width, frame->height, srcFormat, scaledWidth, scaledHeight,
+                              AV_PIX_FMT_RGBA64LE,
+                              (scaling ? SWS_BICUBIC : SWS_POINT) | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT |
+                                  SWS_FULL_CHR_H_INP,
+                              nullptr, nullptr, nullptr));
+    if (!sws) {
+        return makeError(MediaErrorCode::UnsupportedFormat,
+                         std::string("cannot convert image format ") + (av_get_pix_fmt_name(srcFormat) ?: "?"));
+    }
+    {
+        // JPEG (JFIF) is full-range BT.601 unless tagged otherwise (as renderStill).
+        const int colorSpace = frame->colorspace == AVCOL_SPC_BT709 ? SWS_CS_ITU709 : SWS_CS_ITU601;
+        const bool srcFull = frame->color_range != AVCOL_RANGE_MPEG;
+        const int *table = sws_getCoefficients(colorSpace);
+        sws_setColorspaceDetails(sws.get(), table, srcFull ? 1 : 0, table, 1, 0, 1 << 16, 1 << 16);
+    }
+    constexpr size_t kPixelBytes = 8;
+    const size_t storedStride = static_cast<size_t>(scaledWidth) * kPixelBytes;
+    std::vector<uint8_t> stored(storedStride * static_cast<size_t>(scaledHeight));
+    uint8_t *dst[4] = {stored.data(), nullptr, nullptr, nullptr};
+    int dstStride[4] = {static_cast<int>(storedStride), 0, 0, 0};
+    const int rows = sws_scale(sws.get(), frame->data, frame->linesize, 0, frame->height, dst, dstStride);
+    if (rows < 0) {
+        return ffError(rows, MediaErrorCode::Internal, "sws_scale (image)");
+    }
+    const size_t displayStride = static_cast<size_t>(dispWidth) * kPixelBytes;
+    CFRef<CFMutableDataRef> pixels = CFRef<CFMutableDataRef>::adopt(
+        CFDataCreateMutable(kCFAllocatorDefault, static_cast<CFIndex>(displayStride * static_cast<size_t>(dispHeight))));
+    if (!pixels) {
+        return makeError(MediaErrorCode::Internal, "cannot allocate the image's pixels");
+    }
+    CFDataSetLength(pixels.get(), static_cast<CFIndex>(displayStride * static_cast<size_t>(dispHeight)));
+    uint8_t *display = CFDataGetMutableBytePtr(pixels.get());
+    for (int y = 0; y < dispHeight; ++y) {
+        for (int x = 0; x < dispWidth; ++x) {
+            int sx = 0;
+            int sy = 0;
+            sourceFor(still.orientation, x, y, scaledWidth, scaledHeight, sx, sy);
+            std::memcpy(display + static_cast<size_t>(y) * displayStride + static_cast<size_t>(x) * kPixelBytes,
+                        stored.data() + static_cast<size_t>(sy) * storedStride + static_cast<size_t>(sx) * kPixelBytes,
+                        kPixelBytes);
+        }
+    }
+    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(srcFormat);
+    const bool alpha = d != nullptr && (d->flags & (AV_PIX_FMT_FLAG_ALPHA | AV_PIX_FMT_FLAG_PAL));
+    CFRef<CGDataProviderRef> provider = CFRef<CGDataProviderRef>::adopt(CGDataProviderCreateWithCFData(pixels.get()));
+    const uint32_t bitmapInfo =
+        static_cast<uint32_t>(alpha ? kCGImageAlphaLast : kCGImageAlphaNoneSkipLast) |
+        static_cast<uint32_t>(kCGBitmapByteOrder16Little);
+    CFRef<CGImageRef> image = CFRef<CGImageRef>::adopt(
+        CGImageCreate(static_cast<size_t>(dispWidth), static_cast<size_t>(dispHeight), 16, 64, displayStride, space,
+                      bitmapInfo, provider.get(), nullptr, false, kCGRenderingIntentDefault));
+    if (!image) {
+        return makeError(MediaErrorCode::Internal, "CGImageCreate failed for the decoded image");
+    }
+    return drawStillImage(image.get(), true);
 }
 
 } // namespace
@@ -143,7 +239,7 @@ TrackInfo stillTrackInfo(const DecodedStill &still) {
     return track;
 }
 
-Result<PixelBuffer> renderStill(const DecodedStill &still, int maxDimension) {
+Result<PixelBuffer> renderStill(const DecodedStill &still, int maxDimension, bool highPrecision) {
     const AVFrame *frame = still.frame.get();
     int dispWidth = still.width;
     int dispHeight = still.height;
@@ -154,6 +250,17 @@ Result<PixelBuffer> renderStill(const DecodedStill &still, int maxDimension) {
     const int scaledHeight = swap ? dispWidth : dispHeight;
 
     const auto srcFormat = static_cast<AVPixelFormat>(frame->format);
+    if (highPrecision) {
+        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(srcFormat);
+        const bool deep = desc != nullptr && desc->comp[0].depth > 8;
+        CFRef<CGColorSpaceRef> embedded = embeddedColorSpace(frame);
+        const bool wide = embedded && CGColorSpaceIsWideGamutRGB(embedded.get());
+        if (deep || wide) {
+            CFRef<CGColorSpaceRef> space =
+                embedded ? std::move(embedded) : CFRef<CGColorSpaceRef>::adopt(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
+            return renderStillThroughCoreGraphics(still, dispWidth, dispHeight, scaledWidth, scaledHeight, space.get());
+        }
+    }
     const bool scaling = scaledWidth != frame->width || scaledHeight != frame->height;
     SwsPtr sws(sws_getContext(frame->width, frame->height, srcFormat, scaledWidth, scaledHeight, AV_PIX_FMT_BGRA,
                               (scaling ? SWS_BICUBIC : SWS_POINT) | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT |

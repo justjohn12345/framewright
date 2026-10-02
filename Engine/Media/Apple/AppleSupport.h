@@ -63,8 +63,10 @@ struct VideoFormatDetails {
     ColorInfo color;
 };
 VideoFormatDetails videoFormatDetails(CMFormatDescriptionRef format);
-/// The decoder-native biplanar output format for a source (see DecodeOptions::pixelFormat).
-OSType nativePixelFormat(const VideoFormatDetails &details);
+/// The decoder-native output format for a source (see DecodeOptions::pixelFormat and
+/// DecodeOptions::highPrecision): biplanar YCbCr, or for alpha 'BGRA', 'l64r' when `highPrecision`
+/// and the source is deeper than 8 bits.
+OSType nativePixelFormat(const VideoFormatDetails &details, bool highPrecision);
 
 /// Short container token from the file's leading bytes ("mov", "mp4", "m4a", "wav", "mp3", "aac"
 /// for raw ADTS AAC, ...), or from the extension when the content is not recognised.

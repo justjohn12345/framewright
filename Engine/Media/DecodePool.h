@@ -212,6 +212,13 @@ class DecodePool {
     void setLookahead(CMTime lookahead);
     CMTime lookahead() const;
 
+    /// The decode format of every frame the pool decodes (Config::decodeOptions): the pool puts its
+    /// frames into the shared cache under FrameKey{asset, decodeFormat()}, so its consumers look them
+    /// up with it (FrameCache.h, "Decode formats").
+    DecodeFormat decodeFormat() const;
+    /// FrameKey{asset, decodeFormat()}.
+    FrameKey frameKey(AssetId asset) const;
+
     /// Scrub path: decode the frame of `asset` at `time` as soon as possible (cache first).
     /// Requests are coalesced per (asset, lane): only the latest one is serviced; an older
     /// pending one gets Cancelled, and one being decoded is interrupted (Cancelled too). Give

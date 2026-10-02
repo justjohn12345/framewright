@@ -3,6 +3,7 @@
 #include "../CFRef.h"
 #include "../ColorTags.h"
 #include "../Interfaces.h"
+#include "../StillDrawing.h"
 #include "AppleSupport.h"
 
 #import <CoreGraphics/CoreGraphics.h>
@@ -120,7 +121,7 @@ Result<std::optional<MediaInfo>> probeStillImage(const std::string &path) {
     }
 }
 
-Result<PixelBuffer> decodeStillImage(const std::string &path, int maxDimension) {
+Result<PixelBuffer> decodeStillImage(const std::string &path, int maxDimension, bool highPrecision) {
     @autoreleasepool {
         VE_MEDIA_TRY(checkReadableFile(path));
         CFRef<CGImageSourceRef> source = openSource(path);
@@ -149,44 +150,8 @@ Result<PixelBuffer> decodeStillImage(const std::string &path, int maxDimension) 
         if (!image) {
             return makeError(MediaErrorCode::CorruptData, "ImageIO failed to decode " + path);
         }
-        // Use the decoded image's size: ImageIO may round the scaled size differently.
-        width = static_cast<int>(CGImageGetWidth(image.get()));
-        height = static_cast<int>(CGImageGetHeight(image.get()));
-
-        auto pool = PixelBufferPool::create(kCVPixelFormatType_32BGRA, static_cast<size_t>(width),
-                                            static_cast<size_t>(height));
-        if (!pool.ok()) {
-            return std::move(pool).error();
-        }
-        auto buffer = pool->makeBuffer();
-        if (!buffer.ok()) {
-            return std::move(buffer).error();
-        }
-        CVPixelBufferRef pb = buffer->get();
-        {
-            PixelBufferLock lock(pb, false);
-            if (!lock.locked()) {
-                return makeError(MediaErrorCode::Internal, "CVPixelBufferLockBaseAddress failed");
-            }
-            CFRef<CGColorSpaceRef> srgb = CFRef<CGColorSpaceRef>::adopt(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
-            CFRef<CGContextRef> ctx = CFRef<CGContextRef>::adopt(CGBitmapContextCreate(
-                CVPixelBufferGetBaseAddress(pb), static_cast<size_t>(width), static_cast<size_t>(height), 8,
-                CVPixelBufferGetBytesPerRow(pb), srgb.get(),
-                static_cast<uint32_t>(kCGImageAlphaPremultipliedFirst) |
-                    static_cast<uint32_t>(kCGBitmapByteOrder32Little)));
-            if (!ctx) {
-                return makeError(MediaErrorCode::Internal, "CGBitmapContextCreate failed");
-            }
-            CGContextSetBlendMode(ctx.get(), kCGBlendModeCopy);
-            CGContextDrawImage(ctx.get(), CGRectMake(0, 0, width, height), image.get());
-            CFRef<CFDataRef> icc = CFRef<CFDataRef>::adopt(CGColorSpaceCopyICCData(srgb.get()));
-            if (icc) {
-                CVBufferSetAttachment(pb, kCVImageBufferICCProfileKey, icc.get(), kCVAttachmentMode_ShouldPropagate);
-            }
-        }
-        attachColorInfo(pb, {ColorPrimaries::BT709, TransferFunction::SRGB, YCbCrMatrix::Unknown, true});
-        setAlphaMode(pb, true); // CoreGraphics drew premultiplied (kCGImageAlphaPremultipliedFirst).
-        return std::move(buffer).value();
+        // drawImage uses the decoded image's size: ImageIO may round the scaled size differently.
+        return drawStillImage(image.get(), highPrecision);
     }
 }
 

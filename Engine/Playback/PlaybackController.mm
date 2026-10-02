@@ -69,8 +69,9 @@ double absRate(double rate) {
 // MARK: - Shared core (control side + frame source)
 
 struct PlaybackController::Core {
-    Core(std::shared_ptr<audio::HostClock> host, double sampleRate, std::shared_ptr<FrameCache> frameCache)
-        : clock(std::move(host), sampleRate), cache(std::move(frameCache)) {}
+    Core(std::shared_ptr<audio::HostClock> host, double sampleRate, std::shared_ptr<FrameCache> frameCache,
+         media::DecodeFormat poolFormat)
+        : clock(std::move(host), sampleRate), cache(std::move(frameCache)), decodeFormat(poolFormat) {}
 
     struct Display {
         int64_t value = 0;
@@ -121,6 +122,7 @@ struct PlaybackController::Core {
 
     audio::Clock clock;
     const std::shared_ptr<FrameCache> cache;
+    const media::DecodeFormat decodeFormat; // of the pool whose frames the cache holds for us
 
     std::mutex snapshotMutex; // held only to copy/replace the pointer
     std::shared_ptr<const Project> project;
@@ -377,7 +379,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
         if (const MediaAsset *asset = rs.project->findAsset(layer.assetId)) {
             const CMTime pictureTime = pictureTimeFor(layer, *asset);
             shown.wantedIndex = asset->isStill() ? 0 : FrameCache::frameIndex(pictureTime, asset->frameDuration);
-            pin = cache->acquire(layer.assetId, pictureTime);
+            pin = cache->acquire(media::FrameKey{layer.assetId, decodeFormat}, pictureTime);
             bool usable = static_cast<bool>(pin);
             if (usable && request.textureCache) {
                 auto mapped = request.textureCache->textures(pin.image());
@@ -561,7 +563,8 @@ PlaybackController::PlaybackController(std::shared_ptr<media::BackendRouter> rou
     : router_(std::move(router)), cache_(std::move(cache)), pool_(std::move(pool)), config_(std::move(config)),
       powerSource_(config_.powerSource ? config_.powerSource : audio::systemPowerSource()) {
     core_ = std::make_shared<Core>(config_.hostClock ? config_.hostClock : audio::HostClock::system(),
-                                   config_.mixer.sampleRate, cache_);
+                                   config_.mixer.sampleRate, cache_,
+                                   pool_ ? pool_->decodeFormat() : media::DecodeFormat{});
     hub_ = std::make_shared<ObserverHub>();
     mixer_ = std::make_unique<audio::AudioMixer>(router_, &core_->clock, config_.mixer);
     if (config_.makeOutput) {
@@ -811,7 +814,8 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
         // The picture the frame source looks up (see pictureTimeFor). Already decoded: pinned until
         // the next target, so it is still there when the redraw below looks it up.
         const CMTime pictureTime = pictureTimeFor(layer, *asset);
-        if (FrameCache::PinnedFrame cached = cache_->acquire(layer.assetId, pictureTime)) {
+        const media::FrameKey key{layer.assetId, core_->decodeFormat};
+        if (FrameCache::PinnedFrame cached = cache_->acquire(key, pictureTime)) {
             core_->holdDisplayPin(generation, std::move(cached));
             continue;
         }
@@ -850,7 +854,8 @@ bool PlaybackController::firstFramesReadyLocked(CMTime at) const {
     const std::vector<VideoLayer> layers = layersToDecodeLocked(*sequence, at);
     return std::all_of(layers.begin(), layers.end(), [&](const VideoLayer &layer) {
         const MediaAsset *asset = project_->findAsset(layer.assetId);
-        return !asset || cache_->contains(layer.assetId, pictureTimeFor(layer, *asset));
+        return !asset ||
+               cache_->contains(media::FrameKey{layer.assetId, core_->decodeFormat}, pictureTimeFor(layer, *asset));
     });
 }
 

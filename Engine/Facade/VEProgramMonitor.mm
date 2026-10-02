@@ -43,6 +43,7 @@ using namespace ve::facade;
         _onStatus = [onStatus copy];
         media::DecodePool::Config poolConfig;
         poolConfig.budgetFraction = config.poolBudgetShare;
+        poolConfig.decodeOptions.highPrecision = true; // deep alpha, RGB and still sources keep their precision
         _pool = std::make_shared<media::DecodePool>(router, frameCache, poolConfig);
         playback::PlaybackConfig playbackConfig;
         playbackConfig.scrubLaneBase = config.scrubLaneBase;

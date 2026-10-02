@@ -54,7 +54,7 @@ struct FrameCache::State {
     };
 
     mutable std::mutex mutex;
-    std::map<AssetId, Asset> assets;
+    std::map<FrameKey, Asset> assets; ///< By asset and decode format (FrameKey)
     size_t budget = kDefaultBudgetBytes;
     uint64_t nextSerial = 1;
     uint64_t useTick = 0;
@@ -87,13 +87,13 @@ struct FrameCache::State {
         return nullptr;
     }
 
-    Entry *find(AssetId asset, CMTime t) {
+    Entry *find(const FrameKey &asset, CMTime t) {
         auto it = assets.find(asset);
         return it == assets.end() ? nullptr : find(it->second, t);
     }
 
     /// Start time of slot `index` of `asset` (0 for stills or before any frame was put).
-    CMTime slotStart(AssetId asset, int64_t index) const {
+    CMTime slotStart(const FrameKey &asset, int64_t index) const {
         auto it = assets.find(asset);
         if (it == assets.end() || !isPositive(it->second.frameDuration)) {
             return kCMTimeZero;
@@ -101,11 +101,11 @@ struct FrameCache::State {
         return timeForFrame(index, it->second.frameDuration);
     }
 
-    Entry *findSlot(AssetId asset, int64_t index) { return find(asset, slotStart(asset, index)); }
+    Entry *findSlot(const FrameKey &asset, int64_t index) { return find(asset, slotStart(asset, index)); }
 
     void touch(Entry &e) { e.lastUse = ++useTick; }
 
-    void erase(AssetId asset, Entries::iterator it) {
+    void erase(const FrameKey &asset, Entries::iterator it) {
         Entry &e = it->second;
         stats.bytes -= e.frame.bytes;
         --stats.count;
@@ -129,7 +129,7 @@ struct FrameCache::State {
         bool before(const Rank &o) const { return tier != o.tier ? tier < o.tier : key > o.key; }
     };
 
-    Rank rank(AssetId asset, const Entry &e) const {
+    Rank rank(const FrameKey &asset, const Entry &e) const {
         bool focused = false;
         bool ahead = false;
         double aheadDistance = std::numeric_limits<double>::infinity();
@@ -137,7 +137,7 @@ struct FrameCache::State {
         const double start = seconds(e.frame.coverFrom);
         const double end = CMTIME_IS_POSITIVE_INFINITY(e.end) ? std::numeric_limits<double>::infinity() : seconds(e.end);
         for (const Focus &f : focus) {
-            if (f.asset != asset || !CMTIME_IS_NUMERIC(f.time)) {
+            if (f.asset != asset.asset || !CMTIME_IS_NUMERIC(f.time)) {
                 continue;
             }
             focused = true;
@@ -169,7 +169,7 @@ struct FrameCache::State {
 
     void evictTo(size_t limit) {
         while (stats.bytes > limit) {
-            AssetId victimAsset;
+            FrameKey victimAsset;
             Entries::iterator victim;
             Rank best;
             bool found = false;
@@ -195,7 +195,7 @@ struct FrameCache::State {
         }
     }
 
-    void unpin(AssetId asset, CMTime pts, uint64_t serial) {
+    void unpin(const FrameKey &asset, CMTime pts, uint64_t serial) {
         auto a = assets.find(asset);
         if (a == assets.end()) {
             return;
@@ -211,7 +211,7 @@ struct FrameCache::State {
         }
     }
 
-    PinnedFrame pin(const std::shared_ptr<State> &self, AssetId asset, Entry *e) {
+    PinnedFrame pin(const std::shared_ptr<State> &self, const FrameKey &asset, Entry *e) {
         if (e == nullptr) {
             ++stats.misses;
             return PinnedFrame{};
@@ -221,7 +221,7 @@ struct FrameCache::State {
     }
 
     /// Pins `entry` (marked recently used; no hit or miss counted).
-    PinnedFrame pinEntry(const std::shared_ptr<State> &self, AssetId asset, Entry &e) {
+    PinnedFrame pinEntry(const std::shared_ptr<State> &self, const FrameKey &asset, Entry &e) {
         PinnedFrame pinned;
         touch(e);
         if (e.pins++ == 0) {
@@ -338,27 +338,27 @@ FrameCache::Epoch FrameCache::beginEpoch() {
 
 // MARK: - Insert and look up
 
-bool FrameCache::put(AssetId asset, const VideoFrame &frame, CMTime frameDuration, CMTime coverFrom) {
+bool FrameCache::put(const FrameKey &asset, const VideoFrame &frame, CMTime frameDuration, CMTime coverFrom) {
     return insert(std::nullopt, asset, frame.image, frame.pts, frame.duration, frameDuration, coverFrom);
 }
 
-bool FrameCache::put(AssetId asset, PixelBuffer image, CMTime pts, CMTime duration, CMTime frameDuration,
+bool FrameCache::put(const FrameKey &asset, PixelBuffer image, CMTime pts, CMTime duration, CMTime frameDuration,
                      CMTime coverFrom) {
     return insert(std::nullopt, asset, std::move(image), pts, duration, frameDuration, coverFrom);
 }
 
-bool FrameCache::put(Epoch epoch, AssetId asset, const VideoFrame &frame, CMTime frameDuration, CMTime coverFrom) {
+bool FrameCache::put(Epoch epoch, const FrameKey &asset, const VideoFrame &frame, CMTime frameDuration, CMTime coverFrom) {
     return insert(epoch, asset, frame.image, frame.pts, frame.duration, frameDuration, coverFrom);
 }
 
-FrameCache::PinnedFrame FrameCache::putPinned(Epoch epoch, AssetId asset, const VideoFrame &frame,
+FrameCache::PinnedFrame FrameCache::putPinned(Epoch epoch, const FrameKey &asset, const VideoFrame &frame,
                                               CMTime frameDuration, CMTime coverFrom) {
     PinnedFrame pinned;
     insert(epoch, asset, frame.image, frame.pts, frame.duration, frameDuration, coverFrom, &pinned);
     return pinned;
 }
 
-bool FrameCache::insert(std::optional<Epoch> epoch, AssetId asset, PixelBuffer image, CMTime pts, CMTime duration,
+bool FrameCache::insert(std::optional<Epoch> epoch, const FrameKey &asset, PixelBuffer image, CMTime pts, CMTime duration,
                         CMTime frameDuration, CMTime coverFrom, PinnedFrame *pinned) {
     if (!image || !isNumeric(pts)) {
         return false;
@@ -430,47 +430,47 @@ bool FrameCache::insert(std::optional<Epoch> epoch, AssetId asset, PixelBuffer i
     return true;
 }
 
-std::optional<FrameCache::Frame> FrameCache::get(AssetId asset, CMTime t) {
+std::optional<FrameCache::Frame> FrameCache::get(const FrameKey &asset, CMTime t) {
     State &s = *state_;
     std::vector<PixelBuffer> dead;
     Locked lock(s, dead);
     return s.lookup(s.find(asset, t));
 }
 
-std::optional<FrameCache::Frame> FrameCache::get(AssetId asset, int64_t index) {
+std::optional<FrameCache::Frame> FrameCache::get(const FrameKey &asset, int64_t index) {
     State &s = *state_;
     std::vector<PixelBuffer> dead;
     Locked lock(s, dead);
     return s.lookup(s.findSlot(asset, index));
 }
 
-FrameCache::PinnedFrame FrameCache::acquire(AssetId asset, CMTime t) {
+FrameCache::PinnedFrame FrameCache::acquire(const FrameKey &asset, CMTime t) {
     State &s = *state_;
     std::vector<PixelBuffer> dead;
     Locked lock(s, dead);
     return s.pin(state_, asset, s.find(asset, t));
 }
 
-FrameCache::PinnedFrame FrameCache::acquire(AssetId asset, int64_t index) {
+FrameCache::PinnedFrame FrameCache::acquire(const FrameKey &asset, int64_t index) {
     State &s = *state_;
     std::vector<PixelBuffer> dead;
     Locked lock(s, dead);
     return s.pin(state_, asset, s.findSlot(asset, index));
 }
 
-bool FrameCache::contains(AssetId asset, CMTime t) const {
+bool FrameCache::contains(const FrameKey &asset, CMTime t) const {
     State &s = *state_;
     std::lock_guard<std::mutex> lock(s.mutex);
     return s.find(asset, t) != nullptr;
 }
 
-bool FrameCache::contains(AssetId asset, int64_t index) const {
+bool FrameCache::contains(const FrameKey &asset, int64_t index) const {
     State &s = *state_;
     std::lock_guard<std::mutex> lock(s.mutex);
     return s.findSlot(asset, index) != nullptr;
 }
 
-std::vector<int64_t> FrameCache::indices(AssetId asset) const {
+std::vector<int64_t> FrameCache::indices(const FrameKey &asset) const {
     State &s = *state_;
     std::lock_guard<std::mutex> lock(s.mutex);
     std::vector<int64_t> out;
@@ -482,7 +482,7 @@ std::vector<int64_t> FrameCache::indices(AssetId asset) const {
     return out;
 }
 
-std::vector<CMTime> FrameCache::presentationTimes(AssetId asset) const {
+std::vector<CMTime> FrameCache::presentationTimes(const FrameKey &asset) const {
     State &s = *state_;
     std::lock_guard<std::mutex> lock(s.mutex);
     std::vector<CMTime> out;
@@ -518,20 +518,23 @@ void FrameCache::purge(AssetId asset) {
     State &s = *state_;
     std::vector<PixelBuffer> dead;
     Locked lock(s, dead);
-    auto a = s.assets.find(asset);
-    if (a == s.assets.end()) {
-        return;
-    }
-    for (auto &[key, entry] : a->second.entries) {
-        s.stats.bytes -= entry.frame.bytes;
-        --s.stats.count;
-        if (entry.pins > 0) {
-            s.stats.pinnedBytes -= entry.frame.bytes;
-            --s.stats.pinnedCount;
+    // Every decode format of the asset.
+    for (auto a = s.assets.begin(); a != s.assets.end();) {
+        if (a->first.asset != asset) {
+            ++a;
+            continue;
         }
-        s.graveyard.push_back(std::move(entry.frame.image));
+        for (auto &[key, entry] : a->second.entries) {
+            s.stats.bytes -= entry.frame.bytes;
+            --s.stats.count;
+            if (entry.pins > 0) {
+                s.stats.pinnedBytes -= entry.frame.bytes;
+                --s.stats.pinnedCount;
+            }
+            s.graveyard.push_back(std::move(entry.frame.image));
+        }
+        a = s.assets.erase(a);
     }
-    s.assets.erase(a);
 }
 
 void FrameCache::purgeAll() {

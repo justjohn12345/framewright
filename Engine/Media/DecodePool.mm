@@ -450,6 +450,14 @@ CMTime DecodePool::lookahead() const {
     return lookahead_;
 }
 
+DecodeFormat DecodePool::decodeFormat() const {
+    return decodeFormatOf(config_.decodeOptions); // config_ never changes after construction
+}
+
+FrameKey DecodePool::frameKey(AssetId asset) const {
+    return FrameKey{asset, decodeFormat()};
+}
+
 void DecodePool::ensureWorkers() {
     const size_t wanted = std::min(static_cast<size_t>(config_.maxThreads), streams_.size());
     while (workers_.size() < wanted) {
@@ -568,7 +576,7 @@ bool DecodePool::publishStreamFrame(const Stream &s, const std::shared_ptr<Asset
     if (s.removed || slot->retired || slot->epoch != epoch_) {
         return false;
     }
-    return cache_->put(slot->epoch, s.key.asset, f, frameDuration, coverFrom);
+    return cache_->put(slot->epoch, frameKey(s.key.asset), f, frameDuration, coverFrom);
 }
 
 CMTime DecodePool::effectiveWindow(const Stream &s, CMTime lookahead, size_t streamCount) const {
@@ -787,7 +795,7 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
     // The frame under the playhead is decoded but gone from the cache (memory pressure,
     // purge): re-decode it, once per target position.
     auto lost = [&](CMTime at) {
-        return at < s.rangeEnd && !(isNumeric(s.repairedAt) && s.repairedAt == at) && !cache_->contains(asset, at);
+        return at < s.rangeEnd && !(isNumeric(s.repairedAt) && s.repairedAt == at) && !cache_->contains(frameKey(asset), at);
     };
 
     if (s.findingEnd && s.rangeValid && t >= s.rangeStart) {
@@ -996,7 +1004,7 @@ Result<ScrubFrame> DecodePool::serviceScrub(const ScrubKey &key, const std::shar
     const CMTime fd = track->kind == TrackKind::Still ? kCMTimeInvalid : track->frameDuration;
 
     if (FrameCache::PinnedFrame cached =
-            cache_->acquire(key.asset, track->kind == TrackKind::Still ? kCMTimeZero : time)) {
+            cache_->acquire(frameKey(key.asset), track->kind == TrackKind::Still ? kCMTimeZero : time)) {
         const FrameCache::Frame &hit = cached.frame();
         return ScrubFrame{hit.image, hit.pts, hit.duration, hit.index, true, std::move(cached)};
     }
@@ -1069,9 +1077,9 @@ Result<ScrubFrame> DecodePool::serviceScrub(const ScrubKey &key, const std::shar
             // The last frame holds for every later time (as the streams hold it at the end).
             VideoFrame held = f;
             held.duration = kCMTimePositiveInfinity;
-            pin = cache_->putPinned(slot->epoch, key.asset, held, fd, held.pts);
+            pin = cache_->putPinned(slot->epoch, frameKey(key.asset), held, fd, held.pts);
         } else {
-            pin = cache_->putPinned(slot->epoch, key.asset, f, fd, time < f.pts ? time : f.pts);
+            pin = cache_->putPinned(slot->epoch, frameKey(key.asset), f, fd, time < f.pts ? time : f.pts);
         }
     }
     return ScrubFrame{f.image, f.pts, f.duration, FrameCache::frameIndex(f.pts, fd), false, std::move(pin)};

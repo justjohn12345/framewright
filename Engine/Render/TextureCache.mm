@@ -56,6 +56,12 @@ bool layoutFor(OSType format, FormatLayout &out) {
     case kCVPixelFormatType_32BGRA:
         out = {SourceClass::RGBA, MTLPixelFormatBGRA8Unorm, MTLPixelFormatInvalid, 8, true};
         return true;
+    case kCVPixelFormatType_64RGBALE: // 'l64r', DecodeOptions::highPrecision
+        out = {SourceClass::RGBA, MTLPixelFormatRGBA16Unorm, MTLPixelFormatInvalid, 16, true};
+        return true;
+    case kCVPixelFormatType_64RGBAHalf: // 'RGhA', extended-range sRGB stills
+        out = {SourceClass::RGBA, MTLPixelFormatRGBA16Float, MTLPixelFormatInvalid, 16, true};
+        return true;
     case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
     case kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange:
     case kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange:

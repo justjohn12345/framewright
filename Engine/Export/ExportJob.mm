@@ -254,6 +254,8 @@ struct ExportJob::Run {
             media::DecodePool::Config config;
             config.lookahead = job.options_.decodeLookahead;
             config.budgetFraction = job.options_.poolBudgetFraction;
+            // Deep alpha, RGB and still sources keep their precision, as on the monitors.
+            config.decodeOptions.highPrecision = true;
             pool = std::make_shared<media::DecodePool>(services.router, services.cache, config);
             for (const MediaAsset &asset : project.assets) {
                 if (!asset.hasVideo()) {
@@ -331,7 +333,7 @@ struct ExportJob::Run {
                    ") cannot be exported: “" + displayName(*asset) + "” " + what;
         };
         for (;;) {
-            pin = cache.acquire(layer.assetId, pictureTime);
+            pin = cache.acquire(pool->frameKey(layer.assetId), pictureTime);
             if (pin) {
                 auto mapped = compositor->textureCache().textures(pin.image());
                 if (!mapped.ok()) {
@@ -354,7 +356,7 @@ struct ExportJob::Run {
             if (stream && (stream->idle || stream->failed)) {
                 // The step that settled the stream may have published the picture after the
                 // lookup above.
-                if (cache.contains(layer.assetId, pictureTime)) {
+                if (cache.contains(pool->frameKey(layer.assetId), pictureTime)) {
                     continue;
                 }
                 if (stream->failed || stream->error) {

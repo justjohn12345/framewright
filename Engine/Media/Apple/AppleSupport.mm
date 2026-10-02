@@ -345,10 +345,10 @@ VideoFormatDetails videoFormatDetails(CMFormatDescriptionRef format) {
     return d;
 }
 
-OSType nativePixelFormat(const VideoFormatDetails &d) {
+OSType nativePixelFormat(const VideoFormatDetails &d, bool highPrecision) {
     const bool full = d.color.fullRange;
     if (d.hasAlpha) {
-        return kCVPixelFormatType_32BGRA;
+        return highPrecision && d.bitDepth > 8 ? kHighPrecisionRGBAFormat : kCVPixelFormatType_32BGRA;
     }
     switch (d.chroma) {
     case ChromaSubsampling::C422:

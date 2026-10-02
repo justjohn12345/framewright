@@ -25,6 +25,12 @@ Result<std::optional<MediaInfo>> probeStillImage(const std::string &path);
 /// discard alpha (PNG overlays), subsample chroma (visible on graphics and text), and force a
 /// choice of matrix, all to produce one frame that the Metal compositor can sample directly
 /// as BGRA anyway. The cost difference for one frame is irrelevant.
-Result<PixelBuffer> decodeStillImage(const std::string &path, int maxDimension);
+///
+/// With `highPrecision` (DecodeOptions::highPrecision) an image whose decoded colour space is wide
+/// gamut (Display P3, Adobe RGB...) is drawn into 'RGhA' instead (half float, extended-range sRGB:
+/// colours outside sRGB become values below 0 or above 1, nothing is clipped; tagged as above), and
+/// one deeper than 8 bits per component in sRGB or a narrower space into 'l64r' (16-bit sRGB); both
+/// premultiplied. Other images give the same 32BGRA buffer as without it.
+Result<PixelBuffer> decodeStillImage(const std::string &path, int maxDimension, bool highPrecision);
 
 } // namespace ve::media::apple

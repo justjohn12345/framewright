@@ -77,6 +77,7 @@ const SourceProjectIds kSourceIds = [] {
         _onStatus = [onStatus copy];
         media::DecodePool::Config poolConfig;
         poolConfig.budgetFraction = config.poolBudgetShare;
+        poolConfig.decodeOptions.highPrecision = true; // deep alpha, RGB and still sources keep their precision
         _pool = std::make_shared<media::DecodePool>(_router, _frameCache, poolConfig);
         _provider = std::make_shared<ProgramFrameProvider>(_pool, config.scrubLaneBase);
         _time = kCMTimeZero;

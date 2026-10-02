@@ -341,6 +341,7 @@ bool pixelFormatHasAlpha(OSType format) {
     case kCVPixelFormatType_32RGBA:
     case kCVPixelFormatType_32ABGR:
     case kCVPixelFormatType_64ARGB:
+    case kCVPixelFormatType_64RGBALE:
     case kCVPixelFormatType_64RGBAHalf:
     case kCVPixelFormatType_128RGBAFloat:
     case kCVPixelFormatType_4444YpCbCrA8:

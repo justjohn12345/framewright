@@ -48,6 +48,14 @@
 // epoch only (entries of earlier epochs no longer exist). put() without an epoch inserts into
 // the current epoch (single-project users and tests).
 //
+// Decode formats (review media #7). Entries are keyed by FrameKey, the asset and the DecodeFormat
+// its frames were decoded with (DecodeOptions::pixelFormat, maxDimension, highPrecision): a frame
+// decoded as 8-bit 'BGRA' never answers a lookup for the same asset's 'l64r' frames, nor a
+// thumbnail-sized one a full-size lookup. Each producer puts, and each consumer looks up, with the
+// format of the decode pool it reads (DecodePool::decodeFormat()). An AssetId converts to the key
+// of the default format (DecodeOptions{}), as single-format users and tests use it. The focus,
+// purge() and epochs are per asset: they cover every format of it.
+//
 // Pinning (why, and why not a generation counter). PixelBuffer is ref-counted, so eviction can
 // never free a buffer someone is still using: correctness does not need pins. What eviction
 // CAN do to a frame that is being presented is (a) drop it from the cache while the render
@@ -80,6 +88,21 @@
 #include <vector>
 
 namespace ve::media {
+
+/// What frame cache entries are keyed by (see "Decode formats" above).
+struct FrameKey {
+    AssetId asset;
+    DecodeFormat format;
+
+    FrameKey() = default;
+    /// The asset's frames of `decodeFormat` (implicit from an AssetId: the default format).
+    FrameKey(AssetId assetId, DecodeFormat decodeFormat = {}) : asset(assetId), format(decodeFormat) {}
+
+    friend bool operator==(const FrameKey &, const FrameKey &) = default;
+    friend bool operator<(const FrameKey &a, const FrameKey &b) {
+        return a.asset != b.asset ? a.asset < b.asset : a.format < b.format;
+    }
+};
 
 enum class MemoryPressure {
     Normal,   ///< No action.
@@ -165,12 +188,12 @@ class FrameCache {
     /// (e.g. an infinite duration: the last frame held past the end of its stream, DecodePool.h)
     /// extends the kept entry to that end. Returns false if the frame was not retained: an empty
     /// image, a non-numeric pts, or a frame larger than the whole budget.
-    bool put(AssetId asset, const VideoFrame &frame, CMTime frameDuration, CMTime coverFrom = kCMTimeInvalid);
-    bool put(AssetId asset, PixelBuffer image, CMTime pts, CMTime duration, CMTime frameDuration,
+    bool put(const FrameKey &asset, const VideoFrame &frame, CMTime frameDuration, CMTime coverFrom = kCMTimeInvalid);
+    bool put(const FrameKey &asset, PixelBuffer image, CMTime pts, CMTime duration, CMTime frameDuration,
              CMTime coverFrom = kCMTimeInvalid);
     /// Like put(), for a frame decoded for `epoch`: refused (false, nothing changes) unless
     /// `epoch` is the current epoch. The check and the insertion are atomic with beginEpoch().
-    bool put(Epoch epoch, AssetId asset, const VideoFrame &frame, CMTime frameDuration,
+    bool put(Epoch epoch, const FrameKey &asset, const VideoFrame &frame, CMTime frameDuration,
              CMTime coverFrom = kCMTimeInvalid);
     /// Like put(epoch, ...), and pins the entry that holds the frame from now on (the one inserted,
     /// or the pinned entry kept at its pts) before the budget is enforced: a frame decoded because
@@ -178,24 +201,24 @@ class FrameCache {
     /// up, whatever the eviction order thinks of its place (the focus can still name where the
     /// playhead was before a jump). Not counted as a hit. An empty PinnedFrame when the frame was
     /// not retained (as put() returning false).
-    PinnedFrame putPinned(Epoch epoch, AssetId asset, const VideoFrame &frame, CMTime frameDuration,
+    PinnedFrame putPinned(Epoch epoch, const FrameKey &asset, const VideoFrame &frame, CMTime frameDuration,
                           CMTime coverFrom = kCMTimeInvalid);
 
     /// The entry showing at time `t` (marked recently used; counted as hit or miss).
-    std::optional<Frame> get(AssetId asset, CMTime t);
+    std::optional<Frame> get(const FrameKey &asset, CMTime t);
     /// The entry showing at the start of slot `index` (see header comment).
-    std::optional<Frame> get(AssetId asset, int64_t index);
+    std::optional<Frame> get(const FrameKey &asset, int64_t index);
     /// Like get() but pins the entry (see header comment). An empty PinnedFrame on a miss.
-    PinnedFrame acquire(AssetId asset, CMTime t);
-    PinnedFrame acquire(AssetId asset, int64_t index);
+    PinnedFrame acquire(const FrameKey &asset, CMTime t);
+    PinnedFrame acquire(const FrameKey &asset, int64_t index);
 
     /// Whether an entry answers `t` / slot `index`. Does not touch LRU order or statistics.
-    bool contains(AssetId asset, CMTime t) const;
-    bool contains(AssetId asset, int64_t index) const;
+    bool contains(const FrameKey &asset, CMTime t) const;
+    bool contains(const FrameKey &asset, int64_t index) const;
     /// Frame::index of every entry of `asset`, in pts order (diagnostics and tests).
-    std::vector<int64_t> indices(AssetId asset) const;
+    std::vector<int64_t> indices(const FrameKey &asset) const;
     /// pts of every entry of `asset`, ascending (diagnostics and tests).
-    std::vector<CMTime> presentationTimes(AssetId asset) const;
+    std::vector<CMTime> presentationTimes(const FrameKey &asset) const;
 
     // MARK: Eviction order, removal and budget
 
@@ -204,7 +227,7 @@ class FrameCache {
     void setFocus(FocusClient client, std::vector<Focus> focus);
     /// setFocus(0, focus): the default client.
     void setFocus(std::vector<Focus> focus);
-    /// Removes every entry of `asset` (pinned ones included; see header comment).
+    /// Removes every entry of `asset`, in every decode format (pinned ones included; see header comment).
     void purge(AssetId asset);
     void purgeAll();
     /// Evicts unpinned entries (in eviction order) until bytes <= `bytes`.
@@ -223,7 +246,7 @@ class FrameCache {
   private:
     /// `pinned`: when not null (and empty), receives a pin of the entry holding the frame, taken before
     /// eviction.
-    bool insert(std::optional<Epoch> epoch, AssetId asset, PixelBuffer image, CMTime pts, CMTime duration,
+    bool insert(std::optional<Epoch> epoch, const FrameKey &asset, PixelBuffer image, CMTime pts, CMTime duration,
                 CMTime frameDuration, CMTime coverFrom, PinnedFrame *pinned = nullptr);
 
     std::shared_ptr<State> state_;
@@ -248,7 +271,7 @@ class FrameCache::PinnedFrame {
   private:
     friend class FrameCache;
     std::weak_ptr<State> state_;
-    AssetId asset_;
+    FrameKey asset_;
     uint64_t serial_ = 0;
     Frame frame_;
 };

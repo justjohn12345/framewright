@@ -496,7 +496,7 @@ struct FFVideoDecoder::Impl {
         if (!decoded.ok()) {
             return std::move(decoded).error();
         }
-        auto image = renderStill(decoded.value(), opts.maxDimension);
+        auto image = renderStill(decoded.value(), opts.maxDimension, opts.highPrecision);
         if (!image.ok()) {
             return std::move(image).error();
         }
@@ -667,7 +667,8 @@ Status FFVideoDecoder::openImpl(const std::string &path, int trackIndex, const D
         }
         d.outFormat = options.pixelFormat;
     } else {
-        d.outFormat = nativePixelFormat(static_cast<AVPixelFormat>(par->format), d.info.color.fullRange);
+        d.outFormat = nativePixelFormat(static_cast<AVPixelFormat>(par->format), d.info.color.fullRange,
+                                       options.highPrecision);
     }
     int width = 0;
     int height = 0;
