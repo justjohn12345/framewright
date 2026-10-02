@@ -111,6 +111,9 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
         if (++(span.edge == ClipEdge::Head ? heads : tails) > 1) {
             return where + ": more than one transition at its " + nameOf(span.edge);
         }
+        if (auto problem = transitionParametersProblem(span.kind, span.parameters)) {
+            return where + ": transition " + std::to_string(span.id.value()) + ": " + *problem;
+        }
     }
     for (const EffectSpan &span : clip.spans) {
         if (span.lane == kTransitionLane) {
@@ -286,7 +289,7 @@ std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const
                                                    const TransitionSpan &span, CMTime frameDuration) {
     using K = TransitionIssueKind;
     const std::string where = "transition " + std::to_string(span.id.value());
-    if (track.kind == TrackKind::Audio && span.kind != TransitionKind::CrossDissolve) {
+    if (!transitionKindFitsTrack(span.kind, track.kind)) {
         return TransitionIssue{K::Structure, where + ": an audio transition is a crossfade or a fade, not a " +
                                                  displayNameOf(span.kind)};
     }

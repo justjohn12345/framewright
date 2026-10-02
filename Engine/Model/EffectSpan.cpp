@@ -193,7 +193,8 @@ bool operator==(const EffectSpan &a, const EffectSpan &b) {
 
 bool operator==(const TransitionSpan &a, const TransitionSpan &b) {
     return a.id == b.id && a.edge == b.edge && identical(a.start, b.start) && identical(a.end, b.end) &&
-           a.kind == b.kind && a.unknownKindName == b.unknownKindName && a.foreignFields == b.foreignFields;
+           a.kind == b.kind && a.unknownKindName == b.unknownKindName && a.parameters == b.parameters &&
+           a.foreignParameters == b.foreignParameters && a.foreignFields == b.foreignFields;
 }
 
 namespace {

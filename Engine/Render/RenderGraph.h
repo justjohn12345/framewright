@@ -18,10 +18,11 @@
 
 namespace ve {
 
-// The half width, in sequence pixels, of the soft edge of a shaped transition (a wipe or the iris):
-// at one instant the reveal goes from 0 to 1 across 2 * kTransitionFeather pixels, so the edge is
-// anti-aliased without looking blurred at any frame size.
-inline constexpr double kTransitionFeather = 2.0;
+// The default half width, in sequence pixels, of the soft edge of a shaped transition (a wipe or the
+// iris): at one instant the reveal goes from 0 to 1 across 2 * kTransitionFeather pixels, so the edge is
+// anti-aliased without looking blurred at any frame size. A span's Softness parameter sets its own
+// (TransitionParameter::Softness, LayerTransition::softness); f below is that value.
+inline constexpr double kTransitionFeather = kDefaultTransitionSoftness;
 
 // The reveal m of a shaped transition (TransitionKind other than CrossDissolve) at the sequence
 // position (x, y) (pixels, origin top left, +y down) of a W x H frame: the share of the incoming picture
@@ -90,6 +91,9 @@ struct LayerTransition {
     // Cross dissolve: whether this layer is the incoming clip. Fades: true for a fade in (the
     // picture appears as mix grows), false for a fade out.
     bool isIncoming = false;
+    // A shaped kind's soft edge half width f in sequence pixels (the span's Softness, by default
+    // kTransitionFeather); unused by the cross dissolve.
+    double softness = kTransitionFeather;
     ClipId partnerClipId; // invalid for a fade
     std::size_t partnerLayerIndex = 0;
 

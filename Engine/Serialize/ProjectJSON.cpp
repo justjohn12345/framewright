@@ -2,6 +2,7 @@
 
 #include "JsonNode.h"
 #include "ProjectMigrations.h"
+#include "TransitionValueJSON.h"
 
 #include "../Model/Validation.h"
 
@@ -90,6 +91,17 @@ json spanToJson(const TransitionSpan &span) {
            {"end", timeToJson(span.end)},
            {"edge", nameOf(span.edge)},
            {"transition", span.unknownKindName.empty() ? std::string(nameOf(span.kind)) : span.unknownKindName}};
+    // The parameters it sets, and the entries of the file's "parameters" this version does not read.
+    json parameters = json::object();
+    for (const TransitionParameter parameter : kTransitionParameters) {
+        if (const auto &value = span.parameters[parameter]) {
+            parameters[nameOf(parameter)] = serialize::transitionValueToJson(infoOf(parameter), *value);
+        }
+    }
+    addForeignKeys(parameters, foreignObject(span.foreignParameters));
+    if (!parameters.empty()) {
+        j["parameters"] = std::move(parameters);
+    }
     // What a newer version wrote that this one does not read goes back as it came (review core #9).
     addForeignKeys(j, foreignObject(span.foreignFields));
     return j;
@@ -321,7 +333,7 @@ ClipEdge parseClipEdge(const Node &node) {
 
 // The keys of a span's JSON object this version reads, per kind of span; every other key is kept as
 // foreign content (TransitionSpan::foreignFields, ForeignSpanContent::fields): those of every span,
-// and "edge" and "transition" of a transition or "tracks" of a known effect span.
+// and "edge", "transition" and "parameters" of a transition or "tracks" of a known effect span.
 enum class SpanKeys { Transition, Effect, Unknown };
 bool isKnownSpanKey(const std::string &key, SpanKeys keys) {
     if (key == "id" || key == "lane" || key == "kind" || key == "start" || key == "end") {
@@ -329,7 +341,7 @@ bool isKnownSpanKey(const std::string &key, SpanKeys keys) {
     }
     switch (keys) {
     case SpanKeys::Transition:
-        return key == "edge" || key == "transition";
+        return key == "edge" || key == "transition" || key == "parameters";
     case SpanKeys::Effect:
         return key == "tracks";
     case SpanKeys::Unknown:
@@ -385,6 +397,37 @@ TransitionSpan parseTransitionSpan(const Node &node, Warnings &warnings) {
                                "\" (from a newer version of Framewright?); shown as a cross dissolve and saved as \"" +
                                name + "\"");
         }
+    }
+    if (node.has("parameters")) {
+        const Node parametersNode = node.field("parameters");
+        parametersNode.requireObject();
+        json foreign = json::object();
+        for (const auto &entry : parametersNode.value().items()) {
+            const std::string &key = entry.key();
+            const auto parameter = transitionParameterNamed(key);
+            if (!span.unknownKindName.empty()) {
+                foreign[key] = entry.value(); // a kind this version does not know: all of them are its own
+                continue;
+            }
+            const Node valueNode(entry.value(), parametersNode.path() + "." + key);
+            if (!parameter) {
+                foreign[key] = entry.value();
+                warnings.push_back(valueNode.path() + ": unknown transition parameter \"" + key +
+                                   "\" (from a newer version of Framewright?); kept as it is and saved with the "
+                                   "project, but not played or editable");
+                continue;
+            }
+            if (const auto value = serialize::transitionValueFromJson(infoOf(*parameter), valueNode)) {
+                span.parameters[*parameter] = *value;
+            } else {
+                foreign[key] = entry.value();
+                warnings.push_back(valueNode.path() + ": unknown choice " + entry.value().dump() + " of " +
+                                   displayNameOf(*parameter) +
+                                   " (from a newer version of Framewright?); kept as it is and saved with the project, "
+                                   "and the default played");
+            }
+        }
+        span.foreignParameters = foreignText(foreign);
     }
     return span;
 }
@@ -758,10 +801,24 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
                             warnings.push_back(spanWhere + ": a transition lies on lane 0, found lane " +
                                                std::to_string(entry.lane) + "; moved to lane 0");
                         }
-                        if (track.kind == TrackKind::Audio && transition.kind != TransitionKind::CrossDissolve) {
+                        if (!transitionKindFitsTrack(transition.kind, track.kind)) {
+                            // The parameters a cross dissolve does not have go with the kind (its foreign
+                            // ones stay: they never make the file invalid).
+                            const TransitionParameters kept =
+                                parametersKeptBy(TransitionKind::CrossDissolve, transition.parameters);
+                            std::string droppedParameters;
+                            for (const TransitionParameter parameter : kTransitionParameters) {
+                                if (transition.parameters[parameter] && !kept[parameter]) {
+                                    droppedParameters +=
+                                        std::string(droppedParameters.empty() ? "" : ", ") + displayNameOf(parameter);
+                                }
+                            }
+                            const std::string without =
+                                droppedParameters.empty() ? "" : " (without its " + droppedParameters + ")";
                             warnings.push_back(spanWhere + ": an audio transition is a crossfade or a fade, not \"" +
-                                               nameOf(transition.kind) + "\"; using a cross dissolve");
+                                               nameOf(transition.kind) + "\"; using a cross dissolve" + without);
                             transition.kind = TransitionKind::CrossDissolve;
+                            transition.parameters = kept;
                         }
                         continue;
                     }

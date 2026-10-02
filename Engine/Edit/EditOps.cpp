@@ -2218,13 +2218,18 @@ EditResult SetTransitionKind::perform(const Project &project, Sequence &sequence
     if (EditResult r = requireEditableTrack(track, track->id); !r) {
         return r;
     }
-    if (track->kind != TrackKind::Video) {
-        if (kind_ == TransitionKind::CrossDissolve) {
-            return EditResult::success(); // what every audio transition is: nothing to change (review L9)
-        }
+    if (!transitionKindFitsTrack(kind_, track->kind)) {
         return EditResult::failure(EditError::TrackKindMismatch,
                                    std::string("An audio transition is a crossfade or a fade; it cannot be a ") +
                                        displayNameOf(kind_) + ".");
+    }
+    if (track->kind != TrackKind::Video) {
+        return EditResult::success(); // what every audio transition is: nothing to change (review L9)
+    }
+    if (kind_ != span->kind || !span->unknownKindName.empty()) {
+        // Another kind keeps the parameters it has; the foreign ones described the kind it replaces.
+        span->parameters = parametersKeptBy(kind_, span->parameters);
+        span->foreignParameters.clear();
     }
     span->kind = kind_;
     span->unknownKindName.clear(); // a kind chosen replaces one from a newer version's file

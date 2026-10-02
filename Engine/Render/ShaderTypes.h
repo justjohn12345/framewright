@@ -107,7 +107,8 @@ struct VETransitionUniforms {
     // (transitionReveal); zero for a dissolve.
     float progressStart;
     float progressEnd;
-    // The soft edge's half width f in sequence pixels (kTransitionFeather); zero for a dissolve.
+    // The soft edge's half width f in sequence pixels (LayerTransition::softness, by default
+    // kTransitionFeather); zero for a dissolve.
     float feather;
     // The VETransitionShape.
     VEInt shape;

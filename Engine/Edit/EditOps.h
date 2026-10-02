@@ -734,7 +734,9 @@ class SetTransitionRanges final : public SequenceCommand {
 // Sets the kind of a video transition span (Transition.h: a cross dissolve, a wipe or the iris),
 // whatever its role: across a cut, or a fade to or from black at a free edge. Its range, its role and
 // its linked audio transition are unchanged (audio has no kinds: a crossfade or a fade). A kind
-// from a newer version's file (TransitionSpan::unknownKindName) is replaced. Refused:
+// from a newer version's file (TransitionSpan::unknownKindName) is replaced. Another kind keeps the
+// parameter values it has (TransitionKindInfo::parameters: a wipe's softness carries over to the
+// iris) and drops the others and the foreign ones (TransitionSpan::foreignParameters). Refused:
 // TransitionNotFound (no transition span with that id, an effect span's id included),
 // TrackKindMismatch (a wipe or the iris on an audio track; Cross Dissolve, what every audio
 // transition is, succeeds and changes nothing, review L9), TrackLocked. Giving it the kind it has

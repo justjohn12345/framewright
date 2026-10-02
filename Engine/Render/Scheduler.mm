@@ -92,6 +92,7 @@ LayerTransition makeTransition(const TransitionPlacement &placement, CMTime t, C
     transition.progressStart = frameFraction(placement.range, t, frameDuration, startStep);
     transition.progressEnd = frameFraction(placement.range, t, frameDuration, endStep);
     transition.isIncoming = incoming;
+    transition.softness = placement.span->parameters.valueOf(TransitionParameter::Softness).components[0];
     transition.partnerClipId = partner;
     transition.partnerLayerIndex = partnerIndex;
     return transition;

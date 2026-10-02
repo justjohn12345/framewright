@@ -218,19 +218,19 @@ void fillSource(VESourceUniforms &u, const TextureSet &textures, const SourceBin
 // Whether the layer's transition is a shaped one (a wipe or the iris): drawn with the per-pixel
 // reveal instead of a uniform weight (RenderGraph.h).
 bool isShaped(const VideoLayer &layer) {
-    return layer.transition && layer.transition->kind != TransitionKind::CrossDissolve;
+    return layer.transition && isShapedTransition(layer.transition->kind);
 }
 
-// Whether `transition` is an iris closing on the picture (the FadeOut role of the Iris kind): the picture
-// stays inside a disc shrinking to the centre, the opening iris run backwards (RenderGraph.h).
+// Whether `transition` is an iris closing on the picture (the FadeOut role of a Radial kind, the iris):
+// the picture stays inside a disc shrinking to the centre, the opening iris run backwards (RenderGraph.h).
 bool isClosingIris(const LayerTransition &transition) {
-    return transition.kind == TransitionKind::Iris && transition.role == TransitionRole::FadeOut;
+    return infoOf(transition.kind).mask == TransitionMask::Radial && transition.role == TransitionRole::FadeOut;
 }
 
 // The transition uniforms of a draw of `transition` (VETransitionUniforms). The mix at the frame's centre;
 // for a shape, the frame's exposure interval [progressStart, progressEnd] (the instant at the mix when the
 // interval is not set), mirrored to [1 - progressEnd, 1 - progressStart] for a closing iris (the opening
-// iris's interval whose reveal is the picture's share), the shape and the soft edge, and for a layer
+// iris's interval whose reveal is the picture's share), the shape and the soft edge (its softness), and for a layer
 // drawn alone whether its picture is the revealed one: shown times the reveal m where it is the incoming
 // side (a fade in, or a closing iris over its mirrored interval), times 1 - m otherwise. Everything but
 // the mix is zero for a dissolve, whose draws are unchanged.
@@ -238,7 +238,7 @@ VETransitionUniforms transitionUniforms(const LayerTransition &transition, bool 
     VETransitionUniforms u{};
     const double mix = std::clamp(transition.mix, 0.0, 1.0);
     u.mix = float(mix);
-    if (transition.kind == TransitionKind::CrossDissolve) {
+    if (!isShapedTransition(transition.kind)) {
         return u;
     }
     double start = transition.progressStart;
@@ -255,7 +255,7 @@ VETransitionUniforms transitionUniforms(const LayerTransition &transition, bool 
     }
     u.progressStart = float(start);
     u.progressEnd = float(end);
-    u.feather = float(kTransitionFeather);
+    u.feather = float(transition.softness);
     u.shape = VEInt(transition.kind);
     const bool pictureIsRevealed = transition.isIncoming || isClosingIris(transition);
     u.incoming = drawnAlone && pictureIsRevealed ? 1u : 0u;

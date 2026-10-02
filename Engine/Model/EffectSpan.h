@@ -268,7 +268,7 @@ bool operator==(const EffectSpan &a, const EffectSpan &b);
 // in sequence time from the edge it is attached to, because a transition stays on its cut and on the
 // frame grid whatever the clip's speed: a tail span covers [clip end + start, clip end + end]
 // (start <= 0 <= end), a head span [clip start, clip start + end] (start == 0 < end). It has no
-// keyframes; its kind's parameters will be its own (grading decision, section 8).
+// keyframes: its kind's parameters (Transition.h, TransitionKindInfo::parameters) have static values.
 struct TransitionSpan {
     // Every transition lies on lane 0.
     static constexpr int lane = kTransitionLane;
@@ -283,6 +283,14 @@ struct TransitionSpan {
     // renders and edits as `kind` (CrossDissolve); choosing a kind (SetTransitionKind) replaces it.
     // Empty otherwise.
     std::string unknownKindName;
+    // The parameter values it sets (only its kind's); the others have their defaults. None for a kind
+    // from a newer version's file (unknownKindName), whose parameters are all foreign.
+    TransitionParameters parameters;
+    // The entries of the file's "parameters" this version does not read (unknown names; all of them
+    // for a kind it does not know), as compact JSON text of an object, written back into "parameters"
+    // on save ("" when there are none). Choosing another kind (SetTransitionKind) drops them, with
+    // the parameters the new kind does not have.
+    std::string foreignParameters;
     // The keys of the span's JSON object this version does not read (a newer version's), as compact
     // JSON text of an object, written back on save ("" when there are none; review core #9).
     std::string foreignFields;

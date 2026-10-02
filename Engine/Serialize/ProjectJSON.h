@@ -15,7 +15,9 @@
 // (left out when empty) lists its spans in one list, its transitions (Clip::transitions, lane 0) then
 // its effect spans (EffectSpan.h): {"id", "lane", "kind": "transition"
 // | "motion" | "opacity" | "gain", "start", "end"} plus, for a transition, "edge": "head" | "tail"
-// and "transition": "crossDissolve" | "wipeLeft" | "wipeRight" | "wipeUp" | "wipeDown" | "iris", and
+// and "transition": "crossDissolve" | "wipeLeft" | "wipeRight" | "wipeUp" | "wipeDown" | "iris" and
+// "parameters": {"softness": number} (the static values it sets of its kind's parameters, Transition.h;
+// left out when none; forms in TransitionValueJSON.h), and
 // for an effect span "tracks": {"x" | "y" | "scale" |
 // "rotation" | "opacity" | "gain": [{"time" (relative to the span's start), "value",
 // "interpolation": "hold" | "linear" | "easeOut" | "easeIn" | "easeInOut" | "bezier", "curve":
@@ -23,9 +25,10 @@
 // lower-camel strings. Round trips are lossless: projectFromJson(projectToJson(p)) == p bit for
 // bit. Unknown fields are ignored so newer minor additions do not break loading, except in spans:
 // what a newer version wrote there (a span of an unknown kind on an effect lane, a track of an
-// unknown parameter, any other unknown key) is kept on the model as it was read (EffectSpan.h,
-// ForeignSpanContent) and written back on save, so an older build does not strip a newer one's
-// spans; unknown kinds and parameters are reported as warnings. A span of an unknown kind on lane 0,
+// unknown parameter, a transition parameter of an unknown name or choice, any other unknown key) is
+// kept on the model as it was read (EffectSpan.h, ForeignSpanContent, TransitionSpan) and written back
+// on save, so an older build does not strip a newer one's spans; unknown kinds and parameters are
+// reported as warnings. A span of an unknown kind on lane 0,
 // or one outside its clip's source range, is dropped with a warning.
 //
 // Older files are upgraded on load by migrateProjectJson, one schema version at a time. Loading

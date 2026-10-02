@@ -40,7 +40,7 @@ EditError refusalError(const TransitionLimit &limit) {
 }
 
 TransitionKind transitionKindOnTrack(TrackKind trackKind, TransitionKind requested) {
-    return trackKind == TrackKind::Video ? requested : TransitionKind::CrossDissolve;
+    return transitionKindFitsTrack(requested, trackKind) ? requested : TransitionKind::CrossDissolve;
 }
 
 const char *fadeTargetName(TrackKind trackKind) {
