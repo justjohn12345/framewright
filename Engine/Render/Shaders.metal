@@ -255,6 +255,29 @@ kernel void ve_unsharp(texture2d<float, access::read> source [[texture(VETexture
     }
 }
 
+// MARK: - Monitor output (RGBA16Float working texture -> texture target)
+
+struct VEOutputVertexOut {
+    float4 position [[position]];
+};
+
+// One triangle covering the whole target (vertices at (-1, -1), (3, -1) and (-1, 3) in clip space).
+vertex VEOutputVertexOut ve_output_vertex(uint vertexID [[vertex_id]]) {
+    const float2 p = float2((vertexID << 1) & 2, vertexID & 2);
+    VEOutputVertexOut out;
+    out.position = float4(p * 2.0 - 1.0, 0.0, 1.0);
+    return out;
+}
+
+// The working texture's pixel under each target pixel (both have the target's pixel grid: the working
+// texture may be larger, the frame lies in its top-left corner), limited to [0, 1] as ve_convert_to_bgra
+// limits the export's, and opaque (the composite is cleared to opaque black).
+fragment float4 ve_output_fragment(VEOutputVertexOut in [[stage_in]],
+                                   texture2d<float, access::read> working [[texture(VETextureIndexWorking)]]) {
+    const float4 c = working.read(uint2(in.position.xy));
+    return float4(saturate(c.rgb), 1.0);
+}
+
 // MARK: - Export conversion (RGBA16Float composite -> target pixel buffer planes)
 
 kernel void ve_convert_to_bgra(texture2d<float, access::read> composite [[texture(VETextureIndexComposite)]],

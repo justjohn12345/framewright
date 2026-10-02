@@ -46,6 +46,8 @@ enum VETextureIndex {
     // Unsharp mask of a pre-scaled plane.
     VETextureIndexUnsharpSource = 0,      // the Lanczos output (read)
     VETextureIndexUnsharpDestination = 1, // the sharpened plane (write)
+    // Output pass of a texture target (a monitor): the RGBA16Float working texture (read).
+    VETextureIndexWorking = 0,
 };
 
 // Function constants that specialise the fragment function (one pipeline per combination).

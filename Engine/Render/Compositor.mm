@@ -410,6 +410,14 @@ struct Compositor::Impl {
 
     id<MTLTexture> intermediate = nil;
 
+    // Texture targets: the working texture (RGBA16Float, at least the target's size, the frame in its
+    // top-left corner) and the output pass that writes the target from it, one pipeline per format.
+    id<MTLFunction> outputVertexFunction = nil;
+    id<MTLFunction> outputFragmentFunction = nil;
+    std::vector<std::pair<MTLPixelFormat, id<MTLRenderPipelineState>>> outputPipelines;
+    id<MTLTexture> working = nil;
+    std::size_t workingAllocations = 0; // working textures ever allocated (Stats)
+
     // Per-frame scratch, reused (capacity kept) across frames.
     std::vector<TextureSet> resolved;
     std::vector<char> drawn;
@@ -663,6 +671,57 @@ struct Compositor::Impl {
         return media::okStatus();
     }
 
+    // The output pass's pipeline for a texture target of `format`.
+    Result<id<MTLRenderPipelineState>> outputPipeline(MTLPixelFormat format) {
+        for (const auto &entry : outputPipelines) {
+            if (entry.first == format) {
+                return entry.second;
+            }
+        }
+        MTLRenderPipelineDescriptor *desc = [MTLRenderPipelineDescriptor new];
+        desc.label = @"Framewright output";
+        desc.vertexFunction = outputVertexFunction;
+        desc.fragmentFunction = outputFragmentFunction;
+        desc.colorAttachments[0].pixelFormat = format;
+        NSError *error = nil;
+        id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (state == nil) {
+            return makeError(MediaErrorCode::Internal, "Compositor: cannot create the output pipeline for pixel format " +
+                                                           std::to_string(static_cast<unsigned long>(format)) + ": " +
+                                                           nsErrorText(error));
+        }
+        outputPipelines.emplace_back(format, state);
+        return state;
+    }
+
+    // A working texture for a `width` x `height` texture target. Its size is rounded up in the
+    // pre-scale pool's steps (quantizeScratchSize), so a live resize of a monitor reuses it; a
+    // target in another step gets a new one (the previous one lives on in frames still on the GPU).
+    Status ensureWorking(std::size_t width, std::size_t height) {
+        // Metal's largest 2D texture on Apple silicon (a target texture cannot be larger).
+        constexpr std::size_t kMaxSide = 16384;
+        const std::size_t w = quantizeScratchSize(double(width), kMaxSide);
+        const std::size_t h = quantizeScratchSize(double(height), kMaxSide);
+        if (working != nil && working.width == w && working.height == h) {
+            return media::okStatus();
+        }
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kIntermediateFormat
+                                                                                        width:w
+                                                                                       height:h
+                                                                                    mipmapped:NO];
+        desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        desc.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+        if (texture == nil) {
+            return makeError(MediaErrorCode::Internal, "Compositor: cannot allocate the " + std::to_string(w) + "x" +
+                                                           std::to_string(h) + " working texture");
+        }
+        texture.label = @"Framewright working frame";
+        working = texture;
+        ++workingAllocations;
+        return media::okStatus();
+    }
+
     Status ensureCapacity(Slot &slot, std::size_t draws) {
         if (slot.uniforms != nil && slot.drawCapacity >= draws) {
             return media::okStatus();
@@ -859,11 +918,14 @@ Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device,
         return makeError(MediaErrorCode::Internal, "Compositor: cannot load the engine Metal library: " + nsErrorText(error));
     }
     impl->vertexFunction = [impl->library newFunctionWithName:@"ve_layer_vertex"];
+    impl->outputVertexFunction = [impl->library newFunctionWithName:@"ve_output_vertex"];
+    impl->outputFragmentFunction = [impl->library newFunctionWithName:@"ve_output_fragment"];
     id<MTLFunction> bgra = [impl->library newFunctionWithName:@"ve_convert_to_bgra"];
     id<MTLFunction> yuv = [impl->library newFunctionWithName:@"ve_convert_to_420"];
     id<MTLFunction> premultiply = [impl->library newFunctionWithName:@"ve_premultiply"];
     id<MTLFunction> unsharp = [impl->library newFunctionWithName:@"ve_unsharp"];
-    if (impl->vertexFunction == nil || bgra == nil || yuv == nil || premultiply == nil || unsharp == nil) {
+    if (impl->vertexFunction == nil || impl->outputVertexFunction == nil || impl->outputFragmentFunction == nil ||
+        bgra == nil || yuv == nil || premultiply == nil || unsharp == nil) {
         return makeError(MediaErrorCode::Internal, "Compositor: shader functions missing from default.metallib");
     }
     impl->convertBGRA = [device newComputePipelineStateWithFunction:bgra error:&error];
@@ -894,10 +956,11 @@ Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device,
     }
     impl->textureCache = std::move(cache).value();
 
+    // Every target is composited in kIntermediateFormat; a prepared format also gets its output pass.
     impl->pipelines.reserve(32);
-    for (MTLPixelFormat format : preparedFormats) {
+    if (preparedFormats.size() > 0) {
         for (int bits = 0; bits < 8; ++bits) {
-            PipelineKey key{(bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0, format};
+            PipelineKey key{(bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0, kIntermediateFormat};
             if (!key.hasPartner && key.bIsYCbCr) {
                 continue;
             }
@@ -905,6 +968,12 @@ Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device,
             if (!state.ok()) {
                 return std::move(state).error();
             }
+        }
+    }
+    for (MTLPixelFormat format : preparedFormats) {
+        auto state = impl->outputPipeline(format);
+        if (!state.ok()) {
+            return std::move(state).error();
         }
     }
     for (Impl::Slot &slot : impl->slots) {
@@ -932,22 +1001,39 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         return makeError(MediaErrorCode::InvalidArgument, "Compositor: render graph has layers but no frame size");
     }
 
-    // Resolve the colour attachment and the sequence viewport inside it.
+    // Resolve the colour attachment (the working texture, the export intermediate, or for
+    // compositeDirectlyForTesting the target itself) and the sequence viewport inside it.
     id<MTLTexture> colorTexture = nil;
     PixelRect viewport;
+    std::int32_t targetWidth = 0;
+    std::int32_t targetHeight = 0;
     const PixelBuffer *targetBuffer = nullptr;
-    if (const auto *tt = std::get_if<TextureTarget>(&target)) {
-        colorTexture = tt->texture;
-        if (colorTexture == nil) {
+    const TextureTarget *textureTarget = std::get_if<TextureTarget>(&target);
+    id<MTLRenderPipelineState> outputState = nil; // texture targets through the working texture
+    if (textureTarget != nullptr) {
+        id<MTLTexture> targetTexture = textureTarget->texture;
+        if (targetTexture == nil) {
             return makeError(MediaErrorCode::InvalidArgument, "Compositor: texture target has no texture");
         }
-        if ((colorTexture.usage & MTLTextureUsageRenderTarget) == 0) {
+        if ((targetTexture.usage & MTLTextureUsageRenderTarget) == 0) {
             return makeError(MediaErrorCode::InvalidArgument, "Compositor: target texture lacks RenderTarget usage");
         }
-        viewport = tt->viewport;
+        targetWidth = static_cast<std::int32_t>(targetTexture.width);
+        targetHeight = static_cast<std::int32_t>(targetTexture.height);
+        viewport = textureTarget->viewport;
         if (viewport.isEmpty()) {
-            viewport = fitRect(graph.width, graph.height, static_cast<std::int32_t>(colorTexture.width),
-                               static_cast<std::int32_t>(colorTexture.height));
+            viewport = fitRect(graph.width, graph.height, targetWidth, targetHeight);
+        }
+        if (textureTarget->compositeDirectlyForTesting) {
+            colorTexture = targetTexture;
+        } else {
+            auto state = im.outputPipeline(targetTexture.pixelFormat);
+            if (!state.ok()) {
+                return std::move(state).error();
+            }
+            outputState = state.value();
+            VE_MEDIA_TRY(im.ensureWorking(targetTexture.width, targetTexture.height));
+            colorTexture = im.working;
         }
     } else {
         targetBuffer = &std::get<PixelBufferTarget>(target).buffer;
@@ -961,8 +1047,9 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         }
         VE_MEDIA_TRY(im.ensureIntermediate(targetBuffer->width(), targetBuffer->height()));
         colorTexture = im.intermediate;
-        viewport = fitRect(graph.width, graph.height, static_cast<std::int32_t>(targetBuffer->width()),
-                           static_cast<std::int32_t>(targetBuffer->height()));
+        targetWidth = static_cast<std::int32_t>(targetBuffer->width());
+        targetHeight = static_cast<std::int32_t>(targetBuffer->height());
+        viewport = fitRect(graph.width, graph.height, targetWidth, targetHeight);
     }
 
     // Target pixels per sequence pixel (the viewport keeps the sequence aspect up to rounding).
@@ -1041,10 +1128,10 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         return abandon(makeError(MediaErrorCode::Internal, "Compositor: cannot create a render command encoder"));
     }
     encoder.label = @"Framewright layers";
-    // The viewport may reach outside the texture (a caller's viewport); the scissor rectangle
-    // must not, so it is the part of the viewport inside the texture.
-    const PixelRect scissor = clipRect(viewport, static_cast<std::int32_t>(colorTexture.width),
-                                       static_cast<std::int32_t>(colorTexture.height));
+    // The viewport may reach outside the target (a caller's viewport); the scissor rectangle
+    // must not, so it is the part of the viewport inside the target (the top-left target-sized
+    // region of a larger working texture).
+    const PixelRect scissor = clipRect(viewport, targetWidth, targetHeight);
     if (!im.items.empty() && !scissor.isEmpty()) {
         [encoder setViewport:(MTLViewport){double(viewport.x), double(viewport.y), double(viewport.width),
                                            double(viewport.height), 0.0, 1.0}];
@@ -1073,6 +1160,26 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         }
     }
     [encoder endEncoding];
+
+    if (outputState != nil) {
+        // A scope (or a test) reads the frame as blended, then the output pass writes the target.
+        if (textureTarget->workingFrameReader) {
+            textureTarget->workingFrameReader(commandBuffer, im.working);
+        }
+        MTLRenderPassDescriptor *output = [MTLRenderPassDescriptor renderPassDescriptor];
+        output.colorAttachments[0].texture = textureTarget->texture;
+        output.colorAttachments[0].loadAction = MTLLoadActionDontCare; // every pixel is written
+        output.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> outputEncoder = [commandBuffer renderCommandEncoderWithDescriptor:output];
+        if (outputEncoder == nil) {
+            return abandon(makeError(MediaErrorCode::Internal, "Compositor: cannot create the output render encoder"));
+        }
+        outputEncoder.label = @"Framewright output";
+        [outputEncoder setRenderPipelineState:outputState];
+        [outputEncoder setFragmentTexture:im.working atIndex:VETextureIndexWorking];
+        [outputEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [outputEncoder endEncoding];
+    }
 
     if (targetBuffer != nullptr) {
         const OSType format = targetBuffer->pixelFormat();
@@ -1129,8 +1236,8 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         slot.retained.push_back(std::move(outputPlanes));
     }
 
-    if (const auto *tt = std::get_if<TextureTarget>(&target); tt != nullptr && tt->drawable != nil) {
-        [commandBuffer presentDrawable:tt->drawable];
+    if (textureTarget != nullptr && textureTarget->drawable != nil) {
+        [commandBuffer presentDrawable:textureTarget->drawable];
     }
 
     // Fill the slot's result (the slot is ours until the completion handler gives it back).
@@ -1189,6 +1296,7 @@ void Compositor::releaseScratchMemory() {
     Impl &im = *impl_;
     im.scratch.clear();
     im.intermediate = nil;
+    im.working = nil;
     im.textureCache.flush();
 }
 
@@ -1198,6 +1306,12 @@ Compositor::Stats Compositor::stats() const {
     st.freeSlots = freeSlotCount();
     st.scratchTextures = im.scratch.size();
     st.scratchAllocations = im.scratchAllocations;
+    st.workingAllocations = im.workingAllocations;
+    if (im.working != nil) {
+        st.workingWidth = im.working.width;
+        st.workingHeight = im.working.height;
+        st.workingBytes = im.working.allocatedSize;
+    }
     for (const ScratchTexture &e : im.scratch) {
         st.scratchBytes += e.texture.allocatedSize;
     }

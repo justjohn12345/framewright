@@ -25,7 +25,9 @@ NS_ASSUME_NONNULL_BEGIN
 ///
 /// Output: the drawable is 10-bit (MTLPixelFormatBGR10A2Unorm, tagged ITU-R BT.709) so 10-bit
 /// sources, opacity and dissolves do not band; it costs the same 4 bytes per pixel as 8-bit
-/// BGRA. -snapshot returns 8-bit.
+/// BGRA. Each frame is composited into a 16-bit float working texture first (as the export
+/// composites), then written to the drawable; the view keeps that texture (8 bytes per pixel of the
+/// drawable) while it lives, or until -handleMemoryPressure. -snapshot returns 8-bit.
 ///
 /// The frame source is C++ and set by the engine (see Engine/Render/VEPreviewView+Internal.h):
 /// VEEngine -attachProgramView: installs a still-frame source for the frame at the playhead;
@@ -85,8 +87,8 @@ NS_SWIFT_UI_ACTOR
 /// retried instead and only reported here when retrying gives up.
 @property (atomic, readonly, nullable) NSError *lastError;
 
-/// Releases memory that is only a cache (pooled pre-scale textures, unused texture-cache
-/// entries). Call on memory pressure; the next frames re-create what they need.
+/// Releases memory that is only a cache (pooled pre-scale textures, the working texture, unused
+/// texture-cache entries). Call on memory pressure; the next frames re-create what they need.
 - (void)handleMemoryPressure;
 
 /// The last rendered frame at drawable size (letterbox included), or NULL if nothing has been

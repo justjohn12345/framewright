@@ -22,6 +22,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// failed.
 - (const ve::render::TextureCache *_Nullable)textureCache;
 
+/// Installs (or clears, with an empty function) a reader of every frame the view presents, as
+/// composited in the RGBA16Float working texture before the output pass writes the drawable: the
+/// place a scope will read the picture (grading decision, section 4). Called on the render thread
+/// while the frame is encoded; see ve::render::WorkingFrameReader for what it may do. Snapshots do not
+/// call it.
+- (void)setWorkingFrameReader:(ve::render::WorkingFrameReader)reader;
+
 // MARK: Diagnostics and tests
 
 /// Render requests and ticks that found every frame slot on the GPU (the frame was deferred).

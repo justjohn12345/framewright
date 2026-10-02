@@ -76,6 +76,7 @@ struct PreviewState {
 
     std::mutex hookMutex;
     id<CAMetalDrawable> (^drawableProvider)(CAMetalLayer *) = nil;
+    WorkingFrameReader workingFrameReader; // under hookMutex
 
     // The compositor waits for its in-flight frames, whose completions touch the members
     // below; destroy it first.
@@ -216,6 +217,12 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
     TextureTarget target;
     target.texture = drawable.texture;
     target.drawable = drawable;
+    {
+        std::lock_guard<std::mutex> hookLock(st.hookMutex);
+        if (st.workingFrameReader) {
+            target.workingFrameReader = st.workingFrameReader;
+        }
+    }
     PreviewState *raw = statePtr.get(); // the compositor (owned by the state) outlives its completions
     const PreviewFrame &frame = st.frame;
     auto lookup = [&frame](const VideoLayer &, std::size_t index, TextureSet &out) {
@@ -666,6 +673,11 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
 
 - (const TextureCache *)textureCache {
     return _state->compositor ? &_state->compositor->textureCache() : nullptr;
+}
+
+- (void)setWorkingFrameReader:(WorkingFrameReader)reader {
+    std::lock_guard<std::mutex> lock(_state->hookMutex);
+    _state->workingFrameReader = std::move(reader);
 }
 
 - (void)applyWindowVisible:(BOOL)visible {

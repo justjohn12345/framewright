@@ -9,9 +9,22 @@
 //      edge and the layer weight, and blends premultiplied (ONE, ONE_MINUS_SOURCE_ALPHA).
 //      The two layers of a cross dissolve are drawn in one pass as mix(A, B, mix) of their
 //      premultiplied samples, so a dissolve between (partly) transparent layers never dips.
-//   3. Pixel-buffer targets: the frame is composited into an RGBA16Float intermediate, then a
-//      compute pass writes the target's planes (BGRA, or 4:2:0 BT.709 YCbCr for 420v/420f and
-//      the 10-bit x420/xf20 with left-sited chroma, tagged as such).
+//   3. Every target is composited into an RGBA16Float intermediate, so the monitors blend at the
+//      export's precision (grading decision, 2026-10-01, section 4):
+//      - Pixel-buffer targets (export): a compute pass writes the target's planes (BGRA, or 4:2:0
+//        BT.709 YCbCr for 420v/420f and the 10-bit x420/xf20 with left-sited chroma, tagged as such).
+//      - Texture targets (the monitors' framebuffer-only BGR10A2 drawables, snapshots): the frame is
+//        composited into a pooled RGBA16Float working texture of at least the target's size (its
+//        top-left corner), then an output pass, a full-screen render pass, writes the target: each
+//        pixel limited to [0, 1] and opaque, as the export's conversion writes it. A
+//        WorkingFrameReader (TextureTarget) can read the working texture between the two passes, in
+//        the frame's command buffer: where scopes will read the frame as the monitors and the export
+//        blend it. Against compositing straight into a 10-bit target the pixels differ by at most one
+//        10-bit code: the GPU stores each blended value in half float rounding towards zero (less than
+//        one half-float step, about half a code above 0.5), and the output pass rounds that to 10 bits,
+//        so a sample is within a code of the exact composite (within half a code straight), as the
+//        export's intermediate already was. CompositorWorkingBufferTests measure it, and the GPU time:
+//        the extra pass adds 0.01-0.09 ms per 1080p frame and 0.06-0.09 ms per 2160p frame (M4 Pro).
 //
 // Chroma: YCbCr sources are sampled with their chroma plane offset for the buffer's chroma
 // siting (TextureCache.h), so left-sited H.264/HEVC chroma lines up with its luma.
@@ -94,8 +107,9 @@
 // luma plane shown at 1080p gains one 5x5 pass over the 1920x1080 pre-scaled plane, 0.61 -> 0.88 ms
 // of GPU time per frame.
 //
-// Resources: one render pipeline per (source A class, has partner, source B class, target
-// format), created lazily and cached (those for create()'s prepared formats up front).
+// Resources: one render pipeline per (source A class, has partner, source B class, composite
+// format: RGBA16Float, or a test's direct target) and one output pipeline per texture target
+// format, created lazily and cached (those for create()'s prepared formats up front).
 // Per-draw uniforms live in a triple-buffered ring of MTLBuffers (kFramesInFlight slots);
 // steady-state rendering makes no heap allocations of its own (Metal still creates its
 // command buffer and encoders per frame).
@@ -146,15 +160,35 @@ struct PixelRect {
 /// under 2 px: a 3832x2154 sequence fills a 1920x1080 export). Empty if any size is not positive.
 PixelRect fitRect(double sourceWidth, double sourceHeight, std::int32_t destWidth, std::int32_t destHeight);
 
+/// Reads the composited frame of a texture target before the output pass writes the target (see
+/// "Pipeline" above): called on the rendering thread while the frame is encoded, with the frame's command
+/// buffer and the RGBA16Float working texture, whose top-left target-sized region holds the frame (opaque,
+/// letterbox included, values as blended). It may encode passes that read the working texture into the
+/// command buffer (they run after the composite and before the output pass); it must not write the
+/// texture, commit the buffer or keep the texture beyond the frame (the next frame reuses it).
+using WorkingFrameReader = std::function<void(id<MTLCommandBuffer> commandBuffer, id<MTLTexture> working)>;
+
 /// Render into an existing texture (must have MTLTextureUsageRenderTarget, any
-/// colour-renderable pixel format). The sequence frame is drawn into `viewport` (an empty
-/// viewport means "fit the sequence aspect into the whole texture"; a viewport reaching outside
-/// the texture is clipped to it); the rest of the texture is cleared to black. If `drawable` is
-/// set it is presented when the frame completes.
+/// colour-renderable pixel format; a framebuffer-only drawable is fine). The sequence frame is drawn
+/// into `viewport` (an empty viewport means "fit the sequence aspect into the whole texture"; a
+/// viewport reaching outside the texture is clipped to it); the rest of the texture is cleared to
+/// black. The frame is composited into the RGBA16Float working texture and written to `texture` by
+/// the output pass. If `drawable` is set it is presented when the frame completes.
 struct TextureTarget {
+    TextureTarget() = default;
+    /// The three main fields, in order (`TextureTarget{texture, viewport, drawable}`).
+    TextureTarget(id<MTLTexture> target, PixelRect frameViewport = {}, id<MTLDrawable> presented = nil)
+        : texture(target), viewport(frameViewport), drawable(presented) {}
+
     id<MTLTexture> texture = nil;
     PixelRect viewport;
     id<MTLDrawable> drawable = nil;
+    /// Optional; see WorkingFrameReader.
+    WorkingFrameReader workingFrameReader;
+    /// Composite straight into `texture` with no working texture and no output pass (how texture
+    /// targets were drawn before the working buffer, 2026-10-01). Only for the tests that compare the
+    /// two paths' pixels and GPU time; `workingFrameReader` is not called.
+    bool compositeDirectlyForTesting = false;
 };
 
 /// Render into an IOSurface-backed CVPixelBuffer of format '32BGRA', '420v', '420f', or the 10-bit
@@ -218,9 +252,10 @@ class Compositor {
     static double sharpenAmountAt(double scale);
 
     /// Loads the engine's Metal library from the framework bundle and prepares the pipelines
-    /// for rendering into `preparedFormats` (pipelines for other target formats are built on
-    /// first use, which costs a few milliseconds on that frame). Pixel-buffer targets render
-    /// through an RGBA16Float intermediate.
+    /// for rendering into `preparedFormats`: the layer pipelines (every target composites into
+    /// RGBA16Float) and each format's output pass for texture targets (pipelines for other target
+    /// formats are built on first use, which costs a few milliseconds on that frame). Pixel-buffer
+    /// targets need only the layer pipelines (RGBA16Float in the default list).
     static media::Result<std::unique_ptr<Compositor>>
     create(id<MTLDevice> device,
            std::initializer_list<MTLPixelFormat> preparedFormats = {MTLPixelFormatBGRA8Unorm, MTLPixelFormatRGBA16Float});
@@ -250,9 +285,10 @@ class Compositor {
     /// for testing). Thread-safe.
     bool waitForFreeSlot(double timeoutSeconds) const;
 
-    /// Releases memory that is only a cache: pooled pre-scale textures, the export intermediate
-    /// and the texture cache's unused entries (frames on the GPU keep what they use). For memory
-    /// pressure; the next frames re-create what they need. Same thread as render().
+    /// Releases memory that is only a cache: pooled pre-scale textures, the export intermediate,
+    /// the texture targets' working texture and the texture cache's unused entries (frames on the
+    /// GPU keep what they use). For memory pressure; the next frames re-create what they need. Same
+    /// thread as render().
     void releaseScratchMemory();
 
     struct Stats {
@@ -260,6 +296,10 @@ class Compositor {
         std::size_t scratchTextures = 0; ///< Pooled pre-scale textures.
         std::size_t scratchBytes = 0;    ///< Their allocated size.
         std::size_t scratchAllocations = 0; ///< Pre-scale textures allocated since creation (a pool miss each).
+        std::size_t workingWidth = 0;    ///< The texture targets' working texture (0 when there is none).
+        std::size_t workingHeight = 0;
+        std::size_t workingBytes = 0;    ///< Its allocated size.
+        std::size_t workingAllocations = 0; ///< Working textures allocated since creation.
     };
     /// Same thread as render().
     Stats stats() const;
