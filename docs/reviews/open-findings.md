@@ -1324,6 +1324,27 @@ Done: every item of the brief (A1-A4, B1-B5).
 Not in this round (next): P3/BT.2020 primaries (a separate decision), HDR export, HLG tone mapping, grades that
 change over time, match colour.
 
+**Accepted by the lead 2026-10-02.** The lead's own full run at 950bf39, screen unlocked: EngineTests 629,
+doctest 439, AppTests 308 (1 known skip), 0 failures. That includes `WaveformPanelTests`, which had failed in
+the implementer's run only because the screen was locked. No existing golden changed, no session links or
+machine paths in the commits, and the wheels' power follows the section 2 rule (exp2/log2 only of v ≥ 2^-14,
+a straight line below). Colour grading slice 1 and the colour-panel fixes were accepted earlier the same day.
+
+## Where things stand (handover, 2026-10-02)
+- **Pushed:** `origin/main` is at 9127327 (the colour grading prerequisites). **Not pushed:** colour grading
+  slice 1, the colour-panel fixes, and scopes plus slice 2 (31 commits, 96e2cd5..950bf39 and the lead's docs
+  commit after them). The last release is 0.1.8 (18bb9fd); 0.1.9 has not been cut.
+- **Next, in the order the user has leaned towards:**
+  1. The user tries slice 1 and 2 by hand (lists in integration-notes).
+  2. Push and cut 0.1.9.
+  3. HLG display (tone map) and the P3/BT.2020 primaries decision.
+  4. The transition library and the Effects browser (plan items 28-29).
+  5. The safety-and-basics round from `docs/plans/2026-10-01-premiere-lite-feature-gap.md` (autosave, relink,
+     copy/paste, markers, Export Frame, meters, bins).
+- **Open small items:** the empty per-process directory each test run leaves at the app container's root; the
+  flaky `ExportParityTests testAReversedClipPlaysTheSoundTheExportWrites` and the `ExportJobTests` progress
+  pacing bound; the general review's groups 2-6 (`2026-10-01-general-code-review.md`).
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
