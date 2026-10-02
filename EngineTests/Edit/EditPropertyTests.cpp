@@ -230,10 +230,8 @@ class RandomEditor {
         for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
             for (const Track &track : fx_.sequence().tracks(kind)) {
                 for (const Clip &clip : track.clips) {
-                    for (const EffectSpan &span : clip.spans) {
-                        if (span.isTransition() == transitions) {
-                            ids.push_back(span.id);
-                        }
+                    for (const EffectSpan &span : transitions ? clip.transitions : clip.spans) {
+                        ids.push_back(span.id);
                     }
                 }
             }

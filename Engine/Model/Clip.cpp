@@ -146,7 +146,8 @@ bool operator==(const Clip &a, const Clip &b) {
            identical(a.timelineStart, b.timelineStart) && identical(a.timelineDuration, b.timelineDuration) &&
            identical(a.sourceIn, b.sourceIn) && a.speed == b.speed && a.isStill == b.isStill &&
            a.reversed == b.reversed &&
-           a.linkedClipId == b.linkedClipId && a.video == b.video && a.audio == b.audio && a.spans == b.spans;
+           a.linkedClipId == b.linkedClipId && a.video == b.video && a.audio == b.audio && a.transitions == b.transitions &&
+           a.spans == b.spans;
 }
 
 std::optional<ExactTime> Clip::exactSourceTimeAt(CMTime t) const {
@@ -272,9 +273,6 @@ RetimeResult Clip::setTimelineStartKeepingEnd(CMTime newStart) {
             return RetimeResult::NotRepresentable;
         }
         for (EffectSpan &span : moved.spans) {
-            if (span.isTransition()) {
-                continue;
-            }
             const auto start = checkedAdd(span.start, *back);
             const auto end = checkedAdd(span.end, *back);
             if (!start || !end || !isExactModelTime(*start) || !isExactModelTime(*end)) {
@@ -344,10 +342,6 @@ RetimeResult Clip::fitSpans(ClipEdge editedEdge) {
     std::vector<EffectSpan> fitted;
     fitted.reserve(spans.size());
     for (const EffectSpan &span : spans) {
-        if (span.isTransition()) {
-            fitted.push_back(span);
-            continue;
-        }
         SpanCutProblem problem = SpanCutProblem::None;
         if (auto clipped = clipSpan(span, bounds->first, bounds->second, &problem)) {
             fitted.push_back(std::move(*clipped));
@@ -362,12 +356,11 @@ RetimeResult Clip::fitSpans(ClipEdge editedEdge) {
     // Lane-0 fades fit the clip: a head fade and the inside part of the tail span together at
     // most its length. Fades give way to a cross dissolve (which is never shortened here); between
     // two fades the one at the edited edge gives way first.
-    EffectSpan *head = nullptr;
-    EffectSpan *tail = nullptr;
-    for (EffectSpan &span : fitted) {
-        if (span.isTransition()) {
-            (span.edge == ClipEdge::Head ? head : tail) = &span;
-        }
+    std::vector<TransitionSpan> fittedTransitions = transitions;
+    TransitionSpan *head = nullptr;
+    TransitionSpan *tail = nullptr;
+    for (TransitionSpan &span : fittedTransitions) {
+        (span.edge == ClipEdge::Head ? head : tail) = &span;
     }
     const CMTime length = maxTime(timelineDuration, kCMTimeZero);
     const bool tailIsFade = tail != nullptr && tail->end == kCMTimeZero;
@@ -412,9 +405,10 @@ RetimeResult Clip::fitSpans(ClipEdge editedEdge) {
         }
         tail->start = *start;
     }
-    std::erase_if(fitted, [](const EffectSpan &span) {
-        return span.isTransition() && !(span.start < span.end); // a fade shortened to nothing
+    std::erase_if(fittedTransitions, [](const TransitionSpan &span) {
+        return !(span.start < span.end); // a fade shortened to nothing
     });
+    transitions = std::move(fittedTransitions);
     spans = std::move(fitted);
     video = heldVideo;
     audio.gainDb = heldAudio.gainDb;
@@ -422,22 +416,20 @@ RetimeResult Clip::fitSpans(ClipEdge editedEdge) {
 }
 
 void Clip::sortSpans() {
-    auto key = [](const EffectSpan &span) { return std::make_pair(span.lane, span.edge == ClipEdge::Head ? 0 : 1); };
-    std::stable_sort(spans.begin(), spans.end(), [&](const EffectSpan &a, const EffectSpan &b) {
-        if (a.lane != b.lane) {
-            return a.lane < b.lane;
-        }
-        if (a.isTransition() || b.isTransition()) {
-            return key(a) < key(b);
-        }
-        return a.start < b.start;
+    std::stable_sort(transitions.begin(), transitions.end(), [](const TransitionSpan &a, const TransitionSpan &b) {
+        return a.edge == ClipEdge::Head && b.edge == ClipEdge::Tail;
+    });
+    std::stable_sort(spans.begin(), spans.end(), [](const EffectSpan &a, const EffectSpan &b) {
+        return a.lane != b.lane ? a.lane < b.lane : a.start < b.start;
     });
 }
 
 const EffectSpan *Clip::findSpan(SpanId spanId) const {
-    for (const EffectSpan &span : spans) {
-        if (span.id == spanId) {
-            return &span;
+    for (const std::vector<EffectSpan> *list : {&transitions, &spans}) {
+        for (const EffectSpan &span : *list) {
+            if (span.id == spanId) {
+                return &span;
+            }
         }
     }
     return nullptr;
@@ -447,21 +439,17 @@ EffectSpan *Clip::findSpan(SpanId spanId) {
     return const_cast<EffectSpan *>(static_cast<const Clip *>(this)->findSpan(spanId));
 }
 
-const EffectSpan *Clip::transitionAt(ClipEdge edge) const {
-    for (const EffectSpan &span : spans) {
-        if (span.isTransition() && span.edge == edge) {
+const TransitionSpan *Clip::transitionAt(ClipEdge edge) const {
+    for (const TransitionSpan &span : transitions) {
+        if (span.edge == edge) {
             return &span;
         }
     }
     return nullptr;
 }
 
-EffectSpan *Clip::transitionAt(ClipEdge edge) {
-    return const_cast<EffectSpan *>(static_cast<const Clip *>(this)->transitionAt(edge));
-}
-
-bool Clip::hasEffectSpans() const {
-    return std::any_of(spans.begin(), spans.end(), [](const EffectSpan &span) { return !span.isTransition(); });
+TransitionSpan *Clip::transitionAt(ClipEdge edge) {
+    return const_cast<TransitionSpan *>(static_cast<const Clip *>(this)->transitionAt(edge));
 }
 
 std::optional<CMTime> frameShowingSourceTime(const Clip &clip, CMTime sourceTime, CMTime frameDuration) {

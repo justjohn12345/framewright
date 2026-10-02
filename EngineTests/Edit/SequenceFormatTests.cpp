@@ -477,7 +477,7 @@ TEST_CASE("SetSequenceFormat: transitions that no longer fit are shortened or re
     span.edge = ClipEdge::Tail;
     span.start = CMTimeMake(-10, 60);
     span.end = CMTimeMake(10, 60);
-    fx.sequence().findClip(a)->spans.push_back(span);
+    fx.sequence().findClip(a)->transitions.push_back(span);
     const SpanId dissolve = span.id;
     // V2: C [0, 6) at 60 fps (0.1 s) with a fade in of 5 frames and nothing after it.
     const ClipId c = add60(fx.v2, fx.video60, 0, 6, kCMTimeZero);
@@ -488,7 +488,7 @@ TEST_CASE("SetSequenceFormat: transitions that no longer fit are shortened or re
     fade.edge = ClipEdge::Head;
     fade.start = kCMTimeZero;
     fade.end = CMTimeMake(5, 60);
-    fx.sequence().findClip(c)->spans.push_back(fade);
+    fx.sequence().findClip(c)->transitions.push_back(fade);
     fx.requireValid();
 
     SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1920, 1080, CMTimeMake(1, 24)));

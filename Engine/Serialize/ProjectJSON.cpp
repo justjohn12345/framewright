@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -147,8 +148,12 @@ json clipToJson(const Clip &clip) {
     if (clip.reversed) {
         j["reversed"] = true;
     }
-    if (!clip.spans.empty()) {
+    if (!clip.transitions.empty() || !clip.spans.empty()) {
+        // One list in the file: lane 0 (the transitions, head then tail), then lanes 1-3.
         json spans = json::array();
+        for (const TransitionSpan &span : clip.transitions) {
+            spans.push_back(spanToJson(span));
+        }
         for (const EffectSpan &span : clip.spans) {
             spans.push_back(spanToJson(span));
         }
@@ -410,7 +415,15 @@ std::optional<EffectSpan> parseSpan(const Node &node, Warnings &warnings) {
     return span;
 }
 
-Clip parseClip(const Node &node, Warnings &warnings) {
+// The spans of each clip in the order the file lists them (one list there, two containers on the
+// model), with the lane the file gave each: repairSequence reports and repairs in that order.
+struct FileSpan {
+    bool transition = false; // in Clip::transitions (else Clip::spans), in the same order as here
+    int lane = 0;
+};
+using SpanFileOrder = std::map<ClipId, std::vector<FileSpan>>;
+
+Clip parseClip(const Node &node, Warnings &warnings, SpanFileOrder &order) {
     node.requireObject();
     Clip clip;
     clip.id = node.field("id").asId<ClipId>();
@@ -442,16 +455,18 @@ Clip parseClip(const Node &node, Warnings &warnings) {
     }
     if (node.has("spans")) {
         const Node spans = node.field("spans");
+        std::vector<FileSpan> &listed = order[clip.id];
         for (std::size_t i = 0, n = spans.arraySize(); i < n; ++i) {
             if (auto span = parseSpan(spans.element(i), warnings)) {
-                clip.spans.push_back(std::move(*span));
+                listed.push_back(FileSpan{span->isTransition(), span->lane});
+                (span->isTransition() ? clip.transitions : clip.spans).push_back(std::move(*span));
             }
         }
     }
     return clip;
 }
 
-Track parseTrack(const Node &node, Warnings &warnings) {
+Track parseTrack(const Node &node, Warnings &warnings, SpanFileOrder &order) {
     node.requireObject();
     Track track;
     track.id = node.field("id").asId<TrackId>();
@@ -463,13 +478,13 @@ Track parseTrack(const Node &node, Warnings &warnings) {
     if (node.has("clips")) {
         const Node clips = node.field("clips");
         for (std::size_t i = 0, n = clips.arraySize(); i < n; ++i) {
-            track.clips.push_back(parseClip(clips.element(i), warnings));
+            track.clips.push_back(parseClip(clips.element(i), warnings, order));
         }
     }
     return track;
 }
 
-Sequence parseSequence(const Node &node, Warnings &warnings) {
+Sequence parseSequence(const Node &node, Warnings &warnings, SpanFileOrder &order) {
     node.requireObject();
     Sequence sequence;
     sequence.id = node.field("id").asId<SequenceId>();
@@ -487,13 +502,13 @@ Sequence parseSequence(const Node &node, Warnings &warnings) {
         const Node list = node.field(key);
         std::vector<Track> &tracks = std::string(key) == "videoTracks" ? sequence.videoTracks : sequence.audioTracks;
         for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
-            tracks.push_back(parseTrack(list.element(i), warnings));
+            tracks.push_back(parseTrack(list.element(i), warnings, order));
         }
     }
     return sequence;
 }
 
-Project parseProjectNode(const Node &root, Warnings &warnings) {
+Project parseProjectNode(const Node &root, Warnings &warnings, SpanFileOrder &order) {
     root.requireObject();
     Project project;
     project.name = root.stringOr("name", "");
@@ -506,7 +521,7 @@ Project parseProjectNode(const Node &root, Warnings &warnings) {
     if (root.has("sequences")) {
         const Node list = root.field("sequences");
         for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
-            project.sequences.push_back(parseSequence(list.element(i), warnings));
+            project.sequences.push_back(parseSequence(list.element(i), warnings, order));
         }
     }
     if (root.has("activeSequenceId")) {
@@ -608,7 +623,8 @@ namespace {
 // a clip another clip touches, a dissolve whose handles are gone...) are removed as every edit
 // removes them. Everything else (an inexact time, overlapping clips, a keyframe without a value...)
 // is left to validateProject or the parser, which refuse the file.
-std::optional<std::string> repairSequence(Sequence &sequence, const Project &project, Warnings &warnings) {
+std::optional<std::string> repairSequence(Sequence &sequence, const Project &project, const SpanFileOrder &fileOrder,
+                                          Warnings &warnings) {
     const std::string where = "sequence " + std::to_string(sequence.id.value());
     // A time that is not an exact model time (rounded, another epoch, not numeric) has no safe
     // reading: nothing is repaired, and validation refuses the file with that time.
@@ -620,9 +636,11 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
                         return std::nullopt;
                     }
                 }
-                for (const EffectSpan &span : clip.spans) {
-                    if (modelTimeProblem(span.start, "time") || modelTimeProblem(span.end, "time")) {
-                        return std::nullopt;
+                for (const std::vector<EffectSpan> *spans : {&clip.transitions, &clip.spans}) {
+                    for (const EffectSpan &span : *spans) {
+                        if (modelTimeProblem(span.start, "time") || modelTimeProblem(span.end, "time")) {
+                            return std::nullopt;
+                        }
                     }
                 }
             }
@@ -650,22 +668,35 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
                 // A span of an unknown kind (from a newer version) stays only where this version's
                 // rules allow an effect span (its lane is repaired below): kept elsewhere, it would
                 // make validation refuse the whole file.
-                std::erase_if(clip.spans, [&](const EffectSpan &span) {
+                std::vector<bool> dropped(clip.spans.size(), false);
+                for (std::size_t i = 0; i < clip.spans.size(); ++i) {
+                    const EffectSpan &span = clip.spans[i];
                     if (!span.isUnknownKind()) {
-                        return false;
+                        continue;
                     }
                     EffectSpan placed = span;
                     placed.lane = kFirstEffectLane;
-                    const auto problem = effectSpanProblem(placed, clip, track.kind);
-                    if (problem) {
+                    if (const auto problem = effectSpanProblem(placed, clip, track.kind)) {
                         warnings.push_back(clipWhere + ": " + *problem + "; the \"" + span.foreign.kindName +
                                            "\" span from a newer version was dropped");
+                        dropped[i] = true;
                     }
-                    return problem.has_value();
-                });
-                std::vector<SpanId> order;
-                for (const EffectSpan &span : clip.spans) {
-                    order.push_back(span.id);
+                }
+                // The spans that stay, in the file's order (both kinds).
+                std::vector<EffectSpan *> order;
+                if (const auto listed = fileOrder.find(clip.id); listed != fileOrder.end()) {
+                    std::size_t nextTransition = 0;
+                    std::size_t nextEffect = 0;
+                    for (const FileSpan &entry : listed->second) {
+                        if (entry.transition && nextTransition < clip.transitions.size()) {
+                            order.push_back(&clip.transitions[nextTransition++]);
+                        } else if (!entry.transition && nextEffect < clip.spans.size()) {
+                            const std::size_t index = nextEffect++;
+                            if (!dropped[index]) {
+                                order.push_back(&clip.spans[index]);
+                            }
+                        }
+                    }
                 }
                 // Lanes, in the file's order: each effect span keeps its lane unless that is not an
                 // effect lane or an earlier span of the lane overlaps it.
@@ -678,7 +709,8 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
                     }
                     return nullptr;
                 };
-                for (EffectSpan &span : clip.spans) {
+                for (EffectSpan *entry : order) {
+                    EffectSpan &span = *entry;
                     const std::string spanWhere = clipWhere + ": span " + std::to_string(span.id.value());
                     if (span.isTransition()) {
                         if (span.lane != kTransitionLane) {
@@ -715,11 +747,24 @@ std::optional<std::string> repairSequence(Sequence &sequence, const Project &pro
                     }
                     placed.push_back(&span);
                 }
-                clip.sortSpans();
-                bool sorted = true;
-                for (std::size_t k = 0; k < order.size(); ++k) {
-                    sorted = sorted && clip.spans[k].id == order[k];
+                std::vector<SpanId> fileIds;
+                for (const EffectSpan *span : order) {
+                    fileIds.push_back(span->id);
                 }
+                for (std::size_t i = clip.spans.size(); i-- > 0;) {
+                    if (dropped[i]) {
+                        clip.spans.erase(clip.spans.begin() + static_cast<std::ptrdiff_t>(i));
+                    }
+                }
+                clip.sortSpans();
+                // Sorted: lane 0 (head, then tail), then lanes 1-3 by start.
+                std::vector<SpanId> sortedIds;
+                for (const std::vector<EffectSpan> *spans : {&clip.transitions, &clip.spans}) {
+                    for (const EffectSpan &span : *spans) {
+                        sortedIds.push_back(span.id);
+                    }
+                }
+                const bool sorted = sortedIds == fileIds;
                 if (!sorted) {
                     warnings.push_back(clipWhere + ": its spans were not in lane and time order; sorted");
                 }
@@ -740,15 +785,16 @@ ProjectLoadResult projectFromJson(const json &document) {
         const int version = schemaVersionOf(Node(document, ""));
         Warnings warnings;
         Project project;
+        SpanFileOrder spanOrder;
         if (version < kProjectSchemaVersion) {
             json upgraded = document;
             serialize::runProjectMigrations(upgraded, version, kProjectSchemaVersion, warnings);
-            project = parseProjectNode(Node(upgraded, ""), warnings);
+            project = parseProjectNode(Node(upgraded, ""), warnings, spanOrder);
         } else {
-            project = parseProjectNode(Node(document, ""), warnings);
+            project = parseProjectNode(Node(document, ""), warnings, spanOrder);
         }
         for (Sequence &sequence : project.sequences) {
-            if (auto problem = repairSequence(sequence, project, warnings)) {
+            if (auto problem = repairSequence(sequence, project, spanOrder, warnings)) {
                 result.error = "invalid project: " + *problem;
                 return result;
             }

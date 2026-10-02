@@ -274,6 +274,10 @@ struct EffectSpan {
 // Bit-for-bit equality of every field.
 bool operator==(const EffectSpan &a, const EffectSpan &b);
 
+// A lane-0 span: a transition or a fade at an edge of its clip (Transition.h), kept in
+// Clip::transitions apart from the effect spans in Clip::spans.
+using TransitionSpan = EffectSpan;
+
 // The value of `parameter` of an effect span at `time` (the clip's source-time base): its track
 // evaluated at `time - start` (holding before the first and after the last keyframe), limited to
 // the parameter's range; the neutral value when the span has no keyframes for it.

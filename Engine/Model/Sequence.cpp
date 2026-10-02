@@ -300,7 +300,7 @@ CMTime incomingTransitionInside(const Track &track, const Clip &clip) {
     if (previous == nullptr) {
         return kCMTimeZero;
     }
-    const EffectSpan *tail = previous->transitionAt(ClipEdge::Tail);
+    const TransitionSpan *tail = previous->transitionAt(ClipEdge::Tail);
     return tail != nullptr && kCMTimeZero < tail->end ? tail->end : kCMTimeZero;
 }
 
@@ -338,7 +338,7 @@ std::optional<TransitionPlacement> transitionAt(const Track &track, CMTime t) {
     }
     const Clip &clip = track.clips[*index];
     auto covering = [&](const Clip &owner, ClipEdge edge) -> std::optional<TransitionPlacement> {
-        const EffectSpan *span = owner.transitionAt(edge);
+        const TransitionSpan *span = owner.transitionAt(edge);
         if (span == nullptr) {
             return std::nullopt;
         }

@@ -32,6 +32,7 @@ TEST_CASE("SetClipsParams changes several clips in one reversible edit") {
     CHECK(fx.clip(a1b).audio == quiet);
     CHECK(clipFadeLength(fx.clip(a1b), ClipEdge::Tail) == f30(5));
     CHECK(fx.clip(a1a).audio == AudioParams{});
+    CHECK(fx.clip(a1a).transitions.empty());
     CHECK(fx.clip(a1a).spans.empty());
 
     SetClipsParams videoOnly(fx.seq, {ClipParamsChange{v1a, moved, std::nullopt}});

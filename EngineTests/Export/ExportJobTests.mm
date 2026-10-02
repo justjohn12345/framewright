@@ -187,7 +187,7 @@ class ExportRig {
         span.edge = ClipEdge::Tail;
         span.start = CMTimeMake(-(frames / 2), 30);
         span.end = CMTimeMake(frames - frames / 2, 30);
-        clip(from).spans.push_back(span);
+        clip(from).transitions.push_back(span);
         clip(from).sortSpans();
     }
     // A lane-0 fade of `frames` at `edge` of `id` (head: from silence or black; tail: to it).
@@ -199,7 +199,7 @@ class ExportRig {
         span.edge = edge;
         span.start = edge == ClipEdge::Head ? kCMTimeZero : CMTimeMake(-frames, 30);
         span.end = edge == ClipEdge::Head ? CMTimeMake(frames, 30) : kCMTimeZero;
-        clip(id).spans.push_back(span);
+        clip(id).transitions.push_back(span);
         clip(id).sortSpans();
     }
 

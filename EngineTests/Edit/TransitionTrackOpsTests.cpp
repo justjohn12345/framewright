@@ -33,7 +33,8 @@ TEST_CASE("AddTransitionSpans puts a centred dissolve on the outgoing clip's tai
     const EffectSpan &span = *fx.span(id);
     CHECK(span.lane == kTransitionLane);
     CHECK(span.edge == ClipEdge::Tail);
-    CHECK(fx.clip(fx.b).spans.empty()); // the incoming clip owns nothing across the cut
+    CHECK(fx.clip(fx.b).transitions.empty()); // the incoming clip owns nothing across the cut
+    CHECK(fx.clip(fx.b).spans.empty());
 }
 
 TEST_CASE("AddTransitionSpans: asymmetric shares, fades and their rules") {
@@ -405,9 +406,11 @@ TEST_CASE("ClipIndex finds each transition's linked one as linkedTransition does
     for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
         for (const Track &track : *list) {
             for (const Clip &clip : track.clips) {
-                for (const EffectSpan &span : clip.spans) {
-                    CHECK(index.linkedTransition(track, clip, span) == linkedTransition(sequence, span.id));
-                    transitions += span.isTransition() ? 1 : 0;
+                for (const std::vector<EffectSpan> *spans : {&clip.transitions, &clip.spans}) {
+                    for (const EffectSpan &span : *spans) {
+                        CHECK(index.linkedTransition(track, clip, span) == linkedTransition(sequence, span.id));
+                        transitions += span.isTransition() ? 1 : 0;
+                    }
                 }
             }
         }
@@ -554,7 +557,7 @@ TEST_CASE("linkedTransition finds the transition on the linked partners' cut, ei
     CHECK(linkedTransition(fx.sequence(), fx.crossfade) == fx.dissolve);
     CHECK_FALSE(linkedTransition(fx.sequence(), SpanId{999}).has_value());
     SUBCASE("no transition on the partners' cut") {
-        std::erase_if(fx.sequence().findClip(fx.aa)->spans, [&](const EffectSpan &s) { return s.id == fx.crossfade; });
+        std::erase_if(fx.sequence().findClip(fx.aa)->transitions, [&](const TransitionSpan &s) { return s.id == fx.crossfade; });
         CHECK_FALSE(linkedTransition(fx.sequence(), fx.dissolve).has_value());
     }
     SUBCASE("an unlinked clip") {
@@ -570,7 +573,7 @@ TEST_CASE("linkedTransition finds the transition on the linked partners' cut, ei
         other.requireValid();
         CHECK(linkedTransition(other.sequence(), videoFade) == audioFade);
         CHECK(linkedTransition(other.sequence(), audioFade) == videoFade);
-        std::erase_if(other.sequence().findClip(other.aa)->spans, [&](const EffectSpan &s) { return s.id == other.crossfade; });
+        std::erase_if(other.sequence().findClip(other.aa)->transitions, [&](const TransitionSpan &s) { return s.id == other.crossfade; });
         other.addTailTransition(other.aa, 8, 0); // a fade out under a dissolve
         other.requireValid();
         CHECK_FALSE(linkedTransition(other.sequence(), other.dissolve).has_value());

@@ -75,8 +75,8 @@ EditResult splitClipAt(Sequence &, Track &track, std::size_t index, CMTime at, I
     Clip left = track.clips[index];
     Clip right = track.clips[index];
     // Lane 0: the head span stays with the left piece, the tail span goes with the right one.
-    std::erase_if(left.spans, [](const EffectSpan &span) { return span.isTransition() && span.edge == ClipEdge::Tail; });
-    std::erase_if(right.spans, [](const EffectSpan &span) { return span.isTransition() && span.edge == ClipEdge::Head; });
+    std::erase_if(left.transitions, [](const TransitionSpan &span) { return span.edge == ClipEdge::Tail; });
+    std::erase_if(right.transitions, [](const TransitionSpan &span) { return span.edge == ClipEdge::Head; });
     right.linkedClipId.reset();
     // Each piece clips the effect spans to its own source range (fitSpans): a span across the cut
     // is divided exactly, the value at the cut evaluated.
@@ -89,7 +89,7 @@ EditResult splitClipAt(Sequence &, Track &track, std::size_t index, CMTime at, I
     right.id = ids.make<ClipId>();
     // A span divided by the cut is on both pieces: the right piece's part gets a new id.
     for (EffectSpan &span : right.spans) {
-        if (!span.isTransition() && left.findSpan(span.id) != nullptr) {
+        if (left.findSpan(span.id) != nullptr) {
             const SpanId original = span.id;
             span.id = ids.make<SpanId>();
             if (divided != nullptr) {

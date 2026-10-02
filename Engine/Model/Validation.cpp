@@ -102,20 +102,25 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
     }
     int heads = 0;
     int tails = 0;
+    auto laneZeroProblem = [&](const EffectSpan &span) {
+        return where + ": span " + std::to_string(span.id.value()) +
+               (span.isTransition() ? ": a transition lies on lane 0 only, found lane " + std::to_string(span.lane)
+                                    : std::string(": lane 0 holds transitions only"));
+    };
+    for (const TransitionSpan &span : clip.transitions) {
+        if (!span.isTransition() || span.lane != kTransitionLane) {
+            return laneZeroProblem(span);
+        }
+        if (!span.id) {
+            return where + ": a transition span has an invalid id";
+        }
+        if (++(span.edge == ClipEdge::Head ? heads : tails) > 1) {
+            return where + ": more than one transition at its " + nameOf(span.edge);
+        }
+    }
     for (const EffectSpan &span : clip.spans) {
         if (span.isTransition() || span.lane == kTransitionLane) {
-            if (!span.isTransition() || span.lane != kTransitionLane) {
-                return where + ": span " + std::to_string(span.id.value()) +
-                       (span.isTransition() ? ": a transition lies on lane 0 only, found lane " + std::to_string(span.lane)
-                                            : std::string(": lane 0 holds transitions only"));
-            }
-            if (!span.id) {
-                return where + ": a transition span has an invalid id";
-            }
-            if (++(span.edge == ClipEdge::Head ? heads : tails) > 1) {
-                return where + ": more than one transition at its " + nameOf(span.edge);
-            }
-            continue;
+            return laneZeroProblem(span);
         }
         if (auto problem = effectSpanProblem(span, clip, track.kind)) {
             return where + ": " + *problem;
@@ -124,12 +129,9 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
     // Spans of one lane never overlap (effect spans are sorted by start within a lane).
     for (std::size_t i = 0; i < clip.spans.size(); ++i) {
         const EffectSpan &a = clip.spans[i];
-        if (a.isTransition()) {
-            continue;
-        }
         for (std::size_t j = i + 1; j < clip.spans.size(); ++j) {
             const EffectSpan &b = clip.spans[j];
-            if (b.isTransition() || b.lane != a.lane) {
+            if (b.lane != a.lane) {
                 continue;
             }
             if (a.start < b.end && b.start < a.end) {
@@ -138,13 +140,15 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
             }
         }
     }
+    for (std::size_t i = 1; i < clip.transitions.size(); ++i) {
+        if (!(clip.transitions[i - 1].edge == ClipEdge::Head && clip.transitions[i].edge == ClipEdge::Tail)) {
+            return where + ": spans are not in lane and time order";
+        }
+    }
     for (std::size_t i = 1; i < clip.spans.size(); ++i) {
         const EffectSpan &a = clip.spans[i - 1];
         const EffectSpan &b = clip.spans[i];
-        const bool ordered = a.lane < b.lane ||
-                             (a.lane == b.lane && (a.isTransition() ? a.edge == ClipEdge::Head && b.edge == ClipEdge::Tail
-                                                                    : a.start < b.start));
-        if (!ordered) {
+        if (!(a.lane < b.lane || (a.lane == b.lane && a.start < b.start))) {
             return where + ": spans are not in lane and time order";
         }
     }
@@ -312,7 +316,7 @@ std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const
     if (!placement) {
         return TransitionIssue{K::Structure, where + ": cannot compute its range"};
     }
-    const EffectSpan *other = owner.transitionAt(span.edge == ClipEdge::Head ? ClipEdge::Tail : ClipEdge::Head);
+    const TransitionSpan *other = owner.transitionAt(span.edge == ClipEdge::Head ? ClipEdge::Tail : ClipEdge::Head);
     if (span.edge == ClipEdge::Head) {
         if (span.start != kCMTimeZero) {
             return TransitionIssue{K::Structure, where + ": a fade in starts at its clip's start"};
@@ -360,7 +364,7 @@ std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const
     if (partner->timelineDuration < span.end) {
         return TransitionIssue{K::TooLong, where + ": longer than clip " + std::to_string(partner->id.value())};
     }
-    if (const EffectSpan *partnerTail = partner->transitionAt(ClipEdge::Tail)) {
+    if (const TransitionSpan *partnerTail = partner->transitionAt(ClipEdge::Tail)) {
         const auto partnerRoom = checkedAdd(partner->timelineDuration, partnerTail->start);
         if (!partnerRoom || *partnerRoom < span.end) {
             return TransitionIssue{K::Overlap, where + ": meets the transition at the end of clip " +
@@ -397,7 +401,7 @@ void pruneInvalidTransitions(Sequence &sequence, const Project &project, std::ve
             for (std::size_t i = track.clips.size(); i-- > 0;) {
                 Clip &clip = track.clips[i];
                 for (const ClipEdge edge : {ClipEdge::Tail, ClipEdge::Head}) {
-                    const EffectSpan *span = clip.transitionAt(edge);
+                    const TransitionSpan *span = clip.transitionAt(edge);
                     if (span == nullptr) {
                         continue;
                     }
@@ -407,7 +411,7 @@ void pruneInvalidTransitions(Sequence &sequence, const Project &project, std::ve
                         track.clips[i + 1].timelineStart == clip.timelineEnd()) {
                         // The next clip's fade out meets this dissolve: shorten it, if that is all.
                         Clip &next = track.clips[i + 1];
-                        EffectSpan *fade = next.transitionAt(ClipEdge::Tail);
+                        TransitionSpan *fade = next.transitionAt(ClipEdge::Tail);
                         const auto room = checkedSubtract(next.timelineDuration, span->end);
                         if (fade != nullptr && fade->end == kCMTimeZero && room) {
                             const Clip before = next;
@@ -417,7 +421,7 @@ void pruneInvalidTransitions(Sequence &sequence, const Project &project, std::ve
                             if (kept) {
                                 fade->start = *start;
                             } else {
-                                std::erase_if(next.spans, [fadeId](const EffectSpan &s) { return s.id == fadeId; });
+                                std::erase_if(next.transitions, [fadeId](const TransitionSpan &s) { return s.id == fadeId; });
                             }
                             issue = checkTransitionSpan(project, track, clip, *span, sequence.frameDuration);
                             if (issue) {
@@ -437,7 +441,7 @@ void pruneInvalidTransitions(Sequence &sequence, const Project &project, std::ve
                             notes->push_back(where + ": clip " + std::to_string(clip.id.value()) + ": transition " +
                                              std::to_string(id.value()) + " was removed: " + issue->message);
                         }
-                        std::erase_if(clip.spans, [id](const EffectSpan &s) { return s.id == id; });
+                        std::erase_if(clip.transitions, [id](const TransitionSpan &s) { return s.id == id; });
                     }
                 }
             }
@@ -498,13 +502,14 @@ std::optional<std::string> validateSequence(const Sequence &sequence, const Proj
     for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
         for (const Track &track : sequence.tracks(kind)) {
             for (const Clip &clip : track.clips) {
-                for (const EffectSpan &span : clip.spans) {
-                    if (!spanIds.insert(span.id).second) {
-                        return where + ": duplicate span id " + std::to_string(span.id.value());
+                for (const std::vector<EffectSpan> *list : {&clip.transitions, &clip.spans}) {
+                    for (const EffectSpan &span : *list) {
+                        if (!spanIds.insert(span.id).second) {
+                            return where + ": duplicate span id " + std::to_string(span.id.value());
+                        }
                     }
-                    if (!span.isTransition()) {
-                        continue;
-                    }
+                }
+                for (const TransitionSpan &span : clip.transitions) {
                     if (auto issue = checkTransitionSpan(project, track, clip, span, sequence.frameDuration)) {
                         return where + ": " + issue->message;
                     }
@@ -550,9 +555,11 @@ std::optional<std::string> validateProject(const Project &project) {
                     if (auto problem = claim(clip.id.value(), "clip " + std::to_string(clip.id.value()))) {
                         return problem;
                     }
-                    for (const EffectSpan &span : clip.spans) {
-                        if (auto problem = claim(span.id.value(), "span " + std::to_string(span.id.value()))) {
-                            return problem;
+                    for (const std::vector<EffectSpan> *list : {&clip.transitions, &clip.spans}) {
+                        for (const EffectSpan &span : *list) {
+                            if (auto problem = claim(span.id.value(), "span " + std::to_string(span.id.value()))) {
+                                return problem;
+                            }
                         }
                     }
                 }

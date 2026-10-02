@@ -397,7 +397,7 @@ TEST_CASE("Scheduler spans: held values per frame at 29.97 and 999/1000, on a ch
     dissolve.edge = ClipEdge::Tail;
     dissolve.start = -ntsc(6);
     dissolve.end = ntsc(4);
-    clip.spans.push_back(dissolve);
+    clip.transitions.push_back(dissolve);
     fx.track(fx.v1).clips.push_back(clip);
     Clip next;
     next.id = fx.project.ids.make<ClipId>();

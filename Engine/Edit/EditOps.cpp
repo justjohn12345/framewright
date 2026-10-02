@@ -693,7 +693,8 @@ EditResult SplitClip::perform(const Project &, Sequence &sequence, IdGenerator &
         }
     }
     for (const auto &[owner, spanId] : broken) {
-        std::erase_if(sequence.findClip(owner)->spans, [spanId](const EffectSpan &span) { return span.id == spanId; });
+        std::erase_if(sequence.findClip(owner)->transitions,
+                      [spanId](const TransitionSpan &span) { return span.id == spanId; });
     }
     created_.clear();
     divided_.clear();
@@ -1510,6 +1511,7 @@ EditResult RemoveSpans::perform(const Project &, Sequence &sequence, IdGenerator
             return unknownKindRefusal(*span);
         }
         allTransitions_ = allTransitions_ && span->isTransition();
+        std::erase_if(clip->transitions, [id](const TransitionSpan &s) { return s.id == id; });
         std::erase_if(clip->spans, [id](const EffectSpan &s) { return s.id == id; });
         markRemovedOnPurpose(id);
     }
@@ -1846,7 +1848,7 @@ EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime len
     if (length == kCMTimeZero) {
         if (span != nullptr) {
             const SpanId id = span->id;
-            std::erase_if(clip.spans, [id](const EffectSpan &s) { return s.id == id; });
+            std::erase_if(clip.transitions, [id](const TransitionSpan &s) { return s.id == id; });
         }
         return EditResult::success();
     }
@@ -1892,8 +1894,8 @@ EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime len
         fade.lane = kTransitionLane;
         fade.kind = SpanKind::Transition;
         fade.edge = edge;
-        clip.spans.push_back(fade);
-        span = &clip.spans.back();
+        clip.transitions.push_back(fade);
+        span = &clip.transitions.back();
     }
     if (edge == ClipEdge::Head) {
         span->start = kCMTimeZero;
@@ -1984,7 +1986,7 @@ EditResult AddTransitionSpans::perform(const Project &project, Sequence &sequenc
         span.transition = request.kind;
         span.start = request.start;
         span.end = request.end;
-        clip->spans.push_back(span);
+        clip->transitions.push_back(span);
         clip->sortSpans();
         if (EditResult r = checkPlacedTransition(project, sequence, *track, *clip, *clip->findSpan(span.id)); !r) {
             return r;
@@ -2586,6 +2588,9 @@ EditResult RemoveTrack::perform(const Project &, Sequence &sequence, IdGenerator
         return r;
     }
     for (const Clip &clip : track->clips) {
+        for (const TransitionSpan &span : clip.transitions) {
+            markRemovedOnPurpose(span.id);
+        }
         for (const EffectSpan &span : clip.spans) {
             markRemovedOnPurpose(span.id);
         }
@@ -3448,10 +3453,7 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
             for (const Track &track : *list) {
                 for (const Clip &clip : track.clips) {
                     hasEffectSpans = hasEffectSpans || clip.hasEffectSpans();
-                    for (const EffectSpan &span : clip.spans) {
-                        if (!span.isTransition()) {
-                            continue;
-                        }
+                    for (const TransitionSpan &span : clip.transitions) {
                         TransitionFrames frames;
                         frames.after = roundedFrames(span.end, fd);
                         if (span.edge == ClipEdge::Tail) {
@@ -3481,10 +3483,8 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
         for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
             for (Track &track : *list) {
                 for (Clip &clip : track.clips) {
-                    for (EffectSpan &span : clip.spans) {
-                        if (span.isTransition()) {
-                            setTransitionFrames(span, wanted[span.id], newFd);
-                        }
+                    for (TransitionSpan &span : clip.transitions) {
+                        setTransitionFrames(span, wanted[span.id], newFd);
                     }
                 }
             }
@@ -3567,7 +3567,7 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
                             sentences.push_back(sentence);
                             const SpanId id = span->id;
                             markRemovedOnPurpose(id);
-                            std::erase_if(clip.spans, [id](const EffectSpan &s) { return s.id == id; });
+                            std::erase_if(clip.transitions, [id](const TransitionSpan &s) { return s.id == id; });
                             continue;
                         }
                         setTransitionFrames(*span, fitted, newFd);

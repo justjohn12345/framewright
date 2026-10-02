@@ -326,7 +326,7 @@ SpanId PlaybackHarness::addTailTransition(ClipId clip, int64_t before, int64_t a
     span.start = -frames30(before);
     span.end = frames30(after);
     Clip &owner = *sequence().findClip(clip);
-    owner.spans.push_back(span);
+    owner.transitions.push_back(span);
     owner.sortSpans();
     return span.id;
 }
@@ -340,7 +340,7 @@ SpanId PlaybackHarness::addFade(ClipId clip, ClipEdge edge, int64_t frames) {
     span.start = edge == ClipEdge::Head ? kCMTimeZero : -frames30(frames);
     span.end = edge == ClipEdge::Head ? frames30(frames) : kCMTimeZero;
     Clip &owner = *sequence().findClip(clip);
-    owner.spans.push_back(span);
+    owner.transitions.push_back(span);
     owner.sortSpans();
     return span.id;
 }

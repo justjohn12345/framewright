@@ -591,7 +591,7 @@ TEST_CASE("ProjectJSON: unknown kinds and keys of spans warn instead of failing"
         const ProjectLoadResult loaded = projectFromJson(j);
         REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
         Project stripped = *loaded.project;
-        EffectSpan &span = stripped.sequences[0].videoTracks[0].clips[0].spans[0];
+        TransitionSpan &span = stripped.sequences[0].videoTracks[0].clips[0].transitions[0];
         CHECK(span.transition == TransitionKind::CrossDissolve);
         CHECK(span.unknownTransitionName == "wipe");
         span.unknownTransitionName.clear();
@@ -604,8 +604,9 @@ TEST_CASE("ProjectJSON: unknown kinds and keys of spans warn instead of failing"
         const ProjectLoadResult loaded = projectFromJson(j);
         REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
         CHECK(anyContains(loaded.warnings, "spans[1].kind: unknown span kind \"blur\" (from a newer version"));
-        REQUIRE(loaded.project->sequences[0].videoTracks[0].clips[0].spans.size() == 3);
-        CHECK(loaded.project->sequences[0].videoTracks[0].clips[0].spans[1].kind == SpanKind::Unknown);
+        REQUIRE(loaded.project->sequences[0].videoTracks[0].clips[0].transitions.size() == 1);
+        REQUIRE(loaded.project->sequences[0].videoTracks[0].clips[0].spans.size() == 2);
+        CHECK(loaded.project->sequences[0].videoTracks[0].clips[0].spans[0].kind == SpanKind::Unknown);
         CHECK(projectToJson(*loaded.project) == j);
     }
     SUBCASE("a track of an unknown parameter is kept as it is (review core #9)") {
@@ -615,7 +616,7 @@ TEST_CASE("ProjectJSON: unknown kinds and keys of spans warn instead of failing"
         CHECK(anyContains(loaded.warnings, "spans[1].tracks: unknown span parameter \"skew\" (from a newer version"));
         CHECK(projectToJson(*loaded.project) == j);
         Project stripped = *loaded.project;
-        stripped.sequences[0].videoTracks[0].clips[0].spans[1].foreign = ForeignSpanContent{};
+        stripped.sequences[0].videoTracks[0].clips[0].spans[0].foreign = ForeignSpanContent{};
         CHECK(stripped == fx.project);
     }
     SUBCASE("a track of another kind's parameter fails validation") {
@@ -627,7 +628,7 @@ TEST_CASE("ProjectJSON: unknown kinds and keys of spans warn instead of failing"
         const ProjectLoadResult r = projectFromJson(j);
         REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
         CHECK(anyContains(r.warnings, "tracks.y[0].interpolation: unknown keyframe interpolation"));
-        CHECK(r.project->sequences[0].videoTracks[0].clips[0].spans[1].tracks[SpanParameter::Y][0].interpolation ==
+        CHECK(r.project->sequences[0].videoTracks[0].clips[0].spans[0].tracks[SpanParameter::Y][0].interpolation ==
               KeyframeInterpolation::Linear);
     }
     SUBCASE("a curve on a keyframe that is not custom is ignored (it round trips equal)") {
@@ -704,8 +705,9 @@ TEST_CASE("ProjectJSON: a newer version's span kinds, parameters and keys round 
 
     // On the model: the unknown span has no parameters and keeps its kind's name and content.
     const Clip &clip = project.sequences[0].videoTracks[0].clips[0];
-    REQUIRE(clip.spans.size() == 4);
-    const EffectSpan &colour = clip.spans[3];
+    REQUIRE(clip.transitions.size() == 1);
+    REQUIRE(clip.spans.size() == 3);
+    const EffectSpan &colour = clip.spans[2];
     CHECK(colour.isUnknownKind());
     CHECK(colour.lane == 3);
     CHECK(colour.foreign.kindName == "colour");
@@ -714,15 +716,18 @@ TEST_CASE("ProjectJSON: a newer version's span kinds, parameters and keys round 
     CHECK(json::parse(colour.foreign.fields) == json{{"tracks", written["sequences"][0]["videoTracks"][0]["clips"][0]
                                                                   ["spans"][3]["tracks"]},
                                                      {"look", {{"lut", "teal.cube"}, {"amount", 0.75}}}});
-    CHECK(json::parse(clip.spans[1].foreign.tracks).contains("blur"));
-    CHECK(identical(clip.spans[1].foreign.tracksLength, f30(40)));
-    CHECK(clip.spans[2].foreign.fields == R"({"colorSpace":"linear"})");
-    CHECK(clip.spans[0].foreign.fields == R"({"softness":{"amount":0.5}})");
+    CHECK(json::parse(clip.spans[0].foreign.tracks).contains("blur"));
+    CHECK(identical(clip.spans[0].foreign.tracksLength, f30(40)));
+    CHECK(clip.spans[1].foreign.fields == R"({"colorSpace":"linear"})");
+    CHECK(clip.transitions[0].foreign.fields == R"({"softness":{"amount":0.5}})");
 
     // Without what the newer version added, it is the project this version wrote.
     Project stripped = project;
     Clip &strippedClip = stripped.sequences[0].videoTracks[0].clips[0];
     strippedClip.spans.pop_back();
+    for (TransitionSpan &span : strippedClip.transitions) {
+        span.foreign = ForeignSpanContent{};
+    }
     for (EffectSpan &span : strippedClip.spans) {
         span.foreign = ForeignSpanContent{};
     }
@@ -746,7 +751,8 @@ TEST_CASE("ProjectJSON: a span of an unknown kind is kept only where this versio
         REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
         CHECK(anyContains(r.warnings, "spans[3].kind: unknown span kind \"colour\" on lane 0, which holds transitions "
                                       "only here; the span was dropped"));
-        CHECK(r.project->sequences[0].videoTracks[0].clips[0].spans.size() == 3);
+        CHECK(r.project->sequences[0].videoTracks[0].clips[0].transitions.size() == 1);
+        CHECK(r.project->sequences[0].videoTracks[0].clips[0].spans.size() == 2);
     }
     SUBCASE("outside its clip's source range: dropped with a warning") {
         colour["end"] = frames(95);
@@ -754,7 +760,8 @@ TEST_CASE("ProjectJSON: a span of an unknown kind is kept only where this versio
         REQUIRE_MESSAGE(r.ok(), doctest::String(r.error.c_str()));
         CHECK(anyContains(r.warnings, "is outside its clip's source range"));
         CHECK(anyContains(r.warnings, "the \"colour\" span from a newer version was dropped"));
-        CHECK(r.project->sequences[0].videoTracks[0].clips[0].spans.size() == 3);
+        CHECK(r.project->sequences[0].videoTracks[0].clips[0].transitions.size() == 1);
+        CHECK(r.project->sequences[0].videoTracks[0].clips[0].spans.size() == 2);
     }
     SUBCASE("overlapping a span of its lane: moved to a free lane, as any effect span") {
         colour["lane"] = 1; // meets the Motion span (frames 40-80)
@@ -813,13 +820,13 @@ TEST_CASE("ProjectJSON: an unknown transition kind is named in the warning and a
         REQUIRE(loaded.warnings.size() == 1);
         CHECK(contains(loaded.warnings[0], "unknown transition kind \"clockWipe\""));
         CHECK(contains(loaded.warnings[0], "shown as a cross dissolve and saved as \"clockWipe\""));
-        const EffectSpan &span = loaded.project->sequences[0].videoTracks[0].clips[0].spans[0];
+        const TransitionSpan &span = loaded.project->sequences[0].videoTracks[0].clips[0].transitions[0];
         REQUIRE(span.isTransition());
         CHECK(span.transition == TransitionKind::CrossDissolve); // what it renders and edits as
         CHECK(span.unknownTransitionName == "clockWipe");
         // Everything else is the project as written.
         Project stripped = *loaded.project;
-        stripped.sequences[0].videoTracks[0].clips[0].spans[0].unknownTransitionName.clear();
+        stripped.sequences[0].videoTracks[0].clips[0].transitions[0].unknownTransitionName.clear();
         CHECK(stripped == fx.project);
         // Saved and loaded again: the name comes back, not "crossDissolve".
         const json saved = projectToJson(*loaded.project);
@@ -863,7 +870,7 @@ TEST_CASE("ProjectJSON: an unknown transition kind is named in the warning and a
 
 TEST_CASE("ProjectJSON: a model keyframe that is not custom cannot carry a curve (it would not round trip)") {
     Fixture fx = richFixture();
-    fx.sequence().videoTracks[0].clips[0].spans[1].tracks[SpanParameter::Y][0].curve = TimingCurve{0.1, 0.2, 0.3, 0.4};
+    fx.sequence().videoTracks[0].clips[0].spans[0].tracks[SpanParameter::Y][0].curve = TimingCurve{0.1, 0.2, 0.3, 0.4};
     CHECK(contains(problemOf(fx.project), "has a timing curve but is not custom"));
 }
 
@@ -891,8 +898,8 @@ TEST_CASE("ProjectJSON: unknown fields are ignored and optional fields default")
     REQUIRE_MESSAGE(withExtras.ok(), doctest::String(withExtras.error.c_str()));
     // A span's unknown key is kept for saving (review core #9); everything else is the project.
     Project stripped = *withExtras.project;
-    CHECK(stripped.sequences[0].videoTracks[0].clips[0].spans[1].foreign.fields == R"({"label":"zoom"})");
-    stripped.sequences[0].videoTracks[0].clips[0].spans[1].foreign = ForeignSpanContent{};
+    CHECK(stripped.sequences[0].videoTracks[0].clips[0].spans[0].foreign.fields == R"({"label":"zoom"})");
+    stripped.sequences[0].videoTracks[0].clips[0].spans[0].foreign = ForeignSpanContent{};
     CHECK(stripped == fx.project);
 
     // Optional fields may be omitted.
@@ -909,7 +916,7 @@ TEST_CASE("ProjectJSON: unknown fields are ignored and optional fields default")
     const Clip &vfr = loaded.project->findSequence(fx.seq)->videoTracks[1].clips[0];
     CHECK(vfr.video == VideoParams{});
     CHECK(vfr.audio == AudioParams{});
-    CHECK(loaded.project->findSequence(fx.seq)->videoTracks[0].clips[0].spans[0].transition ==
+    CHECK(loaded.project->findSequence(fx.seq)->videoTracks[0].clips[0].transitions[0].transition ==
           TransitionKind::CrossDissolve);
 }
 
@@ -1408,11 +1415,12 @@ TEST_CASE("ProjectJSON: version 4 to 5 migration rules") {
         const Clip &second = onlyClip(*r.project, TrackKind::Audio, 1);
         CHECK(clipFadeLength(first, ClipEdge::Head) == f30(5));
         CHECK(clipFadeLength(first, ClipEdge::Tail) == f30(6)); // a fade out needs nothing past the cut
+        CHECK(second.transitions.empty());
         CHECK(second.spans.empty());
         CHECK(anyContains(r.warnings, "clips[1].audio.fadeInDuration: the fade in"));
         CHECK(anyContains(r.warnings, "the cut there belongs to that clip"));
-        CHECK(first.spans[0].id == SpanId{100}); // new ids from "nextId", in order
-        CHECK(first.spans[1].id == SpanId{101});
+        CHECK(first.transitions[0].id == SpanId{100}); // new ids from "nextId", in order
+        CHECK(first.transitions[1].id == SpanId{101});
         CHECK(r.project->ids.nextValue() == 102);
     }
     SUBCASE("fades on an edge with a crossfade were ignored by version 4 and are dropped silently") {
@@ -1465,6 +1473,7 @@ TEST_CASE("ProjectJSON: version 4 to 5 migration rules") {
         const json doc = v4Document(json::array({v4Clip(10, 3, 0, 60, 0, {{"audio", fades(5, 6)}})}), json::array());
         const ProjectLoadResult r = load(doc);
         CHECK(r.warnings.empty());
+        CHECK(onlyClip(*r.project, TrackKind::Video).transitions.empty());
         CHECK(onlyClip(*r.project, TrackKind::Video).spans.empty());
     }
     SUBCASE("keyframes: Motion on lane 1 and Opacity on lane 2 over the clip, cut exactly at its edges") {

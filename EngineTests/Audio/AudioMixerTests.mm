@@ -92,7 +92,7 @@ struct MixFixture {
         span.start = CMTimeMake(-(frames / 2), 30);
         span.end = CMTimeMake(frames - frames / 2, 30);
         Clip &clip = *sequence().findClip(from);
-        clip.spans.push_back(span);
+        clip.transitions.push_back(span);
         clip.sortSpans();
     }
 
@@ -127,7 +127,7 @@ struct MixFixture {
         span.edge = edge;
         span.start = edge == ClipEdge::Head ? kCMTimeZero : CMTimeMultiply(length, -1);
         span.end = edge == ClipEdge::Head ? length : kCMTimeZero;
-        clip.spans.push_back(span);
+        clip.transitions.push_back(span);
         clip.sortSpans();
     }
 

@@ -125,8 +125,8 @@ TEST_CASE("fadeLimit: the clip's length less its other fade and an incoming cros
     CHECK(fadeLimit(fx.clip(fx.a), fx.track(fx.v1), ClipEdge::Tail, f30(1)).maximumFrames == 45);
     CHECK(fadeLimit(fx.clip(fx.a), fx.track(fx.v1), ClipEdge::Head, f30(1)).maximumFrames == 40);
     // (The fade out is taken away again for the cases below; the fade in stays.)
-    std::vector<EffectSpan> &spans = fx.sequence().findClip(fx.a)->spans;
-    std::erase_if(spans, [&](const EffectSpan &s) { return s.id == fadeOut; });
+    std::vector<TransitionSpan> &spans = fx.sequence().findClip(fx.a)->transitions;
+    std::erase_if(spans, [&](const TransitionSpan &s) { return s.id == fadeOut; });
     REQUIRE(fx.clip(fx.a).findSpan(fadeIn) != nullptr);
 
     // A 20-frame dissolve out of A reaches 10 frames into B: B's fade out may use the other 50.

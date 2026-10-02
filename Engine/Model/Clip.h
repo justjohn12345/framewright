@@ -15,9 +15,9 @@
 // - A reversed clip (reversed) plays its media backwards: its source times are counted from the
 //   end of the media, and the media is read through a mirror (see "Reverse" below). Everything
 //   above holds as written for it.
-// - Effect spans (EffectSpan.h) live in `spans`: lane-0 transitions (Transition.h) and lanes 1-3
-//   effects, which compose onto the static values (motionValuesAt, gainDbAt), each holding its end
-//   value from its end to the clip's end.
+// - Spans (EffectSpan.h): its lane-0 transitions and fades (Transition.h) live in `transitions`, at
+//   most one per edge; its lanes 1-3 effect spans in `spans`, which compose onto the static values
+//   (motionValuesAt, gainDbAt), each holding its end value from its end to the clip's end.
 // - Invariants (checked by validateSequence): speed reduced, with a denominator of at most
 //   kMaxSpeedDenominator and a value within [kMinSpeed, kMaxSpeed]; sourceIn >= 0 and the
 //   derived out point within the asset; start and duration on the sequence frame grid; every
@@ -135,7 +135,9 @@ struct Clip {
     std::optional<ClipId> linkedClipId; // symmetric: the partner links back
     VideoParams video;
     AudioParams audio;
-    // Lane 0 (transitions, at most one per edge) then lanes 1-3, each by start (sortSpans).
+    // Lane 0: transitions and fades, at most one per edge, the head's first (sortSpans).
+    std::vector<TransitionSpan> transitions;
+    // Lanes 1-3: effect spans, by lane, each lane by start (sortSpans).
     std::vector<EffectSpan> spans;
 
     // Speed used for all time mapping ({1, 1} for stills).
@@ -201,17 +203,19 @@ struct Clip {
     // changes.
     [[nodiscard]] RetimeResult fitSpans(ClipEdge editedEdge);
 
-    // Orders the spans: lane 0 (head, then tail), then lanes 1-3, each by start.
+    // Orders the spans: the transitions head then tail, the effect spans by lane, each lane by start.
     void sortSpans();
 
-    // The span with `id`, or nullptr.
+    // The span (a transition or an effect span) with `id`, or nullptr.
     const EffectSpan *findSpan(SpanId spanId) const;
     EffectSpan *findSpan(SpanId spanId);
     // The lane-0 transition span at `edge`, or nullptr.
-    const EffectSpan *transitionAt(ClipEdge edge) const;
-    EffectSpan *transitionAt(ClipEdge edge);
+    const TransitionSpan *transitionAt(ClipEdge edge) const;
+    TransitionSpan *transitionAt(ClipEdge edge);
     // Whether the clip has any span on lanes 1-3.
-    bool hasEffectSpans() const;
+    bool hasEffectSpans() const {
+        return !spans.empty();
+    }
 };
 
 // Bit-for-bit equality of every field.

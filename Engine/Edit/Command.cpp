@@ -229,8 +229,11 @@ std::vector<SpanRecord> spanRecords(const Sequence &sequence) {
     for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
         for (const Track &track : *list) {
             for (const Clip &clip : track.clips) {
+                for (const TransitionSpan &span : clip.transitions) {
+                    records.push_back(SpanRecord{span.id, clip.id, true});
+                }
                 for (const EffectSpan &span : clip.spans) {
-                    records.push_back(SpanRecord{span.id, clip.id, span.isTransition()});
+                    records.push_back(SpanRecord{span.id, clip.id, false});
                 }
             }
         }
@@ -245,7 +248,7 @@ std::vector<std::pair<SpanId, ClipId>> dissolvePartners(const Sequence &sequence
     for (const std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
         for (const Track &track : *list) {
             for (const Clip &clip : track.clips) {
-                const EffectSpan *span = clip.transitionAt(ClipEdge::Tail);
+                const TransitionSpan *span = clip.transitionAt(ClipEdge::Tail);
                 if (span == nullptr) {
                     continue;
                 }
@@ -281,7 +284,7 @@ void removeDissolvesWithNewPartners(Sequence &sequence, const std::vector<std::p
         const auto placement = placeTransition(*track, *owner, *span);
         if (placement && placement->role == TransitionRole::CrossDissolve && placement->partner != nullptr &&
             placement->partner->id != partner) {
-            std::erase_if(owner->spans, [id](const EffectSpan &s) { return s.id == id; });
+            std::erase_if(owner->transitions, [id](const TransitionSpan &s) { return s.id == id; });
         }
     }
 }

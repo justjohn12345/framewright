@@ -69,6 +69,11 @@ inline bool hasInexactTime(const Project &project) {
                             return true;
                         }
                     }
+                    for (const TransitionSpan &span : clip.transitions) {
+                        if (inexact(span.start) || inexact(span.end)) {
+                            return true;
+                        }
+                    }
                     for (const EffectSpan &span : clip.spans) {
                         if (inexact(span.start) || inexact(span.end)) {
                             return true;
@@ -243,7 +248,7 @@ struct Fixture {
         span.start = -f30(before);
         span.end = f30(after);
         Clip &c = *sequence().findClip(clip);
-        c.spans.push_back(span);
+        c.transitions.push_back(span);
         c.sortSpans();
         return span.id;
     }
@@ -258,7 +263,7 @@ struct Fixture {
         span.start = edge == ClipEdge::Head ? kCMTimeZero : -length;
         span.end = edge == ClipEdge::Head ? length : kCMTimeZero;
         Clip &c = *sequence().findClip(clip);
-        c.spans.push_back(span);
+        c.transitions.push_back(span);
         c.sortSpans();
         return span.id;
     }

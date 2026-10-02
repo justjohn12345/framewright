@@ -772,6 +772,7 @@ TEST_CASE("SplitClip moves a transition at the clip's end to the right piece") {
     REQUIRE(placed.has_value());
     CHECK(placed->owner->id == right);
     CHECK(placed->partner->id == b);
+    CHECK(fx.clip(a).transitions.empty());
     CHECK(fx.clip(a).spans.empty());
 }
 

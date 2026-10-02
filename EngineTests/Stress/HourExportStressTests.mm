@@ -156,7 +156,7 @@ void addTransitionSpan(HourProject &h, ClipId clip, ClipEdge edge, CMTime start,
     span.start = start;
     span.end = end;
     Clip &c = *h.sequence().findClip(clip);
-    c.spans.push_back(span);
+    c.transitions.push_back(span);
     c.sortSpans();
 }
 

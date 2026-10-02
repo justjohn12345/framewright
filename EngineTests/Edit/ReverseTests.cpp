@@ -39,16 +39,14 @@ std::vector<CMTime> picturesOf(const Fixture &fx, ClipId clipId) {
 
 // Whether two clips are the same clip with the same times as numbers (a time may come back on
 // another timescale after two edits that move it: 1410/30 and 47/1 are the same clip time).
-bool sameNumerically(const Clip &a, const Clip &b) {
-    if (a.id != b.id || a.assetId != b.assetId || a.trackId != b.trackId || a.timelineStart != b.timelineStart ||
-        a.timelineDuration != b.timelineDuration || a.sourceIn != b.sourceIn || !(a.speed == b.speed) ||
-        a.isStill != b.isStill || a.reversed != b.reversed || a.linkedClipId != b.linkedClipId ||
-        !(a.video == b.video) || !(a.audio == b.audio) || a.spans.size() != b.spans.size()) {
+// Spans equal but for their times' timescales.
+template <typename Span> bool sameSpansNumerically(const std::vector<Span> &a, const std::vector<Span> &b) {
+    if (a.size() != b.size()) {
         return false;
     }
-    for (std::size_t i = 0; i < a.spans.size(); ++i) {
-        EffectSpan x = a.spans[i];
-        const EffectSpan &y = b.spans[i];
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        Span x = a[i];
+        const Span &y = b[i];
         if (x.start != y.start || x.end != y.end) {
             return false;
         }
@@ -59,6 +57,16 @@ bool sameNumerically(const Clip &a, const Clip &b) {
         }
     }
     return true;
+}
+
+bool sameNumerically(const Clip &a, const Clip &b) {
+    if (a.id != b.id || a.assetId != b.assetId || a.trackId != b.trackId || a.timelineStart != b.timelineStart ||
+        a.timelineDuration != b.timelineDuration || a.sourceIn != b.sourceIn || !(a.speed == b.speed) ||
+        a.isStill != b.isStill || a.reversed != b.reversed || a.linkedClipId != b.linkedClipId ||
+        !(a.video == b.video) || !(a.audio == b.audio)) {
+        return false;
+    }
+    return sameSpansNumerically(a.transitions, b.transitions) && sameSpansNumerically(a.spans, b.spans);
 }
 
 // Reverses `clipId`, checks frame k shows forward frame n - 1 - k exactly, reverses it back and

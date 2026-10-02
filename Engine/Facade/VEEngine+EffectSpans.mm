@@ -60,9 +60,11 @@ using namespace ve::facade;
     const Clip *clip = track ? track->find(id) : nullptr;
     NSMutableArray<VEEffectSpan *> *spans = [NSMutableArray array];
     if (clip != nullptr) {
-        for (const EffectSpan &span : clip->spans) {
-            if (isShownSpan(span)) {
-                [spans addObject:makeEffectSpan(span, *clip, *track, sequence)];
+        for (const std::vector<EffectSpan> *list : {&clip->transitions, &clip->spans}) {
+            for (const EffectSpan &span : *list) {
+                if (isShownSpan(span)) {
+                    [spans addObject:makeEffectSpan(span, *clip, *track, sequence)];
+                }
             }
         }
     }
@@ -77,9 +79,11 @@ using namespace ve::facade;
     if (track != nullptr) {
         const ClipIndex index(sequence);
         for (const Clip &clip : track->clips) {
-            for (const EffectSpan &span : clip.spans) {
-                if (isShownSpan(span)) {
-                    [spans addObject:makeEffectSpan(span, clip, *track, sequence, &index)];
+            for (const std::vector<EffectSpan> *list : {&clip.transitions, &clip.spans}) {
+                for (const EffectSpan &span : *list) {
+                    if (isShownSpan(span)) {
+                        [spans addObject:makeEffectSpan(span, clip, *track, sequence, &index)];
+                    }
                 }
             }
         }

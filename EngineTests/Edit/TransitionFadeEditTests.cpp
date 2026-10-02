@@ -206,6 +206,7 @@ TEST_CASE("Fades always fit the clip after edits that shorten it") {
         applyRefused(fx.project, inexact, EditError::InvalidTime);
         SetClipsParams removeBoth(fx.seq, change(kCMTimeZero, kCMTimeZero));
         applyReversible(fx.project, removeBoth);
+        CHECK(fx.clip(c).transitions.empty());
         CHECK(fx.clip(c).spans.empty());
     }
 }

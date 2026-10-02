@@ -144,7 +144,7 @@ Project fadedStillProject(TransitionKind kind, int64_t frames, int64_t fadeFrame
         span.edge = edge;
         span.start = edge == ClipEdge::Head ? kCMTimeZero : CMTimeMake(-fadeFrames, 30);
         span.end = edge == ClipEdge::Head ? CMTimeMake(fadeFrames, 30) : kCMTimeZero;
-        clip.spans.push_back(span);
+        clip.transitions.push_back(span);
     }
     clip.sortSpans();
     sequence.videoTracks[0].clips.push_back(clip);

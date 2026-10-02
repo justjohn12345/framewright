@@ -892,10 +892,13 @@ VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &pr
     info.linkedClipID = clip.linkedClipId ? static_cast<VEClipID>(clip.linkedClipId->value()) : 0;
     info.videoParams = toVE(clip.video);
     info.audioParams = audioParamsOf(clip);
-    NSMutableArray<VEEffectSpan *> *spans = [NSMutableArray arrayWithCapacity:clip.spans.size()];
-    for (const EffectSpan &span : clip.spans) {
-        if (isShownSpan(span)) {
-            [spans addObject:makeEffectSpan(span, clip, track, sequence, index)];
+    NSMutableArray<VEEffectSpan *> *spans =
+        [NSMutableArray arrayWithCapacity:clip.transitions.size() + clip.spans.size()];
+    for (const std::vector<EffectSpan> *list : {&clip.transitions, &clip.spans}) {
+        for (const EffectSpan &span : *list) {
+            if (isShownSpan(span)) {
+                [spans addObject:makeEffectSpan(span, clip, track, sequence, index)];
+            }
         }
     }
     info.spans = spans;

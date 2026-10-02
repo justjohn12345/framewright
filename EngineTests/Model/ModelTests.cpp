@@ -94,7 +94,7 @@ TEST_CASE("Model: lane-0 fades shrink to fit when a clip gets shorter") {
     out.edge = ClipEdge::Tail;
     out.start = CMTimeMake(-10, 30);
     out.end = kCMTimeZero;
-    clip.spans = {in, out};
+    clip.transitions = {in, out};
     REQUIRE(clip.setTimelineEnd(CMTimeMake(25, 30)) == RetimeResult::Ok);
     CHECK(clipFadeLength(clip, ClipEdge::Head) == CMTimeMake(20, 30));
     CHECK(clipFadeLength(clip, ClipEdge::Tail) == CMTimeMake(5, 30)); // the edited edge gives way
@@ -105,14 +105,14 @@ TEST_CASE("Model: lane-0 fades shrink to fit when a clip gets shorter") {
     REQUIRE(clip.setTimelineEnd(CMTimeMake(13, 30)) == RetimeResult::Ok);
     CHECK(clipFadeLength(clip, ClipEdge::Head) == CMTimeMake(3, 30)); // each fade at most the duration
     CHECK(clipFadeLength(clip, ClipEdge::Tail) == kCMTimeZero);
-    CHECK(clip.spans.size() == 1); // a fade shortened to nothing is removed
+    CHECK(clip.transitions.size() == 1); // a fade shortened to nothing is removed
     SUBCASE("a fade gives way to a cross dissolve at the other end, whichever edge was edited") {
         Clip both;
         both.timelineDuration = CMTimeMake(30, 30);
         EffectSpan dissolve = out;
         dissolve.start = CMTimeMake(-12, 30);
         dissolve.end = CMTimeMake(12, 30);
-        both.spans = {in, dissolve};
+        both.transitions = {in, dissolve};
         REQUIRE(both.setTimelineEnd(CMTimeMake(28, 30)) == RetimeResult::Ok);
         CHECK(clipFadeLength(both, ClipEdge::Head) == CMTimeMake(16, 30));
         CHECK(both.transitionAt(ClipEdge::Tail)->start == CMTimeMake(-12, 30)); // never shortened here
@@ -342,17 +342,17 @@ TEST_CASE("Model: validateProject catches broken invariants") {
         expectProblem(fx, "non-finite gain");
         clip.audio.gainDb = 0;
         fx.project.ids.reserveThrough(1000);
-        clip.spans = {fade(ClipEdge::Head, kCMTimeZero, f30(-1))};
+        clip.transitions = {fade(ClipEdge::Head, kCMTimeZero, f30(-1))};
         expectProblem(fx, "is empty");
-        clip.spans = {fade(ClipEdge::Head, kCMTimeZero, f30(31))};
+        clip.transitions = {fade(ClipEdge::Head, kCMTimeZero, f30(31))};
         expectProblem(fx, "longer than its clip");
-        clip.spans = {fade(ClipEdge::Head, kCMTimeZero, f30(20)), fade(ClipEdge::Tail, -f30(11), kCMTimeZero)};
+        clip.transitions = {fade(ClipEdge::Head, kCMTimeZero, f30(20)), fade(ClipEdge::Tail, -f30(11), kCMTimeZero)};
         expectProblem(fx, "meets the fade in");
-        clip.spans = {fade(ClipEdge::Head, kCMTimeZero, f30(20)), fade(ClipEdge::Tail, -f30(10), kCMTimeZero)};
+        clip.transitions = {fade(ClipEdge::Head, kCMTimeZero, f30(20)), fade(ClipEdge::Tail, -f30(10), kCMTimeZero)};
         fx.requireValid(); // fades may meet exactly
-        clip.spans = {fade(ClipEdge::Head, kCMTimeZero, f30(20)), fade(ClipEdge::Tail, kCMTimeInvalid, kCMTimeZero)};
+        clip.transitions = {fade(ClipEdge::Head, kCMTimeZero, f30(20)), fade(ClipEdge::Tail, kCMTimeInvalid, kCMTimeZero)};
         expectProblem(fx, "not a numeric time");
-        clip.spans = {fade(ClipEdge::Tail, -f30(10), kCMTimeZero), fade(ClipEdge::Head, kCMTimeZero, f30(20))};
+        clip.transitions = {fade(ClipEdge::Tail, -f30(10), kCMTimeZero), fade(ClipEdge::Head, kCMTimeZero, f30(20))};
         expectProblem(fx, "lane and time order");
     }
     SUBCASE("rounded times and epochs are rejected everywhere") {
@@ -383,8 +383,8 @@ TEST_CASE("Model: validateProject catches broken invariants") {
                 case 2: clip.sourceIn = modify(clip.sourceIn); break;
                 case 3: dissolve.start = modify(dissolve.start); break;
                 case 4: dissolve.end = modify(dissolve.end); break;
-                case 5: copy.sequence().findClip(a)->spans[1].tracks[SpanParameter::Gain][1].time = modify(copy.sequence().findClip(a)->spans[1].tracks[SpanParameter::Gain][1].time); break;
-                case 9: copy.sequence().findClip(a)->spans[1].end = modify(copy.sequence().findClip(a)->spans[1].end); break;
+                case 5: copy.sequence().findClip(a)->spans[0].tracks[SpanParameter::Gain][1].time = modify(copy.sequence().findClip(a)->spans[0].tracks[SpanParameter::Gain][1].time); break;
+                case 9: copy.sequence().findClip(a)->spans[0].end = modify(copy.sequence().findClip(a)->spans[0].end); break;
                 case 6: copy.sequence().frameDuration = modify(copy.sequence().frameDuration); break;
                 case 7: copy.project.findAsset(copy.av30)->duration = modify(copy.project.findAsset(copy.av30)->duration); break;
                 default:
@@ -526,10 +526,10 @@ TEST_CASE("Model: validateProject catches broken invariants") {
         fx.requireValid();
         fx.addTailTransition(a, 2, 0);
         expectProblem(fx, "more than one transition at its tail");
-        fx.sequence().findClip(a)->spans.pop_back();
-        fx.sequence().findClip(a)->spans[0].lane = 1;
+        fx.sequence().findClip(a)->transitions.pop_back();
+        fx.sequence().findClip(a)->transitions[0].lane = 1;
         expectProblem(fx, "lane 0 only");
-        fx.sequence().findClip(a)->spans[0].lane = 0;
+        fx.sequence().findClip(a)->transitions[0].lane = 0;
         fx.requireValid();
         fx.addSpan(a, SpanKind::Motion, 0, f30(30), f30(40));
         expectProblem(fx, "lane 0 holds transitions only");
