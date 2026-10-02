@@ -616,7 +616,43 @@ Done:
   Full suite after this item: EngineTests 555 (0 skips), doctest 349, AppTests 279 (1 known skip), 0
   failures; no files left (again one empty UUID-named directory at the container's root).
 
-Next: item 3 (high-precision decode).
+- 3, high-precision decode (decision sections 4 and 6, review 1.7 and 2.5): d77e2e7. `DecodeOptions::
+  highPrecision` (MediaTypes.h), set by the program monitor's, the source monitor's and the export's decode
+  pools (not by thumbnails): alpha and RGB video deeper than 8 bits decodes to 'l64r' (16-bit unorm RGBA,
+  straight alpha, `kHighPrecisionRGBAFormat`) on both backends (Apple: `nativePixelFormat(details,
+  highPrecision)`, AVAssetReader delivers it natively for ProRes 4444, checked on this Mac: 1024 levels in a
+  row against 65 for 'BGRA'; FFmpeg: libswscale to RGBA64LE, or VTPixelTransferSession from 'y416');
+  stills deeper than 8 bits decode to 'l64r' (16-bit sRGB) and stills whose colour space is wide gamut to
+  'RGhA' (half float in extended-range sRGB, `kExtendedRGBAFormat`: P3 red is (1.09, -0.23, -0.15)), both
+  premultiplied, tagged sRGB, drawn by one helper for both backends (`Engine/Media/StillDrawing.h`). The
+  FFmpeg still path hands such pictures to CoreGraphics in their ICC profile's space, or in the space their
+  cICP tags name (FFmpeg reports a PNG's cICP instead of its ICC profile when both are present, which is
+  what ImageIO writes for Display P3; Display P3, BT.2020 and sRGB are mapped). 8-bit sRGB stills and 8-bit
+  alpha video keep 'BGRA', bit for bit. TextureCache maps 'l64r' to rgba16Unorm and 'RGhA' to rgba16Float
+  (`SourceClass::RGBA`, the fragment shader unchanged but for the clamp below); the pre-scale of deep RGBA
+  (and its premultiply) uses RGBA16Float instead of RGBA8; `sampleRGBA` limits samples to [0, 1] as
+  `sampleYCbCr` does for ungraded sources (decision section 3), a no-op for unorm textures, so an
+  extended-range still renders as its 8-bit decode did (measured: identical 8-bit pixels for a P3 still).
+  Frame cache key (review 2.5): entries are keyed by `FrameKey` = (asset, `DecodeFormat`: pixelFormat,
+  maxDimension, highPrecision); an `AssetId` converts to the default format's key; `purge`, focus and epochs
+  cover every format of an asset; producers and consumers use their pool's format (`DecodePool::
+  decodeFormat()` / `frameKey(asset)`; PlaybackController's frame source and prefetch, ExportJob).
+  Tests (`HighPrecisionDecodeTests`, 9 cases): a 12-bit ProRes 4444 ramp written at test time decodes to
+  'l64r' on both backends with 1024 levels in a row (8-bit: 256), 1024 in the monitors' working texture
+  (8-bit: 256) and 831 luma codes in a 10-bit export; a 16-bit PNG ramp gives 1024 / 1024 / 876 on both
+  backends; a Display P3 PNG (both backends, within 0.01 of each other) and a P3 HEIC (Apple) decode to 'RGhA'
+  with values outside [0, 1]; an Adobe RGB PNG (ICC profile only) likewise through FFmpeg's ICC path; 8-bit
+  sources (still.png, H.264) give the same format and the same bytes with or without the option; the
+  frame cache keeps formats apart; a pool puts and finds under its own format; a minified straight-alpha
+  'l64r' picture keeps 512 levels in 512 columns; the texture cache maps both formats. Changed existing
+  test (deviation, in the same commit): `TextureCacheTests testUnsupportedFormatsFailWithTheFormatName`
+  used 'RGhA' as its example of an unsupported format, which the brief makes supported; its example is
+  now 'b64a' (`kCVPixelFormatType_64ARGB`). Not changed: the probers still report a still's bit depth as 8
+  (Apple) and its colour as sRGB (both), since nothing reads them for decoding; HDR (PQ, HLG) stills are not
+  tone mapped (as before). Full suite after this item (before the test fix above): EngineTests 563, the
+  only failure that test, AppTests 279 (1 known skip), doctest 349.
+
+Next: item 4 (split `EffectSpan` into effect and transition types).
 
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
