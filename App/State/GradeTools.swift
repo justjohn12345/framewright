@@ -1,3 +1,4 @@
+import Combine
 import FramewrightEngine
 import Foundation
 
@@ -6,15 +7,25 @@ import Foundation
 /// clips), and the edits, each one undo step: a wheel's colour or level dragged (a coalescing group from the
 /// press to the release), a reset. Moving a wheel's colour over several clips keeps each clip's level and
 /// the rest of its grade; moving its level keeps each colour (the engine's NaN fields).
+///
+/// The values it shows are read from the store's clips and selection, so a change of either (an edit made
+/// here or anywhere else, an undo, another clip selected) is announced as a change of this model: the views
+/// that observe only it (the curves, the LUTs) then show the clips as they now are, not as they were when the
+/// view last drew.
 @MainActor
 final class GradeToolsModel: ObservableObject {
     private unowned let store: ProjectStore
     private var engine: VEEngine { store.engine }
     /// The coalescing group of the drag in progress, if any.
     private(set) var dragGroup: String?
+    /// Announces the store's clips and selection changing as this model's change.
+    private var storeForwarding: AnyCancellable?
 
     init(store: ProjectStore) {
         self.store = store
+        storeForwarding = store.$clips.dropFirst().map { _ in () }
+            .merge(with: store.$selection.dropFirst().map { _ in () })
+            .sink { [weak self] in self?.objectWillChange.send() }
     }
 
     /// The clips the tools edit: the selection's clips on video tracks.

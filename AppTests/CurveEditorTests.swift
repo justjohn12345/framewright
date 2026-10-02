@@ -91,6 +91,68 @@ final class CurveEditorTests: XCTestCase {
         XCTAssertFalse(store.clips[first]?.hasGrade ?? true)
     }
 
+    /// The user's report: a point dragged in the editor disappeared on release (the curve drawn back to the
+    /// identity) and the next press started from the identity again, overwriting the curve. The engine kept the
+    /// curve; the editor did not redraw, because the Curves section observed only the tools model, which did
+    /// not announce the selection's clips changing. The drag is made as the editor makes it (press on empty
+    /// space adds a point, moving it, release), then: the clip has the curve, the section's inputs have it, the
+    /// hosted Colour tab draws what a newly opened one draws, and a second press on the point grabs it.
+    func testTheEditorKeepsTheCurveAfterTheDrag() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let clip = try fixture.placeMovie(movie, at: 0)
+        store.selection = [clip]
+        let panel = HostedView(ColourPanel(store: store), size: NSSize(width: 320, height: 1400))
+        defer { panel.close() }
+        await panel.settle()
+        let identity = await panel.pixels()
+        var announced = 0
+        let watch = tools.objectWillChange.sink { announced += 1 }
+        defer { watch.cancel() }
+
+        // The first press, on empty space: a point added there and dragged up.
+        let side: CGFloat = 200
+        let shown = CurveEditing.editable(tools.curve(.luma).points)
+        let press = CurveEditing.viewPoint(CGPoint(x: 0.5, y: 0.5), side: side)
+        XCTAssertNil(CurveEditing.hit(press, in: shown, side: side))
+        let added = try XCTUnwrap(CurveEditing.adding(CurveEditing.curvePoint(press, side: side), to: shown))
+        tools.beginCurveDrag(.luma)
+        tools.setCurve(.luma, added.points)
+        let lifted = CurveEditing.moving(added.index, to: CGPoint(x: 0.5, y: 0.8), in: added.points)
+        tools.setCurve(.luma, lifted)
+        tools.endDrag()
+        XCTAssertEqual(store.clips[clip]?.gradeCurvePoints(.luma).map(\.pointValue), lifted, "the engine has the curve")
+        XCTAssertGreaterThan(announced, 0, "the tools model announced the change to the views observing it")
+        let state = tools.curve(.luma)
+        XCTAssertEqual(state.points, lifted, "what the section gives the editor")
+        XCTAssertFalse(state.mixed)
+
+        let fresh = HostedView(ColourPanel(store: store), size: NSSize(width: 320, height: 1400))
+        defer { fresh.close() }
+        await fresh.settle()
+        let reopened = await fresh.pixels()
+        XCTAssertNotEqual(reopened, identity, "the curve changes the drawing")
+        let live = await panel.pixels()
+        XCTAssertTrue(live == reopened, "the editor shows the curve after the release, not the identity")
+
+        // The second press, on the point: it grabs it (no point added, the curve not reset) and moves it.
+        let shownAgain = CurveEditing.editable(tools.curve(.luma).points)
+        XCTAssertEqual(shownAgain, lifted)
+        let grabbed = try XCTUnwrap(CurveEditing.hit(CurveEditing.viewPoint(lifted[1], side: side), in: shownAgain,
+                                                     side: side))
+        XCTAssertEqual(grabbed, 1)
+        tools.beginCurveDrag(.luma)
+        let lowered = CurveEditing.moving(grabbed, to: CGPoint(x: 0.6, y: 0.3), in: shownAgain)
+        tools.setCurve(.luma, lowered)
+        tools.endDrag()
+        XCTAssertEqual(tools.curve(.luma).points, [CGPoint(x: 0, y: 0), CGPoint(x: 0.6, y: 0.3), CGPoint(x: 1, y: 1)])
+        store.undo()
+        XCTAssertEqual(tools.curve(.luma).points, lifted, "each drag is one undo step")
+        // Another selection is announced too (the editor shows the newly selected clip's curve).
+        announced = 0
+        store.selection = []
+        XCTAssertGreaterThan(announced, 0)
+    }
+
     func testCurveEditsOverTheSelection() async throws {
         let (movie, _) = try await fixture.importMedia()
         let first = try fixture.placeMovie(movie, at: 0)
