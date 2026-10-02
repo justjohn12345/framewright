@@ -1187,12 +1187,73 @@ Done:
     EngineTests 616 (no display-link skips this run), doctest 413, AppTests 304 (1 known skip); nothing left in
     `$TMPDIR/FramewrightEngineTests`, the container's tmp or Preferences beyond the known files.
 
+- B4, LUTs (.cube): 63d23c7. Schema 9.
+  - Reading (`Engine/Model/CubeLut.h`): Adobe's Cube format 1.0 with Resolve's LUT_1D/3D_INPUT_RANGE;
+    TITLE, DOMAIN_MIN/MAX, comments, CRLF; vendor keywords before the table ignored; 1D sizes 2-65536, 3D 2-129;
+    anything else refused with what and where ("line 12: \"x\" is not a number", "the table has 1 values;
+    LUT_3D_SIZE 2 needs 8"). `cubeContentId`: 16 hex digits of an FNV-1a hash of kind, size, domain and table.
+  - Storage: the project keeps a copy of each table (`Project::luts`, by content id, shared and immutable; a
+    table imported twice is stored once); a clip's grade refers to it (`ClipGrade::inputLut`, `::lookLut`,
+    `::lookStrength`, 0-1, 1 without a look). So a project opens anywhere without the .cube file (the brief
+    allowed a copy of the contents or a bookmark; a copy avoids the media library's bookmark and relink machinery
+    and survives copying the project to another machine). File: top-level "luts" (only the LUTs a clip uses, in
+    id order: id, kind, size, domainMin/Max, title, fileName, path, data = base64 of float32 little-endian) and
+    the grade keys "inputLut", "lookLut", "lookStrength". Why schema 9: a version 8 build drops unknown
+    top-level keys, so it would silently lose the tables; with 9 it refuses the file instead. `toV9` (frozen)
+    converts nothing and warns about version 9 content in an older file. Loading: a malformed entry fails with
+    its path; an id that does not match its table is re-keyed (warning, clips follow); a reference to a missing
+    LUT is dropped (warning, with its strength); a strength out of range is limited. Validation: every LUT valid
+    and stored under its content id, every reference held.
+  - Goldens (additions): `EngineTests/Serialize/golden/v9/` (every older fixture migrated to 9, derived from the
+    v8 goldens by the step's rule and checked against the engine; `project-v8-adjusted.json`, a version 8 file
+    holding LUTs, with its golden; `project-v9.json`, the writer's output byte for byte; excluded from the bundle
+    like v8). `MigrationGoldenV9Tests.cpp` (7 cases).
+  - Edits: `GradeChange` has `inputLut`, `lookLut`, `lookStrength` ("Change Input LUT", "Change Look", "Change
+    Look Strength"; a LUT the project does not hold is refused; removing the look resets its strength; a clip
+    without a look keeps strength 1). `SetClipGradeWithLuts` (a Command): adds the LUTs the project lacks, then
+    the grade change, one undo step; undo removes what it added; a refused or empty change adds nothing (so the
+    model still changes only through commands). Copy Grade keeps the LUTs it uses, so Paste brings them into
+    another project.
+  - Rendering: the input LUT on the source's R'G'B' first (made finite and limited), the look after the curves,
+    mixed by its strength; a value is mapped through the LUT's domain and limited to it. 3D: an RGBA32Float
+    texture3d per LUT (compositor cache by id, 8 entries, cleared under memory pressure; a 1x1x1 stand-in when an
+    extended grade has none), read texel by texel with tetrahedral interpolation (`veCubeLookup`, exact for a
+    linear table; the same code on the CPU). 1D: three rows of the grade's tables over the LUT's domain
+    (resampled to 1024 by linear interpolation; rows 4-6 input, 7-9 look). `VEGradeUniforms` is 192 bytes
+    (stages `VEGradeStageInputLut` / `...LookLut`, `lutFlags`, `lookStrength`, the domains, the cube sizes).
+  - Facade (additions): VETypes.h `VELUTKind`, `VELUTInfo` (lutID, displayName, fileName, sourcePath, kind,
+    size), `VEGradeSelection (LUTs)` (`inputLUTID`, `lookLUTID`, `lookStrength`; nil/NaN where mixed),
+    `VEClipInfo` `gradeInputLUTID`, `gradeLookLUTID`, `gradeLookStrength`; VEEngine.h `importLUT(at:)` (throws
+    VEEngineErrorImportFailed with the parser's reason), `lut(withID:)`, `setGradeInputLUT(_:clips:)`,
+    `setGradeLook(_:clips:)`, `setGradeLookStrength(_:clips:)`.
+  - App: the Colour tab's LUTs section (`LUTSection`): Input and Look rows (name, Choose… with an open panel for
+    .cube files, remove), the look's strength slider (one undo step per drag); `GradeToolsModel` LUT calls.
+  - Measured (one 1080p / 2160p layer, everything on: basic grade, wheels, curves, a 1D input LUT of 1024 and a
+    33^3 look): 0.38 ms / 1.46 ms per frame (against 0.27 / 1.08 without the LUTs, 0.10 / 0.43 ungraded).
+  - Tests: doctests `CubeLutTests` (4), `ClipGradeLutTests` (6), `ColorGradeLutTests` (4: a generated identity
+    3D LUT of 2, 17 and 33 returns its input within 1e-6, a 1D identity too; a known transform (red and blue
+    swapped, exact between entries; a square, within h^2/4; an inverting 1D); the domain; the strength; the
+    order; finite outputs), `MigrationGoldenV9Tests` (7); XCTests `ColorGradeExtendedRenderTests` (+2: GPU against
+    CPU for LUTs with wheels and a basic grade, largest 2.9e-5, bound 5e-5; a rendered picture with LUTs equals
+    the reference within 1e-4), `VEEngineGradeLutTests` (3); AppTests `LUTSectionTests` (2). Existing tests
+    changed by the schema number only (named): ProjectJSONTests "format details" (`kProjectSchemaVersion == 9`),
+    "the checked-in version 5 project loads with every clip forward" and "the checked-in version 6 project opens
+    configured, with sharpening on" (expected `"schemaVersion"` 9), "the checked-in version 7 project matches the
+    current writer byte for byte but for its version" (its version line set to 9), "the checked-in version 8
+    project matches the current writer byte for byte" (renamed "... but for its version", the golden's version
+    line set to 9), "a version 5 file with version 6 content opens with a warning naming it" ("saved as version
+    9"); MigrationGoldenV8Tests "a version 7 file holding grades keeps them" and "a golden document loads as the
+    project its older file loads as" (the expected warnings name the current version as the version the project
+    is saved as, and the saved version is the current one, as MigrationGoldenTests does); VEEngineGradeTests
+    `testAGradeIsSavedAndOpened` (`"schemaVersion": 9`). Full suite after B4: TEST SUCCEEDED, EngineTests 621 (3
+    display-link skips), doctest 434, AppTests 306 (1 known skip).
+
 Deviations:
 - B1 and B2 are one commit: B2's model and shader work began in the files B1 had changed before B1 was
   committed (B1 had passed its own tests and a full suite: EngineTests 610, doctest 404, AppTests 302), and
   splitting the shared files afterwards was riskier than committing both.
 
-Next, in the brief's order of value: B4 LUTs, B3 hue curves, B5 vectorscope.
+Next, in the brief's order of value: B3 hue curves, B5 vectorscope.
 Not in this round (next): P3/BT.2020 primaries (a separate decision), HDR export, HLG tone mapping, grades that
 change over time, match colour.
 
