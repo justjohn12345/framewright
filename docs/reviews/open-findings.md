@@ -692,7 +692,52 @@ Done:
     `spanActsAt`), ModelTests "validateProject catches broken invariants" (a transition on lane 1). The
     file-repair path for a transition on another lane is still covered by ProjectJSONTests.
 
-Next: item 5 (`TransitionRules::edgeRoom`).
+- 5, one owner for transition and fade rules (review 1.8): 1c70af7. `Engine/Model/TransitionRules.h`:
+  `TransitionRules::edgeRoom(project, track, owner, edge, shape, frameDuration)` returns per side (`inside`
+  the owner; `beyond` the cut for a cross dissolve, when a clip touches the owner's end) the parts (the
+  clip's length, its other transition's part inside it, a dissolve coming in, the next clip's tail span,
+  the media beyond the cut in timeline time), the room (exact) and its whole frames, the limit
+  (`RoomLimit`: ClipLength, OtherEdge, IncomingDissolve, Media), the limiting clip and the sentence (fade
+  or transition wording, as before); `fadeRoom` (a fade's side, no assets needed), `partInside`,
+  `incomingPartInside`, `wholeFrames`, `fadeRoomBeside` and `conformFadeFrames`. The callers are thin:
+  `fadeLimit` and `transitionSideLimits` copy a side into their structs (`editErrorOf(RoomLimit)` maps the
+  limit to the edit error); `checkTransitionSpan` reads the parts in its own order with its own messages;
+  `pruneInvalidTransitions`' "a fade out gives way to a dissolve coming in" reads the fade's room (on the
+  clip's timescale, as before); `setClipFade` reads `partInside` / `incomingPartInside`; `Clip::fitSpans`
+  fits its fades with `fadeRoomBeside`; the frame-rate conform's frame-by-frame trial loop is
+  `conformFadeFrames` (the frames a fade keeps), then one check. `Sequence.h`'s
+  `incomingTransitionInside`, a copy, is removed. The frozen v4 -> v5 copy is left as it is (item 1).
+  Proof of no change: `TransitionRulesTests` (10 cases) compares each caller with a copy of its code from
+  before (520e7c0) over 3,000 random tracks each (valid and invalid transitions, sample-length fades,
+  wipes on audio, stills, 0.5x/2x, reversed clips, handles at both ends of the media): fadeLimit,
+  transitionSideLimits (all fields), checkTransitionSpan (kind, message, clip; 4,386 issues and 2,375 valid
+  transitions), pruneInvalidTransitions (sequence and notes), setClipFade (result, message, clip, ids),
+  Clip::fitSpans' fades after random trims of either edge, the conform's fade frames at 25, 29.97, 24 and
+  60 fps: all equal. One difference, not reachable: a cross dissolve's room before its cut counted a fade
+  in at the owner's start or else a dissolve coming in; it now subtracts both, which differs only when a
+  clip has both, a fade in on a clip another clip touches (invalid: the cut is the other clip's; pruning
+  removes the fade before any caller sees the clip; the test asserts it is invalid wherever it differs).
+  Disagreements between the old copies, kept as they are (each shown by a test; question for the lead
+  whether to unify them, which would change what users see):
+  - D1, a clip's fade in and its tail dissolve no longer fit the clip: a trim shortens the fade in
+    (`Clip::fitSpans`, "fades give way to a cross dissolve"), but the frame-rate conform keeps the fade in
+    and shortens the dissolve (the dissolve is fitted around the fade in by `transitionSideLimits`;
+    `conformFadeFrames` does not count the dissolve). Test: "D1, a fade in beside a tail dissolve: a trim
+    shortens the fade, the conform the dissolve" (30 -> 25 fps: the fade keeps 15 frames, the dissolve
+    goes from 15 + 15 to 10 + 15).
+  - D2, a dissolve into a clip and the clip's fade out no longer fit it: pruning (after every edit, on
+    load) shortens the fade out, but the frame-rate conform shortens the dissolve (fitted first around the
+    fade out at its wanted length). Test: "D2, a dissolve into a clip that fades out: pruning shortens the
+    fade, the conform the dissolve" (pruning: fade out 20 -> 15; conform at 25 fps: dissolve 15 + 15 ->
+    15 + 10, fade out keeps 15).
+  (The limits the app shows, `fadeLimit` and `transitionSideLimits`, are symmetric on purpose: whichever is
+  being sized is limited by the other.)
+  Full suite after this item: EngineTests 564, doctest 359 (349 + 10), AppTests 279 (1 known skip) with one
+  failure, `TimelineRedrawTests testPlayheadMovesDoNotRedrawTheTimeline` (5 canvas draws during 120
+  playhead moves, bound 2; the canvas still settling after its thumbnails), which passed 3 of 3 when run
+  again alone (0 draws); this item changes nothing the app's timeline draws.
+
+Next: item 6 (the transition descriptor table), quota allowing; then the final verification.
 
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
