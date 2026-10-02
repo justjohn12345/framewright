@@ -115,6 +115,22 @@ std::int64_t conformFadeFrames(const Clip &owner, ClipEdge edge, CMTime frameDur
     return wholeFrames(lengthLeft(owner.timelineDuration, {taken}), frameDuration);
 }
 
+std::int64_t conformFadeFramesBesideDissolves(const Track &track, const Clip &owner, ClipEdge edge,
+                                              CMTime frameDuration) {
+    CMTime dissolve = kCMTimeZero;
+    if (edge == ClipEdge::Head) {
+        const TransitionSpan *tail = owner.transitionAt(ClipEdge::Tail);
+        if (tail != nullptr && kCMTimeZero < tail->end) {
+            dissolve = partInside(owner, ClipEdge::Tail);
+        }
+    } else {
+        dissolve = incomingPartInside(track, owner);
+    }
+    const CMTime taken = edge == ClipEdge::Tail ? partInside(owner, ClipEdge::Head) : kCMTimeZero;
+    return std::min(conformFadeFrames(owner, edge, frameDuration),
+                    wholeFrames(lengthLeft(owner.timelineDuration, {taken, dissolve}), frameDuration));
+}
+
 EdgeRoom edgeRoom(const Project &project, const Track &track, const Clip &owner, ClipEdge edge,
                   TransitionShape shape, CMTime frameDuration) {
     EdgeRoom room;

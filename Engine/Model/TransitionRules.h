@@ -2,8 +2,11 @@
 // clip's length, its other transition, a cross dissolve coming into it, the next clip and the media
 // beyond the cut leave. Validation (checkTransitionSpan, pruneInvalidTransitions), the clip's own
 // fade fitting after a trim (Clip::fitSpans), the edits (setClipFade, the frame-rate conform) and
-// the limits the app shows (fadeLimit, transitionSideLimits, TransitionFitting.h) all read it here;
-// each decides for itself what gives way when two transitions meet.
+// the limits the app shows (fadeLimit, transitionSideLimits, TransitionFitting.h) all read it here.
+// When a fade and a cross dissolve on one clip no longer both fit, the fade gives way and the
+// dissolve keeps its length, in every caller that resolves the conflict (trims, pruning, the
+// frame-rate conform); the limits the app shows are symmetric (whichever is being sized is limited
+// by the other).
 //
 // The sides of a transition at `edge` of its owner:
 //   - inside: the part inside the owner, after its start (a fade in) or before its end (a fade out, or
@@ -91,13 +94,21 @@ SideRoom fadeRoom(const Track &track, const Clip &owner, ClipEdge edge, CMTime f
 // neighbours do not count); nullopt when the difference has no exact form.
 std::optional<CMTime> fadeRoomBeside(CMTime length, CMTime taken);
 
-// The longest fade at `edge` of `owner` the frame-rate conform keeps (SetSequenceFormat), in whole
-// frames of `frameDuration`: it counts the owner's length and, for a fade out, its fade in, but
-// neither the owner's tail dissolve for a fade in nor a dissolve coming into it for a fade out; those
-// dissolves are fitted around the fade instead (transitionSideLimits). Elsewhere a fade gives way to a
-// dissolve (Clip::fitSpans, pruneInvalidTransitions): see open-findings, "Colour grading prerequisites
-// round 2", item 5.
+// The frames a fade at `edge` of `owner` has beside the clip's other fade, in whole frames of
+// `frameDuration`: the owner's length less, for a fade out, its fade in (a fade out gives way to the
+// fade in). Dissolves are not counted; conformFadeFramesBesideDissolves adds them.
 std::int64_t conformFadeFrames(const Clip &owner, ClipEdge edge, CMTime frameDuration);
+
+// The longest fade at `edge` of `owner` (on `track`) the frame-rate conform keeps (SetSequenceFormat),
+// in whole frames of `frameDuration`: conformFadeFrames, less for a fade in the owner's tail dissolve's
+// share before the cut, and for a fade out the part inside the owner of a cross dissolve coming into it.
+// One rule everywhere (the user's decision on D1 and D2, 2026-10-02): when a fade and a dissolve on the
+// same clip no longer both fit, the fade gives way and the dissolve keeps its length, as after a trim
+// (Clip::fitSpans) and in pruning (pruneInvalidTransitions). The conform therefore fits the dissolves
+// first, without the fades, and the fades in what the dissolves leave. A tail span reaching past the
+// owner's end (`end` > 0) is a dissolve; a fade out at the owner's tail does not limit its fade in.
+std::int64_t conformFadeFramesBesideDissolves(const Track &track, const Clip &owner, ClipEdge edge,
+                                              CMTime frameDuration);
 
 // The part inside `owner` of its lane-0 span at `edge`: a fade in's length (`end`), a tail span's
 // share before the cut (`-start`); zero when there is none.

@@ -877,11 +877,10 @@ struct DissolveIntoFadeOut : Fixture {
 
 } // namespace
 
-// Disagreement D1 (kept; open-findings, round 2, item 5): when a clip's fade in and its tail dissolve no
-// longer fit it, a trim shortens the fade in (Clip::fitSpans: "fades give way to a cross dissolve"), but
-// the frame-rate conform keeps the fade in and shortens the dissolve (transitionSideLimits fits the
-// dissolve around the fade in, conformFadeFrames does not count the dissolve).
-TEST_CASE("TransitionRules: D1, a fade in beside a tail dissolve: a trim shortens the fade, the conform the dissolve") {
+// D1 (open-findings, round 2, item 5; the user's decision of 2026-10-02): when a clip's fade in and its tail
+// dissolve no longer fit it, the fade gives way and the dissolve keeps its length, after a trim
+// (Clip::fitSpans) and in the frame-rate conform alike.
+TEST_CASE("TransitionRules: D1, a fade in beside a tail dissolve: a trim and the conform both shorten the fade") {
     SUBCASE("a trim of the clip's start") {
         FadeInBesideDissolve fx(10, 10, 10);
         Clip trimmed = fx.clip(fx.a);
@@ -896,18 +895,17 @@ TEST_CASE("TransitionRules: D1, a fade in beside a tail dissolve: a trim shorten
         applyReversible(fx.project, command);
         const Clip &a = fx.clip(fx.a);
         REQUIRE(a.timelineDuration == f25(25));
-        CHECK(clipFadeLength(a, ClipEdge::Head) == f25(15));      // the fade kept its 15 frames
-        CHECK(a.transitionAt(ClipEdge::Tail)->start == -f25(10)); // the dissolve gave way before the cut
+        CHECK(clipFadeLength(a, ClipEdge::Head) == f25(10));      // the fade gave way: 25 - 15
+        CHECK(a.transitionAt(ClipEdge::Tail)->start == -f25(15)); // the dissolve kept its 15 + 15 frames
         CHECK(a.transitionAt(ClipEdge::Tail)->end == f25(15));
-        CHECK(command.report().transitionsShortened == std::vector<SpanId>{fx.dissolve});
+        CHECK(command.report().transitionsShortened == std::vector<SpanId>{fx.fadeIn});
+        fx.requireValid();
     }
 }
 
-// Disagreement D2 (kept): when a cross dissolve into a clip and the clip's fade out no longer fit it,
-// pruning (every edit, loading) shortens the fade out ("a fade out gives way to a cross dissolve coming
-// into its clip"), but the frame-rate conform shortens the dissolve (fitted first, around the fade out at
-// its wanted length; conformFadeFrames does not count the dissolve).
-TEST_CASE("TransitionRules: D2, a dissolve into a clip that fades out: pruning shortens the fade, the conform the dissolve") {
+// D2 (the same decision): when a cross dissolve into a clip and the clip's fade out no longer fit it, the
+// fade out gives way, in pruning (every edit, loading) and in the frame-rate conform alike.
+TEST_CASE("TransitionRules: D2, a dissolve into a clip that fades out: pruning and the conform both shorten the fade") {
     SUBCASE("pruning") {
         DissolveIntoFadeOut fx(10, 15, 20); // 15 + 20 of B's 30 frames
         std::vector<std::string> notes;
@@ -926,9 +924,106 @@ TEST_CASE("TransitionRules: D2, a dissolve into a clip that fades out: pruning s
         applyReversible(fx.project, command);
         const Clip &b = fx.clip(fx.b);
         REQUIRE(b.timelineDuration == f25(25));
-        CHECK(clipFadeLength(b, ClipEdge::Tail) == f25(15));              // the fade kept its 15 frames
-        CHECK(fx.clip(fx.a).transitionAt(ClipEdge::Tail)->end == f25(10)); // the dissolve gave way after the cut
-        CHECK(command.report().transitionsShortened == std::vector<SpanId>{fx.dissolve});
+        CHECK(clipFadeLength(b, ClipEdge::Tail) == f25(10));              // the fade gave way: 25 - 15
+        CHECK(fx.clip(fx.a).transitionAt(ClipEdge::Tail)->end == f25(15)); // the dissolve kept its 15 + 15 frames
+        CHECK(fx.clip(fx.a).transitionAt(ClipEdge::Tail)->start == -f25(15));
+        CHECK(command.report().transitionsShortened == std::vector<SpanId>{fx.fadeOut});
+        fx.requireValid();
+    }
+}
+
+// The one rule per role in the conform: a fade in beside its clip's tail dissolve, a fade out beside a
+// dissolve coming into its clip; on picture and on sound; shortened or removed, with the sentence saying
+// why, and undone exactly.
+TEST_CASE("TransitionRules: the frame-rate conform fits each fade in what the dissolves leave") {
+    auto sentenceFor = [](const std::vector<std::string> &sentences, const std::string &start) {
+        for (const std::string &s : sentences) {
+            if (s.rfind(start, 0) == 0) {
+                return s;
+            }
+        }
+        return std::string();
+    };
+    SUBCASE("a fade in gives way to its clip's tail dissolve") {
+        FadeInBesideDissolve fx(15, 15, 15);
+        SetSequenceFormat command(fx.seq, at25fps(fx.sequence()));
+        applyReversible(fx.project, command); // applies, checks the undo, applies again
+        CHECK(sentenceFor(command.report().sentences, "The fade in at the start of") ==
+              "The fade in at the start of “av30.mov” is shortened from 15 frames to 10 frames: it gives way to the "
+              "cross dissolve at the clip's end.");
+    }
+    SUBCASE("a fade in the dissolve leaves no frame for is removed") {
+        FadeInBesideDissolve fx(5, 25, 5); // the dissolve takes 25 of A's 30 frames; A becomes 25 frames
+        SetSequenceFormat command(fx.seq, at25fps(fx.sequence()));
+        applyReversible(fx.project, command);
+        const Clip &a = fx.clip(fx.a);
+        CHECK(a.transitionAt(ClipEdge::Head) == nullptr);
+        CHECK(a.transitionAt(ClipEdge::Tail)->start == -f25(25));
+        CHECK(a.transitionAt(ClipEdge::Tail)->end == f25(5));
+        CHECK(command.report().transitionsRemoved == std::vector<SpanId>{fx.fadeIn});
+        CHECK(command.report().transitionsShortened.empty());
+        CHECK(sentenceFor(command.report().sentences, "The fade in at the start of") ==
+              "The fade in at the start of “av30.mov” is removed: not one frame of it fits at 25 fps (it gives way to "
+              "the cross dissolve at the clip's end).");
+        fx.requireValid();
+    }
+    SUBCASE("a fade out on sound gives way to a crossfade coming into its clip") {
+        Fixture fx;
+        const ClipId a = fx.addClip(fx.a1, fx.av30, 0, 30, 30);
+        const ClipId b = fx.addClip(fx.a1, fx.av30, 30, 30, 300);
+        const SpanId crossfade = fx.addTailTransition(a, 15, 20);
+        const SpanId fadeOut = fx.addFade(b, ClipEdge::Tail, f30(10));
+        fx.requireValid();
+        SetSequenceFormat command(fx.seq, at25fps(fx.sequence()));
+        applyReversible(fx.project, command);
+        CHECK(fx.clip(a).transitionAt(ClipEdge::Tail)->id == crossfade);
+        CHECK(fx.clip(a).transitionAt(ClipEdge::Tail)->end == f25(20)); // the crossfade kept its frames
+        CHECK(clipFadeLength(fx.clip(b), ClipEdge::Tail) == f25(5));    // B is 25 frames: 25 - 20
+        CHECK(command.report().transitionsShortened == std::vector<SpanId>{fadeOut});
+        CHECK(sentenceFor(command.report().sentences, "The fade out at the end of") ==
+              "The fade out at the end of “av30.mov” is shortened from 10 frames to 5 frames: it gives way to the "
+              "crossfade coming into the clip.");
+        fx.requireValid();
+    }
+    SUBCASE("a fade out the dissolve leaves no frame for is removed; the fade in still comes first") {
+        // C, apart from the cut, keeps the rule between a clip's two fades: its fade out gives way to its fade in.
+        DissolveIntoFadeOut fx(5, 25, 5); // the dissolve takes 25 of B's frames; B becomes 25 frames
+        const ClipId c = fx.addClip(fx.v1, fx.av30, 100, 30, 30);
+        fx.addFade(c, ClipEdge::Head, f30(20));
+        const SpanId cOut = fx.addFade(c, ClipEdge::Tail, f30(10));
+        fx.requireValid();
+        SetSequenceFormat command(fx.seq, at25fps(fx.sequence()));
+        applyReversible(fx.project, command);
+        CHECK(fx.clip(fx.b).transitionAt(ClipEdge::Tail) == nullptr);
+        CHECK(fx.clip(fx.a).transitionAt(ClipEdge::Tail)->end == f25(25));
+        CHECK(clipFadeLength(fx.clip(c), ClipEdge::Head) == f25(20));
+        CHECK(clipFadeLength(fx.clip(c), ClipEdge::Tail) == f25(5)); // C is 25 frames: 25 - 20
+        CHECK(command.report().transitionsRemoved == std::vector<SpanId>{fx.fadeOut});
+        CHECK(command.report().transitionsShortened == std::vector<SpanId>{cOut});
+        CHECK(sentenceFor(command.report().sentences, "The fade out at the end of “av30.mov” is removed") ==
+              "The fade out at the end of “av30.mov” is removed: not one frame of it fits at 25 fps (it gives way to "
+              "the cross dissolve coming into the clip).");
+        fx.requireValid();
+    }
+}
+
+// A fade shorter than half a frame of the new rate keeps one frame, at the edge it is on.
+TEST_CASE("TransitionRules: the frame-rate conform keeps a sub-frame fade as one frame at its own edge") {
+    for (const ClipEdge edge : {ClipEdge::Head, ClipEdge::Tail}) {
+        CAPTURE(edge == ClipEdge::Head);
+        Fixture fx;
+        const ClipId a = fx.addClip(fx.a1, fx.av30, 0, 30, 30);
+        const SpanId fade = fx.addFade(a, edge, CMTimeMake(100, 48000)); // 100 samples
+        fx.requireValid();
+        SetSequenceFormat command(fx.seq, at25fps(fx.sequence()));
+        applyReversible(fx.project, command);
+        const TransitionSpan *span = fx.clip(a).transitionAt(edge);
+        REQUIRE(span != nullptr);
+        CHECK(span->id == fade);
+        CHECK(clipFadeLength(fx.clip(a), edge) == f25(1));
+        CHECK(span->start == (edge == ClipEdge::Head ? kCMTimeZero : -f25(1)));
+        CHECK(span->end == (edge == ClipEdge::Head ? f25(1) : kCMTimeZero));
+        fx.requireValid();
     }
 }
 

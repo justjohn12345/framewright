@@ -3414,13 +3414,16 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
                         if (span.edge == ClipEdge::Tail) {
                             frames.before = roundedFrames(negateTime(span.start), fd);
                         }
+                        const auto placement = placeTransition(track, clip, span);
+                        const bool dissolve = placement && placement->role == TransitionRole::CrossDissolve &&
+                                              placement->partner != nullptr;
                         if (frames.before + frames.after == 0) {
-                            frames.after = 1; // a fade shorter than half a frame keeps one
+                            // A transition shorter than half a frame keeps one: a fade out inside its clip, a
+                            // fade in or a cross dissolve after the edge.
+                            (span.edge == ClipEdge::Tail && !dissolve ? frames.before : frames.after) = 1;
                         }
                         wanted[span.id] = frames;
-                        const auto placement = placeTransition(track, clip, span);
-                        if (placement && placement->role == TransitionRole::CrossDissolve &&
-                            placement->partner != nullptr) {
+                        if (dissolve) {
                             dissolves.insert(span.id);
                         }
                     }
@@ -3444,96 +3447,170 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
                 }
             }
         }
+        // One rule (the user's decision on D1 and D2, 2026-10-02): when a fade and a cross dissolve on one
+        // clip no longer both fit, the fade gives way and the dissolve keeps its length, as after a trim and
+        // in pruning. So the dissolves are fitted first, with every fade set aside, and then the fades in
+        // what the dissolves leave (TransitionRules::conformFadeFramesBesideDissolves), each clip's fade in
+        // before its fade out. The sentences keep the order of the transitions on their tracks.
+        enum class ConformRole { Dissolve, LostPartner, Fade };
+        struct ConformedTransition {
+            Track *track = nullptr;
+            ClipId clip{};
+            ClipEdge edge = ClipEdge::Head;
+            SpanId span{};
+            ConformRole role = ConformRole::Fade;
+            std::string name;
+            TransitionFrames goal;
+            TransitionFrames fitted;
+            std::string reason;
+            bool skipped = false; // a dissolve the limits do not understand: validation decides
+        };
+        std::vector<ConformedTransition> conformed;
         for (std::vector<Track> *list : {&sequence.videoTracks, &sequence.audioTracks}) {
             for (Track &track : *list) {
                 for (Clip &clip : track.clips) {
                     for (const ClipEdge edge : {ClipEdge::Head, ClipEdge::Tail}) {
-                        TransitionSpan *span = clip.transitionAt(edge);
+                        const TransitionSpan *span = clip.transitionAt(edge);
                         if (span == nullptr) {
                             continue;
                         }
-                        const TransitionFrames goal = wanted[span->id];
-                        const std::string name = transitionName(project, track, clip, *span);
+                        ConformedTransition entry;
+                        entry.track = &track;
+                        entry.clip = clip.id;
+                        entry.edge = edge;
+                        entry.span = span->id;
+                        entry.name = transitionName(project, track, clip, *span);
+                        entry.goal = wanted[span->id];
+                        entry.fitted = entry.goal;
                         const auto placement = placeTransition(track, clip, *span);
                         const bool dissolve = placement && placement->role == TransitionRole::CrossDissolve &&
                                               placement->partner != nullptr;
-                        TransitionFrames fitted = goal;
-                        std::string reason;
-                        if (dissolves.contains(span->id) && !dissolve) {
-                            // The conform keeps touching clips touching, so a cross dissolve keeps its partner;
-                            // should one ever lose it, it is removed and named, never kept as a fade.
-                            fitted = TransitionFrames{};
-                            reason = "the clips no longer meet at a cut.";
-                        } else if (dissolve) {
-                            EditResult why = EditResult::success();
-                            const auto limits = transitionSideLimits(project, sequence, clip.id, span->id, why);
-                            if (!limits) {
-                                continue; // not a transition the limits understand: validation decides
-                            }
-                            fitted.before = std::min(goal.before, limits->maxBeforeFrames);
-                            fitted.after = std::min(goal.after, limits->maxAfterFrames);
-                            reason = fitted.after < goal.after ? limits->afterReason : limits->beforeReason;
-                            if (fitted.after < 1) {
-                                fitted = TransitionFrames{};
-                            }
-                        } else {
-                            // A fade: as long as the clip and its fade in allow (TransitionRules::
-                            // conformFadeFrames), then checked as a whole.
-                            std::int64_t &frames = edge == ClipEdge::Head ? fitted.after : fitted.before;
-                            reason = "the clip is too short for it at this frame rate, with its other transition.";
-                            frames = std::min(frames, TransitionRules::conformFadeFrames(clip, edge, newFd));
-                            std::optional<TransitionIssue> issue;
-                            if (frames > 0) {
-                                setTransitionFrames(*span, fitted, newFd);
-                                issue = checkTransitionSpan(project, track, clip, *span, newFd);
-                            }
-                            if (frames > 0 && issue) {
-                                reason = issue->kind == TransitionIssueKind::Touching
-                                             ? "another clip now touches the clip's start."
-                                             : "it is no longer a valid transition.";
-                                frames = 0;
-                            }
-                            if (fitted.before + fitted.after == 0) {
-                                fitted = TransitionFrames{};
-                            }
-                        }
-                        if (dissolve && fitted.before + fitted.after > 0) {
-                            setTransitionFrames(*span, fitted, newFd);
-                            if (auto issue = checkTransitionSpan(project, track, clip, *span, newFd)) {
-                                reason = issue->kind == TransitionIssueKind::NotAdjacent
-                                             ? "the clips no longer meet at a cut."
-                                             : "it is no longer a valid transition.";
-                                fitted = TransitionFrames{};
-                            }
-                        }
-                        const std::int64_t wantedTotal = goal.before + goal.after;
-                        const std::int64_t fittedTotal = fitted.before + fitted.after;
-                        if (fittedTotal == 0) {
-                            report_.transitionsRemoved.push_back(span->id);
-                            std::string sentence = name + " is removed: not one frame of it fits at " +
-                                                   frameRateName(newFd) + " fps";
-                            sentence += reason.empty() ? "." : " (" + reason.substr(0, reason.size() - 1) + ").";
-                            sentence[0] = 'T';
-                            sentences.push_back(sentence);
-                            const SpanId id = span->id;
-                            markRemovedOnPurpose(id);
-                            std::erase_if(clip.transitions, [id](const TransitionSpan &s) { return s.id == id; });
-                            continue;
-                        }
-                        setTransitionFrames(*span, fitted, newFd);
-                        if (fittedTotal < wantedTotal) {
-                            report_.transitionsShortened.push_back(span->id);
-                            std::string sentence = name + " is shortened from " + framesName(wantedTotal) + " to " +
-                                                   framesName(fittedTotal) + ": " + reason;
-                            sentence[0] = 'T';
-                            sentences.push_back(sentence);
-                        } else {
-                            ++report_.transitionsKept;
-                            if (!example) {
-                                example = std::make_pair(goal, span->id);
-                            }
-                        }
+                        entry.role = dissolve                          ? ConformRole::Dissolve
+                                     : dissolves.contains(span->id) ? ConformRole::LostPartner
+                                                                     : ConformRole::Fade;
+                        conformed.push_back(std::move(entry));
                     }
+                }
+            }
+        }
+        auto eraseTransition = [](Clip &clip, SpanId id) {
+            std::erase_if(clip.transitions, [id](const TransitionSpan &s) { return s.id == id; });
+        };
+        // The fades, set aside while the dissolves are fitted (index into `conformed`, the span).
+        std::vector<std::pair<std::size_t, TransitionSpan>> fades;
+        for (std::size_t i = 0; i < conformed.size(); ++i) {
+            ConformedTransition &entry = conformed[i];
+            Clip &clip = *entry.track->find(entry.clip);
+            if (entry.role == ConformRole::Fade) {
+                fades.emplace_back(i, *clip.transitionAt(entry.edge));
+                eraseTransition(clip, entry.span);
+            } else if (entry.role == ConformRole::LostPartner) {
+                // The conform keeps touching clips touching, so a cross dissolve keeps its partner; should one
+                // ever lose it, it is removed and named, never kept as a fade.
+                entry.fitted = TransitionFrames{};
+                entry.reason = "the clips no longer meet at a cut.";
+                eraseTransition(clip, entry.span);
+            }
+        }
+        for (ConformedTransition &entry : conformed) {
+            if (entry.role != ConformRole::Dissolve) {
+                continue;
+            }
+            Clip &clip = *entry.track->find(entry.clip);
+            TransitionSpan &span = *clip.transitionAt(entry.edge);
+            EditResult why = EditResult::success();
+            const auto limits = transitionSideLimits(project, sequence, clip.id, span.id, why);
+            if (!limits) {
+                entry.skipped = true; // not a transition the limits understand: validation decides
+                continue;
+            }
+            TransitionFrames &fitted = entry.fitted;
+            fitted.before = std::min(entry.goal.before, limits->maxBeforeFrames);
+            fitted.after = std::min(entry.goal.after, limits->maxAfterFrames);
+            entry.reason = fitted.after < entry.goal.after ? limits->afterReason : limits->beforeReason;
+            if (fitted.after < 1) {
+                fitted = TransitionFrames{};
+            }
+            if (fitted.before + fitted.after > 0) {
+                setTransitionFrames(span, fitted, newFd);
+                if (auto issue = checkTransitionSpan(project, *entry.track, clip, span, newFd)) {
+                    entry.reason = issue->kind == TransitionIssueKind::NotAdjacent ? "the clips no longer meet at a cut."
+                                                                                   : "it is no longer a valid transition.";
+                    fitted = TransitionFrames{};
+                }
+            }
+            if (fitted.before + fitted.after == 0) {
+                eraseTransition(clip, entry.span);
+            }
+        }
+        for (auto &[index, stashed] : fades) {
+            ConformedTransition &entry = conformed[index];
+            Clip &clip = *entry.track->find(entry.clip);
+            // A clip's transitions keep the head's first; after the dissolves a clip holds at most its tail
+            // dissolve, which a fade at its tail cannot be beside.
+            if (entry.edge == ClipEdge::Head) {
+                clip.transitions.insert(clip.transitions.begin(), stashed);
+            } else {
+                clip.transitions.push_back(stashed);
+            }
+            TransitionSpan &span = *clip.transitionAt(entry.edge);
+            TransitionFrames &fitted = entry.fitted;
+            std::int64_t &frames = entry.edge == ClipEdge::Head ? fitted.after : fitted.before;
+            const std::int64_t besideFade = TransitionRules::conformFadeFrames(clip, entry.edge, newFd);
+            const std::int64_t room =
+                TransitionRules::conformFadeFramesBesideDissolves(*entry.track, clip, entry.edge, newFd);
+            if (room < besideFade && room < frames) {
+                const char *dissolveName = entry.track->kind == TrackKind::Audio ? "crossfade" : "cross dissolve";
+                entry.reason = entry.edge == ClipEdge::Head
+                                   ? std::string("it gives way to the ") + dissolveName + " at the clip's end."
+                                   : std::string("it gives way to the ") + dissolveName + " coming into the clip.";
+            } else {
+                entry.reason = "the clip is too short for it at this frame rate, with its other transition.";
+            }
+            frames = std::min(frames, room);
+            std::optional<TransitionIssue> issue;
+            if (frames > 0) {
+                setTransitionFrames(span, fitted, newFd);
+                issue = checkTransitionSpan(project, *entry.track, clip, span, newFd);
+            }
+            if (frames > 0 && issue) {
+                entry.reason = issue->kind == TransitionIssueKind::Touching ? "another clip now touches the clip's start."
+                                                                            : "it is no longer a valid transition.";
+                frames = 0;
+            }
+            if (fitted.before + fitted.after == 0) {
+                fitted = TransitionFrames{};
+                eraseTransition(clip, entry.span);
+            } else {
+                setTransitionFrames(span, fitted, newFd);
+            }
+        }
+        for (const ConformedTransition &entry : conformed) {
+            if (entry.skipped) {
+                continue;
+            }
+            const std::int64_t wantedTotal = entry.goal.before + entry.goal.after;
+            const std::int64_t fittedTotal = entry.fitted.before + entry.fitted.after;
+            if (fittedTotal == 0) {
+                report_.transitionsRemoved.push_back(entry.span);
+                std::string sentence =
+                    entry.name + " is removed: not one frame of it fits at " + frameRateName(newFd) + " fps";
+                sentence += entry.reason.empty() ? "." : " (" + entry.reason.substr(0, entry.reason.size() - 1) + ").";
+                sentence[0] = 'T';
+                sentences.push_back(sentence);
+                markRemovedOnPurpose(entry.span);
+                continue;
+            }
+            if (fittedTotal < wantedTotal) {
+                report_.transitionsShortened.push_back(entry.span);
+                std::string sentence = entry.name + " is shortened from " + framesName(wantedTotal) + " to " +
+                                       framesName(fittedTotal) + ": " + entry.reason;
+                sentence[0] = 'T';
+                sentences.push_back(sentence);
+            } else {
+                ++report_.transitionsKept;
+                if (!example) {
+                    example = std::make_pair(entry.goal, entry.span);
                 }
             }
         }
