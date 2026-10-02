@@ -27,6 +27,16 @@ using namespace ve::facade;
     return _programMonitor.view;
 }
 
+- (void)attachWaveformView:(nullable VEWaveformView *)view {
+    VE_ASSERT_MAIN();
+    [_programMonitor attachWaveformView:view];
+}
+
+- (nullable VEWaveformView *)waveformView {
+    VE_ASSERT_MAIN();
+    return _programMonitor.waveformView;
+}
+
 - (BOOL)setProgramPreviewSoloClip:(VEClipID)clipID identityMotion:(BOOL)identityMotion {
     VE_ASSERT_MAIN();
     return [_programMonitor setPreviewSoloClip:toClipId(clipID) identityMotion:identityMotion];

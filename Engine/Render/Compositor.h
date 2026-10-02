@@ -165,11 +165,14 @@ PixelRect fitRect(double sourceWidth, double sourceHeight, std::int32_t destWidt
 
 /// Reads the composited frame of a texture target before the output pass writes the target (see
 /// "Pipeline" above): called on the rendering thread while the frame is encoded, with the frame's command
-/// buffer and the RGBA16Float working texture, whose top-left target-sized region holds the frame (opaque,
-/// letterbox included, values as blended). It may encode passes that read the working texture into the
-/// command buffer (they run after the composite and before the output pass); it must not write the
-/// texture, commit the buffer or keep the texture beyond the frame (the next frame reuses it).
-using WorkingFrameReader = std::function<void(id<MTLCommandBuffer> commandBuffer, id<MTLTexture> working)>;
+/// buffer, the RGBA16Float working texture, whose top-left target-sized region holds the frame (opaque,
+/// letterbox included, values as blended), and where in it the sequence frame lies (`frame`: the
+/// viewport limited to the target, empty when none of it is inside; the letterbox bars are outside it).
+/// It may encode passes that read the working texture into the command buffer (they run after the
+/// composite and before the output pass) and present a drawable of its own with the buffer; it must not
+/// write the texture, commit the buffer or keep the texture beyond the frame (the next frame reuses it).
+using WorkingFrameReader =
+    std::function<void(id<MTLCommandBuffer> commandBuffer, id<MTLTexture> working, const PixelRect &frame)>;
 
 /// Render into an existing texture (must have MTLTextureUsageRenderTarget, any
 /// colour-renderable pixel format; a framebuffer-only drawable is fine). The sequence frame is drawn

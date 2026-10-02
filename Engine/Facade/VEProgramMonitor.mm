@@ -5,6 +5,7 @@
 #import "VEFacadeSupport+Internal.h"
 #import "VEPreviewView.h"
 #import "VETypes+Internal.h"
+#import "VEWaveformView+Internal.h"
 
 #import "../Render/VEPreviewView+Internal.h"
 
@@ -32,6 +33,7 @@ using namespace ve::facade;
     bool _published;      // the controller has the current project's sequence
     __weak VEPreviewView *_view;
     __weak VEPreviewView *_outputView; // mirrors the program (a second display)
+    __weak VEWaveformView *_waveformView; // draws the program view's luma waveform
 }
 
 - (instancetype)initWithRouter:(std::shared_ptr<media::BackendRouter>)router
@@ -99,11 +101,46 @@ using namespace ve::facade;
     if (previous != nil && previous != view) {
         [previous setFrameSource:ve::render::PreviewFrameSource{}];
     }
+    if (previous != nil && previous != view) {
+        [previous setWorkingFrameReader:ve::render::WorkingFrameReader{}];
+    }
     _view = view;
     if (view != nil) {
         [view setFrameSource:_playback->frameSource()];
+        [self installWaveformReader];
         [view renderOnce];
     }
+}
+
+- (void)attachWaveformView:(nullable VEWaveformView *)view {
+    VE_ASSERT_MAIN();
+    VEWaveformView *previous = _waveformView;
+    if (previous != nil && previous != view) {
+        [previous setNeedsFrameHandler:nil];
+    }
+    _waveformView = view;
+    if (view != nil) {
+        __weak VEProgramMonitor *weakSelf = self;
+        [view setNeedsFrameHandler:^{
+            VEProgramMonitor *strongSelf = weakSelf;
+            if (strongSelf != nil) {
+                [strongSelf->_view renderOnce];
+            }
+        }];
+    }
+    [self installWaveformReader];
+    [_view renderOnce];
+}
+
+- (nullable VEWaveformView *)waveformView {
+    VE_ASSERT_MAIN();
+    return _waveformView;
+}
+
+/// The program view reads its working frame into the waveform view, or nothing.
+- (void)installWaveformReader {
+    VEWaveformView *waveform = _waveformView;
+    [_view setWorkingFrameReader:waveform != nil ? [waveform workingFrameReader] : ve::render::WorkingFrameReader{}];
 }
 
 - (nullable VEPreviewView *)view {
@@ -142,7 +179,9 @@ using namespace ve::facade;
 // reference goes away off the main thread), and so does this class's.
 - (void)disconnectViews {
     [_view setFrameSource:ve::render::PreviewFrameSource{}];
+    [_view setWorkingFrameReader:ve::render::WorkingFrameReader{}];
     [_outputView setFrameSource:ve::render::PreviewFrameSource{}];
+    [_waveformView setNeedsFrameHandler:nil];
 }
 
 - (void)handleMemoryPressure {

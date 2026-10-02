@@ -15,3 +15,4 @@ FOUNDATION_EXPORT const unsigned char FramewrightEngineVersionString[];
 #import <FramewrightEngine/VEExport.h>
 #import <FramewrightEngine/VEEngine.h>
 #import <FramewrightEngine/VEPreviewView.h>
+#import <FramewrightEngine/VEWaveformView.h>

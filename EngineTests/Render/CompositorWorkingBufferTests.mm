@@ -316,7 +316,7 @@ double median(std::vector<double> values) {
         MTLPixelFormat workingFormat = MTLPixelFormatInvalid;
         NSUInteger workingWidth = 0;
         NSUInteger workingHeight = 0;
-        auto reader = [&](id<MTLCommandBuffer> commandBuffer, id<MTLTexture> working) {
+        auto reader = [&](id<MTLCommandBuffer> commandBuffer, id<MTLTexture> working, const PixelRect &) {
             ++calls;
             workingFormat = working.pixelFormat;
             workingWidth = working.width;
@@ -489,7 +489,7 @@ double median(std::vector<double> values) {
     auto format = std::make_shared<std::atomic<NSUInteger>>(0);
     auto width = std::make_shared<std::atomic<NSUInteger>>(0);
     auto height = std::make_shared<std::atomic<NSUInteger>>(0);
-    [view setWorkingFrameReader:[calls, format, width, height](id<MTLCommandBuffer> commandBuffer, id<MTLTexture> working) {
+    [view setWorkingFrameReader:[calls, format, width, height](id<MTLCommandBuffer> commandBuffer, id<MTLTexture> working, const PixelRect &) {
         calls->fetch_add(1);
         format->store(working.pixelFormat);
         width->store(working.width);

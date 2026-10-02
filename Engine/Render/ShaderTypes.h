@@ -31,6 +31,10 @@ enum VEBufferIndex {
     VEBufferIndexDraw = 0,    // VEDrawUniforms (vertex and fragment)
     VEBufferIndexConvert = 0, // VEConvertUniforms (compute)
     VEBufferIndexUnsharp = 0, // VEUnsharpUniforms (compute)
+    // The luma waveform (LumaWaveform.h): its counts and uniforms, in its accumulate kernel and its
+    // display pass alike.
+    VEBufferIndexWaveformCounts = 0,
+    VEBufferIndexWaveform = 1, // VEWaveformUniforms
 };
 
 // Texture binding indices, per pipeline as the buffer indices are.
@@ -46,7 +50,8 @@ enum VETextureIndex {
     // Unsharp mask of a pre-scaled plane.
     VETextureIndexUnsharpSource = 0,      // the Lanczos output (read)
     VETextureIndexUnsharpDestination = 1, // the sharpened plane (write)
-    // Output pass of a texture target (a monitor): the RGBA16Float working texture (read).
+    // Output pass of a texture target (a monitor), and the luma waveform's accumulate kernel: the
+    // RGBA16Float working texture (read).
     VETextureIndexWorking = 0,
 };
 
@@ -189,6 +194,22 @@ struct VEConvertUniforms {
     VEUInt unused0;
 };
 
+// The luma waveform of a frame (LumaWaveform.h): its accumulate kernel counts, per column of the frame and
+// luma level, the samples of the working texture there; its display pass draws the counts.
+struct VEWaveformUniforms {
+    // The frame in the working texture: x, y, width, height in texels.
+    VEFloat4 frame;
+    // The display target's width and height in pixels; zw unused (0).
+    VEFloat4 target;
+    // The waveform's columns (across the frame's width) and luma levels (0 black ... levels - 1 white).
+    VEUInt columns;
+    VEUInt levels;
+    // Rows of the frame sampled (evenly spaced; the kernel's grid is frame width x sampleRows).
+    VEUInt sampleRows;
+    // Display: the trace's brightness per count (1 - exp(-count * gain)).
+    float gain;
+};
+
 // The same layout on both sides: sizes, and the offset of every member that follows a scalar group or
 // starts one.
 static_assert(sizeof(struct VEGradeUniforms) == 32, "VEGradeUniforms layout");
@@ -212,3 +233,6 @@ static_assert(VE_OFFSET_OF(struct VEUnsharpUniforms, isLuma) == 24, "VEUnsharpUn
 static_assert(sizeof(struct VEConvertUniforms) == 64, "VEConvertUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEConvertUniforms, width) == 48, "VEConvertUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEConvertUniforms, tenBitCodes) == 56, "VEConvertUniforms layout");
+static_assert(sizeof(struct VEWaveformUniforms) == 48, "VEWaveformUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEWaveformUniforms, columns) == 32, "VEWaveformUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEWaveformUniforms, gain) == 44, "VEWaveformUniforms layout");

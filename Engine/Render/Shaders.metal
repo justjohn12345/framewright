@@ -334,6 +334,58 @@ fragment float4 ve_output_fragment(VEOutputVertexOut in [[stage_in]],
     return float4(saturate(c.rgb), 1.0);
 }
 
+// MARK: - Luma waveform (LumaWaveform.h)
+
+// One thread per sampled pixel: x across the frame's whole width, y one of `sampleRows` evenly spaced rows.
+// The pixel's luma (BT.709 weights on the R'G'B' the monitor shows, limited to [0, 1]) is counted in its
+// waveform column (x scaled to `columns`) at its level (rounded to `levels` steps).
+kernel void ve_waveform_accumulate(texture2d<float, access::read> working [[texture(VETextureIndexWorking)]],
+                                   device atomic_uint *counts [[buffer(VEBufferIndexWaveformCounts)]],
+                                   constant VEWaveformUniforms &u [[buffer(VEBufferIndexWaveform)]],
+                                   uint2 gid [[thread_position_in_grid]]) {
+    const uint width = uint(u.frame.z);
+    const uint height = uint(u.frame.w);
+    if (gid.x >= width || gid.y >= u.sampleRows || height == 0) {
+        return;
+    }
+    const uint row = min(height - 1, uint((float(gid.y) + 0.5) * float(height) / float(u.sampleRows)));
+    const float3 rgb = saturate(working.read(uint2(uint(u.frame.x) + gid.x, uint(u.frame.y) + row)).rgb);
+    const float luma = dot(float3(0.2126, 0.7152, 0.0722), rgb);
+    const uint level = min(u.levels - 1, uint(rint(luma * float(u.levels - 1))));
+    const uint column = min(u.columns - 1, gid.x * u.columns / width);
+    atomic_fetch_add_explicit(&counts[level * u.columns + column], 1u, memory_order_relaxed);
+}
+
+// The waveform drawn over the whole target (ve_output_vertex's triangle): column across, level up (0 IRE at
+// the bottom, 100 at the top), the trace's brightness 1 - exp(-count * gain) in green, over a graticule
+// every 10 IRE (brighter at 0, 50 and 100).
+fragment float4 ve_waveform_fragment(VEOutputVertexOut in [[stage_in]],
+                                     device const uint *counts [[buffer(VEBufferIndexWaveformCounts)]],
+                                     constant VEWaveformUniforms &u [[buffer(VEBufferIndexWaveform)]]) {
+    const float2 size = max(u.target.xy, float2(1.0));
+    const float2 p = in.position.xy;
+    const uint column = min(u.columns - 1, uint(p.x / size.x * float(u.columns)));
+    const float up = 1.0 - p.y / size.y; // 0 at the bottom edge, 1 at the top (at the pixel's centre)
+    // The levels the pixel's row covers (several when the target has fewer rows than levels): the
+    // brightest of them, so no level falls between rows.
+    const float top = 1.0 - floor(p.y) / size.y;
+    const float bottom = 1.0 - (floor(p.y) + 1.0) / size.y;
+    const uint highest = min(u.levels - 1, uint(max(top, 0.0) * float(u.levels)));
+    const uint lowest = min(highest, uint(max(bottom, 0.0) * float(u.levels)));
+    uint count = 0;
+    for (uint level = lowest; level <= highest; ++level) {
+        count = max(count, counts[level * u.columns + column]);
+    }
+    const float trace = 1.0 - exp(-float(count) * u.gain);
+    const float ire = up * 100.0;
+    const float nearest = rint(ire / 10.0) * 10.0;
+    const float pixelsAway = abs(ire - nearest) * size.y / 100.0;
+    const bool major = nearest == 0.0 || nearest == 50.0 || nearest == 100.0;
+    const float grid = pixelsAway < 0.75 ? (major ? 0.32 : 0.16) : 0.0;
+    const float3 colour = max(float3(grid), float3(0.35, 1.0, 0.45) * trace);
+    return float4(colour, 1.0);
+}
+
 // MARK: - Export conversion (RGBA16Float composite -> target pixel buffer planes)
 
 kernel void ve_convert_to_bgra(texture2d<float, access::read> composite [[texture(VETextureIndexComposite)]],

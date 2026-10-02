@@ -202,6 +202,8 @@ struct AppCommands: Commands {
             Toggle("Show Source Monitor", isOn: Binding(get: { layout.showsSourceMonitor },
                                                         set: { store.setSourceMonitorVisible($0) }))
                 .keyboardShortcut("2", modifiers: [.command, .shift])
+            Toggle("Show Waveform", isOn: Binding(get: { layout.showsWaveform },
+                                                  set: { store.setWaveformVisible($0) }))
             Toggle("Program Monitor on Second Display", isOn: Binding(get: { output.isShowing },
                                                                       set: { _ in output.toggle() }))
                 .disabled(!output.isAvailable && !output.isShowing)

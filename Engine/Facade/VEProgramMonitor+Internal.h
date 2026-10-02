@@ -28,6 +28,7 @@
 #include <string>
 
 @class VEPreviewView;
+@class VEWaveformView;
 
 namespace ve::facade {
 
@@ -70,6 +71,11 @@ __attribute__((objc_subclassing_restricted))
 /// The output view stops showing frames and its render loop is paused.
 - (void)detachOutputView;
 @property (nonatomic, readonly, weak, nullable) VEPreviewView *outputView;
+/// Draws the program view's luma waveform in `view` (nil detaches it): installs the waveform's reader of
+/// the working frame on the program view (and on a program view attached later), and renders the program
+/// view once so the waveform appears.
+- (void)attachWaveformView:(nullable VEWaveformView *)view;
+@property (nonatomic, readonly, weak, nullable) VEWaveformView *waveformView;
 /// Both views stop calling into the controller (the engine's dealloc; also done when the monitor is
 /// released).
 - (void)disconnectViews;

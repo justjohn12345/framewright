@@ -56,6 +56,7 @@
 
 @class VEEngine;
 @class VEPreviewView;
+@class VEWaveformView;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -775,6 +776,13 @@ NS_SWIFT_UI_ACTOR
 - (void)detachOutputView;
 /// The attached output view, if any.
 @property (nonatomic, readonly, weak, nullable) VEPreviewView *outputView;
+/// Shows the luma waveform of the program monitor's picture in `view` (VEWaveformView), drawn with
+/// every frame the program view shows (playing or paused; the program view renders once now so the
+/// waveform appears at once); replaces a previously attached waveform view; nil detaches it (it then
+/// costs nothing). Without an attached program view nothing is drawn until one is attached.
+- (void)attachWaveformView:(nullable VEWaveformView *)view NS_SWIFT_NAME(attachWaveformView(_:));
+/// The attached waveform view, if any.
+@property (nonatomic, readonly, weak, nullable) VEWaveformView *waveformView;
 /// Same as seekToTime: (kept for callers that only show stills).
 - (void)showProgramFrameAtTime:(CMTime)time;
 

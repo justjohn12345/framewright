@@ -23,7 +23,8 @@ enum InspectorTab: String, CaseIterable, Identifiable {
 /// Layout (see `ContentView`): the media bin (left), the monitors and the transport bar (centre),
 /// the inspector with its Inspector/Effects tabs (right), and the timeline below them. The program
 /// monitor takes the whole centre unless the source monitor is shown (View > Show Source Monitor,
-/// Shift+Cmd+2; hidden until media is opened in it). The split between the monitors and the
+/// Shift+Cmd+2; hidden until media is opened in it); the luma waveform panel (View > Show Waveform)
+/// sits to its right when shown. The split between the monitors and the
 /// timeline belongs to the user (review D2): `timelineHeight` is always a stored value, set once on
 /// first launch from the tracks' rows without their lanes (`adoptInitialTimelineHeight`; a layout
 /// saved by an earlier version that was fitting, i.e. has no height, gets one the same way), then
@@ -45,6 +46,9 @@ final class WindowLayoutModel: ObservableObject {
     static let sourceFractionKey = "layout.sourceMonitorFraction"
     static let timelineHeightKey = "layout.timelineHeight"
     static let collapsedLanesKey = "layout.collapsedLanes"
+    static let waveformKey = "layout.showsWaveform"
+    /// The waveform panel's width beside the program monitor.
+    static let waveformPanelWidth: CGFloat = 260
 
     static let defaultMediaBinWidth: CGFloat = 240
     static let mediaBinWidths: ClosedRange<CGFloat> = 180 ... 480
@@ -66,6 +70,11 @@ final class WindowLayoutModel: ObservableObject {
 
     @Published var showsSourceMonitor: Bool {
         didSet { if showsSourceMonitor != oldValue { defaults?.set(showsSourceMonitor, forKey: Self.sourceMonitorKey) } }
+    }
+
+    /// Whether the luma waveform panel shows beside the program monitor (View > Show Waveform).
+    @Published var showsWaveform: Bool {
+        didSet { if showsWaveform != oldValue { defaults?.set(showsWaveform, forKey: Self.waveformKey) } }
     }
 
     @Published var inspectorTab: InspectorTab {
@@ -92,6 +101,7 @@ final class WindowLayoutModel: ObservableObject {
     init(defaults: UserDefaults?) {
         self.defaults = defaults
         showsSourceMonitor = defaults?.object(forKey: Self.sourceMonitorKey) as? Bool ?? false
+        showsWaveform = defaults?.object(forKey: Self.waveformKey) as? Bool ?? false
         inspectorTab = defaults?.string(forKey: Self.inspectorTabKey).flatMap(InspectorTab.init(rawValue:)) ?? .inspector
         mediaBinWidth = Self.stored(defaults, Self.mediaBinWidthKey).map { Self.clamp($0, Self.mediaBinWidths) }
             ?? Self.defaultMediaBinWidth
@@ -202,14 +212,15 @@ final class WindowLayoutModel: ObservableObject {
     /// Restores every default (panels, tab, splits and lanes).
     func resetToDefaults() {
         showsSourceMonitor = false
+        showsWaveform = false
         inspectorTab = .inspector
         mediaBinWidth = Self.defaultMediaBinWidth
         inspectorWidth = Self.defaultInspectorWidth
         sourceMonitorFraction = Self.defaultSourceFraction
         timelineHeight = initialTimelineHeight
         collapsedLaneTracks = []
-        for key in [Self.sourceMonitorKey, Self.inspectorTabKey, Self.mediaBinWidthKey, Self.inspectorWidthKey,
-                    Self.sourceFractionKey, Self.timelineHeightKey, Self.collapsedLanesKey] {
+        for key in [Self.sourceMonitorKey, Self.waveformKey, Self.inspectorTabKey, Self.mediaBinWidthKey,
+                    Self.inspectorWidthKey, Self.sourceFractionKey, Self.timelineHeightKey, Self.collapsedLanesKey] {
             defaults?.removeObject(forKey: key)
         }
         // This launch's fit of the rows, stored: the split stays the user's.

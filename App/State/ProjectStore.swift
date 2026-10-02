@@ -605,6 +605,25 @@ final class ProjectStore: ObservableObject {
         engine.attachProgramView(view)
     }
 
+    /// Shows the program monitor's luma waveform in `view` (the waveform panel, while shown).
+    func attachWaveformView(_ view: VEWaveformView) {
+        engine.attachWaveformView(view)
+    }
+
+    /// The waveform panel went away: the engine stops drawing into `view` (unless another view replaced
+    /// it meanwhile).
+    func detachWaveformView(_ view: VEWaveformView) {
+        if engine.waveformView === view {
+            engine.attachWaveformView(nil)
+        }
+    }
+
+    /// View > Show Waveform.
+    func setWaveformVisible(_ visible: Bool) {
+        guard visible != layout.showsWaveform else { return }
+        layout.showsWaveform = visible
+    }
+
     func attachSourceView(_ view: VEPreviewView) {
         engine.attachSourceView(view)
         if let id = source.assetID {

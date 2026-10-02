@@ -201,9 +201,15 @@ struct ContentView: View {
                 .help("Sequence Settings…")
                 .accessibilityIdentifier("SequenceSettingsButton")
             }
-            ProgramMonitorHost(store: store, playhead: store.playhead)
-                .clipShape(RoundedRectangle(cornerRadius: 3))
-                .accessibilityIdentifier("ProgramMonitor")
+            HStack(spacing: 8) {
+                ProgramMonitorHost(store: store, playhead: store.playhead)
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                    .accessibilityIdentifier("ProgramMonitor")
+                if layout.showsWaveform {
+                    WaveformPanel(store: store)
+                        .frame(width: WindowLayoutModel.waveformPanelWidth)
+                }
+            }
         }
         .padding(8)
     }

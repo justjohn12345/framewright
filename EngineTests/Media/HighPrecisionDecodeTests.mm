@@ -275,7 +275,7 @@ std::optional<VideoFrame> firstFrame(IMediaBackend &backend, const std::string &
     TextureTarget target([device() newTextureWithDescriptor:desc]);
     id<MTLTexture> copy = nil;
     id<MTLTexture> __strong *copyRef = &copy;
-    target.workingFrameReader = [copyRef](id<MTLCommandBuffer> commandBuffer, id<MTLTexture> working) {
+    target.workingFrameReader = [copyRef](id<MTLCommandBuffer> commandBuffer, id<MTLTexture> working, const PixelRect &) {
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:working.pixelFormat
                                                                                      width:working.width
                                                                                     height:working.height

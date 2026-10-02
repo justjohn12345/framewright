@@ -1190,7 +1190,7 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
     if (outputState != nil) {
         // A scope (or a test) reads the frame as blended, then the output pass writes the target.
         if (textureTarget->workingFrameReader) {
-            textureTarget->workingFrameReader(commandBuffer, im.working);
+            textureTarget->workingFrameReader(commandBuffer, im.working, scissor);
         }
         MTLRenderPassDescriptor *output = [MTLRenderPassDescriptor renderPassDescriptor];
         output.colorAttachments[0].texture = textureTarget->texture;
