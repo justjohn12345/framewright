@@ -7,6 +7,7 @@
 
 #include "../Edit/EditOps.h"
 #include "../Edit/EditResult.h"
+#include "../Edit/GradeEdits.h"
 #include "../Model/Project.h"
 #include "../Playback/PlaybackController.h"
 #include "../Thumbs/WaveformService.h"
@@ -51,6 +52,17 @@ void setSpanValueIn(VESpanValues &values, SpanParameter parameter, double value)
 VESpanParameter toVE(SpanParameter parameter);
 /// Nullopt for a value outside the enumeration.
 std::optional<SpanParameter> fromVE(VESpanParameter parameter);
+
+VEGradeParameter toVE(GradeParameter parameter);
+/// Nullopt for a value outside the enumeration.
+std::optional<GradeParameter> fromVE(VEGradeParameter parameter);
+/// The value of `parameter` in `params` (NaN for a value outside the enum).
+double gradeValueIn(const VEGradeParams &params, GradeParameter parameter);
+/// Sets the value of `parameter` in `params`.
+void setGradeValueIn(VEGradeParams &params, GradeParameter parameter, double value);
+/// The values of `grade` (its foreign entries are not shown).
+VEGradeParams toVE(const ClipGrade &grade);
+VEGradeSelection *makeGradeSelection(const GradeSummary &summary);
 
 VEAssetInfo *makeAssetInfo(const MediaAsset &asset, const AssetDetails *details, bool missing, NSInteger useCount);
 // `index` (optional): the sequence's clips by id, when many snapshots are made at once (review L9).

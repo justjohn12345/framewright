@@ -28,6 +28,7 @@
 #include <climits>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -170,6 +171,8 @@ struct UndoState {
     // engine. VEEngine+Export.mm starts it, the engine's other files only ask and cancel it.
     VEExporter *_exporter;
     VERippleScope _rippleScope; // see -rippleScope (VEEngine+Edits.mm)
+    // The grade Copy Grade copied (VEEngine+Grade.mm); a value, so it outlives New and Open.
+    std::optional<ve::ClipGrade> _copiedGrade;
 
     // VEEngine.mm
     NSHashTable<id<VEEngineObserver>> *_observers;

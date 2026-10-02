@@ -174,6 +174,80 @@ typedef struct {
     CMTime fadeOutDuration;
 } VEAudioParams;
 
+/// A parameter of a clip's colour grade (the engine's ClipGrade.h; names, units, neutral values and
+/// ranges in VEGradeParameterInfo). The grade applies to the clip's picture in linear light, after its
+/// conversion to RGB and before its Motion, opacity and blending.
+typedef NS_ENUM(NSInteger, VEGradeParameter) {
+    /// Stops: a gain of 2^value (neutral 0, -5...5).
+    VEGradeParameterExposure = 0,
+    /// The exponent of a power curve about linear 0.18 (neutral 1, 0...2; above 1 steeper).
+    VEGradeParameterContrast = 1,
+    /// Warm (+) or cool (-), a red/blue gain pair keeping luminance (neutral 0, -100...100).
+    VEGradeParameterTemperature = 2,
+    /// Magenta (+) or green (-), a green gain keeping luminance (neutral 0, -100...100).
+    VEGradeParameterTint = 3,
+    /// 0 grey, 1 unchanged, 2 twice as saturated (neutral 1, 0...2).
+    VEGradeParameterSaturation = 4,
+};
+
+/// A clip's grade values (a field per VEGradeParameter). When passed to an edit, NaN means
+/// "unchanged"; when read from a VEGradeSelection, NaN means the clips differ (or there are none).
+typedef struct {
+    double exposure;
+    double contrast;
+    double temperature;
+    double tint;
+    double saturation;
+} VEGradeParams;
+
+/// Every field at its neutral value (no grade).
+FOUNDATION_EXPORT VEGradeParams VEGradeParamsNeutral(void);
+/// Every field NaN (nothing to change).
+FOUNDATION_EXPORT VEGradeParams VEGradeParamsUnchanged(void);
+/// The field of `params` that holds `parameter` (NaN for a value outside VEGradeParameter).
+FOUNDATION_EXPORT double VEGradeParamsGetValue(VEGradeParams params, VEGradeParameter parameter)
+    NS_SWIFT_NAME(VEGradeParams.value(self:for:));
+/// Sets the field of `params` that holds `parameter` to `value` (nothing for a value outside
+/// VEGradeParameter).
+FOUNDATION_EXPORT void VEGradeParamsSetValue(VEGradeParams *params, double value, VEGradeParameter parameter)
+    NS_SWIFT_NAME(VEGradeParams.setValue(self:_:for:));
+
+/// One row of the engine's grade parameter table: what a colour control shows for a parameter.
+@interface VEGradeParameterInfo : NSObject
+/// The row of `parameter`, or nil for a value outside VEGradeParameter.
++ (nullable VEGradeParameterInfo *)infoForParameter:(VEGradeParameter)parameter
+    NS_SWIFT_NAME(info(for:));
+/// Every parameter (VEGradeParameter values as NSNumbers) in the table's order.
+@property (class, nonatomic, readonly, copy) NSArray<NSNumber *> *allParameters;
+@property (nonatomic, readonly) VEGradeParameter parameter;
+/// The project file's key ("exposure", "contrast", "temperature", "tint", "saturation").
+@property (nonatomic, readonly, copy) NSString *name;
+/// "Exposure", "Contrast", "Temperature", "Tint", "Saturation".
+@property (nonatomic, readonly, copy) NSString *displayName;
+/// "stops", "×", or "" for the relative scales of temperature and tint.
+@property (nonatomic, readonly, copy) NSString *unit;
+/// The value that changes nothing (0 or 1).
+@property (nonatomic, readonly) double neutralValue;
+/// The valid range, [minimum, maximum].
+@property (nonatomic, readonly) double minimum;
+@property (nonatomic, readonly) double maximum;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+/// What the clips of a selection have for each grade parameter (-[VEEngine gradeOfClips:]): the value
+/// where they agree, "mixed" where they differ.
+@interface VEGradeSelection : NSObject
+/// The clips of the selection that can have a grade (those on video tracks), in the order given.
+@property (nonatomic, readonly, copy) NSArray<NSNumber *> *clipIDs;
+/// Per parameter, the value every clip has; NaN where they differ, and every field NaN without clips.
+@property (nonatomic, readonly) VEGradeParams values;
+/// Whether any of the clips has a grade (a value that is not neutral).
+@property (nonatomic, readonly) BOOL anyGraded;
+/// Whether the clips differ in `parameter` (NO without clips or for a value outside the enum).
+- (BOOL)isMixed:(VEGradeParameter)parameter NS_SWIFT_NAME(isMixed(_:));
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
 /// Identity video parameters (centred, scale 1, no rotation, opaque).
 FOUNDATION_EXPORT VEVideoParams VEVideoParamsIdentity(void);
 
@@ -306,6 +380,10 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 @property (nonatomic, readonly) VEVideoParams videoParams;
 /// The static gain and the lengths of the clip's lane-0 fades (see VEAudioParams).
 @property (nonatomic, readonly) VEAudioParams audioParams;
+/// The clip's colour grade (every field neutral when it has none; always neutral on an audio track).
+@property (nonatomic, readonly) VEGradeParams grade;
+/// Whether the clip has a grade: a value that is not neutral.
+@property (nonatomic, readonly) BOOL hasGrade;
 /// The clip's spans: lane 0 (transitions) first, then lanes 1-3, each in time order.
 @property (nonatomic, readonly, copy) NSArray<VEEffectSpan *> *spans;
 /// Whether the clip has spans on lanes 1-3.

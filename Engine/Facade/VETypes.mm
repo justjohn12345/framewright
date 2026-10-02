@@ -9,7 +9,9 @@
 #include "../Model/Validation.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <iterator>
 #include <limits>
 
 VEVideoParams VEVideoParamsIdentity(void) {
@@ -37,7 +39,48 @@ void VESpanValuesSetValue(VESpanValues *values, double value, VESpanParameter pa
     }
 }
 
+VEGradeParams VEGradeParamsNeutral(void) {
+    return ve::facade::toVE(ve::ClipGrade{});
+}
+
+VEGradeParams VEGradeParamsUnchanged(void) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    return VEGradeParams{nan, nan, nan, nan, nan};
+}
+
+double VEGradeParamsGetValue(VEGradeParams params, VEGradeParameter parameter) {
+    const auto gradeParameter = ve::facade::fromVE(parameter);
+    return gradeParameter ? ve::facade::gradeValueIn(params, *gradeParameter) : std::numeric_limits<double>::quiet_NaN();
+}
+
+void VEGradeParamsSetValue(VEGradeParams *params, double value, VEGradeParameter parameter) {
+    const auto gradeParameter = ve::facade::fromVE(parameter);
+    if (params != nullptr && gradeParameter) {
+        ve::facade::setGradeValueIn(*params, *gradeParameter, value);
+    }
+}
+
 // MARK: - Class extensions (writable for the factories below)
+
+@interface VEGradeParameterInfo ()
+@property (nonatomic, readwrite) VEGradeParameter parameter;
+@property (nonatomic, readwrite, copy) NSString *name;
+@property (nonatomic, readwrite, copy) NSString *displayName;
+@property (nonatomic, readwrite, copy) NSString *unit;
+@property (nonatomic, readwrite) double neutralValue;
+@property (nonatomic, readwrite) double minimum;
+@property (nonatomic, readwrite) double maximum;
+- (instancetype)initInternal;
+@end
+
+@interface VEGradeSelection () {
+    std::array<bool, ve::kGradeParameterCount> _mixed;
+}
+@property (nonatomic, readwrite, copy) NSArray<NSNumber *> *clipIDs;
+@property (nonatomic, readwrite) VEGradeParams values;
+@property (nonatomic, readwrite) BOOL anyGraded;
+- (instancetype)initWithMixed:(const std::array<bool, ve::kGradeParameterCount> &)mixed;
+@end
 
 @interface VEAssetInfo ()
 @property (nonatomic, readwrite) VEAssetID assetID;
@@ -115,6 +158,8 @@ void VESpanValuesSetValue(VESpanValues *values, double value, VESpanParameter pa
 @property (nonatomic, readwrite) VEClipID linkedClipID;
 @property (nonatomic, readwrite) VEVideoParams videoParams;
 @property (nonatomic, readwrite) VEAudioParams audioParams;
+@property (nonatomic, readwrite) VEGradeParams grade;
+@property (nonatomic, readwrite) BOOL hasGrade;
 @property (nonatomic, readwrite, copy) NSArray<VEEffectSpan *> *spans;
 - (instancetype)initInternal;
 @end
@@ -319,6 +364,52 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
 }
 
 } // namespace
+
+@implementation VEGradeParameterInfo
+- (instancetype)initInternal {
+    return [super init];
+}
++ (nullable VEGradeParameterInfo *)infoForParameter:(VEGradeParameter)parameter {
+    const auto gradeParameter = ve::facade::fromVE(parameter);
+    if (!gradeParameter) {
+        return nil;
+    }
+    const ve::GradeParameterInfo &row = ve::infoOf(*gradeParameter);
+    VEGradeParameterInfo *info = [[VEGradeParameterInfo alloc] initInternal];
+    info.parameter = parameter;
+    info.name = ve::facade::toNS(row.name);
+    info.displayName = ve::facade::toNS(row.displayName);
+    info.unit = ve::facade::toNS(row.unit);
+    info.neutralValue = row.neutral;
+    info.minimum = row.minimum;
+    info.maximum = row.maximum;
+    return info;
+}
++ (NSArray<NSNumber *> *)allParameters {
+    NSMutableArray<NSNumber *> *parameters = [NSMutableArray arrayWithCapacity:ve::kGradeParameterCount];
+    for (const ve::GradeParameter parameter : ve::kGradeParameters) {
+        [parameters addObject:@(ve::facade::toVE(parameter))];
+    }
+    return parameters;
+}
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<VEGradeParameterInfo %@ %g in [%g, %g] %@>", self.name, self.neutralValue,
+                                      self.minimum, self.maximum, self.unit];
+}
+@end
+
+@implementation VEGradeSelection
+- (instancetype)initWithMixed:(const std::array<bool, ve::kGradeParameterCount> &)mixed {
+    if ((self = [super init])) {
+        _mixed = mixed;
+    }
+    return self;
+}
+- (BOOL)isMixed:(VEGradeParameter)parameter {
+    const auto gradeParameter = ve::facade::fromVE(parameter);
+    return gradeParameter && _mixed[static_cast<std::size_t>(*gradeParameter)];
+}
+@end
 
 @implementation VEClipInfo
 - (instancetype)initInternal {
@@ -860,6 +951,74 @@ std::optional<KeyframeInterpolation> fromVE(VEKeyframeInterpolation interpolatio
     return std::nullopt;
 }
 
+// The grade's parameters as VEGradeParameter (same order and values).
+static_assert(static_cast<int>(GradeParameter::Exposure) == VEGradeParameterExposure);
+static_assert(static_cast<int>(GradeParameter::Contrast) == VEGradeParameterContrast);
+static_assert(static_cast<int>(GradeParameter::Temperature) == VEGradeParameterTemperature);
+static_assert(static_cast<int>(GradeParameter::Tint) == VEGradeParameterTint);
+static_assert(static_cast<int>(GradeParameter::Saturation) == VEGradeParameterSaturation);
+static_assert(kGradeParameterCount == 5, "VEGradeParameter and VEGradeParams name every GradeParameter");
+
+VEGradeParameter toVE(GradeParameter parameter) {
+    return static_cast<VEGradeParameter>(parameter);
+}
+
+std::optional<GradeParameter> fromVE(VEGradeParameter parameter) {
+    if (parameter < VEGradeParameterExposure || parameter > VEGradeParameterSaturation) {
+        return std::nullopt;
+    }
+    return static_cast<GradeParameter>(parameter);
+}
+
+namespace {
+
+// The field of VEGradeParams that holds each GradeParameter, in the enum's order: the one place
+// that names the public struct's fields.
+constexpr double VEGradeParams::*kGradeFields[] = {&VEGradeParams::exposure, &VEGradeParams::contrast,
+                                                    &VEGradeParams::temperature, &VEGradeParams::tint,
+                                                    &VEGradeParams::saturation};
+static_assert(std::size(kGradeFields) == kGradeParameterCount);
+
+} // namespace
+
+double gradeValueIn(const VEGradeParams &params, GradeParameter parameter) {
+    const auto index = static_cast<std::size_t>(parameter);
+    return index < kGradeParameterCount ? params.*kGradeFields[index] : std::numeric_limits<double>::quiet_NaN();
+}
+
+void setGradeValueIn(VEGradeParams &params, GradeParameter parameter, double value) {
+    const auto index = static_cast<std::size_t>(parameter);
+    if (index < kGradeParameterCount) {
+        params.*kGradeFields[index] = value;
+    }
+}
+
+VEGradeParams toVE(const ClipGrade &grade) {
+    VEGradeParams params{};
+    for (const GradeParameter parameter : kGradeParameters) {
+        setGradeValueIn(params, parameter, grade[parameter]);
+    }
+    return params;
+}
+
+VEGradeSelection *makeGradeSelection(const GradeSummary &summary) {
+    VEGradeSelection *selection = [[VEGradeSelection alloc] initWithMixed:summary.mixed];
+    NSMutableArray<NSNumber *> *clipIDs = [NSMutableArray arrayWithCapacity:summary.clips.size()];
+    for (const ClipId id : summary.clips) {
+        [clipIDs addObject:@(static_cast<VEClipID>(id.value()))];
+    }
+    selection.clipIDs = clipIDs;
+    VEGradeParams values = VEGradeParamsUnchanged();
+    for (const GradeParameter parameter : kGradeParameters) {
+        if (const auto &value = summary.valueOf(parameter)) {
+            setGradeValueIn(values, parameter, *value);
+        }
+    }
+    selection.values = values;
+    selection.anyGraded = summary.anyGraded;
+    return selection;
+}
+
 VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &project, const Sequence &sequence,
                          const ClipIndex *index) {
     VEClipInfo *info = [[VEClipInfo alloc] initInternal];
@@ -892,6 +1051,8 @@ VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &pr
     info.linkedClipID = clip.linkedClipId ? static_cast<VEClipID>(clip.linkedClipId->value()) : 0;
     info.videoParams = toVE(clip.video);
     info.audioParams = audioParamsOf(clip);
+    info.grade = toVE(clip.grade);
+    info.hasGrade = !clip.grade.isNeutral();
     NSMutableArray<VEEffectSpan *> *spans =
         [NSMutableArray arrayWithCapacity:clip.transitions.size() + clip.spans.size()];
     for (const TransitionSpan &span : clip.transitions) {

@@ -681,6 +681,47 @@ NS_SWIFT_UI_ACTOR
 
 @end
 
+// MARK: Grade (a clip's colour correction; VEEngine+Grade.mm)
+//
+// A clip's grade is a property of the clip, as its Motion is (VEClipInfo.grade). The calls take the
+// clips of a selection: those on audio tracks are left out (a selection of linked picture and sound
+// grades the pictures), and when none is left the call is refused with VEEditErrorTrackKindMismatch.
+// An id that names no clip is refused (VEEditErrorClipNotFound), and so is a clip on a locked track
+// (VEEditErrorTrackLocked). Each edit is one undo step; a control drag made of setGradeValue: calls
+// inside one coalescing group (VECoalescingModeReplace) is one step too.
+
+@interface VEEngine (Grade)
+
+/// Sets the fields of `values` that are not NaN on every clip of `clipIDs` (see above) and leaves the
+/// others: moving one control over several clips sets that parameter on all of them and keeps what
+/// differs between them. Refused (VEEditErrorInvalidArgument) when every field is NaN or a value is
+/// outside its range (VEGradeParameterInfo). Undo name "Change <parameter>" for one, else "Change Grade".
+- (VEEditResult *)setGradeValues:(VEGradeParams)values
+                        forClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setGrade(_:forClips:));
+/// setGradeValues:forClips: with one parameter.
+- (VEEditResult *)setGradeValue:(double)value
+                   forParameter:(VEGradeParameter)parameter
+                          clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setGradeValue(_:for:clips:));
+/// What the clips of `clipIDs` that can have a grade have for each parameter: the value where they
+/// agree, "mixed" where they differ (an empty selection for none).
+- (VEGradeSelection *)gradeOfClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(grade(ofClips:));
+/// Copies the clip's grade (every value, and what a newer version wrote that this one keeps) for
+/// pasteGradeOntoClips:. Returns NO, keeping what was copied before, for a missing clip or one on an
+/// audio track. What is copied stays across New and Open.
+- (BOOL)copyGradeOfClip:(VEClipID)clipID NS_SWIFT_NAME(copyGrade(ofClip:));
+/// Whether a grade has been copied.
+@property (nonatomic, readonly) BOOL hasCopiedGrade;
+/// The values of the copied grade (VEGradeParamsNeutral() when none has been copied).
+@property (nonatomic, readonly) VEGradeParams copiedGrade;
+/// Gives every clip of `clipIDs` (see above) the copied grade, replacing its own. Undo name "Paste
+/// Grade". Refused (VEEditErrorInvalidArgument) when no grade has been copied.
+- (VEEditResult *)pasteGradeOntoClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(pasteGrade(ontoClips:));
+/// Removes the grade of every clip of `clipIDs` (see above): every value neutral, and nothing kept of
+/// what a newer version wrote. Undo name "Reset Grade". Clips without a grade make no undo step.
+- (VEEditResult *)resetGradeOfClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(resetGrade(ofClips:));
+
+@end
+
 // MARK: Undo
 
 @interface VEEngine (Undo)
