@@ -7,7 +7,8 @@ import XCTest
 /// The Colour tab's wheels (`GradeToolsModel`, `ColourWheelControl`): one clip shows its wheels; several
 /// show where they agree and "mixed" where they differ (colour and level separately); moving a wheel's
 /// colour over several clips keeps each clip's level, its level keeps each colour; a drag is one undo step;
-/// resets; the colour stays in the disk; the tab is a page of the right-hand panel and shows the wheels.
+/// resets; the colour stays in the disk; the wheel's drawing (neutral centre, saturated rim, each hue where
+/// the puck adds it); the tab is a page of the right-hand panel and shows the wheels.
 @MainActor
 final class ColourWheelsTests: XCTestCase {
     private var fixture: StoreFixture!
@@ -136,7 +137,75 @@ final class ColourWheelsTests: XCTestCase {
         XCTAssertGreaterThan(red.r, red.b)
         let blue = ColourWheelSurface.rgbOf(cb: 0.3, cr: 0, luma: 0.55)
         XCTAssertGreaterThan(blue.b, blue.r)
-        XCTAssertEqual(ColourWheelSurface.hues.count, 25)
+        XCTAssertEqual(ColourWheelSurface.hues.count, 73)
+        // The wheel's hues at full saturation, each the hue of its direction: BT.709's red, green and blue
+        // directions give the primaries; any direction keeps the order of its channels.
+        func direction(r: Double, g: Double, b: Double) -> (cb: Double, cr: Double) {
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            return ((b - y) / 1.8556, (r - y) / 1.5748)
+        }
+        for primary: [Double] in [[1, 0, 0], [0, 1, 0], [0, 0, 1]] {
+            let d = direction(r: primary[0], g: primary[1], b: primary[2])
+            let saturated = ColourWheelSurface.saturatedRGBOf(cb: d.cb * 0.3, cr: d.cr * 0.3)
+            XCTAssertEqual(saturated.r, primary[0], accuracy: 1e-4)
+            XCTAssertEqual(saturated.g, primary[1], accuracy: 1e-4)
+            XCTAssertEqual(saturated.b, primary[2], accuracy: 1e-4)
+        }
+        for step in 0 ..< 36 {
+            let angle = Double(step) / 36 * 2 * .pi
+            let small = ColourWheelSurface.rgbOf(cb: cos(angle) * 0.05, cr: sin(angle) * 0.05, luma: 0.5)
+            let full = ColourWheelSurface.saturatedRGBOf(cb: cos(angle), cr: sin(angle))
+            XCTAssertEqual(max(full.r, full.g, full.b), 1, accuracy: 1e-9)
+            XCTAssertEqual(min(full.r, full.g, full.b), 0, accuracy: 1e-9)
+            // The same hue: the channels in the same proportion above the weakest.
+            let span = max(small.r, small.g, small.b) - min(small.r, small.g, small.b)
+            let low = min(small.r, small.g, small.b)
+            XCTAssertEqual((small.r - low) / span, full.r, accuracy: 1e-9)
+            XCTAssertEqual((small.g - low) / span, full.g, accuracy: 1e-9)
+            XCTAssertEqual((small.b - low) / span, full.b, accuracy: 1e-9)
+        }
+        XCTAssertTrue(ColourWheelSurface.saturatedRGBOf(cb: 0, cr: 0) == (0.5, 0.5, 0.5), "no direction: grey")
+    }
+
+    /// The wheel reads as a grading wheel: neutral grey at the centre (no change), the hues strong at the rim,
+    /// each where the puck adds it (red up and to the left, blue to the right). Drawn offscreen.
+    func testTheWheelIsNeutralAtTheCentreAndSaturatedAtTheRim() async throws {
+        let side: CGFloat = 200
+        let view = HostedView(ColourWheelSurface(colour: nil, onBegin: {}, onChange: { _ in }, onEnd: {})
+            .frame(width: side, height: side), size: NSSize(width: side, height: side))
+        defer { view.close() }
+        _ = await view.pixels()
+        let rep = try XCTUnwrap(view.bitmap())
+        let scale = CGFloat(rep.pixelsWide) / side
+        func colour(at colour: CGPoint) throws -> (r: CGFloat, g: CGFloat, b: CGFloat) {
+            let point = ColourWheelSurface.position(of: colour, side: side)
+            let pixel = try XCTUnwrap(rep.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))?
+                .usingColorSpace(.sRGB))
+            return (pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
+        }
+        func chroma(_ c: (r: CGFloat, g: CGFloat, b: CGFloat)) -> CGFloat { max(c.r, c.g, c.b) - min(c.r, c.g, c.b) }
+
+        // The centre (beside the cross): grey.
+        let centre = try colour(at: CGPoint(x: 0.03, y: 0.03))
+        XCTAssertLessThan(chroma(centre), 0.03, "the centre is neutral: \(centre)")
+        // BT.709 red's direction (Cb -0.1146, Cr 0.5) and blue's (Cb 0.5, Cr -0.0458), on the ring and inside it.
+        let red = CGPoint(x: -0.1146 / 0.513, y: 0.5 / 0.513)
+        let blue = CGPoint(x: 0.5 / 0.502, y: -0.0458 / 0.502)
+        for (direction, isRed) in [(red, true), (blue, false)] {
+            for (radius, least) in [(CGFloat(0.97), CGFloat(0.7)), (0.8, 0.45)] {
+                let c = try colour(at: CGPoint(x: direction.x * radius, y: direction.y * radius))
+                XCTAssertGreaterThan(chroma(c), least, "strong colour at radius \(radius): \(c)")
+                if isRed {
+                    XCTAssertEqual(max(c.r, c.g, c.b), c.r, "red at red's direction: \(c)")
+                } else {
+                    XCTAssertEqual(max(c.r, c.g, c.b), c.b, "blue at blue's direction: \(c)")
+                }
+            }
+        }
+        // Half way out: some colour, less than at the rim.
+        let half = try colour(at: CGPoint(x: red.x * 0.5, y: red.y * 0.5))
+        XCTAssertGreaterThan(chroma(half), 0.15)
+        XCTAssertLessThan(chroma(half), chroma(try colour(at: CGPoint(x: red.x * 0.97, y: red.y * 0.97))))
     }
 
     func testTheColourTabShowsTheWheels() async throws {

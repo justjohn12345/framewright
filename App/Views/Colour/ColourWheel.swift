@@ -63,8 +63,11 @@ struct ColourWheelControl: View {
     }
 }
 
-/// The wheel itself: a disc of hues (the colour at each direction is the BT.709 chroma of that direction,
-/// fading to grey at the centre) with a puck at `colour` (cb across, cr up; nil hides it: the clips differ).
+/// The wheel itself, drawn as a grading wheel is (DaVinci Resolve's, Lightroom's): a disc of hues placed as a
+/// vectorscope places them (the colour at each direction is the BT.709 chroma of that direction, at its full
+/// saturation), strongest at the rim, where a thin ring shows each hue at full strength, and fading to a neutral
+/// grey at the centre (no change); with a puck at `colour` (cb across, cr up; nil hides it: the clips differ).
+/// The puck sits over the colour it adds.
 struct ColourWheelSurface: View {
     let colour: CGPoint?
     var onBegin: () -> Void
@@ -73,11 +76,14 @@ struct ColourWheelSurface: View {
 
     @State private var dragStart: CGPoint?
 
-    /// The hues around the wheel, every 15 degrees from 3 o'clock clockwise (SwiftUI's angular order on screen,
-    /// y down), each the colour of the direction (cb, cr) = (cos a, -sin a).
-    static let hues: [Color] = (0 ... 24).map { step in
-        let angle = Double(step) / 24 * 2 * .pi
-        let rgb = rgbOf(cb: cos(angle) * 0.3, cr: -sin(angle) * 0.3, luma: 0.55)
+    /// The grey of the wheel's centre (no change).
+    static let neutral = Color(white: 0.45)
+
+    /// The hues around the wheel, every 5 degrees from 3 o'clock clockwise (SwiftUI's angular order on screen,
+    /// y down), each the colour of the direction (cb, cr) = (cos a, -sin a) at its full saturation.
+    static let hues: [Color] = (0 ... 72).map { step in
+        let angle = Double(step) / 72 * 2 * .pi
+        let rgb = saturatedRGBOf(cb: cos(angle), cr: -sin(angle))
         return Color(red: rgb.r, green: rgb.g, blue: rgb.b)
     }
 
@@ -89,30 +95,58 @@ struct ColourWheelSurface: View {
         return (min(1, max(0, r)), min(1, max(0, g)), min(1, max(0, b)))
     }
 
+    /// The hue of the chroma direction (cb, cr) at its full saturation: the BT.709 R'G'B' of that chroma,
+    /// stretched so that its strongest channel is 1 and its weakest 0 (adding grey and scaling keep the hue).
+    /// Grey for no direction.
+    static func saturatedRGBOf(cb: Double, cr: Double) -> (r: Double, g: Double, b: Double) {
+        let r = 1.5748 * cr
+        let g = -0.1873 * cb - 0.4681 * cr
+        let b = 1.8556 * cb
+        let low = min(r, g, b)
+        let span = max(r, g, b) - low
+        guard span > 1e-9, span.isFinite else { return (0.5, 0.5, 0.5) }
+        return ((r - low) / span, (g - low) / span, (b - low) / span)
+    }
+
     /// The point of the view for the wheel's (cb, cr) in a square of `side` points.
     static func position(of colour: CGPoint, side: CGFloat) -> CGPoint {
         let radius = side / 2
         return CGPoint(x: radius + colour.x * radius, y: radius - colour.y * radius)
     }
 
+    /// The width of the hue ring at the rim of a wheel `side` points wide.
+    static func ringWidth(side: CGFloat) -> CGFloat {
+        max(2.5, side * 0.035)
+    }
+
     var body: some View {
         GeometryReader { area in
             let side = min(area.size.width, area.size.height)
+            let ring = Self.ringWidth(side: side)
             ZStack {
                 Circle()
                     .fill(AngularGradient(colors: Self.hues, center: .center))
+                // Neutral at the centre, the hues at full strength from just inside the ring.
                 Circle()
-                    .fill(RadialGradient(colors: [Color(white: 0.5), Color(white: 0.5).opacity(0)], center: .center,
-                                         startRadius: 0, endRadius: side / 2))
+                    .fill(RadialGradient(stops: [.init(color: Self.neutral, location: 0),
+                                                 .init(color: Self.neutral.opacity(0.85), location: 0.15),
+                                                 .init(color: Self.neutral.opacity(0.45), location: 0.5),
+                                                 .init(color: Self.neutral.opacity(0), location: 0.95)],
+                                         center: .center, startRadius: 0, endRadius: side / 2 - ring))
                 Circle()
-                    .strokeBorder(Color.black.opacity(0.35), lineWidth: 1)
+                    .strokeBorder(AngularGradient(colors: Self.hues, center: .center), lineWidth: ring)
+                Circle()
+                    .stroke(Color.black.opacity(0.45), lineWidth: 0.75)
+                    .padding(ring)
+                Circle()
+                    .strokeBorder(Color.black.opacity(0.6), lineWidth: 1)
                 Path { path in
                     path.move(to: CGPoint(x: side / 2 - 4, y: side / 2))
                     path.addLine(to: CGPoint(x: side / 2 + 4, y: side / 2))
                     path.move(to: CGPoint(x: side / 2, y: side / 2 - 4))
                     path.addLine(to: CGPoint(x: side / 2, y: side / 2 + 4))
                 }
-                .stroke(Color.black.opacity(0.4), lineWidth: 1)
+                .stroke(Color.white.opacity(0.55), lineWidth: 1)
                 if let colour {
                     Circle()
                         .strokeBorder(Color.white, lineWidth: 2)

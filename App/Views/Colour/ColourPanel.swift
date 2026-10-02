@@ -68,7 +68,8 @@ struct ColourPanel: View {
                     .help("Reset the lift, gamma and gain wheels of the selection")
                     .accessibilityIdentifier("ResetWheels")
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 78), spacing: 10)], spacing: 10) {
+            // Always three across, as a grading panel has them (the wheels shrink with the panel).
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                 ForEach([VEGradeWheel.lift, .gamma, .gain], id: \.rawValue) { wheel in
                     let state = tools.wheel(wheel)
                     ColourWheelControl(wheel: wheel, tools: tools, value: state.value, colourMixed: state.colourMixed,
