@@ -4,7 +4,8 @@
 
 Framewright is a native macOS video editor in the spirit of a simple Premiere: import
 footage, arrange clips on a multi-track timeline, trim, split and move them, dissolve between
-them, adjust motion and sound in an inspector, play it back with synced audio, and export.
+them, adjust motion and sound in an inspector, grade colour with wheels, curves and LUTs while
+watching the scopes, play it back with synced audio, and export.
 It runs on Apple silicon and uses the hardware wherever there is hardware to use.
 
 **Demo video** (2 min 24 s, cut and exported in Framewright):
@@ -45,8 +46,8 @@ audited the code line by line.
   acted on selected, alone), snapping, marquee, a clearly marked selection (a brighter fill and an accent
   border on clips, spans and transitions), undo/redo of every edit, and exact rational time math (29.97 fps and 44.1 kHz audio do not
   accumulate rounding).
-- Real-time playback with an audio-clocked Metal compositor, JKL shuttle, frame stepping and
-  scrubbing; measured A/V offset on the real output device is zero within a sample. A still
+- Real-time playback with an audio-clocked Metal compositor, JKL shuttle (Space always plays forward
+  at 1x, as in other editors), frame stepping and scrubbing; measured A/V offset on the real output device is zero within a sample. A still
   playhead keeps a short lookahead decoded and the audio primed, so Space starts within a frame
   (about 20-30 ms press to picture on cached media, variable-frame-rate phone footage included).
   The audio output stays on for 5 minutes after the last transport action (1 minute on battery).
@@ -92,6 +93,25 @@ audited the code line by line.
   kept together with their linked partner (Delete removes both, Option-Delete one; a change also changes
   the linked one unless turned off); a note when a dissolve sits on a plain split (both sides show the
   same frames); the gain line on audio clips; Speed/Duration sheet.
+- Colour grading, a property of each clip, graded in linear light (so 8-bit and 10-bit footage grade alike and
+  black stays black) and the same in the monitors and the export. The basic correction (exposure ±5 stops,
+  contrast, temperature, tint, saturation) is in the inspector's Colour section and the Colour tab of the right
+  panel; the Colour tab adds lift, gamma and gain wheels (shadows, midtones, highlights; drag a wheel's centre
+  toward a colour, Option for finer, and its slider for brightness), curves (luma, red, green and blue, and hue
+  versus saturation, hue versus hue and hue versus luma: click to add a point, drag to move it, drag it out or
+  press Delete to remove it, a smooth curve through the points) and `.cube` LUTs, an input conversion before the
+  grade (a camera's log to Rec. 709) and a look after it at a strength (the project keeps a copy of each, named
+  by the file chosen). With several clips selected each control shows "Mixed" where they differ and moving it
+  sets that value on all of them; Copy Grade (Option-Cmd-C), Paste Grade (Option-Cmd-V) and Reset Grade are in
+  the Clip menu and the clip's context menu. Every drag or reset is one undo step.
+- Scopes (View > Show Scopes, and View > Scope for the mode): a histogram (luma, RGB overlaid with luma as in
+  Lightroom, or an RGB parade), a waveform (brightness per column, the picture's left to right) and a
+  vectorscope (with the 75 % colour targets and the skin-tone line), in a resizable panel shaped like the
+  picture beside or below the program monitor. A clipping indicator gives the share of the picture at pure
+  white or black, and View > Show Clipping on Program Monitor shows red where a channel is at 100 % and blue
+  where one is at 0 %, as a photo app's clipping warning does.
+  iPhone HDR (HLG) footage is shown as SDR without tone mapping, and P3 and BT.2020 primaries are not
+  converted yet.
 - Photos: drag photos and videos from Photos.app onto the media bin or the timeline (file promises
   received into a Media folder the app makes next to the project, or inside a folder you choose,
   with progress and cancel; iCloud originals can take their time), or File > Import from Photos…
