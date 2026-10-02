@@ -51,8 +51,34 @@ The grade's steps:
    produces NaN.
 2. Apply exposure (a gain), temperature and tint (channel gains, normalised to keep luminance), and saturation
    (a mix toward BT.709 linear luminance) in linear light.
-3. Apply contrast about a pivot of linear 0.18, on the log2 of the value, which keeps it perceptual.
+3. Apply contrast about a pivot of linear 0.18, on the log2 of the value, which keeps it perceptual (see
+   "Contrast and non-positive values" below: log2 is never taken of a value ≤ 0).
 4. Re-encode with the inverse of step 1's curve.
+
+**Contrast and non-positive values (user's requirement, 2026-10-01).** Linear values reach step 3 at or below
+zero: black is 0, sub-black and out-of-gamut sources give negatives (step 1 mirrors the curve for them),
+saturation can push a channel negative, and -0 and denormals occur. log2 of 0 is -inf and of a negative is NaN,
+and a NaN in the fragment shader becomes a black or garbage pixel that spreads through a dissolve's mix and
+the blend. The contrast step must therefore never evaluate log2 (or pow) of a value ≤ 0:
+
+- **Formula:** the contrast curve is `f(v) = pivot · (v / pivot)^c` for `v ≥ ε` (the log2 form,
+  `exp2(c · (log2 v − log2 pivot)) · pivot`, written so log2 only ever sees v ≥ ε), with ε a small positive
+  threshold (for example 2^-14, about 6e-5, below the darkest 10-bit code in linear light).
+- **Below ε:** a straight line through the origin that meets the curve at ε with the same value,
+  `f(v) = v · f(ε) / ε`. It is continuous, monotonic and maps 0 to 0, so black stays black and there is no
+  step or band at ε. Negative values continue the same line (sign kept, never mirrored through log2), so
+  sub-blacks stay ordered and finite.
+- **Contrast 1:** returns v unchanged on both branches, so an untouched control changes nothing, bit for bit,
+  as the function constant requires.
+- **NaN and infinity:** a NaN input (which should not occur) is treated as 0 before the grade. +inf is clamped
+  to the float maximum before the grade, so nothing the grade outputs is NaN or inf. The same rule applies to
+  every other step that uses log, pow or a division (the transfer curves' mirrored branches; temperature/tint
+  luminance normalisation, whose divisor is guarded away from 0).
+- **Tests:** when grading lands, a doctest of the grade function (the same function compiled for the CPU
+  reference) over inputs 0, -0, ±ε, ±ε/2, denormals, negatives down to -1, 1, large values, NaN and ±inf, at
+  contrast 0.5, 1 and 2. Every output must be finite; f must be monotonic and continuous across ε; contrast 1
+  must be the identity. A render test must show a graded black frame stays exactly black and a graded
+  sub-black ramp has no NaN pixels.
 
 The blend stays where it is.
 
