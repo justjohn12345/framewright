@@ -6,7 +6,8 @@ import UniformTypeIdentifiers
 /// The LUTs section of the Colour tab: the input conversion (a .cube LUT applied before the grade: a camera's
 /// log to Rec. 709, say) and the look (applied after the grade and the curves, at a strength). Choose… opens a
 /// .cube file and sets it on the selected clips (the project keeps a copy, so the file is not needed later);
-/// the cross removes it. A file that is not a LUT says why in the status line.
+/// the cross removes it; the row names the LUT by the file chosen (without its extension). A file that is not
+/// a LUT says why in the status line.
 struct LUTSection: View {
     @ObservedObject var tools: GradeToolsModel
 

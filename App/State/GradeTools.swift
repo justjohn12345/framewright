@@ -205,10 +205,14 @@ final class GradeToolsModel: ObservableObject {
         return (first, ids.contains { $0 != first })
     }
 
-    /// What to call the LUT of `id` ("None" for "").
+    /// What to call the LUT of `id` ("None" for ""): the name of the file the user chose, without its extension
+    /// (a .cube file's TITLE is often the name of the tool that wrote it, not of the LUT), else the engine's name
+    /// for it (its TITLE) where the file's name is unknown.
     func lutName(_ id: String) -> String {
         guard !id.isEmpty else { return "None" }
-        return engine.lut(withID: id)?.displayName ?? "Unknown LUT"
+        guard let info = engine.lut(withID: id) else { return "Unknown LUT" }
+        let stem = (info.fileName as NSString).deletingPathExtension
+        return stem.isEmpty ? info.displayName : stem
     }
 
     /// The look's strength as the clips with a look have it (the first's, 1 when none has a look), and
