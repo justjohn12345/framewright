@@ -136,6 +136,8 @@ struct VideoLayer {
     // The grade's curves (slice 2); the identity by default. A layer with a curve is graded with the extended
     // grade, reading the curves' tables.
     GradeCurves gradeCurves{};
+    // The grade's hue curves (slice 2); the identity by default.
+    HueCurves gradeHueCurves{};
     // The grade's LUTs (slice 2; Project::luts' tables, shared) with their content ids, and the look's
     // strength. A layer with a LUT is graded with the extended grade.
     std::shared_ptr<const CubeLut> gradeInputLut;

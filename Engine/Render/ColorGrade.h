@@ -49,6 +49,10 @@ typedef metal::float3 VEGradeFloat3;
 #define VE_GRADE_FLOAT_BITS(x) as_type<uint>(x)
 #define VE_GRADE_BITS_FLOAT(x) as_type<float>(x)
 #define VE_GRADE_DOT(a, b) metal::dot(a, b)
+#define VE_GRADE_ATAN2(y, x) metal::precise::atan2(y, x)
+#define VE_GRADE_SQRT(x) metal::sqrt(x)
+#define VE_GRADE_SINCOS_SIN(x) metal::precise::sin(x)
+#define VE_GRADE_SINCOS_COS(x) metal::precise::cos(x)
 typedef uint VEGradeBits;
 
 #else
@@ -70,6 +74,10 @@ typedef simd_float3 VEGradeFloat3;
 #define VE_GRADE_FLOAT_BITS(x) std::bit_cast<uint32_t>(float(x))
 #define VE_GRADE_BITS_FLOAT(x) std::bit_cast<float>(uint32_t(x))
 #define VE_GRADE_DOT(a, b) simd_dot(a, b)
+#define VE_GRADE_ATAN2(y, x) std::atan2(float(y), float(x))
+#define VE_GRADE_SQRT(x) std::sqrt(float(x))
+#define VE_GRADE_SINCOS_SIN(x) std::sin(float(x))
+#define VE_GRADE_SINCOS_COS(x) std::cos(float(x))
 typedef uint32_t VEGradeBits;
 
 #endif
@@ -254,6 +262,63 @@ template <typename Tables> VE_GRADE_FUNC float veTableLookup(Tables tables, floa
     return a + (b - a) * f;
 }
 
+// Row `row` (a periodic table: sample i at i / width) at hue `h` (a fraction of the circle in [0, 1]; 1, and
+// anything outside or NaN, is read as 0): the linear interpolation of the two samples around it, wrapping from
+// the last to the first.
+template <typename Tables> VE_GRADE_FUNC float veHueTableLookup(Tables tables, float h, VEGradeBits row) {
+    const float wrapped = h >= 0.0f && h < 1.0f ? h : 0.0f;
+    const float position = wrapped * float(kVEGradeTableWidth);
+    const VEGradeBits i0 = VEGradeBits(position) < kVEGradeTableWidth ? VEGradeBits(position) : kVEGradeTableWidth - 1u;
+    const VEGradeBits i1 = i0 + 1u < kVEGradeTableWidth ? i0 + 1u : 0u;
+    const float f = position - float(i0);
+    const float a = veTableRead(tables, i0, row);
+    const float b = veTableRead(tables, i1, row);
+    return a + (b - a) * f;
+}
+
+// The hue curves (ClipGrade.h, GradeHueCurve) on linear RGB: the colour's hue (the angle of its BT.709
+// chroma, Cb across, Cr up, as a fraction of the circle) looks up each curve in use; the hue turns by
+// (y - 0.5) x 120 degrees, the chroma scales by 2y, the whole colour by 2^((y - 0.5) x 2), each fading out as
+// the colour nears grey (full effect from a chroma of 0.05), keeping the colour's luminance through the hue
+// turn and the saturation. A grey (no chroma) is returned unchanged; so is any colour when no bit is set.
+template <typename Tables>
+VE_GRADE_FUNC VEGradeFloat3 veApplyHueCurves(VEGradeFloat3 rgb, VEGradeBits mask, Tables tables) {
+    const float kr = 0.2126f, kg = 0.7152f, kb = 0.0722f;
+    const VEGradeFloat3 weights = {kr, kg, kb};
+    const float y = VE_GRADE_DOT(weights, rgb);
+    float cb = (rgb.z - y) * (1.0f / 1.8556f);
+    float cr = (rgb.x - y) * (1.0f / 1.5748f);
+    const float chroma = VE_GRADE_SQRT(cb * cb + cr * cr);
+    if (!(chroma > 1.0e-6f) || !(chroma < 1.0e30f)) {
+        return rgb; // grey (no hue), or not a number
+    }
+    float hue = VE_GRADE_ATAN2(cr, cb) * 0.15915494309189535f; // 1 / (2 pi)
+    hue = hue < 0.0f ? hue + 1.0f : hue;
+    const float weight = chroma < 0.05f ? chroma * 20.0f : 1.0f;
+    if ((mask & (1u << 1)) != 0u) { // hue vs hue
+        const float turn = (veHueTableLookup(tables, hue, VEGradeTableRowHueHue) - 0.5f) * 2.0943951023931953f * weight;
+        const float s = VE_GRADE_SINCOS_SIN(turn);
+        const float c = VE_GRADE_SINCOS_COS(turn);
+        const float turnedCb = cb * c - cr * s;
+        const float turnedCr = cb * s + cr * c;
+        cb = turnedCb;
+        cr = turnedCr;
+    }
+    if ((mask & (1u << 0)) != 0u) { // hue vs saturation
+        const float scale = 1.0f + (2.0f * veHueTableLookup(tables, hue, VEGradeTableRowHueSaturation) - 1.0f) * weight;
+        cb *= scale;
+        cr *= scale;
+    }
+    const float r = y + 1.5748f * cr;
+    const float b = y + 1.8556f * cb;
+    const float g = (y - kr * r - kb * b) * (1.0f / kg);
+    VEGradeFloat3 out = {r, g, b};
+    if ((mask & (1u << 2)) != 0u) { // hue vs luma
+        out = out * VE_GRADE_EXP2((veHueTableLookup(tables, hue, VEGradeTableRowHueLuma) - 0.5f) * 2.0f * weight);
+    }
+    return out;
+}
+
 // The tone curves on encoded R'G'B' (ClipGrade.h, GradeCurve): the luma curve moves the BT.709 luma, adding
 // the same amount to each channel; then each channel's curve. A curve whose bit of `mask` is clear is skipped.
 template <typename Tables>
@@ -393,6 +458,9 @@ VE_GRADE_FUNC VEGradeFloat3 veGradeExtended(VEGradeFloat3 rgb, VE_GRADE_UNIFORMS
                                   veLinearChannel(rgb.z, transfer)};
     const VEGradeFloat3 gain = {u.gain.x, u.gain.y, u.gain.z};
     VEGradeFloat3 graded = veApplySaturation(veGain(linear, gain), u.saturation);
+    if ((u.stages & VEGradeStageHueCurves) != 0u) {
+        graded = veApplyHueCurves(graded, u.hueCurveMask, tables);
+    }
     if ((u.stages & VEGradeStageWheels) != 0u) {
         graded = veApplyWheels(graded, u);
     }
@@ -481,16 +549,17 @@ inline simd_double3 wheelColourDirection(double cb, double cr) {
 }
 
 // Whether a grade needs the extended grade (a slice 2 stage is in use).
-inline bool needsExtendedGrade(const GradeWheels &wheels, const GradeCurves &curves = {}, bool hasLut = false) {
-    return !isNeutralWheels(wheels) || !isIdentityCurves(curves) || hasLut;
+inline bool needsExtendedGrade(const GradeWheels &wheels, const GradeCurves &curves = {}, bool hasLut = false,
+                               const HueCurves &hueCurves = {}) {
+    return !isNeutralWheels(wheels) || !isIdentityCurves(curves) || hasLut || !isIdentityHueCurves(hueCurves);
 }
 
 // The tone curves' rows of the tables, in GradeCurve order.
 inline constexpr VEGradeTableRow kToneCurveRows[kGradeCurveCount] = {VEGradeTableRowLuma, VEGradeTableRowRed,
                                                                      VEGradeTableRowGreen, VEGradeTableRowBlue};
 
-// A 1D LUT's channel `channel` resampled to the table's samples over its domain (sample i at domain fraction
-// i / (width - 1), the LUT's entries interpolated linearly), into `row`.
+// A 1D LUT's three channels resampled to the table's samples over its domain (sample i at domain fraction
+// i / (width - 1), the LUT's entries interpolated linearly), into rows `firstRow` to `firstRow` + 2.
 inline void writeLutRows(std::vector<float> &data, const CubeLut &lut, int firstRow) {
     const double last = double(lut.size - 1);
     for (int channel = 0; channel < 3; ++channel) {
@@ -506,11 +575,11 @@ inline void writeLutRows(std::vector<float> &data, const CubeLut &lut, int first
     }
 }
 
-// The tables of `curves` and of the 1D LUTs among `inputLut` and `lookLut` (VEGradeTableRow rows of
-// kVEGradeTableWidth samples; an identity curve's row and an absent LUT's rows are the identity), what the
-// compositor uploads and the CPU reference reads.
+// The tables of `curves`, of the 1D LUTs among `inputLut` and `lookLut` and of `hueCurves` (VEGradeTableRow rows
+// of kVEGradeTableWidth samples; an identity curve's row and an absent LUT's rows are the identity, an identity
+// hue curve's row 0.5), what the compositor uploads and the CPU reference reads.
 inline std::vector<float> gradeTableData(const GradeCurves &curves, const CubeLut *inputLut = nullptr,
-                                         const CubeLut *lookLut = nullptr) {
+                                         const CubeLut *lookLut = nullptr, const HueCurves &hueCurves = {}) {
     std::vector<float> data(std::size_t(VEGradeTableRowCount) * kVEGradeTableWidth);
     const std::vector<float> identity = sampleCurve({}, kVEGradeTableWidth);
     for (int row = 0; row < VEGradeTableRowCount; ++row) {
@@ -525,6 +594,11 @@ inline std::vector<float> gradeTableData(const GradeCurves &curves, const CubeLu
     }
     if (lookLut != nullptr && lookLut->kind == CubeKind::OneD) {
         writeLutRows(data, *lookLut, VEGradeTableRowLookLut);
+    }
+    for (std::size_t curve = 0; curve < kGradeHueCurveCount; ++curve) {
+        const std::vector<float> samples = sampleHueCurve(hueCurves[curve], kVEGradeTableWidth);
+        std::copy(samples.begin(), samples.end(),
+                  data.begin() + std::ptrdiff_t(VEGradeTableRowHueSaturation + int(curve)) * kVEGradeTableWidth);
     }
     return data;
 }
@@ -593,9 +667,17 @@ inline void lutDomainOf(const CubeLut &lut, VEFloat4 &minimum, VEFloat4 &scale) 
 // size, and the look's strength.
 inline VEGradeUniforms gradeUniformsFor(const GradeValues &grade, const GradeWheels &wheels, const GradeCurves &curves,
                                         const CubeLut *inputLut, const CubeLut *lookLut, double lookStrength,
-                                        VEInt transfer) {
+                                        VEInt transfer, const HueCurves &hueCurves = {}) {
     VEGradeUniforms u = gradeUniformsFor(grade, wheels, curves, transfer);
     u.lookStrength = 1.0f;
+    for (std::size_t curve = 0; curve < kGradeHueCurveCount; ++curve) {
+        if (!isIdentityHueCurve(hueCurves[curve])) {
+            u.hueCurveMask |= 1u << curve;
+        }
+    }
+    if (u.hueCurveMask != 0u) {
+        u.stages |= VEGradeStageHueCurves;
+    }
     if (inputLut != nullptr) {
         u.stages |= VEGradeStageInputLut;
         lutDomainOf(*inputLut, u.inputDomainMin, u.inputDomainScale);

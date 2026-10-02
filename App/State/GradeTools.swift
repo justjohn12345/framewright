@@ -114,50 +114,64 @@ final class GradeToolsModel: ObservableObject {
 
     // MARK: Curves
 
-    /// The curve the curve editor shows (Luma, Red, Green, Blue; per session).
-    @Published var curveChannel: VEGradeCurve = .luma
+    /// The curve the curve editor shows (per session).
+    @Published var curveChannel: CurveChannel = .luma
 
-    /// `curve` as the clips have it: the first clip's points (what the editor shows) and whether the clips
-    /// differ.
-    func curve(_ curve: VEGradeCurve) -> (points: [CGPoint], mixed: Bool) {
-        let targets = videoTargets
-        guard let first = targets.first else { return ([], false) }
-        let points = first.gradeCurvePoints(curve).map(\.pointValue)
-        let mixed = targets.dropFirst().contains { $0.gradeCurvePoints(curve).map(\.pointValue) != points }
-        return (points, mixed)
+    private func points(of clip: VEClipInfo, _ channel: CurveChannel) -> [CGPoint] {
+        if let tone = channel.toneCurve {
+            return clip.gradeCurvePoints(tone).map(\.pointValue)
+        }
+        if let hue = channel.hueCurve {
+            return clip.gradeHueCurvePoints(hue).map(\.pointValue)
+        }
+        return []
     }
 
-    /// Whether any target has a curve that is not the identity.
+    /// `channel` as the clips have it: the first clip's points (what the editor shows) and whether the clips
+    /// differ.
+    func curve(_ channel: CurveChannel) -> (points: [CGPoint], mixed: Bool) {
+        let targets = videoTargets
+        guard let first = targets.first else { return ([], false) }
+        let shown = points(of: first, channel)
+        let mixed = targets.dropFirst().contains { points(of: $0, channel) != shown }
+        return (shown, mixed)
+    }
+
+    /// Whether any target has a curve (tone or hue) that is not the identity.
     var anyCurveSet: Bool {
-        videoTargets.contains { clip in
-            [VEGradeCurve.luma, .red, .green, .blue].contains { !clip.gradeCurvePoints($0).isEmpty }
-        }
+        videoTargets.contains { clip in CurveChannel.allCases.contains { !points(of: clip, $0).isEmpty } }
     }
 
     /// Starts a drag in the curve editor (a point moved, added or dragged out): one undo step.
-    func beginCurveDrag(_ curve: VEGradeCurve) {
-        openDragGroup("colour.curve.\(curve.rawValue)")
+    func beginCurveDrag(_ channel: CurveChannel) {
+        openDragGroup("colour.curve.\(channel.rawValue)")
     }
 
-    /// Sets `curve` to `points` on every target (inside the drag's group when one is open).
-    func setCurve(_ curve: VEGradeCurve, _ points: [CGPoint]) {
+    /// Sets `channel` to `points` on every target (inside the drag's group when one is open).
+    func setCurve(_ channel: CurveChannel, _ points: [CGPoint]) {
         let clips = videoTargets.map { NSNumber(value: $0.clipID) }
         guard !clips.isEmpty else { return }
         let values = points.map { NSValue(point: $0) }
+        let edit: () -> VEEditResult = {
+            if let tone = channel.toneCurve {
+                return self.engine.setGradeCurve(values, for: tone, clips: clips)
+            }
+            return self.engine.setGradeHueCurve(values, for: channel.hueCurve ?? .saturation, clips: clips)
+        }
         if let group = dragGroup {
-            report(engine.performInCoalescingGroup(group) { self.engine.setGradeCurve(values, for: curve, clips: clips) })
+            report(engine.performInCoalescingGroup(group) { edit() })
         } else {
-            report(engine.setGradeCurve(values, for: curve, clips: clips))
+            report(edit())
         }
     }
 
-    /// `curve` back to the identity on every target.
-    func resetCurve(_ curve: VEGradeCurve) {
+    /// `channel` back to the identity on every target.
+    func resetCurve(_ channel: CurveChannel) {
         endDrag()
-        setCurve(curve, [])
+        setCurve(channel, [])
     }
 
-    /// Every curve back to the identity on every target (one undo step, "Reset Curves").
+    /// Every curve (tone and hue) back to the identity on every target (one undo step, "Reset Curves").
     func resetCurves() {
         endDrag()
         let clips = videoTargets.map { NSNumber(value: $0.clipID) }

@@ -14,7 +14,8 @@
 //   - tint: magenta (+) or green (-), a green gain, -100...100 (100: green down half a stop),
 //     normalised to keep luminance;
 //   - saturation: a mix toward BT.709 luminance (0 grey, 1 unchanged, 2 twice as saturated).
-// Slice 2 adds the colour wheels (GradeWheel), the curves (GradeCurve) and the LUTs (CubeLut.h), below.
+// Slice 2 adds the colour wheels (GradeWheel), the curves (GradeCurve, GradeHueCurve) and the LUTs (CubeLut.h),
+// below.
 //
 // Grades apply to pictures: only a clip on a video track may have one (validateSequence).
 //
@@ -201,6 +202,51 @@ std::vector<float> sampleCurve(const CurvePoints &points, std::size_t samples);
 // Whether every curve is the identity.
 bool isIdentityCurves(const GradeCurves &curves);
 
+// The hue curves (colour grading slice 2): curves over hue (x: the hue as a fraction of the circle, 0 at the
+// Cb axis toward blue, turning toward the Cr axis toward red, as a vectorscope shows it; periodic, so the curve
+// joins itself at x = 1) whose output (y, 0 to 1, 0.5 changes nothing) scales the saturation (0 grey, 1 twice),
+// turns the hue (by up to 60 degrees each way) or scales the luminance (by up to a stop each way) of the
+// colours of that hue, in linear light after saturation (ColorGrade.h). 1 to kMaxCurvePoints points, x in
+// [0, 1) strictly increasing, interpolated by a periodic monotone cubic (Fritsch-Butland tangents: no overshoot
+// between points, a flat run stays flat; limited to [0, 1]); none, or
+// every point at 0.5, is the identity (stored as none). Near grey (no hue) the effect fades out.
+enum class GradeHueCurve {
+    Saturation,
+    Hue,
+    Luma,
+};
+
+inline constexpr std::size_t kGradeHueCurveCount = 3;
+inline constexpr std::array<GradeHueCurve, kGradeHueCurveCount> kGradeHueCurves{
+    GradeHueCurve::Saturation, GradeHueCurve::Hue, GradeHueCurve::Luma};
+
+struct GradeHueCurveInfo {
+    GradeHueCurve curve;
+    const char *name;        // the file's key: "hueCurveSaturation", "hueCurveHue", "hueCurveLuma"
+    const char *displayName; // "Hue vs Saturation", "Hue vs Hue", "Hue vs Luma"
+};
+
+const GradeHueCurveInfo &infoOf(GradeHueCurve curve);
+const char *nameOf(GradeHueCurve curve);
+const char *displayNameOf(GradeHueCurve curve);
+std::optional<GradeHueCurve> gradeHueCurveNamed(std::string_view name);
+
+using HueCurves = std::array<CurvePoints, kGradeHueCurveCount>;
+
+// Whether hue curve `points` is the identity: none, or every y at 0.5.
+bool isIdentityHueCurve(const CurvePoints &points);
+// Why `points` is not a valid hue curve (not 0 to kMaxCurvePoints points, a value not finite, x outside
+// [0, 1) or y outside [0, 1], x not strictly increasing), or nullopt.
+std::optional<std::string> hueCurveProblem(const CurvePoints &points);
+// `points` made valid (a project file's): values limited (x to [0, 1), y to [0, 1]; NaN dropped), sorted,
+// a point at the same x as the one before dropped, at most kMaxCurvePoints; the identity becomes none.
+CurvePoints sanitizedHueCurve(const CurvePoints &points);
+// The periodic curve through `points` at hue `x` (0.5 for none; x taken modulo 1).
+double evaluateHueCurve(const CurvePoints &points, double x);
+// The curve at `samples` hues i / samples (i from 0), a periodic table.
+std::vector<float> sampleHueCurve(const CurvePoints &points, std::size_t samples);
+bool isIdentityHueCurves(const HueCurves &curves);
+
 struct ClipGrade {
     // The values, indexed by GradeParameter; every one neutral by default.
     GradeValues values = neutralValues();
@@ -209,6 +255,8 @@ struct ClipGrade {
     // The curves, indexed by GradeCurve: their points (none: the identity, the default; an identity curve is
     // always stored as none).
     GradeCurves curves{};
+    // The hue curves, indexed by GradeHueCurve (none: the identity).
+    HueCurves hueCurves{};
     // The LUTs (slice 2), by content id in Project::luts ("" for none): the input conversion, applied to the
     // source's R'G'B' before the grade (a camera's log to Rec. 709, say), and the look, applied after the grade
     // and the curves, mixed with what it changes by `lookStrength` (0 to 1; 1 without a look).
@@ -242,8 +290,15 @@ struct ClipGrade {
     CurvePoints &operator[](GradeCurve curve) {
         return curves[static_cast<std::size_t>(curve)];
     }
+    const CurvePoints &operator[](GradeHueCurve curve) const {
+        return hueCurves[static_cast<std::size_t>(curve)];
+    }
+    CurvePoints &operator[](GradeHueCurve curve) {
+        return hueCurves[static_cast<std::size_t>(curve)];
+    }
 
-    // Every value at its neutral value, every wheel neutral, every curve the identity and no LUT (the foreign
+    // Every value at its neutral value, every wheel neutral, every curve (tone and hue) the identity and no LUT
+    // (the foreign
     // entries do not count: this version does not apply them). A neutral grade renders exactly as no grade.
     bool isNeutral() const;
     // Neutral and without foreign entries: nothing for the project file to keep.

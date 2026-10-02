@@ -334,12 +334,31 @@ typedef NS_ENUM(NSInteger, VEGradeCurve) {
 FOUNDATION_EXPORT void VEGradeCurveSample(NSArray<NSValue *> *points, double *samples, NSInteger count)
     NS_SWIFT_NAME(VEGradeCurveInfo.sample(_:into:count:));
 
+/// A hue curve of a clip's grade (the engine's GradeHueCurve): over hue (x, 0 to 1 around the circle, starting
+/// at blue's side of the Cb axis and turning toward red, as a vectorscope shows hues; periodic), its output (y,
+/// 0 to 1, 0.5 changes nothing) scales the saturation (0 grey, 1 doubled), turns the hue (up to 60 degrees each
+/// way) or scales the luminance (up to a stop each way) of the colours of that hue. 1 to 16 points (x in
+/// [0, 1), increasing), a periodic monotone cubic (no overshoot between points); no points is the identity.
+typedef NS_ENUM(NSInteger, VEGradeHueCurve) {
+    VEGradeHueCurveSaturation = 0,
+    VEGradeHueCurveHue = 1,
+    VEGradeHueCurveLuma = 2,
+};
+
+/// The hue curve through `points` at `count` hues i / count into `samples` (made valid first, as a project
+/// file's are): what the renderer applies, for drawing.
+FOUNDATION_EXPORT void VEGradeHueCurveSample(NSArray<NSValue *> *points, double *samples, NSInteger count)
+    NS_SWIFT_NAME(VEGradeCurveInfo.sampleHue(_:into:count:));
+
 @interface VEGradeSelection (Curves)
 /// The points every clip has for `curve` (empty for the identity); nil where they differ, without clips, or
 /// for a value outside VEGradeCurve.
 - (nullable NSArray<NSValue *> *)pointsForCurve:(VEGradeCurve)curve NS_SWIFT_NAME(curve(_:));
 /// Whether the clips differ in `curve` (NO without clips or for a value outside the enum).
 - (BOOL)isCurveMixed:(VEGradeCurve)curve NS_SWIFT_NAME(isCurveMixed(_:));
+/// The same for a hue curve.
+- (nullable NSArray<NSValue *> *)pointsForHueCurve:(VEGradeHueCurve)curve NS_SWIFT_NAME(hueCurve(_:));
+- (BOOL)isHueCurveMixed:(VEGradeHueCurve)curve NS_SWIFT_NAME(isHueCurveMixed(_:));
 @end
 
 /// The kind of a colour LUT (a .cube file).
@@ -557,6 +576,8 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 /// The clip's points of `curve` (NSValue-wrapped points; empty for the identity or a value outside
 /// VEGradeCurve).
 - (NSArray<NSValue *> *)gradeCurvePoints:(VEGradeCurve)curve NS_SWIFT_NAME(gradeCurvePoints(_:));
+/// The clip's points of hue curve `curve` (empty for the identity or a value outside VEGradeHueCurve).
+- (NSArray<NSValue *> *)gradeHueCurvePoints:(VEGradeHueCurve)curve NS_SWIFT_NAME(gradeHueCurvePoints(_:));
 /// The ids of the clip's input LUT and look ("" for none; -[VEEngine lutWithID:] describes them), and the
 /// look's strength (0 to 1; 1 without a look).
 @property (nonatomic, readonly, copy) NSString *gradeInputLUTID;

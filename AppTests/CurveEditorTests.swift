@@ -55,6 +55,42 @@ final class CurveEditorTests: XCTestCase {
         XCTAssertFalse(CurveEditing.isDraggedOut(CGPoint(x: 210, y: -10), side: 200))
     }
 
+    func testTheHueCurvesRules() {
+        XCTAssertEqual(CurveChannel.allCases.count, 7)
+        XCTAssertTrue(CurveChannel.hueHue.isHue)
+        XCTAssertEqual(CurveChannel.hueLuma.hueCurve, .luma)
+        XCTAssertNil(CurveChannel.red.hueCurve)
+        // No points: none shown (a flat line at no change); one point is a curve; x stays below 1.
+        XCTAssertEqual(CurveEditing.editable([], periodic: true), [])
+        let one = CurveEditing.adding(CGPoint(x: 1.4, y: 0.8), to: [], periodic: true)
+        XCTAssertEqual(one?.points, [CGPoint(x: CurveEditing.hueLimit, y: 0.8)])
+        let two = CurveEditing.adding(CGPoint(x: 0.2, y: 0.3), to: one?.points ?? [], periodic: true)
+        XCTAssertEqual(two?.index, 0)
+        let moved = CurveEditing.moving(1, to: CGPoint(x: 2, y: 0.5), in: two?.points ?? [], periodic: true)
+        XCTAssertEqual(moved[1].x, CurveEditing.hueLimit, accuracy: 1e-12)
+        XCTAssertEqual(CurveEditing.removing(0, from: [CGPoint(x: 0.4, y: 0.9)], periodic: true), [],
+                       "the last point removed: the identity")
+        XCTAssertEqual(CurveEditing.removing(0, from: two?.points ?? [], periodic: true).count, 1)
+    }
+
+    func testHueCurveEditsOverTheSelection() async throws {
+        let (movie, _) = try await fixture.importMedia()
+        let first = try fixture.placeMovie(movie, at: 0)
+        store.selection = [first]
+        tools.curveChannel = .hueSaturation
+        tools.beginCurveDrag(.hueSaturation)
+        var working = CurveEditing.adding(CGPoint(x: 0.3, y: 0.5), to: [], periodic: true)!.points
+        working = CurveEditing.moving(0, to: CGPoint(x: 0.3, y: 0.1), in: working, periodic: true)
+        tools.setCurve(.hueSaturation, working)
+        tools.endDrag()
+        XCTAssertEqual(store.clips[first]?.gradeHueCurvePoints(.saturation).map(\.pointValue), working)
+        XCTAssertEqual(store.undoActionName, "Change Hue vs Saturation Curve")
+        XCTAssertEqual(tools.curve(.hueSaturation).points, working)
+        XCTAssertTrue(tools.anyCurveSet)
+        tools.resetCurves()
+        XCTAssertFalse(store.clips[first]?.hasGrade ?? true)
+    }
+
     func testCurveEditsOverTheSelection() async throws {
         let (movie, _) = try await fixture.importMedia()
         let first = try fixture.placeMovie(movie, at: 0)

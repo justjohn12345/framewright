@@ -173,6 +173,36 @@ NSArray<NSValue *> *pointsOf(std::initializer_list<std::pair<double, double>> po
     XCTAssertEqual(engine.changeCount, before);
 }
 
+- (void)testHueCurves {
+    VEAssetInfo *asset = nil;
+    VEEngine *engine = [self engineWithAsset:&asset];
+    const auto first = [self place:engine asset:asset at:0];
+    const auto second = [self place:engine asset:asset at:30];
+    NSArray<NSNumber *> *both = @[ @(first.first), @(second.first) ];
+    NSArray<NSValue *> *pale = pointsOf({{0.2, 0.5}, {0.29, 0.1}, {0.4, 0.5}});
+    VEEditResult *r = [engine setGradeHueCurvePoints:pale forHueCurve:VEGradeHueCurveSaturation clips:both];
+    XCTAssertTrue(r.ok, @"%@", r.message);
+    XCTAssertEqualObjects(engine.undoActionName, @"Change Hue vs Saturation Curve");
+    XCTAssertEqualObjects([[engine clipInfo:second.first] gradeHueCurvePoints:VEGradeHueCurveSaturation], pale);
+    XCTAssertEqualObjects([[engine gradeOfClips:both] pointsForHueCurve:VEGradeHueCurveSaturation], pale);
+    XCTAssertTrue([engine setGradeHueCurvePoints:pointsOf({{0.5, 0.8}}) forHueCurve:VEGradeHueCurveLuma clips:@[ @(first.first) ]].ok);
+    XCTAssertTrue([[engine gradeOfClips:both] isHueCurveMixed:VEGradeHueCurveLuma]);
+    XCTAssertNil([[engine gradeOfClips:both] pointsForHueCurve:VEGradeHueCurveLuma]);
+    XCTAssertEqual([engine setGradeHueCurvePoints:pointsOf({{1.0, 0.2}}) forHueCurve:VEGradeHueCurveHue clips:both].errorCode,
+                   VEEditErrorInvalidArgument);
+    XCTAssertEqual([engine setGradeHueCurvePoints:pale forHueCurve:static_cast<VEGradeHueCurve>(5) clips:both].errorCode,
+                   VEEditErrorInvalidArgument);
+    double samples[4] = {};
+    VEGradeHueCurveSample(pointsOf({{0.25, 1.0}}), samples, 4);
+    XCTAssertEqual(samples[2], 1.0, @"one point: a constant");
+    VEGradeHueCurveSample(@[], samples, 4);
+    XCTAssertEqual(samples[1], 0.5, @"no points: no change");
+    // Reset Curves takes the hue curves too.
+    XCTAssertTrue([engine resetGradeCurvesOfClips:both].ok);
+    XCTAssertEqualObjects([[engine clipInfo:first.first] gradeHueCurvePoints:VEGradeHueCurveLuma], @[]);
+    XCTAssertFalse([engine clipInfo:second.first].hasGrade);
+}
+
 - (void)testCurvesAreSavedAndOpened {
     VEAssetInfo *asset = nil;
     VEEngine *engine = [self engineWithAsset:&asset];

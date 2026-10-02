@@ -742,8 +742,15 @@ NS_SWIFT_UI_ACTOR
 /// group. Refused (VEEditErrorInvalidArgument) for a value outside [0, 1].
 - (VEEditResult *)setGradeLookStrength:(double)strength
                                  clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setGradeLookStrength(_:clips:));
-/// Sets every curve of every clip of `clipIDs` (see above) to the identity, keeping the rest of their
-/// grades. Undo name "Reset Curves"; clips without curves make no undo step.
+/// Sets hue curve `curve` of every clip of `clipIDs` (see above) to `points` (NSValue-wrapped points, x in
+/// [0, 1) increasing, y 0 to 1, at most 16; empty, or every y 0.5, is the identity). Refused
+/// (VEEditErrorInvalidArgument) for a value outside VEGradeHueCurve or points that are not a valid hue curve.
+/// Undo name "Change Hue vs Saturation Curve" (and so on); a point drag is one coalescing group.
+- (VEEditResult *)setGradeHueCurvePoints:(NSArray<NSValue *> *)points
+                             forHueCurve:(VEGradeHueCurve)curve
+                                   clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setGradeHueCurve(_:for:clips:));
+/// Sets every curve (the tone curves and the hue curves) of every clip of `clipIDs` (see above) to the
+/// identity, keeping the rest of their grades. Undo name "Reset Curves"; clips without curves make no undo step.
 - (VEEditResult *)resetGradeCurvesOfClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(resetGradeCurves(ofClips:));
 /// Sets every wheel of every clip of `clipIDs` (see above) neutral, keeping the rest of their grades. Undo
 /// name "Reset Wheels"; clips whose wheels are all neutral make no undo step.

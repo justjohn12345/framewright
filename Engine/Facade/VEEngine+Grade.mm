@@ -211,10 +211,24 @@ using namespace ve::facade;
     return [self pushGradeChange:std::move(change) forClips:clipIDs name:{}];
 }
 
+- (VEEditResult *)setGradeHueCurvePoints:(NSArray<NSValue *> *)points
+                             forHueCurve:(VEGradeHueCurve)curve
+                                   clips:(NSArray<NSNumber *> *)clipIDs {
+    VE_ASSERT_MAIN();
+    const auto hueCurve = fromVE(curve);
+    if (!hueCurve) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"Unknown hue curve."];
+    }
+    return [self pushGradeChange:GradeChange::of(*hueCurve, fromVE(points)) forClips:clipIDs name:{}];
+}
+
 - (VEEditResult *)resetGradeCurvesOfClips:(NSArray<NSNumber *> *)clipIDs {
     VE_ASSERT_MAIN();
     GradeChange change;
     for (const GradeCurve curve : kGradeCurves) {
+        change[curve] = CurvePoints{};
+    }
+    for (const GradeHueCurve curve : kGradeHueCurves) {
         change[curve] = CurvePoints{};
     }
     return [self pushGradeChange:std::move(change) forClips:clipIDs name:"Reset Curves"];

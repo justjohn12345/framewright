@@ -167,14 +167,22 @@ id<MTLTexture> cubeTexture(const CubeLut *lut) {
 /// Runs `ve_grade_samples` over `inputs` with each of `uniforms` and returns the largest difference to the
 /// CPU reference (relative above 1, absolute below); fails on a value that is not finite.
 - (double)largestDifferenceOver:(const std::vector<simd_float4> &)inputs uniforms:(const std::vector<VEGradeUniforms> &)uniforms {
-    return [self largestDifferenceOver:inputs uniforms:uniforms tables:{}];
+    return [self largestDifferenceOver:inputs uniforms:uniforms tables:{} clampedWorst:nullptr];
 }
 
-/// The same with the grade's tables (`ve_grade_samples_tables`, the tables bound as a texture and given to the
-/// CPU reference) when `tables` is not empty.
 - (double)largestDifferenceOver:(const std::vector<simd_float4> &)inputs
                        uniforms:(const std::vector<VEGradeUniforms> &)uniforms
                          tables:(const std::vector<float> &)tables {
+    return [self largestDifferenceOver:inputs uniforms:uniforms tables:tables clampedWorst:nullptr];
+}
+
+/// The same with the grade's tables (`ve_grade_samples_tables`, the tables bound as a texture and given to the
+/// CPU reference) when `tables` is not empty; `clampedWorst`, when given, gets the largest difference of the
+/// values limited to [0, 1] (what the fragment shader then shows).
+- (double)largestDifferenceOver:(const std::vector<simd_float4> &)inputs
+                       uniforms:(const std::vector<VEGradeUniforms> &)uniforms
+                         tables:(const std::vector<float> &)tables
+                   clampedWorst:(double *)clampedWorst {
     id<MTLDevice> gpu = device();
     NSError *error = nil;
     NSBundle *engine = [NSBundle bundleWithIdentifier:@"com.justjohn12345.framewright.engine"];
@@ -233,6 +241,11 @@ id<MTLTexture> cubeTexture(const CubeLut *lut) {
                     return INFINITY;
                 }
                 worst = std::max(worst, std::fabs(double(g) - double(cpu[c])) / std::max(1.0, std::fabs(double(cpu[c]))));
+                if (clampedWorst != nullptr) {
+                    const double shownGPU = std::clamp(double(g), 0.0, 1.0);
+                    const double shownCPU = std::clamp(double(cpu[c]), 0.0, 1.0);
+                    *clampedWorst = std::max(*clampedWorst, std::fabs(shownGPU - shownCPU));
+                }
             }
         }
     }
@@ -296,6 +309,33 @@ id<MTLTexture> cubeTexture(const CubeLut *lut) {
     // The curves add a table read and a linear interpolation, the same arithmetic on both sides; the bound is
     // the wheels' (the GPU's fast exp2/log2/pow before them).
     XCTAssertLessThanOrEqual(worst, 5e-5);
+}
+
+- (void)testTheShaderHueCurvesMatchTheCPUReference {
+    const HueCurves hueCurves{{CurvePoints{{0.05, 0.9}, {0.29, 0.1}, {0.6, 0.7}}, CurvePoints{{0.2, 0.8}, {0.7, 0.3}},
+                               CurvePoints{{0.0, 0.6}, {0.5, 0.25}, {0.9, 0.95}}}};
+    const std::vector<float> tables = gradeTableData(GradeCurves{}, nullptr, nullptr, hueCurves);
+    std::vector<VEGradeUniforms> uniforms;
+    for (const VEInt transfer : {VEGradeTransferBT1886, VEGradeTransferSRGB, VEGradeTransferLinear}) {
+        uniforms.push_back(gradeUniformsFor(ClipGrade::neutralValues(), GradeWheels{}, GradeCurves{}, nullptr, nullptr,
+                                            1.0, transfer, hueCurves));
+        uniforms.push_back(gradeUniformsFor(GradeValues{0.5, 1.3, 20.0, -10.0, 1.4}, strongWheels()[8], GradeCurves{},
+                                            nullptr, nullptr, 1.0, transfer, hueCurves));
+    }
+    for (const VEGradeUniforms &u : uniforms) {
+        XCTAssertEqual(u.hueCurveMask, 7u);
+    }
+    double shown = 0.0;
+    const double worst = [self largestDifferenceOver:[self gridInputs] uniforms:uniforms tables:tables clampedWorst:&shown];
+    NSLog(@"GRADE EXTENDED GPU vs CPU (hue curves): %zu grades, largest difference %.3g, of the shown values %.3g",
+          uniforms.size(), worst, shown);
+    // The shown values (limited to [0, 1]) within the wheels' bound. Unlimited, a sub-black input can differ by
+    // a little more: green is rebuilt from luminance by subtraction (a rounding of about 1e-7 in linear light near
+    // zero), and the re-encoding's 1/2.4 power has an unbounded slope at 0 (at linear 1e-7 it magnifies 5000
+    // times), so a value just below black differs by up to 3e-4, a third of a 10-bit code, before the shader
+    // limits it to 0 on both sides.
+    XCTAssertLessThanOrEqual(shown, 5e-5);
+    XCTAssertLessThanOrEqual(worst, 5e-4);
 }
 
 - (void)testTheShaderLutsMatchTheCPUReference {
@@ -381,6 +421,35 @@ id<MTLTexture> cubeTexture(const CubeLut *lut) {
 }
 
 // MARK: - Rendered
+
+- (void)testAPictureGradedWithHueCurvesIsTheReferenceOfTheUngradedPicture {
+    const size_t w = 128, h = 32;
+    const TextureSet set = texturesFor(*_compositor, colourRamp(w, h));
+    RenderGraph plain = makeGraph(int32_t(w), int32_t(h));
+    plain.layers.push_back(makeLayer(1));
+    const std::vector<float> before = [self render:plain textures:{set} width:w height:h];
+    const HueCurves hueCurves{{CurvePoints{{0.1, 0.0}, {0.6, 1.0}}, CurvePoints{{0.4, 0.9}}, CurvePoints{{0.3, 0.2}, {0.8, 0.8}}}};
+    RenderGraph graded = plain;
+    graded.layers[0].gradeHueCurves = hueCurves;
+    const std::vector<float> after = [self render:graded textures:{set} width:w height:h];
+    const VEGradeUniforms u = gradeUniformsFor(ClipGrade::neutralValues(), GradeWheels{}, GradeCurves{}, nullptr, nullptr,
+                                               1.0, VEGradeTransferBT1886, hueCurves);
+    const std::vector<float> tables = gradeTableData(GradeCurves{}, nullptr, nullptr, hueCurves);
+    double worst = 0.0, moved = 0.0;
+    for (size_t i = 0; i + 3 < before.size() && i + 3 < after.size(); i += 4) {
+        const simd_float3 expected =
+            simd_clamp(gradeReference(simd_make_float3(before[i], before[i + 1], before[i + 2]), u, tables.data()),
+                       simd_make_float3(0.0f, 0.0f, 0.0f), simd_make_float3(1.0f, 1.0f, 1.0f));
+        for (int c = 0; c < 3; ++c) {
+            worst = std::max(worst, double(std::fabs(after[i + c] - expected[c])));
+            moved = std::max(moved, double(std::fabs(after[i + c] - before[i + c])));
+        }
+    }
+    NSLog(@"GRADE EXTENDED rendered hue curves against the reference of the ungraded picture: %.3g (moved %.3g)", worst,
+          moved);
+    XCTAssertLessThan(worst, 1e-4);
+    XCTAssertGreaterThan(moved, 0.05, @"the curves changed the picture");
+}
 
 - (void)testAPictureWithLutsIsTheReferenceOfTheUngradedPicture {
     const size_t w = 128, h = 32;

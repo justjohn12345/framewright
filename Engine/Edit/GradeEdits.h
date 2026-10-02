@@ -53,6 +53,8 @@ struct GradeChange {
     // The curves to set, each its whole list of points (nullopt: the clip keeps its own; an identity curve is
     // stored as no points).
     std::array<std::optional<CurvePoints>, kGradeCurveCount> curves{};
+    // The hue curves to set, likewise (an identity is stored as no points).
+    std::array<std::optional<CurvePoints>, kGradeHueCurveCount> hueCurves{};
     // The LUTs to set (an id of Project::luts, or "" for none) and the look's strength; nullopt keeps each
     // clip's own. Removing the look sets its strength back to 1; a clip without a look keeps strength 1.
     std::optional<std::string> inputLut;
@@ -68,6 +70,8 @@ struct GradeChange {
     static GradeChange of(GradeWheel wheel, const WheelChange &change);
     // One curve.
     static GradeChange of(GradeCurve curve, CurvePoints points);
+    // One hue curve.
+    static GradeChange of(GradeHueCurve curve, CurvePoints points);
     // Every parameter and the foreign entries of `grade` (Paste Grade; the neutral grade: Reset Grade).
     static GradeChange whole(const ClipGrade &grade);
 
@@ -91,9 +95,15 @@ struct GradeChange {
     const std::optional<CurvePoints> &operator[](GradeCurve curve) const {
         return curves[static_cast<std::size_t>(curve)];
     }
+    std::optional<CurvePoints> &operator[](GradeHueCurve curve) {
+        return hueCurves[static_cast<std::size_t>(curve)];
+    }
+    const std::optional<CurvePoints> &operator[](GradeHueCurve curve) const {
+        return hueCurves[static_cast<std::size_t>(curve)];
+    }
     // The number of wheels with something to set.
     std::size_t wheelCount() const;
-    // The number of curves given.
+    // The number of curves given (tone and hue).
     std::size_t curveCount() const;
     // The number of LUT settings given (input, look, strength).
     std::size_t lutCount() const {
@@ -117,7 +127,8 @@ struct GradeChange {
 class SetClipGrade final : public SequenceCommand {
   public:
     // `name` is the Undo menu's name; empty: "Change <parameter>" for one parameter, "Change <wheel>" for
-    // one wheel, "Change <curve> Curve" for one curve, "Change Input LUT", "Change Look" or "Change Look
+    // one wheel, "Change <curve> Curve" for one curve ("Change Luma Curve", "Change Hue vs Saturation Curve"),
+    // "Change Input LUT", "Change Look" or "Change Look
     // Strength" for one LUT setting, else "Change Grade".
     SetClipGrade(SequenceId sequenceId, std::vector<ClipId> clipIds, GradeChange change, std::string name = {});
     std::string name() const override;
@@ -167,6 +178,8 @@ struct GradeSummary {
     // whether they differ.
     std::array<std::optional<CurvePoints>, kGradeCurveCount> curves{};
     std::array<bool, kGradeCurveCount> curveMixed{};
+    std::array<std::optional<CurvePoints>, kGradeHueCurveCount> hueCurves{};
+    std::array<bool, kGradeHueCurveCount> hueCurveMixed{};
     // The LUTs and the look's strength every one of `clips` has (nullopt when they differ or there are none).
     std::optional<std::string> inputLut;
     std::optional<std::string> lookLut;
@@ -195,6 +208,12 @@ struct GradeSummary {
     }
     bool isMixed(GradeCurve curve) const {
         return curveMixed[static_cast<std::size_t>(curve)];
+    }
+    const std::optional<CurvePoints> &valueOf(GradeHueCurve curve) const {
+        return hueCurves[static_cast<std::size_t>(curve)];
+    }
+    bool isMixed(GradeHueCurve curve) const {
+        return hueCurveMixed[static_cast<std::size_t>(curve)];
     }
 };
 

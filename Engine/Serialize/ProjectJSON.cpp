@@ -193,14 +193,21 @@ json gradeToJson(const ClipGrade &grade) {
             j["lookStrength"] = grade.lookStrength;
         }
     }
+    const auto pointsToJson = [](const CurvePoints &points) {
+        json list = json::array();
+        for (const CurvePoint &point : points) {
+            list.push_back(json::array({point.x, point.y}));
+        }
+        return list;
+    };
     for (const GradeCurve curve : kGradeCurves) {
-        const CurvePoints &points = grade[curve];
-        if (!points.empty()) {
-            json list = json::array();
-            for (const CurvePoint &point : points) {
-                list.push_back(json::array({point.x, point.y}));
-            }
-            j[nameOf(curve)] = std::move(list);
+        if (!grade[curve].empty()) {
+            j[nameOf(curve)] = pointsToJson(grade[curve]);
+        }
+    }
+    for (const GradeHueCurve curve : kGradeHueCurves) {
+        if (!grade[curve].empty()) {
+            j[nameOf(curve)] = pointsToJson(grade[curve]);
         }
     }
     addForeignKeys(j, foreignObject(grade.foreign));
@@ -672,7 +679,7 @@ ClipGrade parseGrade(const Node &node, Warnings &warnings) {
             }
             continue;
         }
-        if (const auto curve = gradeCurveNamed(key)) {
+        const auto readPoints = [&valueNode]() {
             CurvePoints points;
             const std::size_t count = valueNode.arraySize();
             for (std::size_t i = 0; i < count; ++i) {
@@ -682,6 +689,22 @@ ClipGrade parseGrade(const Node &node, Warnings &warnings) {
                 }
                 points.push_back(CurvePoint{pointNode.element(0).asDouble(), pointNode.element(1).asDouble()});
             }
+            return points;
+        };
+        if (const auto hueCurve = gradeHueCurveNamed(key)) {
+            const CurvePoints points = readPoints();
+            CurvePoints kept = sanitizedHueCurve(points);
+            if (const auto problem = hueCurveProblem(points)) {
+                warnings.push_back(valueNode.path() + ": the " + displayNameOf(*hueCurve) + " curve's points are not a " +
+                                   "valid curve (" + *problem + "); kept " + std::to_string(kept.size()) + " of " +
+                                   std::to_string(points.size()) +
+                                   (kept.empty() ? " (no curve)" : ", sorted and limited"));
+            }
+            grade[*hueCurve] = std::move(kept);
+            continue;
+        }
+        if (const auto curve = gradeCurveNamed(key)) {
+            const CurvePoints points = readPoints();
             CurvePoints kept = sanitizedCurve(points);
             if (const auto problem = curveProblem(points)) {
                 warnings.push_back(valueNode.path() + ": the " + displayNameOf(*curve) + " curve's points are not a " +

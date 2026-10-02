@@ -109,6 +109,8 @@ void VEGradeParamsSetValue(VEGradeParams *params, double value, VEGradeParameter
     std::array<bool, ve::kGradeWheelCount> _wheelMixed;
     std::array<std::optional<ve::CurvePoints>, ve::kGradeCurveCount> _curves;
     std::array<bool, ve::kGradeCurveCount> _curveMixed;
+    std::array<std::optional<ve::CurvePoints>, ve::kGradeHueCurveCount> _hueCurves;
+    std::array<bool, ve::kGradeHueCurveCount> _hueCurveMixed;
     std::optional<std::string> _inputLut;
     std::optional<std::string> _lookLut;
     std::optional<double> _lookStrength;
@@ -444,6 +446,8 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
         _wheelMixed = {};
         _curves = {};
         _curveMixed = {};
+        _hueCurves = {};
+        _hueCurveMixed = {};
     }
     return self;
 }
@@ -473,6 +477,17 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
 - (BOOL)isCurveMixed:(VEGradeCurve)curve {
     const auto gradeCurve = ve::facade::fromVE(curve);
     return gradeCurve && _curveMixed[static_cast<std::size_t>(*gradeCurve)];
+}
+- (nullable NSArray<NSValue *> *)pointsForHueCurve:(VEGradeHueCurve)curve {
+    const auto hueCurve = ve::facade::fromVE(curve);
+    if (!hueCurve || !_hueCurves[static_cast<std::size_t>(*hueCurve)]) {
+        return nil;
+    }
+    return ve::facade::toVE(*_hueCurves[static_cast<std::size_t>(*hueCurve)]);
+}
+- (BOOL)isHueCurveMixed:(VEGradeHueCurve)curve {
+    const auto hueCurve = ve::facade::fromVE(curve);
+    return hueCurve && _hueCurveMixed[static_cast<std::size_t>(*hueCurve)];
 }
 - (nullable NSString *)inputLUTID {
     return _inputLut ? ve::facade::toNS(*_inputLut) : nil;
@@ -526,6 +541,16 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
 }
 @end
 
+void VEGradeHueCurveSample(NSArray<NSValue *> *points, double *samples, NSInteger count) {
+    if (samples == nullptr || count <= 0) {
+        return;
+    }
+    const ve::CurvePoints curve = ve::sanitizedHueCurve(ve::facade::fromVE(points));
+    for (NSInteger i = 0; i < count; ++i) {
+        samples[i] = ve::evaluateHueCurve(curve, double(i) / double(count));
+    }
+}
+
 void VEGradeCurveSample(NSArray<NSValue *> *points, double *samples, NSInteger count) {
     if (samples == nullptr || count <= 0) {
         return;
@@ -577,6 +602,10 @@ void VEGradeCurveSample(NSArray<NSValue *> *points, double *samples, NSInteger c
 - (NSArray<NSValue *> *)gradeCurvePoints:(VEGradeCurve)curve {
     const auto gradeCurve = ve::facade::fromVE(curve);
     return gradeCurve ? ve::facade::toVE(_clip.grade[*gradeCurve]) : @[];
+}
+- (NSArray<NSValue *> *)gradeHueCurvePoints:(VEGradeHueCurve)curve {
+    const auto hueCurve = ve::facade::fromVE(curve);
+    return hueCurve ? ve::facade::toVE(_clip.grade[*hueCurve]) : @[];
 }
 - (NSString *)gradeInputLUTID {
     return ve::facade::toNS(_clip.grade.inputLut);
@@ -1157,6 +1186,18 @@ static_assert(static_cast<int>(GradeCurve::Green) == VEGradeCurveGreen);
 static_assert(static_cast<int>(GradeCurve::Blue) == VEGradeCurveBlue);
 static_assert(kGradeCurveCount == 4, "VEGradeCurve names every GradeCurve");
 
+static_assert(static_cast<int>(GradeHueCurve::Saturation) == VEGradeHueCurveSaturation);
+static_assert(static_cast<int>(GradeHueCurve::Hue) == VEGradeHueCurveHue);
+static_assert(static_cast<int>(GradeHueCurve::Luma) == VEGradeHueCurveLuma);
+static_assert(kGradeHueCurveCount == 3, "VEGradeHueCurve names every GradeHueCurve");
+
+std::optional<GradeHueCurve> fromVE(VEGradeHueCurve curve) {
+    if (curve < VEGradeHueCurveSaturation || curve > VEGradeHueCurveLuma) {
+        return std::nullopt;
+    }
+    return static_cast<GradeHueCurve>(curve);
+}
+
 VELUTInfo *makeLUTInfo(const std::string &lutId, const CubeLut &lut) {
     VELUTInfo *info = [[VELUTInfo alloc] initInternal];
     info.lutID = toNS(lutId);
@@ -1260,6 +1301,8 @@ VEGradeSelection *makeGradeSelection(const GradeSummary &summary) {
     selection->_wheelMixed = summary.wheelMixed;
     selection->_curves = summary.curves;
     selection->_curveMixed = summary.curveMixed;
+    selection->_hueCurves = summary.hueCurves;
+    selection->_hueCurveMixed = summary.hueCurveMixed;
     selection->_inputLut = summary.inputLut;
     selection->_lookLut = summary.lookLut;
     selection->_lookStrength = summary.lookStrength;

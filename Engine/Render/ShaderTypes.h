@@ -97,6 +97,7 @@ enum VEGradeStage {
     VEGradeStageCurves = 2, // the tone curves (veApplyCurves; VEGradeUniforms::curveMask says which)
     VEGradeStageInputLut = 4, // the input LUT, before the grade (veApplyLut)
     VEGradeStageLookLut = 8,  // the look LUT, after the curves, mixed by lookStrength
+    VEGradeStageHueCurves = 16, // the hue curves (veApplyHueCurves; VEGradeUniforms::hueCurveMask says which)
 };
 
 // VEGradeUniforms::lutFlags: which LUT is 3D (a texture3d of its own, read with tetrahedral interpolation);
@@ -117,7 +118,11 @@ enum VEGradeTableRow {
     VEGradeTableRowBlue = 3,
     VEGradeTableRowInputLut = 4, // red, green, blue of a 1D input LUT: rows 4, 5, 6
     VEGradeTableRowLookLut = 7,  // of a 1D look: rows 7, 8, 9
-    VEGradeTableRowCount = 10,
+    // The hue curves (periodic rows: sample i at hue i / kVEGradeTableWidth).
+    VEGradeTableRowHueSaturation = 10,
+    VEGradeTableRowHueHue = 11,
+    VEGradeTableRowHueLuma = 12,
+    VEGradeTableRowCount = 13,
 };
 
 // How close to white (1) or black (0) a channel of the working picture counts as clipped, for the scopes'
@@ -168,8 +173,9 @@ struct VEGradeUniforms {
     // The sizes of 3D LUTs (entries per side; 0 for a 1D LUT or none).
     VEUInt inputCubeSize;
     VEUInt lookCubeSize;
+    // VEGradeStageHueCurves: the hue curves in use, bit 1 << GradeHueCurve (saturation, hue, luma).
+    VEUInt hueCurveMask;
     VEUInt unused0;
-    VEUInt unused1;
 };
 
 // The shape of a transition draw (VETransitionUniforms::shape), TransitionKind's values

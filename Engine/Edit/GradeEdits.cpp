@@ -53,6 +53,12 @@ GradeChange GradeChange::of(GradeCurve curve, CurvePoints points) {
     return change;
 }
 
+GradeChange GradeChange::of(GradeHueCurve curve, CurvePoints points) {
+    GradeChange change;
+    change[curve] = std::move(points);
+    return change;
+}
+
 GradeChange GradeChange::whole(const ClipGrade &grade) {
     GradeChange change;
     for (const GradeParameter parameter : kGradeParameters) {
@@ -62,6 +68,9 @@ GradeChange GradeChange::whole(const ClipGrade &grade) {
         change[wheel] = WheelChange::whole(grade[wheel]);
     }
     for (const GradeCurve curve : kGradeCurves) {
+        change[curve] = grade[curve];
+    }
+    for (const GradeHueCurve curve : kGradeHueCurves) {
         change[curve] = grade[curve];
     }
     change.inputLut = grade.inputLut;
@@ -74,6 +83,9 @@ GradeChange GradeChange::whole(const ClipGrade &grade) {
 std::size_t GradeChange::curveCount() const {
     std::size_t n = 0;
     for (const auto &curve : curves) {
+        n += curve ? 1 : 0;
+    }
+    for (const auto &curve : hueCurves) {
         n += curve ? 1 : 0;
     }
     return n;
@@ -109,6 +121,11 @@ ClipGrade GradeChange::appliedTo(ClipGrade grade) const {
             grade[curve] = isIdentityCurve(*points) ? CurvePoints{} : *points;
         }
     }
+    for (const GradeHueCurve curve : kGradeHueCurves) {
+        if (const auto &points = (*this)[curve]) {
+            grade[curve] = isIdentityHueCurve(*points) ? CurvePoints{} : *points;
+        }
+    }
     if (inputLut) {
         grade.inputLut = *inputLut;
     }
@@ -141,6 +158,9 @@ SetClipGrade::SetClipGrade(SequenceId sequenceId, std::vector<ClipId> clipIds, G
     for (const GradeCurve curve : kGradeCurves) {
         key += change_[curve] ? ":" + std::string(nameOf(curve)) : "";
     }
+    for (const GradeHueCurve curve : kGradeHueCurves) {
+        key += change_[curve] ? ":" + std::string(nameOf(curve)) : "";
+    }
     key += change_.inputLut ? ":inputLut" : "";
     key += change_.lookLut ? ":lookLut" : "";
     key += change_.lookStrength ? ":lookStrength" : "";
@@ -161,6 +181,11 @@ std::string SetClipGrade::name() const {
     if (change_.count() == 0 && change_.wheelCount() == 0 && change_.curveCount() == 1 && change_.lutCount() == 0 &&
         !change_.foreign) {
         for (const GradeCurve curve : kGradeCurves) {
+            if (change_[curve]) {
+                return std::string("Change ") + displayNameOf(curve) + " Curve";
+            }
+        }
+        for (const GradeHueCurve curve : kGradeHueCurves) {
             if (change_[curve]) {
                 return std::string("Change ") + displayNameOf(curve) + " Curve";
             }
@@ -221,6 +246,14 @@ EditResult SetClipGrade::perform(const Project &project, Sequence &sequence, IdG
     for (const GradeCurve curve : kGradeCurves) {
         if (const auto &points = change_[curve]) {
             if (auto problem = curveProblem(*points)) {
+                return EditResult::failure(EditError::InvalidArgument, std::string("The ") + displayNameOf(curve) +
+                                                                           " curve is not valid: " + *problem + ".");
+            }
+        }
+    }
+    for (const GradeHueCurve curve : kGradeHueCurves) {
+        if (const auto &points = change_[curve]) {
+            if (auto problem = hueCurveProblem(*points)) {
                 return EditResult::failure(EditError::InvalidArgument, std::string("The ") + displayNameOf(curve) +
                                                                            " curve is not valid: " + *problem + ".");
             }
@@ -358,6 +391,15 @@ GradeSummary summarizeGrades(const Sequence &sequence, const std::vector<ClipId>
             } else if (summary.curves[i] && *summary.curves[i] != grade[curve]) {
                 summary.curves[i] = std::nullopt;
                 summary.curveMixed[i] = true;
+            }
+        }
+        for (const GradeHueCurve curve : kGradeHueCurves) {
+            const auto i = static_cast<std::size_t>(curve);
+            if (n == 0) {
+                summary.hueCurves[i] = grade[curve];
+            } else if (summary.hueCurves[i] && *summary.hueCurves[i] != grade[curve]) {
+                summary.hueCurves[i] = std::nullopt;
+                summary.hueCurveMixed[i] = true;
             }
         }
         if (n == 0) {

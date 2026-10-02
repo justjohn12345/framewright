@@ -219,13 +219,15 @@ struct SourceBinding {
 // layer runs the pipeline without the grade, exactly as before grading existed.
 bool isGraded(const VideoLayer &layer) {
     return !isNeutralGrade(layer.grade) ||
-           needsExtendedGrade(layer.gradeWheels, layer.gradeCurves, layer.gradeInputLut || layer.gradeLookLut);
+           needsExtendedGrade(layer.gradeWheels, layer.gradeCurves, layer.gradeInputLut || layer.gradeLookLut,
+                              layer.gradeHueCurves);
 }
 
 // Whether the layer's grade uses a slice 2 stage (the extended grade); a grade of the five basic values only
 // runs the slice 1 grade exactly as before.
 bool isExtendedGrade(const VideoLayer &layer) {
-    return needsExtendedGrade(layer.gradeWheels, layer.gradeCurves, layer.gradeInputLut || layer.gradeLookLut);
+    return needsExtendedGrade(layer.gradeWheels, layer.gradeCurves, layer.gradeInputLut || layer.gradeLookLut,
+                              layer.gradeHueCurves);
 }
 
 // The source uniforms of `layer`'s picture: its sampling and placement, its weight, and (when graded) its
@@ -244,7 +246,8 @@ void fillSource(VESourceUniforms &u, const TextureSet &textures, const SourceBin
     u.grade = isGraded(layer) ? gradeUniformsFor(layer.grade, layer.gradeWheels, layer.gradeCurves,
                                                  layer.gradeInputLut.get(), layer.gradeLookLut.get(),
                                                  layer.gradeLookStrength,
-                                                 gradeTransferFor(textures.transfer(), layer.isStill))
+                                                 gradeTransferFor(textures.transfer(), layer.isStill),
+                                                 layer.gradeHueCurves)
                               : VEGradeUniforms{};
 }
 
@@ -723,6 +726,7 @@ struct Compositor::Impl {
     // command buffers retain them). The identity tables serve extended grades without curves.
     struct GradeTableEntry {
         GradeCurves curves;
+        HueCurves hueCurves;
         std::string input1D; // the 1D LUTs' content ids ("" for none or a 3D one)
         std::string look1D;
         id<MTLTexture> texture = nil;
@@ -821,7 +825,7 @@ struct Compositor::Impl {
         }
         texture.label = @"Framewright grade tables";
         const std::vector<float> data =
-            gradeTableData(layer.gradeCurves, layer.gradeInputLut.get(), layer.gradeLookLut.get());
+            gradeTableData(layer.gradeCurves, layer.gradeInputLut.get(), layer.gradeLookLut.get(), layer.gradeHueCurves);
         [texture replaceRegion:MTLRegionMake2D(0, 0, kVEGradeTableWidth, VEGradeTableRowCount)
                    mipmapLevel:0
                      withBytes:data.data()
@@ -835,7 +839,8 @@ struct Compositor::Impl {
             layer.gradeInputLut && layer.gradeInputLut->kind == CubeKind::OneD ? layer.gradeInputLutId : std::string();
         const std::string look1D =
             layer.gradeLookLut && layer.gradeLookLut->kind == CubeKind::OneD ? layer.gradeLookLutId : std::string();
-        if (isIdentityCurves(layer.gradeCurves) && input1D.empty() && look1D.empty()) {
+        if (isIdentityCurves(layer.gradeCurves) && isIdentityHueCurves(layer.gradeHueCurves) && input1D.empty() &&
+            look1D.empty()) {
             if (identityGradeTables == nil) {
                 auto made = makeGradeTables(VideoLayer{});
                 if (!made.ok()) {
@@ -847,7 +852,8 @@ struct Compositor::Impl {
         }
         ++gradeTableUses;
         for (GradeTableEntry &entry : gradeTables) {
-            if (entry.curves == layer.gradeCurves && entry.input1D == input1D && entry.look1D == look1D) {
+            if (entry.curves == layer.gradeCurves && entry.hueCurves == layer.gradeHueCurves && entry.input1D == input1D &&
+                entry.look1D == look1D) {
                 entry.lastUse = gradeTableUses;
                 return entry.texture;
             }
@@ -863,7 +869,8 @@ struct Compositor::Impl {
                                                  });
             gradeTables.erase(oldest);
         }
-        gradeTables.push_back(GradeTableEntry{layer.gradeCurves, input1D, look1D, made.value(), gradeTableUses});
+        gradeTables.push_back(
+            GradeTableEntry{layer.gradeCurves, layer.gradeHueCurves, input1D, look1D, made.value(), gradeTableUses});
         return made.value();
     }
 

@@ -101,8 +101,8 @@ bool isNeutralGrade(const GradeValues &values) {
 }
 
 bool ClipGrade::isNeutral() const {
-    return isNeutralGrade(values) && isNeutralWheels(wheels) && isIdentityCurves(curves) && inputLut.empty() &&
-           lookLut.empty();
+    return isNeutralGrade(values) && isNeutralWheels(wheels) && isIdentityCurves(curves) &&
+           isIdentityHueCurves(hueCurves) && inputLut.empty() && lookLut.empty();
 }
 
 namespace {
@@ -301,6 +301,167 @@ std::vector<float> sampleCurve(const CurvePoints &points, std::size_t samples) {
     return table;
 }
 
+namespace {
+
+constexpr GradeHueCurveInfo kHueCurveTable[] = {
+    {GradeHueCurve::Saturation, "hueCurveSaturation", "Hue vs Saturation"},
+    {GradeHueCurve::Hue, "hueCurveHue", "Hue vs Hue"},
+    {GradeHueCurve::Luma, "hueCurveLuma", "Hue vs Luma"},
+};
+
+constexpr bool hueCurveTableInOrder() {
+    std::size_t i = 0;
+    for (const GradeHueCurveInfo &row : kHueCurveTable) {
+        if (static_cast<std::size_t>(row.curve) != i || kGradeHueCurves[i] != row.curve) {
+            return false;
+        }
+        ++i;
+    }
+    return i == kGradeHueCurveCount;
+}
+static_assert(hueCurveTableInOrder(), "kHueCurveTable must describe GradeHueCurve in order");
+
+// The largest x a hue curve's point may have: below 1 (x = 1 is x = 0).
+constexpr double kHueLimit = 1.0 - 1.0 / 65536.0;
+
+} // namespace
+
+const GradeHueCurveInfo &infoOf(GradeHueCurve curve) {
+    const auto index = static_cast<std::size_t>(curve);
+    return index < std::size(kHueCurveTable) ? kHueCurveTable[index] : kHueCurveTable[0];
+}
+
+const char *nameOf(GradeHueCurve curve) {
+    return infoOf(curve).name;
+}
+
+const char *displayNameOf(GradeHueCurve curve) {
+    return infoOf(curve).displayName;
+}
+
+std::optional<GradeHueCurve> gradeHueCurveNamed(std::string_view name) {
+    for (const GradeHueCurveInfo &row : kHueCurveTable) {
+        if (name == row.name) {
+            return row.curve;
+        }
+    }
+    return std::nullopt;
+}
+
+bool isIdentityHueCurve(const CurvePoints &points) {
+    for (const CurvePoint &point : points) {
+        if (point.y != 0.5) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::optional<std::string> hueCurveProblem(const CurvePoints &points) {
+    if (points.size() > kMaxCurvePoints) {
+        return "a hue curve has at most " + std::to_string(kMaxCurvePoints) + " points (not " +
+               std::to_string(points.size()) + ")";
+    }
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const CurvePoint &point = points[i];
+        if (!std::isfinite(point.x) || !std::isfinite(point.y) || point.x < 0.0 || point.x >= 1.0 || point.y < 0.0 ||
+            point.y > 1.0) {
+            return "a hue curve's point (" + numberText(point.x) + ", " + numberText(point.y) +
+                   ") is outside [0, 1) x [0, 1]";
+        }
+        if (i > 0 && !(point.x > points[i - 1].x)) {
+            return "a hue curve's points must go from left to right (" + numberText(point.x) + " after " +
+                   numberText(points[i - 1].x) + ")";
+        }
+    }
+    return std::nullopt;
+}
+
+CurvePoints sanitizedHueCurve(const CurvePoints &points) {
+    CurvePoints kept;
+    for (const CurvePoint &point : points) {
+        if (std::isnan(point.x) || std::isnan(point.y)) {
+            continue;
+        }
+        kept.push_back(CurvePoint{std::clamp(point.x, 0.0, kHueLimit), std::clamp(point.y, 0.0, 1.0)});
+    }
+    std::stable_sort(kept.begin(), kept.end(), [](const CurvePoint &a, const CurvePoint &b) { return a.x < b.x; });
+    CurvePoints unique;
+    for (const CurvePoint &point : kept) {
+        if ((unique.empty() || point.x > unique.back().x) && unique.size() < kMaxCurvePoints) {
+            unique.push_back(point);
+        }
+    }
+    return isIdentityHueCurve(unique) ? CurvePoints{} : unique;
+}
+
+double evaluateHueCurve(const CurvePoints &points, double x) {
+    const std::size_t n = points.size();
+    if (n == 0) {
+        return 0.5;
+    }
+    if (n == 1) {
+        return points[0].y;
+    }
+    double h = x - std::floor(x);
+    if (!std::isfinite(h)) {
+        h = 0.0;
+    }
+    // The points unrolled around the circle: point k of index k (any integer) is points[k mod n] k div n turns on.
+    const auto at = [&](std::ptrdiff_t k) {
+        const std::ptrdiff_t m = std::ptrdiff_t(n);
+        const std::ptrdiff_t wrapped = ((k % m) + m) % m;
+        const double turns = double((k - wrapped) / m);
+        return CurvePoint{points[std::size_t(wrapped)].x + turns, points[std::size_t(wrapped)].y};
+    };
+    // The segment [k, k + 1] holding h: k the last point at or before h (one turn back when h is before the first).
+    std::ptrdiff_t k = -1;
+    for (std::size_t j = 0; j < n; ++j) {
+        if (points[j].x <= h) {
+            k = std::ptrdiff_t(j);
+        }
+    }
+    const auto secant = [&](std::ptrdiff_t j) {
+        const CurvePoint a = at(j);
+        const CurvePoint b = at(j + 1);
+        return (b.y - a.y) / (b.x - a.x);
+    };
+    // A point's tangent (Fritsch-Butland): 0 at a local extremum or a flat side, else the harmonic mean of its
+    // two secants, so the curve never overshoots its points (a flat run stays flat).
+    const auto tangent = [&](std::ptrdiff_t j) {
+        const double before = secant(j - 1);
+        const double after = secant(j);
+        return before * after <= 0.0 ? 0.0 : 2.0 / (1.0 / before + 1.0 / after);
+    };
+    const CurvePoint p1 = at(k);
+    const CurvePoint p2 = at(k + 1);
+    const double span = p2.x - p1.x;
+    const double t = span > 0.0 ? (h - p1.x) / span : 0.0;
+    const double m1 = tangent(k) * span;
+    const double m2 = tangent(k + 1) * span;
+    const double t2 = t * t;
+    const double t3 = t2 * t;
+    const double y = (2 * t3 - 3 * t2 + 1) * p1.y + (t3 - 2 * t2 + t) * m1 + (-2 * t3 + 3 * t2) * p2.y + (t3 - t2) * m2;
+    return std::clamp(y, 0.0, 1.0);
+}
+
+std::vector<float> sampleHueCurve(const CurvePoints &points, std::size_t samples) {
+    std::vector<float> table(samples);
+    for (std::size_t i = 0; i < samples; ++i) {
+        table[i] = float(evaluateHueCurve(points, double(i) / double(samples)));
+    }
+    return table;
+}
+
+bool isIdentityHueCurves(const HueCurves &curves) {
+    for (const CurvePoints &points : curves) {
+        if (!isIdentityHueCurve(points)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool isIdentityCurves(const GradeCurves &curves) {
     for (const CurvePoints &points : curves) {
         if (!isIdentityCurve(points)) {
@@ -401,6 +562,15 @@ std::optional<std::string> gradeProblem(const ClipGrade &grade) {
             return std::string("grade ") + displayNameOf(curve) + " curve: " + *problem;
         }
         if (!points.empty() && isIdentityCurve(points)) {
+            return std::string("grade ") + displayNameOf(curve) + " curve: an identity curve is stored without points";
+        }
+    }
+    for (const GradeHueCurve curve : kGradeHueCurves) {
+        const CurvePoints &points = grade[curve];
+        if (auto problem = hueCurveProblem(points)) {
+            return std::string("grade ") + displayNameOf(curve) + " curve: " + *problem;
+        }
+        if (!points.empty() && isIdentityHueCurve(points)) {
             return std::string("grade ") + displayNameOf(curve) + " curve: an identity curve is stored without points";
         }
     }

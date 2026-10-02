@@ -33,6 +33,7 @@ VideoLayer makeLayer(const Clip &clip, const MediaAsset &asset, CMTime time, CMT
     layer.grade = clip.grade.values;
     layer.gradeWheels = clip.grade.wheels;
     layer.gradeCurves = clip.grade.curves;
+    layer.gradeHueCurves = clip.grade.hueCurves;
     // The grade's LUTs, shared with the project (a validated project holds every one a clip uses).
     if (!clip.grade.inputLut.empty()) {
         if (const auto found = project.luts.find(clip.grade.inputLut); found != project.luts.end()) {
