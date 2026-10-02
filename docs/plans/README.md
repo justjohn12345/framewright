@@ -33,8 +33,11 @@ exposure-integrated transition edges) and the iris fades on black.
    Framewright project (its sequences and media references come in as bin items).
 2. **Colour correction and grading** (asked 2026-09-29). Slice 1 done 2026-10-02 (exposure, contrast,
    temperature, tint and saturation as a property of the clip, per the approved decision
-   `docs/reviews/2026-10-01-grading-pipeline-decision.md` section 7, and the luma waveform; history table in
-   `docs/reviews/README.md`, status notes in `docs/reviews/open-findings.md` at 400ded1). The original sketch,
+   `docs/reviews/2026-10-01-grading-pipeline-decision.md` section 7, and the luma waveform); slice 2 and the
+   scopes done the same day (lift/gamma/gain wheels, tone and hue curves, `.cube` LUTs, histogram, vectorscope,
+   clipping indicator; released in 0.1.9, hand-test fixes in 0.1.10). Next: HLG tone mapping and the P3/BT.2020
+   primaries decision. History table in
+   `docs/reviews/README.md`, status notes in `docs/reviews/open-findings.md` at 400ded1. The original sketch,
    superseded for the base grade by that decision: a Colour span kind on the effect lanes with start and end values, applied per clip in the fragment shader after the source conversion (the per-source colour matrix)
    and before compositing, in a linear-light working space so 8-bit and 10-bit sources grade alike and export
    stays identical to the monitor (the parity tests enforce it). Slice 1: exposure, contrast, temperature, tint,

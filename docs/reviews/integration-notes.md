@@ -1040,7 +1040,7 @@ idea in the review's C1 text is dropped.
   `testControlKSkipsALockedOrHiddenTopTrackAndAsksForOneClip`; `PaneDividerTests` (new);
   `TimelineRedrawTests.testKenBurnsOutlinesFollowingThePlayheadRedrawNeitherTheTimelineNorTheBin` replaces the
   landing-pictures test (0 timeline builds, 0 canvas draws, 0 tile bodies for 9 playhead steps with the editor open).
-- By hand: see `open-findings.md`, "Ken Burns editor round: by hand".
+- By hand: see `open-findings.md` at e22318b, "Ken Burns editor round: by hand".
 
 ## Ken Burns and Transform modes (2026-09-25; user feedback on the Ken Burns editor round)
 The Motion span editor has two modes that choose the same values (where the clip sits at the span's start and end:

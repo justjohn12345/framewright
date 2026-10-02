@@ -5,8 +5,8 @@
 //     fitting are compared with copies of their code before the change (namespace ref below) over
 //     thousands of random tracks: valid and invalid transitions, fades of sample lengths, stills, speeds,
 //     handles near the media's ends;
-//   - the disagreements between the copies that the change keeps (documented in open-findings,
-//     "Colour grading prerequisites round 2", item 5), each shown by a test;
+//   - the disagreements between the copies that the change keeps (documented in open-findings.md at
+//     400ded1, "Colour grading prerequisites round 2", item 5), each shown by a test;
 //   - edgeRoom's parts, limits, limiting clips and reasons on hand-made cuts.
 
 #include "../../Engine/Edit/TransitionFitting.h"
@@ -877,9 +877,9 @@ struct DissolveIntoFadeOut : Fixture {
 
 } // namespace
 
-// D1 (open-findings, round 2, item 5; the user's decision of 2026-10-02): when a clip's fade in and its tail
-// dissolve no longer fit it, the fade gives way and the dissolve keeps its length, after a trim
-// (Clip::fitSpans) and in the frame-rate conform alike.
+// D1 (open-findings.md at 400ded1, prerequisites round 2, item 5; the user's decision of 2026-10-02): when a
+// clip's fade in and its tail dissolve no longer fit it, the fade gives way and the dissolve keeps its length,
+// after a trim (Clip::fitSpans) and in the frame-rate conform alike.
 TEST_CASE("TransitionRules: D1, a fade in beside a tail dissolve: a trim and the conform both shorten the fade") {
     SUBCASE("a trim of the clip's start") {
         FadeInBesideDissolve fx(10, 10, 10);
