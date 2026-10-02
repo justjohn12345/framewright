@@ -842,6 +842,43 @@ Done:
   frame-rate conform keeps a sub-frame fade as one frame at its own edge" (failed before the fix for the
   fade out). Doctests 367 (365 + 2).
 
+- 2, the clip grade in the model (schema 8): f3adc2b. `Engine/Model/ClipGrade.h`: `GradeParameter`
+  (Exposure, Contrast, Temperature, Tint, Saturation) and a `GradeParameterInfo` table in the descriptor
+  style (name, display name, unit, neutral, range; `static_assert`ed in order, neutral within a finite
+  range and equal to `ClipGrade`'s default): exposure 0 stops in [-5, 5], contrast 1× in [0, 2],
+  temperature 0 in [-100, 100], tint 0 in [-100, 100], saturation 1× in [0, 2] (temperature and tint are
+  relative scales with no unit; their meaning is in the header). `Clip::grade` is a `ClipGrade` (the
+  values indexed by parameter, and `foreign`, the newer version's entries as compact JSON text);
+  `isNeutral` (every value neutral: no grade) and `isEmpty` (neutral and nothing foreign: nothing to
+  write). Clip equality includes it; a split copies it to both pieces; a through edit needs equal grades
+  (`isThroughEdit`). Validation (`validateClip`): every value finite and in range (`gradeProblem`:
+  "grade Saturation 2.5 is outside its range [0, 2]"), and only a clip on a video track has a grade.
+  File: `"grade": {...}` on a clip with the values that are not neutral plus the foreign entries, left out
+  when empty, so a project without grades writes exactly what version 7 wrote but the version number.
+  Reading: an unknown grade key is kept and written back with a warning; a value out of range is limited
+  to it with a warning; a non-number fails the load with its path; a grade on a clip of an audio track is
+  dropped with a warning. Schema 8: `toV8` in `ProjectMigrations.cpp` converts nothing (a version 7 file
+  that already holds grades keeps them, with a warning per clip, as `toV6` does), `kLastMigrationTarget` 8.
+  Goldens (additions only, in `EngineTests/Serialize/golden/v8/`, excluded from the test bundle in
+  `project.yml` because their names repeat the version 7 ones; the tests read the source tree): every
+  older fixture migrated to 8 (11 files, derived from the frozen version 7 goldens by the step's rule and
+  checked against the engine), `project-v7-adjusted.json` (a version 7 file holding grades, an unknown
+  grade key, a value out of range, a grade on a sound clip) with its golden, and `project-v8.json` (the
+  current writer, byte for byte, with three graded clips). No existing golden changed. Tests:
+  `ClipGradeTests.cpp` (6 cases: the table, neutral, validation, writing, foreign keys and bad values,
+  split and through edit), `MigrationGoldenV8Tests.cpp` (6 cases: each input against its v8 golden, the
+  7 -> 8 step changes only the version (against the v7 goldens), the graded version 7 file, golden loads
+  as its older file, in parts, every input has a v8 golden), ProjectJSONTests "the checked-in version 8
+  project matches the current writer byte for byte". Existing tests changed by the schema number only
+  (named): ProjectJSONTests "format details" (`kProjectSchemaVersion == 8`), "the checked-in version 5
+  project loads with every clip forward" and "the checked-in version 6 project opens configured, with
+  sharpening on" (expected `"schemaVersion"` 8), "a version 5 file with version 6 content opens with a
+  warning naming it" ("saved as version 8"), "the checked-in version 7 project matches the current writer
+  byte for byte" (renamed "... but for its version": the golden with its version line set to 8 must equal
+  the writer's output, which proves ungraded projects write as before); MigrationGoldenTests "a golden
+  document loads as the project its older file loads as" (the expected warnings name the current version as
+  the version the project is saved as, as "migrating in parts" already did for its parts). Doctests 380.
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
