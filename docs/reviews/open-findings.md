@@ -1123,7 +1123,76 @@ Done:
     `$TMPDIR/FramewrightEngineTests`, the container's tmp (the smoke test's PNG and the saved state, as before)
     or Preferences.
 
-Next, in the brief's order of value: B1 wheels, B2 curves, B4 LUTs, B3 hue curves, B5 vectorscope.
+- B1, the colour wheels, and B2, the curves: one commit (see "Deviations" below), b8a2da8.
+  - Model (`ClipGrade.h`): the slice 1 parameter table is unchanged (its tests pin five rows, and "lift" and
+    "curves" are its examples of a newer version's unknown keys). The wheels are a table of their own
+    (`GradeWheel` Lift, Gamma, Gain with name, display name and tonal range; `WheelValue` level in [-1, 1] and
+    a colour (cb, cr) in the unit disk); the curves another (`GradeCurve` Luma, Red, Green, Blue; 0 or 2-16
+    `CurvePoint`s in [0, 1] with x strictly increasing; an identity curve is stored as no points;
+    `sanitizedCurve`, `evaluateCurve`, `sampleCurve`: a Fritsch-Carlson monotone cubic, flat beyond the end
+    points). `ClipGrade::wheels` and `::curves` count in `isNeutral`, equality and `gradeProblem`.
+  - File (schema 8, compatibly): flat keys a version 8 build keeps as foreign entries: "liftLevel", "liftCb",
+    "liftCr", "gammaLevel", ... (each a number, written when not 0) and "curveLuma", "curveRed", "curveGreen",
+    "curveBlue" (a list of [x, y], written when not the identity). A wheel outside its range is limited and a
+    curve that is not valid repaired (sorted, limited, deduplicated, at most 16), each with a warning; a
+    malformed value fails the load with its path; an identity curve becomes none silently.
+  - Edits (`GradeEdits.h`): `GradeChange` carries per wheel a `WheelChange` (level, colour, or both; so the
+    colour moved over several clips keeps each clip's level, and the level keeps each colour) and per curve
+    its whole points. Names "Change Lift", "Change Luma Curve". `GradeSummary` has per wheel and per curve the
+    agreed value or "mixed"; `identical` compares whole grades. Paste and Reset Grade carry everything.
+  - Rendering (`ColorGrade.h`, shared by Metal and the CPU reference): the wheels in linear light after
+    saturation and before contrast, out = (gain (v + lift (1 - v)))^(1/gamma) per channel with lift = 0.1
+    (level + 0.5 w), gain and gamma = 2^(level + 0.5 w), w the colour as a zero-luminance BT.709 direction
+    (`wheelColourDirection`); the power follows the section 2 rule (`vePower`: pow only of values >= 2^-14, the
+    line through the origin below, input limited to 2^40). The curves on the re-encoded values: the luma curve
+    adds its change of BT.709 luma to each channel (chroma kept), then each channel's curve, each read from
+    an R32Float table (1024 samples per row, `gradeTableData`) with a texel-exact linear interpolation
+    (`veTableLookup`, the same on both sides). A new function constant per source,
+    `VEFunctionConstantSourceAHasExtendedGrade` / `...B`, selects `veGradeExtended`; inside it each stage is
+    skipped by its bit of `VEGradeUniforms::stages` (and `curveMask` per curve), so ungraded and slice 1 grades
+    run exactly the code they ran before (42 prepared layer pipelines instead of 20; compositor creation 2.4
+    ms). `VEGradeUniforms` is 112 bytes (offsets `static_assert`ed). The compositor caches each graded clip's
+    tables by its curves (32 entries, least recently used, cleared under memory pressure).
+  - Facade (additions): VETypes.h `VEGradeWheel`, `VEGradeWheelValue`, `VEGradeWheelValueNeutral()`,
+    `VEGradeWheelInfo`, `VEGradeCurve`, `VEGradeCurveInfo` (with `maximumPointCount`), `VEGradeCurveSample`
+    (Swift `VEGradeCurveInfo.sample(_:into:count:)`), `VEGradeSelection (Wheels)` `wheel(_:)` /
+    `isWheelMixed(_:)`, `VEGradeSelection (Curves)` `curve(_:)` / `isCurveMixed(_:)`, `VEClipInfo (Wheels)`
+    `gradeWheel(_:)` / `gradeCurvePoints(_:)`; VEEngine.h `setGradeWheel(_:for:clips:)` (NaN fields kept),
+    `resetGradeWheels(ofClips:)` ("Reset Wheels"), `setGradeCurve(_:for:clips:)`, `resetGradeCurves(ofClips:)`
+    ("Reset Curves"). `VEClipInfo.hasGrade`'s comment now says "a value or a wheel".
+  - App: a Colour tab in the right-hand panel (`InspectorTab.colour`, between Inspector and Effects;
+    `ColourPanel`). Why a tab: three wheels with their sliders and a square curve editor need the panel's
+    width and more height than the inspector leaves beside Video, Audio and Speed. The tab shows the basic
+    rows too (the inspector's `ParameterSection`, made internal, so both edit the one grade; the inspector
+    keeps its Colour section, which its tests pin), Copy and Paste, the wheels (`ColourWheelControl`: a hue
+    disc placed as a vectorscope places colours, the puck dragged relative to the press, Option for a quarter
+    of the speed, a level slider, per-wheel and section resets, "Mixed" where the clips differ) and the curves
+    (`CurveEditor`: Luma/Red/Green/Blue, click to add, drag to move between the neighbours, drag out of the
+    square or Delete to remove, Reset and Reset All; the rules are `CurveEditing`, pure). `GradeToolsModel`
+    holds the logic (values over the selection, a drag as one coalescing group, the resets).
+  - Measured (M4 Pro, median of 60 frames, `ColorGradeExtendedRenderTests testTheExtendedGradeCostOnTheGPU`,
+    one graded layer at 1:1 with the working texture and output pass): 1080p ungraded 0.10 ms, basic grade
+    0.19, + wheels 0.21, + curves 0.27; 2160p 0.41-0.47, 0.75-0.79, 0.82-0.83, 1.04.
+  - Tests: doctests `ClipGradeWheelTests` (5), `ClipGradeCurveTests` (6), `ColorGradeWheelTests` (5: every
+    output finite for the special inputs under strong settings and basic grades, the power's section 2 rule
+    and continuity at epsilon, neutral bit for bit and no stage equal to the slice 1 grade, what each wheel
+    does in linear light, the colour keeps luminance), `ColorGradeCurveTests` (3); XCTests
+    `ColorGradeExtendedRenderTests` (7: GPU against the CPU reference on 29,791 inputs for 30 wheel grades,
+    largest 3.4e-5, and 6 curve grades, 1.7e-5, bound 5e-5 (slice 1's 2e-5: the wheels chain a third power
+    with exponents up to 2.83); rendered wheels and curves equal the reference of the ungraded picture within
+    1e-4; gain and gamma keep black exactly black (lift raises it); a dissolve with one side extended; two
+    clips with different curves in one frame; the cost), `VEEngineGradeWheelTests` (4), `VEEngineGradeCurveTests`
+    (4), AppTests `ColourWheelsTests` (4, the tab drawn in a window), `CurveEditorTests` (2). Existing tests
+    unchanged. Full suite after B2 (after a clean Debug build, 0 warnings in project code): TEST SUCCEEDED,
+    EngineTests 616 (no display-link skips this run), doctest 413, AppTests 304 (1 known skip); nothing left in
+    `$TMPDIR/FramewrightEngineTests`, the container's tmp or Preferences beyond the known files.
+
+Deviations:
+- B1 and B2 are one commit: B2's model and shader work began in the files B1 had changed before B1 was
+  committed (B1 had passed its own tests and a full suite: EngineTests 610, doctest 404, AppTests 302), and
+  splitting the shared files afterwards was riskier than committing both.
+
+Next, in the brief's order of value: B4 LUTs, B3 hue curves, B5 vectorscope.
 Not in this round (next): P3/BT.2020 primaries (a separate decision), HDR export, HLG tone mapping, grades that
 change over time, match colour.
 
