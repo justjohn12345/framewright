@@ -101,7 +101,8 @@ bool isNeutralGrade(const GradeValues &values) {
 }
 
 bool ClipGrade::isNeutral() const {
-    return isNeutralGrade(values) && isNeutralWheels(wheels) && isIdentityCurves(curves);
+    return isNeutralGrade(values) && isNeutralWheels(wheels) && isIdentityCurves(curves) && inputLut.empty() &&
+           lookLut.empty();
 }
 
 namespace {
@@ -402,6 +403,12 @@ std::optional<std::string> gradeProblem(const ClipGrade &grade) {
         if (!points.empty() && isIdentityCurve(points)) {
             return std::string("grade ") + displayNameOf(curve) + " curve: an identity curve is stored without points";
         }
+    }
+    if (!std::isfinite(grade.lookStrength) || grade.lookStrength < 0.0 || grade.lookStrength > 1.0) {
+        return "grade look strength " + numberText(grade.lookStrength) + " is outside its range [0, 1]";
+    }
+    if (grade.lookLut.empty() && grade.lookStrength != 1.0) {
+        return "grade look strength " + numberText(grade.lookStrength) + " without a look";
     }
     for (const GradeWheel wheel : kGradeWheels) {
         const WheelValue &value = grade[wheel];

@@ -8,7 +8,10 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
+#include <cstring>
+#include <set>
 #include <cstdio>
 #include <limits>
 #include <map>
@@ -181,6 +184,15 @@ json gradeToJson(const ClipGrade &grade) {
             j[name + "Cr"] = value.cr;
         }
     }
+    if (!grade.inputLut.empty()) {
+        j["inputLut"] = grade.inputLut;
+    }
+    if (!grade.lookLut.empty()) {
+        j["lookLut"] = grade.lookLut;
+        if (grade.lookStrength != 1.0) {
+            j["lookStrength"] = grade.lookStrength;
+        }
+    }
     for (const GradeCurve curve : kGradeCurves) {
         const CurvePoints &points = grade[curve];
         if (!points.empty()) {
@@ -193,6 +205,78 @@ json gradeToJson(const ClipGrade &grade) {
     }
     addForeignKeys(j, foreignObject(grade.foreign));
     return j;
+}
+
+// MARK: LUTs (schema 9)
+
+static_assert(std::endian::native == std::endian::little, "the LUT data is written as little-endian float32");
+
+constexpr char kBase64Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+std::string base64Encode(const unsigned char *bytes, std::size_t length) {
+    std::string out;
+    out.reserve((length + 2) / 3 * 4);
+    for (std::size_t i = 0; i < length; i += 3) {
+        const std::uint32_t chunk = (std::uint32_t(bytes[i]) << 16) | (i + 1 < length ? std::uint32_t(bytes[i + 1]) << 8 : 0u) |
+                                    (i + 2 < length ? std::uint32_t(bytes[i + 2]) : 0u);
+        out.push_back(kBase64Alphabet[(chunk >> 18) & 63]);
+        out.push_back(kBase64Alphabet[(chunk >> 12) & 63]);
+        out.push_back(i + 1 < length ? kBase64Alphabet[(chunk >> 6) & 63] : '=');
+        out.push_back(i + 2 < length ? kBase64Alphabet[chunk & 63] : '=');
+    }
+    return out;
+}
+
+// The bytes of base64 `text`, or nullopt when it is not base64 (padding only at the end).
+std::optional<std::vector<unsigned char>> base64Decode(const std::string &text) {
+    if (text.size() % 4 != 0) {
+        return std::nullopt;
+    }
+    std::vector<unsigned char> out;
+    out.reserve(text.size() / 4 * 3);
+    for (std::size_t i = 0; i < text.size(); i += 4) {
+        std::uint32_t chunk = 0;
+        int padding = 0;
+        for (std::size_t k = 0; k < 4; ++k) {
+            const char c = text[i + k];
+            std::uint32_t value = 0;
+            if (c == '=' && i + 4 == text.size() && k >= 2) {
+                ++padding;
+            } else if (padding > 0) {
+                return std::nullopt;
+            } else if (const char *at = std::strchr(kBase64Alphabet, c); at != nullptr && c != '\0') {
+                value = std::uint32_t(at - kBase64Alphabet);
+            } else {
+                return std::nullopt;
+            }
+            chunk = (chunk << 6) | value;
+        }
+        out.push_back(static_cast<unsigned char>(chunk >> 16));
+        if (padding < 2) {
+            out.push_back(static_cast<unsigned char>(chunk >> 8));
+        }
+        if (padding < 1) {
+            out.push_back(static_cast<unsigned char>(chunk));
+        }
+    }
+    return out;
+}
+
+json floatTriple(const std::array<float, 3> &values) {
+    return json::array({values[0], values[1], values[2]});
+}
+
+json lutToJson(const std::string &id, const CubeLut &lut) {
+    return json{{"id", id},
+                {"kind", lut.kind == CubeKind::OneD ? "1d" : "3d"},
+                {"size", lut.size},
+                {"domainMin", floatTriple(lut.domainMin)},
+                {"domainMax", floatTriple(lut.domainMax)},
+                {"title", lut.title},
+                {"fileName", lut.fileName},
+                {"path", lut.sourcePath},
+                {"data", base64Encode(reinterpret_cast<const unsigned char *>(lut.table.data()),
+                                      lut.table.size() * sizeof(float))}};
 }
 
 json clipToJson(const Clip &clip) {
@@ -575,6 +659,19 @@ ClipGrade parseGrade(const Node &node, Warnings &warnings) {
             member = valueNode.asDouble(); // a JSON number is finite
             continue;
         }
+        if (key == "inputLut" || key == "lookLut") {
+            (key == "inputLut" ? grade.inputLut : grade.lookLut) = valueNode.asString();
+            continue;
+        }
+        if (key == "lookStrength") {
+            const double strength = valueNode.asDouble();
+            grade.lookStrength = std::clamp(strength, 0.0, 1.0);
+            if (strength != grade.lookStrength) {
+                warnings.push_back(valueNode.path() + ": the look strength " + entry.value().dump() +
+                                   " is outside its range [0, 1]; limited to " + json(grade.lookStrength).dump());
+            }
+            continue;
+        }
         if (const auto curve = gradeCurveNamed(key)) {
             CurvePoints points;
             const std::size_t count = valueNode.arraySize();
@@ -743,6 +840,49 @@ Sequence parseSequence(const Node &node, Warnings &warnings, SpanFileOrder &orde
     return sequence;
 }
 
+// A LUT of the file's "luts" and the id the file gives it. A malformed entry fails the load with its path (the
+// table is the LUT: nothing could stand in for it).
+std::pair<std::string, CubeLut> parseLut(const Node &node) {
+    node.requireObject();
+    CubeLut lut;
+    const std::string id = node.field("id").asString();
+    const std::string kind = node.field("kind").asString();
+    if (kind != "1d" && kind != "3d") {
+        node.field("kind").fail("expected \"1d\" or \"3d\"");
+    }
+    lut.kind = kind == "1d" ? CubeKind::OneD : CubeKind::ThreeD;
+    const std::uint64_t size = node.field("size").asUInt64();
+    const std::uint32_t limit = lut.kind == CubeKind::OneD ? kMaxCube1DSize : kMaxCube3DSize;
+    if (size < 2 || size > limit) {
+        node.field("size").fail("must be from 2 to " + std::to_string(limit));
+    }
+    lut.size = std::uint32_t(size);
+    for (const char *key : {"domainMin", "domainMax"}) {
+        const Node triple = node.field(key);
+        if (triple.arraySize() != 3) {
+            triple.fail("expected [r, g, b]");
+        }
+        std::array<float, 3> &target = std::string(key) == "domainMin" ? lut.domainMin : lut.domainMax;
+        for (std::size_t c = 0; c < 3; ++c) {
+            target[c] = float(triple.element(c).asDouble());
+        }
+    }
+    lut.title = node.stringOr("title", "");
+    lut.fileName = node.stringOr("fileName", "");
+    lut.sourcePath = node.stringOr("path", "");
+    const Node data = node.field("data");
+    const auto bytes = base64Decode(data.asString());
+    if (!bytes || bytes->size() != lut.entryCount() * 3 * sizeof(float)) {
+        data.fail("expected the base64 of " + std::to_string(lut.entryCount() * 3) + " float32 values");
+    }
+    lut.table.resize(lut.entryCount() * 3);
+    std::memcpy(lut.table.data(), bytes->data(), bytes->size());
+    if (auto problem = cubeProblem(lut)) {
+        node.fail(*problem);
+    }
+    return {id, std::move(lut)};
+}
+
 Project parseProjectNode(const Node &root, Warnings &warnings, SpanFileOrder &order) {
     root.requireObject();
     Project project;
@@ -753,10 +893,52 @@ Project parseProjectNode(const Node &root, Warnings &warnings, SpanFileOrder &or
             project.assets.push_back(parseAsset(list.element(i)));
         }
     }
+    // The LUTs, by the id the file gives them, and the ids their contents give (they differ only in a file
+    // edited by hand: the clips' references follow the contents).
+    std::map<std::string, std::string> lutIds;
+    if (root.has("luts")) {
+        const Node list = root.field("luts");
+        for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
+            auto [fileId, lut] = parseLut(list.element(i));
+            const std::string id = project.addLut(std::move(lut));
+            if (id != fileId) {
+                warnings.push_back(list.element(i).path() + ": the LUT's id " + fileId +
+                                   " does not match its table; kept as " + id);
+            }
+            lutIds[fileId] = id;
+        }
+    }
     if (root.has("sequences")) {
         const Node list = root.field("sequences");
         for (std::size_t i = 0, n = list.arraySize(); i < n; ++i) {
             project.sequences.push_back(parseSequence(list.element(i), warnings, order));
+        }
+    }
+    // Each clip's LUTs: a reference to a LUT the file does not hold is dropped (with its look strength).
+    for (Sequence &sequence : project.sequences) {
+        for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
+            for (Track &track : sequence.tracks(kind)) {
+                for (Clip &clip : track.clips) {
+                    for (std::string *lut : {&clip.grade.inputLut, &clip.grade.lookLut}) {
+                        if (lut->empty()) {
+                            continue;
+                        }
+                        const auto found = lutIds.find(*lut);
+                        if (found == lutIds.end()) {
+                            warnings.push_back("clip " + std::to_string(clip.id.value()) + ": its grade's LUT " + *lut +
+                                               " is not in the project's \"luts\"; dropped");
+                            lut->clear();
+                        } else {
+                            *lut = found->second;
+                        }
+                    }
+                    if (clip.grade.lookLut.empty() && clip.grade.lookStrength != 1.0) {
+                        warnings.push_back("clip " + std::to_string(clip.id.value()) +
+                                           ": a look strength without a look; dropped");
+                        clip.grade.lookStrength = 1.0;
+                    }
+                }
+            }
         }
     }
     if (root.has("activeSequenceId")) {
@@ -808,16 +990,39 @@ json projectToJson(const Project &project) {
         assets.push_back(assetToJson(asset));
     }
     json sequences = json::array();
+    std::set<std::string> usedLuts;
     for (const Sequence &sequence : project.sequences) {
         sequences.push_back(sequenceToJson(sequence));
+        for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
+            for (const Track &track : sequence.tracks(kind)) {
+                for (const Clip &clip : track.clips) {
+                    for (const std::string *lut : {&clip.grade.inputLut, &clip.grade.lookLut}) {
+                        if (!lut->empty()) {
+                            usedLuts.insert(*lut);
+                        }
+                    }
+                }
+            }
+        }
     }
-    return json{{"schemaVersion", kProjectSchemaVersion},
-                {"name", project.name},
-                {"nextId", idToJson(project.ids.nextValue())},
-                {"activeSequenceId", idToJson(project.activeSequenceId)},
-                {"assets", std::move(assets)},
-                {"sequences", std::move(sequences)},
-                {"sharpenScaledDownSources", project.sharpenScaledDownSources}};
+    json document{{"schemaVersion", kProjectSchemaVersion},
+                  {"name", project.name},
+                  {"nextId", idToJson(project.ids.nextValue())},
+                  {"activeSequenceId", idToJson(project.activeSequenceId)},
+                  {"assets", std::move(assets)},
+                  {"sequences", std::move(sequences)},
+                  {"sharpenScaledDownSources", project.sharpenScaledDownSources}};
+    // Only the LUTs a clip uses, in id order (a valid project holds every one of them).
+    json luts = json::array();
+    for (const std::string &id : usedLuts) {
+        if (const CubeLut *lut = project.findLut(id)) {
+            luts.push_back(lutToJson(id, *lut));
+        }
+    }
+    if (!luts.empty()) {
+        document["luts"] = std::move(luts);
+    }
+    return document;
 }
 
 std::string serializeProject(const Project &project, int indent) {

@@ -18,7 +18,8 @@ bool trackActive(const Track &track, bool soloActive) {
     return !track.muted && (!soloActive || track.solo);
 }
 
-VideoLayer makeLayer(const Clip &clip, const MediaAsset &asset, CMTime time, CMTime frameDuration) {
+VideoLayer makeLayer(const Clip &clip, const MediaAsset &asset, CMTime time, CMTime frameDuration,
+                     const Project &project) {
     VideoLayer layer;
     layer.clipId = clip.id;
     layer.assetId = clip.assetId;
@@ -32,6 +33,20 @@ VideoLayer makeLayer(const Clip &clip, const MediaAsset &asset, CMTime time, CMT
     layer.grade = clip.grade.values;
     layer.gradeWheels = clip.grade.wheels;
     layer.gradeCurves = clip.grade.curves;
+    // The grade's LUTs, shared with the project (a validated project holds every one a clip uses).
+    if (!clip.grade.inputLut.empty()) {
+        if (const auto found = project.luts.find(clip.grade.inputLut); found != project.luts.end()) {
+            layer.gradeInputLut = found->second;
+            layer.gradeInputLutId = clip.grade.inputLut;
+        }
+    }
+    if (!clip.grade.lookLut.empty()) {
+        if (const auto found = project.luts.find(clip.grade.lookLut); found != project.luts.end()) {
+            layer.gradeLookLut = found->second;
+            layer.gradeLookLutId = clip.grade.lookLut;
+            layer.gradeLookStrength = clip.grade.lookStrength;
+        }
+    }
     return layer;
 }
 
@@ -194,8 +209,8 @@ RenderGraph Scheduler::renderGraphAt(const Sequence &sequence, const Project &pr
                 // value the audio crossfade's linear progress has at the middle of the frame (a shape
                 // averages its edge over [k / n, (k + 1) / n]).
                 const std::size_t outgoingIndex = graph.layers.size();
-                VideoLayer outgoing = makeLayer(from, *fromAsset, t, sequence.frameDuration);
-                VideoLayer incoming = makeLayer(to, *toAsset, t, sequence.frameDuration);
+                VideoLayer outgoing = makeLayer(from, *fromAsset, t, sequence.frameDuration, project);
+                VideoLayer incoming = makeLayer(to, *toAsset, t, sequence.frameDuration, project);
                 outgoing.transition =
                     makeTransition(*transition, t, sequence.frameDuration, false, to.id, outgoingIndex + 1);
                 incoming.transition = makeTransition(*transition, t, sequence.frameDuration, true, from.id, outgoingIndex);
@@ -206,7 +221,7 @@ RenderGraph Scheduler::renderGraphAt(const Sequence &sequence, const Project &pr
         }
         if (const Clip *clip = track.clipAt(t)) {
             if (const MediaAsset *asset = project.findAsset(clip->assetId)) {
-                VideoLayer layer = makeLayer(*clip, *asset, t, sequence.frameDuration);
+                VideoLayer layer = makeLayer(*clip, *asset, t, sequence.frameDuration, project);
                 if (transition && transition->role != TransitionRole::CrossDissolve && transition->owner == clip) {
                     // A fade to or from black: this layer alone, weighted by the fade.
                     layer.transition = makeTransition(*transition, t, sequence.frameDuration,
@@ -250,7 +265,7 @@ RenderGraph Scheduler::soloGraphAt(const Sequence &sequence, const Project &proj
     if (held < clip.timelineStart || held >= clip.timelineEnd()) {
         held = clip.timelineStart; // a clip shorter than a frame, off the grid
     }
-    VideoLayer layer = makeLayer(clip, *asset, held, fd);
+    VideoLayer layer = makeLayer(clip, *asset, held, fd, project);
     if (identityMotion) {
         layer.transform = VideoParams{};
         layer.opacity = 1.0;

@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <string>
 #include <vector>
@@ -72,6 +73,61 @@ media::PixelBuffer colourRamp(size_t w, size_t h) {
         });
     tagYCbCr(buffer, media::YCbCrMatrix::BT709, ChromaSiting::Left);
     return buffer;
+}
+
+// A 3D LUT of `size` per side from `f` (red fastest).
+CubeLut cubeOf(std::uint32_t size, const std::function<simd_float3(simd_float3)> &f) {
+    CubeLut lut;
+    lut.kind = CubeKind::ThreeD;
+    lut.size = size;
+    for (std::uint32_t b = 0; b < size; ++b) {
+        for (std::uint32_t g = 0; g < size; ++g) {
+            for (std::uint32_t r = 0; r < size; ++r) {
+                const float last = float(size - 1);
+                const simd_float3 v = f(simd_make_float3(float(r) / last, float(g) / last, float(b) / last));
+                lut.table.insert(lut.table.end(), {v.x, v.y, v.z});
+            }
+        }
+    }
+    return lut;
+}
+
+// A 1D LUT of `size` entries from `f`, the same for each channel but a tilt per channel.
+CubeLut curveOf(std::uint32_t size, const std::function<float(float)> &f) {
+    CubeLut lut;
+    lut.kind = CubeKind::OneD;
+    lut.size = size;
+    for (std::uint32_t i = 0; i < size; ++i) {
+        const float v = f(float(i) / float(size - 1));
+        lut.table.insert(lut.table.end(), {v, 0.95f * v + 0.02f, std::min(1.0f, 1.05f * v)});
+    }
+    return lut;
+}
+
+// A LUT's texture as the compositor makes it: RGBA32Float, its side the LUT's size (a 1x1x1 stand-in for none).
+id<MTLTexture> cubeTexture(const CubeLut *lut) {
+    const NSUInteger side = lut != nullptr && lut->kind == CubeKind::ThreeD ? lut->size : 1;
+    MTLTextureDescriptor *desc = [MTLTextureDescriptor new];
+    desc.textureType = MTLTextureType3D;
+    desc.pixelFormat = MTLPixelFormatRGBA32Float;
+    desc.width = desc.height = desc.depth = side;
+    desc.storageMode = MTLStorageModeShared;
+    id<MTLTexture> texture = [device() newTextureWithDescriptor:desc];
+    std::vector<float> rgba(side * side * side * 4, 0.0f);
+    if (side > 1) {
+        for (size_t i = 0; i < side * side * side; ++i) {
+            rgba[i * 4] = lut->table[i * 3];
+            rgba[i * 4 + 1] = lut->table[i * 3 + 1];
+            rgba[i * 4 + 2] = lut->table[i * 3 + 2];
+        }
+    }
+    [texture replaceRegion:MTLRegionMake3D(0, 0, 0, side, side, side)
+               mipmapLevel:0
+                     slice:0
+                 withBytes:rgba.data()
+               bytesPerRow:side * 16
+             bytesPerImage:side * side * 16];
+    return texture;
 }
 
 } // namespace
@@ -242,7 +298,125 @@ media::PixelBuffer colourRamp(size_t w, size_t h) {
     XCTAssertLessThanOrEqual(worst, 5e-5);
 }
 
+- (void)testTheShaderLutsMatchTheCPUReference {
+    id<MTLDevice> gpu = device();
+    NSError *error = nil;
+    NSBundle *engine = [NSBundle bundleWithIdentifier:@"com.justjohn12345.framewright.engine"];
+    id<MTLLibrary> library = [gpu newDefaultLibraryWithBundle:engine error:&error];
+    id<MTLComputePipelineState> pipeline =
+        [gpu newComputePipelineStateWithFunction:[library newFunctionWithName:@"ve_grade_samples_luts"] error:&error];
+    XCTAssertNotNil(pipeline, @"%@", error);
+    if (pipeline == nil) {
+        return;
+    }
+    const CubeLut cube = cubeOf(33, [](simd_float3 v) {
+        return simd_make_float3(0.9f * v.x * v.x + 0.1f * v.y, std::sqrt(v.y) * 0.8f + 0.1f * v.z, 1.0f - 0.7f * v.z);
+    });
+    CubeLut shifted = cubeOf(17, [](simd_float3 v) { return simd_make_float3(v.z, v.x, v.y) * 0.9f + 0.05f; });
+    shifted.domainMin = {-0.25f, -0.25f, -0.25f};
+    shifted.domainMax = {1.25f, 1.25f, 1.25f};
+    const CubeLut curve = curveOf(4096, [](float x) { return std::pow(x, 0.6f); });
+    struct Case {
+        const CubeLut *input;
+        const CubeLut *look;
+        double strength;
+    };
+    const Case cases[] = {{&cube, nullptr, 1.0}, {nullptr, &cube, 0.7}, {&curve, &shifted, 0.5}, {&shifted, &curve, 1.0}};
+    const std::vector<simd_float4> inputs = [self gridInputs];
+    const uint32_t count = uint32_t(inputs.size());
+    id<MTLBuffer> in = [gpu newBufferWithBytes:inputs.data()
+                                        length:inputs.size() * sizeof(simd_float4)
+                                       options:MTLResourceStorageModeShared];
+    id<MTLBuffer> out = [gpu newBufferWithLength:inputs.size() * sizeof(simd_float4) options:MTLResourceStorageModeShared];
+    id<MTLCommandQueue> queue = [gpu newCommandQueue];
+    double worst = 0.0;
+    for (const Case &c : cases) {
+        for (const VEInt transfer : {VEGradeTransferBT1886, VEGradeTransferLinear}) {
+            const VEGradeUniforms u = gradeUniformsFor(GradeValues{0.5, 1.2, 10.0, 0.0, 1.1}, strongWheels()[8],
+                                                       GradeCurves{}, c.input, c.look, c.strength, transfer);
+            const std::vector<float> tableData = gradeTableData(GradeCurves{}, c.input, c.look);
+            MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                                                                            width:kVEGradeTableWidth
+                                                                                           height:VEGradeTableRowCount
+                                                                                        mipmapped:NO];
+            desc.storageMode = MTLStorageModeShared;
+            id<MTLTexture> tables = [gpu newTextureWithDescriptor:desc];
+            [tables replaceRegion:MTLRegionMake2D(0, 0, kVEGradeTableWidth, VEGradeTableRowCount)
+                      mipmapLevel:0
+                        withBytes:tableData.data()
+                      bytesPerRow:kVEGradeTableWidth * sizeof(float)];
+            id<MTLCommandBuffer> commands = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
+            [encoder setComputePipelineState:pipeline];
+            [encoder setBuffer:in offset:0 atIndex:0];
+            [encoder setBuffer:out offset:0 atIndex:1];
+            [encoder setBytes:&u length:sizeof u atIndex:2];
+            [encoder setBytes:&count length:sizeof count atIndex:3];
+            [encoder setTexture:tables atIndex:0];
+            [encoder setTexture:cubeTexture(c.input) atIndex:1];
+            [encoder setTexture:cubeTexture(c.look) atIndex:2];
+            [encoder dispatchThreads:MTLSizeMake(count, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(std::min<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup, 256), 1, 1)];
+            [encoder endEncoding];
+            [commands commit];
+            [commands waitUntilCompleted];
+            const auto *gpuValues = static_cast<const simd_float4 *>(out.contents);
+            for (uint32_t i = 0; i < count; ++i) {
+                const simd_float3 cpu = gradeReference(inputs[i].xyz, u, tableData.data(), c.input, c.look);
+                for (int ch = 0; ch < 3; ++ch) {
+                    const float g = gpuValues[i][ch];
+                    if (!std::isfinite(g)) {
+                        XCTFail(@"not finite: input (%g, %g, %g)", inputs[i].x, inputs[i].y, inputs[i].z);
+                        return;
+                    }
+                    worst = std::max(worst, std::fabs(double(g) - double(cpu[ch])) / std::max(1.0, std::fabs(double(cpu[ch]))));
+                }
+            }
+        }
+    }
+    NSLog(@"GRADE EXTENDED GPU vs CPU (LUTs, with wheels and a basic grade): largest difference %.3g", worst);
+    // The LUT stages read texels and interpolate with the same arithmetic on both sides; what differs comes
+    // from the grade's powers before them, so the wheels' bound holds.
+    XCTAssertLessThanOrEqual(worst, 5e-5);
+}
+
 // MARK: - Rendered
+
+- (void)testAPictureWithLutsIsTheReferenceOfTheUngradedPicture {
+    const size_t w = 128, h = 32;
+    const TextureSet set = texturesFor(*_compositor, colourRamp(w, h));
+    RenderGraph plain = makeGraph(int32_t(w), int32_t(h));
+    plain.layers.push_back(makeLayer(1));
+    const std::vector<float> before = [self render:plain textures:{set} width:w height:h];
+    const auto cube = std::make_shared<const CubeLut>(
+        cubeOf(17, [](simd_float3 v) { return simd_make_float3(v.y, 0.5f * v.x + 0.4f * v.z, v.z * v.z); }));
+    const auto curve = std::make_shared<const CubeLut>(curveOf(64, [](float x) { return std::sqrt(x); }));
+    double worst = 0.0;
+    for (const auto &[input, look] : std::vector<std::pair<std::shared_ptr<const CubeLut>, std::shared_ptr<const CubeLut>>>{
+             {cube, nullptr}, {nullptr, cube}, {curve, cube}, {cube, curve}}) {
+        RenderGraph graded = plain;
+        graded.layers[0].gradeInputLut = input;
+        graded.layers[0].gradeInputLutId = input ? cubeContentId(*input) : std::string();
+        graded.layers[0].gradeLookLut = look;
+        graded.layers[0].gradeLookLutId = look ? cubeContentId(*look) : std::string();
+        graded.layers[0].gradeLookStrength = look ? 0.75 : 1.0;
+        const std::vector<float> after = [self render:graded textures:{set} width:w height:h];
+        const VEGradeUniforms u = gradeUniformsFor(ClipGrade::neutralValues(), GradeWheels{}, GradeCurves{}, input.get(),
+                                                   look.get(), look ? 0.75 : 1.0, VEGradeTransferBT1886);
+        const std::vector<float> tables = gradeTableData(GradeCurves{}, input.get(), look.get());
+        for (size_t i = 0; i + 3 < before.size() && i + 3 < after.size(); i += 4) {
+            const simd_float3 expected = simd_clamp(
+                gradeReference(simd_make_float3(before[i], before[i + 1], before[i + 2]), u, tables.data(), input.get(),
+                               look.get()),
+                simd_make_float3(0.0f, 0.0f, 0.0f), simd_make_float3(1.0f, 1.0f, 1.0f));
+            for (int c = 0; c < 3; ++c) {
+                worst = std::max(worst, double(std::fabs(after[i + c] - expected[c])));
+            }
+        }
+    }
+    NSLog(@"GRADE EXTENDED rendered LUTs against the reference of the ungraded picture: %.3g", worst);
+    XCTAssertLessThan(worst, 1e-4);
+}
 
 - (void)testAPictureGradedWithCurvesIsTheReferenceOfTheUngradedPicture {
     const size_t w = 128, h = 32;
@@ -455,10 +629,20 @@ media::PixelBuffer colourRamp(size_t w, size_t h) {
             const RenderGraph *graph;
             std::vector<double> times;
         };
+        RenderGraph luts = curves;
+        const auto look = std::make_shared<const CubeLut>(
+            cubeOf(33, [](simd_float3 v) { return simd_make_float3(v.y, 0.5f * v.x + 0.4f * v.z, v.z * v.z); }));
+        const auto shaper = std::make_shared<const CubeLut>(curveOf(1024, [](float x) { return std::sqrt(x); }));
+        luts.layers[0].gradeInputLut = shaper;
+        luts.layers[0].gradeInputLutId = cubeContentId(*shaper);
+        luts.layers[0].gradeLookLut = look;
+        luts.layers[0].gradeLookLutId = cubeContentId(*look);
+        luts.layers[0].gradeLookStrength = 0.8;
         Scene scenes[] = {{"ungraded", &plain, {}},
                           {"basic grade", &basic, {}},
                           {"basic grade + wheels", &wheels, {}},
-                          {"basic grade + wheels + curves", &curves, {}}};
+                          {"basic grade + wheels + curves", &curves, {}},
+                          {"everything: + 1D input LUT + 33^3 look", &luts, {}}};
         for (int i = 0; i < 70; ++i) {
             for (Scene &scene : scenes) {
                 const double ms = timeOf(*scene.graph);

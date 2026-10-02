@@ -720,6 +720,28 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)setGradeCurvePoints:(NSArray<NSValue *> *)points
                              forCurve:(VEGradeCurve)curve
                                 clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setGradeCurve(_:for:clips:));
+/// Reads the .cube file at `url` (a 1D or 3D LUT; Adobe's Cube format, with Resolve's input-range keywords)
+/// and keeps it ready for setGradeInputLUT:clips: and setGradeLook:clips:, which copy it into the project.
+/// Returns its description, or nil with `error` (VEEngineErrorImportFailed) saying what is wrong with the
+/// file and where ("line 12: ..."), or that it cannot be read. Importing the same table again returns the same
+/// id.
+- (nullable VELUTInfo *)importLUTAtURL:(NSURL *)url error:(NSError **)error NS_SWIFT_NAME(importLUT(at:));
+/// The LUT of `lutID` the project holds or was imported this session, or nil.
+- (nullable VELUTInfo *)lutWithID:(NSString *)lutID NS_SWIFT_NAME(lut(withID:));
+/// Sets the input LUT (applied to each clip's picture before its grade: a camera's log to Rec. 709, say) of
+/// every clip of `clipIDs` (see above); nil or "" removes it. Undo name "Change Input LUT". Refused
+/// (VEEditErrorInvalidArgument) for an id that is neither in the project nor imported.
+- (VEEditResult *)setGradeInputLUT:(nullable NSString *)lutID
+                             clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setGradeInputLUT(_:clips:));
+/// Sets the look (applied after the grade and the curves, mixed by its strength) of every clip of `clipIDs`
+/// (see above); nil or "" removes it (its strength goes back to 1). Undo name "Change Look".
+- (VEEditResult *)setGradeLook:(nullable NSString *)lutID
+                         clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setGradeLook(_:clips:));
+/// Sets the look's strength (0 to 1) of every clip of `clipIDs` that has a look (see above; a clip without a
+/// look keeps 1). Undo name "Change Look Strength"; a slider drag is several of these in one coalescing
+/// group. Refused (VEEditErrorInvalidArgument) for a value outside [0, 1].
+- (VEEditResult *)setGradeLookStrength:(double)strength
+                                 clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setGradeLookStrength(_:clips:));
 /// Sets every curve of every clip of `clipIDs` (see above) to the identity, keeping the rest of their
 /// grades. Undo name "Reset Curves"; clips without curves make no undo step.
 - (VEEditResult *)resetGradeCurvesOfClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(resetGradeCurves(ofClips:));

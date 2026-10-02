@@ -342,6 +342,39 @@ FOUNDATION_EXPORT void VEGradeCurveSample(NSArray<NSValue *> *points, double *sa
 - (BOOL)isCurveMixed:(VEGradeCurve)curve NS_SWIFT_NAME(isCurveMixed(_:));
 @end
 
+/// The kind of a colour LUT (a .cube file).
+typedef NS_ENUM(NSInteger, VELUTKind) {
+    /// One curve per channel.
+    VELUTKind1D = 1,
+    /// A cube of colours, interpolated tetrahedrally.
+    VELUTKind3D = 3,
+};
+
+/// A colour LUT the engine holds (imported from a .cube file; a project keeps a copy of each LUT its clips
+/// use, so it opens anywhere).
+@interface VELUTInfo : NSObject
+/// The LUT's content id (the same table always has the same id).
+@property (nonatomic, readonly, copy) NSString *lutID;
+/// What to call it: the file's TITLE, else its file name without the extension.
+@property (nonatomic, readonly, copy) NSString *displayName;
+/// The file's name and where it was imported from ("" when unknown).
+@property (nonatomic, readonly, copy) NSString *fileName;
+@property (nonatomic, readonly, copy) NSString *sourcePath;
+@property (nonatomic, readonly) VELUTKind kind;
+/// Entries per channel (1D) or per side (3D).
+@property (nonatomic, readonly) NSInteger size;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+@interface VEGradeSelection (LUTs)
+/// The input LUT's id every clip has ("" for none); nil where they differ or without clips.
+@property (nonatomic, readonly, copy, nullable) NSString *inputLUTID;
+/// The look's id every clip has ("" for none); nil where they differ or without clips.
+@property (nonatomic, readonly, copy, nullable) NSString *lookLUTID;
+/// The look's strength every clip has (0 to 1); NaN where they differ or without clips.
+@property (nonatomic, readonly) double lookStrength;
+@end
+
 /// Identity video parameters (centred, scale 1, no rotation, opaque).
 FOUNDATION_EXPORT VEVideoParams VEVideoParamsIdentity(void);
 
@@ -524,6 +557,11 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 /// The clip's points of `curve` (NSValue-wrapped points; empty for the identity or a value outside
 /// VEGradeCurve).
 - (NSArray<NSValue *> *)gradeCurvePoints:(VEGradeCurve)curve NS_SWIFT_NAME(gradeCurvePoints(_:));
+/// The ids of the clip's input LUT and look ("" for none; -[VEEngine lutWithID:] describes them), and the
+/// look's strength (0 to 1; 1 without a look).
+@property (nonatomic, readonly, copy) NSString *gradeInputLUTID;
+@property (nonatomic, readonly, copy) NSString *gradeLookLUTID;
+@property (nonatomic, readonly) double gradeLookStrength;
 @end
 
 /// A track of the active sequence.

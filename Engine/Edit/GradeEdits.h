@@ -18,6 +18,7 @@
 #include "Command.h"
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -52,6 +53,11 @@ struct GradeChange {
     // The curves to set, each its whole list of points (nullopt: the clip keeps its own; an identity curve is
     // stored as no points).
     std::array<std::optional<CurvePoints>, kGradeCurveCount> curves{};
+    // The LUTs to set (an id of Project::luts, or "" for none) and the look's strength; nullopt keeps each
+    // clip's own. Removing the look sets its strength back to 1; a clip without a look keeps strength 1.
+    std::optional<std::string> inputLut;
+    std::optional<std::string> lookLut;
+    std::optional<double> lookStrength;
     std::optional<std::string> foreign;
 
     // One parameter.
@@ -89,9 +95,13 @@ struct GradeChange {
     std::size_t wheelCount() const;
     // The number of curves given.
     std::size_t curveCount() const;
+    // The number of LUT settings given (input, look, strength).
+    std::size_t lutCount() const {
+        return (inputLut ? 1 : 0) + (lookLut ? 1 : 0) + (lookStrength ? 1 : 0);
+    }
     // Nothing given at all.
     bool isEmpty() const {
-        return count() == 0 && wheelCount() == 0 && curveCount() == 0 && !foreign;
+        return count() == 0 && wheelCount() == 0 && curveCount() == 0 && lutCount() == 0 && !foreign;
     }
     // `grade` with the change applied.
     ClipGrade appliedTo(ClipGrade grade) const;
@@ -101,12 +111,14 @@ struct GradeChange {
 // or the change is empty, a clip is missing or listed twice, a clip lies on an audio track
 // (TrackKindMismatch: a grade is for pictures) or a locked track, or a value is not finite or outside its
 // parameter's range (InvalidArgument, naming the range), a wheel's level outside [-1, 1], its colour outside
-// the unit disk or given without both cb and cr, or a curve that is not valid (curveProblem). A change that
+// the unit disk or given without both cb and cr, a curve that is not valid (curveProblem), a LUT the project
+// does not hold, or a look strength outside [0, 1] (a clip without a look keeps strength 1). A change that
 // leaves every clip as it was records no undo step.
 class SetClipGrade final : public SequenceCommand {
   public:
     // `name` is the Undo menu's name; empty: "Change <parameter>" for one parameter, "Change <wheel>" for
-    // one wheel, "Change <curve> Curve" for one curve, else "Change Grade".
+    // one wheel, "Change <curve> Curve" for one curve, "Change Input LUT", "Change Look" or "Change Look
+    // Strength" for one LUT setting, else "Change Grade".
     SetClipGrade(SequenceId sequenceId, std::vector<ClipId> clipIds, GradeChange change, std::string name = {});
     std::string name() const override;
 
@@ -117,6 +129,26 @@ class SetClipGrade final : public SequenceCommand {
     std::vector<ClipId> clipIds_;
     GradeChange change_;
     std::string name_;
+};
+
+// A grade change that uses LUTs the project may not hold yet (a LUT just imported, a pasted grade from
+// another project): adds the ones it lacks to Project::luts, then applies `grade` (a SetClipGrade), as one
+// undo step; undo removes the LUTs it added. Refused (the project left as it was) when `grade` is refused or a
+// LUT is not valid. A grade that changes nothing adds nothing.
+class SetClipGradeWithLuts final : public Command {
+  public:
+    SetClipGradeWithLuts(std::vector<std::shared_ptr<const CubeLut>> luts, std::unique_ptr<SetClipGrade> grade);
+    EditResult apply(Project &project) override;
+    void revert(Project &project) const override;
+    bool canRevert(const Project &project) const override;
+    bool isNoOp() const override;
+    std::string name() const override;
+
+  private:
+    std::vector<std::shared_ptr<const CubeLut>> luts_;
+    std::vector<std::string> ids_;   // the LUTs' content ids
+    std::vector<std::string> added_; // the ones the last apply added
+    std::unique_ptr<SetClipGrade> grade_;
 };
 
 // What a selection's clips have for each grade parameter.
@@ -135,6 +167,10 @@ struct GradeSummary {
     // whether they differ.
     std::array<std::optional<CurvePoints>, kGradeCurveCount> curves{};
     std::array<bool, kGradeCurveCount> curveMixed{};
+    // The LUTs and the look's strength every one of `clips` has (nullopt when they differ or there are none).
+    std::optional<std::string> inputLut;
+    std::optional<std::string> lookLut;
+    std::optional<double> lookStrength;
     // Whether any of `clips` has a grade (not neutral).
     bool anyGraded = false;
     // Whether every one of `clips` has the same whole grade: each value and the entries a newer version

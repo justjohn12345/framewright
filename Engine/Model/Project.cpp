@@ -1,5 +1,6 @@
 #include "Project.h"
 
+#include <algorithm>
 #include <map>
 #include <utility>
 
@@ -8,7 +9,23 @@ namespace ve {
 bool operator==(const Project &a, const Project &b) {
     return a.name == b.name && a.assets == b.assets && a.sequences == b.sequences &&
            a.activeSequenceId == b.activeSequenceId && a.ids == b.ids &&
-           a.sharpenScaledDownSources == b.sharpenScaledDownSources;
+           a.sharpenScaledDownSources == b.sharpenScaledDownSources &&
+           std::equal(a.luts.begin(), a.luts.end(), b.luts.begin(), b.luts.end(), [](const auto &x, const auto &y) {
+               return x.first == y.first && (x.second == y.second || (x.second && y.second && *x.second == *y.second));
+           });
+}
+
+const CubeLut *Project::findLut(const std::string &id) const {
+    const auto it = luts.find(id);
+    return it == luts.end() ? nullptr : it->second.get();
+}
+
+std::string Project::addLut(CubeLut lut) {
+    std::string id = cubeContentId(lut);
+    if (luts.find(id) == luts.end()) {
+        luts.emplace(id, std::make_shared<const CubeLut>(std::move(lut)));
+    }
+    return id;
 }
 
 const MediaAsset *Project::findAsset(AssetId assetId) const {

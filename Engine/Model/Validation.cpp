@@ -108,6 +108,11 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
     if (track.kind != TrackKind::Video && !clip.grade.isEmpty()) {
         return where + ": a clip on an audio track has no grade";
     }
+    for (const std::string *lut : {&clip.grade.inputLut, &clip.grade.lookLut}) {
+        if (!lut->empty() && project.findLut(*lut) == nullptr) {
+            return where + ": its grade uses LUT " + *lut + ", which the project does not hold";
+        }
+    }
     int heads = 0;
     int tails = 0;
     for (const TransitionSpan &span : clip.transitions) {
@@ -540,6 +545,17 @@ std::optional<std::string> validateProject(const Project &project) {
         return std::nullopt;
     };
 
+    for (const auto &[id, lut] : project.luts) {
+        if (!lut) {
+            return "LUT " + id + " has no table";
+        }
+        if (auto problem = cubeProblem(*lut)) {
+            return "LUT " + id + ": " + *problem;
+        }
+        if (cubeContentId(*lut) != id) {
+            return "LUT " + id + " is not stored under its content id";
+        }
+    }
     for (const MediaAsset &asset : project.assets) {
         if (auto problem = claim(asset.id.value(), "asset " + std::to_string(asset.id.value()))) {
             return problem;

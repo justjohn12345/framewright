@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -171,8 +172,13 @@ struct UndoState {
     // engine. VEEngine+Export.mm starts it, the engine's other files only ask and cancel it.
     VEExporter *_exporter;
     VERippleScope _rippleScope; // see -rippleScope (VEEngine+Edits.mm)
-    // The grade Copy Grade copied (VEEngine+Grade.mm); a value, so it outlives New and Open.
+    // The grade Copy Grade copied (VEEngine+Grade.mm); a value, so it outlives New and Open, with the LUTs
+    // it uses (so it pastes into another project).
     std::optional<ve::ClipGrade> _copiedGrade;
+    std::vector<std::shared_ptr<const ve::CubeLut>> _copiedLuts;
+    // The LUTs imported this session (VEEngine+Grade.mm, importLUTAtURL:error:), by content id, until a grade
+    // edit copies them into a project.
+    std::map<std::string, std::shared_ptr<const ve::CubeLut>> _importedLuts;
 
     // VEEngine.mm
     NSHashTable<id<VEEngineObserver>> *_observers;

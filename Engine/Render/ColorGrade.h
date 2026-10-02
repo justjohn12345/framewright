@@ -276,12 +276,119 @@ VE_GRADE_FUNC VEGradeFloat3 veApplyCurves(VEGradeFloat3 rgb, VEGradeBits mask, T
     return rgb;
 }
 
-// The grade with the slice 2 stages (the source's extended-grade function constant): steps 1-4 of veGrade
-// with the wheels (VEGradeStageWheels) in linear light after saturation and before contrast, then the tone
-// curves (VEGradeStageCurves) on the re-encoded values. A stage whose bit is clear is skipped, so with no
-// bit set this is veGrade, value for value.
+// A 3D LUT (CubeLut.h): a texture3d on the GPU (RGBA32Float, its side the LUT's size), the table's RGB
+// triples on the CPU (red fastest), and none where no stage reads one. Read texel by texel, so both sides
+// interpolate the same way.
+#ifdef __METAL_VERSION__
+typedef metal::texture3d<float, metal::access::read> VEGradeCube;
+VE_GRADE_FUNC metal::float3 veCubeRead(VEGradeCube cube, uint r, uint g, uint b) {
+    return cube.read(metal::uint3(r, g, b)).rgb;
+}
+#else
+struct VEGradeCube {
+    const float *rgb = nullptr; // size^3 RGB triples, red fastest, then green, then blue
+    uint32_t size = 0;
+};
+VE_GRADE_FUNC simd_float3 veCubeRead(VEGradeCube cube, uint32_t r, uint32_t g, uint32_t b) {
+    const float *entry = cube.rgb + ((std::size_t(b) * cube.size + g) * cube.size + r) * 3;
+    return simd_make_float3(entry[0], entry[1], entry[2]);
+}
+#endif
+struct VENoGradeCube {};
+VE_GRADE_FUNC VEGradeFloat3 veCubeRead(VENoGradeCube, VEGradeBits, VEGradeBits, VEGradeBits) {
+    const VEGradeFloat3 none = {0.0f, 0.0f, 0.0f};
+    return none; // never read: no LUT stage without a cube
+}
+
+// A 3D LUT of `size` entries per side at `p` (in [0, 1] per channel, NaN as 0): tetrahedral interpolation of
+// the cube's eight surrounding entries (the four of the tetrahedron the point lies in), exact for a LUT that
+// is a linear function of its input, such as the identity.
+template <typename Cube> VE_GRADE_FUNC VEGradeFloat3 veCubeLookup(Cube cube, VEGradeBits size, VEGradeFloat3 p) {
+    const float last = float(size - 1u);
+    const float px = (p.x > 0.0f ? (p.x < 1.0f ? p.x : 1.0f) : 0.0f) * last;
+    const float py = (p.y > 0.0f ? (p.y < 1.0f ? p.y : 1.0f) : 0.0f) * last;
+    const float pz = (p.z > 0.0f ? (p.z < 1.0f ? p.z : 1.0f) : 0.0f) * last;
+    const VEGradeBits ix = VEGradeBits(px) < size - 1u ? VEGradeBits(px) : size - 2u;
+    const VEGradeBits iy = VEGradeBits(py) < size - 1u ? VEGradeBits(py) : size - 2u;
+    const VEGradeBits iz = VEGradeBits(pz) < size - 1u ? VEGradeBits(pz) : size - 2u;
+    const float fx = px - float(ix), fy = py - float(iy), fz = pz - float(iz);
+    const VEGradeFloat3 c000 = veCubeRead(cube, ix, iy, iz);
+    const VEGradeFloat3 c111 = veCubeRead(cube, ix + 1u, iy + 1u, iz + 1u);
+    if (fx >= fy) {
+        if (fy >= fz) {
+            const VEGradeFloat3 c100 = veCubeRead(cube, ix + 1u, iy, iz);
+            const VEGradeFloat3 c110 = veCubeRead(cube, ix + 1u, iy + 1u, iz);
+            return c000 + fx * (c100 - c000) + fy * (c110 - c100) + fz * (c111 - c110);
+        }
+        if (fx >= fz) {
+            const VEGradeFloat3 c100 = veCubeRead(cube, ix + 1u, iy, iz);
+            const VEGradeFloat3 c101 = veCubeRead(cube, ix + 1u, iy, iz + 1u);
+            return c000 + fx * (c100 - c000) + fz * (c101 - c100) + fy * (c111 - c101);
+        }
+        const VEGradeFloat3 c001 = veCubeRead(cube, ix, iy, iz + 1u);
+        const VEGradeFloat3 c101 = veCubeRead(cube, ix + 1u, iy, iz + 1u);
+        return c000 + fz * (c001 - c000) + fx * (c101 - c001) + fy * (c111 - c101);
+    }
+    if (fz >= fy) {
+        const VEGradeFloat3 c001 = veCubeRead(cube, ix, iy, iz + 1u);
+        const VEGradeFloat3 c011 = veCubeRead(cube, ix, iy + 1u, iz + 1u);
+        return c000 + fz * (c001 - c000) + fy * (c011 - c001) + fx * (c111 - c011);
+    }
+    if (fz >= fx) {
+        const VEGradeFloat3 c010 = veCubeRead(cube, ix, iy + 1u, iz);
+        const VEGradeFloat3 c011 = veCubeRead(cube, ix, iy + 1u, iz + 1u);
+        return c000 + fy * (c010 - c000) + fz * (c011 - c010) + fx * (c111 - c011);
+    }
+    const VEGradeFloat3 c010 = veCubeRead(cube, ix, iy + 1u, iz);
+    const VEGradeFloat3 c110 = veCubeRead(cube, ix + 1u, iy + 1u, iz);
+    return c000 + fy * (c010 - c000) + fx * (c110 - c010) + fz * (c111 - c110);
+}
+
+// A LUT applied to `rgb`: the value mapped through the LUT's domain ((v - min) * scale, then limited to the
+// table), a 3D LUT (`cubeSize` not 0) by tetrahedral interpolation, a 1D one by its three rows of the tables
+// from `firstRow`.
+template <typename Tables, typename Cube>
+VE_GRADE_FUNC VEGradeFloat3 veApplyLut(VEGradeFloat3 rgb, VEGradeFloat3 domainMin, VEGradeFloat3 domainScale,
+                                       VEGradeBits cubeSize, Cube cube, Tables tables, VEGradeBits firstRow) {
+    const VEGradeFloat3 p = (rgb - domainMin) * domainScale;
+    if (cubeSize >= 2u) {
+        return veCubeLookup(cube, cubeSize, p);
+    }
+    const VEGradeFloat3 out = {veTableLookup(tables, p.x, firstRow), veTableLookup(tables, p.y, firstRow + 1u),
+                               veTableLookup(tables, p.z, firstRow + 2u)};
+    return out;
+}
+
+// An encoded value made safe and limited (step 1 of veGrade without the black residue), before an input LUT.
+VE_GRADE_FUNC float veLimitEncoded(float v) {
+    v = veSanitize(v);
+    return v > kVEGradeEncodedLimit ? kVEGradeEncodedLimit : v < -kVEGradeEncodedLimit ? -kVEGradeEncodedLimit : v;
+}
+
+// veGradeExtended (below) without 3D LUTs.
+template <typename Tables, typename Cube>
+VE_GRADE_FUNC VEGradeFloat3 veGradeExtended(VEGradeFloat3 rgb, VE_GRADE_UNIFORMS u, Tables tables, Cube inputCube,
+                                            Cube lookCube);
 template <typename Tables> VE_GRADE_FUNC VEGradeFloat3 veGradeExtended(VEGradeFloat3 rgb, VE_GRADE_UNIFORMS u, Tables tables) {
+    return veGradeExtended(rgb, u, tables, VENoGradeCube{}, VENoGradeCube{});
+}
+
+// The grade with the slice 2 stages (the source's extended-grade function constant): the input LUT
+// (VEGradeStageInputLut) on the source's R'G'B', steps 1-4 of veGrade with the wheels (VEGradeStageWheels)
+// in linear light after saturation and before contrast, the tone curves (VEGradeStageCurves) on the
+// re-encoded values, then the look (VEGradeStageLookLut) mixed by its strength. A stage whose bit is clear is
+// skipped, so with no bit set this is veGrade, value for value. Every output is finite: each LUT's output is
+// a blend of its finite entries.
+template <typename Tables, typename Cube>
+VE_GRADE_FUNC VEGradeFloat3 veGradeExtended(VEGradeFloat3 rgb, VE_GRADE_UNIFORMS u, Tables tables, Cube inputCube,
+                                            Cube lookCube) {
     const int transfer = u.transfer;
+    if ((u.stages & VEGradeStageInputLut) != 0u) {
+        const VEGradeFloat3 limited = {veLimitEncoded(rgb.x), veLimitEncoded(rgb.y), veLimitEncoded(rgb.z)};
+        const VEGradeFloat3 domainMin = {u.inputDomainMin.x, u.inputDomainMin.y, u.inputDomainMin.z};
+        const VEGradeFloat3 domainScale = {u.inputDomainScale.x, u.inputDomainScale.y, u.inputDomainScale.z};
+        rgb = veApplyLut(limited, domainMin, domainScale, u.inputCubeSize, inputCube, tables, VEGradeTableRowInputLut);
+    }
     const VEGradeFloat3 linear = {veLinearChannel(rgb.x, transfer), veLinearChannel(rgb.y, transfer),
                                   veLinearChannel(rgb.z, transfer)};
     const VEGradeFloat3 gain = {u.gain.x, u.gain.y, u.gain.z};
@@ -295,12 +402,20 @@ template <typename Tables> VE_GRADE_FUNC VEGradeFloat3 veGradeExtended(VEGradeFl
     if ((u.stages & VEGradeStageCurves) != 0u) {
         out = veApplyCurves(out, u.curveMask, tables);
     }
+    if ((u.stages & VEGradeStageLookLut) != 0u) {
+        const VEGradeFloat3 domainMin = {u.lookDomainMin.x, u.lookDomainMin.y, u.lookDomainMin.z};
+        const VEGradeFloat3 domainScale = {u.lookDomainScale.x, u.lookDomainScale.y, u.lookDomainScale.z};
+        const VEGradeFloat3 looked =
+            veApplyLut(out, domainMin, domainScale, u.lookCubeSize, lookCube, tables, VEGradeTableRowLookLut);
+        out = out + (looked - out) * u.lookStrength;
+    }
     return out;
 }
 
 #ifndef __METAL_VERSION__
 
 #include "../Model/ClipGrade.h"
+#include "../Model/CubeLut.h"
 #include "../Media/MediaTypes.h"
 
 namespace ve::render {
@@ -366,18 +481,50 @@ inline simd_double3 wheelColourDirection(double cb, double cr) {
 }
 
 // Whether a grade needs the extended grade (a slice 2 stage is in use).
-inline bool needsExtendedGrade(const GradeWheels &wheels, const GradeCurves &curves = {}) {
-    return !isNeutralWheels(wheels) || !isIdentityCurves(curves);
+inline bool needsExtendedGrade(const GradeWheels &wheels, const GradeCurves &curves = {}, bool hasLut = false) {
+    return !isNeutralWheels(wheels) || !isIdentityCurves(curves) || hasLut;
 }
 
-// The tables of `curves` (VEGradeTableRow rows of kVEGradeTableWidth samples; an identity curve's row is the
-// identity), what the compositor uploads and the CPU reference reads.
-inline std::vector<float> gradeTableData(const GradeCurves &curves) {
+// The tone curves' rows of the tables, in GradeCurve order.
+inline constexpr VEGradeTableRow kToneCurveRows[kGradeCurveCount] = {VEGradeTableRowLuma, VEGradeTableRowRed,
+                                                                     VEGradeTableRowGreen, VEGradeTableRowBlue};
+
+// A 1D LUT's channel `channel` resampled to the table's samples over its domain (sample i at domain fraction
+// i / (width - 1), the LUT's entries interpolated linearly), into `row`.
+inline void writeLutRows(std::vector<float> &data, const CubeLut &lut, int firstRow) {
+    const double last = double(lut.size - 1);
+    for (int channel = 0; channel < 3; ++channel) {
+        float *row = data.data() + std::ptrdiff_t(firstRow + channel) * kVEGradeTableWidth;
+        for (std::uint32_t i = 0; i < kVEGradeTableWidth; ++i) {
+            const double position = double(i) / double(kVEGradeTableWidth - 1) * last;
+            const std::uint32_t i0 = std::min<std::uint32_t>(std::uint32_t(position), lut.size - 2);
+            const double f = position - double(i0);
+            const double a = lut.table[std::size_t(i0) * 3 + std::size_t(channel)];
+            const double b = lut.table[std::size_t(i0 + 1) * 3 + std::size_t(channel)];
+            row[i] = float(a + (b - a) * f);
+        }
+    }
+}
+
+// The tables of `curves` and of the 1D LUTs among `inputLut` and `lookLut` (VEGradeTableRow rows of
+// kVEGradeTableWidth samples; an identity curve's row and an absent LUT's rows are the identity), what the
+// compositor uploads and the CPU reference reads.
+inline std::vector<float> gradeTableData(const GradeCurves &curves, const CubeLut *inputLut = nullptr,
+                                         const CubeLut *lookLut = nullptr) {
     std::vector<float> data(std::size_t(VEGradeTableRowCount) * kVEGradeTableWidth);
-    const GradeCurve rows[VEGradeTableRowCount] = {GradeCurve::Luma, GradeCurve::Red, GradeCurve::Green, GradeCurve::Blue};
+    const std::vector<float> identity = sampleCurve({}, kVEGradeTableWidth);
     for (int row = 0; row < VEGradeTableRowCount; ++row) {
-        const std::vector<float> samples = sampleCurve(curves[static_cast<std::size_t>(rows[row])], kVEGradeTableWidth);
-        std::copy(samples.begin(), samples.end(), data.begin() + std::ptrdiff_t(row) * kVEGradeTableWidth);
+        std::copy(identity.begin(), identity.end(), data.begin() + std::ptrdiff_t(row) * kVEGradeTableWidth);
+    }
+    for (std::size_t curve = 0; curve < kGradeCurveCount; ++curve) {
+        const std::vector<float> samples = sampleCurve(curves[curve], kVEGradeTableWidth);
+        std::copy(samples.begin(), samples.end(), data.begin() + std::ptrdiff_t(kToneCurveRows[curve]) * kVEGradeTableWidth);
+    }
+    if (inputLut != nullptr && inputLut->kind == CubeKind::OneD) {
+        writeLutRows(data, *inputLut, VEGradeTableRowInputLut);
+    }
+    if (lookLut != nullptr && lookLut->kind == CubeKind::OneD) {
+        writeLutRows(data, *lookLut, VEGradeTableRowLookLut);
     }
     return data;
 }
@@ -423,10 +570,9 @@ inline VEGradeUniforms gradeUniformsFor(const GradeValues &grade, const GradeWhe
 inline VEGradeUniforms gradeUniformsFor(const GradeValues &grade, const GradeWheels &wheels, const GradeCurves &curves,
                                         VEInt transfer) {
     VEGradeUniforms u = gradeUniformsFor(grade, wheels, transfer);
-    const GradeCurve rows[VEGradeTableRowCount] = {GradeCurve::Luma, GradeCurve::Red, GradeCurve::Green, GradeCurve::Blue};
-    for (int row = 0; row < VEGradeTableRowCount; ++row) {
-        if (!isIdentityCurve(curves[static_cast<std::size_t>(rows[row])])) {
-            u.curveMask |= 1u << row;
+    for (std::size_t curve = 0; curve < kGradeCurveCount; ++curve) {
+        if (!isIdentityCurve(curves[curve])) {
+            u.curveMask |= 1u << kToneCurveRows[curve];
         }
     }
     if (u.curveMask != 0u) {
@@ -435,15 +581,55 @@ inline VEGradeUniforms gradeUniformsFor(const GradeValues &grade, const GradeWhe
     return u;
 }
 
-// The CPU reference of the shader's grade with `u`'s values (unclamped; the shader then clamps to [0, 1]):
-// the extended grade when a slice 2 stage is set (with `tables`, gradeTableData's floats, when a stage reads
-// them), else the slice 1 grade.
-inline simd_float3 gradeReference(simd_float3 rgb, const VEGradeUniforms &u, const float *tables = nullptr) {
-    if (u.stages != 0u) {
-        if (tables != nullptr) {
-            return veGradeExtended(rgb, u, VEGradeTables{tables});
+// A LUT's domain as the shader maps it: its minimum and the scale 1 / (max - min) (in double).
+inline void lutDomainOf(const CubeLut &lut, VEFloat4 &minimum, VEFloat4 &scale) {
+    minimum = simd_make_float4(lut.domainMin[0], lut.domainMin[1], lut.domainMin[2], 0.0f);
+    scale = simd_make_float4(float(1.0 / (double(lut.domainMax[0]) - double(lut.domainMin[0]))),
+                             float(1.0 / (double(lut.domainMax[1]) - double(lut.domainMin[1]))),
+                             float(1.0 / (double(lut.domainMax[2]) - double(lut.domainMin[2]))), 0.0f);
+}
+
+// The uniforms of a whole grade: the wheels' and curves' (above), then each LUT's stage bit, domain and (3D)
+// size, and the look's strength.
+inline VEGradeUniforms gradeUniformsFor(const GradeValues &grade, const GradeWheels &wheels, const GradeCurves &curves,
+                                        const CubeLut *inputLut, const CubeLut *lookLut, double lookStrength,
+                                        VEInt transfer) {
+    VEGradeUniforms u = gradeUniformsFor(grade, wheels, curves, transfer);
+    u.lookStrength = 1.0f;
+    if (inputLut != nullptr) {
+        u.stages |= VEGradeStageInputLut;
+        lutDomainOf(*inputLut, u.inputDomainMin, u.inputDomainScale);
+        if (inputLut->kind == CubeKind::ThreeD) {
+            u.lutFlags |= VEGradeLutInputIs3D;
+            u.inputCubeSize = inputLut->size;
         }
-        return veGradeExtended(rgb, u, VENoGradeTables{});
+    }
+    if (lookLut != nullptr) {
+        u.stages |= VEGradeStageLookLut;
+        lutDomainOf(*lookLut, u.lookDomainMin, u.lookDomainScale);
+        if (lookLut->kind == CubeKind::ThreeD) {
+            u.lutFlags |= VEGradeLutLookIs3D;
+            u.lookCubeSize = lookLut->size;
+        }
+        u.lookStrength = float(std::clamp(lookStrength, 0.0, 1.0));
+    }
+    return u;
+}
+
+// The CPU reference of the shader's grade with `u`'s values (unclamped; the shader then clamps to [0, 1]):
+// the extended grade when a slice 2 stage is set (with `tables`, gradeTableData's floats, and the 3D LUTs'
+// tables when stages read them), else the slice 1 grade.
+inline simd_float3 gradeReference(simd_float3 rgb, const VEGradeUniforms &u, const float *tables = nullptr,
+                                  const CubeLut *inputLut = nullptr, const CubeLut *lookLut = nullptr) {
+    if (u.stages != 0u) {
+        const auto cubeOf = [](const CubeLut *lut) {
+            return lut != nullptr && lut->kind == CubeKind::ThreeD ? VEGradeCube{lut->table.data(), lut->size}
+                                                                   : VEGradeCube{};
+        };
+        if (tables != nullptr) {
+            return veGradeExtended(rgb, u, VEGradeTables{tables}, cubeOf(inputLut), cubeOf(lookLut));
+        }
+        return veGradeExtended(rgb, u, VENoGradeTables{}, cubeOf(inputLut), cubeOf(lookLut));
     }
     return veGrade(rgb, u.gain.x, u.gain.y, u.gain.z, u.saturation, u.contrast, u.contrastSlope, u.transfer);
 }

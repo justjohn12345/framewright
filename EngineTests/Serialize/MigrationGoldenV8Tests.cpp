@@ -144,7 +144,7 @@ TEST_CASE("Migration goldens v8: a version 7 file holding grades keeps them, by 
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
     // The step's warnings, then the parser's: the unknown parameter kept, the value limited, the sound
     // clip's grade dropped.
-    std::vector<std::string> expected = stepWarnings;
+    std::vector<std::string> expected = savedAs(stepWarnings, kVersion8, kProjectSchemaVersion);
     expected.push_back("sequences[0].videoTracks[0].clips[0].grade.lift: unknown grade parameter \"lift\" (from a "
                        "newer version of Framewright?); kept as it is and saved with the project, but not applied or "
                        "editable");
@@ -163,7 +163,7 @@ TEST_CASE("Migration goldens v8: a version 7 file holding grades keeps them, by 
     const json input = readJson(fixture.input);
     CHECK(saved.at("sequences")[0].at("videoTracks")[0].at("clips")[0].at("grade") ==
           input.at("sequences")[0].at("videoTracks")[0].at("clips")[0].at("grade"));
-    CHECK(saved.at("schemaVersion") == kVersion8);
+    CHECK(saved.at("schemaVersion") == kProjectSchemaVersion);
 }
 
 TEST_CASE("Migration goldens v8: a golden document loads as the project its older file loads as") {
@@ -175,7 +175,7 @@ TEST_CASE("Migration goldens v8: a golden document loads as the project its olde
         REQUIRE_MESSAGE(fromOlder.ok(), doctest::String(fromOlder.error.c_str()));
         REQUIRE_MESSAGE(fromGolden.ok(), doctest::String(fromGolden.error.c_str()));
         CHECK(*fromOlder.project == *fromGolden.project);
-        std::vector<std::string> expected = warningsOf(golden);
+        std::vector<std::string> expected = savedAs(warningsOf(golden), kVersion8, kProjectSchemaVersion);
         expected.insert(expected.end(), fromGolden.warnings.begin(), fromGolden.warnings.end());
         CHECK(fromOlder.warnings == expected);
     }

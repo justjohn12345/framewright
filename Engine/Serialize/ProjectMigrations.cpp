@@ -1280,6 +1280,42 @@ void migrate(json &document, const StepContext &context) {
 
 } // namespace toV8
 
+// ===== 8 -> 9 =====
+
+namespace toV9 {
+
+// Version 9 added the project's "luts" (the colour LUTs a clip's grade uses, a copy of each table) and a
+// clip grade's "inputLut", "lookLut" and "lookStrength". A version 8 file has none, so only the version
+// number changes. One that has them anyway (written by hand, or by a build between the two) keeps them,
+// with a warning (once for the table, once per clip), as the 7 -> 8 step does; the project is then saved in
+// the current version.
+void migrate(json &document, const StepContext &context) {
+    Node(document, "").requireObject();
+    const std::string saved = " is a version 9 feature in a project of an earlier version: kept, and the project is "
+                              "saved as version " +
+                              std::to_string(context.targetVersion);
+    if (document.find("luts") != document.end()) {
+        context.warnings.push_back("luts:" + saved);
+    }
+    forEachSequence(document, [&](json &sequence, const Node &node) {
+        forEachTrack(sequence, node, [&](json &track, const Node &trackNode, bool, std::size_t) {
+            forEachClip(track, trackNode, [&](json &clip, const Node &clipNode) {
+                const auto grade = clip.find("grade");
+                if (grade == clip.end() || !grade->is_object()) {
+                    return;
+                }
+                for (const char *key : {"inputLut", "lookLut", "lookStrength"}) {
+                    if (grade->find(key) != grade->end()) {
+                        context.warnings.push_back(clipNode.path() + ".grade." + key + ":" + saved);
+                    }
+                }
+            });
+        });
+    });
+}
+
+} // namespace toV9
+
 struct MigrationStep {
     int fromVersion;
     void (*apply)(json &document, const StepContext &context);
@@ -1288,7 +1324,7 @@ struct MigrationStep {
 // One entry per schema version bump, in order: entry i upgrades fromVersion to fromVersion + 1.
 constexpr MigrationStep kMigrations[] = {
     {1, toV2::migrate}, {2, toV3::migrate}, {3, toV4::migrate},
-    {4, toV5::migrate}, {5, toV6::migrate}, {6, toV7::migrate}, {7, toV8::migrate},
+    {4, toV5::migrate}, {5, toV6::migrate}, {6, toV7::migrate}, {7, toV8::migrate}, {8, toV9::migrate},
 };
 
 constexpr bool migrationsInOrder() {

@@ -14,7 +14,7 @@
 //   - tint: magenta (+) or green (-), a green gain, -100...100 (100: green down half a stop),
 //     normalised to keep luminance;
 //   - saturation: a mix toward BT.709 luminance (0 grey, 1 unchanged, 2 twice as saturated).
-// Slice 2 adds the colour wheels (GradeWheel) and the curves (GradeCurve), below.
+// Slice 2 adds the colour wheels (GradeWheel), the curves (GradeCurve) and the LUTs (CubeLut.h), below.
 //
 // Grades apply to pictures: only a clip on a video track may have one (validateSequence).
 //
@@ -209,6 +209,12 @@ struct ClipGrade {
     // The curves, indexed by GradeCurve: their points (none: the identity, the default; an identity curve is
     // always stored as none).
     GradeCurves curves{};
+    // The LUTs (slice 2), by content id in Project::luts ("" for none): the input conversion, applied to the
+    // source's R'G'B' before the grade (a camera's log to Rec. 709, say), and the look, applied after the grade
+    // and the curves, mixed with what it changes by `lookStrength` (0 to 1; 1 without a look).
+    std::string inputLut;
+    std::string lookLut;
+    double lookStrength = 1.0;
     // The entries of the file's "grade" this version does not read (a newer version's parameters), as
     // compact JSON text of an object, written back on save ("" when there are none; the foreign-content
     // rule of review core #9). They change nothing here.
@@ -237,8 +243,8 @@ struct ClipGrade {
         return curves[static_cast<std::size_t>(curve)];
     }
 
-    // Every value at its neutral value, every wheel neutral and every curve the identity (the foreign entries
-    // do not count: this version does not apply them). A neutral grade renders exactly as no grade.
+    // Every value at its neutral value, every wheel neutral, every curve the identity and no LUT (the foreign
+    // entries do not count: this version does not apply them). A neutral grade renders exactly as no grade.
     bool isNeutral() const;
     // Neutral and without foreign entries: nothing for the project file to keep.
     bool isEmpty() const {
@@ -251,7 +257,8 @@ struct ClipGrade {
 
 // Why `grade` is not valid (a value not finite or outside its range, naming the parameter and the
 // range; a wheel's level outside its limit or its colour outside the disk; a curve that is not valid or an
-// identity curve stored with points), or nullopt.
+// identity curve stored with points; a look strength outside [0, 1], or not 1 without a look), or nullopt.
+// (Whether the LUTs exist is the project's question: validateClip.)
 std::optional<std::string> gradeProblem(const ClipGrade &grade);
 
 } // namespace ve

@@ -1,8 +1,8 @@
 import FramewrightEngine
 import Foundation
 
-/// The editing logic of the Colour tab's slice 2 tools (the colour wheels and the curves), over the
-/// selection's video clips, as `InspectorModel` is for the inspector's rows: the values shown (agreeing or "mixed" across the
+/// The editing logic of the Colour tab's slice 2 tools (the colour wheels, the curves and the LUTs), over
+/// the selection's video clips, as `InspectorModel` is for the inspector's rows: the values shown (agreeing or "mixed" across the
 /// clips), and the edits, each one undo step: a wheel's colour or level dragged (a coalescing group from the
 /// press to the release), a reset. Moving a wheel's colour over several clips keeps each clip's level and
 /// the rest of its grade; moving its level keeps each colour (the engine's NaN fields).
@@ -163,6 +163,79 @@ final class GradeToolsModel: ObservableObject {
         let clips = videoTargets.map { NSNumber(value: $0.clipID) }
         guard !clips.isEmpty else { return }
         report(engine.resetGradeCurves(ofClips: clips))
+    }
+
+    // MARK: LUTs
+
+    /// A LUT slot: the input conversion (before the grade) or the look (after it).
+    enum LUTSlot {
+        case input
+        case look
+    }
+
+    /// The slot's LUT as the clips have it: the first clip's id ("" for none) and whether the clips differ.
+    func lut(_ slot: LUTSlot) -> (id: String, mixed: Bool) {
+        let ids = videoTargets.map { slot == .input ? $0.gradeInputLUTID : $0.gradeLookLUTID }
+        guard let first = ids.first else { return ("", false) }
+        return (first, ids.contains { $0 != first })
+    }
+
+    /// What to call the LUT of `id` ("None" for "").
+    func lutName(_ id: String) -> String {
+        guard !id.isEmpty else { return "None" }
+        return engine.lut(withID: id)?.displayName ?? "Unknown LUT"
+    }
+
+    /// The look's strength as the clips with a look have it (the first's, 1 when none has a look), and
+    /// whether they differ.
+    var lookStrength: (value: Double, mixed: Bool) {
+        let strengths = videoTargets.filter { !$0.gradeLookLUTID.isEmpty }.map(\.gradeLookStrength)
+        guard let first = strengths.first else { return (1, false) }
+        return (first, strengths.contains { $0 != first })
+    }
+
+    /// Imports the .cube file at `url` and sets it in `slot` on every target (one undo step). A file that
+    /// cannot be read or is not a LUT says why in the status line and changes nothing; returns whether it was
+    /// set.
+    @discardableResult
+    func importLUT(at url: URL, into slot: LUTSlot) -> Bool {
+        endDrag()
+        let info: VELUTInfo
+        do {
+            info = try engine.importLUT(at: url)
+        } catch {
+            store.statusMessage = error.localizedDescription
+            return false
+        }
+        return setLUT(info.lutID, slot)
+    }
+
+    /// Sets `id` ("" removes) in `slot` on every target (one undo step).
+    @discardableResult
+    func setLUT(_ id: String, _ slot: LUTSlot) -> Bool {
+        let clips = videoTargets.map { NSNumber(value: $0.clipID) }
+        guard !clips.isEmpty else { return false }
+        let result = slot == .input ? engine.setGradeInputLUT(id, clips: clips) : engine.setGradeLook(id, clips: clips)
+        report(result)
+        return result.ok
+    }
+
+    /// Starts a drag of the look's strength slider (one undo step).
+    func beginStrengthDrag() {
+        openDragGroup("colour.lookStrength")
+    }
+
+    /// Sets the look's strength (0 to 1) on every target with a look.
+    func setLookStrength(_ strength: Double) {
+        guard strength.isFinite else { return }
+        let clips = videoTargets.map { NSNumber(value: $0.clipID) }
+        guard !clips.isEmpty else { return }
+        let value = min(1, max(0, strength))
+        if let group = dragGroup {
+            report(engine.performInCoalescingGroup(group) { self.engine.setGradeLookStrength(value, clips: clips) })
+        } else {
+            report(engine.setGradeLookStrength(value, clips: clips))
+        }
     }
 
     private func apply(_ value: VEGradeWheelValue, _ wheel: VEGradeWheel) {

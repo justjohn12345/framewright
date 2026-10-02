@@ -3,7 +3,7 @@ import SwiftUI
 
 /// The Colour tab of the right-hand panel: the grading tools for the selected video clips. The basic grade
 /// (the inspector's Colour rows, the same `ParameterSection`, so both places edit the one grade), the
-/// colour wheels (lift, gamma, gain) and the curves (luma, red, green, blue).
+/// colour wheels (lift, gamma, gain), the curves (luma, red, green, blue) and the LUTs (input, look).
 ///
 /// Why a tab: three wheels with their level sliders need the panel's whole width and more height than the
 /// inspector's sections leave beside Video, Audio and Speed (the curves and LUTs of later slices too). The
@@ -26,6 +26,8 @@ struct ColourPanel: View {
                     wheels
                     Divider()
                     CurvesSection(tools: tools)
+                    Divider()
+                    LUTSection(tools: tools)
                 } else {
                     Text("Select a video clip to grade it.")
                         .foregroundStyle(.secondary)

@@ -70,6 +70,8 @@ WheelValue fromVE(const VEGradeWheelValue &value);
 /// The curve of a VEGradeCurve (nullopt outside the enum), and curve points both ways (NSValue-wrapped
 /// points).
 std::optional<GradeCurve> fromVE(VEGradeCurve curve);
+/// The description of the LUT `lut` stored under `lutId`.
+VELUTInfo *makeLUTInfo(const std::string &lutId, const CubeLut &lut);
 NSArray<NSValue *> *toVE(const CurvePoints &points);
 CurvePoints fromVE(NSArray<NSValue *> *points);
 

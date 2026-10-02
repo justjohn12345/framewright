@@ -198,11 +198,12 @@ static float4 gradeSample(float4 premultiplied, constant VEGradeUniforms &grade)
 }
 
 // The same with the slice 2 stages (the source's extended-grade function constant), reading the source's
-// grade tables.
-static float4 gradeSampleExtended(float4 premultiplied, constant VEGradeUniforms &grade, VEGradeTables tables) {
+// grade tables and 3D LUTs.
+static float4 gradeSampleExtended(float4 premultiplied, constant VEGradeUniforms &grade, VEGradeTables tables,
+                                  VEGradeCube inputCube, VEGradeCube lookCube) {
     const float alpha = premultiplied.a;
     const float3 colour = alpha > 0.0 ? premultiplied.rgb / alpha : float3(0.0);
-    const float3 graded = saturate(veGradeExtended(colour, grade, tables));
+    const float3 graded = saturate(veGradeExtended(colour, grade, tables, inputCube, lookCube));
     return float4(graded * alpha, alpha);
 }
 
@@ -215,6 +216,14 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
                                   VEGradeTables aTables [[texture(VETextureIndexAGradeTables),
                                                           function_constant(kSourceAHasExtendedGrade)]],
                                   VEGradeTables bTables [[texture(VETextureIndexBGradeTables),
+                                                          function_constant(kSourceBHasExtendedGrade)]],
+                                  VEGradeCube aInputCube [[texture(VETextureIndexAInputCube),
+                                                           function_constant(kSourceAHasExtendedGrade)]],
+                                  VEGradeCube aLookCube [[texture(VETextureIndexALookCube),
+                                                          function_constant(kSourceAHasExtendedGrade)]],
+                                  VEGradeCube bInputCube [[texture(VETextureIndexBInputCube),
+                                                           function_constant(kSourceBHasExtendedGrade)]],
+                                  VEGradeCube bLookCube [[texture(VETextureIndexBLookCube),
                                                           function_constant(kSourceBHasExtendedGrade)]]) {
     const float2 uvA = sourceUV(uniforms.a, in.framePosition);
     const float coverageA = edgeCoverage(uvA);
@@ -225,7 +234,7 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
         colorA = sampleRGBA(a0, uvA, uniforms.a, kSourceAHasGrade);
     }
     if (kSourceAHasExtendedGrade) {
-        colorA = gradeSampleExtended(colorA, uniforms.a.grade, aTables);
+        colorA = gradeSampleExtended(colorA, uniforms.a.grade, aTables, aInputCube, aLookCube);
     } else if (kSourceAHasGrade) {
         colorA = gradeSample(colorA, uniforms.a.grade);
     }
@@ -250,7 +259,7 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
         colorB = sampleRGBA(b0, uvB, uniforms.b, kSourceBHasGrade);
     }
     if (kSourceBHasExtendedGrade) {
-        colorB = gradeSampleExtended(colorB, uniforms.b.grade, bTables);
+        colorB = gradeSampleExtended(colorB, uniforms.b.grade, bTables, bInputCube, bLookCube);
     } else if (kSourceBHasGrade) {
         colorB = gradeSample(colorB, uniforms.b.grade);
     }
@@ -294,6 +303,22 @@ kernel void ve_grade_samples_tables(device const float4 *input [[buffer(0)]],
         return;
     }
     output[gid] = float4(veGradeExtended(input[gid].rgb, grade, tables), 0.0);
+}
+
+// The extended grade with its tables (texture 0) and 3D LUTs (textures 1 and 2: input, look), for the tests
+// of the LUT stages.
+kernel void ve_grade_samples_luts(device const float4 *input [[buffer(0)]],
+                                  device float4 *output [[buffer(1)]],
+                                  constant VEGradeUniforms &grade [[buffer(2)]],
+                                  constant uint &count [[buffer(3)]],
+                                  VEGradeTables tables [[texture(0)]],
+                                  VEGradeCube inputCube [[texture(1)]],
+                                  VEGradeCube lookCube [[texture(2)]],
+                                  uint gid [[thread_position_in_grid]]) {
+    if (gid >= count) {
+        return;
+    }
+    output[gid] = float4(veGradeExtended(input[gid].rgb, grade, tables, inputCube, lookCube), 0.0);
 }
 
 // MARK: - Minification

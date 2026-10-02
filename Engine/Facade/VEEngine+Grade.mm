@@ -114,6 +114,103 @@ using namespace ve::facade;
     return [self pushGradeChange:GradeChange::of(*gradeCurve, fromVE(points)) forClips:clipIDs name:{}];
 }
 
+// MARK: - LUTs
+
+- (nullable VELUTInfo *)importLUTAtURL:(NSURL *)url error:(NSError **)error {
+    VE_ASSERT_MAIN();
+    NSError *readError = nil;
+    NSData *data = url.isFileURL ? [NSData dataWithContentsOfURL:url options:0 error:&readError] : nil;
+    if (data == nil) {
+        if (error != nullptr) {
+            *error = makeError(VEEngineErrorImportFailed,
+                               [NSString stringWithFormat:@"“%@” cannot be read: %@", url.lastPathComponent,
+                                                          readError.localizedDescription ?: @"not a file"]);
+        }
+        return nil;
+    }
+    CubeParseResult parsed =
+        parseCube(std::string_view(static_cast<const char *>(data.bytes), static_cast<std::size_t>(data.length)));
+    if (!parsed.lut) {
+        if (error != nullptr) {
+            *error = makeError(VEEngineErrorImportFailed,
+                               [NSString stringWithFormat:@"“%@” is not a LUT Framewright can use: %@",
+                                                          url.lastPathComponent, toNS(parsed.error)]);
+        }
+        return nil;
+    }
+    CubeLut lut = std::move(*parsed.lut);
+    lut.fileName = url.lastPathComponent.UTF8String ?: "";
+    lut.sourcePath = url.path.UTF8String ?: "";
+    const std::string lutId = cubeContentId(lut);
+    if (const CubeLut *held = _project.findLut(lutId)) {
+        return makeLUTInfo(lutId, *held);
+    }
+    auto [entry, inserted] = _importedLuts.emplace(lutId, std::make_shared<const CubeLut>(std::move(lut)));
+    return makeLUTInfo(lutId, *entry->second);
+}
+
+/// The LUT of `lutId`: the project's, else one imported this session (nullptr for neither).
+- (std::shared_ptr<const CubeLut>)heldLut:(const std::string &)lutId {
+    if (const auto found = _project.luts.find(lutId); found != _project.luts.end()) {
+        return found->second;
+    }
+    if (const auto found = _importedLuts.find(lutId); found != _importedLuts.end()) {
+        return found->second;
+    }
+    return nullptr;
+}
+
+- (nullable VELUTInfo *)lutWithID:(NSString *)lutID {
+    VE_ASSERT_MAIN();
+    const std::string lutId = lutID.UTF8String ?: "";
+    const std::shared_ptr<const CubeLut> lut = [self heldLut:lutId];
+    return lut ? makeLUTInfo(lutId, *lut) : nil;
+}
+
+/// Sets the input LUT (`input`) or the look of the clips: a SetClipGrade, wrapped to add the LUT to the
+/// project when it holds it not yet.
+- (VEEditResult *)setLut:(nullable NSString *)lutID input:(BOOL)input clips:(NSArray<NSNumber *> *)clipIDs {
+    VE_ASSERT_MAIN();
+    const std::string lutId = lutID.UTF8String ?: "";
+    GradeChange change;
+    (input ? change.inputLut : change.lookLut) = lutId;
+    std::shared_ptr<const CubeLut> lut;
+    if (!lutId.empty()) {
+        lut = [self heldLut:lutId];
+        if (!lut) {
+            return [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                         message:@"That LUT is not in the project; import it first."];
+        }
+    }
+    VEEditResult *refusal = nil;
+    std::vector<ClipId> clips = [self gradeEditClips:clipIDs refusal:&refusal];
+    if (clips.empty()) {
+        return refusal;
+    }
+    auto grade = std::make_unique<SetClipGrade>([self sequenceId], std::move(clips), std::move(change));
+    if (!lut) {
+        return [self push:std::move(grade) created:nil];
+    }
+    return [self push:std::make_unique<SetClipGradeWithLuts>(std::vector<std::shared_ptr<const CubeLut>>{lut},
+                                                              std::move(grade))
+              created:nil];
+}
+
+- (VEEditResult *)setGradeInputLUT:(nullable NSString *)lutID clips:(NSArray<NSNumber *> *)clipIDs {
+    return [self setLut:lutID input:YES clips:clipIDs];
+}
+
+- (VEEditResult *)setGradeLook:(nullable NSString *)lutID clips:(NSArray<NSNumber *> *)clipIDs {
+    return [self setLut:lutID input:NO clips:clipIDs];
+}
+
+- (VEEditResult *)setGradeLookStrength:(double)strength clips:(NSArray<NSNumber *> *)clipIDs {
+    VE_ASSERT_MAIN();
+    GradeChange change;
+    change.lookStrength = strength;
+    return [self pushGradeChange:std::move(change) forClips:clipIDs name:{}];
+}
+
 - (VEEditResult *)resetGradeCurvesOfClips:(NSArray<NSNumber *> *)clipIDs {
     VE_ASSERT_MAIN();
     GradeChange change;
@@ -151,6 +248,14 @@ using namespace ve::facade;
         return NO;
     }
     _copiedGrade = track->find(id)->grade;
+    _copiedLuts.clear();
+    for (const std::string *lut : {&_copiedGrade->inputLut, &_copiedGrade->lookLut}) {
+        if (!lut->empty()) {
+            if (const auto found = _project.luts.find(*lut); found != _project.luts.end()) {
+                _copiedLuts.push_back(found->second);
+            }
+        }
+    }
     return YES;
 }
 
@@ -169,7 +274,18 @@ using namespace ve::facade;
     if (!_copiedGrade) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"No grade has been copied."];
     }
-    return [self pushGradeChange:GradeChange::whole(*_copiedGrade) forClips:clipIDs name:"Paste Grade"];
+    if (_copiedLuts.empty()) {
+        return [self pushGradeChange:GradeChange::whole(*_copiedGrade) forClips:clipIDs name:"Paste Grade"];
+    }
+    // The copied grade's LUTs go with it, into another project too.
+    VEEditResult *refusal = nil;
+    std::vector<ClipId> clips = [self gradeEditClips:clipIDs refusal:&refusal];
+    if (clips.empty()) {
+        return refusal;
+    }
+    auto grade = std::make_unique<SetClipGrade>([self sequenceId], std::move(clips), GradeChange::whole(*_copiedGrade),
+                                                "Paste Grade");
+    return [self push:std::make_unique<SetClipGradeWithLuts>(_copiedLuts, std::move(grade)) created:nil];
 }
 
 - (VEEditResult *)resetGradeOfClips:(NSArray<NSNumber *> *)clipIDs {

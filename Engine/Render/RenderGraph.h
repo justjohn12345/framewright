@@ -5,6 +5,7 @@
 #pragma once
 
 #include "../Model/Clip.h"
+#include "../Model/CubeLut.h"
 #include "../Model/Ids.h"
 #include "../Model/TimeUtil.h"
 #include "../Model/Transition.h"
@@ -13,7 +14,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace ve {
@@ -133,6 +136,13 @@ struct VideoLayer {
     // The grade's curves (slice 2); the identity by default. A layer with a curve is graded with the extended
     // grade, reading the curves' tables.
     GradeCurves gradeCurves{};
+    // The grade's LUTs (slice 2; Project::luts' tables, shared) with their content ids, and the look's
+    // strength. A layer with a LUT is graded with the extended grade.
+    std::shared_ptr<const CubeLut> gradeInputLut;
+    std::shared_ptr<const CubeLut> gradeLookLut;
+    std::string gradeInputLutId;
+    std::string gradeLookLutId;
+    double gradeLookStrength = 1.0;
     std::optional<LayerTransition> transition;
 };
 

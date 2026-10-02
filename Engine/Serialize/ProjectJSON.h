@@ -1,8 +1,11 @@
 // Project file serialization (JSON via nlohmann/json).
 //
-// Format (schema version 8): a top-level object with "schemaVersion" (kProjectSchemaVersion),
-// "name", "nextId", "activeSequenceId", "assets", "sequences" and "sharpenScaledDownSources"
-// (Project.h). A sequence holds its settings ("frameDuration", "width", "height",
+// Format (schema version 9): a top-level object with "schemaVersion" (kProjectSchemaVersion),
+// "name", "nextId", "activeSequenceId", "assets", "sequences", "sharpenScaledDownSources"
+// (Project.h) and "luts" (left out when no clip uses a LUT): the colour LUTs the clips' grades use, each
+// {"id" (its content id, cubeContentId), "kind": "1d" | "3d", "size", "domainMin", "domainMax" ([r, g, b]),
+// "title", "fileName", "path" (where it was imported from, for display), "data" (the table, red fastest,
+// RGB float32 little-endian, base64)}. A sequence holds its settings ("frameDuration", "width", "height",
 // "audioSampleRate", and "configured": false while a new project's sequence waits for its first
 // video clip, Sequence.h) and its tracks. A missing "configured" or "sharpenScaledDownSources"
 // reads as true. CMTime is {"value",
@@ -13,7 +16,10 @@
 // times are clip times, Clip.h "Reverse"). Its "video" object holds the static Motion values and
 // "audio" its "gainDb"; "grade" (a clip on a video track; left out when every value is neutral and
 // nothing foreign is kept) its colour grade, {"exposure" | "contrast" | "temperature" | "tint" |
-// "saturation": number} with the values that are not neutral (ClipGrade.h); "spans"
+// "saturation": number} with the values that are not neutral (ClipGrade.h), plus the slice 2 keys: the
+// wheels "liftLevel", "liftCb", "liftCr", "gammaLevel", ... (numbers, when not 0), the curves "curveLuma",
+// "curveRed", "curveGreen", "curveBlue" (lists of [x, y], when not the identity), "inputLut" and "lookLut"
+// (ids into "luts") and "lookStrength" (0 to 1, when a look is set and the strength is not 1); "spans"
 // (left out when empty) lists its spans in one list, its transitions (Clip::transitions, lane 0) then
 // its effect spans (EffectSpan.h): {"id", "lane", "kind": "transition"
 // | "motion" | "opacity" | "gain", "start", "end"} plus, for a transition, "edge": "head" | "tail"
@@ -55,7 +61,7 @@
 
 namespace ve {
 
-inline constexpr int kProjectSchemaVersion = 8;
+inline constexpr int kProjectSchemaVersion = 9;
 
 nlohmann::json projectToJson(const Project &project);
 

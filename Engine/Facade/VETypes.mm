@@ -85,6 +85,16 @@ void VEGradeParamsSetValue(VEGradeParams *params, double value, VEGradeParameter
 - (instancetype)initInternal;
 @end
 
+@interface VELUTInfo ()
+@property (nonatomic, readwrite, copy) NSString *lutID;
+@property (nonatomic, readwrite, copy) NSString *displayName;
+@property (nonatomic, readwrite, copy) NSString *fileName;
+@property (nonatomic, readwrite, copy) NSString *sourcePath;
+@property (nonatomic, readwrite) VELUTKind kind;
+@property (nonatomic, readwrite) NSInteger size;
+- (instancetype)initInternal;
+@end
+
 @interface VEGradeCurveInfo ()
 @property (nonatomic, readwrite) VEGradeCurve curve;
 @property (nonatomic, readwrite, copy) NSString *name;
@@ -99,6 +109,9 @@ void VEGradeParamsSetValue(VEGradeParams *params, double value, VEGradeParameter
     std::array<bool, ve::kGradeWheelCount> _wheelMixed;
     std::array<std::optional<ve::CurvePoints>, ve::kGradeCurveCount> _curves;
     std::array<bool, ve::kGradeCurveCount> _curveMixed;
+    std::optional<std::string> _inputLut;
+    std::optional<std::string> _lookLut;
+    std::optional<double> _lookStrength;
 }
 @property (nonatomic, readwrite, copy) NSArray<NSNumber *> *clipIDs;
 @property (nonatomic, readwrite) VEGradeParams values;
@@ -461,6 +474,25 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
     const auto gradeCurve = ve::facade::fromVE(curve);
     return gradeCurve && _curveMixed[static_cast<std::size_t>(*gradeCurve)];
 }
+- (nullable NSString *)inputLUTID {
+    return _inputLut ? ve::facade::toNS(*_inputLut) : nil;
+}
+- (nullable NSString *)lookLUTID {
+    return _lookLut ? ve::facade::toNS(*_lookLut) : nil;
+}
+- (double)lookStrength {
+    return _lookStrength.value_or(std::numeric_limits<double>::quiet_NaN());
+}
+@end
+
+@implementation VELUTInfo
+- (instancetype)initInternal {
+    return [super init];
+}
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<VELUTInfo %@ %@ %ldD size %ld>", self.lutID, self.displayName, long(self.kind),
+                                      long(self.size)];
+}
 @end
 
 @implementation VEGradeCurveInfo
@@ -545,6 +577,15 @@ void VEGradeCurveSample(NSArray<NSValue *> *points, double *samples, NSInteger c
 - (NSArray<NSValue *> *)gradeCurvePoints:(VEGradeCurve)curve {
     const auto gradeCurve = ve::facade::fromVE(curve);
     return gradeCurve ? ve::facade::toVE(_clip.grade[*gradeCurve]) : @[];
+}
+- (NSString *)gradeInputLUTID {
+    return ve::facade::toNS(_clip.grade.inputLut);
+}
+- (NSString *)gradeLookLUTID {
+    return ve::facade::toNS(_clip.grade.lookLut);
+}
+- (double)gradeLookStrength {
+    return _clip.grade.lookStrength;
 }
 - (BOOL)hasEffectSpans {
     return _clip.hasEffectSpans();
@@ -1116,6 +1157,24 @@ static_assert(static_cast<int>(GradeCurve::Green) == VEGradeCurveGreen);
 static_assert(static_cast<int>(GradeCurve::Blue) == VEGradeCurveBlue);
 static_assert(kGradeCurveCount == 4, "VEGradeCurve names every GradeCurve");
 
+VELUTInfo *makeLUTInfo(const std::string &lutId, const CubeLut &lut) {
+    VELUTInfo *info = [[VELUTInfo alloc] initInternal];
+    info.lutID = toNS(lutId);
+    std::string name = lut.title;
+    if (name.empty()) {
+        name = lut.fileName;
+        if (const auto dot = name.find_last_of('.'); dot != std::string::npos && dot > 0) {
+            name.resize(dot);
+        }
+    }
+    info.displayName = toNS(name);
+    info.fileName = toNS(lut.fileName);
+    info.sourcePath = toNS(lut.sourcePath);
+    info.kind = lut.kind == CubeKind::OneD ? VELUTKind1D : VELUTKind3D;
+    info.size = NSInteger(lut.size);
+    return info;
+}
+
 std::optional<GradeCurve> fromVE(VEGradeCurve curve) {
     if (curve < VEGradeCurveLuma || curve > VEGradeCurveBlue) {
         return std::nullopt;
@@ -1201,6 +1260,9 @@ VEGradeSelection *makeGradeSelection(const GradeSummary &summary) {
     selection->_wheelMixed = summary.wheelMixed;
     selection->_curves = summary.curves;
     selection->_curveMixed = summary.curveMixed;
+    selection->_inputLut = summary.inputLut;
+    selection->_lookLut = summary.lookLut;
+    selection->_lookStrength = summary.lookStrength;
     selection.anyGraded = summary.anyGraded;
     selection.identical = summary.identical;
     return selection;

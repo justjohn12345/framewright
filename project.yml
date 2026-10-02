@@ -152,6 +152,8 @@ targets:
           # The version 8 migration goldens share their names with the version 7 ones beside them;
           # the tests read every golden from the source tree (__FILE__), so they need no bundle copy.
           - "Serialize/golden/v8/**"
+          # Likewise the version 9 goldens.
+          - "Serialize/golden/v9/**"
     dependencies:
       - target: FramewrightEngine
       - sdk: Metal.framework
