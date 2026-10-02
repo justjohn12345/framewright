@@ -1271,12 +1271,26 @@ Done:
     0), where the shader limits both to 0; a rendered picture equals the reference within 1e-4),
     `VEEngineGradeCurveTests testHueCurves`; AppTests `CurveEditorTests` (+2).
 
+- B5, the vectorscope: dd1ba18. `Engine/Render/Vectorscope.h`: each sampled pixel's BT.709 chroma (Cb =
+  (B' - Y') / 1.8556 across, Cr = (R' - Y') / 1.5748 up, of R'G'B' limited to [0, 1]) counted in a 256 x 256 grid
+  (up to 540 evenly spaced rows of every column; a SIMD group whose samples share a bin adds them with one
+  atomic, so a flat picture costs one atomic per group; the clipping counters on the same samples). The display
+  draws a square centred in the view (chroma -0.5 to 0.5 on each axis, the brightest bin under each pixel),
+  over the ring at chroma 0.5, the crosshair, boxes at the 75 % colour bars' chroma (`Vectorscope::barTargets`:
+  red, magenta, blue, cyan, green, yellow) and the skin tone line (123 degrees from the Cb axis).
+  `VEScopeModeVectorscope` (VEWaveformView.h addition); `ScopeMode.vectorscope` in the panel's menu and View >
+  Scope. Measured (into a 1200 x 676 panel): 0.07-0.26 ms at 1080p, 0.16-0.20 ms at 2160p. Tests:
+  `VectorscopeTests` (5: 75 % colour bars in their targets' bins and grey at the centre, every sample counted
+  once, a flat picture, the frame rectangle and the 540-row sampling, the clipping counters, the display's
+  trace in a bar's box, the ring, the skin line and black outside the square, the view's reader in vectorscope
+  mode, the cost); `ScopePanelTests` (the mode reaches the view, the menu lists three).
+
 Deviations:
 - B1 and B2 are one commit: B2's model and shader work began in the files B1 had changed before B1 was
   committed (B1 had passed its own tests and a full suite: EngineTests 610, doctest 404, AppTests 302), and
   splitting the shared files afterwards was riskier than committing both.
 
-Next: B5 vectorscope, then the final verification (full suite, ThreadSanitizer, StressTests).
+Next: the final verification (full suite, ThreadSanitizer, StressTests).
 Not in this round (next): P3/BT.2020 primaries (a separate decision), HDR export, HLG tone mapping, grades that
 change over time, match colour.
 

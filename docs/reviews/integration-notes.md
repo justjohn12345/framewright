@@ -1977,7 +1977,7 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
 
 ## Scopes and colour grading slice 2 (2026-10-02; status in `open-findings.md`)
 - Scopes: `VEWaveformView` is the program monitor's scope view (the class kept its slice 1 name), with `mode`
-  (waveform, histogram, vectorscope when B5 lands) and `histogramStyle`. A new scope follows `Histogram.h`: a
+  (waveform, histogram, vectorscope) and `histogramStyle`. A new scope follows `Histogram.h` or `Vectorscope.h`: a
   counts pass over the reader's frame rectangle of the RGBA16Float working texture, which also counts the
   clipping counters into a `ScopeStatsRing` slot (`countClipping` in Shaders.metal; never a second read of the
   frame), and a display pass into the view's drawable, both in the program frame's command buffer.
@@ -2012,7 +2012,9 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
      narrow window; the placement menu forces either); drag its divider to resize it; relaunch: mode, style,
      placement and width are remembered. Waveform: one column per picture column (compare a vertical edge in
      the picture with the trace). Histogram: RGB + Luma, Luma and RGB Parade; a black or white frame gives a
-     spike at the end that reaches the top while the rest stays readable.
+     spike at the end that reaches the top while the rest stays readable. Vectorscope: colour bars (or a
+     test chart) land in the boxes; skin tones lie along the line toward the upper left; a white-balance shift
+     moves the cloud off the centre.
   2. Clipping: raise exposure until highlights clip: the red up-triangle shows a percentage; lower it until
      shadows crush: the blue down-triangle. The triangle button tints the program monitor's clipped pixels red
      and blue (never the letterbox bars, the second display or an export); it is off again after relaunch and
