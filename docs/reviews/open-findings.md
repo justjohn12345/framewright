@@ -652,19 +652,47 @@ Done:
   tone mapped (as before). Full suite after this item (before the test fix above): EngineTests 563, the
   only failure that test, AppTests 279 (1 known skip), doctest 349.
 
-In progress:
-- 4, split `EffectSpan` into effect and transition types (review 1.9). Step 1 done: 4da7893, a clip keeps
-  its transitions apart (`Clip::transitions`, lane 0, at most one per edge; `Clip::spans`, lanes 1-3), the
-  element type still `EffectSpan` behind a `TransitionSpan` alias. The project file keeps one "spans" list
-  (the parser routes, the writer writes the transitions first as the sorted list had them, repairSequence
-  repairs and warns in the file's order). Full suite green after it (EngineTests 564, doctest 349, AppTests
-  279 with 1 known skip). Tests changed (container only: they put transitions into, took them out of, or
-  indexed them in `Clip::spans`): AudioMixerTests.mm, ClipOpsTests, EditPropertyTests, EffectsEditTests,
-  ReverseTests (transitions compared like spans), SequenceFormatTests, TransitionFadeEditTests,
-  TransitionFittingTests, TransitionTrackOpsTests, ExportJobTests.mm, ModelFixtures.h, ModelTests,
-  PlaybackTestSupport.mm, SchedulerSpanTests, TransitionShapeTests.mm, ProjectJSONTests,
-  HourExportStressTests.mm. Next: step 2, `TransitionSpan` a type of its own (no lane, tracks or effect
-  kind; `EffectSpan` without edge, transition kind and `isTransition()`).
+- 4, split `EffectSpan` into effect and transition types (review 1.9): 4da7893 (step 1, containers) and
+  520e7c0 (step 2, types). A clip keeps `transitions` (lane 0, at most one per edge, the head's first) apart
+  from `spans` (lanes 1-3). `TransitionSpan` (EffectSpan.h): id, edge, start/end offsets from the edge,
+  `kind` (TransitionKind), `unknownKindName` (a newer version's kind kept by name) and `foreignFields`
+  (its unknown keys); lane 0 is a constant, so it has no lane, keyframes, effect kind or `ForeignSpanContent`
+  of its own. `EffectSpan` lost `edge`, `transition`, `unknownTransitionName` and `isTransition()`;
+  `SpanKind::Transition` stays in the kind table (the descriptor tables keep the kinds and parameters) as the
+  project file's name of a transition. Lookups by id are per kind (`Clip`/`Sequence::findSpan`,
+  `findTransition`, `hasSpan`); `placeTransition`, `checkTransitionSpan`, `linkedTransition`, `ClipIndex::
+  linkedTransition`, the conform helpers, `spanTimelineRange` and the facade's `makeEffectSpan` (overloads)
+  take a `TransitionSpan`. Where an id of either kind arrives the transition is looked up first, so every
+  refusal keeps its text (span edits: "... is a transition; change it with the transition edits"; matching:
+  "a transition has no values to match"; Ken Burns: "the Ken Burns move needs a Motion span", now
+  `kenBurnsNeedsMotionSpan()`, used by `planKenBurns` too; Continue on Next Clip). The project file keeps one
+  "spans" list: the parser reads each element into either type (`ParsedSpan`, with the lane the file gave
+  it), the writer writes the transitions first as the sorted list had them, and repairSequence repairs and
+  warns in the file's order (a transition's lane comes from the file). Proof of no change: JSON and golden
+  files unchanged (the migration goldens and every round trip pass), the facade API unchanged, and the
+  full suite green after each step: EngineTests 564 (0 skips), doctest 349, AppTests 279 (1 known skip), no
+  files left (one empty UUID-named directory per full run at the container's root, as before this round).
+  Tests changed (named; container or type changes only, except the three removals):
+  - step 1 (where tests put transitions into, took them out of, or indexed them in `Clip::spans`):
+    AudioMixerTests.mm, ClipOpsTests, EditPropertyTests, EffectsEditTests, ReverseTests (transitions
+    compared numerically like spans), SequenceFormatTests, TransitionFadeEditTests, TransitionFittingTests,
+    TransitionTrackOpsTests, ExportJobTests.mm, ModelFixtures.h, ModelTests, PlaybackTestSupport.mm,
+    SchedulerSpanTests, TransitionShapeTests.mm, ProjectJSONTests, HourExportStressTests.mm; where a check
+    that a clip "owns nothing" or has "no fade" read `spans.empty()`, it now reads both lists.
+  - step 2 (the new type and lookups: `TransitionSpan` declarations, `.kind`/`.unknownKindName`/
+    `.foreignFields`, `findTransition`, the fixtures' new `transition(id)`): AudioMixerTests.mm,
+    ClipOpsTests, EditPropertyTests, LockedTrackTests, ReverseTests, SequenceFormatTests,
+    TransitionFadeEditTests, TransitionFittingTests, TransitionTrackOpsTests (the linked-transition loop
+    walks transitions; effect spans are checked to have none), ExportJobTests.mm, ExportParityTests.mm,
+    EffectSpanTests, ModelFixtures.h, ModelTests, PlaybackTestSupport.mm, SchedulerSpanTests,
+    SchedulerTests, TransitionShapeTests.mm, ProjectJSONTests, HourExportStressTests.mm.
+  - removed, as the types can no longer express the state they checked: EffectSpanTests "track
+    validation" subcase "a transition with keyframes" (`spanTracksProblem` of a transition), EffectSpanTests
+    "lane rules" (a fade moved to lane 2: "a transition lies on lane 0 only") and "hold after" (a fade's
+    `spanActsAt`), ModelTests "validateProject catches broken invariants" (a transition on lane 1). The
+    file-repair path for a transition on another lane is still covered by ProjectJSONTests.
+
+Next: item 5 (`TransitionRules::edgeRoom`).
 
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
