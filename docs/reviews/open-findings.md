@@ -1331,15 +1331,16 @@ machine paths in the commits, and the wheels' power follows the section 2 rule (
 a straight line below). Colour grading slice 1 and the colour-panel fixes were accepted earlier the same day.
 
 ## Where things stand (handover, 2026-10-02)
-- **Pushed:** `origin/main` is at 9127327 (the colour grading prerequisites). **Not pushed:** colour grading
-  slice 1, the colour-panel fixes, and scopes plus slice 2 (31 commits, 96e2cd5..950bf39 and the lead's docs
-  commit after them). The last release is 0.1.8 (18bb9fd); 0.1.9 has not been cut.
+- **Pushed and released:** colour grading slices 1 and 2 and the scopes shipped in 0.1.9 (e9aeafa). The user's
+  hand test of them found three problems, fixed in 0221e41, bff9d3e and 5e22e7c and released as 0.1.10: curve
+  points vanished on release (the Curves and LUTs sections did not redraw after an edit), the LUT rows did not name
+  the chosen file, and the wheels were drawn washed out. Left from that test: the curve editor's hue strip still
+  uses the old pastel hues.
 - **Next, in the order the user has leaned towards:**
-  1. The user tries slice 1 and 2 by hand (lists in integration-notes).
-  2. Push and cut 0.1.9.
-  3. HLG display (tone map) and the P3/BT.2020 primaries decision.
-  4. The transition library and the Effects browser (plan items 28-29).
-  5. The safety-and-basics round from `docs/plans/2026-10-01-premiere-lite-feature-gap.md` (autosave, relink,
+  1. The user finishes the hand test of slices 1 and 2 (lists in integration-notes).
+  2. HLG display (tone map) and the P3/BT.2020 primaries decision.
+  3. The transition library and the Effects browser (plan items 28-29).
+  4. The safety-and-basics round from `docs/plans/2026-10-01-premiere-lite-feature-gap.md` (autosave, relink,
      copy/paste, markers, Export Frame, meters, bins).
 - **Open small items:** the empty per-process directory each test run leaves at the app container's root; the
   flaky `ExportParityTests testAReversedClipPlaysTheSoundTheExportWrites` and the `ExportJobTests` progress
