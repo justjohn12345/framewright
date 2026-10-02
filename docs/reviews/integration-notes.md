@@ -1974,3 +1974,57 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
      it; reopening the app remembers it.
   7. Save and reopen a graded project: the grades come back; open the file in a text editor: `"grade"` only on
      the graded clips, `"schemaVersion": 8`.
+
+## Scopes and colour grading slice 2 (2026-10-02; status in `open-findings.md`)
+- Scopes: `VEWaveformView` is the program monitor's scope view (the class kept its slice 1 name), with `mode`
+  (waveform, histogram, vectorscope when B5 lands) and `histogramStyle`. A new scope follows `Histogram.h`: a
+  counts pass over the reader's frame rectangle of the RGBA16Float working texture, which also counts the
+  clipping counters into a `ScopeStatsRing` slot (`countClipping` in Shaders.metal; never a second read of the
+  frame), and a display pass into the view's drawable, both in the program frame's command buffer.
+- The clipping rule (scopes and the monitor overlay alike): a channel at or above 1 - 2^-12 is clipped white,
+  at or below 2^-12 clipped black (`kVEScopeClipTolerance`). The overlay is `VEEngine.showsClippingOverlay`, a
+  function constant of the monitors' output pass that only the program monitor sets; the plain output fragment
+  is specialised too (a function with a function constant must be).
+- App layout: `ScopeLayout.arrange` places the panel (pure, tested); the program monitor, the divider and the
+  panel share one ZStack placed by padding, so the monitor's view (and its engine attachment) survives the
+  panel coming and going. The layout keys: `layout.scopeMode`, `.histogramStyle`, `.scopePlacement`,
+  `.scopeWidth` (and slice 1's `layout.showsWaveform`, which now means "the scope panel shows").
+- The grade has three more parts, each with its own table rather than rows of the slice 1 parameter table (its
+  tests pin five rows, and "lift" and "curves" are its examples of a newer version's unknown keys): the wheels
+  (`GradeWheel`, flat keys "liftLevel" ...), the tone curves (`GradeCurve`, "curveLuma" ...) and the LUTs
+  (`inputLut`, `lookLut`, `lookStrength`, with the tables in `Project::luts`). A new grade part: its model and
+  table in `ClipGrade.h`, its keys in `gradeToJson` / `parseGrade` (flat keys, so an older build keeps them as
+  foreign entries; a project-level table needs a schema bump), its field of `GradeChange` (with `appliedTo`,
+  the name and the coalescing key), `GradeSummary`, the facade's converters, its stage in `veGradeExtended`
+  with a `VEGradeStage` bit and its uniforms in whole 16-byte rows, `gradeUniformsFor`, and the CPU reference.
+- Rendering: a graded source uses the extended grade (`VEFunctionConstantSourceAHasExtendedGrade` / `...B`)
+  only when a slice 2 part is in use; inside it each stage is skipped by its uniform bit, so ungraded and
+  slice 1 grades run exactly the code they ran before. An extended draw binds the source's grade tables
+  (R32Float, `kVEGradeTableWidth` x `VEGradeTableRowCount`: tone curves, 1D LUT rows) and two 3D LUT textures
+  (stand-ins when unused); the compositor caches them (tables by curves and 1D LUT ids, cubes by id).
+  `ve_grade_samples`, `ve_grade_samples_tables` and `ve_grade_samples_luts` are test kernels.
+- Schema 9 (`toV9` frozen, goldens in `EngineTests/Serialize/golden/v9/`). A schema 10 step follows the same
+  pattern (a `v10/` directory, goldens derived from the v9 ones and checked against the engine).
+- The model still changes only through commands: `SetClipGradeWithLuts` adds the LUTs a grade change needs and
+  removes them on undo; `importLUTAtURL:` only parses and keeps the table on the engine until a command uses it.
+- What to check by hand in the app:
+  1. Scopes: View > Show Scopes opens the panel wide and short beside the program monitor (below it in a tall,
+     narrow window; the placement menu forces either); drag its divider to resize it; relaunch: mode, style,
+     placement and width are remembered. Waveform: one column per picture column (compare a vertical edge in
+     the picture with the trace). Histogram: RGB + Luma, Luma and RGB Parade; a black or white frame gives a
+     spike at the end that reaches the top while the rest stays readable.
+  2. Clipping: raise exposure until highlights clip: the red up-triangle shows a percentage; lower it until
+     shadows crush: the blue down-triangle. The triangle button tints the program monitor's clipped pixels red
+     and blue (never the letterbox bars, the second display or an export); it is off again after relaunch and
+     after Reset Window Layout. Playback updates the percentages without stutter.
+  3. The Colour tab (right panel): the basic rows (the same as the inspector's), the wheels (drag a puck toward
+     a colour; Option for fine control; the slider for the level; reset buttons; several clips with different
+     wheels show "Mixed"), and Undo after each drag (one step).
+  4. Curves: click to add a point, drag it, drag it out of the square or select it and press Delete; Luma keeps
+     the colours while changing brightness, Red/Green/Blue tint; Reset and Reset All.
+  5. LUTs: Choose… a .cube file as Input (a camera log to Rec. 709 LUT should normalise log footage) and as Look
+     (a creative LUT) with Strength; a broken file says why in the status line; save, move or delete the .cube
+     file, reopen the project: the LUTs are still applied (the project holds a copy). Copy Grade on a clip with
+     a LUT, File > New, import media, Paste Grade: the LUT comes along.
+  6. Export a graded sequence (wheels, curves, LUTs) and compare with the program monitor.
+  7. Open a version 9 project in the previous release: it is refused as too new (instead of losing its LUTs).
