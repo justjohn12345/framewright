@@ -968,7 +968,32 @@ Done:
   12 frames (5 in the dissolve): luma within 0.93 codes per 16x16 block (bound 1.5), mean difference 0.25-0.73
   (bound 1), the worst single red or blue block 7.7 (the codec's chroma halving beside a saturated edge; the
   first parity test's bound 12), while grading moved the picture by 22-40 codes per block; every layer carries
-  its clip's grade.
+  its clip's grade. Full suite after this item: TEST SUCCEEDED, EngineTests 583 (3 display-link
+  skips), doctest 393, AppTests 279 (1 known skip); no files left (one UUID-named directory at the container's
+  root per run, the known pattern).
+
+- 6, the colour panel: 8d16b30. A Colour section in the inspector, below Video (justification: a grade is a
+  property of the clip as its Motion is, decision section 7, so it sits beside Motion with the same rows,
+  multi-selection rules, typed values, nudges, slider drags and resets; a separate tab would duplicate that
+  machinery for five sliders; slice 2's wheels, curves and scopes may want a tab). The rows are five new cases of
+  the existing `InspectorParameter` table (no third table, review 1.11): their section, name, unit, neutral
+  value and range come from the engine's grade table through `VEGradeParameterInfo` (read once); typed units
+  "stops" and "×"/"x"; a nudge moves a tenth of a stop of exposure and a hundredth of contrast and saturation
+  (`nudgeStep`, 1 for every other row). One clip: its grade; several: each row shows the value where the
+  clips agree and the "Mixed" placeholder where they differ (the same per-clip comparison the Video rows use;
+  the engine's `grade(ofClips:)` agrees, tested); moving a row sets that one parameter on every selected video
+  clip in one undo step (`setGradeValue`; a mixed row's nudge starts from the value it shows), the clips' other
+  grade parameters kept; linked sound in the selection is left out. The section's Reset is Reset Grade; it also
+  has Copy and Paste buttons. Clip menu: Copy Grade (⌥⌘C, free), Paste Grade (⌥⌘V, free), Reset Grade, each
+  enabled as it applies (`canCopyGrade`, `canPasteGrade`, `canResetGrade`); the same three in a video clip's
+  context menu. Copy takes the earliest selected video clip and says whose grade was copied. Tests:
+  `ColourPanelTests` (6: the rows from the engine table, one clip and mixed display, a multi-clip set with undo
+  and typed values with units and limits, nudges in the grade's steps and a drag as one undo step, resets and
+  copy/paste with the menus' enabled states, the context menu). Existing tests changed (named): the clip
+  context menu's exact item list in `LinkedTransitionStoreTests
+  testTheTimelinesRightClickMenuSelectsAndOffersTheTransitionActions` and `EffectLanesTimelineTests
+  testControlKAddsAMotionSpanAtThePlayhead` gained "Copy Grade", "Paste Grade", "Reset Grade" (the brief adds
+  them to the context menu). AppTests 285 (1 known skip), 0 failures.
 
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
