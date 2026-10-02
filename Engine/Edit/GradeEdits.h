@@ -24,14 +24,44 @@
 
 namespace ve {
 
+// What SetClipGrade sets of one wheel on each clip: its level, its colour (cb and cr, always given
+// together), or both; nullopt keeps the clip's own. So moving a wheel's colour over several clips keeps each
+// clip's level, as a slider keeps the other values.
+struct WheelChange {
+    std::optional<double> level;
+    std::optional<double> cb;
+    std::optional<double> cr;
+
+    static WheelChange whole(const WheelValue &value) {
+        return WheelChange{value.level, value.cb, value.cr};
+    }
+    bool isEmpty() const {
+        return !level && !cb && !cr;
+    }
+    // `value` with the change applied.
+    WheelValue appliedTo(WheelValue value) const;
+    friend bool operator==(const WheelChange &, const WheelChange &) = default;
+};
+
 // What SetClipGrade sets on each clip: the values given (nullopt: the clip keeps its own) and, for a
 // whole grade, the foreign entries (nullopt: the clip keeps its own).
 struct GradeChange {
     std::array<std::optional<double>, kGradeParameterCount> values{};
+    // What to set of each wheel (WheelChange; empty: the clip keeps its own).
+    std::array<WheelChange, kGradeWheelCount> wheels{};
+    // The curves to set, each its whole list of points (nullopt: the clip keeps its own; an identity curve is
+    // stored as no points).
+    std::array<std::optional<CurvePoints>, kGradeCurveCount> curves{};
     std::optional<std::string> foreign;
 
     // One parameter.
     static GradeChange of(GradeParameter parameter, double value);
+    // One wheel, whole (its level and colour).
+    static GradeChange of(GradeWheel wheel, const WheelValue &value);
+    // Part of one wheel.
+    static GradeChange of(GradeWheel wheel, const WheelChange &change);
+    // One curve.
+    static GradeChange of(GradeCurve curve, CurvePoints points);
     // Every parameter and the foreign entries of `grade` (Paste Grade; the neutral grade: Reset Grade).
     static GradeChange whole(const ClipGrade &grade);
 
@@ -41,8 +71,28 @@ struct GradeChange {
     const std::optional<double> &operator[](GradeParameter parameter) const {
         return values[static_cast<std::size_t>(parameter)];
     }
-    // The number of values given.
+    WheelChange &operator[](GradeWheel wheel) {
+        return wheels[static_cast<std::size_t>(wheel)];
+    }
+    const WheelChange &operator[](GradeWheel wheel) const {
+        return wheels[static_cast<std::size_t>(wheel)];
+    }
+    // The number of values given (of the basic parameters).
     std::size_t count() const;
+    std::optional<CurvePoints> &operator[](GradeCurve curve) {
+        return curves[static_cast<std::size_t>(curve)];
+    }
+    const std::optional<CurvePoints> &operator[](GradeCurve curve) const {
+        return curves[static_cast<std::size_t>(curve)];
+    }
+    // The number of wheels with something to set.
+    std::size_t wheelCount() const;
+    // The number of curves given.
+    std::size_t curveCount() const;
+    // Nothing given at all.
+    bool isEmpty() const {
+        return count() == 0 && wheelCount() == 0 && curveCount() == 0 && !foreign;
+    }
     // `grade` with the change applied.
     ClipGrade appliedTo(ClipGrade grade) const;
 };
@@ -50,11 +100,13 @@ struct GradeChange {
 // Sets grade parameters on clips (see the header). Refused as a whole, changing nothing, when the list
 // or the change is empty, a clip is missing or listed twice, a clip lies on an audio track
 // (TrackKindMismatch: a grade is for pictures) or a locked track, or a value is not finite or outside its
-// parameter's range (InvalidArgument, naming the range). A change that leaves every clip as it was
-// records no undo step.
+// parameter's range (InvalidArgument, naming the range), a wheel's level outside [-1, 1], its colour outside
+// the unit disk or given without both cb and cr, or a curve that is not valid (curveProblem). A change that
+// leaves every clip as it was records no undo step.
 class SetClipGrade final : public SequenceCommand {
   public:
-    // `name` is the Undo menu's name; empty: "Change <parameter>" for one parameter, else "Change Grade".
+    // `name` is the Undo menu's name; empty: "Change <parameter>" for one parameter, "Change <wheel>" for
+    // one wheel, "Change <curve> Curve" for one curve, else "Change Grade".
     SetClipGrade(SequenceId sequenceId, std::vector<ClipId> clipIds, GradeChange change, std::string name = {});
     std::string name() const override;
 
@@ -75,6 +127,14 @@ struct GradeSummary {
     std::array<std::optional<double>, kGradeParameterCount> values{};
     // Per parameter: whether the clips differ.
     std::array<bool, kGradeParameterCount> mixed{};
+    // Per wheel: the setting every one of `clips` has (nullopt when they differ or there are none), and
+    // whether they differ.
+    std::array<std::optional<WheelValue>, kGradeWheelCount> wheels{};
+    std::array<bool, kGradeWheelCount> wheelMixed{};
+    // Per curve: the points every one of `clips` has (nullopt when they differ or there are none), and
+    // whether they differ.
+    std::array<std::optional<CurvePoints>, kGradeCurveCount> curves{};
+    std::array<bool, kGradeCurveCount> curveMixed{};
     // Whether any of `clips` has a grade (not neutral).
     bool anyGraded = false;
     // Whether every one of `clips` has the same whole grade: each value and the entries a newer version
@@ -87,6 +147,18 @@ struct GradeSummary {
     }
     bool isMixed(GradeParameter parameter) const {
         return mixed[static_cast<std::size_t>(parameter)];
+    }
+    const std::optional<WheelValue> &valueOf(GradeWheel wheel) const {
+        return wheels[static_cast<std::size_t>(wheel)];
+    }
+    bool isMixed(GradeWheel wheel) const {
+        return wheelMixed[static_cast<std::size_t>(wheel)];
+    }
+    const std::optional<CurvePoints> &valueOf(GradeCurve curve) const {
+        return curves[static_cast<std::size_t>(curve)];
+    }
+    bool isMixed(GradeCurve curve) const {
+        return curveMixed[static_cast<std::size_t>(curve)];
     }
 };
 

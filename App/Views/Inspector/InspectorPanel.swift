@@ -1,9 +1,10 @@
 import Combine
 import SwiftUI
 
-/// The right-hand panel: the Inspector (the selection's properties) and Effects (the transitions to
+/// The right-hand panel: the Inspector (the selection's properties), Colour (the grading tools,
+/// `ColourPanel`) and Effects (the transitions to
 /// drag onto a cut or a clip's free end, or add at the playhead with "+", and the lane effects, Ken
-/// Burns, Move, Fade and Gain, to drag onto an effect lane) as two tabs, like Premiere's Effect Controls / Effects pair. The tab is remembered (`WindowLayoutModel.inspectorTab`); asking the
+/// Burns, Move, Fade and Gain, to drag onto an effect lane) as tabs, like Premiere's Effect Controls / Effects pair. The tab is remembered (`WindowLayoutModel.inspectorTab`); asking the
 /// inspector to focus a field (double-clicking a transition) switches to the Inspector tab.
 struct InspectorPanel: View {
     @ObservedObject var store: ProjectStore
@@ -30,6 +31,8 @@ struct InspectorPanel: View {
             switch layout.inspectorTab {
             case .inspector:
                 InspectorView(store: store)
+            case .colour:
+                ColourPanel(store: store)
             case .effects:
                 EffectsPanel(store: store)
             }

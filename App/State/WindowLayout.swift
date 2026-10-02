@@ -1,9 +1,11 @@
 import CoreGraphics
 import Foundation
 
-/// Which page the right-hand panel shows: the selection's properties or the effects to add.
+/// Which page the right-hand panel shows: the selection's properties, its grading tools, or the effects
+/// to add.
 enum InspectorTab: String, CaseIterable, Identifiable {
     case inspector
+    case colour
     case effects
 
     var id: String { rawValue }
@@ -11,6 +13,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .inspector: return "Inspector"
+        case .colour: return "Colour"
         case .effects: return "Effects"
         }
     }

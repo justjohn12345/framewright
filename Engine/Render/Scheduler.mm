@@ -30,6 +30,8 @@ VideoLayer makeLayer(const Clip &clip, const MediaAsset &asset, CMTime time, CMT
     layer.transform = Scheduler::motionAt(clip, time);
     layer.opacity = layer.transform.opacity;
     layer.grade = clip.grade.values;
+    layer.gradeWheels = clip.grade.wheels;
+    layer.gradeCurves = clip.grade.curves;
     return layer;
 }
 

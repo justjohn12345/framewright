@@ -252,6 +252,96 @@ FOUNDATION_EXPORT void VEGradeParamsSetValue(VEGradeParams *params, double value
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
+/// A colour wheel of a clip's grade (colour grading slice 2; the engine's GradeWheel): lift moves the
+/// shadows most, gamma the midtones, gain the highlights. Applied in linear light after saturation and before
+/// contrast, as out = (gain * (in + lift * (1 - in)))^(1 / gamma) per channel (see VEGradeWheelValue).
+typedef NS_ENUM(NSInteger, VEGradeWheel) {
+    VEGradeWheelLift = 0,
+    VEGradeWheelGamma = 1,
+    VEGradeWheelGain = 2,
+};
+
+/// A wheel's setting: `level` in [-1, 1] (lift: the blacks raised to linear 0.1 at 1; gain: +-1 stop;
+/// gamma: linear 0.18 to 0.42 at 1), and its colour, the point (`cb`, `cr`) in the unit disk, taken as
+/// BT.709 chroma as a vectorscope shows it (+cr toward red, +cb toward blue): the channels tilt toward that
+/// colour, by about half a stop at the rim, keeping luminance. All zero is neutral. When read from a
+/// VEGradeSelection, every field is NaN where the clips differ.
+typedef struct {
+    double level;
+    double cb;
+    double cr;
+} VEGradeWheelValue;
+
+/// Every field 0 (a neutral wheel).
+FOUNDATION_EXPORT VEGradeWheelValue VEGradeWheelValueNeutral(void);
+
+/// The wheels' names and what they move.
+@interface VEGradeWheelInfo : NSObject
+/// The row of `wheel`, or nil for a value outside VEGradeWheel.
++ (nullable VEGradeWheelInfo *)infoForWheel:(VEGradeWheel)wheel NS_SWIFT_NAME(info(for:));
+/// Every wheel (VEGradeWheel values as NSNumbers) in order: lift, gamma, gain.
+@property (class, nonatomic, readonly, copy) NSArray<NSNumber *> *allWheels;
+@property (nonatomic, readonly) VEGradeWheel wheel;
+/// The file's key prefix: "lift", "gamma", "gain".
+@property (nonatomic, readonly, copy) NSString *name;
+/// "Lift", "Gamma", "Gain".
+@property (nonatomic, readonly, copy) NSString *displayName;
+/// "shadows", "midtones", "highlights".
+@property (nonatomic, readonly, copy) NSString *tonalRange;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+@interface VEGradeSelection (Wheels)
+/// The setting every clip has for `wheel`; every field NaN where they differ, without clips, or for a value
+/// outside VEGradeWheel.
+- (VEGradeWheelValue)valueForWheel:(VEGradeWheel)wheel NS_SWIFT_NAME(wheel(_:));
+/// Whether the clips differ in `wheel` (NO without clips or for a value outside the enum).
+- (BOOL)isWheelMixed:(VEGradeWheel)wheel NS_SWIFT_NAME(isWheelMixed(_:));
+@end
+
+/// A tone curve of a clip's grade (colour grading slice 2; the engine's GradeCurve), over the encoded values
+/// the scopes show: Luma moves each pixel's luma (keeping its colour), Red, Green and Blue map their
+/// channels. A curve passes through its points (x the input, y the output, both 0 to 1, x increasing, 2 to
+/// 16 points; NSValue-wrapped points) as a monotone cubic, flat beyond its first and last points; no points
+/// is the identity.
+typedef NS_ENUM(NSInteger, VEGradeCurve) {
+    VEGradeCurveLuma = 0,
+    VEGradeCurveRed = 1,
+    VEGradeCurveGreen = 2,
+    VEGradeCurveBlue = 3,
+};
+
+/// The curves' names.
+@interface VEGradeCurveInfo : NSObject
+/// The row of `curve`, or nil for a value outside VEGradeCurve.
++ (nullable VEGradeCurveInfo *)infoForCurve:(VEGradeCurve)curve NS_SWIFT_NAME(info(for:));
+/// Every curve (VEGradeCurve values as NSNumbers) in order: luma, red, green, blue.
+@property (class, nonatomic, readonly, copy) NSArray<NSNumber *> *allCurves;
+/// The most points a curve has (16).
+@property (class, nonatomic, readonly) NSInteger maximumPointCount;
+@property (nonatomic, readonly) VEGradeCurve curve;
+/// The file's key: "curveLuma", ...
+@property (nonatomic, readonly, copy) NSString *name;
+/// "Luma", "Red", "Green", "Blue".
+@property (nonatomic, readonly, copy) NSString *displayName;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+/// The curve through `points` (NSValue-wrapped points, as a clip has them) at `count` evenly spaced x from 0
+/// to 1 into `samples` (sample i at x = i / (count - 1)): what the renderer applies, for drawing a curve.
+/// Points that are not a valid curve are first made valid as a project file's are (limited to [0, 1],
+/// sorted, at most 16).
+FOUNDATION_EXPORT void VEGradeCurveSample(NSArray<NSValue *> *points, double *samples, NSInteger count)
+    NS_SWIFT_NAME(VEGradeCurveInfo.sample(_:into:count:));
+
+@interface VEGradeSelection (Curves)
+/// The points every clip has for `curve` (empty for the identity); nil where they differ, without clips, or
+/// for a value outside VEGradeCurve.
+- (nullable NSArray<NSValue *> *)pointsForCurve:(VEGradeCurve)curve NS_SWIFT_NAME(curve(_:));
+/// Whether the clips differ in `curve` (NO without clips or for a value outside the enum).
+- (BOOL)isCurveMixed:(VEGradeCurve)curve NS_SWIFT_NAME(isCurveMixed(_:));
+@end
+
 /// Identity video parameters (centred, scale 1, no rotation, opaque).
 FOUNDATION_EXPORT VEVideoParams VEVideoParamsIdentity(void);
 
@@ -386,7 +476,7 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 @property (nonatomic, readonly) VEAudioParams audioParams;
 /// The clip's colour grade (every field neutral when it has none; always neutral on an audio track).
 @property (nonatomic, readonly) VEGradeParams grade;
-/// Whether the clip has a grade: a value that is not neutral.
+/// Whether the clip has a grade: a value or a wheel that is not neutral.
 @property (nonatomic, readonly) BOOL hasGrade;
 /// The clip's spans: lane 0 (transitions) first, then lanes 1-3, each in time order.
 @property (nonatomic, readonly, copy) NSArray<VEEffectSpan *> *spans;
@@ -426,6 +516,14 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
                 atEnd:(BOOL)atEnd
         frameDuration:(CMTime)frameDuration NS_SWIFT_NAME(getBaseValues(_:underSpan:atEnd:frameDuration:));
 - (instancetype)init NS_UNAVAILABLE;
+@end
+
+@interface VEClipInfo (Wheels)
+/// The clip's setting of `wheel` (neutral for a value outside VEGradeWheel).
+- (VEGradeWheelValue)gradeWheel:(VEGradeWheel)wheel NS_SWIFT_NAME(gradeWheel(_:));
+/// The clip's points of `curve` (NSValue-wrapped points; empty for the identity or a value outside
+/// VEGradeCurve).
+- (NSArray<NSValue *> *)gradeCurvePoints:(VEGradeCurve)curve NS_SWIFT_NAME(gradeCurvePoints(_:));
 @end
 
 /// A track of the active sequence.

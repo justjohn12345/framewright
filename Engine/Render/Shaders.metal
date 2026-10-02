@@ -30,6 +30,13 @@ constant bool kSourceBHasGradeValue [[function_constant(VEFunctionConstantSource
 constant bool kSourceAHasGrade = is_function_constant_defined(kSourceAHasGradeValue) && kSourceAHasGradeValue;
 constant bool kSourceBHasGrade =
     kHasPartner && is_function_constant_defined(kSourceBHasGradeValue) && kSourceBHasGradeValue;
+// A graded source whose grade uses a slice 2 stage (VEGradeUniforms::stages) runs veGradeExtended.
+constant bool kSourceAHasExtendedGradeValue [[function_constant(VEFunctionConstantSourceAHasExtendedGrade)]];
+constant bool kSourceBHasExtendedGradeValue [[function_constant(VEFunctionConstantSourceBHasExtendedGrade)]];
+constant bool kSourceAHasExtendedGrade =
+    kSourceAHasGrade && is_function_constant_defined(kSourceAHasExtendedGradeValue) && kSourceAHasExtendedGradeValue;
+constant bool kSourceBHasExtendedGrade =
+    kSourceBHasGrade && is_function_constant_defined(kSourceBHasExtendedGradeValue) && kSourceBHasExtendedGradeValue;
 
 struct VELayerVertexOut {
     float4 position [[position]];
@@ -190,12 +197,25 @@ static float4 gradeSample(float4 premultiplied, constant VEGradeUniforms &grade)
     return float4(graded * alpha, alpha);
 }
 
+// The same with the slice 2 stages (the source's extended-grade function constant), reading the source's
+// grade tables.
+static float4 gradeSampleExtended(float4 premultiplied, constant VEGradeUniforms &grade, VEGradeTables tables) {
+    const float alpha = premultiplied.a;
+    const float3 colour = alpha > 0.0 ? premultiplied.rgb / alpha : float3(0.0);
+    const float3 graded = saturate(veGradeExtended(colour, grade, tables));
+    return float4(graded * alpha, alpha);
+}
+
 fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
                                   constant VEDrawUniforms &uniforms [[buffer(VEBufferIndexDraw)]],
                                   texture2d<float> a0 [[texture(VETextureIndexA0)]],
                                   texture2d<float> a1 [[texture(VETextureIndexA1), function_constant(kSourceAIsYCbCr)]],
                                   texture2d<float> b0 [[texture(VETextureIndexB0), function_constant(kHasPartner)]],
-                                  texture2d<float> b1 [[texture(VETextureIndexB1), function_constant(kSourceBHasChroma)]]) {
+                                  texture2d<float> b1 [[texture(VETextureIndexB1), function_constant(kSourceBHasChroma)]],
+                                  VEGradeTables aTables [[texture(VETextureIndexAGradeTables),
+                                                          function_constant(kSourceAHasExtendedGrade)]],
+                                  VEGradeTables bTables [[texture(VETextureIndexBGradeTables),
+                                                          function_constant(kSourceBHasExtendedGrade)]]) {
     const float2 uvA = sourceUV(uniforms.a, in.framePosition);
     const float coverageA = edgeCoverage(uvA);
     float4 colorA;
@@ -204,7 +224,9 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     } else {
         colorA = sampleRGBA(a0, uvA, uniforms.a, kSourceAHasGrade);
     }
-    if (kSourceAHasGrade) {
+    if (kSourceAHasExtendedGrade) {
+        colorA = gradeSampleExtended(colorA, uniforms.a.grade, aTables);
+    } else if (kSourceAHasGrade) {
         colorA = gradeSample(colorA, uniforms.a.grade);
     }
     colorA *= coverageA * uniforms.a.weight;
@@ -227,7 +249,9 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
     } else {
         colorB = sampleRGBA(b0, uvB, uniforms.b, kSourceBHasGrade);
     }
-    if (kSourceBHasGrade) {
+    if (kSourceBHasExtendedGrade) {
+        colorB = gradeSampleExtended(colorB, uniforms.b.grade, bTables);
+    } else if (kSourceBHasGrade) {
         colorB = gradeSample(colorB, uniforms.b.grade);
     }
     colorB *= coverageB * uniforms.b.weight;
@@ -241,7 +265,8 @@ fragment float4 ve_layer_fragment(VELayerVertexOut in [[stage_in]],
 // MARK: - The grade over a list of values (for the tests)
 
 // Grades `count` R'G'B' values of `input` (float4 each, w ignored) with `grade` into `output` (float4, w 0),
-// unclamped: the same function the fragment shader runs on a graded source (ColorGrade.h), so the tests can
+// unclamped: the same function the fragment shader runs on a graded source (ColorGrade.h; the extended grade
+// when a slice 2 stage is set, as gradeReference chooses, without tables: identity curves), so the tests can
 // hold it to the CPU reference value by value. Not used for rendering.
 kernel void ve_grade_samples(device const float4 *input [[buffer(0)]],
                              device float4 *output [[buffer(1)]],
@@ -251,9 +276,24 @@ kernel void ve_grade_samples(device const float4 *input [[buffer(0)]],
     if (gid >= count) {
         return;
     }
-    const float3 graded = veGrade(input[gid].rgb, grade.gain.x, grade.gain.y, grade.gain.z, grade.saturation,
-                                  grade.contrast, grade.contrastSlope, grade.transfer);
+    const float3 graded = grade.stages != 0u ? veGradeExtended(input[gid].rgb, grade, VENoGradeTables{})
+                                             : veGrade(input[gid].rgb, grade.gain.x, grade.gain.y, grade.gain.z,
+                                                       grade.saturation, grade.contrast, grade.contrastSlope,
+                                                       grade.transfer);
     output[gid] = float4(graded, 0.0);
+}
+
+// The extended grade with its tables (texture 0), for the tests of the stages that read them (the curves).
+kernel void ve_grade_samples_tables(device const float4 *input [[buffer(0)]],
+                                    device float4 *output [[buffer(1)]],
+                                    constant VEGradeUniforms &grade [[buffer(2)]],
+                                    constant uint &count [[buffer(3)]],
+                                    VEGradeTables tables [[texture(0)]],
+                                    uint gid [[thread_position_in_grid]]) {
+    if (gid >= count) {
+        return;
+    }
+    output[gid] = float4(veGradeExtended(input[gid].rgb, grade, tables), 0.0);
 }
 
 // MARK: - Minification

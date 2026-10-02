@@ -98,13 +98,17 @@ struct PipelineKey {
     bool hasPartner = false;
     bool bIsYCbCr = false;
     MTLPixelFormat format = MTLPixelFormatInvalid;
-    // The sources' grades (VEFunctionConstantSourceAHasGrade / ...BHasGrade).
+    // The sources' grades (VEFunctionConstantSourceAHasGrade / ...BHasGrade), and whether they use a slice 2
+    // stage (VEFunctionConstantSourceAHasExtendedGrade / ...B; only with the grade).
     bool aIsGraded = false;
     bool bIsGraded = false;
+    bool aIsExtended = false;
+    bool bIsExtended = false;
 
     std::uint64_t packed() const {
-        return (static_cast<std::uint64_t>(format) << 5) | (aIsYCbCr ? 1u : 0u) | (hasPartner ? 2u : 0u) |
-               (hasPartner && bIsYCbCr ? 4u : 0u) | (aIsGraded ? 8u : 0u) | (hasPartner && bIsGraded ? 16u : 0u);
+        return (static_cast<std::uint64_t>(format) << 7) | (aIsYCbCr ? 1u : 0u) | (hasPartner ? 2u : 0u) |
+               (hasPartner && bIsYCbCr ? 4u : 0u) | (aIsGraded ? 8u : 0u) | (hasPartner && bIsGraded ? 16u : 0u) |
+               (aIsGraded && aIsExtended ? 32u : 0u) | (hasPartner && bIsGraded && bIsExtended ? 64u : 0u);
     }
 };
 
@@ -204,12 +208,20 @@ struct SourceBinding {
     // plane 1.
     simd_float4 extent = simd_make_float4(1.0f, 1.0f, 1.0f, 1.0f);
     bool straightAlpha = false; // RGBA colour not premultiplied (the shader premultiplies per texel)
+    // An extended grade's tables (VETextureIndexAGradeTables / B; nil for other sources).
+    id<MTLTexture> gradeTables = nil;
 };
 
 // Whether the layer's picture is graded: a grade with a value that is not neutral (ClipGrade.h). An ungraded
 // layer runs the pipeline without the grade, exactly as before grading existed.
 bool isGraded(const VideoLayer &layer) {
-    return !isNeutralGrade(layer.grade);
+    return !isNeutralGrade(layer.grade) || needsExtendedGrade(layer.gradeWheels, layer.gradeCurves);
+}
+
+// Whether the layer's grade uses a slice 2 stage (the extended grade); a grade of the five basic values only
+// runs the slice 1 grade exactly as before.
+bool isExtendedGrade(const VideoLayer &layer) {
+    return needsExtendedGrade(layer.gradeWheels, layer.gradeCurves);
 }
 
 // The source uniforms of `layer`'s picture: its sampling and placement, its weight, and (when graded) its
@@ -225,7 +237,8 @@ void fillSource(VESourceUniforms &u, const TextureSet &textures, const SourceBin
     u.unused0 = 0;
     u.unused1 = 0;
     u.planeExtent = binding.extent;
-    u.grade = isGraded(layer) ? gradeUniformsFor(layer.grade, gradeTransferFor(textures.transfer(), layer.isStill))
+    u.grade = isGraded(layer) ? gradeUniformsFor(layer.grade, layer.gradeWheels, layer.gradeCurves,
+                                                 gradeTransferFor(textures.transfer(), layer.isStill))
                               : VEGradeUniforms{};
 }
 
@@ -644,11 +657,15 @@ struct Compositor::Impl {
         bool b = key.hasPartner && key.bIsYCbCr;
         bool aGraded = key.aIsGraded;
         bool bGraded = key.hasPartner && key.bIsGraded;
+        bool aExtended = aGraded && key.aIsExtended;
+        bool bExtended = bGraded && key.bIsExtended;
         [constants setConstantValue:&a type:MTLDataTypeBool atIndex:VEFunctionConstantSourceAIsYCbCr];
         [constants setConstantValue:&partner type:MTLDataTypeBool atIndex:VEFunctionConstantHasPartner];
         [constants setConstantValue:&b type:MTLDataTypeBool atIndex:VEFunctionConstantSourceBIsYCbCr];
         [constants setConstantValue:&aGraded type:MTLDataTypeBool atIndex:VEFunctionConstantSourceAHasGrade];
         [constants setConstantValue:&bGraded type:MTLDataTypeBool atIndex:VEFunctionConstantSourceBHasGrade];
+        [constants setConstantValue:&aExtended type:MTLDataTypeBool atIndex:VEFunctionConstantSourceAHasExtendedGrade];
+        [constants setConstantValue:&bExtended type:MTLDataTypeBool atIndex:VEFunctionConstantSourceBHasExtendedGrade];
         NSError *error = nil;
         id<MTLFunction> fragment = [library newFunctionWithName:@"ve_layer_fragment" constantValues:constants error:&error];
         if (fragment == nil) {
@@ -693,6 +710,73 @@ struct Compositor::Impl {
         }
         intermediate.label = @"Framewright composite";
         return media::okStatus();
+    }
+
+    // Extended grades' tables (gradeTableData) by curves: a small least-recently-used cache, so a graded
+    // clip's tables are built once, not every frame (frames on the GPU keep the textures they use: the
+    // command buffers retain them). The identity tables serve extended grades without curves.
+    struct GradeTableEntry {
+        GradeCurves curves;
+        id<MTLTexture> texture = nil;
+        std::uint64_t lastUse = 0;
+    };
+    static constexpr std::size_t kMaxGradeTables = 32;
+    std::vector<GradeTableEntry> gradeTables;
+    std::uint64_t gradeTableUses = 0;
+    id<MTLTexture> identityGradeTables = nil;
+
+    Result<id<MTLTexture>> makeGradeTables(const GradeCurves &curves) {
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                                                                        width:kVEGradeTableWidth
+                                                                                       height:VEGradeTableRowCount
+                                                                                    mipmapped:NO];
+        desc.usage = MTLTextureUsageShaderRead;
+        desc.storageMode = MTLStorageModeShared;
+        id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+        if (texture == nil) {
+            return makeError(MediaErrorCode::Internal, "Compositor: cannot allocate a grade's tables");
+        }
+        texture.label = @"Framewright grade tables";
+        const std::vector<float> data = gradeTableData(curves);
+        [texture replaceRegion:MTLRegionMake2D(0, 0, kVEGradeTableWidth, VEGradeTableRowCount)
+                   mipmapLevel:0
+                     withBytes:data.data()
+                   bytesPerRow:kVEGradeTableWidth * sizeof(float)];
+        return texture;
+    }
+
+    // The tables of `layer`'s extended grade.
+    Result<id<MTLTexture>> gradeTablesFor(const VideoLayer &layer) {
+        if (isIdentityCurves(layer.gradeCurves)) {
+            if (identityGradeTables == nil) {
+                auto made = makeGradeTables(GradeCurves{});
+                if (!made.ok()) {
+                    return made;
+                }
+                identityGradeTables = made.value();
+            }
+            return identityGradeTables;
+        }
+        ++gradeTableUses;
+        for (GradeTableEntry &entry : gradeTables) {
+            if (entry.curves == layer.gradeCurves) {
+                entry.lastUse = gradeTableUses;
+                return entry.texture;
+            }
+        }
+        auto made = makeGradeTables(layer.gradeCurves);
+        if (!made.ok()) {
+            return made;
+        }
+        if (gradeTables.size() >= kMaxGradeTables) {
+            const auto oldest = std::min_element(gradeTables.begin(), gradeTables.end(),
+                                                 [](const GradeTableEntry &a, const GradeTableEntry &b) {
+                                                     return a.lastUse < b.lastUse;
+                                                 });
+            gradeTables.erase(oldest);
+        }
+        gradeTables.push_back(GradeTableEntry{layer.gradeCurves, made.value(), gradeTableUses});
+        return made.value();
     }
 
     // The output pass's pipeline for a texture target of `format`, with or without the clipping overlay
@@ -836,13 +920,21 @@ struct Compositor::Impl {
                 }
                 item.a = binding.value();
                 fillSource(item.uniforms.a, t, item.a, pl, weight, layer);
+                if (isExtendedGrade(layer)) {
+                    auto tables = gradeTablesFor(layer);
+                    if (!tables.ok()) {
+                        return std::move(tables).error();
+                    }
+                    item.a.gradeTables = tables.value();
+                }
                 item.uniforms.quadRect = simd_make_float4(float(pl.x0), float(pl.y0), float(pl.x1), float(pl.y1));
                 if (isShaped(layer)) {
                     item.uniforms.transition = transitionUniforms(*layer.transition, true);
                 }
                 item.layerA = item.layerB = i;
                 auto state =
-                    pipeline({t.sourceClass() == SourceClass::YCbCrBiPlanar, false, false, format, isGraded(layer), false});
+                    pipeline({t.sourceClass() == SourceClass::YCbCrBiPlanar, false, false, format, isGraded(layer), false,
+                              isExtendedGrade(layer), false});
                 if (!state.ok()) {
                     return std::move(state).error();
                 }
@@ -878,6 +970,16 @@ struct Compositor::Impl {
                 item.b = bindingB.value();
                 fillSource(item.uniforms.a, ta, item.a, pa, pa.visible ? outLayer.opacity : 0.0, outLayer);
                 fillSource(item.uniforms.b, tb, item.b, pb, pb.visible ? inLayer.opacity : 0.0, inLayer);
+                for (const auto &[pairLayer, pairBinding] :
+                     {std::pair<const VideoLayer *, SourceBinding *>{&outLayer, &item.a}, {&inLayer, &item.b}}) {
+                    if (isExtendedGrade(*pairLayer)) {
+                        auto tables = gradeTablesFor(*pairLayer);
+                        if (!tables.ok()) {
+                            return std::move(tables).error();
+                        }
+                        pairBinding->gradeTables = tables.value();
+                    }
+                }
                 double x0 = pa.visible ? pa.x0 : pb.x0, y0 = pa.visible ? pa.y0 : pb.y0;
                 double x1 = pa.visible ? pa.x1 : pb.x1, y1 = pa.visible ? pa.y1 : pb.y1;
                 if (pa.visible && pb.visible) {
@@ -892,7 +994,7 @@ struct Compositor::Impl {
                 item.layerB = in;
                 auto state = pipeline({ta.sourceClass() == SourceClass::YCbCrBiPlanar, true,
                                        tb.sourceClass() == SourceClass::YCbCrBiPlanar, format, isGraded(outLayer),
-                                       isGraded(inLayer)});
+                                       isGraded(inLayer), isExtendedGrade(outLayer), isExtendedGrade(inLayer)});
                 if (!state.ok()) {
                     return std::move(state).error();
                 }
@@ -1008,13 +1110,16 @@ Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device,
 
     // Every target is composited in kIntermediateFormat; a prepared format also gets its output pass. Every
     // layer pipeline is made here (graded and not), so a first graded frame never waits for a compile.
-    impl->pipelines.reserve(32);
+    impl->pipelines.reserve(64);
     if (preparedFormats.size() > 0) {
-        for (int bits = 0; bits < 32; ++bits) {
-            PipelineKey key{(bits & 1) != 0,  (bits & 2) != 0, (bits & 4) != 0, kIntermediateFormat,
-                            (bits & 8) != 0, (bits & 16) != 0};
-            if (!key.hasPartner && (key.bIsYCbCr || key.bIsGraded)) {
+        for (int bits = 0; bits < 128; ++bits) {
+            PipelineKey key{(bits & 1) != 0,  (bits & 2) != 0,  (bits & 4) != 0,  kIntermediateFormat,
+                            (bits & 8) != 0,  (bits & 16) != 0, (bits & 32) != 0, (bits & 64) != 0};
+            if (!key.hasPartner && (key.bIsYCbCr || key.bIsGraded || key.bIsExtended)) {
                 continue;
+            }
+            if ((key.aIsExtended && !key.aIsGraded) || (key.bIsExtended && !key.bIsGraded)) {
+                continue; // the extended grade is a kind of grade
             }
             auto state = impl->pipeline(key);
             if (!state.ok()) {
@@ -1202,10 +1307,16 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
             [encoder setFragmentBuffer:slot.uniforms offset:offset atIndex:VEBufferIndexDraw];
             [encoder setFragmentTexture:item.a.planes[0] atIndex:VETextureIndexA0];
             [encoder setFragmentTexture:item.a.planes[1] atIndex:VETextureIndexA1];
+            if (item.a.gradeTables != nil) {
+                [encoder setFragmentTexture:item.a.gradeTables atIndex:VETextureIndexAGradeTables];
+            }
             slot.retained.push_back(im.resolved[item.layerA]);
             if (item.layerB != item.layerA) {
                 [encoder setFragmentTexture:item.b.planes[0] atIndex:VETextureIndexB0];
                 [encoder setFragmentTexture:item.b.planes[1] atIndex:VETextureIndexB1];
+                if (item.b.gradeTables != nil) {
+                    [encoder setFragmentTexture:item.b.gradeTables atIndex:VETextureIndexBGradeTables];
+                }
                 slot.retained.push_back(im.resolved[item.layerB]);
             }
             [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
@@ -1355,6 +1466,7 @@ void Compositor::releaseScratchMemory() {
     im.intermediate = nil;
     im.working = nil;
     im.textureCache.flush();
+    im.gradeTables.clear();
 }
 
 Compositor::Stats Compositor::stats() const {

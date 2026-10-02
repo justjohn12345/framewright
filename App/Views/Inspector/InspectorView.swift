@@ -262,7 +262,8 @@ private struct ClipInfoSection: View {
 }
 
 /// A section of parameters with a reset button for the whole section.
-private struct ParameterSection<Extra: View>: View {
+/// A section of parameter rows (the inspector's; the Colour tab shows the Colour one too).
+struct ParameterSection<Extra: View>: View {
     @ObservedObject var store: ProjectStore
     let inspector: InspectorModel
     let section: InspectorSection

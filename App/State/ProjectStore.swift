@@ -40,6 +40,8 @@ final class ProjectStore: ObservableObject {
     private(set) lazy var playbackActions: PlaybackActions = EnginePlaybackActions(store: self)
     /// The inspector's editing logic (parameters, nudges, sliders, resets, messages).
     private(set) lazy var inspector = InspectorModel(store: self)
+    /// The Colour tab's grading tools (the wheels): their values over the selection and their edits.
+    private(set) lazy var gradeTools = GradeToolsModel(store: self)
     /// Where media received from Photos is kept (the project's Media folder).
     let mediaFolder = ImportedMediaFolder()
     /// Media arriving from Photos (file promise drops, Import from Photos…), shown in the bin.

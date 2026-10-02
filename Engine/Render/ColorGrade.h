@@ -176,6 +176,128 @@ VE_GRADE_FUNC VEGradeFloat3 veGrade(VEGradeFloat3 rgb, float gainR, float gainG,
     return out;
 }
 
+// MARK: - Slice 2 (veGradeExtended)
+
+// The address space of the uniforms the extended grade reads (constant memory on the GPU).
+#ifdef __METAL_VERSION__
+#define VE_GRADE_UNIFORMS constant VEGradeUniforms &
+#else
+#define VE_GRADE_UNIFORMS const VEGradeUniforms &
+#endif
+
+// The largest |v| the wheels' power sees: (2^40)^(2^1.5) is about 2^113, finite, and the contrast after it
+// limits its own input to 2^60. The grade's linear values stay far below it (step 1's limit, the gains).
+#define kVEGradePowerLimit 1.099511627776e12f /* 2^40 */
+
+// v^exponent for v >= epsilon, and below epsilon (negative values included) the straight line through the
+// origin that meets the curve at epsilon: v * slope with slope = epsilon^exponent / epsilon (computed on the
+// CPU). The section 2 rule: pow (as exp2 and log2) only ever sees v >= epsilon; continuous, monotonic, 0
+// maps to 0, finite for every input. An exponent of 1 returns v unchanged.
+VE_GRADE_FUNC float vePower(float v, float exponent, float slope) {
+    if (exponent == 1.0f) {
+        return v;
+    }
+    v = v > kVEGradePowerLimit ? kVEGradePowerLimit : v < -kVEGradePowerLimit ? -kVEGradePowerLimit : v;
+    const float safe = v >= kVEGradeEpsilon ? v : kVEGradeEpsilon;
+    const float curve = VE_GRADE_EXP2(exponent * VE_GRADE_LOG2(safe));
+    return v >= kVEGradeEpsilon ? curve : v * slope;
+}
+
+// The lift / gamma / gain wheels on one linear channel (ClipGrade.h, GradeWheel):
+// out = (gain * (v + lift * (1 - v)))^(1 / gamma). Each part at its neutral value (lift 0, gain 1, exponent
+// 1) returns its input bit for bit. Monotonic for every setting of the range (lift > -1, gain > 0).
+VE_GRADE_FUNC float veWheelChannel(float v, float lift, float gain, float inverseGamma, float slope) {
+    if (lift != 0.0f) {
+        v = v + lift * (1.0f - v);
+    }
+    return vePower(v * gain, inverseGamma, slope);
+}
+
+VE_GRADE_FUNC VEGradeFloat3 veApplyWheels(VEGradeFloat3 rgb, VE_GRADE_UNIFORMS u) {
+    const VEGradeFloat3 out = {veWheelChannel(rgb.x, u.lift.x, u.wheelGain.x, u.inverseGamma.x, u.gammaSlope.x),
+                               veWheelChannel(rgb.y, u.lift.y, u.wheelGain.y, u.inverseGamma.y, u.gammaSlope.y),
+                               veWheelChannel(rgb.z, u.lift.z, u.wheelGain.z, u.inverseGamma.z, u.gammaSlope.z)};
+    return out;
+}
+
+// The grade's tables (ShaderTypes.h, VEGradeTableRow): a texture on the GPU, the same floats on the CPU
+// (gradeTableData), and none (the identity) where no stage reads one. Read texel by texel, so both sides
+// interpolate the same way.
+#ifdef __METAL_VERSION__
+typedef metal::texture2d<float, metal::access::read> VEGradeTables;
+VE_GRADE_FUNC float veTableRead(VEGradeTables tables, uint x, uint row) {
+    return tables.read(metal::uint2(x, row)).r;
+}
+#else
+struct VEGradeTables {
+    const float *values = nullptr; // VEGradeTableRowCount rows of kVEGradeTableWidth
+};
+VE_GRADE_FUNC float veTableRead(VEGradeTables tables, uint32_t x, uint32_t row) {
+    return tables.values[row * kVEGradeTableWidth + x];
+}
+#endif
+struct VENoGradeTables {};
+VE_GRADE_FUNC float veTableRead(VENoGradeTables, VEGradeBits x, VEGradeBits) {
+    return float(x) / float(kVEGradeTableWidth - 1u);
+}
+
+// Row `row` of the tables at `x` (limited to [0, 1], NaN as 0): the linear interpolation of the two samples
+// around it.
+template <typename Tables> VE_GRADE_FUNC float veTableLookup(Tables tables, float x, VEGradeBits row) {
+    const float limited = x > 0.0f ? (x < 1.0f ? x : 1.0f) : 0.0f;
+    const float position = limited * float(kVEGradeTableWidth - 1u);
+    const VEGradeBits i0 = VEGradeBits(position);
+    const VEGradeBits i1 = i0 + 1u < kVEGradeTableWidth ? i0 + 1u : kVEGradeTableWidth - 1u;
+    const float f = position - float(i0);
+    const float a = veTableRead(tables, i0, row);
+    const float b = veTableRead(tables, i1, row);
+    return a + (b - a) * f;
+}
+
+// The tone curves on encoded R'G'B' (ClipGrade.h, GradeCurve): the luma curve moves the BT.709 luma, adding
+// the same amount to each channel; then each channel's curve. A curve whose bit of `mask` is clear is skipped.
+template <typename Tables>
+VE_GRADE_FUNC VEGradeFloat3 veApplyCurves(VEGradeFloat3 rgb, VEGradeBits mask, Tables tables) {
+    if ((mask & (1u << VEGradeTableRowLuma)) != 0u) {
+        const VEGradeFloat3 weights = {0.2126f, 0.7152f, 0.0722f};
+        const float luma = VE_GRADE_DOT(weights, rgb);
+        const float moved = veTableLookup(tables, luma, VEGradeTableRowLuma) - luma;
+        rgb = rgb + moved;
+    }
+    if ((mask & (1u << VEGradeTableRowRed)) != 0u) {
+        rgb.x = veTableLookup(tables, rgb.x, VEGradeTableRowRed);
+    }
+    if ((mask & (1u << VEGradeTableRowGreen)) != 0u) {
+        rgb.y = veTableLookup(tables, rgb.y, VEGradeTableRowGreen);
+    }
+    if ((mask & (1u << VEGradeTableRowBlue)) != 0u) {
+        rgb.z = veTableLookup(tables, rgb.z, VEGradeTableRowBlue);
+    }
+    return rgb;
+}
+
+// The grade with the slice 2 stages (the source's extended-grade function constant): steps 1-4 of veGrade
+// with the wheels (VEGradeStageWheels) in linear light after saturation and before contrast, then the tone
+// curves (VEGradeStageCurves) on the re-encoded values. A stage whose bit is clear is skipped, so with no
+// bit set this is veGrade, value for value.
+template <typename Tables> VE_GRADE_FUNC VEGradeFloat3 veGradeExtended(VEGradeFloat3 rgb, VE_GRADE_UNIFORMS u, Tables tables) {
+    const int transfer = u.transfer;
+    const VEGradeFloat3 linear = {veLinearChannel(rgb.x, transfer), veLinearChannel(rgb.y, transfer),
+                                  veLinearChannel(rgb.z, transfer)};
+    const VEGradeFloat3 gain = {u.gain.x, u.gain.y, u.gain.z};
+    VEGradeFloat3 graded = veApplySaturation(veGain(linear, gain), u.saturation);
+    if ((u.stages & VEGradeStageWheels) != 0u) {
+        graded = veApplyWheels(graded, u);
+    }
+    VEGradeFloat3 out = {veEncode(veContrast(graded.x, u.contrast, u.contrastSlope), transfer),
+                         veEncode(veContrast(graded.y, u.contrast, u.contrastSlope), transfer),
+                         veEncode(veContrast(graded.z, u.contrast, u.contrastSlope), transfer)};
+    if ((u.stages & VEGradeStageCurves) != 0u) {
+        out = veApplyCurves(out, u.curveMask, tables);
+    }
+    return out;
+}
+
 #ifndef __METAL_VERSION__
 
 #include "../Model/ClipGrade.h"
@@ -233,8 +355,96 @@ inline VEGradeUniforms gradeUniformsFor(const GradeValues &grade, VEInt transfer
     return u;
 }
 
-// The CPU reference of the shader's grade with `u`'s values (unclamped; the shader then clamps to [0, 1]).
-inline simd_float3 gradeReference(simd_float3 rgb, const VEGradeUniforms &u) {
+// A wheel's colour (cb, cr) as a zero-luminance direction in R, G, B (ClipGrade.h, GradeWheel): BT.709
+// chroma converted with Y' = 0, divided by the blue axis's length 2 (1 - Kb) = 1.8556.
+inline simd_double3 wheelColourDirection(double cb, double cr) {
+    constexpr double kr = 0.2126, kb = 0.0722, kg = 1.0 - kr - kb;
+    const double r = 2.0 * (1.0 - kr) * cr;
+    const double g = -2.0 * kb * (1.0 - kb) / kg * cb - 2.0 * kr * (1.0 - kr) / kg * cr;
+    const double b = 2.0 * (1.0 - kb) * cb;
+    return simd_make_double3(r, g, b) / (2.0 * (1.0 - kb));
+}
+
+// Whether a grade needs the extended grade (a slice 2 stage is in use).
+inline bool needsExtendedGrade(const GradeWheels &wheels, const GradeCurves &curves = {}) {
+    return !isNeutralWheels(wheels) || !isIdentityCurves(curves);
+}
+
+// The tables of `curves` (VEGradeTableRow rows of kVEGradeTableWidth samples; an identity curve's row is the
+// identity), what the compositor uploads and the CPU reference reads.
+inline std::vector<float> gradeTableData(const GradeCurves &curves) {
+    std::vector<float> data(std::size_t(VEGradeTableRowCount) * kVEGradeTableWidth);
+    const GradeCurve rows[VEGradeTableRowCount] = {GradeCurve::Luma, GradeCurve::Red, GradeCurve::Green, GradeCurve::Blue};
+    for (int row = 0; row < VEGradeTableRowCount; ++row) {
+        const std::vector<float> samples = sampleCurve(curves[static_cast<std::size_t>(rows[row])], kVEGradeTableWidth);
+        std::copy(samples.begin(), samples.end(), data.begin() + std::ptrdiff_t(row) * kVEGradeTableWidth);
+    }
+    return data;
+}
+
+// The uniforms of a grade with its slice 2 stages: gradeUniformsFor's, then per wheel and channel c (w the
+// wheel's colour direction): lift 0.1 (level + 0.5 w_c), gain 2^(level + 0.5 w_c), gamma 2^(level + 0.5
+// w_c) as the exponent 1 / gamma with its linear segment's slope epsilon^(1 / gamma) / epsilon; exactly 0, 1,
+// 1 and 1 for a neutral wheel, whose stage bit stays clear when every wheel is neutral.
+inline VEGradeUniforms gradeUniformsFor(const GradeValues &grade, const GradeWheels &wheels, VEInt transfer) {
+    VEGradeUniforms u = gradeUniformsFor(grade, transfer);
+    u.lift = simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    u.wheelGain = simd_make_float4(1.0f, 1.0f, 1.0f, 0.0f);
+    u.inverseGamma = simd_make_float4(1.0f, 1.0f, 1.0f, 0.0f);
+    u.gammaSlope = simd_make_float4(1.0f, 1.0f, 1.0f, 0.0f);
+    u.stages = 0u;
+    u.curveMask = 0u;
+    if (isNeutralWheels(wheels)) {
+        return u;
+    }
+    u.stages |= VEGradeStageWheels;
+    const WheelValue &lift = wheels[static_cast<std::size_t>(GradeWheel::Lift)];
+    const WheelValue &gamma = wheels[static_cast<std::size_t>(GradeWheel::Gamma)];
+    const WheelValue &gain = wheels[static_cast<std::size_t>(GradeWheel::Gain)];
+    const simd_double3 liftColour = wheelColourDirection(lift.cb, lift.cr);
+    const simd_double3 gammaColour = wheelColourDirection(gamma.cb, gamma.cr);
+    const simd_double3 gainColour = wheelColourDirection(gain.cb, gain.cr);
+    const double epsilon = double(kVEGradeEpsilon);
+    for (int c = 0; c < 3; ++c) {
+        const double liftValue = lift.isNeutral() ? 0.0 : 0.1 * (lift.level + 0.5 * liftColour[c]);
+        const double gainValue = gain.isNeutral() ? 1.0 : std::exp2(gain.level + 0.5 * gainColour[c]);
+        const double inverse = gamma.isNeutral() ? 1.0 : 1.0 / std::exp2(gamma.level + 0.5 * gammaColour[c]);
+        const float inverseFloat = float(inverse);
+        u.lift[c] = float(liftValue);
+        u.wheelGain[c] = float(gainValue);
+        u.inverseGamma[c] = inverseFloat;
+        u.gammaSlope[c] = inverseFloat == 1.0f ? 1.0f : float(std::pow(epsilon, double(inverseFloat)) / epsilon);
+    }
+    return u;
+}
+
+// The uniforms of a grade with its wheels and curves: the wheels' (above), and the curves' stage bit and mask
+// when a curve is not the identity.
+inline VEGradeUniforms gradeUniformsFor(const GradeValues &grade, const GradeWheels &wheels, const GradeCurves &curves,
+                                        VEInt transfer) {
+    VEGradeUniforms u = gradeUniformsFor(grade, wheels, transfer);
+    const GradeCurve rows[VEGradeTableRowCount] = {GradeCurve::Luma, GradeCurve::Red, GradeCurve::Green, GradeCurve::Blue};
+    for (int row = 0; row < VEGradeTableRowCount; ++row) {
+        if (!isIdentityCurve(curves[static_cast<std::size_t>(rows[row])])) {
+            u.curveMask |= 1u << row;
+        }
+    }
+    if (u.curveMask != 0u) {
+        u.stages |= VEGradeStageCurves;
+    }
+    return u;
+}
+
+// The CPU reference of the shader's grade with `u`'s values (unclamped; the shader then clamps to [0, 1]):
+// the extended grade when a slice 2 stage is set (with `tables`, gradeTableData's floats, when a stage reads
+// them), else the slice 1 grade.
+inline simd_float3 gradeReference(simd_float3 rgb, const VEGradeUniforms &u, const float *tables = nullptr) {
+    if (u.stages != 0u) {
+        if (tables != nullptr) {
+            return veGradeExtended(rgb, u, VEGradeTables{tables});
+        }
+        return veGradeExtended(rgb, u, VENoGradeTables{});
+    }
     return veGrade(rgb, u.gain.x, u.gain.y, u.gain.z, u.saturation, u.contrast, u.contrastSlope, u.transfer);
 }
 

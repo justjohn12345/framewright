@@ -43,6 +43,10 @@ VEGradeParams VEGradeParamsNeutral(void) {
     return ve::facade::toVE(ve::ClipGrade{});
 }
 
+VEGradeWheelValue VEGradeWheelValueNeutral(void) {
+    return VEGradeWheelValue{0.0, 0.0, 0.0};
+}
+
 VEGradeParams VEGradeParamsUnchanged(void) {
     const double nan = std::numeric_limits<double>::quiet_NaN();
     return VEGradeParams{nan, nan, nan, nan, nan};
@@ -73,8 +77,28 @@ void VEGradeParamsSetValue(VEGradeParams *params, double value, VEGradeParameter
 - (instancetype)initInternal;
 @end
 
+@interface VEGradeWheelInfo ()
+@property (nonatomic, readwrite) VEGradeWheel wheel;
+@property (nonatomic, readwrite, copy) NSString *name;
+@property (nonatomic, readwrite, copy) NSString *displayName;
+@property (nonatomic, readwrite, copy) NSString *tonalRange;
+- (instancetype)initInternal;
+@end
+
+@interface VEGradeCurveInfo ()
+@property (nonatomic, readwrite) VEGradeCurve curve;
+@property (nonatomic, readwrite, copy) NSString *name;
+@property (nonatomic, readwrite, copy) NSString *displayName;
+- (instancetype)initInternal;
+@end
+
 @interface VEGradeSelection () {
     std::array<bool, ve::kGradeParameterCount> _mixed;
+  @public
+    std::array<std::optional<ve::WheelValue>, ve::kGradeWheelCount> _wheels;
+    std::array<bool, ve::kGradeWheelCount> _wheelMixed;
+    std::array<std::optional<ve::CurvePoints>, ve::kGradeCurveCount> _curves;
+    std::array<bool, ve::kGradeCurveCount> _curveMixed;
 }
 @property (nonatomic, readwrite, copy) NSArray<NSNumber *> *clipIDs;
 @property (nonatomic, readwrite) VEGradeParams values;
@@ -403,6 +427,10 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
 - (instancetype)initWithMixed:(const std::array<bool, ve::kGradeParameterCount> &)mixed {
     if ((self = [super init])) {
         _mixed = mixed;
+        _wheels = {};
+        _wheelMixed = {};
+        _curves = {};
+        _curveMixed = {};
     }
     return self;
 }
@@ -410,11 +438,113 @@ std::optional<ve::MotionParameter> motionParameterFrom(VEMotionParameter paramet
     const auto gradeParameter = ve::facade::fromVE(parameter);
     return gradeParameter && _mixed[static_cast<std::size_t>(*gradeParameter)];
 }
+- (VEGradeWheelValue)valueForWheel:(VEGradeWheel)wheel {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const auto gradeWheel = ve::facade::fromVE(wheel);
+    if (!gradeWheel || !_wheels[static_cast<std::size_t>(*gradeWheel)]) {
+        return VEGradeWheelValue{nan, nan, nan};
+    }
+    return ve::facade::toVE(*_wheels[static_cast<std::size_t>(*gradeWheel)]);
+}
+- (BOOL)isWheelMixed:(VEGradeWheel)wheel {
+    const auto gradeWheel = ve::facade::fromVE(wheel);
+    return gradeWheel && _wheelMixed[static_cast<std::size_t>(*gradeWheel)];
+}
+- (nullable NSArray<NSValue *> *)pointsForCurve:(VEGradeCurve)curve {
+    const auto gradeCurve = ve::facade::fromVE(curve);
+    if (!gradeCurve || !_curves[static_cast<std::size_t>(*gradeCurve)]) {
+        return nil;
+    }
+    return ve::facade::toVE(*_curves[static_cast<std::size_t>(*gradeCurve)]);
+}
+- (BOOL)isCurveMixed:(VEGradeCurve)curve {
+    const auto gradeCurve = ve::facade::fromVE(curve);
+    return gradeCurve && _curveMixed[static_cast<std::size_t>(*gradeCurve)];
+}
+@end
+
+@implementation VEGradeCurveInfo
+- (instancetype)initInternal {
+    return [super init];
+}
++ (nullable VEGradeCurveInfo *)infoForCurve:(VEGradeCurve)curve {
+    const auto gradeCurve = ve::facade::fromVE(curve);
+    if (!gradeCurve) {
+        return nil;
+    }
+    const ve::GradeCurveInfo &row = ve::infoOf(*gradeCurve);
+    VEGradeCurveInfo *info = [[VEGradeCurveInfo alloc] initInternal];
+    info.curve = curve;
+    info.name = ve::facade::toNS(row.name);
+    info.displayName = ve::facade::toNS(row.displayName);
+    return info;
+}
++ (NSArray<NSNumber *> *)allCurves {
+    NSMutableArray<NSNumber *> *curves = [NSMutableArray arrayWithCapacity:ve::kGradeCurveCount];
+    for (const ve::GradeCurve curve : ve::kGradeCurves) {
+        [curves addObject:@(static_cast<NSInteger>(curve))];
+    }
+    return curves;
+}
++ (NSInteger)maximumPointCount {
+    return NSInteger(ve::kMaxCurvePoints);
+}
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<VEGradeCurveInfo %@>", self.name];
+}
+@end
+
+void VEGradeCurveSample(NSArray<NSValue *> *points, double *samples, NSInteger count) {
+    if (samples == nullptr || count <= 0) {
+        return;
+    }
+    const ve::CurvePoints curve = ve::sanitizedCurve(ve::facade::fromVE(points));
+    for (NSInteger i = 0; i < count; ++i) {
+        const double x = count > 1 ? double(i) / double(count - 1) : 0.0;
+        samples[i] = ve::evaluateCurve(curve, x);
+    }
+}
+
+@implementation VEGradeWheelInfo
+- (instancetype)initInternal {
+    return [super init];
+}
++ (nullable VEGradeWheelInfo *)infoForWheel:(VEGradeWheel)wheel {
+    const auto gradeWheel = ve::facade::fromVE(wheel);
+    if (!gradeWheel) {
+        return nil;
+    }
+    const ve::GradeWheelInfo &row = ve::infoOf(*gradeWheel);
+    VEGradeWheelInfo *info = [[VEGradeWheelInfo alloc] initInternal];
+    info.wheel = wheel;
+    info.name = ve::facade::toNS(row.name);
+    info.displayName = ve::facade::toNS(row.displayName);
+    info.tonalRange = ve::facade::toNS(row.tonalRange);
+    return info;
+}
++ (NSArray<NSNumber *> *)allWheels {
+    NSMutableArray<NSNumber *> *wheels = [NSMutableArray arrayWithCapacity:ve::kGradeWheelCount];
+    for (const ve::GradeWheel wheel : ve::kGradeWheels) {
+        [wheels addObject:@(static_cast<NSInteger>(wheel))];
+    }
+    return wheels;
+}
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<VEGradeWheelInfo %@ (%@)>", self.name, self.tonalRange];
+}
 @end
 
 @implementation VEClipInfo
 - (instancetype)initInternal {
     return [super init];
+}
+- (VEGradeWheelValue)gradeWheel:(VEGradeWheel)wheel {
+    const auto gradeWheel = ve::facade::fromVE(wheel);
+    return gradeWheel ? ve::facade::toVE(_clip.grade[*gradeWheel]) : VEGradeWheelValueNeutral();
+}
+- (NSArray<NSValue *> *)gradeCurvePoints:(VEGradeCurve)curve {
+    const auto gradeCurve = ve::facade::fromVE(curve);
+    return gradeCurve ? ve::facade::toVE(_clip.grade[*gradeCurve]) : @[];
 }
 - (BOOL)hasEffectSpans {
     return _clip.hasEffectSpans();
@@ -960,6 +1090,57 @@ static_assert(static_cast<int>(GradeParameter::Tint) == VEGradeParameterTint);
 static_assert(static_cast<int>(GradeParameter::Saturation) == VEGradeParameterSaturation);
 static_assert(kGradeParameterCount == 5, "VEGradeParameter and VEGradeParams name every GradeParameter");
 
+static_assert(static_cast<int>(GradeWheel::Lift) == VEGradeWheelLift);
+static_assert(static_cast<int>(GradeWheel::Gamma) == VEGradeWheelGamma);
+static_assert(static_cast<int>(GradeWheel::Gain) == VEGradeWheelGain);
+static_assert(kGradeWheelCount == 3, "VEGradeWheel names every GradeWheel");
+
+std::optional<GradeWheel> fromVE(VEGradeWheel wheel) {
+    if (wheel < VEGradeWheelLift || wheel > VEGradeWheelGain) {
+        return std::nullopt;
+    }
+    return static_cast<GradeWheel>(wheel);
+}
+
+VEGradeWheelValue toVE(const WheelValue &value) {
+    return VEGradeWheelValue{value.level, value.cb, value.cr};
+}
+
+WheelValue fromVE(const VEGradeWheelValue &value) {
+    return WheelValue{value.level, value.cb, value.cr};
+}
+
+static_assert(static_cast<int>(GradeCurve::Luma) == VEGradeCurveLuma);
+static_assert(static_cast<int>(GradeCurve::Red) == VEGradeCurveRed);
+static_assert(static_cast<int>(GradeCurve::Green) == VEGradeCurveGreen);
+static_assert(static_cast<int>(GradeCurve::Blue) == VEGradeCurveBlue);
+static_assert(kGradeCurveCount == 4, "VEGradeCurve names every GradeCurve");
+
+std::optional<GradeCurve> fromVE(VEGradeCurve curve) {
+    if (curve < VEGradeCurveLuma || curve > VEGradeCurveBlue) {
+        return std::nullopt;
+    }
+    return static_cast<GradeCurve>(curve);
+}
+
+NSArray<NSValue *> *toVE(const CurvePoints &points) {
+    NSMutableArray<NSValue *> *values = [NSMutableArray arrayWithCapacity:points.size()];
+    for (const CurvePoint &point : points) {
+        [values addObject:[NSValue valueWithPoint:NSMakePoint(point.x, point.y)]];
+    }
+    return values;
+}
+
+CurvePoints fromVE(NSArray<NSValue *> *points) {
+    CurvePoints out;
+    out.reserve(points.count);
+    for (NSValue *value in points) {
+        const NSPoint point = value.pointValue;
+        out.push_back(CurvePoint{double(point.x), double(point.y)});
+    }
+    return out;
+}
+
 VEGradeParameter toVE(GradeParameter parameter) {
     return static_cast<VEGradeParameter>(parameter);
 }
@@ -1016,6 +1197,10 @@ VEGradeSelection *makeGradeSelection(const GradeSummary &summary) {
         }
     }
     selection.values = values;
+    selection->_wheels = summary.wheels;
+    selection->_wheelMixed = summary.wheelMixed;
+    selection->_curves = summary.curves;
+    selection->_curveMixed = summary.curveMixed;
     selection.anyGraded = summary.anyGraded;
     selection.identical = summary.identical;
     return selection;

@@ -127,6 +127,12 @@ struct VideoLayer {
     // The clip's colour grade (ClipGrade.h); neutral (no grade) by default. The compositor grades the
     // picture with it after its conversion to R'G'B' (ColorGrade.h) unless every value is neutral.
     GradeValues grade = ClipGrade::neutralValues();
+    // The grade's colour wheels (slice 2); neutral by default. A layer with a wheel set is graded with the
+    // extended grade.
+    GradeWheels gradeWheels{};
+    // The grade's curves (slice 2); the identity by default. A layer with a curve is graded with the extended
+    // grade, reading the curves' tables.
+    GradeCurves gradeCurves{};
     std::optional<LayerTransition> transition;
 };
 

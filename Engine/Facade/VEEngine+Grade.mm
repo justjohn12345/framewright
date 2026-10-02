@@ -79,6 +79,59 @@ using namespace ve::facade;
     return [self pushGradeChange:GradeChange::of(*gradeParameter, value) forClips:clipIDs name:{}];
 }
 
+- (VEEditResult *)setGradeWheel:(VEGradeWheelValue)value
+                       forWheel:(VEGradeWheel)wheel
+                          clips:(NSArray<NSNumber *> *)clipIDs {
+    VE_ASSERT_MAIN();
+    const auto gradeWheel = fromVE(wheel);
+    if (!gradeWheel) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"Unknown grade wheel."];
+    }
+    WheelChange change;
+    if (!std::isnan(value.level)) {
+        change.level = value.level;
+    }
+    if (!std::isnan(value.cb)) {
+        change.cb = value.cb;
+    }
+    if (!std::isnan(value.cr)) {
+        change.cr = value.cr;
+    }
+    if (change.isEmpty()) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"No wheel setting to set."];
+    }
+    return [self pushGradeChange:GradeChange::of(*gradeWheel, change) forClips:clipIDs name:{}];
+}
+
+- (VEEditResult *)setGradeCurvePoints:(NSArray<NSValue *> *)points
+                             forCurve:(VEGradeCurve)curve
+                                clips:(NSArray<NSNumber *> *)clipIDs {
+    VE_ASSERT_MAIN();
+    const auto gradeCurve = fromVE(curve);
+    if (!gradeCurve) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"Unknown grade curve."];
+    }
+    return [self pushGradeChange:GradeChange::of(*gradeCurve, fromVE(points)) forClips:clipIDs name:{}];
+}
+
+- (VEEditResult *)resetGradeCurvesOfClips:(NSArray<NSNumber *> *)clipIDs {
+    VE_ASSERT_MAIN();
+    GradeChange change;
+    for (const GradeCurve curve : kGradeCurves) {
+        change[curve] = CurvePoints{};
+    }
+    return [self pushGradeChange:std::move(change) forClips:clipIDs name:"Reset Curves"];
+}
+
+- (VEEditResult *)resetGradeWheelsOfClips:(NSArray<NSNumber *> *)clipIDs {
+    VE_ASSERT_MAIN();
+    GradeChange change;
+    for (const GradeWheel wheel : kGradeWheels) {
+        change[wheel] = WheelChange::whole(WheelValue{});
+    }
+    return [self pushGradeChange:std::move(change) forClips:clipIDs name:"Reset Wheels"];
+}
+
 - (VEGradeSelection *)gradeOfClips:(NSArray<NSNumber *> *)clipIDs {
     VE_ASSERT_MAIN();
     std::vector<ClipId> ids;

@@ -52,6 +52,9 @@ enum VETextureIndex {
     VETextureIndexA1 = 1, // source A: interleaved CbCr (YCbCr only)
     VETextureIndexB0 = 2, // partner source B (dissolve), same layout as A
     VETextureIndexB1 = 3,
+    // An extended grade's tables (VEGradeTableRow), per source.
+    VETextureIndexAGradeTables = 4,
+    VETextureIndexBGradeTables = 5,
     // Compute conversion.
     VETextureIndexComposite = 0, // RGBA16Float intermediate (read)
     VETextureIndexOut0 = 1,      // BGRA, or luma of a biplanar target (write)
@@ -76,6 +79,28 @@ enum VEFunctionConstant {
     // The monitor output pass (ve_output_fragment) tints clipped pixels (kVEScopeClipTolerance): a monitor's
     // clipping overlay. Absent or false: the output pass is a plain copy.
     VEFunctionConstantClippingOverlay = 5,
+    // The source's grade uses a slice 2 stage (VEGradeUniforms::stages: the wheels, ...): the grade runs
+    // veGradeExtended, each stage skipped by its bit when unused. Without it a graded source runs the slice 1
+    // grade exactly as before. Only with the matching ...HasGrade.
+    VEFunctionConstantSourceAHasExtendedGrade = 6,
+    VEFunctionConstantSourceBHasExtendedGrade = 7,
+};
+
+// The slice 2 stages of a grade (VEGradeUniforms::stages), each run only when its bit is set.
+enum VEGradeStage {
+    VEGradeStageWheels = 1, // lift / gamma / gain (ColorGrade.h, veApplyWheels)
+    VEGradeStageCurves = 2, // the tone curves (veApplyCurves; VEGradeUniforms::curveMask says which)
+};
+
+// The grade's tables (veTableLookup): one R32Float texture per graded source, kVEGradeTableWidth samples per
+// row over [0, 1], a row per curve (VEGradeTableRow). Built on the CPU from the clip's curves (gradeTableData).
+#define kVEGradeTableWidth 1024u
+enum VEGradeTableRow {
+    VEGradeTableRowLuma = 0,
+    VEGradeTableRowRed = 1,
+    VEGradeTableRowGreen = 2,
+    VEGradeTableRowBlue = 3,
+    VEGradeTableRowCount = 4,
 };
 
 // How close to white (1) or black (0) a channel of the working picture counts as clipped, for the scopes'
@@ -104,6 +129,19 @@ struct VEGradeUniforms {
     float contrastSlope;
     // The VEGradeTransfer.
     VEInt transfer;
+    // Slice 2, read only with the source's extended-grade function constant. The wheels (VEGradeStageWheels),
+    // per channel in xyz (w unused, 0): the lift offset, the gain, the gamma's exponent 1 / gamma, and that
+    // power's linear segment below epsilon, epsilon^(1 / gamma) / epsilon.
+    VEFloat4 lift;
+    VEFloat4 wheelGain;
+    VEFloat4 inverseGamma;
+    VEFloat4 gammaSlope;
+    // The VEGradeStage bits of the stages to run.
+    VEUInt stages;
+    // VEGradeStageCurves: the curves in use, bit 1 << VEGradeTableRow (the others are the identity).
+    VEUInt curveMask;
+    VEUInt unused1;
+    VEUInt unused2;
 };
 
 // The shape of a transition draw (VETransitionUniforms::shape), TransitionKind's values
@@ -257,10 +295,13 @@ struct VEHistogramUniforms {
 
 // The same layout on both sides: sizes, and the offset of every member that follows a scalar group or
 // starts one.
-static_assert(sizeof(struct VEGradeUniforms) == 32, "VEGradeUniforms layout");
+static_assert(sizeof(struct VEGradeUniforms) == 112, "VEGradeUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEGradeUniforms, saturation) == 16, "VEGradeUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEGradeUniforms, transfer) == 28, "VEGradeUniforms layout");
-static_assert(sizeof(struct VESourceUniforms) == 176, "VESourceUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEGradeUniforms, lift) == 32, "VEGradeUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEGradeUniforms, gammaSlope) == 80, "VEGradeUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEGradeUniforms, stages) == 96, "VEGradeUniforms layout");
+static_assert(sizeof(struct VESourceUniforms) == 256, "VESourceUniforms layout");
 static_assert(VE_OFFSET_OF(struct VESourceUniforms, weight) == 112, "VESourceUniforms layout");
 static_assert(VE_OFFSET_OF(struct VESourceUniforms, straightAlpha) == 116, "VESourceUniforms layout");
 static_assert(VE_OFFSET_OF(struct VESourceUniforms, planeExtent) == 128, "VESourceUniforms layout");
@@ -268,10 +309,10 @@ static_assert(VE_OFFSET_OF(struct VESourceUniforms, grade) == 144, "VESourceUnif
 static_assert(sizeof(struct VETransitionUniforms) == 32, "VETransitionUniforms layout");
 static_assert(VE_OFFSET_OF(struct VETransitionUniforms, shape) == 16, "VETransitionUniforms layout");
 static_assert(VE_OFFSET_OF(struct VETransitionUniforms, incoming) == 20, "VETransitionUniforms layout");
-static_assert(sizeof(struct VEDrawUniforms) == 64 + 2 * 176, "VEDrawUniforms layout");
+static_assert(sizeof(struct VEDrawUniforms) == 64 + 2 * 256, "VEDrawUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEDrawUniforms, transition) == 32, "VEDrawUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEDrawUniforms, a) == 64, "VEDrawUniforms layout");
-static_assert(VE_OFFSET_OF(struct VEDrawUniforms, b) == 64 + 176, "VEDrawUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEDrawUniforms, b) == 64 + 256, "VEDrawUniforms layout");
 static_assert(sizeof(struct VEUnsharpUniforms) == 32, "VEUnsharpUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEUnsharpUniforms, width) == 16, "VEUnsharpUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEUnsharpUniforms, isLuma) == 24, "VEUnsharpUniforms layout");

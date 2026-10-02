@@ -63,6 +63,15 @@ void setGradeValueIn(VEGradeParams &params, GradeParameter parameter, double val
 /// The values of `grade` (its foreign entries are not shown).
 VEGradeParams toVE(const ClipGrade &grade);
 VEGradeSelection *makeGradeSelection(const GradeSummary &summary);
+/// The wheel of a VEGradeWheel (nullopt outside the enum), and wheel settings both ways.
+std::optional<GradeWheel> fromVE(VEGradeWheel wheel);
+VEGradeWheelValue toVE(const WheelValue &value);
+WheelValue fromVE(const VEGradeWheelValue &value);
+/// The curve of a VEGradeCurve (nullopt outside the enum), and curve points both ways (NSValue-wrapped
+/// points).
+std::optional<GradeCurve> fromVE(VEGradeCurve curve);
+NSArray<NSValue *> *toVE(const CurvePoints &points);
+CurvePoints fromVE(NSArray<NSValue *> *points);
 
 VEAssetInfo *makeAssetInfo(const MediaAsset &asset, const AssetDetails *details, bool missing, NSInteger useCount);
 // `index` (optional): the sequence's clips by id, when many snapshots are made at once (review L9).

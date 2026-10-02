@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <map>
 #include <utility>
@@ -156,11 +157,38 @@ json assetToJson(const MediaAsset &asset) {
 // A clip's grade: the values that are not neutral, then the entries this version does not read (a
 // newer version's parameters) as they came. Written only when not empty (ClipGrade::isEmpty), so a
 // clip without a grade writes what version 7 wrote.
+// The colour wheels (slice 2) are flat keys of a number each, "<wheel>Level", "<wheel>Cb", "<wheel>Cr"
+// ("liftLevel", "gammaCr", ...), written when not zero; the curves are "curveLuma", "curveRed", ... each a
+// list of [x, y] points, written when not the identity. Flat keys, so a version that does not know them keeps
+// them as foreign entries.
 json gradeToJson(const ClipGrade &grade) {
     json j = json::object();
     for (const GradeParameter parameter : kGradeParameters) {
         if (grade[parameter] != neutralValue(parameter)) {
             j[nameOf(parameter)] = grade[parameter];
+        }
+    }
+    for (const GradeWheel wheel : kGradeWheels) {
+        const WheelValue &value = grade[wheel];
+        const std::string name = nameOf(wheel);
+        if (value.level != 0.0) {
+            j[name + "Level"] = value.level;
+        }
+        if (value.cb != 0.0) {
+            j[name + "Cb"] = value.cb;
+        }
+        if (value.cr != 0.0) {
+            j[name + "Cr"] = value.cr;
+        }
+    }
+    for (const GradeCurve curve : kGradeCurves) {
+        const CurvePoints &points = grade[curve];
+        if (!points.empty()) {
+            json list = json::array();
+            for (const CurvePoint &point : points) {
+                list.push_back(json::array({point.x, point.y}));
+            }
+            j[nameOf(curve)] = std::move(list);
         }
     }
     addForeignKeys(j, foreignObject(grade.foreign));
@@ -520,6 +548,20 @@ std::optional<ParsedSpan> parseSpan(const Node &node, Warnings &warnings) {
 // warning; an entry this version does not know (a newer version's parameter) is kept as it is and
 // written back on save (ClipGrade::foreign), with a warning. A value that is not a number fails the
 // load with its path.
+// The wheel key `key` names ("liftLevel" -> Lift, member 0; "gammaCb" -> Gamma, 1; "gainCr" -> Gain, 2).
+std::optional<std::pair<GradeWheel, int>> wheelKeyNamed(const std::string &key) {
+    static constexpr const char *kMembers[] = {"Level", "Cb", "Cr"};
+    for (const GradeWheel wheel : kGradeWheels) {
+        const std::string name = nameOf(wheel);
+        for (int member = 0; member < 3; ++member) {
+            if (key == name + kMembers[member]) {
+                return std::make_pair(wheel, member);
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 ClipGrade parseGrade(const Node &node, Warnings &warnings) {
     node.requireObject();
     ClipGrade grade;
@@ -527,6 +569,32 @@ ClipGrade parseGrade(const Node &node, Warnings &warnings) {
     for (const auto &entry : node.value().items()) {
         const std::string &key = entry.key();
         const Node valueNode(entry.value(), node.path() + "." + key);
+        if (const auto wheelKey = wheelKeyNamed(key)) {
+            WheelValue &value = grade[wheelKey->first];
+            double &member = wheelKey->second == 0 ? value.level : wheelKey->second == 1 ? value.cb : value.cr;
+            member = valueNode.asDouble(); // a JSON number is finite
+            continue;
+        }
+        if (const auto curve = gradeCurveNamed(key)) {
+            CurvePoints points;
+            const std::size_t count = valueNode.arraySize();
+            for (std::size_t i = 0; i < count; ++i) {
+                const Node pointNode = valueNode.element(i);
+                if (pointNode.arraySize() != 2) {
+                    pointNode.fail("expected a point [x, y]");
+                }
+                points.push_back(CurvePoint{pointNode.element(0).asDouble(), pointNode.element(1).asDouble()});
+            }
+            CurvePoints kept = sanitizedCurve(points);
+            if (const auto problem = curveProblem(points)) {
+                warnings.push_back(valueNode.path() + ": the " + displayNameOf(*curve) + " curve's points are not a " +
+                                   "valid curve (" + *problem + "); kept " +
+                                   std::to_string(kept.size()) + " of " + std::to_string(points.size()) +
+                                   (kept.empty() ? " (no curve)" : ", sorted and limited to [0, 1]"));
+            }
+            grade[*curve] = std::move(kept);
+            continue;
+        }
         const auto parameter = gradeParameterNamed(key);
         if (!parameter) {
             foreign[key] = entry.value();
@@ -545,6 +613,22 @@ ClipGrade parseGrade(const Node &node, Warnings &warnings) {
             grade[*parameter] = limited;
         } else {
             grade[*parameter] = value;
+        }
+    }
+    // A wheel outside its range (a level beyond 1, a colour outside the wheel) is moved into it.
+    for (const GradeWheel wheel : kGradeWheels) {
+        if (!isValidWheel(grade[wheel])) {
+            const WheelValue limited = clampWheel(grade[wheel]);
+            const auto text = [](double v) {
+                char buffer[32];
+                std::snprintf(buffer, sizeof buffer, "%g", v);
+                return std::string(buffer);
+            };
+            warnings.push_back(node.path() + ": the " + displayNameOf(wheel) + " wheel (level " +
+                               text(grade[wheel].level) + ", colour " + text(grade[wheel].cb) + ", " +
+                               text(grade[wheel].cr) + ") is outside its range; limited to level " + text(limited.level) +
+                               ", colour " + text(limited.cb) + ", " + text(limited.cr));
+            grade[wheel] = limited;
         }
     }
     grade.foreign = foreignText(foreign);

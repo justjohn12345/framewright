@@ -703,6 +703,29 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)setGradeValue:(double)value
                    forParameter:(VEGradeParameter)parameter
                           clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setGradeValue(_:for:clips:));
+/// Sets the fields of `value` that are not NaN of `wheel` on every clip of `clipIDs` (see above), keeping
+/// the rest of their grades: NaN `level` keeps each clip's level (moving the colour over several clips), NaN
+/// `cb` and `cr` keep each clip's colour (moving the level). Refused (VEEditErrorInvalidArgument) for a value
+/// outside VEGradeWheel, every field NaN, only one of `cb` and `cr`, a level outside [-1, 1] or a colour
+/// outside the unit disk. Undo name "Change <wheel>" ("Change Lift"). A drag of a wheel is several of these
+/// in one coalescing group (one undo step), as for a slider.
+- (VEEditResult *)setGradeWheel:(VEGradeWheelValue)value
+                       forWheel:(VEGradeWheel)wheel
+                          clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setGradeWheel(_:for:clips:));
+/// Sets `curve` of every clip of `clipIDs` (see above) to `points` (NSValue-wrapped points, x increasing, 2
+/// to 16 of them, both coordinates 0 to 1; empty, or points on the diagonal from (0, 0) to (1, 1), is the
+/// identity), keeping the rest of their grades. Refused (VEEditErrorInvalidArgument) for a value outside
+/// VEGradeCurve or points that are not a valid curve. Undo name "Change <curve> Curve" ("Change Luma Curve").
+/// A drag of a point is several of these in one coalescing group (one undo step).
+- (VEEditResult *)setGradeCurvePoints:(NSArray<NSValue *> *)points
+                             forCurve:(VEGradeCurve)curve
+                                clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setGradeCurve(_:for:clips:));
+/// Sets every curve of every clip of `clipIDs` (see above) to the identity, keeping the rest of their
+/// grades. Undo name "Reset Curves"; clips without curves make no undo step.
+- (VEEditResult *)resetGradeCurvesOfClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(resetGradeCurves(ofClips:));
+/// Sets every wheel of every clip of `clipIDs` (see above) neutral, keeping the rest of their grades. Undo
+/// name "Reset Wheels"; clips whose wheels are all neutral make no undo step.
+- (VEEditResult *)resetGradeWheelsOfClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(resetGradeWheels(ofClips:));
 /// What the clips of `clipIDs` that can have a grade have for each parameter: the value where they
 /// agree, "mixed" where they differ (an empty selection for none).
 - (VEGradeSelection *)gradeOfClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(grade(ofClips:));
