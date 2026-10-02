@@ -806,12 +806,41 @@ Decisions taken by the user, 2026-10-02:
 - **D1 and D2: one rule.** When a fade and a dissolve on the same clip no longer both fit, the fade gives way
   and the dissolve keeps its length, everywhere. Today trims and pruning already do this; the frame-rate
   conform shortens the dissolve instead, so the conform changes to match. Its tests "D1 …" and "D2 …" change
-  with it. **Not implemented yet**; scheduled with the first grading round.
+  with it. Implemented in colour grading slice 1, item 1 (status below).
 
 Still open: kinds as presets and the facade's parameter API (item 6, the UI round). Also, each full test run
 leaves one empty per-process temporary directory (`<UUID>-<pid>-<hex>`) at the app container's root; 339
 were removed by hand on 2026-10-02. The cause (probably an item-replacement or temporary directory the test
 host asks Foundation for and never removes) is not fixed.
+
+## Colour grading slice 1 (2026-10-02): status
+Brief: the first grading round from 9127327, items 1-7 in this order, each committed when its tests pass:
+D1/D2 as one rule, the clip grade in the model (schema 8), its edit commands and facade API, the grade in the
+shader, its tests, the colour panel, the luma waveform. Decision followed:
+`2026-10-01-grading-pipeline-decision.md` (approved; section 7's decision: the grade is a property of the clip).
+
+Done:
+- 1, D1/D2, one rule (the user's decision of 2026-10-02): 96e2cd5. The frame-rate conform
+  (`SetSequenceFormat`) now fits the cross dissolves first, with every fade set aside, then each fade in
+  what the dissolves leave (`TransitionRules::conformFadeFramesBesideDissolves`: a fade in less its clip's
+  tail dissolve's share before the cut, a fade out less its fade in and a dissolve coming into its clip);
+  a clip's fade in still comes before its fade out. The sentences keep the order of the transitions on their
+  tracks, and a fade shortened or removed by a dissolve says so ("... it gives way to the cross dissolve at
+  the clip's end." / "... coming into the clip.", "crossfade" on sound). So when a fade and a dissolve on one
+  clip no longer both fit, the fade gives way everywhere (trims, pruning, the conform).
+  `TransitionRules::conformFadeFrames` is unchanged (the clip and its other fade; one term of the new rule).
+  Found and fixed in the same code: a fade out shorter than half a frame of the new rate was given its one
+  frame after the clip's end (`frames.after = 1` for every edge), so the conform left it invalid and the
+  pruning after it dropped it unreported; it now keeps its frame inside the clip (a fade in or a dissolve
+  after the edge, as before). Tests changed (they pinned the old behaviour, allowed by the brief): "D1, a fade
+  in beside a tail dissolve: a trim and the conform both shorten the fade" (conform: the fade 15 -> 10 frames,
+  the dissolve keeps 15 + 15) and "D2, a dissolve into a clip that fades out: pruning and the conform both
+  shorten the fade" (conform: the fade out 15 -> 10, the dissolve keeps 15 + 15). New: "the frame-rate
+  conform fits each fade in what the dissolves leave" (per role: a fade in shortened and one removed, a fade
+  out on sound shortened beside a crossfade, a fade out removed while a separate clip keeps its fade in's
+  priority over its fade out; each sentence checked, every case through `applyReversible`) and "the
+  frame-rate conform keeps a sub-frame fade as one frame at its own edge" (failed before the fix for the
+  fade out). Doctests 367 (365 + 2).
 
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
