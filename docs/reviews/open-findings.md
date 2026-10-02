@@ -578,7 +578,45 @@ Done:
   UUID-named directory at the container's root, as every earlier run did (326 there, the oldest from
   before this round).
 
-Next: item 2 (the float working buffer on the monitors).
+- 2, the float working buffer on the monitors (decision section 4, review 1.6): 47f0dc9. Every texture
+  target (the monitors' framebuffer-only BGR10A2 drawables, the solo preview, the output display,
+  snapshots) is composited into a pooled RGBA16Float working texture of at least the target's size (rounded
+  up in the pre-scale pool's steps, so a live resize reuses it: 1920x1080 -> 1920x1088, 16.7 MB; 2160p ->
+  3840x2176, 66.8 MB per view), then an output pass (a full-screen render pass, `ve_output_fragment`) writes
+  the target, limited to [0, 1] and opaque as `ve_convert_to_bgra` writes the export. The export keeps its
+  intermediate. Hook for a future scope (facade-private only): `WorkingFrameReader` on `TextureTarget`, and
+  `-[VEPreviewView setWorkingFrameReader:]` in `VEPreviewView+Internal.h`, called on the render thread with
+  the frame's command buffer and the working texture between the two passes (snapshots do not call it).
+  `TextureTarget` gained a three-field constructor so the existing `TextureTarget{texture, viewport,
+  drawable}` initialisations compile unchanged (with the new fields an aggregate would trip
+  -Wmissing-field-initializers), and `compositeDirectlyForTesting`, the old path, kept only for the
+  comparison tests. `releaseScratchMemory` (memory pressure) releases the working texture; `Stats` reports
+  it. Public header: doc comments only (VEPreviewView.h). Measured (`CompositorWorkingBufferTests`, M4 Pro,
+  Debug):
+  - Pixels, against the old path (both in one run): no sample of nine scenes (1:1 burn-in, a 10-bit
+    gradient, three layers at 50 % scaled and rotated, a 4K source pre-scaled and sharpened, straight alpha
+    over video, a dissolve, an iris, letterboxing into 1273x815, a viewport outside the target) changes by
+    more than one 10-bit code. But many change by one: 30 % of the samples of a 1:1 picture, 0.05-31 % by
+    scene. Cause, measured: the GPU stores each blended value in half float rounding towards zero (every
+    stored value lies at or below the exact float composite, less than one half-float step below), and the
+    output pass rounds that to 10 bits; so a sample lies within 0.84-1.0 codes of a 32-bit float composite
+    for one layer (0.49-0.50 straight into 10 bits) and within 0.9-1.31 codes for several (0.78-1.08
+    straight). The export's intermediate has always had the same rounding; monitors and export now agree.
+    Question for the lead: if half a code of accuracy on the monitors matters more than matching the export,
+    an RGBA32Float working texture (twice the memory) would make single layers exact.
+  - The reader sees, bit for bit, what an RGBA16Float target composited directly holds, and the target is
+    exactly that limited to [0, 1] and rounded to the nearest 10-bit code.
+  - GPU time per frame (median of 120 interleaved frames, three runs): the extra pass adds +0.01 to +0.09 ms
+    at 1080p (1 layer: 0.12-0.33 ms against 0.09-0.25; 3 layers at 50 %: 0.17-0.19 against 0.16-0.18) and
+    +0.06 to +0.09 ms at 2160p (1 layer: 0.28-0.29 against 0.20; 3 layers: 0.64-0.66 against 0.58-0.60),
+    against the note's estimate of 0.024 and 0.09 ms. The parity tests (`ExportParityTests`, which render
+    the monitor into a BGR10A2 texture target and so now go through the working texture), the compositor,
+    sharpen, preview-view, sequence-format, transition-shape and monitor suites pass unchanged, and so do the
+    redraw-budget tests in the full run.
+  Full suite after this item: EngineTests 555 (0 skips), doctest 349, AppTests 279 (1 known skip), 0
+  failures; no files left (again one empty UUID-named directory at the container's root).
+
+Next: item 3 (high-precision decode).
 
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
