@@ -324,15 +324,6 @@ const Clip *touchingClip(const Track &track, const Clip &clip, ClipEdge edge) {
     return next.timelineStart == clip.timelineEnd() ? &next : nullptr;
 }
 
-CMTime incomingTransitionInside(const Track &track, const Clip &clip) {
-    const Clip *previous = touchingClip(track, clip, ClipEdge::Head);
-    if (previous == nullptr) {
-        return kCMTimeZero;
-    }
-    const TransitionSpan *tail = previous->transitionAt(ClipEdge::Tail);
-    return tail != nullptr && kCMTimeZero < tail->end ? tail->end : kCMTimeZero;
-}
-
 std::optional<TransitionPlacement> placeTransition(const Track &track, const Clip &owner, const TransitionSpan &span) {
     TransitionPlacement placement;
     placement.track = &track;

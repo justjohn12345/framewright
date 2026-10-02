@@ -28,6 +28,7 @@
 #pragma once
 
 #include "../Model/Project.h"
+#include "../Model/TransitionRules.h"
 #include "Command.h"
 #include "EditPrimitives.h"
 
@@ -783,6 +784,10 @@ class ClipIndex {
 // transition there show (or play) the same media, so it has no visible (audible) effect. Two
 // pieces of one still are a through edit when neither has effect spans.
 bool isThroughEdit(const Sequence &sequence, ClipId fromClipId, ClipId toClipId);
+
+// The error an edit reports when `limit` stops a transition (TransitionRules.h): InvalidArgument for a
+// clip's length, Overlap for another transition, InsufficientHandles for missing media.
+EditError editErrorOf(RoomLimit limit);
 
 // How far a cross dissolve out of `owner` can reach on each side of its cut, and why not farther:
 // before the cut it is limited by the owner's length (less a fade in at its head) and by the next

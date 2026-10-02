@@ -48,32 +48,13 @@ const char *fadeTargetName(TrackKind trackKind) {
 }
 
 TransitionLimit fadeLimit(const Clip &clip, const Track &track, ClipEdge edge, CMTime frameDuration) {
-    // A fade in is limited by the clip's tail transition, a fade out by its fade in and the dissolve coming
-    // into the clip: never by the span at its own edge (the fade being resized, if any).
-    const Clip &owner = clip;
-    CMTime taken = kCMTimeZero;
-    CMTime incoming = kCMTimeZero;
-    if (edge == ClipEdge::Head) {
-        if (const TransitionSpan *tail = owner.transitionAt(ClipEdge::Tail)) {
-            taken = -tail->start;
-        }
-    } else {
-        taken = clipFadeLength(owner, ClipEdge::Head);
-        incoming = incomingTransitionInside(track, owner);
-    }
-    const CMTime room = owner.timelineDuration - taken - incoming;
+    // The fade's own edge never counts (TransitionRules::edgeRoom): a fade being resized is not in its own way.
+    const SideRoom room = TransitionRules::fadeRoom(track, clip, edge, frameDuration);
     TransitionLimit limit;
-    if (kCMTimeZero < incoming) {
-        limit.reason = track.kind == TrackKind::Audio ? "It would meet the crossfade coming into the clip."
-                                                      : "It would meet the cross dissolve coming into the clip.";
-        limit.limitError = EditError::Overlap;
-    } else {
-        limit.reason = taken == kCMTimeZero ? "A fade cannot be longer than its clip."
-                                            : "It would overlap the transition at the clip's other end.";
-        limit.limitError = taken == kCMTimeZero ? EditError::InvalidArgument : EditError::Overlap;
-    }
-    limit.maximumFrames = std::max<std::int64_t>(0, frameIndexAt(room, frameDuration, SnapMode::Floor));
-    limit.maximum = limit.maximumFrames > 0 ? timeForFrame(limit.maximumFrames, frameDuration) : kCMTimeZero;
+    limit.maximumFrames = room.frames;
+    limit.maximum = room.frames > 0 ? timeForFrame(room.frames, frameDuration) : kCMTimeZero;
+    limit.limitError = editErrorOf(room.limit);
+    limit.reason = room.reason;
     return limit;
 }
 

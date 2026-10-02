@@ -1868,7 +1868,7 @@ EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime len
     }
     if (edge == ClipEdge::Tail) {
         // A cross dissolve coming into the clip keeps its part inside it: the fade out has the rest.
-        const CMTime incoming = incomingTransitionInside(track, clip);
+        const CMTime incoming = TransitionRules::incomingPartInside(track, clip);
         const auto room = checkedSubtract(clip.timelineDuration, incoming);
         if (kCMTimeZero < incoming && (!room || *room < length)) {
             // Overlap, as the facade's fade limit reports the same condition (review L9).
@@ -1880,11 +1880,8 @@ EditResult setClipFade(Clip &clip, const Track &track, ClipEdge edge, CMTime len
                                                                                      : kCMTimeZero));
         }
     }
-    const CMTime other = edge == ClipEdge::Head ? [&] {
-        const TransitionSpan *tail = clip.transitionAt(ClipEdge::Tail);
-        return tail != nullptr ? -tail->start : kCMTimeZero;
-    }()
-                                                : clipFadeLength(clip, ClipEdge::Head);
+    // What the transition at the other edge takes of the clip.
+    const CMTime other = TransitionRules::partInside(clip, edge == ClipEdge::Head ? ClipEdge::Tail : ClipEdge::Head);
     const auto total = ExactTime::from(length) && ExactTime::from(other)
                            ? ExactTime::from(length)->plus(*ExactTime::from(other))
                            : std::nullopt;
@@ -2319,6 +2316,19 @@ bool isThroughEdit(const Sequence &sequence, ClipId fromClipId, ClipId toClipId)
 
 // ----- Transition limits -----
 
+EditError editErrorOf(RoomLimit limit) {
+    switch (limit) {
+    case RoomLimit::ClipLength:
+        return EditError::InvalidArgument;
+    case RoomLimit::OtherEdge:
+    case RoomLimit::IncomingDissolve:
+        return EditError::Overlap;
+    case RoomLimit::Media:
+        return EditError::InsufficientHandles;
+    }
+    return EditError::InvalidArgument;
+}
+
 namespace {
 
 std::string quotedMediaName(const Project &project, const Clip &clip) {
@@ -2332,17 +2342,6 @@ TransitionLimit noTransition(EditError error, std::string reason) {
     limit.limitError = error;
     limit.reason = std::move(reason);
     return limit;
-}
-
-// Whole frames of `length` (a timeline time), rounded down; unlimited for nullopt.
-std::int64_t wholeFrames(const std::optional<ExactTime> &length, CMTime frameDuration) {
-    if (!length) {
-        return std::numeric_limits<std::int64_t>::max() / 4;
-    }
-    if (length->numerator() <= 0) {
-        return 0;
-    }
-    return length->frameIndex(frameDuration, SnapMode::Floor).value_or(0);
 }
 
 } // namespace
@@ -2388,74 +2387,25 @@ std::optional<TransitionSideLimits> transitionSideLimits(const Project &project,
         why = EditResult::failure(EditError::TransitionNotFound, "The transition no longer exists.");
         return std::nullopt;
     }
-    const CMTime fd = sequence->frameDuration;
+    // TransitionRules::edgeRoom: before the cut the owner's frames not taken by its fade in or by a
+    // dissolve into it, and the next clip's media before its in point; after the cut the next clip's
+    // frames not taken by its own tail transition, and the owner's media after its out point.
+    const EdgeRoom room =
+        TransitionRules::edgeRoom(project, *track, *owner, ClipEdge::Tail, TransitionShape::CrossDissolve,
+                                  sequence->frameDuration);
     TransitionSideLimits limits;
-
-    // Before the cut: the owner's frames not taken by its fade in or by a dissolve into it, and the
-    // next clip's media before its in point.
-    CMTime taken = kCMTimeZero;
-    EditError roomError = EditError::InvalidArgument;
-    std::string roomReason = "A transition cannot be longer than the clips it joins.";
-    if (const TransitionSpan *head = owner->transitionAt(ClipEdge::Head)) {
-        taken = head->end;
-        roomError = EditError::Overlap;
-        roomReason = "It would overlap the fade at the clip's start.";
-    } else if (const Clip *previous = touchingClip(*track, *owner, ClipEdge::Head)) {
-        if (const TransitionSpan *incoming = previous->transitionAt(ClipEdge::Tail); incoming && kCMTimeZero < incoming->end) {
-            taken = incoming->end;
-            roomError = EditError::Overlap;
-            roomReason = "It would overlap the neighbouring transition.";
-        }
+    limits.maxBeforeFrames = room.inside.frames;
+    limits.beforeError = editErrorOf(room.inside.limit);
+    limits.beforeReason = room.inside.reason;
+    if (room.inside.limit == RoomLimit::Media) {
+        limits.beforeLimitingClip = room.inside.limitingClip;
     }
-    const auto ownerLength = ExactTime::from(owner->timelineDuration);
-    const auto takenExact = ExactTime::from(taken);
-    const std::int64_t roomBefore =
-        wholeFrames(ownerLength && takenExact ? ownerLength->minus(*takenExact) : std::nullopt, fd);
-    std::int64_t mediaBefore = wholeFrames(std::nullopt, fd);
-    if (!next->isStill) {
-        const auto in = ExactTime::from(next->sourceIn);
-        mediaBefore = wholeFrames(in ? in->dividedBy(next->speedRatio()) : std::nullopt, fd);
-    }
-    limits.maxBeforeFrames = std::min(roomBefore, mediaBefore);
-    if (roomBefore <= mediaBefore) {
-        limits.beforeError = roomError;
-        limits.beforeReason = roomReason;
-    } else {
-        limits.beforeError = EditError::InsufficientHandles;
-        limits.beforeReason = quotedMediaName(project, *next) + " has no more media before its in point.";
-        limits.beforeLimitingClip = next->id;
-    }
-
-    // After the cut: the next clip's frames not taken by its own tail transition, and the owner's
-    // media after its out point.
-    CMTime nextTaken = kCMTimeZero;
-    EditError nextError = EditError::InvalidArgument;
-    std::string nextReason = "A transition cannot be longer than the clips it joins.";
-    if (const TransitionSpan *nextTail = next->transitionAt(ClipEdge::Tail)) {
-        nextTaken = -nextTail->start;
-        nextError = EditError::Overlap;
-        nextReason = "It would overlap the neighbouring transition.";
-    }
-    const auto nextLength = ExactTime::from(next->timelineDuration);
-    const auto nextTakenExact = ExactTime::from(nextTaken);
-    const std::int64_t roomAfter =
-        wholeFrames(nextLength && nextTakenExact ? nextLength->minus(*nextTakenExact) : std::nullopt, fd);
-    std::int64_t mediaAfter = wholeFrames(std::nullopt, fd);
-    if (!owner->isStill) {
-        const MediaAsset *asset = project.findAsset(owner->assetId);
-        const auto out = owner->exactSourceOut();
-        const auto end = asset ? ExactTime::from(mediaEndFor(*asset, track->kind)) : std::nullopt;
-        const auto rest = out && end ? end->minus(*out) : std::nullopt;
-        mediaAfter = wholeFrames(rest ? rest->dividedBy(owner->speedRatio()) : std::optional<ExactTime>(ExactTime{}), fd);
-    }
-    limits.maxAfterFrames = std::min(roomAfter, mediaAfter);
-    if (roomAfter <= mediaAfter) {
-        limits.afterError = nextError;
-        limits.afterReason = nextReason;
-    } else {
-        limits.afterError = EditError::InsufficientHandles;
-        limits.afterReason = quotedMediaName(project, *owner) + " has no more media after its out point.";
-        limits.afterLimitingClip = owner->id;
+    const SideRoom &after = *room.beyond; // a clip touches the owner's end (checked above)
+    limits.maxAfterFrames = after.frames;
+    limits.afterError = editErrorOf(after.limit);
+    limits.afterReason = after.reason;
+    if (after.limit == RoomLimit::Media) {
+        limits.afterLimitingClip = after.limitingClip;
     }
     why = EditResult::success();
     return limits;
@@ -3522,20 +3472,15 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
                                 fitted = TransitionFrames{};
                             }
                         } else {
-                            // A fade: shorter while it is too long for its clip or meets its other transition.
+                            // A fade: as long as the clip and its fade in allow (TransitionRules::
+                            // conformFadeFrames), then checked as a whole.
                             std::int64_t &frames = edge == ClipEdge::Head ? fitted.after : fitted.before;
-                            auto issue = checkTransitionSpan(project, track, clip, *span, newFd);
-                            auto lengthIssue = [&issue] {
-                                return issue && (issue->kind == TransitionIssueKind::TooLong ||
-                                                 issue->kind == TransitionIssueKind::Overlap);
-                            };
                             reason = "the clip is too short for it at this frame rate, with its other transition.";
-                            while (frames > 0 && lengthIssue()) {
-                                --frames;
-                                if (frames > 0) {
-                                    setTransitionFrames(*span, fitted, newFd);
-                                    issue = checkTransitionSpan(project, track, clip, *span, newFd);
-                                }
+                            frames = std::min(frames, TransitionRules::conformFadeFrames(clip, edge, newFd));
+                            std::optional<TransitionIssue> issue;
+                            if (frames > 0) {
+                                setTransitionFrames(*span, fitted, newFd);
+                                issue = checkTransitionSpan(project, track, clip, *span, newFd);
                             }
                             if (frames > 0 && issue) {
                                 reason = issue->kind == TransitionIssueKind::Touching

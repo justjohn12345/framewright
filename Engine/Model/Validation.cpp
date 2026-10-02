@@ -1,5 +1,7 @@
 #include "Validation.h"
 
+#include "TransitionRules.h"
+
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -297,12 +299,16 @@ std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const
         return TransitionIssue{K::BadDuration, where + ": its range " + describe(span.start) + " - " +
                                                    describe(span.end) + " is empty"};
     }
-    const CMTime length = owner.timelineDuration;
     const auto placement = placeTransition(track, owner, span);
     if (!placement) {
         return TransitionIssue{K::Structure, where + ": cannot compute its range"};
     }
-    const TransitionSpan *other = owner.transitionAt(span.edge == ClipEdge::Head ? ClipEdge::Tail : ClipEdge::Head);
+    // The room on each side (TransitionRules.h); each check below reads the parts it is about.
+    const EdgeRoom room = TransitionRules::edgeRoom(
+        project, track, owner, span.edge,
+        placement->role == TransitionRole::CrossDissolve ? TransitionShape::CrossDissolve : TransitionShape::Fade,
+        frameDuration);
+    const CMTime length = room.inside.length;
     if (span.edge == ClipEdge::Head) {
         if (span.start != kCMTimeZero) {
             return TransitionIssue{K::Structure, where + ": a fade in starts at its clip's start"};
@@ -326,9 +332,10 @@ std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const
     if (!inside || length < *inside) {
         return TransitionIssue{K::TooLong, where + ": longer than its clip"};
     }
-    if (other != nullptr) {
-        const auto room = checkedSubtract(length, *inside);
-        if (!room || *room < other->end) {
+    if (owner.transitionAt(ClipEdge::Head) != nullptr) {
+        // What the fade in takes of the clip (its part inside it).
+        const auto rest = checkedSubtract(length, *inside);
+        if (!rest || *rest < room.inside.otherEdge) {
             return TransitionIssue{K::Overlap, where + ": meets the fade in at the start of clip " +
                                                    std::to_string(owner.id.value())};
         }
@@ -338,7 +345,7 @@ std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const
     }
     // A cross dissolve into the clip touching the owner's end.
     const Clip *partner = placement->partner;
-    if (partner == nullptr) {
+    if (partner == nullptr || !room.beyond) {
         return TransitionIssue{K::NotAdjacent, where + ": runs past the end of clip " + std::to_string(owner.id.value()) +
                                                    " but no clip touches that end"};
     }
@@ -347,35 +354,30 @@ std::optional<TransitionIssue> checkTransitionSpan(const Project &project, const
                                                    "of its cut (" + describe(span.start) + " - " +
                                                    describe(span.end) + ")"};
     }
-    if (partner->timelineDuration < span.end) {
+    const SideRoom &beyond = *room.beyond;
+    if (beyond.length < span.end) {
         return TransitionIssue{K::TooLong, where + ": longer than clip " + std::to_string(partner->id.value())};
     }
-    if (const TransitionSpan *partnerTail = partner->transitionAt(ClipEdge::Tail)) {
-        const auto partnerRoom = checkedAdd(partner->timelineDuration, partnerTail->start);
+    if (partner->transitionAt(ClipEdge::Tail) != nullptr) {
+        // What the next clip's own tail span takes of it.
+        const auto partnerRoom = checkedSubtract(beyond.length, beyond.otherEdge);
         if (!partnerRoom || *partnerRoom < span.end) {
             return TransitionIssue{K::Overlap, where + ": meets the transition at the end of clip " +
                                                    std::to_string(partner->id.value())};
         }
     }
-    if (!owner.isStill) {
-        const MediaAsset *asset = project.findAsset(owner.assetId);
-        const auto sourceEnd = owner.exactSourceTimeAt(placement->range.end);
-        const CMTime mediaEnd = asset ? mediaEndFor(*asset, track.kind) : kCMTimeInvalid;
-        if (!asset || !isNumeric(mediaEnd) || !sourceEnd || sourceEnd->compare(mediaEnd) > 0) {
-            return TransitionIssue{K::InsufficientHandles,
-                                   where + ": clip " + std::to_string(owner.id.value()) +
-                                       " lacks media after its out point for the transition",
-                                   owner.id};
-        }
+    // Media beyond the cut: the owner's after its out point, the next clip's before its in point.
+    if (!owner.isStill && (!beyond.media || beyond.media->compare(span.end) < 0)) {
+        return TransitionIssue{K::InsufficientHandles,
+                               where + ": clip " + std::to_string(owner.id.value()) +
+                                   " lacks media after its out point for the transition",
+                               owner.id};
     }
-    if (!partner->isStill) {
-        const auto sourceStart = partner->exactSourceTimeAt(placement->range.start);
-        if (!sourceStart || sourceStart->compare(kCMTimeZero) < 0) {
-            return TransitionIssue{K::InsufficientHandles,
-                                   where + ": clip " + std::to_string(partner->id.value()) +
-                                       " lacks media before its in point for the transition",
-                                   partner->id};
-        }
+    if (!partner->isStill && (!room.inside.media || room.inside.media->compare(*inside) < 0)) {
+        return TransitionIssue{K::InsufficientHandles,
+                               where + ": clip " + std::to_string(partner->id.value()) +
+                                   " lacks media before its in point for the transition",
+                               partner->id};
     }
     return std::nullopt;
 }
@@ -398,7 +400,11 @@ void pruneInvalidTransitions(Sequence &sequence, const Project &project, std::ve
                         // The next clip's fade out meets this dissolve: shorten it, if that is all.
                         Clip &next = track.clips[i + 1];
                         TransitionSpan *fade = next.transitionAt(ClipEdge::Tail);
-                        const auto room = checkedSubtract(next.timelineDuration, span->end);
+                        // The fade out's room in its clip beside the dissolve coming in (TransitionRules.h;
+                        // the clip has no fade in: the cut is the dissolve's), on the clip's timescale.
+                        const SideRoom left =
+                            TransitionRules::fadeRoom(track, next, ClipEdge::Tail, sequence.frameDuration);
+                        const auto room = checkedSubtract(left.length, left.incoming);
                         if (fade != nullptr && fade->end == kCMTimeZero && room) {
                             const Clip before = next;
                             const SpanId fadeId = fade->id;

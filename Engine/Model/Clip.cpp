@@ -1,5 +1,7 @@
 #include "Clip.h"
 
+#include "TransitionRules.h"
+
 #include "Track.h"
 
 #include <algorithm>
@@ -380,19 +382,20 @@ RetimeResult Clip::fitSpans(ClipEdge editedEdge) {
         return RetimeResult::NotRepresentable;
     }
     if (together->compare(length) > 0) {
+        // The fade that gives way keeps the room the other leaves (TransitionRules.h).
         const bool headGivesWay = head != nullptr && (!tailIsFade || editedEdge == ClipEdge::Head);
         if (headGivesWay) {
-            const auto rest = checkedSubtract(length, tailInside);
+            const auto rest = TransitionRules::fadeRoomBeside(length, tailInside);
             if (!rest) {
                 return RetimeResult::NotRepresentable;
             }
-            headLength = maxTime(*rest, kCMTimeZero);
+            headLength = *rest;
         } else if (tailIsFade) {
-            const auto rest = checkedSubtract(length, headLength);
+            const auto rest = TransitionRules::fadeRoomBeside(length, headLength);
             if (!rest) {
                 return RetimeResult::NotRepresentable;
             }
-            tailInside = maxTime(*rest, kCMTimeZero);
+            tailInside = *rest;
         }
     }
     if (head != nullptr) {
