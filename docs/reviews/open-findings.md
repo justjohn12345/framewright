@@ -942,6 +942,34 @@ Done:
   ProgramFrameProviderTests and CompositorPreviewViewTests pass unchanged (3 display-link skips). Not graded:
   the source monitor (it shows the media), thumbnails.
 
+- 5, tests for the grade: c75d08c. `EngineTests/Render/ColorGradeTests.cpp` (8 doctest cases on the CPU
+  reference): sanitising; the contrast curve over 0, -0, +-epsilon, +-epsilon/2, denormals (1e-40 and the
+  smallest), negatives to -1, 1, 0.18, large values to float max, NaN and +-inf at contrast 0.5, 1, 2, 0 and 1.3:
+  every output finite, sign kept, monotonic over a dense grid through the linear segment and across epsilon,
+  continuous at epsilon (relative 1e-5), the line below epsilon (negatives continue it), the pivot fixed,
+  contrast 1 bit for bit; the whole grade finite for every special input under 8 grades and 3 transfers;
+  black exactly black under 324 grades and 3 transfers; each step's neutral value bit for bit and the neutral
+  uniforms exact (gains 1, slope 1), the whole neutral grade within 2e-6 of its input over [0, 1]; exposure +1
+  and -2 multiply linear values by 2 and 1/4, saturation 0 gives the linear luminance's grey, temperature and
+  tint keep a grey's luminance and tilt the right channels, contrast pivots on linear 0.18; the transfer curves
+  odd, monotonic and inverse of each other; values beyond 256 limited; `gradeTransferFor`.
+  `EngineTests/Render/ColorGradeRenderTests.mm` (9 XCTests): the shader's grade (`ve_grade_samples`, a kernel
+  over the same function, used only by tests) against the CPU reference on 29,791 R'G'B' inputs from 31
+  values each (specials included) for 10 grades and 3 transfers: every GPU value finite, largest difference
+  8.08e-6 of the value (absolute below 1), bound 2e-5; rendered into an RGBA32Float target: graded black
+  exactly 0 for 420v, x420, 420f and BGRA under 9 strong grades; a 10-bit ramp from code 0 (sub-black) and
+  941-1019 (super-white) with extreme chroma has no NaN or out-of-range sample, and sub-black luma with
+  neutral chroma stays exactly 0; exposure +1 doubles linear values (largest error 2.6e-7); saturation 0 leaves
+  every pixel with equal channels; 8-bit and 10-bit sources of the same codes grade within 1.2e-5 (bound
+  1e-3); a straight-alpha picture is graded unpremultiplied (its transparent colour never shows); each side of
+  a dissolve gets its own grade (the pair equals mix of the two graded sides within 1e-5 at mix 0, 0.3, 1); the
+  cost (logged as GRADE COST). Parity: ExportParityTests `testGradedClipsAndAGradedDissolveExportTheMonitorsPictures`
+  (new): two graded clips crossing in a 5 + 5 dissolve, exported as ProRes 422 and compared with the monitor at
+  12 frames (5 in the dissolve): luma within 0.93 codes per 16x16 block (bound 1.5), mean difference 0.25-0.73
+  (bound 1), the worst single red or blue block 7.7 (the codec's chroma halving beside a saturated edge; the
+  first parity test's bound 12), while grading moved the picture by 22-40 codes per block; every layer carries
+  its clip's grade.
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
