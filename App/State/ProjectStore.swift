@@ -265,6 +265,7 @@ final class ProjectStore: ObservableObject {
     /// Tells the engine whether the source monitor is on screen (it drops the source controller's
     /// stopped lookahead while hidden).
     private var sourceVisibilityForwarding: AnyCancellable?
+    private var clippingOverlayForwarding: AnyCancellable?
     /// Redraws the timeline (which observes the store) when a track's lanes collapse or expand.
     private var laneCollapseForwarding: AnyCancellable?
 
@@ -323,6 +324,10 @@ final class ProjectStore: ObservableObject {
         // Window Layout, the saved layout at launch) goes through `layout.showsSourceMonitor`.
         sourceVisibilityForwarding = layout.$showsSourceMonitor.removeDuplicates().sink { [weak engine] visible in
             MainActor.assumeIsolated { engine?.sourceMonitorVisible = visible }
+        }
+        // The scope panel's button, the View menu and Reset Window Layout all set the layout's flag.
+        clippingOverlayForwarding = layout.$showsClippingOverlay.removeDuplicates().sink { [weak engine] shows in
+            MainActor.assumeIsolated { engine?.showsClippingOverlay = shows }
         }
         laneCollapseForwarding = layout.$collapsedLaneTracks.removeDuplicates().dropFirst().sink { [weak self] _ in
             MainActor.assumeIsolated {
@@ -605,20 +610,20 @@ final class ProjectStore: ObservableObject {
         engine.attachProgramView(view)
     }
 
-    /// Shows the program monitor's luma waveform in `view` (the waveform panel, while shown).
+    /// Shows the program monitor's scope in `view` (the scope panel, while shown).
     func attachWaveformView(_ view: VEWaveformView) {
         engine.attachWaveformView(view)
     }
 
-    /// The waveform panel went away: the engine stops drawing into `view` (unless another view replaced
-    /// it meanwhile).
+    /// The scope panel went away: the engine stops drawing into `view` (unless another view replaced it
+    /// meanwhile).
     func detachWaveformView(_ view: VEWaveformView) {
         if engine.waveformView === view {
             engine.attachWaveformView(nil)
         }
     }
 
-    /// View > Show Waveform.
+    /// View > Show Scopes (the panel's close button hides it too).
     func setWaveformVisible(_ visible: Bool) {
         guard visible != layout.showsWaveform else { return }
         layout.showsWaveform = visible

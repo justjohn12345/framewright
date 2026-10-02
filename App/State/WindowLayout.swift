@@ -23,8 +23,9 @@ enum InspectorTab: String, CaseIterable, Identifiable {
 /// Layout (see `ContentView`): the media bin (left), the monitors and the transport bar (centre),
 /// the inspector with its Inspector/Effects tabs (right), and the timeline below them. The program
 /// monitor takes the whole centre unless the source monitor is shown (View > Show Source Monitor,
-/// Shift+Cmd+2; hidden until media is opened in it); the luma waveform panel (View > Show Waveform)
-/// sits to its right when shown. The split between the monitors and the
+/// Shift+Cmd+2; hidden until media is opened in it); the scope panel (View > Show Scopes: the waveform
+/// or the histogram, `scopeMode`) sits beside or below it when shown, wide and short, as wide as the user
+/// dragged it (`scopeWidth`; `ScopeLayout` places it). The split between the monitors and the
 /// timeline belongs to the user (review D2): `timelineHeight` is always a stored value, set once on
 /// first launch from the tracks' rows without their lanes (`adoptInitialTimelineHeight`; a layout
 /// saved by an earlier version that was fitting, i.e. has no height, gets one the same way), then
@@ -47,8 +48,18 @@ final class WindowLayoutModel: ObservableObject {
     static let timelineHeightKey = "layout.timelineHeight"
     static let collapsedLanesKey = "layout.collapsedLanes"
     static let waveformKey = "layout.showsWaveform"
-    /// The waveform panel's width beside the program monitor.
+    static let scopeModeKey = "layout.scopeMode"
+    static let histogramStyleKey = "layout.histogramStyle"
+    static let scopePlacementKey = "layout.scopePlacement"
+    static let scopeWidthKey = "layout.scopeWidth"
+    /// The narrow width of slice 1's waveform panel, a column beside the monitor (a test host still lays
+    /// the panel out at it; the window gives it `scopeWidth`).
     static let waveformPanelWidth: CGFloat = 260
+    /// The scope's width when the user has not dragged it: readable (each waveform column one picture
+    /// column on a Retina display up to 960 pixels across), and short at the picture's aspect.
+    static let defaultScopeWidth: CGFloat = 480
+    /// The widths a drag may store (the area limits it further when laid out).
+    static let scopeWidths: ClosedRange<CGFloat> = 160 ... 2400
 
     static let defaultMediaBinWidth: CGFloat = 240
     static let mediaBinWidths: ClosedRange<CGFloat> = 180 ... 480
@@ -72,10 +83,34 @@ final class WindowLayoutModel: ObservableObject {
         didSet { if showsSourceMonitor != oldValue { defaults?.set(showsSourceMonitor, forKey: Self.sourceMonitorKey) } }
     }
 
-    /// Whether the luma waveform panel shows beside the program monitor (View > Show Waveform).
+    /// Whether the scope panel shows beside or below the program monitor (View > Show Scopes; slice 1's
+    /// waveform panel, hence the name).
     @Published var showsWaveform: Bool {
         didSet { if showsWaveform != oldValue { defaults?.set(showsWaveform, forKey: Self.waveformKey) } }
     }
+
+    /// The scope the panel shows.
+    @Published var scopeMode: ScopeMode {
+        didSet { if scopeMode != oldValue { defaults?.set(scopeMode.rawValue, forKey: Self.scopeModeKey) } }
+    }
+
+    /// How the histogram is drawn.
+    @Published var histogramStyle: HistogramStyleChoice {
+        didSet { if histogramStyle != oldValue { defaults?.set(histogramStyle.rawValue, forKey: Self.histogramStyleKey) } }
+    }
+
+    /// Where the panel sits.
+    @Published var scopePlacement: ScopePlacement {
+        didSet { if scopePlacement != oldValue { defaults?.set(scopePlacement.rawValue, forKey: Self.scopePlacementKey) } }
+    }
+
+    /// The scope's width in points as the user dragged it (`scopeWidths`); its height follows the picture.
+    @Published private(set) var scopeWidth: CGFloat
+
+    /// Whether the program monitor tints its clipped pixels (the scope panel's button, View > Show Clipping
+    /// on Program Monitor). A check made for the moment, so not remembered across launches: every launch
+    /// starts with it off. The store hands it to the engine.
+    @Published var showsClippingOverlay = false
 
     @Published var inspectorTab: InspectorTab {
         didSet { if inspectorTab != oldValue { defaults?.set(inspectorTab.rawValue, forKey: Self.inspectorTabKey) } }
@@ -102,6 +137,13 @@ final class WindowLayoutModel: ObservableObject {
         self.defaults = defaults
         showsSourceMonitor = defaults?.object(forKey: Self.sourceMonitorKey) as? Bool ?? false
         showsWaveform = defaults?.object(forKey: Self.waveformKey) as? Bool ?? false
+        scopeMode = defaults?.string(forKey: Self.scopeModeKey).flatMap(ScopeMode.init(rawValue:)) ?? .waveform
+        histogramStyle = defaults?.string(forKey: Self.histogramStyleKey).flatMap(HistogramStyleChoice.init(rawValue:))
+            ?? .rgbAndLuma
+        scopePlacement = defaults?.string(forKey: Self.scopePlacementKey).flatMap(ScopePlacement.init(rawValue:))
+            ?? .automatic
+        scopeWidth = Self.stored(defaults, Self.scopeWidthKey).map { Self.clamp($0, Self.scopeWidths) }
+            ?? Self.defaultScopeWidth
         inspectorTab = defaults?.string(forKey: Self.inspectorTabKey).flatMap(InspectorTab.init(rawValue:)) ?? .inspector
         mediaBinWidth = Self.stored(defaults, Self.mediaBinWidthKey).map { Self.clamp($0, Self.mediaBinWidths) }
             ?? Self.defaultMediaBinWidth
@@ -155,6 +197,15 @@ final class WindowLayoutModel: ObservableObject {
         guard clamped != inspectorWidth else { return }
         inspectorWidth = clamped
         defaults?.set(Double(clamped), forKey: Self.inspectorWidthKey)
+    }
+
+    /// The scope's width (a drag on its divider), clamped to `scopeWidths` and remembered.
+    func setScopeWidth(_ width: CGFloat) {
+        guard width.isFinite else { return }
+        let clamped = Self.clamp(width, Self.scopeWidths)
+        guard clamped != scopeWidth else { return }
+        scopeWidth = clamped
+        defaults?.set(Double(clamped), forKey: Self.scopeWidthKey)
     }
 
     func setSourceMonitorFraction(_ fraction: Double) {
@@ -213,13 +264,19 @@ final class WindowLayoutModel: ObservableObject {
     func resetToDefaults() {
         showsSourceMonitor = false
         showsWaveform = false
+        scopeMode = .waveform
+        histogramStyle = .rgbAndLuma
+        scopePlacement = .automatic
+        scopeWidth = Self.defaultScopeWidth
+        showsClippingOverlay = false
         inspectorTab = .inspector
         mediaBinWidth = Self.defaultMediaBinWidth
         inspectorWidth = Self.defaultInspectorWidth
         sourceMonitorFraction = Self.defaultSourceFraction
         timelineHeight = initialTimelineHeight
         collapsedLaneTracks = []
-        for key in [Self.sourceMonitorKey, Self.waveformKey, Self.inspectorTabKey, Self.mediaBinWidthKey,
+        for key in [Self.sourceMonitorKey, Self.waveformKey, Self.scopeModeKey, Self.histogramStyleKey,
+                    Self.scopePlacementKey, Self.scopeWidthKey, Self.inspectorTabKey, Self.mediaBinWidthKey,
                     Self.inspectorWidthKey, Self.sourceFractionKey, Self.timelineHeightKey, Self.collapsedLanesKey] {
             defaults?.removeObject(forKey: key)
         }

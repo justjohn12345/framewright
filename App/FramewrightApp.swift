@@ -203,8 +203,18 @@ struct AppCommands: Commands {
             Toggle("Show Source Monitor", isOn: Binding(get: { layout.showsSourceMonitor },
                                                         set: { store.setSourceMonitorVisible($0) }))
                 .keyboardShortcut("2", modifiers: [.command, .shift])
-            Toggle("Show Waveform", isOn: Binding(get: { layout.showsWaveform },
-                                                  set: { store.setWaveformVisible($0) }))
+            Toggle("Show Scopes", isOn: Binding(get: { layout.showsWaveform },
+                                                set: { store.setWaveformVisible($0) }))
+            Picker("Scope", selection: Binding(get: { layout.scopeMode },
+                                               set: { mode in
+                                                   layout.scopeMode = mode
+                                                   store.setWaveformVisible(true)
+                                               })) {
+                ForEach(ScopeMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            Toggle("Show Clipping on Program Monitor", isOn: $layout.showsClippingOverlay)
             Toggle("Program Monitor on Second Display", isOn: Binding(get: { output.isShowing },
                                                                       set: { _ in output.toggle() }))
                 .disabled(!output.isAvailable && !output.isShowing)

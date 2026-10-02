@@ -25,6 +25,7 @@ struct ContentView: View {
     @State private var dragStartInspectorWidth: CGFloat = 0
     @State private var dragStartTimelineHeight: CGFloat = 0
     @State private var dragStartSourceFraction: Double = 0
+    @State private var dragStartScopeWidth: CGFloat = 0
 
     init(store: ProjectStore, documents: DocumentController) {
         self.store = store
@@ -201,16 +202,51 @@ struct ContentView: View {
                 .help("Sequence Settings…")
                 .accessibilityIdentifier("SequenceSettingsButton")
             }
-            HStack(spacing: 8) {
-                ProgramMonitorHost(store: store, playhead: store.playhead)
-                    .clipShape(RoundedRectangle(cornerRadius: 3))
-                    .accessibilityIdentifier("ProgramMonitor")
-                if layout.showsWaveform {
-                    WaveformPanel(store: store)
-                        .frame(width: WindowLayoutModel.waveformPanelWidth)
+            // One ZStack whatever the arrangement, so the program monitor keeps its view (and its engine
+            // attachment) when the scopes come, go or move.
+            GeometryReader { area in
+                let arrangement = layout.showsWaveform ? scopeArrangement(in: area.size) : nil
+                let monitor = arrangement?.monitor ?? CGRect(origin: .zero, size: area.size)
+                ZStack(alignment: .topLeading) {
+                    ProgramMonitorHost(store: store, playhead: store.playhead)
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                        .accessibilityIdentifier("ProgramMonitor")
+                        .frame(width: monitor.width, height: monitor.height)
+                        .padding(.leading, monitor.minX)
+                        .padding(.top, monitor.minY)
+                    if let arrangement {
+                        PaneDivider(orientation: arrangement.beside ? .vertical : .horizontal,
+                                    onBegin: { dragStartScopeWidth = arrangement.scopeSize.width },
+                                    onDrag: { translation in
+                                        layout.setScopeWidth(ScopeLayout.draggedWidth(
+                                            from: dragStartScopeWidth, translation: translation,
+                                            beside: arrangement.beside, aspect: sequenceAspect))
+                                    },
+                                    help: "Drag to resize the scopes")
+                            .frame(width: arrangement.divider.width, height: arrangement.divider.height)
+                            .padding(.leading, arrangement.divider.minX)
+                            .padding(.top, arrangement.divider.minY)
+                        ScopePanel(store: store)
+                            .frame(width: arrangement.panel.width, height: arrangement.panel.height)
+                            .padding(.leading, arrangement.panel.minX)
+                            .padding(.top, arrangement.panel.minY)
+                    }
                 }
+                .frame(width: area.size.width, height: area.size.height, alignment: .topLeading)
             }
         }
         .padding(8)
+    }
+
+    /// The sequence's picture aspect (width over height).
+    private var sequenceAspect: CGFloat {
+        let sequence = store.sequence
+        return sequence.width > 0 && sequence.height > 0 ? CGFloat(sequence.width) / CGFloat(sequence.height) : 16.0 / 9.0
+    }
+
+    /// Where the monitor and the scope panel go in a monitor area of `size` (`ScopeLayout`).
+    private func scopeArrangement(in size: CGSize) -> ScopeArrangement {
+        ScopeLayout.arrange(area: size, aspect: sequenceAspect, placement: layout.scopePlacement,
+                            scopeWidth: layout.scopeWidth)
     }
 }
