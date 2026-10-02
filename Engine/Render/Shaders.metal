@@ -328,10 +328,50 @@ vertex VEOutputVertexOut ve_output_vertex(uint vertexID [[vertex_id]]) {
 // The working texture's pixel under each target pixel (both have the target's pixel grid: the working
 // texture may be larger, the frame lies in its top-left corner), limited to [0, 1] as ve_convert_to_bgra
 // limits the export's, and opaque (the composite is cleared to opaque black).
+//
+// With the clipping overlay (a monitor's, VEFunctionConstantClippingOverlay) a pixel of the frame (inside
+// `frame`, so never a letterbox bar) with a channel at or above white (within kVEScopeClipTolerance) is shown
+// red and one with a channel at or below black blue (red wins for a pixel that is both), as a photo app's
+// clipping warning; the scopes' clipping counters count the same pixels. Never used by export.
+constant bool kClippingOverlayValue [[function_constant(VEFunctionConstantClippingOverlay)]];
+constant bool kClippingOverlay = is_function_constant_defined(kClippingOverlayValue) && kClippingOverlayValue;
+
 fragment float4 ve_output_fragment(VEOutputVertexOut in [[stage_in]],
-                                   texture2d<float, access::read> working [[texture(VETextureIndexWorking)]]) {
+                                   texture2d<float, access::read> working [[texture(VETextureIndexWorking)]],
+                                   constant float4 &frame [[buffer(VEBufferIndexOutputFrame),
+                                                            function_constant(kClippingOverlay)]]) {
     const float4 c = working.read(uint2(in.position.xy));
+    const float2 p = in.position.xy;
+    if (kClippingOverlay && p.x >= frame.x && p.y >= frame.y && p.x < frame.z && p.y < frame.w) {
+        if (max3(c.r, c.g, c.b) >= 1.0 - kVEScopeClipTolerance) {
+            return float4(1.0, 0.0, 0.0, 1.0);
+        }
+        if (min3(c.r, c.g, c.b) <= kVEScopeClipTolerance) {
+            return float4(0.0, 0.25, 1.0, 1.0);
+        }
+    }
     return float4(saturate(c.rgb), 1.0);
+}
+
+// MARK: - Scopes: clipping counters (ScopeStats.h)
+
+// Counts a sample of the working picture in the frame's clipping counters (stats[0]: a channel at or above
+// white, stats[1]: a channel at or below black, each within kVEScopeClipTolerance) when `active`. Summed over
+// the SIMD group first, so a frame that is all white or all black costs one device atomic per group, not one
+// per pixel. Called by every lane of the group (inactive lanes pass `active` false).
+static inline void countClipping(device atomic_uint *stats, float3 rgb, bool active) {
+    const bool white = active && max3(rgb.r, rgb.g, rgb.b) >= 1.0 - kVEScopeClipTolerance;
+    const bool black = active && min3(rgb.r, rgb.g, rgb.b) <= kVEScopeClipTolerance;
+    const uint whites = simd_sum(white ? 1u : 0u);
+    const uint blacks = simd_sum(black ? 1u : 0u);
+    if (simd_is_first()) {
+        if (whites != 0) {
+            atomic_fetch_add_explicit(&stats[0], whites, memory_order_relaxed);
+        }
+        if (blacks != 0) {
+            atomic_fetch_add_explicit(&stats[1], blacks, memory_order_relaxed);
+        }
+    }
 }
 
 // MARK: - Luma waveform (LumaWaveform.h)
@@ -339,21 +379,26 @@ fragment float4 ve_output_fragment(VEOutputVertexOut in [[stage_in]],
 // One thread per sampled pixel: x across the frame's whole width, y one of `sampleRows` evenly spaced rows.
 // The pixel's luma (BT.709 weights on the R'G'B' the monitor shows, limited to [0, 1]) is counted in its
 // waveform column (x scaled to `columns`) at its level (rounded to `levels` steps).
+// The sampled pixels are also counted in the frame's clipping counters (countClipping).
 kernel void ve_waveform_accumulate(texture2d<float, access::read> working [[texture(VETextureIndexWorking)]],
                                    device atomic_uint *counts [[buffer(VEBufferIndexWaveformCounts)]],
                                    constant VEWaveformUniforms &u [[buffer(VEBufferIndexWaveform)]],
+                                   device atomic_uint *stats [[buffer(VEBufferIndexScopeStats)]],
                                    uint2 gid [[thread_position_in_grid]]) {
     const uint width = uint(u.frame.z);
     const uint height = uint(u.frame.w);
-    if (gid.x >= width || gid.y >= u.sampleRows || height == 0) {
-        return;
+    const bool active = gid.x < width && gid.y < u.sampleRows && height != 0;
+    float3 sample = float3(0.5);
+    if (active) {
+        const uint row = min(height - 1, uint((float(gid.y) + 0.5) * float(height) / float(u.sampleRows)));
+        sample = working.read(uint2(uint(u.frame.x) + gid.x, uint(u.frame.y) + row)).rgb;
+        const float3 rgb = saturate(sample);
+        const float luma = dot(float3(0.2126, 0.7152, 0.0722), rgb);
+        const uint level = min(u.levels - 1, uint(rint(luma * float(u.levels - 1))));
+        const uint column = min(u.columns - 1, gid.x * u.columns / width);
+        atomic_fetch_add_explicit(&counts[level * u.columns + column], 1u, memory_order_relaxed);
     }
-    const uint row = min(height - 1, uint((float(gid.y) + 0.5) * float(height) / float(u.sampleRows)));
-    const float3 rgb = saturate(working.read(uint2(uint(u.frame.x) + gid.x, uint(u.frame.y) + row)).rgb);
-    const float luma = dot(float3(0.2126, 0.7152, 0.0722), rgb);
-    const uint level = min(u.levels - 1, uint(rint(luma * float(u.levels - 1))));
-    const uint column = min(u.columns - 1, gid.x * u.columns / width);
-    atomic_fetch_add_explicit(&counts[level * u.columns + column], 1u, memory_order_relaxed);
+    countClipping(stats, sample, active);
 }
 
 // The waveform drawn over the whole target (ve_output_vertex's triangle): column across, level up (0 IRE at
@@ -383,6 +428,184 @@ fragment float4 ve_waveform_fragment(VEOutputVertexOut in [[stage_in]],
     const bool major = nearest == 0.0 || nearest == 50.0 || nearest == 100.0;
     const float grid = pixelsAway < 0.75 ? (major ? 0.32 : 0.16) : 0.0;
     const float3 colour = max(float3(grid), float3(0.35, 1.0, 0.45) * trace);
+    return float4(colour, 1.0);
+}
+
+// MARK: - Histogram (Histogram.h)
+
+// The histogram bin of a value: rounded to kVEHistogramBins steps of [0, 1] (bin 0 is black, the last white).
+static inline uint histogramBin(float v) {
+    return min(kVEHistogramBins - 1, uint(rint(saturate(v) * float(kVEHistogramBins - 1))));
+}
+
+// Adds a thread's run of `count` samples at `bin` of channel row `row` to the group's histogram.
+static inline void addHistogramRun(threadgroup atomic_uint *groupCounts, uint row, uint bin, uint count) {
+    if (count != 0) {
+        atomic_fetch_add_explicit(&groupCounts[row * kVEHistogramBins + bin], count, memory_order_relaxed);
+    }
+}
+
+// One threadgroup per kVEHistogramTileSide-pixel square tile of the frame, kVEHistogramGroupSide^2 threads:
+// each thread counts (tile side / group side)^2 pixels, strided so neighbouring threads read neighbouring
+// pixels, into the group's own histogram in threadgroup memory; the group then adds its non-zero bins to the
+// counts. Every pixel of the frame is counted (R, G, B and BT.709 luma of the R'G'B' the monitor shows,
+// limited to [0, 1]) and in the clipping counters. A thread keeps a run per channel (its samples at one bin
+// in a row) and adds the run when the bin changes; at the end, a SIMD group whose runs share a bin adds them
+// as one sum. A flat picture (all of a group's samples on one counter) thus costs one threadgroup atomic per
+// SIMD group and channel, not one per sample.
+kernel void ve_histogram_accumulate(texture2d<float, access::read> working [[texture(VETextureIndexWorking)]],
+                                    device atomic_uint *counts [[buffer(VEBufferIndexScopeCounts)]],
+                                    constant VEHistogramUniforms &u [[buffer(VEBufferIndexScopeUniforms)]],
+                                    device atomic_uint *stats [[buffer(VEBufferIndexScopeStats)]],
+                                    uint2 tile [[threadgroup_position_in_grid]],
+                                    uint2 local [[thread_position_in_threadgroup]],
+                                    uint index [[thread_index_in_threadgroup]]) {
+    threadgroup atomic_uint groupCounts[kVEHistogramMaximaOffset];
+    constexpr uint threads = kVEHistogramGroupSide * kVEHistogramGroupSide;
+    for (uint i = index; i < kVEHistogramMaximaOffset; i += threads) {
+        atomic_store_explicit(&groupCounts[i], 0u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint width = uint(u.frame.z);
+    const uint height = uint(u.frame.w);
+    const uint2 origin = uint2(u.frame.xy);
+    constexpr uint steps = kVEHistogramTileSide / kVEHistogramGroupSide;
+    uint runBin[kVEHistogramChannels] = {0, 0, 0, 0};
+    uint runCount[kVEHistogramChannels] = {0, 0, 0, 0};
+    for (uint j = 0; j < steps; ++j) {
+        for (uint i = 0; i < steps; ++i) {
+            const uint x = tile.x * kVEHistogramTileSide + local.x + i * kVEHistogramGroupSide;
+            const uint y = tile.y * kVEHistogramTileSide + local.y + j * kVEHistogramGroupSide;
+            const bool active = x < width && y < height;
+            float3 sample = float3(0.5);
+            if (active) {
+                sample = working.read(origin + uint2(x, y)).rgb;
+                const float3 rgb = saturate(sample);
+                const uint bins[kVEHistogramChannels] = {histogramBin(rgb.r), histogramBin(rgb.g), histogramBin(rgb.b),
+                                                         histogramBin(dot(float3(0.2126, 0.7152, 0.0722), rgb))};
+                for (uint c = 0; c < kVEHistogramChannels; ++c) {
+                    if (runCount[c] != 0 && bins[c] != runBin[c]) {
+                        addHistogramRun(groupCounts, c, runBin[c], runCount[c]);
+                        runCount[c] = 0;
+                    }
+                    runBin[c] = bins[c];
+                    runCount[c] += 1;
+                }
+            }
+            countClipping(stats, sample, active);
+        }
+    }
+    for (uint c = 0; c < kVEHistogramChannels; ++c) {
+        // Lanes without samples (outside the frame) join any bin.
+        const uint first = simd_broadcast_first(runBin[c]);
+        if (simd_all(runCount[c] == 0 || runBin[c] == first)) {
+            const uint sum = simd_sum(runCount[c]);
+            if (simd_is_first()) {
+                addHistogramRun(groupCounts, c, first, sum);
+            }
+        } else {
+            addHistogramRun(groupCounts, c, runBin[c], runCount[c]);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = index; i < kVEHistogramMaximaOffset; i += threads) {
+        const uint n = atomic_load_explicit(&groupCounts[i], memory_order_relaxed);
+        if (n != 0) {
+            atomic_fetch_add_explicit(&counts[i], n, memory_order_relaxed);
+        }
+    }
+}
+
+// One threadgroup of kVEHistogramBins threads (thread b reads bin b of every channel): the tallest red,
+// green or blue bar and the tallest luma bar, between the end bins and over every bin, into the counts' last
+// four uints (kVEHistogramMaximaOffset). The display scales the bars by them.
+kernel void ve_histogram_finish(device uint *counts [[buffer(VEBufferIndexScopeCounts)]],
+                                uint bin [[thread_index_in_threadgroup]],
+                                uint simdLane [[thread_index_in_simdgroup]],
+                                uint simdGroup [[simdgroup_index_in_threadgroup]],
+                                uint simdGroups [[simdgroups_per_threadgroup]]) {
+    threadgroup uint partial[4][32];
+    const uint rgb = max3(counts[bin], counts[kVEHistogramBins + bin], counts[2 * kVEHistogramBins + bin]);
+    const uint luma = counts[3 * kVEHistogramBins + bin];
+    const bool inner = bin > 0 && bin + 1 < kVEHistogramBins;
+    const uint values[4] = {inner ? rgb : 0u, inner ? luma : 0u, rgb, luma};
+    for (uint k = 0; k < 4; ++k) {
+        const uint m = simd_max(values[k]);
+        if (simdLane == 0) {
+            partial[k][simdGroup] = m;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (bin < 4) {
+        uint m = 0;
+        for (uint g = 0; g < simdGroups; ++g) {
+            m = max(m, partial[bin][g]);
+        }
+        counts[kVEHistogramMaximaOffset + bin] = m;
+    }
+}
+
+// A bar's height (0 ... 0.94 of the target, leaving room above the tallest) for `count` with the scale's
+// reference count `reference` (the tallest bar between the end bins, or over every bin when those are empty);
+// an end bin taller than the reference reaches the top.
+static inline float histogramHeight(uint count, uint reference) {
+    return reference == 0 ? 0.0 : min(1.0, float(count) / float(reference)) * 0.94;
+}
+
+// The histogram drawn over the whole target (ve_output_vertex's triangle): level across (black at the left,
+// white at the right), samples up. Styles: 0, R, G and B filled and overlaid additively (overlaps show as
+// their mixtures, all three as grey) with the luma bars' tops as a white line, on one scale; 1, the luma bars
+// filled in light grey; 2, an RGB parade: the red, green and blue histograms side by side, on one scale.
+// A faint graticule marks the quarters of the range.
+fragment float4 ve_histogram_fragment(VEOutputVertexOut in [[stage_in]],
+                                      device const uint *counts [[buffer(VEBufferIndexScopeCounts)]],
+                                      constant VEHistogramUniforms &u [[buffer(VEBufferIndexScopeUniforms)]]) {
+    const float2 size = max(u.target.xy, float2(1.0));
+    const float2 p = in.position.xy;
+    const bool parade = u.style == 2;
+    const float sectionWidth = parade ? size.x / 3.0 : size.x;
+    const uint section = parade ? min(2u, uint(p.x / sectionWidth)) : 0u;
+    const float x = p.x - float(section) * sectionWidth; // within the section
+    if (parade && section > 0 && x < 2.0) {
+        return float4(0.22, 0.22, 0.22, 1.0); // the line between parade sections
+    }
+    const float across = x / sectionWidth;
+    const uint bin = min(kVEHistogramBins - 1, uint(across * float(kVEHistogramBins)));
+    const float up = 1.0 - p.y / size.y; // 0 at the bottom edge, 1 at the top
+    const float pixel = 1.0 / size.y;
+    const device uint *maxima = counts + kVEHistogramMaximaOffset;
+    const uint referenceRGB = maxima[0] != 0 ? maxima[0] : maxima[2];
+    const uint referenceLuma = maxima[1] != 0 ? maxima[1] : maxima[3];
+    const uint referenceAll = max(referenceRGB, referenceLuma);
+    float3 colour = float3(0.0);
+    // The quarters of the range (25, 50, 75 %).
+    const float quarter = across * 4.0;
+    if (abs(quarter - rint(quarter)) * sectionWidth / 4.0 < 0.6 && rint(quarter) > 0.0 && rint(quarter) < 4.0) {
+        colour = float3(0.14);
+    }
+    if (u.style == 1) {
+        const float h = histogramHeight(counts[3 * kVEHistogramBins + bin], referenceLuma);
+        if (up <= h) {
+            colour = float3(0.78);
+        }
+    } else if (parade) {
+        const float h = histogramHeight(counts[section * kVEHistogramBins + bin], referenceRGB);
+        if (up <= h) {
+            const float3 channels[3] = {float3(1.0, 0.25, 0.25), float3(0.3, 1.0, 0.35), float3(0.35, 0.5, 1.0)};
+            colour = channels[section] * 0.85;
+        }
+    } else {
+        const float r = histogramHeight(counts[bin], referenceAll);
+        const float g = histogramHeight(counts[kVEHistogramBins + bin], referenceAll);
+        const float b = histogramHeight(counts[2 * kVEHistogramBins + bin], referenceAll);
+        const float3 fill = float3(up <= r ? 0.72 : 0.0, up <= g ? 0.72 : 0.0, up <= b ? 0.72 : 0.0);
+        colour = max(colour, fill);
+        // The luma bars' tops, a white line.
+        const float l = histogramHeight(counts[3 * kVEHistogramBins + bin], referenceAll);
+        if (l > 0.0 && abs(up - l) < 1.5 * pixel) {
+            colour = float3(0.95);
+        }
+    }
     return float4(colour, 1.0);
 }
 

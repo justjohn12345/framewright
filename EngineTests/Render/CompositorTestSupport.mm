@@ -252,6 +252,29 @@ id<MTLTexture> makeTargetTexture(size_t width, size_t height) {
     return [device() newTextureWithDescriptor:desc];
 }
 
+id<MTLTexture> makeWorkingFrame(size_t width, size_t height, const std::function<simd_float3(size_t x, size_t y)> &colour) {
+    MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                    width:width
+                                                                                   height:height
+                                                                                mipmapped:NO];
+    desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+    desc.storageMode = MTLStorageModeShared;
+    id<MTLTexture> texture = [device() newTextureWithDescriptor:desc];
+    std::vector<_Float16> texels(width * height * 4);
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            const simd_float3 c = colour(x, y);
+            _Float16 *t = &texels[(y * width + x) * 4];
+            t[0] = _Float16(c.x);
+            t[1] = _Float16(c.y);
+            t[2] = _Float16(c.z);
+            t[3] = _Float16(1.0f);
+        }
+    }
+    [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:texels.data() bytesPerRow:width * 8];
+    return texture;
+}
+
 RGBd referenceRGB(double y, double cb, double cr, int bitDepth, bool fullRange, media::YCbCrMatrix matrix) {
     double kr = 0.2126, kb = 0.0722;
     if (matrix == media::YCbCrMatrix::BT601) {

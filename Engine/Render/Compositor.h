@@ -191,6 +191,10 @@ struct TextureTarget {
     id<MTLDrawable> drawable = nil;
     /// Optional; see WorkingFrameReader.
     WorkingFrameReader workingFrameReader;
+    /// The output pass tints clipped pixels (a monitor's clipping overlay; ve_output_fragment): a channel at
+    /// or above white red, at or below black blue. Only for monitors; ignored with
+    /// `compositeDirectlyForTesting`.
+    bool clippingOverlay = false;
     /// Composite straight into `texture` with no working texture and no output pass (how texture
     /// targets were drawn before the working buffer, 2026-10-01). Only for the tests that compare the
     /// two paths' pixels and GPU time; `workingFrameReader` is not called.

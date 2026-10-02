@@ -76,6 +76,9 @@ __attribute__((objc_subclassing_restricted))
 /// view once so the waveform appears.
 - (void)attachWaveformView:(nullable VEWaveformView *)view;
 @property (nonatomic, readonly, weak, nullable) VEWaveformView *waveformView;
+/// Whether the program view tints its clipped pixels (VEPreviewView's clippingOverlay; kept for a program
+/// view attached later; the output view never shows it). Setting it renders the program view once.
+@property (nonatomic) BOOL showsClippingOverlay;
 /// Both views stop calling into the controller (the engine's dealloc; also done when the monitor is
 /// released).
 - (void)disconnectViews;

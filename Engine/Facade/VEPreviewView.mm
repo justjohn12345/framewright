@@ -77,6 +77,7 @@ struct PreviewState {
     std::mutex hookMutex;
     id<CAMetalDrawable> (^drawableProvider)(CAMetalLayer *) = nil;
     WorkingFrameReader workingFrameReader; // under hookMutex
+    std::atomic<bool> clippingOverlay{false}; // the output pass tints clipped pixels (the program monitor's)
 
     // The compositor waits for its in-flight frames, whose completions touch the members
     // below; destroy it first.
@@ -217,6 +218,7 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
     TextureTarget target;
     target.texture = drawable.texture;
     target.drawable = drawable;
+    target.clippingOverlay = st.clippingOverlay.load();
     {
         std::lock_guard<std::mutex> hookLock(st.hookMutex);
         if (st.workingFrameReader) {
@@ -678,6 +680,14 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
 - (void)setWorkingFrameReader:(WorkingFrameReader)reader {
     std::lock_guard<std::mutex> lock(_state->hookMutex);
     _state->workingFrameReader = std::move(reader);
+}
+
+- (void)setClippingOverlay:(BOOL)overlay {
+    _state->clippingOverlay.store(overlay);
+}
+
+- (BOOL)clippingOverlay {
+    return _state->clippingOverlay.load();
 }
 
 - (void)applyWindowVisible:(BOOL)visible {

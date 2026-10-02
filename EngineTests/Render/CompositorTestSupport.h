@@ -7,6 +7,7 @@
 #include "../../Engine/Render/Compositor.h"
 
 #import <Metal/Metal.h>
+#include <simd/simd.h>
 
 #include <cstdint>
 #include <functional>
@@ -65,6 +66,10 @@ RGBA8 texturePixel(id<MTLTexture> texture, size_t x, size_t y);
 
 /// A shared-storage BGRA8Unorm render target texture.
 id<MTLTexture> makeTargetTexture(size_t width, size_t height);
+
+/// A shared-storage RGBA16Float texture (what a monitor's working texture is) whose pixel (x, y) is
+/// `colour(x, y)` (R, G, B, stored as half floats; alpha 1): a synthetic frame for the scopes.
+id<MTLTexture> makeWorkingFrame(size_t width, size_t height, const std::function<simd_float3(size_t x, size_t y)> &colour);
 
 /// Reference YCbCr codes -> 8-bit-scaled R'G'B' (0...255, unclamped doubles).
 struct RGBd {

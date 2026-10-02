@@ -783,6 +783,11 @@ NS_SWIFT_UI_ACTOR
 - (void)attachWaveformView:(nullable VEWaveformView *)view NS_SWIFT_NAME(attachWaveformView(_:));
 /// The attached waveform view, if any.
 @property (nonatomic, readonly, weak, nullable) VEWaveformView *waveformView;
+/// Whether the program monitor tints the pixels the scopes count as clipped (VEWaveformView): red where a
+/// channel is at or above white, blue where one is at or below black, as a photo app's clipping warning.
+/// Only the program monitor shows it (never the output display, a snapshot or an export); setting it
+/// renders the program monitor once, so a paused picture shows it at once. Off by default.
+@property (nonatomic) BOOL showsClippingOverlay;
 /// Same as seekToTime: (kept for callers that only show stills).
 - (void)showProgramFrameAtTime:(CMTime)time;
 

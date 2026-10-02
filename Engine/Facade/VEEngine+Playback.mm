@@ -37,6 +37,16 @@ using namespace ve::facade;
     return _programMonitor.waveformView;
 }
 
+- (BOOL)showsClippingOverlay {
+    VE_ASSERT_MAIN();
+    return _programMonitor.showsClippingOverlay;
+}
+
+- (void)setShowsClippingOverlay:(BOOL)shows {
+    VE_ASSERT_MAIN();
+    _programMonitor.showsClippingOverlay = shows;
+}
+
 - (BOOL)setProgramPreviewSoloClip:(VEClipID)clipID identityMotion:(BOOL)identityMotion {
     VE_ASSERT_MAIN();
     return [_programMonitor setPreviewSoloClip:toClipId(clipID) identityMotion:identityMotion];

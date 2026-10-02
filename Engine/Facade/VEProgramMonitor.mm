@@ -33,7 +33,8 @@ using namespace ve::facade;
     bool _published;      // the controller has the current project's sequence
     __weak VEPreviewView *_view;
     __weak VEPreviewView *_outputView; // mirrors the program (a second display)
-    __weak VEWaveformView *_waveformView; // draws the program view's luma waveform
+    __weak VEWaveformView *_waveformView; // draws the program view's scope
+    BOOL _showsClippingOverlay;           // the program view tints clipped pixels
 }
 
 - (instancetype)initWithRouter:(std::shared_ptr<media::BackendRouter>)router
@@ -104,9 +105,13 @@ using namespace ve::facade;
     if (previous != nil && previous != view) {
         [previous setWorkingFrameReader:ve::render::WorkingFrameReader{}];
     }
+    if (previous != nil && previous != view) {
+        previous.clippingOverlay = NO;
+    }
     _view = view;
     if (view != nil) {
         [view setFrameSource:_playback->frameSource()];
+        view.clippingOverlay = _showsClippingOverlay;
         [self installWaveformReader];
         [view renderOnce];
     }
@@ -135,6 +140,21 @@ using namespace ve::facade;
 - (nullable VEWaveformView *)waveformView {
     VE_ASSERT_MAIN();
     return _waveformView;
+}
+
+- (BOOL)showsClippingOverlay {
+    VE_ASSERT_MAIN();
+    return _showsClippingOverlay;
+}
+
+- (void)setShowsClippingOverlay:(BOOL)shows {
+    VE_ASSERT_MAIN();
+    if (shows == _showsClippingOverlay) {
+        return;
+    }
+    _showsClippingOverlay = shows;
+    _view.clippingOverlay = shows;
+    [_view renderOnce];
 }
 
 /// The program view reads its working frame into the waveform view, or nothing.

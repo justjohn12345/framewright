@@ -428,7 +428,9 @@ struct Compositor::Impl {
     // top-left corner) and the output pass that writes the target from it, one pipeline per format.
     id<MTLFunction> outputVertexFunction = nil;
     id<MTLFunction> outputFragmentFunction = nil;
-    std::vector<std::pair<MTLPixelFormat, id<MTLRenderPipelineState>>> outputPipelines;
+    // By pixel format and clipping overlay (the format shifted left by one, the overlay in bit 0).
+    std::vector<std::pair<std::uint64_t, id<MTLRenderPipelineState>>> outputPipelines;
+    id<MTLFunction> outputOverlayFragmentFunction = nil;
     id<MTLTexture> working = nil;
     std::size_t workingAllocations = 0; // working textures ever allocated (Stats)
 
@@ -693,17 +695,32 @@ struct Compositor::Impl {
         return media::okStatus();
     }
 
-    // The output pass's pipeline for a texture target of `format`.
-    Result<id<MTLRenderPipelineState>> outputPipeline(MTLPixelFormat format) {
+    // The output pass's pipeline for a texture target of `format`, with or without the clipping overlay
+    // (VEFunctionConstantClippingOverlay; its fragment function is specialised on first use).
+    Result<id<MTLRenderPipelineState>> outputPipeline(MTLPixelFormat format, bool clippingOverlay = false) {
+        const std::uint64_t key = (static_cast<std::uint64_t>(format) << 1) | (clippingOverlay ? 1u : 0u);
         for (const auto &entry : outputPipelines) {
-            if (entry.first == format) {
+            if (entry.first == key) {
                 return entry.second;
             }
         }
+        if (clippingOverlay && outputOverlayFragmentFunction == nil) {
+            MTLFunctionConstantValues *constants = [MTLFunctionConstantValues new];
+            const bool overlay = true;
+            [constants setConstantValue:&overlay type:MTLDataTypeBool atIndex:VEFunctionConstantClippingOverlay];
+            NSError *functionError = nil;
+            outputOverlayFragmentFunction = [library newFunctionWithName:@"ve_output_fragment"
+                                                          constantValues:constants
+                                                                   error:&functionError];
+            if (outputOverlayFragmentFunction == nil) {
+                return makeError(MediaErrorCode::Internal,
+                                 "Compositor: cannot specialise the clipping overlay: " + nsErrorText(functionError));
+            }
+        }
         MTLRenderPipelineDescriptor *desc = [MTLRenderPipelineDescriptor new];
-        desc.label = @"Framewright output";
+        desc.label = clippingOverlay ? @"Framewright output with the clipping overlay" : @"Framewright output";
         desc.vertexFunction = outputVertexFunction;
-        desc.fragmentFunction = outputFragmentFunction;
+        desc.fragmentFunction = clippingOverlay ? outputOverlayFragmentFunction : outputFragmentFunction;
         desc.colorAttachments[0].pixelFormat = format;
         NSError *error = nil;
         id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:desc error:&error];
@@ -712,7 +729,7 @@ struct Compositor::Impl {
                                                            std::to_string(static_cast<unsigned long>(format)) + ": " +
                                                            nsErrorText(error));
         }
-        outputPipelines.emplace_back(format, state);
+        outputPipelines.emplace_back(key, state);
         return state;
     }
 
@@ -943,7 +960,16 @@ Result<std::unique_ptr<Compositor>> Compositor::create(id<MTLDevice> device,
     }
     impl->vertexFunction = [impl->library newFunctionWithName:@"ve_layer_vertex"];
     impl->outputVertexFunction = [impl->library newFunctionWithName:@"ve_output_vertex"];
-    impl->outputFragmentFunction = [impl->library newFunctionWithName:@"ve_output_fragment"];
+    {
+        // The output fragment function has a function constant (the clipping overlay, off here; outputPipeline
+        // specialises it on when a monitor asks), so it must be specialised to be used.
+        MTLFunctionConstantValues *constants = [MTLFunctionConstantValues new];
+        const bool overlay = false;
+        [constants setConstantValue:&overlay type:MTLDataTypeBool atIndex:VEFunctionConstantClippingOverlay];
+        impl->outputFragmentFunction = [impl->library newFunctionWithName:@"ve_output_fragment"
+                                                           constantValues:constants
+                                                                    error:&error];
+    }
     id<MTLFunction> bgra = [impl->library newFunctionWithName:@"ve_convert_to_bgra"];
     id<MTLFunction> yuv = [impl->library newFunctionWithName:@"ve_convert_to_420"];
     id<MTLFunction> premultiply = [impl->library newFunctionWithName:@"ve_premultiply"];
@@ -1053,7 +1079,7 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         if (textureTarget->compositeDirectlyForTesting) {
             colorTexture = targetTexture;
         } else {
-            auto state = im.outputPipeline(targetTexture.pixelFormat);
+            auto state = im.outputPipeline(targetTexture.pixelFormat, textureTarget->clippingOverlay);
             if (!state.ok()) {
                 return std::move(state).error();
             }
@@ -1203,6 +1229,11 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
         outputEncoder.label = @"Framewright output";
         [outputEncoder setRenderPipelineState:outputState];
         [outputEncoder setFragmentTexture:im.working atIndex:VETextureIndexWorking];
+        if (textureTarget->clippingOverlay) {
+            const simd_float4 frame = simd_make_float4(float(scissor.x), float(scissor.y), float(scissor.x + scissor.width),
+                                                       float(scissor.y + scissor.height));
+            [outputEncoder setFragmentBytes:&frame length:sizeof frame atIndex:VEBufferIndexOutputFrame];
+        }
         [outputEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [outputEncoder endEncoding];
     }

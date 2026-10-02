@@ -28,18 +28,6 @@ media::MediaError waveformError(const std::string &what, NSError *error = nil) {
     return media::makeError(MediaErrorCode::Internal, text);
 }
 
-// The part of `r` inside a width x height texture.
-PixelRect clippedTo(const PixelRect &r, std::int32_t width, std::int32_t height) {
-    const std::int64_t x0 = std::max<std::int64_t>(0, r.x);
-    const std::int64_t y0 = std::max<std::int64_t>(0, r.y);
-    const std::int64_t x1 = std::min<std::int64_t>(width, std::int64_t(r.x) + r.width);
-    const std::int64_t y1 = std::min<std::int64_t>(height, std::int64_t(r.y) + r.height);
-    if (x1 <= x0 || y1 <= y0) {
-        return PixelRect{};
-    }
-    return PixelRect{std::int32_t(x0), std::int32_t(y0), std::int32_t(x1 - x0), std::int32_t(y1 - y0)};
-}
-
 } // namespace
 
 struct LumaWaveform::Impl {
@@ -50,6 +38,8 @@ struct LumaWaveform::Impl {
     id<MTLFunction> displayFragment = nil;
     std::vector<std::pair<MTLPixelFormat, id<MTLRenderPipelineState>>> displayPipelines;
     id<MTLBuffer> counts = nil;
+    // Bound as the clipping counters when the caller gives none (written, never read).
+    id<MTLBuffer> discardedStats = nil;
     VEWaveformUniforms uniforms{};
     bool accumulated = false;
     std::uint64_t samplesPerColumn = 0;
@@ -105,10 +95,13 @@ media::Result<std::unique_ptr<LumaWaveform>> LumaWaveform::create(id<MTLDevice> 
     }
     const NSUInteger length = NSUInteger(settings.columns) * settings.levels * sizeof(std::uint32_t);
     impl->counts = [device newBufferWithLength:length options:MTLResourceStorageModeShared];
-    if (impl->counts == nil) {
+    impl->discardedStats = [device newBufferWithLength:ScopeStatsRing::kSlotStride options:MTLResourceStorageModePrivate];
+    if (impl->counts == nil || impl->discardedStats == nil) {
         return waveformError("cannot allocate the counts");
     }
     impl->counts.label = @"Framewright waveform counts";
+    impl->discardedStats.label = @"Framewright waveform discarded clipping counters";
+    impl->uniforms.columns = settings.columns;
     std::memset(impl->counts.contents, 0, length);
     return std::unique_ptr<LumaWaveform>(new LumaWaveform(std::move(impl)));
 }
@@ -118,28 +111,41 @@ LumaWaveform::LumaWaveform(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) 
 LumaWaveform::~LumaWaveform() = default;
 
 bool LumaWaveform::encodeAccumulate(id<MTLCommandBuffer> commandBuffer, id<MTLTexture> working, const PixelRect &frame) {
+    return encodeAccumulate(commandBuffer, working, frame, 0, nullptr);
+}
+
+std::uint32_t LumaWaveform::sampleRowsFor(const PixelRect &frame, std::int32_t width, std::int32_t height) const {
+    const PixelRect r = clipToTexture(frame, width, height);
+    return r.isEmpty() ? 0u : std::min<std::uint32_t>(impl_->settings.maxSampleRows, std::uint32_t(r.height));
+}
+
+bool LumaWaveform::encodeAccumulate(id<MTLCommandBuffer> commandBuffer, id<MTLTexture> working, const PixelRect &frame,
+                                    std::uint32_t columns, const ScopeStatsSlot *stats) {
     Impl &im = *impl_;
     if (commandBuffer == nil || working == nil || working.device != im.device) {
         return false;
     }
-    const PixelRect r = clippedTo(frame, std::int32_t(working.width), std::int32_t(working.height));
+    const PixelRect r = clipToTexture(frame, std::int32_t(working.width), std::int32_t(working.height));
     if (r.isEmpty()) {
         return false;
     }
+    const std::uint32_t activeColumns = columns == 0 ? im.settings.columns : std::min(columns, im.settings.columns);
     const std::uint32_t rows = std::min<std::uint32_t>(im.settings.maxSampleRows, std::uint32_t(r.height));
     VEWaveformUniforms &u = im.uniforms;
     u.frame = simd_make_float4(float(r.x), float(r.y), float(r.width), float(r.height));
-    u.columns = im.settings.columns;
+    u.columns = activeColumns;
     u.levels = im.settings.levels;
     u.sampleRows = rows;
     // Pixels per column: the frame's width over the columns, times the rows (the average; columns of a
     // width that does not divide evenly differ by at most one pixel column).
-    im.samplesPerColumn = std::max<std::uint64_t>(1, std::uint64_t(r.width) * rows / im.settings.columns);
+    im.samplesPerColumn = std::max<std::uint64_t>(1, std::uint64_t(r.width) * rows / activeColumns);
     u.gain = float(48.0 / double(im.samplesPerColumn));
 
     id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
     blit.label = @"Framewright waveform clear";
-    [blit fillBuffer:im.counts range:NSMakeRange(0, im.counts.length) value:0];
+    [blit fillBuffer:im.counts
+               range:NSMakeRange(0, NSUInteger(activeColumns) * im.settings.levels * sizeof(std::uint32_t))
+               value:0];
     [blit endEncoding];
 
     id<MTLComputeCommandEncoder> compute = [commandBuffer computeCommandEncoder];
@@ -148,6 +154,11 @@ bool LumaWaveform::encodeAccumulate(id<MTLCommandBuffer> commandBuffer, id<MTLTe
     [compute setTexture:working atIndex:VETextureIndexWorking];
     [compute setBuffer:im.counts offset:0 atIndex:VEBufferIndexWaveformCounts];
     [compute setBytes:&u length:sizeof u atIndex:VEBufferIndexWaveform];
+    if (stats != nullptr && stats->buffer != nil) {
+        [compute setBuffer:stats->buffer offset:stats->offset atIndex:VEBufferIndexScopeStats];
+    } else {
+        [compute setBuffer:im.discardedStats offset:0 atIndex:VEBufferIndexScopeStats];
+    }
     const NSUInteger tw = im.accumulate.threadExecutionWidth;
     const NSUInteger th = std::max<NSUInteger>(1, std::min<NSUInteger>(8, im.accumulate.maxTotalThreadsPerThreadgroup / tw));
     [compute dispatchThreads:MTLSizeMake(NSUInteger(r.width), rows, 1) threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
@@ -199,6 +210,10 @@ std::vector<std::uint32_t> LumaWaveform::countsSnapshot() const {
 
 std::uint64_t LumaWaveform::samplesPerColumn() const {
     return impl_->samplesPerColumn;
+}
+
+std::uint32_t LumaWaveform::columns() const {
+    return impl_->uniforms.columns;
 }
 
 std::uint32_t LumaWaveform::sampleRows() const {

@@ -29,6 +29,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// call it.
 - (void)setWorkingFrameReader:(ve::render::WorkingFrameReader)reader;
 
+/// Whether the output pass tints clipped pixels (TextureTarget::clippingOverlay) from the next frame on:
+/// the program monitor's clipping overlay. Any thread; call -renderOnce to show it on a paused picture.
+/// Snapshots never show it.
+@property (atomic) BOOL clippingOverlay;
+
 // MARK: Diagnostics and tests
 
 /// Render requests and ticks that found every frame slot on the GPU (the frame was deferred).

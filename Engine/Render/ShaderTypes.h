@@ -35,6 +35,15 @@ enum VEBufferIndex {
     // display pass alike.
     VEBufferIndexWaveformCounts = 0,
     VEBufferIndexWaveform = 1, // VEWaveformUniforms
+    // The other scopes (Histogram.h): their counts and uniforms, as the waveform's.
+    VEBufferIndexScopeCounts = 0,
+    VEBufferIndexScopeUniforms = 1,
+    // Every scope's accumulate kernel: the clipping counters of the frame (ScopeStats.h; two atomic uints,
+    // the samples with a channel at or above white, and at or below black).
+    VEBufferIndexScopeStats = 2,
+    // The monitor output pass with the clipping overlay: the frame's rectangle in the target (float4: x0, y0,
+    // x1, y1 in pixels); the letterbox bars outside it are never tinted.
+    VEBufferIndexOutputFrame = 0,
 };
 
 // Texture binding indices, per pipeline as the buffer indices are.
@@ -64,7 +73,17 @@ enum VEFunctionConstant {
     // the end of the grade. Without it a source is drawn exactly as before grading existed.
     VEFunctionConstantSourceAHasGrade = 3,
     VEFunctionConstantSourceBHasGrade = 4,
+    // The monitor output pass (ve_output_fragment) tints clipped pixels (kVEScopeClipTolerance): a monitor's
+    // clipping overlay. Absent or false: the output pass is a plain copy.
+    VEFunctionConstantClippingOverlay = 5,
 };
+
+// How close to white (1) or black (0) a channel of the working picture counts as clipped, for the scopes'
+// clipping counters and the monitor's clipping overlay: 2^-12, a quarter of a 10-bit code. The working
+// texture is half float, whose largest value below 1 is 1 - 2^-11, so a channel counts as clipped white
+// exactly when it is stored as 1 or more; a channel within 2^-12 of 0 (the YCbCr matrix's float residue at
+// video black, stored as the smallest half subnormals) counts as black, while 10-bit code 1 (2^-10) does not.
+#define kVEScopeClipTolerance 2.44140625e-04f
 
 // The transfer curve a graded source is linearised by (VEGradeUniforms::transfer; ColorGrade.h).
 enum VEGradeTransfer {
@@ -210,6 +229,32 @@ struct VEWaveformUniforms {
     float gain;
 };
 
+// A histogram of a frame (Histogram.h): its accumulate kernel counts the samples of the working texture per
+// channel (R, G, B, luma) and level; its finish kernel finds the tallest bars; its display pass draws them.
+//
+// The counts buffer: kVEHistogramChannels rows of kVEHistogramBins uints (row 0 red, 1 green, 2 blue, 3 luma;
+// bin b holds the samples whose value rounds to b / (bins - 1)), then the finish kernel's four uints: the
+// tallest red, green or blue bar and the tallest luma bar between the end bins, then the same over every bin.
+#define kVEHistogramBins 256u
+#define kVEHistogramChannels 4u
+#define kVEHistogramMaximaOffset (kVEHistogramBins * kVEHistogramChannels)
+#define kVEHistogramCountsLength (kVEHistogramMaximaOffset + 4u)
+// A threadgroup of the accumulate kernel is kVEHistogramGroupSide^2 threads; each counts a
+// kVEHistogramTileSide-pixel square tile's pixels in threadgroup memory, then adds them to the counts.
+#define kVEHistogramGroupSide 16u
+#define kVEHistogramTileSide 64u
+struct VEHistogramUniforms {
+    // The frame in the working texture: x, y, width, height in texels.
+    VEFloat4 frame;
+    // The display target's width and height in pixels; zw unused (0).
+    VEFloat4 target;
+    // The VEHistogramStyle of the display (0 RGB and luma overlaid, 1 luma, 2 RGB parade).
+    VEUInt style;
+    VEUInt unused0;
+    VEUInt unused1;
+    VEUInt unused2;
+};
+
 // The same layout on both sides: sizes, and the offset of every member that follows a scalar group or
 // starts one.
 static_assert(sizeof(struct VEGradeUniforms) == 32, "VEGradeUniforms layout");
@@ -236,3 +281,5 @@ static_assert(VE_OFFSET_OF(struct VEConvertUniforms, tenBitCodes) == 56, "VEConv
 static_assert(sizeof(struct VEWaveformUniforms) == 48, "VEWaveformUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEWaveformUniforms, columns) == 32, "VEWaveformUniforms layout");
 static_assert(VE_OFFSET_OF(struct VEWaveformUniforms, gain) == 44, "VEWaveformUniforms layout");
+static_assert(sizeof(struct VEHistogramUniforms) == 48, "VEHistogramUniforms layout");
+static_assert(VE_OFFSET_OF(struct VEHistogramUniforms, style) == 32, "VEHistogramUniforms layout");
