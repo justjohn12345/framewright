@@ -908,6 +908,40 @@ Done:
   `$TMPDIR/FramewrightEngineTests`, the container's tmp or Preferences (one UUID-named directory at the
   container's root, the known pattern).
 
+- 4, the grade in the shader: 2cc418d. `Engine/Render/ColorGrade.h` holds the per-pixel grade, compiled by
+  Shaders.metal and by C++ (the CPU reference `gradeReference`, the uniforms `gradeUniformsFor` and the
+  transfer choice `gradeTransferFor`). Steps: NaN -> 0 and +-inf -> +-float max by their bits (fast math),
+  encoded values limited to +-256 (keeps every later step finite), an encoded value within 2^-20 of 0 is 0
+  (see below), linearised by the source's transfer (BT.1886 2.4 for BT.709 / SMPTE 240M / PQ / HLG /
+  untagged video, sRGB for sRGB-tagged sources and untagged stills, identity for linear; mirrored for
+  negatives), the channel gains (2^exposure times the temperature/tint gains red 2^(t/2), green 2^(-m/2),
+  blue 2^(-t/2) for t, m over 100, divided on the CPU in double by their BT.709 luminance kept at least 1e-6;
+  exactly 1 when neutral), saturation (a mix toward BT.709 linear luminance), contrast by the section 2
+  rule (pivot 0.18, epsilon 2^-14, log2 only of values >= epsilon, the line v * f(epsilon) / epsilon below
+  it with the slope computed on the CPU, contrast 1 the identity; its input limited to +-2^60 so the curve is
+  finite on its own), re-encoded, then the caller's clamp. Each step at its neutral value returns its input
+  bit for bit. `VEGradeUniforms` (gain, saturation, contrast, contrastSlope, transfer; 32 bytes) is the last
+  member of `VESourceUniforms` (176 bytes now; offsets `static_assert`ed), filled per source in `fillSource`
+  from `VideoLayer::grade` (copied from `Clip::grade` by the scheduler) and the picture's transfer tag
+  (`TextureSet::transfer()`, read from kCVImageBufferTransferFunctionKey); a dissolve pair fills A and B from
+  their own layers. Function constants `VEFunctionConstantSourceAHasGrade` / `...BHasGrade` select graded
+  sources (`PipelineKey` gained the two bits; a compositor made for a monitor prepares all 20 layer pipelines
+  instead of 6: 1.1 ms once compiled). A graded source skips `sampleYCbCr`'s clamp and `sampleRGBA`'s colour
+  clamp (its alpha stays clamped); straight or premultiplied RGBA is graded unpremultiplied (divided by alpha,
+  0 where alpha is 0) and premultiplied again; the grade's result is clamped to [0, 1] before coverage, weight
+  and blend. An ungraded layer runs the code it ran before (the graded branches are compile-time false).
+  Black residue: the YCbCr matrix leaves 2e-8 to 5e-8 at video black in the ungraded picture too (measured:
+  420v 4.8e-8, x420 2.2e-8, 420f 3.5e-8 in red), which exposure +5 lifted to about 1e-6; values within 2^-20
+  (a sixteenth of a 16-bit code) count as 0, so a graded black frame is exactly black. Fast math: the curves
+  use `metal::fast`; measured against the CPU (libm) the largest difference is 8.08e-6 with either
+  `metal::fast` or `metal::precise`, and the GPU cost per graded 1080p layer +0.14 to +0.16 ms with fast
+  against +0.53 ms with precise (M4 Pro, median of 60 frames; one ungraded layer 0.10-0.16 ms in the same
+  runs); a graded dissolve pair +0.29 to +0.33 ms. Proof of no change for ungraded layers: CompositorTests,
+  CompositorWorkingBufferTests, CompositorSharpenTests, TransitionShapeTests, TransitionSoftnessTests,
+  ExportParityTests, SequenceFormatRenderTests, HighPrecisionDecodeTests, TextureCacheTests,
+  ProgramFrameProviderTests and CompositorPreviewViewTests pass unchanged (3 display-link skips). Not graded:
+  the source monitor (it shows the media), thumbnails.
+
 ## Known limits, with reasons
 - The render goldens cannot be re-recorded (their tool needed the schema-4 engine); new migration cases are checked
   against version 4's rule computed independently instead.
