@@ -1378,6 +1378,123 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
     return decoded;
 }
 
+/// Graded clips (colour grading slice 1): V1 is the movie from 1 s for 30 frames, warmed, brightened and made
+/// more contrasty and saturated, crossing over 10 frames (5 before the cut, 5 after) into the movie from 5 s,
+/// darkened, tinted green and desaturated. Every sampled frame of the export, the dissolve's included (each
+/// side graded with its own grade), shows the monitor's picture (luma within 1.5 codes per 16x16 block, the
+/// codec's chroma error within the first test's bound); the frames carry their clips' grades; and grading
+/// changed the picture (the ungraded frame differs by 22-40 codes per block on average, the export by under 1).
+- (void)testGradedClipsAndAGradedDissolveExportTheMonitorsPictures {
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    h.sequence().width = 640;
+    h.sequence().height = 360;
+    const AssetId movie = h.importAsset("h264_1080p30.mp4");
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    const ClipId a = h.addClip(h.v1, movie, 0, 30, CMTimeMake(1, 1));
+    const ClipId b = h.addClip(h.v1, movie, 30, 30, CMTimeMake(5, 1));
+    const SpanId dissolve = h.addTailTransition(a, 5, 5);
+    ClipGrade warm;
+    warm[GradeParameter::Exposure] = 0.7;
+    warm[GradeParameter::Contrast] = 1.4;
+    warm[GradeParameter::Temperature] = 30.0;
+    warm[GradeParameter::Saturation] = 1.3;
+    ClipGrade cold;
+    cold[GradeParameter::Exposure] = -0.5;
+    cold[GradeParameter::Tint] = -40.0;
+    cold[GradeParameter::Saturation] = 0.4;
+    h.sequence().findClip(a)->grade = warm;
+    h.sequence().findClip(b)->grade = cold;
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+
+    ex::ExportRequest request;
+    request.project = std::make_shared<const Project>(h.project);
+    request.sequenceId = h.sequenceId;
+    request.encode.container = media::ContainerFormat::MOV;
+    media::VideoEncodeSettings v;
+    v.codec = media::VideoCodec::ProRes422;
+    v.width = 640;
+    v.height = 360;
+    request.encode.video = v;
+    request.outputPath = _dir + "/graded-parity.mov";
+    ex::ExportServices services;
+    services.router = h.router;
+    services.cache = std::make_shared<media::FrameCache>();
+    services.routing = routingOf(h.project, *h.router);
+    std::string error;
+    auto result = runExport(request, services, error);
+    XCTAssertTrue(result.has_value(), @"%s", error.c_str());
+    if (!result || !result->ok()) {
+        XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
+        return;
+    }
+    auto created = render::Compositor::create(h.device(), {kMonitorFormat});
+    auto routed = h.router->probe(request.outputPath);
+    XCTAssertTrue(created.ok() && routed.ok());
+    if (!created.ok() || !routed.ok()) {
+        return;
+    }
+    media::DecodeOptions bgra;
+    bgra.pixelFormat = kCVPixelFormatType_32BGRA;
+    auto decoder = h.router->makeVideoDecoder(*routed, -1, bgra);
+    XCTAssertTrue(decoder.ok());
+    if (!decoder.ok()) {
+        return;
+    }
+    for (int64_t f : {0, 12, 24, 25, 27, 29, 30, 32, 34, 35, 45, 59}) {
+        h.controller->seek(frames30(f));
+        const PlaybackHarness::Sample sample = h.presentExact();
+        XCTAssertEqual(sample.presented.frameIndex, f);
+        const render::PreviewFrame &frame = h.frame();
+        const bool inDissolve = f >= 25 && f < 35;
+        XCTAssertEqual(frame.graph.layers.size(), inDissolve ? 2u : 1u, @"frame %lld", f);
+        for (const VideoLayer &layer : frame.graph.layers) {
+            const ClipGrade &expected = layer.clipId == a ? warm : cold;
+            XCTAssertTrue(layer.grade == expected.values, @"frame %lld: the layer of clip %llu lost its grade", f,
+                          layer.clipId.value());
+            if (inDissolve) {
+                XCTAssertTrue(layer.transition && layer.transition->transitionId == dissolve, @"frame %lld", f);
+            }
+        }
+        const std::vector<double> monitor = monitorBlockMeans(*created.value(), frame.graph, frame, 640, 360);
+        XCTAssertFalse(monitor.empty(), @"frame %lld", f);
+        if (monitor.empty()) {
+            continue;
+        }
+        // The same frame ungraded: grading must have changed it far more than the export differs.
+        RenderGraph ungraded = frame.graph;
+        for (VideoLayer &layer : ungraded.layers) {
+            layer.grade = ClipGrade::neutralValues();
+        }
+        const std::vector<double> plain = monitorBlockMeans(*created.value(), ungraded, frame, 640, 360);
+        const Difference graded = compare(monitor, plain);
+        XCTAssertGreaterThan(graded.meanBlock, 8.0, @"frame %lld: the grade barely changed the picture", f);
+
+        XCTAssertTrue(decoder->decoder->seek(frames30(f)).ok());
+        auto decoded = decoder->decoder->next();
+        XCTAssertTrue(decoded.ok() && decoded.value(), @"exported frame %lld", f);
+        if (!decoded.ok() || !decoded.value()) {
+            continue;
+        }
+        const std::vector<double> exported = blockMeans(decoded.value()->image.get());
+        const Difference d = compare(monitor, exported);
+        const Difference luma = compare(lumaCodesOf(monitor), lumaCodesOf(exported));
+        NSLog(@"PARITY graded frame %lld: the grade moves blocks by %.2f on average; the export differs from the "
+              @"monitor by at most %.2f (block %zu channel %d: %.2f vs %.2f), on average %.3f; luma by at most %.2f",
+              f, graded.meanBlock, d.maxBlock, d.worstBlock, d.worstChannel, d.worstA, d.worstB, d.meanBlock,
+              luma.maxBlock);
+        // The monitor through its drawable against the decoded ProRes export. Luma agrees within a code (0.93
+        // measured); one block's red or blue may move further beside a saturated edge (7.7 measured), the
+        // codec halving the chroma horizontally, which the first test bounds by 12 beside its coloured still.
+        XCTAssertLessThan(luma.maxBlock, 1.5, @"frame %lld: the export's luma differs from the monitor's", f);
+        XCTAssertLessThan(d.maxBlock, 12.0, @"frame %lld: the export differs from the monitor", f);
+        XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
+    }
+}
+
 /// A reversed clip (Clip.h "Reverse"): V1 is the movie from 1 s for 30 frames with its sound on A1,
 /// linked. Exported forward and then reversed (SetClipReversed on the same project): frame k of the
 /// reversed export is frame n - 1 - k of the forward export, pixel for pixel (and by the burn-in, the
