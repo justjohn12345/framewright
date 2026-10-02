@@ -100,7 +100,15 @@ ProjectLoadResult parseProject(std::string_view text);
 //           and iris transition kinds; a version 5 file has neither.
 //   6 -> 7: every sequence gets "configured": true (an existing project's settings are chosen: it
 //           never adopts a clip's) and the project "sharpenScaledDownSources": true (the default).
+// The steps are frozen (ProjectMigrations.h): a later schema version adds a step and never changes
+// how an older file is converted.
 std::optional<std::string> migrateProjectJson(nlohmann::json &document, int fromVersion,
+                                              std::vector<std::string> &warnings);
+
+// As above, but stops at `toVersion` (fromVersion <= toVersion <= kProjectSchemaVersion), which is
+// also the version a warning about newer content says the project is saved as. The golden
+// migration tests use it to compare each older file with its fixture migrated to version 7.
+std::optional<std::string> migrateProjectJson(nlohmann::json &document, int fromVersion, int toVersion,
                                               std::vector<std::string> &warnings);
 
 // Individual pieces (used by tests and by clipboard/export code).
