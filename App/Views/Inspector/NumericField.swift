@@ -7,8 +7,13 @@ import SwiftUI
 /// - Up/Down arrow nudge by +1/-1 and Shift+Up/Down by +10/-10 (`nudge`), showing the new
 ///   value at once;
 /// - Escape reverts to the current value.
-/// While the field is not being edited it shows `text` (the model's value). `focusSerial`
-/// focuses the field whenever it changes (a double-click on a transition focuses its duration).
+/// The field shows `text` (the model's value) whenever the user has not typed into it, also while it
+/// has keyboard focus: Return keeps the focus, so a change made elsewhere afterwards (Undo, another
+/// control, a new selection) must show in it at once. `text` is empty where the selected clips' values
+/// differ, and then the field shows `placeholder` ("Mixed") in grey instead of any value as editable
+/// text; an empty commit changes nothing and leaves the placeholder. Text the user has typed is kept
+/// until it is committed or reverted. `focusSerial` focuses the field whenever it changes (a
+/// double-click on a transition focuses its duration).
 struct NumericField: NSViewRepresentable {
     let text: String
     let placeholder: String
@@ -44,11 +49,14 @@ struct NumericField: NSViewRepresentable {
         field.placeholderString = placeholder
         field.isEnabled = isEnabled
         let editing = field.currentEditor() != nil
-        if !editing || coordinator.showModelValue {
-            if field.stringValue != text {
+        if !editing || coordinator.showModelValue || !coordinator.edited {
+            let changed = field.stringValue != text
+            if changed {
                 field.stringValue = text
             }
-            if editing, let editor = field.currentEditor() {
+            // After a nudge or a commit, and whenever the shown value changes under the focus, the new
+            // value is selected so typing replaces it; an unchanged value keeps the user's selection.
+            if editing, changed || coordinator.showModelValue, let editor = field.currentEditor() {
                 editor.selectedRange = NSRange(location: 0, length: (text as NSString).length)
             }
             coordinator.showModelValue = false
