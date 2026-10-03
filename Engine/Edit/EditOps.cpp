@@ -3373,13 +3373,18 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
         for (Track &track : sequence.videoTracks) {
             for (Clip &clip : track.clips) {
                 const MediaAsset *asset = project.findAsset(clip.assetId);
-                if (asset == nullptr || asset->width <= 0 || asset->height <= 0) {
+                double factor = 1.0;
+                if (clip.generated) {
+                    // A title or a matte draws on a canvas the size of the frame, its text block placed and
+                    // sized as fractions of it: the canvas follows the frame by itself, so only the Motion's
+                    // offsets (sequence pixels) scale.
+                } else if (asset == nullptr || asset->width <= 0 || asset->height <= 0) {
                     continue;
-                }
-                double factor = k * fitScale(*asset, old.width, old.height) /
-                                fitScale(*asset, target.width, target.height);
-                if (std::fabs(factor - 1.0) < 1e-12) {
-                    factor = 1.0; // the same aspect ratio: the fitted size scales with the frame
+                } else {
+                    factor = k * fitScale(*asset, old.width, old.height) / fitScale(*asset, target.width, target.height);
+                    if (std::fabs(factor - 1.0) < 1e-12) {
+                        factor = 1.0; // the same aspect ratio: the fitted size scales with the frame
+                    }
                 }
                 clip.video.x *= k;
                 clip.video.y *= k;

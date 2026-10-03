@@ -383,6 +383,34 @@ TEST_CASE("SetSequenceFormat: a size change scales every placement with the fram
     }
 }
 
+TEST_CASE("SetSequenceFormat: a title's Motion offsets scale with the frame; its canvas follows the frame") {
+    Fixture fx;
+    const AssetId titles = fx.project.addAsset(makeGeneratorAsset(GeneratorKind::Title));
+    const ClipId title = fx.addClip(fx.v2, titles, 0, 60);
+    fx.sequence().findClip(title)->generated = GeneratedContent::makePreset(GeneratedPreset::LowerThird);
+    fx.sequence().findClip(title)->video = VideoParams{120.0, -60.0, 1.5, 5.0, 1.0};
+    SpanTracks move;
+    move[SpanParameter::X] = {key(kCMTimeZero, 0), key(f30(30), 300)};
+    const SpanId span = fx.addSpan(title, SpanKind::Motion, 1, kCMTimeZero, f30(30), move);
+    fx.requireValid();
+    SUBCASE("the same shape") {
+        SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 3840, 2160, CMTimeMake(1, 30)));
+        applyReversible(fx.project, command);
+        CHECK(fx.clip(title).video == VideoParams{240.0, -120.0, 1.5, 5.0, 1.0});
+        CHECK(fx.span(span)->tracks[SpanParameter::X][1].value == 600.0);
+        CHECK(command.report().clipsRescaled == 1);
+        CHECK(fx.clip(title).generated->title().x == 0.26); // the text block stays where it is in the frame
+    }
+    SUBCASE("another shape: the canvas is the new frame, the scale stays") {
+        SetSequenceFormat command(fx.seq, formatWith(fx.sequence(), 1080, 1080, CMTimeMake(1, 30)));
+        applyReversible(fx.project, command);
+        const double k = 1080.0 / 1920.0;
+        CHECK(fx.clip(title).video.x == doctest::Approx(120.0 * k));
+        CHECK(fx.clip(title).video.y == doctest::Approx(-60.0 * k));
+        CHECK(fx.clip(title).video.scale == 1.5);
+    }
+}
+
 TEST_CASE("SetSequenceFormat: a frame-rate change moves clip edges to the new grid and keeps transitions' frames") {
     Fixture fx;
     // V1: A [0, 45) | B [45, 100) with a 10-frame dissolve centred on the cut (5 + 5); B fades out over
