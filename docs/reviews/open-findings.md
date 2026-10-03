@@ -256,20 +256,21 @@ testTheShownPanelIsDrawnWithTheProgramMonitorsFramesAndLetGoWhenHidden` (the loc
 detached: 10 against 9; it passed three times alone; not seen before, not touched by this round: a new flake to
 watch).
 
-## Where things stand (handover, 2026-10-02)
-- **Released and pushed:** 0.1.10 at 400ded1 is the last release; everything is pushed. Colour grading slices 1
-  and 2 and the scopes shipped in 0.1.9 (e9aeafa). The user's hand test of them found three problems, fixed in
-  0221e41, bff9d3e and 5e22e7c and released in 0.1.10: curve points vanished on release (the Curves and LUTs
-  sections did not redraw after an edit), the LUT rows did not name the chosen file, and the wheels were drawn
-  washed out. Left from that test: the curve editor's hue strip still uses the old pastel hues.
-- **Titles slice 1** is committed on main (c996a93..e5abda0, docs c7feff8, the review fix round bd96f79..74a95a7 and
-  its docs commit), not pushed or released;
-  its status is above and the owner's hand-test list is in integration-notes ("Titles slice 1").
+## Where things stand (handover, 2026-10-03)
+- **Released and pushed:** 0.1.11 (built from 221ad31) is the last release; everything is pushed. It adds titles
+  slice 1 (c996a93..e5abda0, docs c7feff8) and its review fix round (bd96f79..74a95a7, docs 9927acd), accepted by
+  the lead with the full suite passing with the screen unlocked; the owner tried it ("seems ok"). The full hand-test
+  list is in integration-notes ("Titles slice 1"). Open for the owner: the typing run's 2 s idle commit, no extra
+  space above the first line at line spacing above 1, and an export reporting (not freezing) a mid-export font
+  change. Earlier: colour grading and scopes in 0.1.9, their hand-test fixes in 0.1.10 (left from that test: the
+  curve editor's hue strip still uses the old pastel hues).
 - **Next, in the order the user has leaned towards:**
-  1. The user finishes the hand test of slices 1 and 2 (lists in integration-notes).
-  2. HLG display (tone map) and the P3/BT.2020 primaries decision.
-  3. The transition library and the Effects browser (plan items 28-29).
-  4. The safety-and-basics round from `docs/plans/2026-10-01-premiere-lite-feature-gap.md` (autosave, relink,
+  1. The user finishes the hand tests of grading slices 1 and 2 and titles slice 1 (lists in integration-notes).
+  2. Titles slice 2 (typing on the picture, safe areas, Copy/Paste Style), per `docs/plans/2026-10-02-titles-design.md`.
+  3. Autosave and backups (the app has none).
+  4. HLG display (tone map) and the P3/BT.2020 primaries decision.
+  5. The transition library and the Effects browser (plan items 28-29).
+  6. The safety-and-basics round from `docs/plans/2026-10-01-premiere-lite-feature-gap.md` (autosave, relink,
      copy/paste, markers, Export Frame, meters, bins).
 - **Open small items:** the empty per-process directory each test run leaves at the app container's root; the
   flaky tests and the other leftovers above ("Left open by the 2026-09-30 to 2026-10-02 rounds"); B7 and the
