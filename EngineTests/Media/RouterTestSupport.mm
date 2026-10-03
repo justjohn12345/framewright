@@ -43,6 +43,10 @@ class FakeVideoDecoder final : public IVideoDecoder {
         if (b_->onOpen) {
             b_->onOpen();
         }
+        if (b_->openHonorsInterrupt && interrupt_ && interrupt_->requested()) {
+            ++b_->interrupted;
+            return makeError(MediaErrorCode::Cancelled, b_->name + ": open interrupted");
+        }
         if (b_->failOpen) {
             return makeError(MediaErrorCode::DecodeFailed, b_->name + ": scripted open failure");
         }

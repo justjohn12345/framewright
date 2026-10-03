@@ -1302,6 +1302,34 @@ static DecodeTarget continuing(AssetId asset, CMTime at, uint64_t scrubLane = 7)
 
 /// suspendTargets() stops the streams after the frame in flight and decodes nothing until the next setTargets(),
 /// which goes on from where they were (decoders and ranges kept).
+/// A suspension while a stream opens its decoder (an open that, like FFmpeg's, decodes and so stops when
+/// interrupted) does not leave the stream failed: when the same target comes back (a scrub that ends on the frame it
+/// began on, a clip the lookahead reached before a click), it decodes. Review fix round, finding 1.
+- (void)testASuspensionDuringAnOpenLetsTheStreamDecodeWhenTheSameTargetReturns {
+    _fake->openHonorsInterrupt = true;
+    Gate open;
+    Latch opening(1);
+    std::atomic<bool> first{true};
+    _fake->onOpen = [&] {
+        if (first.exchange(false)) {
+            opening.countDown();
+            open.pass();
+        }
+    };
+    DecodePool pool(_fakeRouter, _cache);
+    const DecodeTarget target{AssetId(1), "/fake/a.mov", -1, CMTimeMake(1, 1)};
+    pool.setTargets({target});
+    XCTAssertTrue(opening.wait(std::chrono::seconds(5)), @"the stream is opening");
+    pool.suspendTargets();
+    open.open();
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    pool.setTargets({target});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    const auto stream = pool.stats().streams.at(0);
+    XCTAssertFalse(stream.failed, @"%s", stream.error ? stream.error->description().c_str() : "");
+    XCTAssertTrue(covers(*_cache, AssetId(1), 30, 59), @"the window is decoded");
+}
+
 - (void)testSuspendedStreamsDecodeNothingUntilTheNextTargets {
     _fake->decodeDelay = std::chrono::milliseconds(5);
     DecodePool pool(_fakeRouter, _cache);

@@ -114,6 +114,9 @@ struct DecodePool::Stream {
     /// Waiting for a scrub request of the target's continueScrubLane to hand its decoder over
     /// (StepResult::AwaitScrub): not stepped until the request ends or the target moves.
     bool awaitingScrub = false;
+    /// The step in flight opens the decoder (set with `busy`): suspendTargets() leaves it alone (an
+    /// interrupted open is thrown away, and FFmpeg decodes its first frame inside open()).
+    bool opening = false;
     uint64_t lastServed = 0;
     StreamStats published;
     /// Shared with the decoder (DecodeOptions::interrupt): setTargets() requests it when the
@@ -476,8 +479,10 @@ void DecodePool::suspendTargets() {
     }
     suspended_ = true;
     for (auto &[key, stream] : streams_) {
-        if (stream->busy) {
-            stream->interrupt->request(); // the decode in flight stops after the frame it is on
+        // A decode in flight stops after the frame it is on; an open finishes (it is not wasted, and the
+        // stream keeps its decoder for when the targets come back).
+        if (stream->busy && !stream->opening) {
+            stream->interrupt->request();
         }
     }
 }
@@ -593,6 +598,7 @@ void DecodePool::workerMain() {
         const size_t streamCount = std::max<size_t>(1, streams_.size());
         const bool reopen = std::exchange(s->reopen, false);
         const bool rearmRepair = std::exchange(s->rearmRepair, false);
+        s->opening = reopen || !s->decoder; // not busy until now: the decoder is read under the lock
         lock.unlock();
         if (rearmRepair) {
             s->repairedAt = kCMTimeInvalid; // busy: the worker owns it now
@@ -692,6 +698,9 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
             // A generated picture: rendered by its source, no media to route (see the header comment).
             auto decoder = std::make_unique<GeneratedVideoDecoder>(target.generated);
             if (Status opened = decoder->open({}, -1, options); !opened.ok()) {
+                if (opened.error().code == MediaErrorCode::Cancelled && s.interrupt->requested()) {
+                    return StepResult::Progress; // interrupted, not failed: the next step renders again
+                }
                 s.error = opened.error();
                 s.openFailed = true;
                 os_log_error(poolLog(), "cannot render %{public}s: %{public}s",
@@ -713,6 +722,11 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
             }
             const RoutedMediaInfo &info = *routed.value();
             auto opened = router_->makeVideoDecoder(info, target.trackIndex, options);
+            if (!opened.ok() && opened.error().code == MediaErrorCode::Cancelled && s.interrupt->requested()) {
+                // Interrupted (a relink, a removal or a shutdown asked for it): not a failure of the
+                // media. The next step opens again, whether or not the target moves meanwhile.
+                return StepResult::Progress;
+            }
             if (!opened.ok()) {
                 s.error = opened.error();
                 s.openFailed = true;
