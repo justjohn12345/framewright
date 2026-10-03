@@ -10,9 +10,7 @@ namespace ve {
 namespace {
 
 std::string quotedMediaName(const Project &project, const Clip &clip) {
-    const MediaAsset *asset = project.findAsset(clip.assetId);
-    const std::string name = asset && !asset->name.empty() ? asset->name : "clip " + std::to_string(clip.id.value());
-    return "“" + name + "”";
+    return "“" + project.clipName(clip) + "”"; // a title by its first line, not the generator asset's name
 }
 
 // length - taken... as an exact time; nullopt on overflow.

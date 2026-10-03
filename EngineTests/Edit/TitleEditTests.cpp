@@ -5,6 +5,7 @@
 // Overwrite, and the grade's rules (titles and mattes are never graded). Every successful edit undoes and redoes
 // exactly (applyReversible).
 
+#include "../../Engine/Edit/EditOps.h"
 #include "../../Engine/Edit/GradeEdits.h"
 #include "../../Engine/Edit/TitleEdits.h"
 #include "../Model/ModelFixtures.h"
@@ -296,4 +297,24 @@ TEST_CASE("Title edits: titles and mattes are not graded") {
     CHECK(refused.error == EditError::InvalidArgument);
     CHECK(refused.message == "Clip " + std::to_string(title.value()) + " is a Title: titles and colour mattes are not graded.");
     CHECK(fx.project == before);
+}
+
+TEST_CASE("Title edits: sentences name a title by its first line") {
+    TitleRig fx;
+    const ClipId title = fx.addTitle(fx.v2, "\nOpening Card\nsubtitle", 0, 60);
+    const ClipId matte = fx.addGenerated(fx.v1, fx.mattes, GeneratedContent::makeMatte(kBlack), 0, 60);
+    const ClipId empty = fx.addTitle(fx.v2, " ", 100, 30);
+    const ClipId video = fx.addClip(fx.v1, fx.av30, 60, 30);
+    CHECK(fx.project.clipName(fx.clip(title)) == "Opening Card");
+    CHECK(fx.project.clipName(fx.clip(matte)) == "Colour Matte");
+    CHECK(fx.project.clipName(fx.clip(empty)) == "Title");
+    CHECK(fx.project.clipName(fx.clip(video)) == "av30.mov");
+    // A refusal that names the clip (Continue on Next Clip with nothing after it).
+    SpanTracks move;
+    move[SpanParameter::X] = {key(kCMTimeZero, 0), key(f30(30), 100)};
+    const SpanId span = fx.addSpan(title, SpanKind::Motion, 1, kCMTimeZero, f30(30), move);
+    ContinueMotionPlan plan;
+    const EditResult refused = planContinueMotion(fx.project, fx.sequence(), span, plan);
+    CHECK(refused.error == EditError::NotAdjacent);
+    CHECK(refused.message == "No clip touches the end of “Opening Card”, so there is nothing to continue the move on.");
 }

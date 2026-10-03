@@ -29,14 +29,16 @@ using namespace ve::facade;
 - (CMTime)frameTimeForAsset:(VEAssetID)assetID atTime:(CMTime)time {
     VE_ASSERT_MAIN();
     const MediaAsset *asset = _project.findAsset(toAssetId(assetID));
-    return asset != nullptr ? assetFrameTime(*asset, time, [self activeSequence].frameDuration) : kCMTimeZero;
+    // A generator asset (titles, mattes) has no media to time.
+    return asset != nullptr && asset->isFileBacked() ? assetFrameTime(*asset, time, [self activeSequence].frameDuration)
+                                                     : kCMTimeZero;
 }
 
 - (void)sourceMonitorShowAsset:(VEAssetID)assetID atTime:(CMTime)time {
     VE_ASSERT_MAIN();
     const AssetId id = toAssetId(assetID);
     const MediaAsset *asset = assetID > 0 ? _project.findAsset(id) : nullptr;
-    if (asset == nullptr) {
+    if (asset == nullptr || !asset->isFileBacked()) { // nothing, or a generator asset (no media to show): empty
         [_sourceMonitor resetWithProject:_project];
         [self postSourcePlaybackStatus:_sourceMonitor.playbackStatus];
         return;

@@ -107,6 +107,10 @@ bool sameColour(VEColour a, VEColour b) {
     XCTAssertEqual(info.pictureHeight, 1080);
     XCTAssertFalse(info.hasGrade);
     XCTAssertEqualObjects(engine.undoActionName, @"Add Title");
+    // The source monitor shows no generator asset (it has no media), and times none.
+    [engine sourceMonitorShowAsset:info.assetID atTime:CMTimeMake(1, 1)];
+    XCTAssertEqual(engine.sourceMonitorAssetID, 0);
+    XCTAssertEqual(CMTimeCompare([engine frameTimeForAsset:info.assetID atTime:CMTimeMake(1, 1)], kCMTimeZero), 0);
     // The generator asset is hidden from the bin, but the clip refers to it.
     XCTAssertEqual(engine.allAssets.count, assetsBefore);
     VEAssetInfo *generator = [engine assetInfo:info.assetID];

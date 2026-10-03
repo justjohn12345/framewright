@@ -1667,10 +1667,9 @@ EditResult planMatchSpanEdge(const Sequence &sequence, SpanId spanId, ClipEdge e
 
 namespace {
 
-// “name” of the clip's media, for a sentence.
+// “name” of the clip (Project::clipName: a title's first line, its media's name), for a sentence.
 std::string quotedClipName(const Project &project, const Clip &clip) {
-    const MediaAsset *asset = project.findAsset(clip.assetId);
-    return "“" + (asset != nullptr ? asset->name : "clip " + idString(clip.id.value())) + "”";
+    return "“" + project.clipName(clip) + "”";
 }
 
 } // namespace
@@ -2360,9 +2359,7 @@ EditError editErrorOf(RoomLimit limit) {
 namespace {
 
 std::string quotedMediaName(const Project &project, const Clip &clip) {
-    const MediaAsset *asset = project.findAsset(clip.assetId);
-    const std::string name = asset && !asset->name.empty() ? asset->name : "clip " + idString(clip.id.value());
-    return "“" + name + "”";
+    return "“" + project.clipName(clip) + "”"; // a title by its first line, not the generator asset's name
 }
 
 TransitionLimit noTransition(EditError error, std::string reason) {
@@ -3370,11 +3367,13 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
     if (target.width != old.width || target.height != old.height) {
         const double k = std::min(double(target.width) / double(old.width), double(target.height) / double(old.height));
         report_.placementScale = k;
+        std::size_t generatedClips = 0;
         for (Track &track : sequence.videoTracks) {
             for (Clip &clip : track.clips) {
                 const MediaAsset *asset = project.findAsset(clip.assetId);
                 double factor = 1.0;
                 if (clip.generated) {
+                    ++generatedClips;
                     // A title or a matte draws on a canvas the size of the frame, its text block placed and
                     // sized as fractions of it: the canvas follows the frame by itself, so only the Motion's
                     // offsets (sequence pixels) scale.
@@ -3421,6 +3420,14 @@ EditResult SetSequenceFormat::perform(const Project &project, Sequence &sequence
                                      ? " (×" + std::string(scale) + ") and every picture keeps its place and size in "
                                            "it; picture outside the old frame may now show."
                                      : "."));
+            if (generatedClips > 0) {
+                // A title or a matte is drawn on the frame itself, not on a picture fitted into it.
+                sentences.push_back(generatedClips == 1
+                                        ? "The title or colour matte fills the new frame instead: its text is placed and "
+                                          "wrapped in it as before, as fractions of the frame's size."
+                                        : "Titles and colour mattes fill the new frame instead: their text is placed and "
+                                          "wrapped in it as before, as fractions of the frame's size.");
+            }
         }
     }
 

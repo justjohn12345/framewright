@@ -408,6 +408,8 @@ TEST_CASE("SetSequenceFormat: a title's Motion offsets scale with the frame; its
         CHECK(fx.clip(title).video.x == doctest::Approx(120.0 * k));
         CHECK(fx.clip(title).video.y == doctest::Approx(-60.0 * k));
         CHECK(fx.clip(title).video.scale == 1.5);
+        CHECK(anyContains(command.report().sentences, "The title or colour matte fills the new frame instead: its text "
+                                                      "is placed and wrapped in it as before"));
     }
 }
 

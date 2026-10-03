@@ -42,6 +42,9 @@ struct Project {
     // The project's generator asset of `kind` (the first, MediaAsset.h; a title clip refers to the Title asset),
     // or nullptr when no clip of the kind was made yet.
     const MediaAsset *findGeneratorAsset(GeneratorKind kind) const;
+    // What a sentence about `clip` calls it (unquoted): a title by its first line with text ("Title" when none has), a
+    // colour matte "Colour Matte", a clip of media by its media's name ("clip <id>" when it has none).
+    std::string clipName(const Clip &clip) const;
     const Sequence *findSequence(SequenceId sequenceId) const;
     Sequence *findSequence(SequenceId sequenceId);
     const Sequence *activeSequence() const;

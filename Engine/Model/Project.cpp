@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <map>
+#include <string>
 #include <utility>
 
 namespace ve {
@@ -39,6 +40,15 @@ const MediaAsset *Project::findAsset(AssetId assetId) const {
 
 MediaAsset *Project::findAsset(AssetId assetId) {
     return const_cast<MediaAsset *>(static_cast<const Project *>(this)->findAsset(assetId));
+}
+
+std::string Project::clipName(const Clip &clip) const {
+    if (clip.generated) {
+        return clip.generated->isTitle() ? titleDisplayName(clip.generated->title())
+                                         : std::string(displayNameOf(clip.generated->kind()));
+    }
+    const MediaAsset *asset = findAsset(clip.assetId);
+    return asset != nullptr && !asset->name.empty() ? asset->name : "clip " + std::to_string(clip.id.value());
 }
 
 const MediaAsset *Project::findGeneratorAsset(GeneratorKind kind) const {

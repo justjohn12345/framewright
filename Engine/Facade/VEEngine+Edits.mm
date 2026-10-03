@@ -492,10 +492,8 @@ void setAudioChange(ClipParamsChange &change, const VEAudioParams &params) {
         if (partner == nullptr || !partner->isStill || clip->reversed == on) {
             continue;
         }
-        const MediaAsset *clipAsset = _project.findAsset(clip->assetId);
-        const MediaAsset *stillAsset = _project.findAsset(partner->assetId);
-        NSString *clipName = clipAsset ? toNS(clipAsset->name) : @"the clip";
-        NSString *stillName = stillAsset ? toNS(stillAsset->name) : @"its picture";
+        NSString *clipName = toNS(_project.clipName(*clip));
+        NSString *stillName = toNS(_project.clipName(*partner));
         [notes addObject:[NSString stringWithFormat:@"“%@” is a still image, which has no direction: its linked "
                                                     @"“%@” was %@ on its own.",
                                                     stillName, clipName, on ? @"reversed" : @"played forward"]];
