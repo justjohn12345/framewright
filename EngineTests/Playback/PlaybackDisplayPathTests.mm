@@ -209,6 +209,45 @@ JitterRun runWithLateCallbacks(ToneRig &rig, bool stampEntryTime) {
     XCTAssertGreaterThan(reads.load(), 1000u, @"the reader must actually race the frame source");
 }
 
+/// A paused frame whose picture the lookahead decoded before the frame's own request did (the request queued behind
+/// other lanes' on the scrub thread; the lookahead follows a seek at once): presented once. The request's
+/// completion, later, finds the same picture shown and reports nothing new, so a paused view does not redraw and
+/// lastPresented() does not change. testLastPresentedIsNeverLostToAConcurrentReader failed intermittently on this.
+- (void)testAPictureTheLookaheadDecodedFirstIsNotPresentedAgain {
+    PlaybackHarness h(PlaybackHarness::Mode::Realtime, 0.0);
+    const AssetId movie = h.importAsset("gop5s_h264_1080p30.mp4");
+    const AssetId other = h.importAsset("gop5s_h264_1080p30.mp4");
+    if (!h.ok()) {
+        XCTFail(@"%s", h.error().c_str());
+        return;
+    }
+    h.addClip(h.v1, movie, 0, 300, kCMTimeZero);
+    h.load();
+    h.controller->seek(frames30(10));
+    XCTAssertEqual(h.presentExact().presented.frameIndex, 10);
+    XCTAssertTrue(h.pool->waitUntilIdle(std::chrono::seconds(10)));
+    // The scrub thread busy with three deep decodes on other lanes (the other asset), then the seek: its picture's
+    // request waits behind them while the lookahead decodes the picture on a worker.
+    std::atomic<int> blockers{0};
+    for (uint64_t lane = 70; lane < 73; ++lane) {
+        h.pool->requestFrame(other, CMTimeMake(147 - int64_t(lane - 70), 30),
+                             [&blockers](media::Result<media::ScrubFrame>) { blockers.fetch_add(1); }, lane);
+    }
+    h.controller->seek(frames30(140));
+    const PlaybackHarness::Sample shown = h.presentExact();
+    XCTAssertEqual(shown.presented.frameIndex, 140);
+    XCTAssertEqual(shown.burnIns.front().value_or(-1), 140);
+    const uint64_t serial = h.controller->lastPresented().serial;
+    // Every request done (the frame's own included), and its redraw request delivered.
+    XCTAssertTrue(PlaybackHarness::waitUntil([&] {
+        const auto stats = h.pool->stats();
+        return blockers.load() == 3 && stats.scrubRequests == stats.scrubServiced + stats.scrubCancelled + stats.scrubFailed;
+    }));
+    XCTAssertFalse(h.present().changed, @"the same picture is not presented again");
+    XCTAssertEqual(h.controller->lastPresented().serial, serial);
+    XCTAssertEqual(h.controller->lastPresented().frameIndex, 140);
+}
+
 - (void)testMeasuredAVOffsetOnTheRealOutput {
     audio::AudioOutput *device = nullptr;
     bool created = false;
