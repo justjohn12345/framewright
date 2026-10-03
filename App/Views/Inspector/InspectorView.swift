@@ -4,9 +4,10 @@ import FramewrightEngine
 
 /// Properties of the selection: the selected span (an effect span's range, interpolation, lane and
 /// start and end values; a transition's duration and shares of its cut), or the selected clips'
-/// video, colour (the clip's grade) and audio parameters (multi-selection edits apply to every
-/// selected clip of the matching kind; a parameter that differs between them shows "Mixed"), a
-/// single clip's speed, or the selected media.
+/// title or colour matte settings (`TitleInspectorSections`), video, colour (the clip's grade; not for
+/// titles and mattes) and audio parameters (multi-selection edits apply to every selected clip of the
+/// matching kind; a parameter that differs between them shows "Mixed"), a single clip's speed, or the
+/// selected media.
 ///
 /// The Colour section sits beside Video because a grade is a property of the clip, as its Motion is
 /// (grading decision, section 7): the same rows, multi-selection rules and undo behaviour, built from
@@ -45,6 +46,9 @@ struct InspectorView: View {
         .onDisappear {
             inspector.endSliderDrag()
             inspector.endNudgeBurst()
+            store.titleInspector.endSliderDrag()
+            store.titleInspector.endBurst()
+            store.titleInspector.endTyping()
         }
     }
 
@@ -62,6 +66,8 @@ struct InspectorView: View {
                     .foregroundStyle(.secondary)
                 Divider()
             }
+            // A title's Text, Font, Outline, Shadow and Background, or a colour matte's colour.
+            TitleInspectorSections(store: store)
             if inspector.isAvailable(.positionX) {
                 ParameterSection(store: store, inspector: inspector, section: .video,
                                  subtitle: inspector.videoTargets.count > 1 ? "\(inspector.videoTargets.count) video clips" : nil) {
@@ -82,7 +88,7 @@ struct InspectorView: View {
             }
             if inspector.isAvailable(.exposure) {
                 ParameterSection(store: store, inspector: inspector, section: .colour,
-                                 subtitle: inspector.videoTargets.count > 1 ? "\(inspector.videoTargets.count) video clips" : nil) {
+                                 subtitle: inspector.gradeTargets.count > 1 ? "\(inspector.gradeTargets.count) video clips" : nil) {
                     HStack {
                         Button("Copy") { store.copyGrade() }
                             .disabled(!store.canCopyGrade)

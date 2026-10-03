@@ -259,6 +259,9 @@ final class InspectorModel: ObservableObject {
     // MARK: Targets
 
     var videoTargets: [VEClipInfo] { store.selectedClips.filter { $0.trackKind == .video } }
+    /// The selected clips the Colour rows grade: the video clips but titles and colour mattes, which are not
+    /// graded (`ProjectStore.gradeTargets`).
+    var gradeTargets: [VEClipInfo] { store.gradeTargets }
     /// The only selected video clip (the Video section's Match menu).
     var motionTarget: VEClipInfo? {
         let targets = videoTargets
@@ -332,7 +335,8 @@ final class InspectorModel: ObservableObject {
 
     func isAvailable(_ parameter: InspectorParameter) -> Bool {
         switch parameter.section {
-        case .video, .colour: return !videoTargets.isEmpty
+        case .video: return !videoTargets.isEmpty
+        case .colour: return !gradeTargets.isEmpty
         case .audio: return !audioTargets.isEmpty
         case .speed: return speedTarget != nil
         case .transition: return transition != nil
@@ -344,7 +348,8 @@ final class InspectorModel: ObservableObject {
     /// The parameter's value on the first target (display units), or nil when unavailable.
     func value(_ parameter: InspectorParameter) -> Double? {
         switch parameter.section {
-        case .video, .colour: return videoTargets.first.map { value(parameter, of: $0) }
+        case .video: return videoTargets.first.map { value(parameter, of: $0) }
+        case .colour: return gradeTargets.first.map { value(parameter, of: $0) }
         case .audio: return audioTargets.first.map { value(parameter, of: $0) }
         case .speed: return speedTarget.map { value(parameter, of: $0) }
         case .transition: return transition.map { Double(store.frames($0.duration)) }
@@ -355,7 +360,8 @@ final class InspectorModel: ObservableObject {
     func isMixed(_ parameter: InspectorParameter) -> Bool {
         let clips: [VEClipInfo]
         switch parameter.section {
-        case .video, .colour: clips = videoTargets
+        case .video: clips = videoTargets
+        case .colour: clips = gradeTargets
         case .audio: clips = audioTargets
         case .speed, .transition: return false
         }
@@ -627,7 +633,7 @@ final class InspectorModel: ObservableObject {
             guard batch.count > 0 else { return }
             handle(engine.applyClipParams(batch), mode: .single, clampNote: nil)
         case .colour:
-            let clips = videoTargets.map { NSNumber(value: $0.clipID) }
+            let clips = gradeTargets.map { NSNumber(value: $0.clipID) }
             guard !clips.isEmpty else { return }
             handle(engine.resetGrade(ofClips: clips), mode: .single, clampNote: nil)
         case .speed:
@@ -938,7 +944,8 @@ final class InspectorModel: ObservableObject {
 
     private func targetKey(_ parameter: InspectorParameter) -> String {
         switch parameter.section {
-        case .video, .colour: return videoTargets.map { String($0.clipID) }.joined(separator: ",")
+        case .video: return videoTargets.map { String($0.clipID) }.joined(separator: ",")
+        case .colour: return gradeTargets.map { String($0.clipID) }.joined(separator: ",")
         case .audio: return audioTargets.map { String($0.clipID) }.joined(separator: ",")
         case .speed: return speedTarget.map { String($0.clipID) } ?? ""
         case .transition: return transition.map { String($0.transitionID) } ?? ""
@@ -1025,7 +1032,7 @@ final class InspectorModel: ObservableObject {
         let bounds = range(parameter)
         let newValue = min(bounds.upperBound, max(bounds.lowerBound, requested))
         let note = abs(newValue - requested) > 1e-9 ? limitNote(parameter, bounds) : nil
-        let clips = videoTargets.map { NSNumber(value: $0.clipID) }
+        let clips = gradeTargets.map { NSNumber(value: $0.clipID) }
         guard !clips.isEmpty else { return }
         handle(perform(mode) { self.engine.setGradeValue(newValue, for: grade, clips: clips) }, mode: mode,
                clampNote: note)

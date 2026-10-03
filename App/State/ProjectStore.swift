@@ -40,6 +40,8 @@ final class ProjectStore: ObservableObject {
     private(set) lazy var playbackActions: PlaybackActions = EnginePlaybackActions(store: self)
     /// The inspector's editing logic (parameters, nudges, sliders, resets, messages).
     private(set) lazy var inspector = InspectorModel(store: self)
+    /// The inspector's title and colour matte sections' editing logic.
+    private(set) lazy var titleInspector = TitleInspectorModel(store: self)
     /// The Colour tab's grading tools (the wheels): their values over the selection and their edits.
     private(set) lazy var gradeTools = GradeToolsModel(store: self)
     /// Where media received from Photos is kept (the project's Media folder).
@@ -95,6 +97,8 @@ final class ProjectStore: ObservableObject {
             if !selection.isEmpty, selectedSpanID != nil { selectedSpanID = nil }
             // The anchor is a clip of the selection or none (a marquee or a deselect replaced it).
             if let anchor = selectionAnchor, !selection.contains(anchor) { selectionAnchor = nil }
+            // A title's typing run ends with the selection it was typed for.
+            if selection != oldValue, titleTypingGroup != nil { titleInspector.endTyping() }
         }
     }
     /// The selected span (an effect span on lanes 1-3 or a transition on lane 0), exclusive with the
@@ -196,6 +200,9 @@ final class ProjectStore: ObservableObject {
     /// The coalescing group of the inspector's keyboard-nudge burst, while one is open. Unlike a
     /// drag it does not block other commands: another edit simply commits the burst first.
     var nudgeGroup: String?
+    /// The coalescing group of the title text area's typing run, while one is open (`TitleInspectorModel`). Like a
+    /// nudge burst it does not block other commands: another edit commits the run first.
+    var titleTypingGroup: String?
 
     /// Width of the timeline's track area, for Zoom to Fit (updated by the timeline).
     var timelineViewportWidth: CGFloat = 800
@@ -225,12 +232,12 @@ final class ProjectStore: ObservableObject {
     /// fade handle, gain line) or an edit group such as an inspector slider drag. Edit commands
     /// (Delete, Split, Link, Insert...) from keys and menus are ignored meanwhile, so they never
     /// interleave with the gesture's own coalesced edits (the engine would commit the gesture
-    /// first; see VEEngine.h). An inspector nudge burst is not a gesture: the next command
-    /// commits it as its own undo step.
+    /// first; see VEEngine.h). An inspector nudge burst (or a title's colour burst) and a title's
+    /// typing run are not gestures: the next command commits them as their own undo step.
     var isGestureActive: Bool {
         guard cancelActiveGesture == nil else { return true }
         guard let key = engine.coalescingKey else { return false }
-        return key != nudgeGroup
+        return key != nudgeGroup && key != titleTypingGroup
     }
 
     /// Number of times the timeline's content model was rebuilt (once per change of what it draws;
@@ -1309,8 +1316,9 @@ final class ProjectStore: ObservableObject {
 
     // MARK: Grade
 
-    /// The selected clips that can have a grade: those on video tracks.
-    var gradeTargets: [VEClipInfo] { selectedClips.filter { $0.trackKind == .video } }
+    /// The selected clips that can have a grade: those on video tracks, but titles and colour mattes, which are
+    /// not graded (Copy, Paste and Reset Grade leave them out).
+    var gradeTargets: [VEClipInfo] { selectedClips.filter { $0.trackKind == .video && $0.generatorKind == .none } }
 
     /// Copy Grade applies: exactly one video clip is selected, or several whose grades are identical
     /// (every value and what a newer version wrote, compared by the engine), so what is copied is the
