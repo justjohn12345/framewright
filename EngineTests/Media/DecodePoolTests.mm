@@ -10,6 +10,7 @@
 #include "RouterTestSupport.h"
 #include "TestMedia.h"
 
+#include <functional>
 #include <thread>
 
 using namespace ve;
@@ -21,6 +22,18 @@ namespace {
 
 double msSince(Clock::time_point t) {
     return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
+}
+
+/// Polls `condition` every millisecond for up to 10 s.
+bool waitFor(const std::function<bool()> &condition) {
+    const auto deadline = Clock::now() + std::chrono::seconds(10);
+    while (Clock::now() < deadline) {
+        if (condition()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return condition();
 }
 
 /// Every slot in [from, to] is cached.
@@ -1131,6 +1144,185 @@ struct ScrubLog {
         }
     }
     XCTAssertTrue(_cache->contains(asset, CMTimeMake(7, 1)), @"the scrubbed last frame is held too");
+}
+
+// MARK: - Hand-off from the scrub path, and suspension
+
+/// The stream of an asset's lookahead (lane 1) whose picture was requested on scrub lane `scrubLane`.
+static DecodeTarget continuing(AssetId asset, CMTime at, uint64_t scrubLane = 7) {
+    DecodeTarget target{asset, "/fake/a.mov", -1, at};
+    target.lane = 1;
+    target.continueScrubLane = scrubLane;
+    return target;
+}
+
+/// A stream that would seek to the picture its scrub lane decoded continues from that lane's decoder instead (no
+/// second decode of the GOP from its keyframe), with the frames after it, and the lane gets the stream's own decoder
+/// in exchange (no decoder opened on either side).
+- (void)testAStreamContinuesFromTheScrubDecoderOfItsPicture {
+    ScrubLog log;
+    DecodePool pool(_fakeRouter, _cache);
+    const AssetId asset(1);
+    pool.setTargets({continuing(asset, CMTimeMake(1, 1))}); // the lookahead somewhere else first
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    const CMTime picture = CMTimeMake(135, 30);
+    pool.requestFrame(asset, picture, log.callback(1), 7);
+    XCTAssertTrue(log.waitFor(1, std::chrono::seconds(10)));
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    const int opens = _fake->opens.load();
+    const int seeks = _fake->seeks.load();
+    XCTAssertEqual(opens, 2, @"the stream's decoder and the scrub lane's");
+
+    pool.setTargets({continuing(asset, picture)});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    const auto stream = pool.stats().streams.at(0);
+    XCTAssertEqual(stream.handoffs, uint64_t(1), @"the stream took the lane's decoder over");
+    XCTAssertEqual(stream.backend, std::string("fake"), @"with the backend that opened it");
+    XCTAssertEqual(_fake->seeks.load(), seeks, @"nothing sought again");
+    XCTAssertEqual(_fake->opens.load(), opens, @"nothing opened");
+    XCTAssertEqual(CMTimeCompare(stream.rangeStart, picture), 0);
+    for (int64_t frame = 135; frame < 150; ++frame) {
+        auto cached = _cache->get(asset, frame);
+        XCTAssertTrue(cached.has_value(), @"frame %lld is decoded", frame);
+        if (cached) {
+            XCTAssertEqual(readBurnIn(cached->image.get()), std::optional<int>(static_cast<int>(frame)),
+                           @"the decoder went on from the picture in order");
+        }
+    }
+    // The lane decodes with the stream's previous decoder: a seek, no open.
+    XCTAssertFalse(_cache->contains(asset, int64_t(90)));
+    pool.requestFrame(asset, CMTimeMake(3, 1), log.callback(2), 7);
+    XCTAssertTrue(log.waitFor(2, std::chrono::seconds(10)));
+    XCTAssertEqual(_fake->opens.load(), opens, @"the lane got a decoder in exchange");
+    XCTAssertEqual(_fake->seeks.load(), seeks + 1);
+    {
+        std::lock_guard<std::mutex> lock(log.mutex);
+        const auto &r = log.results[2].at(0);
+        XCTAssertTrue(r.ok());
+        if (r.ok()) {
+            XCTAssertFalse(r.value().fromCache);
+            XCTAssertEqual(readBurnIn(r.value().image.get()), std::optional<int>(90));
+        }
+    }
+    // A stream starting at a picture its lane did not decode last seeks as before.
+    pool.setTargets({continuing(asset, CMTimeMake(8, 1))});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    const auto elsewhere = pool.stats().streams.at(0);
+    XCTAssertEqual(elsewhere.handoffs, uint64_t(1), @"no hand-off for a picture the lane did not decode");
+    XCTAssertEqual(elsewhere.seeks, stream.seeks + 1);
+}
+
+/// While the lane's request for the stream's picture is being decoded, the stream waits for it instead of decoding
+/// the same GOP alongside it, then takes the decoder over. A request for another picture ends the wait.
+- (void)testAStreamWaitsForTheScrubRequestOfItsPicture {
+    Gate decode;
+    Latch decoding(1);
+    std::atomic<bool> first{true};
+    _fake->onDecode = [&](int64_t) {
+        if (first.exchange(false)) {
+            decoding.countDown();
+            decode.pass();
+        }
+    };
+    ScrubLog log;
+    DecodePool pool(_fakeRouter, _cache);
+    const AssetId asset(1);
+    pool.registerAsset(asset, "/fake/a.mov");
+    const CMTime picture = CMTimeMake(135, 30);
+    pool.requestFrame(asset, picture, log.callback(1), 7);
+    XCTAssertTrue(decoding.wait(std::chrono::seconds(5)), @"the request is decoding");
+    pool.setTargets({continuing(asset, picture)});
+    XCTAssertTrue(waitFor([&] { return pool.stats().streams.at(0).awaitingScrub; }), @"the stream waits");
+    XCTAssertEqual(_fake->seeks.load(), 1, @"only the request's seek");
+    XCTAssertEqual(_fake->opens.load(), 1, @"the stream opens no decoder of its own");
+    decode.open();
+    XCTAssertTrue(log.waitFor(1, std::chrono::seconds(10)));
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    const auto stream = pool.stats().streams.at(0);
+    XCTAssertEqual(stream.handoffs, uint64_t(1));
+    XCTAssertEqual(stream.seeks, uint64_t(0));
+    XCTAssertEqual(_fake->seeks.load(), 1, @"the GOP was decoded once");
+    XCTAssertTrue(covers(*_cache, asset, 135, 149));
+
+    // Waiting for a request that a newer one supersedes: the wait ends, and the stream seeks.
+    Gate second;
+    Latch decodingSecond(1);
+    first = true;
+    _fake->onDecode = [&](int64_t) {
+        if (first.exchange(false)) {
+            decodingSecond.countDown();
+            second.pass();
+        }
+    };
+    const CMTime later = CMTimeMake(200, 30);
+    pool.requestFrame(asset, later, log.callback(2), 7);
+    XCTAssertTrue(decodingSecond.wait(std::chrono::seconds(5)));
+    pool.setTargets({continuing(asset, later)});
+    XCTAssertTrue(waitFor([&] { return pool.stats().streams.at(0).awaitingScrub; }));
+    pool.requestFrame(asset, CMTimeMake(260, 30), log.callback(3), 7); // supersedes request 2
+    second.open();
+    XCTAssertTrue(log.waitFor(3, std::chrono::seconds(10)));
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    XCTAssertFalse(pool.stats().streams.at(0).awaitingScrub);
+    XCTAssertTrue(covers(*_cache, asset, 200, 214), @"the stream decoded its window once the wait ended");
+}
+
+/// A request for the picture being decoded on its lane (the playhead stops where it was scrubbed) neither
+/// interrupts nor restarts that decode: both are answered, the later one from the cache.
+- (void)testARequestForThePictureBeingDecodedDoesNotRestartIt {
+    Gate decode;
+    Latch decoding(1);
+    std::atomic<bool> first{true};
+    _fake->onDecode = [&](int64_t) {
+        if (first.exchange(false)) {
+            decoding.countDown();
+            decode.pass();
+        }
+    };
+    ScrubLog log;
+    DecodePool pool(_fakeRouter, _cache);
+    pool.registerAsset(AssetId(1), "/fake/a.mov");
+    pool.requestFrame(AssetId(1), CMTimeMake(4, 1), log.callback(1), 7);
+    XCTAssertTrue(decoding.wait(std::chrono::seconds(5)));
+    pool.requestFrame(AssetId(1), CMTimeMake(4, 1), log.callback(2), 7);
+    decode.open();
+    XCTAssertTrue(log.waitFor(2, std::chrono::seconds(10)));
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    std::lock_guard<std::mutex> lock(log.mutex);
+    XCTAssertTrue(log.results[1].at(0).ok(), @"the decode in flight was kept");
+    XCTAssertTrue(log.results[2].at(0).ok());
+    if (log.results[2].at(0).ok()) {
+        XCTAssertTrue(log.results[2].at(0).value().fromCache);
+        XCTAssertEqual(readBurnIn(log.results[2].at(0).value().image.get()), std::optional<int>(120));
+    }
+    XCTAssertEqual(_fake->seeks.load(), 1);
+    XCTAssertEqual(_fake->interrupted.load(), 0);
+    XCTAssertEqual(pool.stats().scrubCancelled, uint64_t(0));
+}
+
+/// suspendTargets() stops the streams after the frame in flight and decodes nothing until the next setTargets(),
+/// which goes on from where they were (decoders and ranges kept).
+- (void)testSuspendedStreamsDecodeNothingUntilTheNextTargets {
+    _fake->decodeDelay = std::chrono::milliseconds(5);
+    DecodePool pool(_fakeRouter, _cache);
+    pool.setLookahead(CMTimeMake(5, 1));
+    pool.setTargets({DecodeTarget{AssetId(1), "/fake/a.mov", -1, CMTimeMake(1, 1)}});
+    XCTAssertTrue(waitFor([&] { return _fake->framesDecoded.load() >= 10; }));
+    pool.suspendTargets();
+    XCTAssertTrue(pool.stats().suspended);
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(5)), @"suspended streams count as idle");
+    const int decoded = _fake->framesDecoded.load();
+    XCTAssertLessThan(decoded, 150, @"stopped before the window was covered");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    XCTAssertEqual(_fake->framesDecoded.load(), decoded, @"nothing decoded while suspended");
+    const int seeks = _fake->seeks.load();
+    const int opens = _fake->opens.load();
+    pool.setTargets({DecodeTarget{AssetId(1), "/fake/a.mov", -1, CMTimeMake(1, 1)}});
+    XCTAssertFalse(pool.stats().suspended);
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(20)));
+    XCTAssertTrue(covers(*_cache, AssetId(1), 30, 179), @"the window is covered after the suspension");
+    XCTAssertEqual(_fake->seeks.load(), seeks, @"it went on where it stopped");
+    XCTAssertEqual(_fake->opens.load(), opens, @"with its decoder");
 }
 
 @end
