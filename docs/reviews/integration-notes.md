@@ -2105,3 +2105,91 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
      system font; reopen the project: the load warning names the font; Export asks before exporting; reactivate
      the font: the badge goes and the title returns in its font.
   8. Undo and redo through all of it; save, reopen, and open a version 10 project in 0.1.10: refused as too new.
+
+## Titles slice 2 (2026-10-03; status in `open-findings.md`)
+- **Schema 11.** A title holds `"pointText"` (bool) and `"anchor"` (`"top"`, `"centre"`, `"bottom"`): two rows at the
+  end of the `TitleParameterInfo` table (`TitleParameter::PointText`, `Anchor`; a new value type
+  `TitleValueType::Anchor` with `TitleAnchor` in `TitleValue`, so any `std::visit` over a `TitleValue` needs its
+  branch; the content id hashes them). `toV11` is frozen (only the version; a version 10 file holding the keys keeps
+  them with a warning each); goldens in `EngineTests/Serialize/golden/v11/` (excluded from the test bundle like v8-10),
+  the writer golden `project-v11.json`. The facade mirrors them (`VETitleParameterPointText`/`Anchor`,
+  `VETitleValueTypeAnchor`, `VETitleAnchor`, `VETitleInfo.pointText`/`anchor`; a static_assert keeps
+  `VETitleParameter` in step with the table).
+- **Where a title's picture lies.** `CanvasGeometry` is relative to the title's position, which is now the point its
+  block is anchored at (area text: x is the block's centre; point text: its left edge, centre or right edge as it
+  aligns; y its top, centre or bottom). `measureTitleBlock` returns the block's offset from the position
+  (`left`, `top`) besides its size; `VEEngine titleBlockOfClip:` gives the block on the canvas, and the program
+  monitor's box uses it (`TitleBoxModel.block(of:at:store:)`). A text ending with a line break, or empty, has an empty
+  last line in its block (the caret's line after Return): such a slice 1 title is half a line higher than before.
+- **Hit testing.** `media::TitleTextLayout` (TitleRenderer.h) is the renderer's own k = 1 lines (`layoutLines`, shared
+  with the drawing): carets (`CTLineGetOffsetForStringIndex`), the index at a point (never past a break, never at the
+  next line's start, never inside a surrogate pair) and selection rectangles (per glyph, caret to caret: tracking and
+  right-to-left runs come out right). The facade's `VETitleTextLayout` (`titleTextLayoutOfClip:atTime:`) places it
+  through the clip's composed Motion at a time (`canvasToFrame`, `canvasToFrameTransform`: the compositor's
+  placement of a frame-sized still): `caret(at:)`, `canvasSelectionRects(for:)` + `frameQuad(ofCanvasRect:)`,
+  `index(atFramePoint:)`, `index(onLine:nearCanvasX:)`, `line(ofIndex:)`, `range(ofLine:)`. UTF-16 indices
+  (NSString's).
+- **Keeping text in place.** `setTitlePointText:clips:`, `setTitleAnchor:clips:` and `setTitleAlignment:clips:` move
+  each title's position so its block stays (`pushTitleChangeKeepingPlace`); `SetGeneratedContent` takes per-clip
+  changes for it. `setTitleToggle:` with PointText goes the same way. A plain `setTitlePosition` still sets the
+  position as given.
+- **Copy and Paste Style.** `copyTitleStyleOfClip:`, `hasCopiedTitleStyle`, `pasteTitleStyleOntoClips:` ("Paste
+  Style", one step over several titles). The style is every parameter `isStyleParameter` says
+  (`VETitleParameterInfo.isStyle`): not the text, position, box width, point text or anchor. The copied title lives in
+  the engine (`_copiedTitleStyle`), across New and Open. App: `ProjectStore.copyTitleStyle()`, `pasteTitleStyle()`,
+  `canCopyTitleStyle` (one title, or several with no style parameter Mixed), `canPasteTitleStyle`; the clip context
+  menu shows them for a title where other clips show the grade items.
+- **Presets.** `GeneratedPreset::TitleCard` (a black matte with a bold title on the track above: `presetLayers`;
+  `AddGeneratedClip` stacks several contents, each above the previous one's track) and `Caption` (point text, top
+  left of title-safe, anchored at its top). `addGeneratedPreset`/`placeGeneratedPreset` return the top clip first in
+  `createdIDs`. App: `GeneratorPreset.titleCard`, `.caption`, with their own drag types (project.yml, Info.plist).
+- **Safe areas.** `SafeAreas` (App/State/SafeAreas.swift): the action-safe and title-safe rectangles, the centre and
+  the snapping lines, from `SafeAreaStandard` (`.smpte`: 93/90 %, the default; `.classic`: 90/80 %). Editing
+  preferences `showSafeAreas` and `safeAreaStandard`; `ProjectStore.showsSafeAreas`, `safeAreas`. Drawn by
+  `SafeAreaGuides` in `ProgramMonitorLayout` (one `if` after the picture).
+- **Snapping.** `TitleSnapping` (pure): a box's bounds on the frame to the lines, each axis on its own, within a
+  threshold. `TitleBoxModel.applyDrag(_:translation:snapping:snapThreshold:)`: snapping is off unless asked; the
+  overlay asks unless Command is held, with 6 points of the monitor. `TitleBoxModel.snapLines` while a drag lasts.
+  Point text has no width handles (`isResizable`; `target(at:box:resizable:)`).
+- **Typing on the picture.** `PictureTitleEditor` (App/State/TitleTextEditing.swift) is the session, owned by
+  `TitleBoxModel.editor` (`beginEditing(.selectAll | .caret(atFramePoint:))`, `endEditing()`, `editingProblem`);
+  `ProjectStore.isEditingTitleOnPicture`, `canEditTitleOnPicture`, `beginEditingTitleOnPicture()`. Text changes go
+  through `TitleInspectorModel.textChanged` (the typing run, its idle commit, `commitOpenEdits()`).
+  `PictureTitleEditorView` (App/Views/ProgramMonitor/PictureTitleEditorView.swift) puts `TitleEditingSurfaceView`
+  over the picture area while the session lasts (in place of the box's drag layer): it draws the caret and selection
+  with Core Animation layers from the editor's geometry and takes the clicks; its `TitleEditingTextView` (an
+  invisible NSTextView, no undo manager) has the keys. `KeyboardController` maps Return/Enter to
+  `.editTitleOnPicture` (taken only when it starts a session: the timeline's keys, a title's box showing); every other
+  key reaches the text view because `shouldHandleKeys` leaves an NSText alone. `ProgramMonitorHost`'s tap does not
+  reclaim the keys while a session lasts. Clip > Edit Title on Picture.
+- **Recent fonts.** `TitleInspectorModel.recentFonts` (the store's defaults, `TitleRecentFonts`, at most five) and
+  `useRecentFont(at:)`; the family popup lists them under "Recent".
+- **Tests and tools.** `AppTests/TestSnapshots.swift` writes hosted drawings as PNG files when `FW_SNAPSHOTS=1`
+  (`TEST_RUNNER_FW_SNAPSHOTS=1` with xcodebuild) into the app container's temporary directory
+  (`~/Library/Containers/com.justjohn12345.framewright/Data/tmp/FramewrightSnapshots`). `TitleDragLatencyTests`
+  (Measurements scheme) has `testMeasureTypingOnThePicture` (the editor window; skips when it cannot be shown) and
+  `testMeasureTypingWithAnOffscreenMonitor`.
+- What to check by hand in the app:
+  1. Select a title over a clip with the playhead in it and press Return: all its text is selected on the picture;
+     type: the text on the picture changes as you type, with a blinking caret at the end. Press Return for a second
+     line, the arrows, Option-arrows, Command-arrows and Shift with them, Delete, Command-A, Command-C/X/V: each does
+     what it does in any text field. Space, J, K, L, I and O type letters (nothing plays or is marked). Escape ends
+     it; Command-Z then takes the whole run back in one step; the inspector's text area followed all along.
+  2. Double-click a word of a title on the picture: typing starts with the caret where you clicked; double-click
+     again selects the word, triple-click the line; drag across words to select them; Shift-click to extend. Click
+     outside the box, or in the timeline: typing ends.
+  3. Do 1 and 2 on a title with a Ken Burns zoom and a turn (Motion span or the Video rows' rotation), with the
+     program monitor large and small: the caret and the selection sit on the letters.
+  4. In the inspector's Text section switch Text Box to Point and back, and the Anchor between top, centre and
+     bottom: the text stays where it is each time. Type a long line into point text: it grows from its left edge
+     (left-aligned), centre or right edge. Add lines to a top-anchored title: it grows down; bottom-anchored: up.
+  5. View > Show Title/Action Safe Areas; Settings > Editing > Safe areas: SMPTE and Classic.
+  6. Drag a title's box near the frame's centre and near the safe-area edges: it snaps, and a pink line shows what
+     it snapped to; hold Command while dragging: no snapping. Drag a box's edge near a safe-area edge: it snaps.
+  7. Select a styled lower third, Clip > Copy Style (or the context menu); select several other titles, Paste Style:
+     they take its font, colours, box and shadow but keep their own text and places; one Undo takes them all back.
+  8. Clip > Add Title Card (a bold title over a black matte, two clips) and Add Caption (top left; type a long
+     caption on the picture: it grows right and down). Drag the new tiles onto a track.
+  9. Choose a few fonts for titles: the family popup lists the last five at the top under Recent.
+  10. Open a slice 1 (version 10) project: its titles look as before (but one whose text ends with a line break is
+     half a line higher); save, and open it in 0.1.11: refused as too new.

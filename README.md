@@ -94,14 +94,19 @@ audited the code line by line.
   kept together with their linked partner (Delete removes both, Option-Delete one; a change also changes
   the linked one unless turned off); a note when a dissolve sits on a plain split (both sides show the
   same frames); the gain line on audio clips; Speed/Duration sheet.
-- Titles, lower thirds and colour mattes: Clip > Add Title (Control-T), Add Lower Third (Shift-Control-T) and
-  Add Colour Matte, or the Effects tab's tiles, put one at the playhead on the first free video track above the
-  target track (a new track when none is free). A title is a clip of its own with its text and style, an overlay
-  over whatever the tracks below show (or a title card over a matte), and fades, dissolves, Motion spans and
-  opacity work on it as on any clip: type it in
-  the inspector, with its font (the system font or any font on the Mac), size, colour, alignment, line spacing,
-  tracking, an outline, a soft shadow and a background box; drag its box on the program monitor to move it or
-  change its wrap width. Titles are drawn with Core Text at the size they are shown, so they stay sharp under a
+- Titles, lower thirds and colour mattes: Clip > Add Title (Control-T), Add Lower Third (Shift-Control-T), Add
+  Colour Matte, Add Title Card (a title over a black matte) and Add Caption (text at the top left that grows as you
+  type), or the Effects tab's tiles, put one at the playhead on the first free video track above the target track
+  (a new track when none is free). A title is a clip of its own with its text and style, an overlay over whatever
+  the tracks below show (or a title card over a matte), and fades, dissolves, Motion spans and opacity work on it
+  as on any clip. Type it on the picture (double-click its box on the program monitor, or press Return with it
+  selected: a caret and selection drawn over the picture, every text key of a Mac text field, Escape to finish) or
+  in the inspector, with its font (the system font or any font on the Mac, the last five used first), size, colour,
+  alignment, line spacing, tracking, an outline, a soft shadow and a background box; area text wraps at its box's
+  width, point text grows with what is typed, and it can hang from its top or stand on its bottom. Drag its box on
+  the program monitor to move it (it snaps to the frame's centre lines and the safe areas; hold Command not to) or
+  change its wrap width; View > Show Title/Action Safe Areas draws the safe areas (SMPTE's 93 % and 90 %, or the
+  classic 90 % and 80 %). Copy Style and Paste Style give a set of titles one look. Titles are drawn with Core Text at the size they are shown, so they stay sharp under a
   Ken Burns zoom and in an export larger than the sequence, and they are not graded. A project whose font is not
   on the Mac shows its titles in the system font with a warning and keeps the font's name. Fonts are used under
   their own licences: check that a font's licence allows its use in video you publish.

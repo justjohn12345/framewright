@@ -303,6 +303,81 @@ Tests (full `Framewright` scheme at 1364d79, the screen unlocked): EngineTests 6
 testAPictureRenderedForAnEarlierEpochIsNotPublished` (`pool.waitUntilIdle` timed out after 10 s; a decode pool test
 that does not involve the views; it passed three times alone): a flake to watch.
 
+## Titles slice 2 (2026-10-03): status
+The slice of `docs/plans/2026-10-02-titles-design.md` ("### Slice 2", sections 6, 9 and 10), one commit per item. Nothing
+was cut. Not pushed; awaiting the lead's review.
+
+Done (engine):
+1. 6f6b480 point text and the vertical anchor in the model, schema 11 (`pointText`, `anchor`; the frozen 10 -> 11
+   step; v11 goldens and the writer golden `project-v11.json`; no existing golden changed).
+2. d97218f the renderer: point text, the anchor and `TitleTextLayout` (the renderer's own lines: carets, the index at a
+   point, selection rectangles).
+3. 8d888ba the facade: `VETitleTextLayout` through the clip's Motion, keeping text in place for point text, the
+   anchor and the alignment, Copy Style and Paste Style.
+4. f528a31 the Title Card (a matte with its title above: two clips) and Caption presets.
+
+Done (app): 9bcfe79 the Add Title Card and Add Caption items and tiles; abfad08 point text and the anchor in the
+inspector, the box following them; ea6cb03 the font popup's recent fonts; cb9ff05 the safe-area guides (View menu,
+Settings > Editing); f42d243 snapping a dragged box; fb706d9 Copy Style and Paste Style (Clip menu, context menu);
+1b7c3df typing on the program monitor; 70ee691 the typing measurement; ed1b396 the program monitor's picture with its
+overlays checked offscreen (and PNG files of it).
+
+Deviations from the note, and why:
+- **A text ending with a line break (or empty) has an empty last line in its block**, as tall as a line of its font:
+  the caret's line after Return, which the box and the background box take in at once (Premiere and Final Cut do the
+  same). A slice 1 title whose text ends with a line break is therefore drawn half a line higher (centre anchor) and
+  its background box a line taller; `titleBlockSizeOfClip:` of an empty title is one line, not 0 (one slice 1 test
+  changed with it: `VEEngineTitleTests testTheBoxSizeIsTheTitlesBlockInSequencePixels`, and
+  `TitleRendererTests testAnEmptyTextGivesATransparentPicture`'s block height).
+- **Point text's x follows its alignment** (its left edge, centre or right edge), as Premiere's and Final Cut's point
+  text do, so typing grows the text away from that point; area text keeps x at its centre. Turning point text on or
+  off, changing the anchor, and changing a point text's alignment move the position so the text stays where it is
+  (the inspector's controls and the facade's setters; a plain `setTitlePosition` does not).
+- **Paste Style leaves out point text and the anchor** besides the text, position and box width: they say where the
+  text is, and pasting them would move it.
+- **The anchor is part of the content id** (it places the picture relative to the position).
+- **The safe-area percentages are a choice of two pairs** (SMPTE ST 2046-1, the default, and the classic 90/80), not
+  free numbers, as the note's "the classic pair as a preference".
+- **Snapping is disabled with Command** (Ken Burns boxes do not snap, so there was no convention to follow), and it
+  snaps to the safe-area lines whether or not the guides are shown (the line it snapped to is drawn); a box's edge
+  snaps only when the box is not turned. Copy Style and Paste Style have no keyboard shortcuts.
+- **Return starts typing on the picture with all the text selected** (as Finder's Return on a name), a double-click
+  with the caret where it was clicked. Playback pauses when typing starts. Clip > Edit Title on Picture shows Return.
+- **A title card is two clips** (a black matte and a bold title on the track above), added or dropped as one undo
+  step, rather than one clip.
+
+Measured (Debug build, this Mac, the screen locked: the editor window could not be shown):
+- Keystroke to the picture handed out, typing on the picture with the program drawn by a view in no window and the
+  typing surface in a hidden window (`TitleDragLatencyTests testMeasureTypingWithAnOffscreenMonitor`, a lower third
+  over a movie, 40 keys at 12 a second): median 11.8 ms, p90 15.3 ms (the first key 123 ms: fonts and caches warming).
+  The same through the engine alone (no app, a typing run's coalescing group): 0.9-1.5 ms median. The whole-window
+  measurement (`testMeasureTypingOnThePicture`, Measurements scheme) skips while the window cannot be shown: run it
+  with the screen unlocked. An earlier version of the offscreen measurement inside the drag harness's own loop gave
+  44-48 ms (and wrap-width drags 26 ms against the 9.8 ms measured in the window); a stand-alone probe in the same
+  host gave 9-15 ms for the same keys, so that harness path was left out; why it was slower is not known.
+- The caret and selection are drawn by Core Animation layers at the keystroke (the surface's own redraw), not after
+  SwiftUI's update of the window; the new picture lands when the pool has rendered it.
+
+Open:
+- What needs a person: the double-click on the box by hand (the test of it skips when the window cannot be shown, as
+  it could not this session), typing feel, input methods (marked text is not drawn on the picture: the title shows
+  the committed text; the candidate window is placed at the caret), the font popup's recent fonts with the user's
+  fonts, snapping by hand.
+- The caret follows the title's Motion at the playhead; typing during playback is possible from the menu (Play) and
+  the caret then follows the moving title.
+
+Tests changed with the slice (each for a behaviour it changed): the schema-number tests listed in 6f6b480's message
+(as 7b62a72 did for version 10), the version 10 writer test ("but for its version and the version 11 title keys"),
+the two empty-block tests above, `GeneratorTilesTests` and `TimelineDropTests` (five presets: d094acb).
+
+Tests (full `Framewright` scheme at ed1b396, the screen locked; the two preset-list tests were fixed in
+d094acb and pass): EngineTests 701 (baseline 687), doctest 487 cases (476), AppTests 372 with 2 skipped (347, 1): the
+known skip and `TitleTypingTests testADoubleClickOnTheBoxStartsTypingWithTheCaretThere`, which needs a visible window.
+Failures in that run: `ScopePanelTests testTheWindowShowsTheScopesWideAtThePicturesAspect` and `WaveformPanelTests
+testTheShownPanelIsDrawnWithTheProgramMonitorsFramesAndLetGoWhenHidden` (the locked screen, as before), and
+`FFmpegBackendConformanceTests testMemoryIsStableAcrossLongDecodesAndSeeks` (footprint grew 73 MB against 24; it
+passed alone; another agent was building and testing in its worktree at the time: a flake under load to watch).
+
 ## Where things stand (handover, 2026-10-03)
 - **Released and pushed:** 0.1.11 (built from 221ad31) is the last release; everything is pushed. It adds titles
   slice 1 (c996a93..e5abda0, docs c7feff8) and its review fix round (bd96f79..74a95a7, docs 9927acd), accepted by
