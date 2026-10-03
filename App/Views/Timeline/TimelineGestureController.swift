@@ -880,8 +880,8 @@ final class TimelineGestureController: ObservableObject {
     /// to Lane and Remove; a clip Delete, Ripple Delete, Link/Unlink, Speed/Duration…, Reverse Clip
     /// (checked when the selection plays backwards) and, for a
     /// video clip, Add Ken Burns… and Add Motion Span (at the playhead, on the clicked clip) and Copy
-    /// Grade, Paste Grade and Reset Grade (on the selection's video clips). Nothing during a drag or over
-    /// empty space.
+    /// Grade, Paste Grade and Reset Grade (on the selection's video clips; for a title, Copy Style and Paste Style on
+    /// the selection's titles instead). Nothing during a drag or over empty space.
     func contextMenuItems(at location: CGPoint) -> [ContextMenuItem] {
         guard drag == .idle, !store.isGestureActive else { return [] }
         let store = self.store
@@ -929,9 +929,19 @@ final class TimelineGestureController: ObservableObject {
                     store.addMotionSpanAtPlayhead(clip: id, mode: .transform)
                 })
                 items.append(.separator)
-                items.append(ContextMenuItem(title: "Copy Grade", isEnabled: store.canCopyGrade) { store.copyGrade() })
-                items.append(ContextMenuItem(title: "Paste Grade", isEnabled: store.canPasteGrade) { store.pasteGrade() })
-                items.append(ContextMenuItem(title: "Reset Grade", isEnabled: store.canResetGrade) { store.resetGrade() })
+                if clip.generatorKind == .title {
+                    // A title: its style instead of a grade (titles are not graded).
+                    items.append(ContextMenuItem(title: "Copy Style", isEnabled: store.canCopyTitleStyle) {
+                        store.copyTitleStyle()
+                    })
+                    items.append(ContextMenuItem(title: "Paste Style", isEnabled: store.canPasteTitleStyle) {
+                        store.pasteTitleStyle()
+                    })
+                } else {
+                    items.append(ContextMenuItem(title: "Copy Grade", isEnabled: store.canCopyGrade) { store.copyGrade() })
+                    items.append(ContextMenuItem(title: "Paste Grade", isEnabled: store.canPasteGrade) { store.pasteGrade() })
+                    items.append(ContextMenuItem(title: "Reset Grade", isEnabled: store.canResetGrade) { store.resetGrade() })
+                }
             }
             return items
         case .lane, .track, .none:

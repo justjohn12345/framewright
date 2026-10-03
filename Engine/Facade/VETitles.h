@@ -134,6 +134,9 @@ typedef struct {
 @property (nonatomic, readonly) double defaultValue;
 @property (nonatomic, readonly) double minimum;
 @property (nonatomic, readonly) double maximum;
+/// Whether the parameter is part of a title's style (what Copy Style copies and Paste Style sets): not the text, the
+/// position, the box width, point text or the anchor.
+@property (nonatomic, readonly) BOOL isStyle;
 /// Every parameter, in VETitleParameter order.
 @property (class, nonatomic, readonly, copy) NSArray<VETitleParameterInfo *> *allParameters NS_SWIFT_NONISOLATED;
 /// The row of `parameter` (the first row for a value outside the enum).

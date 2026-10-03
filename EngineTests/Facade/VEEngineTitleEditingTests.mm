@@ -412,6 +412,7 @@ double brightFraction(const Grey &grey, VETitleQuad quad, double scale, double i
             const BOOL style = p != VETitleParameterText && p != VETitleParameterPositionX &&
                                p != VETitleParameterPositionY && p != VETitleParameterBoxWidth &&
                                p != VETitleParameterPointText && p != VETitleParameterAnchor;
+            XCTAssertEqual(row.isStyle, style, @"%@", row.name);
             if (!style) {
                 continue;
             }

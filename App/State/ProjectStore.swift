@@ -1445,6 +1445,63 @@ final class ProjectStore: ObservableObject {
         return report(engine.pasteGrade(ontoClips: clips.map { NSNumber(value: $0.clipID) }))
     }
 
+    // MARK: Title style
+
+    /// The selected title clips (Copy Style and Paste Style work on them; other clips are left out).
+    var titleStyleTargets: [VEClipInfo] { selectedClips.filter { $0.generatorKind == .title } }
+
+    /// Copy Style applies: one title is selected, or several whose styles are the same (every style parameter
+    /// agrees), so what is copied is the style of every one of them.
+    var canCopyTitleStyle: Bool { copyableTitleStyleSource != nil }
+
+    private var copyableTitleStyleSource: VEClipInfo? {
+        let targets = titleStyleTargets
+        guard let first = targets.first else { return nil }
+        if targets.count == 1 { return first }
+        let selection = engine.title(ofClips: targets.map { NSNumber(value: $0.clipID) })
+        let differs = VETitleParameterInfo.allParameters.contains { $0.isStyle && selection.isMixed($0.parameter) }
+        return differs ? nil : first
+    }
+
+    /// Paste Style applies: a style was copied (in this session, any project) and a title is selected.
+    var canPasteTitleStyle: Bool { hasCopiedTitleStyle && !titleStyleTargets.isEmpty }
+
+    /// Whether Copy Style has copied a style (the engine keeps it, across New and Open).
+    @Published private(set) var hasCopiedTitleStyle = false
+
+    /// Clip > Copy Style: copies the style of the selected title (or the style several selected titles share): its
+    /// font, size, colours, alignment, spacing, outline, shadow and background, not its text or where it is. The status
+    /// line says whose.
+    func copyTitleStyle() {
+        guard !isGestureActive else { return }
+        let targets = titleStyleTargets
+        guard !targets.isEmpty else {
+            statusMessage = "Select a title to copy its style."
+            return
+        }
+        guard let source = copyableTitleStyleSource, engine.copyTitleStyle(ofClip: source.clipID) else {
+            statusMessage = "The selected titles have different styles: select one title to copy its style."
+            return
+        }
+        hasCopiedTitleStyle = true
+        statusMessage = targets.count > 1 ? "Copied the style of the \(targets.count) selected titles."
+            : "Copied the style of “\(source.name)”."
+    }
+
+    /// Clip > Paste Style: gives every selected title the copied style, one undo step; each keeps its text, position,
+    /// wrap width, point text and anchor.
+    @discardableResult
+    func pasteTitleStyle() -> Bool {
+        guard !isGestureActive else { return false }
+        let titles = titleStyleTargets
+        guard !titles.isEmpty else {
+            statusMessage = "Select the titles to paste the style onto."
+            return false
+        }
+        inspector.endNudgeBurst()
+        return report(engine.pasteTitleStyle(ontoClips: titles.map { NSNumber(value: $0.clipID) }))
+    }
+
     /// Clip > Reset Grade: removes the grade of every selected video clip (one undo step).
     @discardableResult
     func resetGrade() -> Bool {

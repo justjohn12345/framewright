@@ -181,6 +181,12 @@ struct AppCommands: Commands {
                 .disabled(!store.canPasteGrade)
             Button("Reset Grade") { store.resetGrade() }
                 .disabled(!store.canResetGrade)
+            // The style of the selected titles (font, size, colours, alignment, spacing, outline, shadow, background;
+            // not the text or where it is): copied from one title, or several with the same style, pasted onto all.
+            Button("Copy Style") { store.copyTitleStyle() }
+                .disabled(!store.canCopyTitleStyle || store.isGestureActive)
+            Button("Paste Style") { store.pasteTitleStyle() }
+                .disabled(!store.canPasteTitleStyle || store.isGestureActive)
             Divider()
             Button("Raise Gain 1 dB  ]") { store.nudgeGain(1) }
                 .disabled(store.selection.isEmpty)

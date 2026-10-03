@@ -25,6 +25,7 @@ using namespace ve::facade;
 @property (nonatomic, readwrite) double defaultValue;
 @property (nonatomic, readwrite) double minimum;
 @property (nonatomic, readwrite) double maximum;
+@property (nonatomic, readwrite) BOOL isStyle;
 - (instancetype)initInternal;
 @end
 
@@ -336,6 +337,7 @@ void forgetTitleFontAvailability() {
     info.defaultValue = row.defaultValue;
     info.minimum = row.minimum;
     info.maximum = row.maximum;
+    info.isStyle = isStyleParameter(row.parameter);
     return info;
 }
 - (NSString *)description {
