@@ -169,6 +169,9 @@ struct AppCommands: Commands {
                 .disabled(!store.canAddGenerated)
             Button("Add Caption") { store.addGenerated(.caption) }
                 .disabled(!store.canAddGenerated)
+            // Return, handled by KeyboardController (a text field keeps its own Return).
+            Button("Edit Title on Picture  ↩") { store.beginEditingTitleOnPicture() }
+                .disabled(!store.canEditTitleOnPicture)
             Divider()
             // The grade of the selected video clips (their linked sound is left out): copied from one clip,
             // or from several with identical grades (`canCopyGrade`), pasted onto all, reset on all; each

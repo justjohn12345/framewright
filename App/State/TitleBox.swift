@@ -40,7 +40,7 @@ final class TitleBoxModel: ObservableObject {
     /// box to grab).
     static let minimumHeightFraction: CGFloat = 1
 
-    private unowned let store: ProjectStore
+    unowned let store: ProjectStore
     let clipID: VEClipID
     @Published private(set) var clip: VEClipInfo
     /// The text block on the frame at the playhead, through the clip's Motion there (sequence pixels).
@@ -56,6 +56,8 @@ final class TitleBoxModel: ObservableObject {
     @Published private(set) var note: String?
     /// The guide lines the drag in progress snapped to (`TitleSnapping`), drawn across the frame while it lasts.
     @Published private(set) var snapLines: [SafeAreas.Line] = []
+    /// Typing on the picture in progress (`beginEditing`, `endEditing`; TitleTextEditing.swift), else nil.
+    @Published var editor: PictureTitleEditor?
 
     private(set) var time: CMTime
     /// The title's values and the clip's Motion when the drag started, and its block relative to its position (sequence
@@ -83,23 +85,28 @@ final class TitleBoxModel: ObservableObject {
 
     // MARK: Reading
 
-    /// The clip changed (an edit, an undo): re-read the box and the outlines. A drag in progress keeps its origin.
+    /// The clip changed (an edit, an undo): re-read the box and the outlines. A drag in progress keeps its origin;
+    /// typing on the picture lays the text out again.
     func update(clip: VEClipInfo) {
         guard clip.clipID == clipID else { return }
         self.clip = clip
         read()
+        editor?.modelChanged()
     }
 
-    /// The program playhead moved.
+    /// The program playhead moved: typing on the picture follows the clip's Motion there, and ends when the playhead
+    /// leaves the clip.
     func setPlayhead(_ time: CMTime) {
         guard time != self.time else { return }
         self.time = time
         read()
+        editor?.setTime(time)
     }
 
     private func read() {
         let visible = clip.timelineStart <= time && time < clip.timelineEnd
         if visible != isVisible { isVisible = visible }
+        if !visible, editor != nil { endEditing() }
         let placed = Self.block(of: clip, at: time, store: store) ?? box
         if placed != box { box = placed }
         let others: [Outline] = store.clips.values

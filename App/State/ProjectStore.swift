@@ -1219,6 +1219,7 @@ final class ProjectStore: ObservableObject {
               let clip = clips[id], clip.generatorKind == .title else {
             if let titleBox {
                 titleBox.cancelDrag()
+                titleBox.endEditing()
                 self.titleBox = nil
             }
             return
@@ -1228,7 +1229,23 @@ final class ProjectStore: ObservableObject {
             return
         }
         titleBox?.cancelDrag()
+        titleBox?.endEditing()
         titleBox = TitleBoxModel(store: self, clip: clip, time: playheadTime)
+    }
+
+    /// Whether the selected title's text is being typed on the program monitor (`PictureTitleEditor`).
+    var isEditingTitleOnPicture: Bool { titleBox?.editor != nil }
+
+    /// Clip > Edit Title on Picture and Return with a title selected: the selected title's text can be typed on the
+    /// program monitor (its box shows: one title selected, the playhead in it, no span selected).
+    var canEditTitleOnPicture: Bool { titleBox.map { $0.editingProblem == nil } ?? false }
+
+    /// Starts typing the selected title's text on the program monitor with all of it selected (Return; Clip > Edit
+    /// Title on Picture). False when no title's box shows (then nothing happens: Return is not taken).
+    @discardableResult
+    func beginEditingTitleOnPicture() -> Bool {
+        guard let titleBox else { return false }
+        return titleBox.beginEditing(.selectAll)
     }
 
     private func failKenBurns(_ id: VESpanID, _ reason: String) {

@@ -40,6 +40,8 @@ struct ProgramMonitorHost: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
+            // While a title's text is typed on the picture, its clicks are the typing's (TitleEditingSurfaceView).
+            guard !store.isEditingTitleOnPicture else { return }
             store.focusArea = .timeline
             store.reclaimKeyboardFocus()
         }

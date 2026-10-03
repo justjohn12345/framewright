@@ -6,7 +6,9 @@ import SwiftUI
 /// The selected title's box on the program monitor (`TitleBoxModel`): the text block through the clip's Motion at
 /// the playhead, with handles at its corners and on its left and right edges, and thin dashed outlines of the other
 /// titles at the playhead. Drag the box to move the text, an edge or a corner to change its wrap width about its
-/// centre; each drag is one undo step and Escape cancels it. A drag snaps the box to the frame's centre lines and the
+/// centre; each drag is one undo step and Escape cancels it. Double-click the box to type its text on the picture
+/// (`PictureTitleEditorView`: the caret and selection are drawn over the picture; Escape or a click outside the box ends
+/// it); the handles go while typing. A drag snaps the box to the frame's centre lines and the
 /// safe-area edges (the line it snapped to is drawn while it lasts); holding Command does not snap. Nothing is drawn
 /// while the playhead is outside the clip, and presses then pass through.
 struct TitleBoxOverlay: View {
@@ -39,7 +41,11 @@ struct TitleBoxOverlay: View {
             if model.isVisible {
                 snapLinesView
                 boxView
-                dragLayer
+                if let editor = model.editor {
+                    PictureTitleEditorView(model: model, editor: editor, viewport: viewport)
+                } else {
+                    dragLayer
+                }
             }
         }
         .accessibilityIdentifier("TitleBoxOverlay")
@@ -60,7 +66,7 @@ struct TitleBoxOverlay: View {
     /// text, whose width follows its text).
     private var boxView: some View {
         let box = viewport.view(model.box)
-        let handles = model.isResizable
+        let handles = model.isResizable && model.editor == nil
             ? box.corners + [box.point(local: CGPoint(x: -box.size.width / 2, y: 0)),
                              box.point(local: CGPoint(x: box.size.width / 2, y: 0))]
             : []
@@ -120,7 +126,14 @@ struct TitleBoxOverlay: View {
                                     snapping: !NSEvent.modifierFlags.contains(.command),
                                     snapThreshold: viewport.sequence(CGSize(width: Self.snapDistance, height: 0)).width)
                 }
-                .onEnded { _ in model.endDrag() })
+                .onEnded { value in
+                    model.endDrag()
+                    // A double-click on the box (no movement) types on the picture, the caret where it was.
+                    if value.translation == .zero, (NSApp.currentEvent?.clickCount ?? 0) >= 2,
+                       TitleBoxModel.target(at: value.startLocation, box: box, resizable: model.isResizable) != nil {
+                        model.beginEditing(.caret(atFramePoint: viewport.sequence(value.location)))
+                    }
+                })
             .accessibilityIdentifier("TitleBoxDragArea")
     }
 }

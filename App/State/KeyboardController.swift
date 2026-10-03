@@ -24,7 +24,9 @@ import Foundation
 /// end, which opens the Ken Burns editor; only the selected clip, or the selected span's clip, never
 /// another clip under the playhead: with none selected, or its track locked, it only says why in the
 /// status line), Control-T / Shift-Control-T (Add Title / Add Lower Third at the playhead, above the
-/// target video track). Auto-repeat of Space, J/K/L, Control-K and Control-T is ignored (holding L does
+/// target video track), Return (type the selected title's text on the program monitor, when its box shows; while
+/// typing there the text view has the keys, so every key above types or edits text instead). Auto-repeat of Space,
+/// J/K/L, Control-K and Control-T is ignored (holding L does
 /// not race to 8x, holding Space does not toggle, holding Control-K adds one span, Control-T one title). Transport keys drive the
 /// monitor that has focus (see `PlaybackActions`).
 @MainActor
@@ -50,6 +52,9 @@ final class KeyboardController {
         /// `ProjectStore.addGenerated`). Handled here rather than by the menu so a text field keeps its own
         /// Control-T (transpose).
         case addTitle, addLowerThird
+        /// Return (or Enter) with one title selected and its box on the program monitor: type its text on the
+        /// picture, all of it selected (`ProjectStore.beginEditingTitleOnPicture`). Not taken otherwise.
+        case editTitleOnPicture
 
         /// The keys the program output window takes: the transport (play, shuttle, step, start/end)
         /// and Escape. Everything else edits or navigates the timeline.
@@ -112,6 +117,7 @@ final class KeyboardController {
             if flags == [.control, .shift] { return .addLowerThird }
         }
         switch keyCode {
+        case 36, 76: return flags.isEmpty ? .editTitleOnPicture : nil
         case 53: return flags.isEmpty ? .cancel : nil
         case 123: return flags.isEmpty ? .stepBackward : nil
         case 124: return flags.isEmpty ? .stepForward : nil
@@ -189,6 +195,11 @@ final class KeyboardController {
             return true
         }
         guard Self.shouldHandleKeys(firstResponder: window.firstResponder) else { return false }
+        if action == .editTitleOnPicture {
+            // Taken only when it starts typing on the picture (the timeline has the keys, a title's box shows).
+            guard store.focusArea == .timeline, !event.isARepeat else { return false }
+            return store.beginEditingTitleOnPicture()
+        }
         if event.isARepeat, action.ignoresRepeat {
             return true // swallowed: a held key is one command
         }
@@ -225,6 +236,7 @@ final class KeyboardController {
         case .addMotionSpan: store.addMotionSpanAtPlayhead()
         case .addTitle: store.addGenerated(.title)
         case .addLowerThird: store.addGenerated(.lowerThird)
+        case .editTitleOnPicture: store.beginEditingTitleOnPicture()
         }
     }
 }
