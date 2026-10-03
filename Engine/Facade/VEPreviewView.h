@@ -62,6 +62,14 @@ NS_SWIFT_UI_ACTOR
 /// frame if the source reports no change). Asynchronous; coalesces with pending requests.
 - (void)renderOnce;
 
+/// Like -renderOnce, but draws only what changed: the frame source's new frame, or the current frame when it must
+/// be drawn again (a resize, a frame that could not be presented, a -renderOnce coalesced with this request).
+/// When the source reports no change nothing is drawn and renderCount stays. Asynchronous; coalesces with pending
+/// requests. The engine asks this of its monitors whenever their picture may have changed, as soon as it may have
+/// (the paused program redraws an edit on the render thread at once, not after the main thread's next turn), and
+/// again when a decode lands: of the requests for one change, only the first draws.
+- (void)renderIfChanged;
+
 /// -renderOnce, then calls `completion` on the main queue when the GPU has finished the frame
 /// (error nil) or rendering failed (error set).
 - (void)renderOnceWithCompletion:(nullable void (^)(NSError *_Nullable error))completion;

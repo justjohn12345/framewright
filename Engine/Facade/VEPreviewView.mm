@@ -61,6 +61,8 @@ struct PreviewState {
     std::atomic<NSUInteger> busyCount{0};
     std::atomic<NSUInteger> drawableFailures{0};
     std::atomic<bool> renderOncePending{false};
+    // The queued request must draw even if the source reports no change (a -renderOnce joined it).
+    std::atomic<bool> renderOnceForced{false};
     // A frame must be (re)drawn even if the source reports no change: a resize, or a frame that
     // could not be presented.
     std::atomic<bool> redrawPending{false};
@@ -118,7 +120,7 @@ bool lookupFromFrame(const PreviewFrame &frame, std::size_t index, TextureSet &o
 }
 
 void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once, CFTimeInterval timestamp,
-                        void (^completion)(NSError *));
+                        void (^completion)(NSError *), bool skipUnchanged = false);
 
 // Render thread: a frame could not be presented. While the display link runs the next vsync
 // redraws it; while it is stopped a timer on the render thread retries (unless the window is
@@ -149,9 +151,11 @@ void deferRedraw(const std::shared_ptr<PreviewState> &statePtr) {
 }
 
 // Renders on the render thread. `once`: renderOnce semantics (blocking lock, bounded wait for a
-// frame slot, always renders). `completion` (may be nil) is called on the main queue.
+// frame slot, always renders). `skipUnchanged` (with `once`): renderIfChanged semantics, nothing is
+// drawn when the source has no new frame and no redraw is pending. `completion` (may be nil) is
+// called on the main queue.
 void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once, CFTimeInterval timestamp,
-                        void (^completion)(NSError *)) {
+                        void (^completion)(NSError *), bool skipUnchanged) {
     PreviewState &st = *statePtr;
     auto finish = [completion](NSError *error) {
         if (completion != nil) {
@@ -186,7 +190,8 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
     request.isRenderOnce = once;
     request.textureCache = &st.compositor->textureCache();
     const bool fresh = st.source ? st.source(request, st.frame) : false;
-    if (!fresh && !once && !pending) {
+    if (!fresh && !pending && (!once || skipUnchanged)) {
+        finish(nil);
         return;
     }
     // Set with the frame it describes, under the lock -snapshot takes: the count always matches
@@ -564,18 +569,33 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
 }
 
 - (void)renderOnce {
+    [self requestRenderForced:YES];
+}
+
+- (void)renderIfChanged {
+    [self requestRenderForced:NO];
+}
+
+// `forced`: -renderOnce (draw even without a change); a request already queued draws for both.
+- (void)requestRenderForced:(BOOL)forced {
     if (_state->occluded.load()) {
         _state->redrawPending.store(true); // drawn when the window becomes visible
         return;
     }
     _state->retryAttempts.store(0); // a new request: retry afresh if it cannot be presented
+    // Before the pending flag: a queued block that has not read it yet sees it; one that already
+    // read it has cleared the pending flag first, so this request queues its own block.
+    if (forced) {
+        _state->renderOnceForced.store(true);
+    }
     if (_state->renderOncePending.exchange(true)) {
         return; // one already queued; it will pick up the latest frame
     }
     std::shared_ptr<PreviewState> state = _state;
     [self performOnRenderThread:^{
         state->renderOncePending.store(false);
-        renderPreviewFrame(state, true, CACurrentMediaTime(), nil);
+        const bool force = state->renderOnceForced.exchange(false);
+        renderPreviewFrame(state, true, CACurrentMediaTime(), nil, /*skipUnchanged*/ !force);
     } wait:NO];
 }
 

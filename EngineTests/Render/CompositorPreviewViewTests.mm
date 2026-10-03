@@ -333,6 +333,55 @@ bool spinUntil(const std::function<bool()> &done, double timeoutSeconds) {
     XCTAssertEqual(view.renderCount, 3u);
 }
 
+// renderIfChanged draws only what changed: nothing when the source reports no new frame (renderCount
+// stays), the new frame when it has one, and the current frame when a renderOnce joined the request.
+- (void)testRenderIfChangedDrawsOnlyWhatChanged {
+    auto picture = solidSource({4, 5, 6, 255});
+    auto changed = std::make_shared<std::atomic<bool>>(true);
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    auto entered = std::make_shared<test::Gate>();
+    auto release = std::make_shared<test::Gate>();
+    auto block = std::make_shared<std::atomic<bool>>(false);
+    VEPreviewView *view = [self makeViewWithSize:NSMakeSize(320, 180) source:nullptr];
+    PreviewFrameSource inner = makeSource(picture);
+    [view setFrameSource:PreviewFrameSource([=](const PreviewFrameRequest &request, PreviewFrame &frame) {
+        calls->fetch_add(1);
+        if (block->exchange(false)) {
+            entered->open();
+            release->pass();
+        }
+        // A new frame only when told; otherwise the source reports no change and leaves the frame alone.
+        return changed->exchange(false) ? inner(request, frame) : false;
+    })];
+    XCTAssertNil([self renderOnce:view]);
+    XCTAssertEqual(view.renderCount, 1u);
+
+    // No change: the source is asked, nothing is drawn.
+    [view renderIfChanged];
+    XCTAssertTrue(spinUntil([calls] { return calls->load() == 2; }, 5.0));
+    spinUntil([] { return false; }, 0.2);
+    XCTAssertEqual(view.renderCount, 1u, @"nothing changed: nothing drawn");
+
+    // A new frame: drawn.
+    changed->store(true);
+    [view renderIfChanged];
+    XCTAssertTrue(spinUntil([view] { return view.renderCount == 2; }, 5.0), @"the new frame is drawn");
+
+    // A renderOnce queued behind a renderIfChanged (coalesced with it) still draws, without a change.
+    block->store(true);
+    [view renderIfChanged];
+    XCTAssertTrue(entered->pass(std::chrono::seconds(5)));
+    [view renderIfChanged];
+    [view renderOnce];
+    [view renderIfChanged];
+    release->open();
+    XCTAssertTrue(spinUntil([calls] { return calls->load() == 5; }, 5.0), @"the blocked call and one coalesced");
+    XCTAssertTrue(spinUntil([view] { return view.renderCount == 3; }, 5.0), @"the coalesced renderOnce drew");
+    spinUntil([] { return false; }, 0.2);
+    XCTAssertEqual(calls->load(), 5);
+    XCTAssertEqual(view.renderCount, 3u);
+}
+
 // setFrameSource waits for a source call in progress: when it returns, the old source is never
 // called again, and the next render uses the new one.
 - (void)testSetFrameSourceWaitsForTheRunningSourceCall {

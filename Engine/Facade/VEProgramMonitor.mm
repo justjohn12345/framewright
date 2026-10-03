@@ -77,10 +77,25 @@ using namespace ve::facade;
         if (strongSelf == nil) {
             return;
         }
-        [strongSelf->_view renderOnce];
-        [strongSelf->_outputView renderOnce];
+        // Often already drawn by -presentChange (the change was made on this thread): then nothing is drawn.
+        [strongSelf->_view renderIfChanged];
+        [strongSelf->_outputView renderIfChanged];
     };
     _playback->setObserver(dispatch_get_main_queue(), std::move(observer));
+}
+
+/// The paused picture may have changed (an edit, a seek, a step, the solo): the views draw it now, on their render
+/// threads, rather than when the controller's redraw request reaches the main queue. That request waits for the
+/// rest of this turn of the main thread, which during a drag is SwiftUI updating the window for the edit (several
+/// milliseconds, tens in a Debug build); a box dragged on the monitor would show its picture that much later. A
+/// picture still being decoded or rendered is not drawn: the source keeps the previous one until it lands (the
+/// controller's request then draws it). While running, the display link draws every frame.
+- (void)presentChange {
+    if (isRunning(_playback->state())) {
+        return;
+    }
+    [_view renderIfChanged];
+    [_outputView renderIfChanged];
 }
 
 - (void)controllerStatusChanged:(const playback::PlaybackStatus &)status {
@@ -264,6 +279,7 @@ using namespace ve::facade;
     if (resized) {
         [self updateGeneratedOutputScale];
     }
+    [self presentChange];
 }
 
 - (void)detachFromProject {
@@ -278,12 +294,14 @@ using namespace ve::facade;
     VE_ASSERT_MAIN();
     // The controller has the current model (every model change is published to it at once).
     _playback->setPreviewSolo(playback::PlaybackController::PreviewSolo{clip, identityMotion == YES});
+    [self presentChange];
     return _playback->previewSolo().has_value();
 }
 
 - (void)clearPreviewSolo {
     VE_ASSERT_MAIN();
     _playback->setPreviewSolo(std::nullopt);
+    [self presentChange];
 }
 
 - (std::optional<playback::PlaybackController::PreviewSolo>)previewSolo {
@@ -311,6 +329,7 @@ using namespace ve::facade;
 - (void)seekToTime:(CMTime)time {
     VE_ASSERT_MAIN();
     _playback->seek(CMTIME_IS_NUMERIC(time) ? time : kCMTimeZero, playback::SeekMode::Exact);
+    [self presentChange];
 }
 
 - (void)setRate:(double)rate {
@@ -331,12 +350,14 @@ using namespace ve::facade;
 - (void)stepFrames:(NSInteger)frames {
     VE_ASSERT_MAIN();
     _playback->stepFrames(static_cast<int>(std::clamp<NSInteger>(frames, INT_MIN, INT_MAX)));
+    [self presentChange];
 }
 
 - (void)scrubToTime:(CMTime)time {
     VE_ASSERT_MAIN();
     if (CMTIME_IS_NUMERIC(time)) {
         _playback->scrubTo(time);
+        [self presentChange];
     }
 }
 

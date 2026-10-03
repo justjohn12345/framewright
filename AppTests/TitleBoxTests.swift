@@ -7,7 +7,7 @@ import XCTest
 /// The title box on the program monitor (`TitleBoxModel`; titles design section 9, slice 1): when it is shown, its
 /// geometry through the clip's Motion and rotation, what a press grabs, moving and widening with synthetic drags
 /// (as the Ken Burns tests make them), under a zoom and a turn, one undo step per drag, Escape cancelling, and the
-/// other titles outlined.
+/// other titles outlined; a step of a drag drawn on the paused program monitor at once, without a new picture.
 @MainActor
 final class TitleBoxTests: XCTestCase {
     private var fixture: StoreFixture!
@@ -211,5 +211,87 @@ final class TitleBoxTests: XCTestCase {
         defer { hosted.close() }
         let pixels = await hosted.pixels()
         XCTAssertFalse(pixels.isEmpty)
+    }
+
+    // MARK: Drawing a drag (2026-10-03)
+
+    /// A paused program view (no window: it draws on its render thread all the same) over the movie at 0 with the
+    /// lower third over it, selected, the playhead on frame 10; returns once the frame is drawn with every layer.
+    private func programViewWithLowerThird() async throws -> (VEPreviewView, TitleBoxModel) {
+        let view = VEPreviewView(frame: NSRect(x: 0, y: 0, width: 480, height: 270))
+        store.attachProgramView(view)
+        let (movie, _) = try await fixture.importMedia()
+        try fixture.placeMovie(movie, at: 0)
+        store.targetVideoTrackID = store.videoTracks[0].trackID
+        let (_, model) = try lowerThird()
+        let drawn = await StoreFixture.wait(until: { view.renderCount > 0 && view.missingLayerCount == 0 }, timeout: 20)
+        XCTAssertTrue(drawn, "the movie and the lower third were drawn")
+        // Settled: the stopped lookahead and the audio warm-up have run.
+        await StoreFixture.wait(until: { false }, timeout: 0.3)
+        return (view, model)
+    }
+
+    /// Waits on the main thread without letting it turn (no main-queue block, no SwiftUI update runs) until the
+    /// view drew more than `count` frames, or `timeout` passes.
+    private func waitWithoutTurning(_ view: VEPreviewView, drawnMoreThan count: UInt,
+                                    timeout: TimeInterval = 2) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while view.renderCount <= count, Date() < deadline {
+            usleep(200)
+        }
+        return view.renderCount > count
+    }
+
+    /// A step of a move drag is drawn by the paused program monitor at once, on its render thread: before the main
+    /// thread's next turn (which, in the app, is SwiftUI updating the window for the edit), from the title's cached
+    /// picture (no new render, nothing asked of the decode pool), once (the controller's later request for the same
+    /// edit draws nothing).
+    func testAMoveStepIsDrawnAtOnceFromTheCachedPicture() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        let (view, model) = try await programViewWithLowerThird()
+        defer { store.engine.attachProgramView(nil) }
+        for step in 1 ... 5 {
+            let renders = view.renderCount
+            let before = store.engine.playbackStats
+            model.applyDrag(.body, translation: CGSize(width: 20 * step, height: 10 * step))
+            guard waitWithoutTurning(view, drawnMoreThan: renders) else {
+                XCTFail("step \(step) was not drawn until the main thread turned")
+                return
+            }
+            let after = store.engine.playbackStats
+            XCTAssertEqual(view.renderCount, renders + 1, "step \(step) drawn once")
+            XCTAssertEqual(after.presentedFrames, before.presentedFrames + 1, "a new frame for step \(step)")
+            XCTAssertEqual(after.cacheMisses, before.cacheMisses,
+                           "step \(step): the title's picture was not rendered again")
+            XCTAssertEqual(view.missingLayerCount, 0)
+        }
+        let drawn = view.renderCount
+        let presented = store.engine.playbackStats.presentedFrames
+        model.endDrag()
+        await StoreFixture.wait(until: { false }, timeout: 0.3)
+        XCTAssertEqual(view.renderCount, drawn, "the controller's requests for the same edits drew nothing more")
+        XCTAssertEqual(store.engine.playbackStats.presentedFrames, presented)
+        XCTAssertEqual(store.clips[store.titleBox?.clipID ?? 0]?.title?.x ?? 0, 0.26 + 100.0 / 1920, accuracy: 1e-9)
+    }
+
+    /// A step of a wrap-width drag needs a new picture: the monitor keeps showing the previous one (never the frame
+    /// without the title) while the pool renders it off the main thread, then draws the new one.
+    func testAWidthStepKeepsThePreviousPictureUntilTheNewOneLands() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        let (view, model) = try await programViewWithLowerThird()
+        defer { store.engine.attachProgramView(nil) }
+        let renders = view.renderCount
+        let before = store.engine.playbackStats
+        model.applyDrag(.edge(right: true), translation: CGSize(width: 96, height: 0))
+        XCTAssertFalse(waitWithoutTurning(view, drawnMoreThan: renders, timeout: 0.3) && view.missingLayerCount > 0,
+                       "never the frame without the title")
+        let landed = await StoreFixture.wait(until: {
+            self.store.engine.playbackStats.presentedFrames > before.presentedFrames
+        }, timeout: 10)
+        XCTAssertTrue(landed, "the new picture was drawn")
+        XCTAssertEqual(view.missingLayerCount, 0)
+        XCTAssertGreaterThan(store.engine.playbackStats.cacheMisses, before.cacheMisses, "a new picture was needed")
+        model.endDrag()
+        XCTAssertEqual(store.clips[store.titleBox?.clipID ?? 0]?.title?.width ?? 0, 0.5, accuracy: 1e-9)
     }
 }
