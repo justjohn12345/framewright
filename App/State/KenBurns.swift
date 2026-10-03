@@ -152,8 +152,9 @@ final class KenBurnsModel: ObservableObject {
     let assetID: VEAssetID
     let sequenceSize: CGSize
     let frameDuration: CMTime
-    /// The clip's picture size (the asset's display size, its container rotation applied): what the
-    /// boxes fit into the frame.
+    /// The clip's picture size (`VEClipInfo.pictureWidth`/`pictureHeight`: the asset's display size, its
+    /// container rotation applied, or the frame for a title or a colour matte, whose canvas is the frame):
+    /// what the boxes fit into the frame.
     let pictureSize: CGSize
 
     /// How the edges are shown and dragged (the bar's Ken Burns | Transform switch).
@@ -198,9 +199,9 @@ final class KenBurnsModel: ObservableObject {
 
     /// Why the editor cannot open on `span` of `clip` (nil when it can): not a Motion span, a clip
     /// without a picture, a sequence without a frame size.
-    static func problem(span: VEEffectSpan, clip: VEClipInfo, asset: VEAssetInfo, sequence: VESequenceInfo) -> String? {
+    static func problem(span: VEEffectSpan, clip: VEClipInfo, sequence: VESequenceInfo) -> String? {
         guard span.kind == .motion else { return "Ken Burns edits a Motion span." }
-        guard clip.trackKind == .video, asset.hasVideo, asset.width > 0, asset.height > 0 else {
+        guard clip.trackKind == .video, clip.pictureWidth > 0, clip.pictureHeight > 0 else {
             return "Ken Burns works on a clip with a picture."
         }
         let frame = sequence.frameDuration
@@ -213,10 +214,10 @@ final class KenBurnsModel: ObservableObject {
     /// Nil when the span is not a Motion span of a video clip with a picture; `reason` says why.
     /// `playhead` is the program playhead (the outlines' time). `mode` nil: the automatic mode
     /// (`automaticMode`, from the clip's placement at the span's start).
-    init?(store: ProjectStore, span: VEEffectSpan, clip: VEClipInfo, asset: VEAssetInfo, sequence: VESequenceInfo,
+    init?(store: ProjectStore, span: VEEffectSpan, clip: VEClipInfo, sequence: VESequenceInfo,
           playhead: CMTime, mode: KenBurnsMode? = nil, previous: VEClipInfo? = nil, next: VEClipInfo? = nil,
           reason: inout String) {
-        if let problem = Self.problem(span: span, clip: clip, asset: asset, sequence: sequence) {
+        if let problem = Self.problem(span: span, clip: clip, sequence: sequence) {
             reason = problem
             return nil
         }
@@ -225,9 +226,9 @@ final class KenBurnsModel: ObservableObject {
         spanID = span.spanID
         self.span = span
         self.clip = clip
-        assetID = asset.assetID
+        assetID = clip.assetID
         sequenceSize = CGSize(width: sequence.width, height: sequence.height)
-        pictureSize = CGSize(width: asset.width, height: asset.height)
+        pictureSize = CGSize(width: clip.pictureWidth, height: clip.pictureHeight)
         frameDuration = frame
         outlineTime = playhead
         interpolation = span.interpolation
@@ -238,8 +239,8 @@ final class KenBurnsModel: ObservableObject {
         self.mode = .transform // until every property is set (the automatic mode reads the span's start)
         self.previous = Neighbour(previous, atEnd: true, frameDuration: frame)
         self.next = Neighbour(next, atEnd: false, frameDuration: frame)
-        self.mode = mode ?? Self.automaticMode(start: edgeMotion(atEnd: false), picture: pictureSize,
-                                               sequence: sequenceSize)
+        self.mode = mode ?? (clip.generatorKind != .none ? .transform
+            : Self.automaticMode(start: edgeMotion(atEnd: false), picture: pictureSize, sequence: sequenceSize))
         readBoxes()
         readOutlines()
         readContinueOnNextClipProblem()
@@ -356,13 +357,14 @@ final class KenBurnsModel: ObservableObject {
     }
 
     /// The mode the editor opens `span` of `clip` in when no mode is remembered for it
-    /// (`automaticMode(start:picture:sequence:)` at the span's start); nil when the editor cannot open
-    /// on it (`problem`).
-    static func automaticMode(span: VEEffectSpan, clip: VEClipInfo, asset: VEAssetInfo,
-                              sequence: VESequenceInfo) -> KenBurnsMode? {
-        guard problem(span: span, clip: clip, asset: asset, sequence: sequence) == nil else { return nil }
+    /// (`automaticMode(start:picture:sequence:)` at the span's start; always Transform for a title or a
+    /// colour matte, whose frame-sized canvas would otherwise always count as spanning the frame: a title is
+    /// placed, not cropped); nil when the editor cannot open on it (`problem`).
+    static func automaticMode(span: VEEffectSpan, clip: VEClipInfo, sequence: VESequenceInfo) -> KenBurnsMode? {
+        guard problem(span: span, clip: clip, sequence: sequence) == nil else { return nil }
+        guard clip.generatorKind == .none else { return .transform }
         let start = edgeMotion(of: span, clip: clip, atEnd: false, frameDuration: sequence.frameDuration)
-        return automaticMode(start: start, picture: CGSize(width: asset.width, height: asset.height),
+        return automaticMode(start: start, picture: CGSize(width: clip.pictureWidth, height: clip.pictureHeight),
                              sequence: CGSize(width: sequence.width, height: sequence.height))
     }
 
@@ -457,10 +459,8 @@ final class KenBurnsModel: ObservableObject {
                 $0.trackID == trackID && $0.clipID != excluded && $0.timelineStart <= time && time < $0.timelineEnd
             }
             for clip in under.sorted(by: { $0.timelineStart < $1.timelineStart }) {
-                guard let asset = store.asset(clip.assetID), asset.hasVideo, asset.width > 0, asset.height > 0 else {
-                    continue
-                }
-                let picture = CGSize(width: asset.width, height: asset.height)
+                guard clip.pictureWidth > 0, clip.pictureHeight > 0 else { continue }
+                let picture = CGSize(width: clip.pictureWidth, height: clip.pictureHeight)
                 found.append(Outline(clipID: clip.clipID, trackName: track.name,
                                      box: box(for: clip.motion(at: time), picture: picture, sequence: sequence)))
             }

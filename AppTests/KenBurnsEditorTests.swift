@@ -408,10 +408,14 @@ final class KenBurnsEditorTests: XCTestCase {
         // The reason for a clip without a picture.
         let (_, tone) = try await fixture.importMedia()
         let span = try XCTUnwrap(store.engine.spanInfo(id))
-        XCTAssertEqual(KenBurnsModel.problem(span: span, clip: try XCTUnwrap(store.clips[clip]), asset: tone,
-                                             sequence: store.sequence), "Ken Burns works on a clip with a picture.")
-        XCTAssertNil(KenBurnsModel.problem(span: span, clip: try XCTUnwrap(store.clips[clip]),
-                                           asset: try XCTUnwrap(store.asset(assetID)), sequence: store.sequence))
+        let a1 = try XCTUnwrap(store.audioTracks.first).trackID
+        XCTAssertTrue(store.place(asset: tone.assetID, at: CMTime(value: 900, timescale: 30), videoTrack: 0,
+                                  audioTrack: a1, overwrite: true))
+        let sound = try XCTUnwrap(store.clips[try XCTUnwrap(store.selection.first)])
+        XCTAssertEqual(KenBurnsModel.problem(span: span, clip: sound, sequence: store.sequence),
+                       "Ken Burns works on a clip with a picture.")
+        XCTAssertNil(KenBurnsModel.problem(span: span, clip: try XCTUnwrap(store.clips[clip]), sequence: store.sequence))
+        XCTAssertNotNil(store.asset(assetID))
     }
 
     // MARK: Re-reading

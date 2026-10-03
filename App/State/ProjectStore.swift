@@ -99,6 +99,7 @@ final class ProjectStore: ObservableObject {
             if let anchor = selectionAnchor, !selection.contains(anchor) { selectionAnchor = nil }
             // A title's typing run ends with the selection it was typed for.
             if selection != oldValue, titleTypingGroup != nil { titleInspector.endTyping() }
+            if selection != oldValue { syncTitleBox() }
         }
     }
     /// The selected span (an effect span on lanes 1-3 or a transition on lane 0), exclusive with the
@@ -115,6 +116,7 @@ final class ProjectStore: ObservableObject {
             if let id = selectedSpanID, id != oldValue { revealLanes(ofSpan: id) }
             // Selecting a Motion span opens its Ken Burns editor; anything else closes it.
             syncKenBurns()
+            syncTitleBox()
         }
     }
     /// The clip the clip selection was last made for by a click (`select(clip:extend:)`), which the
@@ -185,6 +187,9 @@ final class ProjectStore: ObservableObject {
     /// program monitor's layout (which observes the store) follows a mode switch: Ken Burns shows the
     /// picture without a margin, Transform inside one.
     @Published private(set) var kenBurnsMode: KenBurnsMode?
+    /// The selected title's box on the program monitor (`TitleBoxModel`): while exactly one title clip is selected
+    /// and no span is (a selected Motion span opens the Ken Burns editor instead).
+    @Published private(set) var titleBox: TitleBoxModel?
     /// The open editor's `KenBurnsModel.monitorExtent` (nil while it is closed), republished for the
     /// program monitor's layout like `kenBurnsMode`: in Ken Burns mode with a rectangle outside the
     /// frame box, the monitor shows the frame with room for the rectangles (review M2).
@@ -385,6 +390,7 @@ final class ProjectStore: ObservableObject {
         // The editor re-reads its span and framings on every model change (an edit of an earlier
         // span, an undo, a trim move what it shows).
         syncKenBurns()
+        syncTitleBox()
         changeCount = engine.changeCount
         canUndo = engine.canUndo
         canRedo = engine.canRedo
@@ -1151,13 +1157,14 @@ final class ProjectStore: ObservableObject {
             if kenBurns != nil { kenBurns = nil }
             return
         }
-        guard let info = asset(clip.assetID) else {
+        // A clip of media whose asset the bin does not hold (titles and mattes have no bin item).
+        guard clip.generatorKind != .none || asset(clip.assetID) != nil else {
             failKenBurns(id, "The media of “\(clip.name)” is not in the project, so Ken Burns does not know its "
                 + "picture's size.")
             return
         }
         var reason = ""
-        guard let model = KenBurnsModel(store: self, span: span, clip: clip, asset: info, sequence: sequence,
+        guard let model = KenBurnsModel(store: self, span: span, clip: clip, sequence: sequence,
                                         playhead: playheadTime, mode: kenBurnsModes[id], previous: previous,
                                         next: next, reason: &reason) else {
             failKenBurns(id, reason)
@@ -1165,6 +1172,24 @@ final class ProjectStore: ObservableObject {
         }
         engine.pause()
         kenBurns = model
+    }
+
+    /// Opens, re-reads or closes the title box (`titleBox`) after a change of the model or the selection.
+    func syncTitleBox() {
+        guard selectedSpanID == nil, kenBurns == nil, selection.count == 1, let id = selection.first,
+              let clip = clips[id], clip.generatorKind == .title else {
+            if let titleBox {
+                titleBox.cancelDrag()
+                self.titleBox = nil
+            }
+            return
+        }
+        if let titleBox, titleBox.clipID == id {
+            titleBox.update(clip: clip)
+            return
+        }
+        titleBox?.cancelDrag()
+        titleBox = TitleBoxModel(store: self, clip: clip, time: playheadTime)
     }
 
     private func failKenBurns(_ id: VESpanID, _ reason: String) {

@@ -1,0 +1,108 @@
+import CoreMedia
+import FramewrightEngine
+import SwiftUI
+
+/// The selected title's box on the program monitor (`TitleBoxModel`): the text block through the clip's Motion at
+/// the playhead, with handles at its corners and on its left and right edges, and thin dashed outlines of the other
+/// titles at the playhead. Drag the box to move the text, an edge or a corner to change its wrap width about its
+/// centre; each drag is one undo step and Escape cancels it. Nothing is drawn while the playhead is outside the
+/// clip, and presses then pass through.
+struct TitleBoxOverlay: View {
+    @ObservedObject var model: TitleBoxModel
+    @ObservedObject var playhead: PlayheadModel
+    let viewport: KenBurnsViewport
+    /// The drag in progress: what it grabbed (nil when the press grabbed nothing). A gesture state, so it is reset
+    /// when the drag ends or is cancelled.
+    @GestureState private var drag: ActiveDrag?
+
+    struct ActiveDrag: Equatable {
+        let target: TitleBoxModel.Target?
+    }
+
+    static let handleSize: CGFloat = 7
+    static let tint = Color(red: 1.0, green: 0.82, blue: 0.2)
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(model.outlines, id: \.clipID) { outline in
+                path(viewport.view(outline.box))
+                    .stroke(Color.white.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("TitleBox.outline.\(outline.clipID)")
+            }
+            if model.isVisible {
+                boxView
+                dragLayer
+            }
+        }
+        .accessibilityIdentifier("TitleBoxOverlay")
+        .onChange(of: playhead.time, initial: true) { _, time in model.setPlayhead(time) }
+        .onChange(of: drag == nil) { _, ended in
+            if ended { model.gestureAbandoned() }
+        }
+    }
+
+    private func path(_ box: KenBurnsBox) -> Path {
+        Path { path in
+            path.addLines(box.corners)
+            path.closeSubpath()
+        }
+    }
+
+    /// The box, its corner handles and its edge handles (at the middle of the left and right edges).
+    private var boxView: some View {
+        let box = viewport.view(model.box)
+        let handles = box.corners + [box.point(local: CGPoint(x: -box.size.width / 2, y: 0)),
+                                     box.point(local: CGPoint(x: box.size.width / 2, y: 0))]
+        return ZStack(alignment: .topLeading) {
+            path(box)
+                .stroke(Color.black.opacity(0.5), lineWidth: 3)
+            path(box)
+                .stroke(Self.tint, lineWidth: 1.5)
+                .accessibilityIdentifier("TitleBox.box")
+            ForEach(Array(handles.enumerated()), id: \.offset) { _, point in
+                Rectangle()
+                    .fill(Self.tint)
+                    .overlay(Rectangle().stroke(Color.black.opacity(0.6), lineWidth: 1))
+                    .frame(width: Self.handleSize, height: Self.handleSize)
+                    .rotationEffect(.degrees(box.rotationDegrees))
+                    .position(point)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// Presses on the box (`TitleBoxModel.target`) drag it; presses elsewhere grab nothing.
+    private var dragLayer: some View {
+        let box = viewport.view(model.box)
+        return Color.clear
+            .contentShape(TitleBoxHitShape(box: box))
+            .gesture(DragGesture(minimumDistance: 0)
+                .updating($drag) { value, state, _ in
+                    if state == nil {
+                        state = ActiveDrag(target: TitleBoxModel.target(at: value.startLocation, box: box))
+                    }
+                    guard let target = state?.target else { return }
+                    model.applyDrag(target, translation: viewport.sequence(value.translation))
+                }
+                .onEnded { _ in model.endDrag() })
+            .accessibilityIdentifier("TitleBoxDragArea")
+    }
+}
+
+/// The area a press on the title box grabs: the box widened by the handles' reach, turned with it, so presses
+/// elsewhere on the monitor go through to it (and its context menu, its drop target).
+struct TitleBoxHitShape: Shape {
+    let box: KenBurnsBox
+
+    func path(in rect: CGRect) -> Path {
+        let grown = KenBurnsBox(center: box.center,
+                                size: CGSize(width: box.size.width + 2 * KenBurnsHit.cornerRadius,
+                                             height: box.size.height + 2 * KenBurnsHit.cornerRadius),
+                                rotationDegrees: box.rotationDegrees)
+        return Path { path in
+            path.addLines(grown.corners)
+            path.closeSubpath()
+        }
+    }
+}

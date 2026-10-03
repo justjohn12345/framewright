@@ -33,7 +33,8 @@ enum MonitorFrame {
 /// picture's), fitted with the rectangles around it (`KenBurnsViewport.editor`). The area around the frame is `MonitorFrame.outsideColor`, the frame's
 /// edge a thin line while the editor is open; the editor's boxes or rectangles and the other clips'
 /// outlines are drawn over the whole area and its bar (range, caption, toggles, mode, smoothing,
-/// Swap, Close) below it. A selected Opacity or Gain span shows its readout instead. The debug HUD
+/// Swap, Close) below it. A selected Opacity or Gain span shows its readout instead. With one title
+/// selected (and no span) its box is drawn over the picture to move and widen it (`TitleBoxOverlay`). The debug HUD
 /// sits at the area's top-left. Observes the store to notice the editor opening, closing, switching
 /// spans and switching modes (`ProjectStore.kenBurnsMode`).
 struct ProgramMonitorLayout<Picture: View>: View {
@@ -61,6 +62,8 @@ struct ProgramMonitorLayout<Picture: View>: View {
                         .position(x: frame.midX, y: frame.midY)
                     if let editor {
                         KenBurnsOverlay(model: editor, playhead: store.playhead, viewport: viewport)
+                    } else if let titleBox = store.titleBox {
+                        TitleBoxOverlay(model: titleBox, playhead: store.playhead, viewport: viewport)
                     }
                 }
                 .clipped()

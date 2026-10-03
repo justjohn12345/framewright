@@ -261,8 +261,7 @@ extension ProjectStore {
     /// the asked mode is the one it opens in.
     func rememberAskedKenBurnsMode(_ mode: KenBurnsMode, for id: VESpanID) -> String? {
         guard mode == .kenBurns, let span = engine.spanInfo(id), let clip = engine.clipInfo(span.clipID),
-              let asset = asset(clip.assetID),
-              KenBurnsModel.automaticMode(span: span, clip: clip, asset: asset, sequence: sequence) == .transform
+              KenBurnsModel.automaticMode(span: span, clip: clip, sequence: sequence) == .transform
         else {
             rememberKenBurnsMode(mode, for: id)
             return nil
@@ -270,6 +269,10 @@ extension ProjectStore {
         if kenBurnsModes[id] == .kenBurns {
             rememberKenBurnsMode(.kenBurns, for: id) // the user switched this span to Ken Burns before
             return nil
+        }
+        if clip.generatorKind != .none {
+            return "A \(clip.generatorKind == .title ? "title" : "colour matte") is placed, not cropped: opened in "
+                + "Transform mode; switch to Ken Burns on the bar to frame it as a crop."
         }
         return "“\(clip.name)” is placed inside the frame: opened in Transform mode; switch to Ken Burns on the bar "
             + "to crop."
