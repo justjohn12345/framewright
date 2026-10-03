@@ -136,6 +136,9 @@ __attribute__((objc_subclassing_restricted))
 - (void)setIdleLookahead:(BOOL)enabled;
 /// What the controller was last told (PlaybackController::idleLookahead).
 @property (nonatomic, readonly) BOOL controllerIdleLookahead;
+/// Makes the monitor's pool forget the pictures it renders for the generator asset `asset` (the Mac's fonts
+/// changed: titles are rendered again); call FrameCache::purge as well.
+- (void)invalidateGeneratedAsset:(ve::AssetId)asset;
 /// Registers `asset`'s file with the monitor's pool, and its routing with the pool and the
 /// controller.
 - (void)registerAsset:(ve::AssetId)asset path:(const std::string &)path;

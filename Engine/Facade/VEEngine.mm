@@ -139,6 +139,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
             [weakSelf handleMemoryPressure:(level & DISPATCH_MEMORYPRESSURE_CRITICAL) != 0];
         });
         dispatch_resume(_memoryPressureSource);
+        [self startObservingTitleFonts];
         [self resetToEmptyProjectNamed:@"Untitled"];
         [self publishPlaybackSnapshot];
     }
@@ -154,6 +155,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
     if (_memoryPressureSource != nil) {
         dispatch_source_cancel(_memoryPressureSource);
     }
+    [self stopObservingTitleFonts];
     [_exporter cancel]; // the job deletes its partial file on its own queue
     // The views may outlive the engine: they must stop calling into the controllers first.
     [_programMonitor disconnectViews];

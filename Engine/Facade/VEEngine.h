@@ -65,6 +65,9 @@ FOUNDATION_EXPORT NSNotificationName const VEEngineModelDidChangeNotification;
 /// Posted when the asset list or an asset's details change (import, removal, probe results,
 /// project load).
 FOUNDATION_EXPORT NSNotificationName const VEEngineAssetsDidChangeNotification;
+/// Posted when the fonts installed on this Mac change (Font Book activated or deactivated one): titles were drawn
+/// again with the fonts there are now, and VETitleFont.available and missingTitleFonts may have changed.
+FOUNDATION_EXPORT NSNotificationName const VEEngineTitleFontsDidChangeNotification;
 /// Posted when an asset's poster thumbnail finished generating after import.
 /// userInfo[VEEngineAssetIDKey]: NSNumber (VEAssetID).
 FOUNDATION_EXPORT NSNotificationName const VEEngineThumbnailDidBecomeAvailableNotification;
@@ -772,6 +775,74 @@ NS_SWIFT_UI_ACTOR
 /// Removes the grade of every clip of `clipIDs` (see above): every value neutral, and nothing kept of
 /// what a newer version wrote. Undo name "Reset Grade". Clips without a grade make no undo step.
 - (VEEditResult *)resetGradeOfClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(resetGrade(ofClips:));
+
+@end
+
+// MARK: Titles and colour mattes (VEEngine+Titles.mm; VETitles.h)
+//
+// A title or a colour matte is a clip of its own on a video track: an overlay over the tracks below, or a card on
+// its own. It carries its content (VEClipInfo.title, matteColour) and refers to the project's hidden generator
+// asset of its kind, which the first clip of the kind makes in the same undo step (allAssets leaves it out; it is
+// not saved while no clip uses it). Every rule about stills applies to it (any length, trims without media bounds,
+// no speed or reverse), it may have Motion, Opacity spans, fades and transitions, and it has no grade (the grade
+// calls leave titles and mattes out, as they leave out sound). The picture is drawn in memory at the size it is
+// shown (its Motion zoom, an export larger than the sequence), so it stays sharp.
+//
+// Edits take the clips of a selection: those that are not titles (or, for the matte's colour, not mattes) are
+// refused (VEEditErrorInvalidArgument), as are values outside a parameter's range (VETitleParameterInfo). Every
+// edit is one undo step; a slider drag, a box drag and a typing run made of these calls inside one coalescing group
+// (VECoalescingModeReplace) are one step too.
+
+@interface VEEngine (Titles)
+
+/// Adds a title, a lower third or a colour matte (`preset`) at `time` (the playhead), 5 s long, on the lowest
+/// video track above `videoTrackID` (the target video track; 0: from the bottom track up) that is free for that
+/// time and unlocked, or on a new video track added on top: nothing is overwritten or rippled. One undo step ("Add
+/// Title", "Add Lower Third", "Add Colour Matte") that also adds the generator asset and the new track when needed.
+/// createdIDs holds the new clip.
+- (VEEditResult *)addGeneratedPreset:(VEGeneratedPreset)preset
+                              atTime:(CMTime)time
+                          aboveTrack:(VETrackID)videoTrackID NS_SWIFT_NAME(addGenerated(_:at:aboveTrack:));
+/// Places `preset` on `videoTrackID` at `time` as a dropped bin item is placed: overwriting what is under it, or
+/// with `insert` rippling later clips right (insertAsset:'s rules). One undo step; createdIDs holds the new clip.
+- (VEEditResult *)placeGeneratedPreset:(VEGeneratedPreset)preset
+                               onTrack:(VETrackID)videoTrackID
+                                atTime:(CMTime)time
+                                insert:(BOOL)insert NS_SWIFT_NAME(placeGenerated(_:onTrack:at:insert:));
+/// Sets the text of the titles of `clipIDs` (UTF-8, at most 16384 bytes). Undo name "Edit Title Text".
+- (VEEditResult *)setTitleText:(NSString *)text clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setTitleText(_:clips:));
+/// Sets a number parameter (VETitleValueTypeNumber) of the titles of `clipIDs`. Undo name "Change <parameter>".
+- (VEEditResult *)setTitleNumber:(double)value
+                    forParameter:(VETitleParameter)parameter
+                           clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setTitleNumber(_:for:clips:));
+/// Sets a colour parameter (fill, outline, shadow, box).
+- (VEEditResult *)setTitleColour:(VEColour)colour
+                    forParameter:(VETitleParameter)parameter
+                           clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setTitleColour(_:for:clips:));
+/// Turns the outline, the shadow or the background box on or off.
+- (VEEditResult *)setTitleToggle:(BOOL)on
+                    forParameter:(VETitleParameter)parameter
+                           clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setTitleToggle(_:for:clips:));
+- (VEEditResult *)setTitleAlignment:(VETitleAlignment)alignment
+                              clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setTitleAlignment(_:clips:));
+- (VEEditResult *)setTitleFont:(VETitleFont *)font clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setTitleFont(_:clips:));
+/// Moves the text blocks of the titles of `clipIDs` to (x, y) and, unless `width` is NaN, gives them that wrap
+/// width (fractions of the frame; the box drag on the program monitor). Undo name "Move Title" (or "Resize Title"
+/// with a width). Moving renders nothing new.
+- (VEEditResult *)setTitlePositionX:(double)x
+                                  y:(double)y
+                              width:(double)width
+                              clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setTitlePosition(x:y:width:clips:));
+/// Sets the colour of the colour mattes of `clipIDs`. Undo name "Change Matte Colour".
+- (VEEditResult *)setMatteColour:(VEColour)colour clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setMatteColour(_:clips:));
+/// What the titles and mattes of `clipIDs` have (the others are left out).
+- (VETitleSelection *)titleOfClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(title(ofClips:));
+/// The size of a title's text block in sequence pixels (the box the program monitor draws: the wrap width and the
+/// height of its lines; the height is 0 for an empty text); CGSizeZero for a clip that is not a title.
+- (CGSize)titleBlockSizeOfClip:(VEClipID)clipID NS_SWIFT_NAME(titleBlockSize(ofClip:));
+/// The fonts the active sequence's titles use that this Mac does not have, with how many titles use each (the
+/// export sheet asks before exporting them in the system font).
+@property (nonatomic, readonly, copy) NSArray<VEMissingTitleFont *> *missingTitleFonts;
 
 @end
 

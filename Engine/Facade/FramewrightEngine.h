@@ -11,6 +11,7 @@ FOUNDATION_EXPORT double FramewrightEngineVersionNumber;
 //! Project version string for FramewrightEngine.
 FOUNDATION_EXPORT const unsigned char FramewrightEngineVersionString[];
 
+#import <FramewrightEngine/VETitles.h>
 #import <FramewrightEngine/VETypes.h>
 #import <FramewrightEngine/VEExport.h>
 #import <FramewrightEngine/VEEngine.h>

@@ -76,10 +76,26 @@ EditResult checkAudioParams(const AudioParams &a) {
 // Builds the clip described by a placement (without id or start).
 EditResult buildClip(const Project &project, const Sequence &sequence, const Track &track,
                      const ClipPlacement &placement, Clip &out) {
-    const MediaAsset *asset = project.findAsset(placement.assetId);
+    const MediaAsset *asset = !placement.assetId && placement.generated
+                                  ? project.findGeneratorAsset(placement.generated->kind())
+                                  : project.findAsset(placement.assetId);
     if (!asset) {
         return EditResult::failure(EditError::AssetNotFound,
-                                   "asset " + idString(placement.assetId.value()) + " does not exist");
+                                   placement.assetId ? "asset " + idString(placement.assetId.value()) + " does not exist"
+                                                     : std::string("the project has no ") +
+                                                           displayNameOf(placement.generated->kind()) + " asset");
+    }
+    if (asset->isGenerator() != static_cast<bool>(placement.generated) ||
+        (placement.generated && placement.generated->kind() != asset->generator)) {
+        return EditResult::failure(EditError::InvalidArgument,
+                                   asset->isGenerator() ? std::string("a ") + displayNameOf(asset->generator) +
+                                                              " clip needs content of its kind"
+                                                        : std::string("a clip of media has no generated content"));
+    }
+    if (placement.generated) {
+        if (auto problem = generatedContentProblem(*placement.generated)) {
+            return EditResult::failure(EditError::InvalidArgument, *problem);
+        }
     }
     if (!assetFitsTrack(*asset, track.kind)) {
         return EditResult::failure(EditError::TrackKindMismatch, std::string("a ") + nameOf(asset->kind) +
@@ -110,6 +126,7 @@ EditResult buildClip(const Project &project, const Sequence &sequence, const Tra
         clip.speed = Ratio{1, 1};
         clip.sourceIn = kCMTimeZero;
         clip.timelineDuration = length;
+        clip.generated = placement.generated;
     } else {
         if (EditResult r = checkSpeed(placement.speed); !r) {
             return r;
@@ -355,6 +372,11 @@ std::vector<TransitionPlacement> transitionsOn(const Track &track, const Clip &c
 }
 
 } // namespace
+
+EditResult buildClipForPlacement(const Project &project, const Sequence &sequence, const Track &track,
+                                 const ClipPlacement &placement, Clip &out) {
+    return buildClip(project, sequence, track, placement, out);
+}
 
 ClipPlacement placementForAsset(const MediaAsset &asset, TrackId trackId) {
     ClipPlacement placement;

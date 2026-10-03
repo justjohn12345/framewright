@@ -415,6 +415,11 @@ using namespace ve::facade;
     _pool->registerAsset(asset, path);
 }
 
+- (void)invalidateGeneratedAsset:(AssetId)asset {
+    VE_ASSERT_MAIN();
+    _pool->invalidate(asset);
+}
+
 - (void)registerAsset:(AssetId)asset path:(const std::string &)path routing:(const media::RoutedMediaInfo &)routed {
     VE_ASSERT_MAIN();
     _pool->registerAsset(asset, path, routed);

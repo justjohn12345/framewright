@@ -180,6 +180,9 @@ struct UndoState {
     // edit copies them into a project.
     std::map<std::string, std::shared_ptr<const ve::CubeLut>> _importedLuts;
 
+    // VEEngine+Titles.mm: the observers of the Mac's font changes (startObservingTitleFonts).
+    NSArray *_fontObservers;
+
     // VEEngine.mm
     NSHashTable<id<VEEngineObserver>> *_observers;
     std::vector<std::pair<ve::AssetId, size_t>> _lastUseCounts; // posted by updateUseCounts
@@ -289,6 +292,17 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)postSourcePlaybackStatus:(VEPlaybackStatus *)status;
 /// Allows the source monitor's stopped lookahead unless an export runs (export start and end).
 - (void)updateSourceIdleLookahead;
+@end
+
+// VEEngine+Titles.mm
+@interface VEEngine (TitlesInternal)
+/// A load warning for each font the project's titles use that this Mac lacks (Open).
+- (NSArray<NSString *> *)missingTitleFontWarnings;
+/// The Mac's fonts changed: titles are drawn again with the fonts there are now.
+- (void)titleFontsChanged;
+/// Observes the Mac's font changes (from init) until stopObservingTitleFonts (dealloc).
+- (void)startObservingTitleFonts;
+- (void)stopObservingTitleFonts;
 @end
 
 // VEEngine+Export.mm

@@ -41,6 +41,18 @@ MediaAsset *Project::findAsset(AssetId assetId) {
     return const_cast<MediaAsset *>(static_cast<const Project *>(this)->findAsset(assetId));
 }
 
+const MediaAsset *Project::findGeneratorAsset(GeneratorKind kind) const {
+    if (kind == GeneratorKind::None) {
+        return nullptr;
+    }
+    for (const MediaAsset &asset : assets) {
+        if (asset.generator == kind) {
+            return &asset;
+        }
+    }
+    return nullptr;
+}
+
 const Sequence *Project::findSequence(SequenceId sequenceId) const {
     for (const Sequence &sequence : sequences) {
         if (sequence.id == sequenceId) {

@@ -15,24 +15,32 @@ using namespace ve::facade;
 
 // MARK: - Grade
 
-/// The clips of `clipIDs` a grade edit applies to: every id but those of clips on audio tracks (an id
-/// that names no clip stays, so the command refuses it). Empty, with `refusal` set, when nothing is left.
+/// The clips of `clipIDs` a grade edit applies to: every id but those of clips on audio tracks and of titles and
+/// colour mattes, which have no grade (an id that names no clip stays, so the command refuses it). Empty, with
+/// `refusal` set, when nothing is left.
 - (std::vector<ClipId>)gradeEditClips:(NSArray<NSNumber *> *)clipIDs refusal:(VEEditResult *__autoreleasing *)refusal {
     const Sequence &sequence = [self activeSequence];
     std::vector<ClipId> clips;
     clips.reserve(clipIDs.count);
+    bool generated = false;
     for (NSNumber *number : clipIDs) {
         const ClipId id = toClipId(number.longLongValue);
         const Track *track = sequence.trackOfClip(id);
+        const Clip *clip = track != nullptr ? track->find(id) : nullptr;
+        if (clip != nullptr && clip->generated) {
+            generated = true;
+            continue;
+        }
         if (track == nullptr || track->kind == TrackKind::Video) {
             clips.push_back(id);
         }
     }
     if (clips.empty()) {
-        *refusal = clipIDs.count == 0
-                       ? [VEEditResult failureWithMessage:@"Nothing selected."]
-                       : [VEEditResult failureWithCode:VEEditErrorTrackKindMismatch
-                                               message:@"A grade applies to pictures: select a clip on a video track."];
+        *refusal = clipIDs.count == 0 ? [VEEditResult failureWithMessage:@"Nothing selected."]
+                   : generated        ? [VEEditResult failureWithCode:VEEditErrorInvalidArgument
+                                                       message:@"Titles and colour mattes are not graded."]
+                                      : [VEEditResult failureWithCode:VEEditErrorTrackKindMismatch
+                                                       message:@"A grade applies to pictures: select a clip on a video track."];
     }
     return clips;
 }
@@ -258,8 +266,8 @@ using namespace ve::facade;
     const Sequence &sequence = [self activeSequence];
     const ClipId id = toClipId(clipID);
     const Track *track = sequence.trackOfClip(id);
-    if (track == nullptr || track->kind != TrackKind::Video) {
-        return NO;
+    if (track == nullptr || track->kind != TrackKind::Video || track->find(id)->generated) {
+        return NO; // sound, titles and colour mattes have no grade
     }
     _copiedGrade = track->find(id)->grade;
     _copiedLuts.clear();

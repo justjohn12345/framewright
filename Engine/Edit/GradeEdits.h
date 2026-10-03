@@ -8,8 +8,9 @@
 //   says "set exposure to 1.2 on these clips", relative to the state before the gesture.
 // - summarizeGrades tells, per parameter, the value the clips of a selection agree on, or that they
 //   differ ("mixed"), and whether their whole grades are identical (Copy Grade of several clips).
-// - gradeTargets picks the clips of a selection that can have a grade (those on video tracks): a
-//   selection of linked picture and sound grades the pictures.
+// - gradeTargets picks the clips of a selection that can have a grade (those on video tracks, titles and colour
+//   mattes left out: they are not graded, titles design section 5): a selection of linked picture and sound
+//   grades the pictures, and Paste Grade over a selection that includes titles never changes their colours.
 //
 // Plain C++ (CoreMedia's CMTime only): unit-testable without media.
 
@@ -119,7 +120,8 @@ struct GradeChange {
 
 // Sets grade parameters on clips (see the header). Refused as a whole, changing nothing, when the list
 // or the change is empty, a clip is missing or listed twice, a clip lies on an audio track
-// (TrackKindMismatch: a grade is for pictures) or a locked track, or a value is not finite or outside its
+// (TrackKindMismatch: a grade is for pictures) or a locked track, a clip is a title or a colour matte
+// (InvalidArgument: not graded), or a value is not finite or outside its
 // parameter's range (InvalidArgument, naming the range), a wheel's level outside [-1, 1], its colour outside
 // the unit disk or given without both cb and cr, a curve that is not valid (curveProblem), a LUT the project
 // does not hold, or a look strength outside [0, 1] (a clip without a look keeps strength 1). A change that
@@ -221,8 +223,8 @@ struct GradeSummary {
 // and clips on audio tracks, are left out.
 GradeSummary summarizeGrades(const Sequence &sequence, const std::vector<ClipId> &clipIds);
 
-// The clips of `clipIds` that can have a grade (on video tracks), in the order given, each once; ids
-// that name no clip are left out (the edit then refuses nothing for them).
+// The clips of `clipIds` that can have a grade (on video tracks, not titles or colour mattes), in the order
+// given, each once; ids that name no clip are left out (the edit then refuses nothing for them).
 std::vector<ClipId> gradeTargets(const Sequence &sequence, const std::vector<ClipId> &clipIds);
 
 } // namespace ve

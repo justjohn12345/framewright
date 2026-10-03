@@ -39,6 +39,9 @@ struct Project {
 
     const MediaAsset *findAsset(AssetId assetId) const;
     MediaAsset *findAsset(AssetId assetId);
+    // The project's generator asset of `kind` (the first, MediaAsset.h; a title clip refers to the Title asset),
+    // or nullptr when no clip of the kind was made yet.
+    const MediaAsset *findGeneratorAsset(GeneratorKind kind) const;
     const Sequence *findSequence(SequenceId sequenceId) const;
     Sequence *findSequence(SequenceId sequenceId);
     const Sequence *activeSequence() const;

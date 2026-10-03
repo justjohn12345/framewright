@@ -56,10 +56,21 @@ struct ClipPlacement {
     Ratio speed{1, 1};                 // see speedFromDouble(); ignored for stills
     VideoParams video;                 // static values (a new clip has no spans)
     AudioParams audio;
+    // A title or a colour matte (GeneratedContent.h): the new clip's content. With no `assetId` the clip refers to
+    // the project's generator asset of the content's kind (Project::findGeneratorAsset); a clip of a generator asset
+    // needs content of its kind, and a clip of media has none.
+    std::shared_ptr<const GeneratedContent> generated = nullptr;
 };
 
 // Placement of the whole of `asset` on `trackId` (stills get the default duration).
 ClipPlacement placementForAsset(const MediaAsset &asset, TrackId trackId);
+
+// The clip `placement` makes on `track` (no id, start or spans yet; a still's length from its source range, or
+// defaultStillDuration()), or a failure saying why it cannot be placed there: AssetNotFound, TrackKindMismatch, an
+// invalid speed, range or Motion, generated content that does not fit its asset (ClipPlacement::generated).
+// InsertClip, OverwriteClip and AddGeneratedClip (TitleEdits.h) build their clips with it.
+EditResult buildClipForPlacement(const Project &project, const Sequence &sequence, const Track &track,
+                                 const ClipPlacement &placement, Clip &out);
 
 struct InsertOptions {
     // With exactly two placements, link the new clips to each other.

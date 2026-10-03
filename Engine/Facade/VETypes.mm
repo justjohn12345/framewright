@@ -1,4 +1,5 @@
 #import "VETypes+Internal.h"
+#import "VETitles+Internal.h"
 
 #import <AVFoundation/AVFoundation.h>
 
@@ -147,6 +148,7 @@ void VEGradeParamsSetValue(VEGradeParams *params, double value, VEGradeParameter
 @property (nonatomic, readwrite) BOOL hasAudio;
 @property (nonatomic, readwrite) BOOL isStill;
 @property (nonatomic, readwrite) NSInteger useCount;
+@property (nonatomic, readwrite) VEGeneratorKind generatorKind;
 - (instancetype)initInternal;
 @end
 
@@ -182,6 +184,11 @@ void VEGradeParamsSetValue(VEGradeParams *params, double value, VEGradeParameter
 @property (nonatomic, readwrite) VETrackID trackID;
 @property (nonatomic, readwrite) VETrackKind trackKind;
 @property (nonatomic, readwrite, copy) NSString *name;
+@property (nonatomic, readwrite) VEGeneratorKind generatorKind;
+@property (nonatomic, readwrite, nullable) VETitleInfo *title;
+@property (nonatomic, readwrite) VEColour matteColour;
+@property (nonatomic, readwrite) NSInteger pictureWidth;
+@property (nonatomic, readwrite) NSInteger pictureHeight;
 @property (nonatomic, readwrite) CMTime timelineStart;
 @property (nonatomic, readwrite) CMTime duration;
 @property (nonatomic, readwrite) CMTime timelineEnd;
@@ -971,6 +978,7 @@ VEAssetInfo *makeAssetInfo(const MediaAsset &asset, const AssetDetails *details,
     info.hasAudio = asset.hasAudio();
     info.isStill = asset.isStill();
     info.useCount = useCount;
+    info.generatorKind = toVE(asset.generator);
     return info;
 }
 
@@ -1321,6 +1329,19 @@ VEClipInfo *makeClipInfo(const Clip &clip, const Track &track, const Project &pr
     info.trackKind = track.kind == TrackKind::Video ? VETrackKindVideo : VETrackKindAudio;
     const MediaAsset *asset = project.findAsset(clip.assetId);
     info.name = asset ? toNS(asset->name) : @"";
+    if (clip.generated) {
+        // A title or a matte: named by its first line, its picture a frame-sized canvas.
+        info.generatorKind = toVE(clip.generated->kind());
+        info.name = clip.generated->isTitle() ? toNS(titleDisplayName(clip.generated->title()))
+                                              : @(displayNameOf(GeneratorKind::ColourMatte));
+        info.title = clip.generated->isTitle() ? makeTitleInfo(clip.generated->title()) : nil;
+        info.matteColour = clip.generated->isMatte() ? toVE(clip.generated->matteColour()) : VEColour{};
+        info.pictureWidth = sequence.width;
+        info.pictureHeight = sequence.height;
+    } else if (asset != nullptr && track.kind == TrackKind::Video && asset->hasVideo()) {
+        info.pictureWidth = asset->width;
+        info.pictureHeight = asset->height;
+    }
     info.timelineStart = clip.timelineStart;
     info.duration = clip.duration();
     info.timelineEnd = clip.timelineEnd();

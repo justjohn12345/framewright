@@ -117,6 +117,7 @@ constexpr const char *kMediaFolderBookmarkKey = "mediaFolderBookmark";
     for (const std::string &warning : warnings) {
         [warningStrings addObject:toNS(warning)];
     }
+    [warningStrings addObjectsFromArray:[self missingTitleFontWarnings]];
     _document.loadWarnings = warningStrings;
 
     // Find every asset's file: through its bookmark (follows moves and grants sandbox access),

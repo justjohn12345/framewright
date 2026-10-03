@@ -14,6 +14,8 @@
 #import <CoreMedia/CoreMedia.h>
 #import <Foundation/Foundation.h>
 
+#import <FramewrightEngine/VETitles.h>
+
 NS_ASSUME_NONNULL_BEGIN
 
 typedef int64_t VEAssetID;
@@ -441,6 +443,9 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 /// Number of clips using this asset in every sequence of the project (the count removeAsset:
 /// checks: the asset can be removed only at 0).
 @property (nonatomic, readonly) NSInteger useCount;
+/// What a generator asset generates (the project's hidden "Title" and "Colour Matte" assets, which have no file
+/// and no size; allAssets leaves them out); VEGeneratorKindNone for media.
+@property (nonatomic, readonly) VEGeneratorKind generatorKind;
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
@@ -493,8 +498,19 @@ FOUNDATION_EXPORT VEAudioParams VEAudioParamsDefault(void);
 @property (nonatomic, readonly) VEAssetID assetID;
 @property (nonatomic, readonly) VETrackID trackID;
 @property (nonatomic, readonly) VETrackKind trackKind;
-/// Name of the asset (clips have no own name).
+/// Name of the asset (clips have no own name); a title's first line ("Title" when it has none), "Colour Matte"
+/// for a matte.
 @property (nonatomic, readonly, copy) NSString *name;
+/// A title or a colour matte (VETitles.h): what the clip generates; VEGeneratorKindNone for a clip of media.
+@property (nonatomic, readonly) VEGeneratorKind generatorKind;
+/// A title clip's content (nil for any other clip).
+@property (nonatomic, readonly, nullable) VETitleInfo *title;
+/// A colour matte's colour (black for any other clip).
+@property (nonatomic, readonly) VEColour matteColour;
+/// The size of the picture the clip shows before its Motion, in pixels: the asset's displayed size (rotation
+/// applied), or the sequence's frame for a title or a matte (which stand for a frame-sized canvas); zero for sound.
+@property (nonatomic, readonly) NSInteger pictureWidth;
+@property (nonatomic, readonly) NSInteger pictureHeight;
 @property (nonatomic, readonly) CMTime timelineStart;
 @property (nonatomic, readonly) CMTime duration;
 @property (nonatomic, readonly) CMTime timelineEnd;

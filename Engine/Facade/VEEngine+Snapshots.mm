@@ -66,7 +66,9 @@ using namespace ve::facade;
     VE_ASSERT_MAIN();
     NSMutableArray<VEAssetInfo *> *assets = [NSMutableArray arrayWithCapacity:_project.assets.size()];
     for (const MediaAsset &asset : _project.assets) {
-        [assets addObject:[self makeInfoForAsset:asset]];
+        if (asset.isFileBacked()) { // the generator assets of titles and mattes are hidden
+            [assets addObject:[self makeInfoForAsset:asset]];
+        }
     }
     return assets;
 }

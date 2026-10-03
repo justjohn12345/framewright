@@ -286,6 +286,11 @@ EditResult SetClipGrade::perform(const Project &project, Sequence &sequence, IdG
                                        "Clip " + std::to_string(id.value()) + " is on audio track “" + track->name +
                                            "”: a grade applies to pictures.");
         }
+        if (clip->generated) {
+            return EditResult::failure(EditError::InvalidArgument, "Clip " + std::to_string(id.value()) + " is a " +
+                                                                       displayNameOf(clip->generated->kind()) +
+                                                                       ": titles and colour mattes are not graded.");
+        }
         clip->grade = change_.appliedTo(clip->grade);
     }
     return EditResult::success();
@@ -426,7 +431,8 @@ std::vector<ClipId> gradeTargets(const Sequence &sequence, const std::vector<Cli
     std::unordered_set<ClipId> seen;
     for (const ClipId id : clipIds) {
         const Track *track = sequence.trackOfClip(id);
-        if (track != nullptr && track->kind == TrackKind::Video && seen.insert(id).second) {
+        if (track != nullptr && track->kind == TrackKind::Video && !track->find(id)->generated &&
+            seen.insert(id).second) {
             targets.push_back(id);
         }
     }
