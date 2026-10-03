@@ -146,6 +146,24 @@ struct VideoLayer {
     std::string gradeLookLutId;
     double gradeLookStrength = 1.0;
     std::optional<LayerTransition> transition;
+    // A generated layer (a title or a colour matte; Clip::generated): what it shows, shared with the model; null
+    // for a clip of media. Its picture comes from a generated source (Engine/Media/TitleRenderer.h) and stands for
+    // a frame-sized canvas, which the compositor places as a frame-sized still (its CanvasGeometry, carried by the
+    // picture, says where on the canvas the picture lies relative to the anchor below). Never graded, never
+    // sharpened.
+    std::shared_ptr<const GeneratedContent> generated;
+    // The anchor of a generated picture's canvas geometry, in sequence pixels from the frame's top-left: a title's
+    // position (the centre of its text block, TitleContent::x and y times the frame's size); (0, 0) for a matte.
+    double canvasAnchorX = 0.0;
+    double canvasAnchorY = 0.0;
+    // The largest Motion scale the clip reaches over its length (maxMotionScale), for a generated layer: its
+    // picture is rendered at that scale (times the output's scale), so it stays sharp at the end of a zoom. 1 for a
+    // clip of media (unused).
+    double maxMotionScale = 1.0;
+    // The clip's Motion changes over its length (it has a Motion span): a generated picture drawn smaller than its
+    // raster is then left at its exact place on every frame, so a zoom or a move stays smooth (Compositor.h,
+    // "Generated pictures"). False for a clip of media (unused).
+    bool motionAnimated = false;
 };
 
 struct RenderGraph {

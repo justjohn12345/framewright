@@ -27,8 +27,9 @@
 // k. The picture holds only the rectangle that has something in it (box, ink, outline, shadow) with a
 // transparent margin of kRasterMargin sequence pixels, snapped to whole sequence pixels around the block so
 // pictures of one title at different integer k cover the same canvas rectangle; its CanvasGeometry places it
-// relative to the title's position (the block's centre), which is not part of the picture. (The compositor
-// puts the picture's corner on a whole canvas pixel, so a title without Motion is drawn texel for pixel.)
+// relative to the title's position (the block's centre), which is not part of the picture. (The compositor puts
+// the corner of a picture it draws texel for pixel on a whole target pixel, so a fractional position does not
+// blur it.)
 //
 // Fonts (section 7). The system font is named by its weight (a descriptor of the UI font with the weight
 // trait). Any other font is named by its PostScript name and opened with CTFontCreateWithName, which

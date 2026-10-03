@@ -128,20 +128,32 @@ int quarterTurnsClockwise(std::int32_t degrees) {
     return static_cast<int>(((turns % 4) + 4) % 4);
 }
 
-// Geometry, in order: the decoded (storage-orientation) picture is rotated by the container
-// rotation, the rotated picture is fitted into the sequence frame, then the clip transform
-// (scale about the centre, rotation, offset) is applied. The returned rows map a sequence
-// position to storage uv.
-Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegrees, double storageWidth,
-                      double storageHeight, double frameWidth, double frameHeight) {
-    Placement p{};
-    const int quarterTurns = quarterTurnsClockwise(sourceRotationDegrees);
-    const bool swapped = (quarterTurns & 1) != 0;
-    const double sourceWidth = swapped ? storageHeight : storageWidth; // displayed orientation
-    const double sourceHeight = swapped ? storageWidth : storageHeight;
-    double fit = std::min(frameWidth / sourceWidth, frameHeight / sourceHeight);
-    double cx = frameWidth / 2.0 + params.x;
-    double cy = frameHeight / 2.0 + params.y;
+// Where a picture's displayed rectangle lands in the sequence frame: the fit, the centre, the size and the rotation
+// (cosine and sine) of the clip transform applied to it (see placeSource).
+struct Fitted {
+    double sourceWidth = 0; // displayed orientation
+    double sourceHeight = 0;
+    double fit = 1;
+    double cx = 0;
+    double cy = 0;
+    double sx = 0; // displayed size in sequence pixels
+    double sy = 0;
+    double c = 1;
+    double s = 0;
+    int quarterTurns = 0;
+    bool ok = false;
+};
+
+Fitted fitSource(const VideoParams &params, std::int32_t sourceRotationDegrees, double storageWidth,
+                 double storageHeight, double frameWidth, double frameHeight) {
+    Fitted f;
+    f.quarterTurns = quarterTurnsClockwise(sourceRotationDegrees);
+    const bool swapped = (f.quarterTurns & 1) != 0;
+    f.sourceWidth = swapped ? storageHeight : storageWidth;
+    f.sourceHeight = swapped ? storageWidth : storageHeight;
+    f.fit = std::min(frameWidth / f.sourceWidth, frameHeight / f.sourceHeight);
+    f.cx = frameWidth / 2.0 + params.x;
+    f.cy = frameHeight / 2.0 + params.y;
     // Pixel exact: a picture that covers the frame with under 2 px to spare on each axis (a frame taken
     // from it with odd sides rounded down, see formatAdoptedFrom) has its base place at exactly its own
     // size with its top-left pixel on the frame's, the spare column and row cropped, rather than scaled
@@ -150,20 +162,48 @@ Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegr
     // value: a Ken Burns or Motion move through scale 1 stays continuous (deciding it from the
     // animated transform drew that one frame 1:1 and top-left, the next fitted and centred: a jump of
     // half a pixel and a crop change), and the identity transform is pixel exact.
-    if (sourceWidth >= frameWidth && sourceHeight >= frameHeight && sourceWidth - frameWidth < 2.0 &&
-        sourceHeight - frameHeight < 2.0) {
-        fit = 1.0;
-        cx = sourceWidth / 2.0 + params.x;
-        cy = sourceHeight / 2.0 + params.y;
+    if (f.sourceWidth >= frameWidth && f.sourceHeight >= frameHeight && f.sourceWidth - frameWidth < 2.0 &&
+        f.sourceHeight - frameHeight < 2.0) {
+        f.fit = 1.0;
+        f.cx = f.sourceWidth / 2.0 + params.x;
+        f.cy = f.sourceHeight / 2.0 + params.y;
     }
-    const double sx = sourceWidth * fit * params.scale;
-    const double sy = sourceHeight * fit * params.scale;
-    if (!(sx > 1e-6) || !(sy > 1e-6) || !std::isfinite(sx) || !std::isfinite(sy)) {
-        return p;
+    f.sx = f.sourceWidth * f.fit * params.scale;
+    f.sy = f.sourceHeight * f.fit * params.scale;
+    if (!(f.sx > 1e-6) || !(f.sy > 1e-6) || !std::isfinite(f.sx) || !std::isfinite(f.sy)) {
+        return f;
     }
     const double theta = params.rotationDegrees * M_PI / 180.0;
-    const double c = std::cos(theta);
-    const double s = std::sin(theta);
+    f.c = std::cos(theta);
+    f.s = std::sin(theta);
+    f.ok = true;
+    return f;
+}
+
+// Bounding box of points `xs`, `ys` (sequence pixels) with 1 px margin for the AA edge, clipped to the frame.
+void setBoundingBox(Placement &p, std::initializer_list<double> xs, std::initializer_list<double> ys, double frameWidth,
+                    double frameHeight) {
+    const auto [xMin, xMax] = std::minmax(xs);
+    const auto [yMin, yMax] = std::minmax(ys);
+    p.x0 = std::max(0.0, std::floor(xMin) - 1.0);
+    p.y0 = std::max(0.0, std::floor(yMin) - 1.0);
+    p.x1 = std::min(frameWidth, std::ceil(xMax) + 1.0);
+    p.y1 = std::min(frameHeight, std::ceil(yMax) + 1.0);
+    p.visible = p.x1 > p.x0 && p.y1 > p.y0;
+}
+
+// Geometry, in order: the decoded (storage-orientation) picture is rotated by the container
+// rotation, the rotated picture is fitted into the sequence frame, then the clip transform
+// (scale about the centre, rotation, offset) is applied. The returned rows map a sequence
+// position to storage uv.
+Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegrees, double storageWidth,
+                      double storageHeight, double frameWidth, double frameHeight) {
+    Placement p{};
+    const Fitted f = fitSource(params, sourceRotationDegrees, storageWidth, storageHeight, frameWidth, frameHeight);
+    if (!f.ok) {
+        return p;
+    }
+    const double c = f.c, s = f.s, cx = f.cx, cy = f.cy, sx = f.sx, sy = f.sy;
     // Displayed uv' of a sequence position. Forward: p = centre + R (uv' - 0.5) * size,
     // R = [c -s; s c] (clockwise with +y down). Inverse: uv' = 0.5 + R^T (p - centre) / size.
     const simd_float4 ux = simd_make_float4(float(c / sx), float(s / sx), float(0.5 - (c * cx + s * cy) / sx), 0.0f);
@@ -171,7 +211,7 @@ Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegr
     // Storage uv from displayed uv' (the storage picture turned clockwise by quarterTurns):
     //   90: u = v', v = 1 - u'   180: u = 1 - u', v = 1 - v'   270: u = 1 - v', v = u'
     const simd_float4 one = simd_make_float4(0.0f, 0.0f, 1.0f, 0.0f);
-    switch (quarterTurns) {
+    switch (f.quarterTurns) {
     case 1:
         p.uvFromFrameX = uy;
         p.uvFromFrameY = one - ux;
@@ -189,16 +229,93 @@ Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegr
         p.uvFromFrameY = uy;
         break;
     }
-    p.scale = fit * params.scale;
+    p.scale = f.fit * params.scale;
     // Bounding box of the rotated rectangle.
     const double hx = std::fabs(c) * sx / 2.0 + std::fabs(s) * sy / 2.0;
     const double hy = std::fabs(s) * sx / 2.0 + std::fabs(c) * sy / 2.0;
-    p.x0 = std::max(0.0, std::floor(cx - hx) - 1.0);
-    p.y0 = std::max(0.0, std::floor(cy - hy) - 1.0);
-    p.x1 = std::min(frameWidth, std::ceil(cx + hx) + 1.0);
-    p.y1 = std::min(frameHeight, std::ceil(cy + hy) + 1.0);
-    p.visible = p.x1 > p.x0 && p.y1 > p.y0;
+    setBoundingBox(p, {cx - hx, cx + hx}, {cy - hy, cy + hy}, frameWidth, frameHeight);
     return p;
+}
+
+// A generated picture (a title or a matte; GeneratedSource.h): the frame-sized canvas it stands for is placed as a
+// frame-sized still is (placeSource, no container rotation), and the picture covers the rectangle `geometry` of it,
+// anchored at (anchorX, anchorY). The rows map a sequence position to the picture's uv through the canvas's (an
+// affine change of the two rows, on the CPU), the scale is in sequence pixels per texel of the picture
+// (`textureWidth` x `textureHeight` texels over the rectangle), and the quad covers the rectangle only. Outside it
+// the shader's edge coverage is 0: the rest of the canvas is transparent.
+// On the target's pixel grid: when the picture is drawn unrotated at one target pixel per texel (`targetScaleX` and
+// `targetScaleY` are target pixels per sequence pixel), or smaller and its clip's Motion does not change
+// (`animated` false: a monitor smaller than the sequence showing a still title), its corner is moved (by under half
+// a target pixel) onto a whole target pixel, so it is not resampled at a fractional offset (a title's position is
+// a fraction of the frame, and half a pixel off, bilinear sampling of its reduced picture blurs small letters by a
+// third). A picture whose Motion changes and that is not drawn texel for pixel (a zoom in progress) keeps its exact
+// place, so it moves smoothly instead of in whole-pixel steps.
+Placement placeCanvas(const VideoParams &params, const media::CanvasGeometry &geometry, double anchorX, double anchorY,
+                      double textureWidth, double textureHeight, double frameWidth, double frameHeight,
+                      double targetScaleX, double targetScaleY, bool animated) {
+    Placement p{};
+    if (!geometry.isValid() || !(textureWidth > 0) || !(textureHeight > 0)) {
+        return p;
+    }
+    const Fitted f = fitSource(params, 0, geometry.canvasWidth, geometry.canvasHeight, frameWidth, frameHeight);
+    if (!f.ok) {
+        return p;
+    }
+    const double cw = geometry.canvasWidth, ch = geometry.canvasHeight;
+    const double c = f.c, s = f.s, cx = f.cx, cy = f.cy, sx = f.sx, sy = f.sy;
+    double rx = anchorX + geometry.x;
+    double ry = anchorY + geometry.y;
+    const double pixelsPerTexelX = targetScaleX * (sx / cw) * geometry.width / textureWidth;
+    const double pixelsPerTexelY = targetScaleY * (sy / ch) * geometry.height / textureHeight;
+    const bool texelForPixel = std::fabs(pixelsPerTexelX - 1.0) < 1e-6 && std::fabs(pixelsPerTexelY - 1.0) < 1e-6;
+    const bool stillAndReduced = !animated && pixelsPerTexelX < 1.0 && pixelsPerTexelY < 1.0;
+    if (s == 0.0 && c > 0.0 && (texelForPixel || stillAndReduced)) {
+        // The corner's place in the target (the viewport's origin is a whole pixel), rounded to a whole pixel.
+        const double tx = (cx + (rx / cw - 0.5) * sx) * targetScaleX;
+        const double ty = (cy + (ry / ch - 0.5) * sy) * targetScaleY;
+        rx += (std::round(tx) - tx) / targetScaleX * cw / sx;
+        ry += (std::round(ty) - ty) / targetScaleY * ch / sy;
+    }
+    // Canvas uv of a sequence position (placeSource's rows, unrotated storage), then the picture's uv:
+    // u = (u_canvas * cw - rx) / width, v = (v_canvas * ch - ry) / height.
+    const double ax = cw / geometry.width;
+    const double ay = ch / geometry.height;
+    p.uvFromFrameX = simd_make_float4(float(c / sx * ax), float(s / sx * ax),
+                                      float((0.5 - (c * cx + s * cy) / sx) * ax - rx / geometry.width), 0.0f);
+    p.uvFromFrameY = simd_make_float4(float(-s / sy * ay), float(c / sy * ay),
+                                      float((0.5 - (-s * cx + c * cy) / sy) * ay - ry / geometry.height), 0.0f);
+    p.scale = f.fit * params.scale * geometry.width / textureWidth;
+    // The rectangle's corners in the frame: p = centre + R ((X / cw - 0.5) sx, (Y / ch - 0.5) sy).
+    const auto corner = [&](double X, double Y) {
+        const double dx = (X / cw - 0.5) * sx;
+        const double dy = (Y / ch - 0.5) * sy;
+        return std::pair<double, double>{cx + c * dx - s * dy, cy + s * dx + c * dy};
+    };
+    const auto [x0, y0] = corner(rx, ry);
+    const auto [x1, y1] = corner(rx + geometry.width, ry);
+    const auto [x2, y2] = corner(rx, ry + geometry.height);
+    const auto [x3, y3] = corner(rx + geometry.width, ry + geometry.height);
+    setBoundingBox(p, {x0, x1, x2, x3}, {y0, y1, y2, y3}, frameWidth, frameHeight);
+    return p;
+}
+
+// Where `layer`'s picture `textures` lands: placeCanvas for a generated picture (its TextureSet carries the canvas
+// geometry), else placeSource.
+Placement placeLayer(const VideoLayer &layer, const TextureSet &textures, double frameWidth, double frameHeight,
+                     double targetScaleX, double targetScaleY) {
+    if (const auto &canvas = textures.canvas()) {
+        return placeCanvas(layer.transform, *canvas, layer.canvasAnchorX, layer.canvasAnchorY, double(textures.width()),
+                           double(textures.height()), frameWidth, frameHeight, targetScaleX, targetScaleY,
+                           layer.motionAnimated);
+    }
+    return placeSource(layer.transform, layer.sourceRotationDegrees, double(textures.width()),
+                       double(textures.height()), frameWidth, frameHeight);
+}
+
+// Whether `layer`'s minified picture may be sharpened (RenderGraph::sharpenMinified): never a generated picture,
+// which is rendered at the size it is drawn (sharpening its anti-aliased edges would ring around light letters).
+bool maySharpen(const RenderGraph &graph, const VideoLayer &layer) {
+    return graph.sharpenMinified && !layer.generated;
 }
 
 // The textures a draw samples for one source: its own planes, or pre-scaled copies.
@@ -976,9 +1093,10 @@ struct Compositor::Impl {
     }
 
     // Builds `items` and `jobs` for the graph; fills `skipped` and `resolved`. `targetScale`:
-    // target pixels per sequence pixel.
+    // target pixels per sequence pixel; `snapScaleX` and `snapScaleY` the same per axis (the viewport's; a
+    // generated picture drawn texel for pixel is put on whole target pixels with them: placeCanvas).
     Status buildItems(const RenderGraph &graph, TextureLookup lookup, MTLPixelFormat format, double targetScale,
-                      double sharpenTargetScale, std::size_t &drawnLayers) {
+                      double sharpenTargetScale, double snapScaleX, double snapScaleY, std::size_t &drawnLayers) {
         const std::size_t n = graph.layers.size();
         ++buildCounter;
         items.clear();
@@ -1021,15 +1139,14 @@ struct Compositor::Impl {
                     weight *= layer.transition->weight();
                 }
                 const TextureSet &t = resolved[i];
-                const Placement pl = placeSource(layer.transform, layer.sourceRotationDegrees, double(t.width()),
-                                                 double(t.height()), frameW, frameH);
+                const Placement pl = placeLayer(layer, t, frameW, frameH, snapScaleX, snapScaleY);
                 drawn[i] = 1;
                 ++drawnLayers;
                 if (!pl.visible || weight <= 0.0) {
                     continue;
                 }
-                auto binding =
-                    bindSource(t, layer, pl.scale * targetScale, pl.scale * sharpenTargetScale, graph.sharpenMinified);
+                auto binding = bindSource(t, layer, pl.scale * targetScale, pl.scale * sharpenTargetScale,
+                                          maySharpen(graph, layer));
                 if (!binding.ok()) {
                     return std::move(binding).error();
                 }
@@ -1058,22 +1175,20 @@ struct Compositor::Impl {
                 const VideoLayer &inLayer = graph.layers[in];
                 const TextureSet &ta = resolved[out];
                 const TextureSet &tb = resolved[in];
-                const Placement pa = placeSource(outLayer.transform, outLayer.sourceRotationDegrees,
-                                                 double(ta.width()), double(ta.height()), frameW, frameH);
-                const Placement pb = placeSource(inLayer.transform, inLayer.sourceRotationDegrees, double(tb.width()),
-                                                 double(tb.height()), frameW, frameH);
+                const Placement pa = placeLayer(outLayer, ta, frameW, frameH, snapScaleX, snapScaleY);
+                const Placement pb = placeLayer(inLayer, tb, frameW, frameH, snapScaleX, snapScaleY);
                 drawn[i] = drawn[partner] = 1;
                 drawnLayers += 2;
                 if (!pa.visible && !pb.visible) {
                     continue;
                 }
                 auto bindingA = bindSource(ta, outLayer, pa.visible ? pa.scale * targetScale : 1.0,
-                                           pa.visible ? pa.scale * sharpenTargetScale : 1.0, graph.sharpenMinified);
+                                           pa.visible ? pa.scale * sharpenTargetScale : 1.0, maySharpen(graph, outLayer));
                 if (!bindingA.ok()) {
                     return std::move(bindingA).error();
                 }
                 auto bindingB = bindSource(tb, inLayer, pb.visible ? pb.scale * targetScale : 1.0,
-                                           pb.visible ? pb.scale * sharpenTargetScale : 1.0, graph.sharpenMinified);
+                                           pb.visible ? pb.scale * sharpenTargetScale : 1.0, maySharpen(graph, inLayer));
                 if (!bindingB.ok()) {
                     return std::move(bindingB).error();
                 }
@@ -1327,8 +1442,10 @@ Result<Submission> Compositor::render(const RenderGraph &graph, TextureLookup lo
     // it draws the picture minified too, never a picture that is not minified in the sequence (1080p in a
     // 1080p sequence), and never one it draws at 0.75 of its size or more (a 4K source on a 4K display).
     const double sharpenTargetScale = targetBuffer != nullptr ? targetScale : 1.0;
-    if (Status built =
-            im.buildItems(graph, lookup, colorTexture.pixelFormat, targetScale, sharpenTargetScale, drawnLayers);
+    const double snapScaleX = viewport.isEmpty() || graph.width <= 0 ? 1.0 : double(viewport.width) / graph.width;
+    const double snapScaleY = viewport.isEmpty() || graph.height <= 0 ? 1.0 : double(viewport.height) / graph.height;
+    if (Status built = im.buildItems(graph, lookup, colorTexture.pixelFormat, targetScale, sharpenTargetScale,
+                                     snapScaleX, snapScaleY, drawnLayers);
         !built.ok()) {
         im.dropScratchReferences();
         return std::move(built).error();

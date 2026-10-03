@@ -41,6 +41,19 @@
 // and row are cropped). The sequence frame itself is fitted into the target the same way (black bars;
 // bars under a pixel on each side fill instead, see fitRect).
 //
+// Generated pictures (titles, colour mattes; Engine/Media/GeneratedSource.h): a picture whose TextureSet carries a
+// CanvasGeometry stands for a frame-sized transparent canvas. The canvas is placed exactly as a frame-sized still
+// (fitted, which for a canvas of the frame's size is 1:1, then the clip transform about the frame's centre), and the
+// picture covers the geometry's rectangle of it, anchored at the layer's VideoLayer::canvasAnchorX/Y: the sample rows
+// map a sequence position through the canvas's uv to the picture's (an affine change of the two rows on the CPU; no
+// shader change), the quad covers the rectangle only, and outside it the edge coverage leaves the canvas
+// transparent. A picture drawn unrotated at one target pixel per texel (a title rendered at the scale it is shown),
+// or smaller while its clip's Motion does not change (VideoLayer::motionAnimated false: a still title in a monitor
+// smaller than the sequence), has its corner moved by under half a pixel onto a whole target pixel, so it is drawn
+// texel for pixel, or reduced on the target's grid, rather than resampled at a fractional offset; a picture whose
+// Motion changes keeps its exact place while it is not drawn texel for pixel, so a zoom stays smooth. A generated
+// picture is never sharpened (see "Sharpening").
+//
 // Colour: blending happens on gamma-encoded BT.709 R'G'B' values (display-referred, like
 // Premiere's default non-linear compositing), not in linear light. Opacity and dissolves are
 // therefore "video" blends; a linear-light path would linearise before and re-encode after
@@ -96,7 +109,9 @@
 // premultiplied colour, each channel within [0, alpha]; alpha is left as the pre-scale made it. The
 // kernel is a plain compute pass over fixed arithmetic, so the program monitor, the solo preview, the
 // output display, the source monitor and the export (each its own Compositor) produce the same planes.
-// Which pictures are sharpened: those a target draws below kMinifyThreshold (they are Lanczos pre-scaled to
+// Which pictures are sharpened: never a generated picture (a title or a matte: it is rendered at the size it is
+// drawn, and the mask would draw dark rings around light letters over video; the Lanczos pre-scale still applies);
+// of the others, those a target draws below kMinifyThreshold (they are Lanczos pre-scaled to
 // the drawn size; nothing is resampled below what the target draws) and that are minified in the output of
 // the sequence too: for a pixel-buffer target (an export) its drawn size in the target, for a texture target
 // (a monitor, the solo preview, the output display) its size in the sequence frame, which is what an export
