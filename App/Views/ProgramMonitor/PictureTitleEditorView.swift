@@ -39,6 +39,8 @@ final class TitleEditingSurfaceView: NSView, NSTextViewDelegate {
     let textView = TitleEditingTextView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
     /// How near the text block (points) a click still edits the text rather than ending the session.
     static let clickMargin: CGFloat = 12
+    /// The text view's container: wider than any title's line.
+    static let unbounded: CGFloat = 1.0e7
     /// The caret's blink: shown, then hidden, half a period each.
     static let blinkPeriod: CFTimeInterval = 1.06
 
@@ -85,6 +87,13 @@ final class TitleEditingSurfaceView: NSView, NSTextViewDelegate {
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.isContinuousSpellCheckingEnabled = false
         textView.drawsBackground = false
+        // Its own lines are paragraphs: a container no line reaches (a 1-point-wide one would break a line at every
+        // glyph, and the text view's own commands that follow lines would act on single glyphs). The moves and
+        // deletions that depend on lines follow the title's drawn lines instead (TitleEditingTextView).
+        textView.isHorizontallyResizable = true
+        textView.maxSize = NSSize(width: Self.unbounded, height: Self.unbounded)
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(width: Self.unbounded, height: Self.unbounded)
         textView.alphaValue = 0 // it takes the keys; the surface draws the caret and the selection
         textView.delegate = self
         textView.surface = self
@@ -236,6 +245,36 @@ final class TitleEditingSurfaceView: NSView, NSTextViewDelegate {
         moveSelection(to: editor.lineBoundary(of: from, end: end), extend: extend)
     }
 
+    /// Command-Delete and Command-Forward-Delete: the text from the caret to the start (or end) of its drawn line is
+    /// deleted (a selection is deleted as it is; at the line's edge one character goes, as the text view does).
+    func deleteToLineBoundary(end: Bool) {
+        guard let editor else { return }
+        let selected = textView.selectedRange()
+        var range = selected
+        if selected.length == 0 {
+            let boundary = editor.lineBoundary(of: selected.location, end: end)
+            range = end ? NSRange(location: selected.location, length: max(0, boundary - selected.location))
+                : NSRange(location: boundary, length: max(0, selected.location - boundary))
+            if range.length == 0 {
+                if end { textView.deleteForward(nil) } else { textView.deleteBackward(nil) }
+                return
+            }
+        }
+        guard textView.shouldChangeText(in: range, replacementString: "") else { return }
+        textView.replaceCharacters(in: range, with: "")
+        select(NSRange(location: range.location, length: 0), active: range.location)
+        textView.didChangeText()
+    }
+
+    /// Selects the drawn line the caret is on.
+    func selectDrawnLine() {
+        guard let editor else { return }
+        let selected = textView.selectedRange()
+        let start = editor.lineBoundary(of: selected.location, end: false)
+        let end = max(start, editor.lineBoundary(of: NSMaxRange(selected), end: true))
+        select(NSRange(location: start, length: end - start), active: end)
+    }
+
     func moveToDocumentBoundary(end: Bool, extend: Bool) {
         moveSelection(to: end ? (textView.string as NSString).length : 0, extend: extend)
     }
@@ -359,8 +398,9 @@ final class TitleEditingSurfaceView: NSView, NSTextViewDelegate {
 /// The text view of a typing session on the program monitor: invisible, it takes the keys, so every key editing text
 /// does what it does in any Mac text field (arrows, Option-arrows, Command-arrows, Delete, Return for a new line,
 /// Command-A, Command-C/X/V of text, input methods) and the editor's single-key shortcuts (Space, J/K/L, I/O, the
-/// arrows, Delete) never see them (`KeyboardController.shouldHandleKeys`: a text view has the keys). Moves that depend
-/// on the lines (up, down, the start and end of a line) follow the title's drawn lines, not this view's own. It has
+/// arrows, Delete) never see them (`KeyboardController.shouldHandleKeys`: a text view has the keys). Moves and deletions
+/// that depend on the lines (up, down, the start and end of a line, Command-Delete and Command-Forward-Delete, Select
+/// Line) follow the title's drawn lines, not this view's own (whose lines are paragraphs: its container is unbounded). It has
 /// no undo of its own, so Command-Z undoes the typing run in the engine as one step. Escape, or giving up the keys,
 /// ends the session.
 final class TitleEditingTextView: NSTextView {
@@ -396,6 +436,9 @@ final class TitleEditingTextView: NSTextView {
     override func moveToRightEndOfLineAndModifySelection(_ sender: Any?) {
         surface?.moveToLineBoundary(end: true, extend: true)
     }
+    override func deleteToBeginningOfLine(_ sender: Any?) { surface?.deleteToLineBoundary(end: false) }
+    override func deleteToEndOfLine(_ sender: Any?) { surface?.deleteToLineBoundary(end: true) }
+    override func selectLine(_ sender: Any?) { surface?.selectDrawnLine() }
     override func pageUp(_ sender: Any?) { surface?.moveToDocumentBoundary(end: false, extend: false) }
     override func pageDown(_ sender: Any?) { surface?.moveToDocumentBoundary(end: true, extend: false) }
     override func pageUpAndModifySelection(_ sender: Any?) { surface?.moveToDocumentBoundary(end: false, extend: true) }

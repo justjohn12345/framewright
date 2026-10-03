@@ -380,6 +380,49 @@ final class TitleTypingTests: XCTestCase {
         XCTAssertEqual(textView.selectedRange(), NSRange(location: 6, length: 0), "the caret where it was clicked")
     }
 
+    /// Command-Delete and Command-Forward-Delete delete to the start and the end of the drawn line (review fix: the text
+    /// view's own lines were one glyph wide, so they deleted one character).
+    func testCommandDeleteDeletesToTheDrawnLinesEdge() async throws {
+        let (id, box) = try await titleOnMonitor()
+        let keyboard = KeyboardController(store: store)
+        XCTAssertTrue(store.engine.setTitleText("Hello world", clips: [NSNumber(value: id)]).ok)
+        box.update(clip: try XCTUnwrap(store.engine.clipInfo(id)))
+        XCTAssertTrue(box.beginEditing(.selectAll))
+        let single = try await surface()
+        single.textView.setSelectedRange(NSRange(location: 11, length: 0))
+        XCTAssertFalse(press("\u{7f}", keyCode: 51, modifiers: .command, keyboard: keyboard), "Command-Delete is text's")
+        XCTAssertEqual(store.clips[id]?.title?.text, "", "Command-Delete at the end: the whole line")
+        box.endEditing()
+        // A paragraph the box wraps into drawn lines: only the drawn line's part goes.
+        XCTAssertTrue(store.engine.setTitleText("one two three four five six", clips: [NSNumber(value: id)]).ok)
+        XCTAssertTrue(store.engine.setTitleNumber(0.15, for: .boxWidth, clips: [NSNumber(value: id)]).ok)
+        box.update(clip: try XCTUnwrap(store.engine.clipInfo(id)))
+        XCTAssertTrue(box.beginEditing(.selectAll))
+        let wrapped = try await surface()
+        let layout = try XCTUnwrap(box.editor?.layout)
+        XCTAssertGreaterThanOrEqual(layout.lineCount, 3)
+        let last = layout.range(ofLine: layout.lineCount - 1)
+        let second = layout.range(ofLine: 1)
+        wrapped.textView.setSelectedRange(NSRange(location: layout.length, length: 0))
+        XCTAssertFalse(press("\u{7f}", keyCode: 51, modifiers: .command, keyboard: keyboard))
+        let text = "one two three four five six" as NSString
+        XCTAssertEqual(store.clips[id]?.title?.text, text.substring(to: last.location), "the last drawn line's text went")
+        // Command-Forward-Delete from the start of the first drawn line to its end (before the wrap), in the text as it
+        // is laid out now.
+        let now = try XCTUnwrap(box.editor?.layout)
+        XCTAssertGreaterThanOrEqual(now.lineCount, 2)
+        XCTAssertEqual(second.location, now.range(ofLine: 1).location)
+        wrapped.textView.setSelectedRange(NSRange(location: 0, length: 0))
+        wrapped.textView.doCommand(by: #selector(NSResponder.deleteToEndOfLine(_:)))
+        let lineEnd = now.index(onLine: 0, nearCanvasX: .greatestFiniteMagnitude)
+        XCTAssertLessThan(lineEnd, now.range(ofLine: 1).location, "before the space the line wrapped at")
+        let expected = (text.substring(to: last.location) as NSString).substring(from: lineEnd)
+        XCTAssertEqual(store.clips[id]?.title?.text, expected)
+        // The text view's own lines are paragraphs (an unbounded container), not single glyphs.
+        XCTAssertGreaterThan(wrapped.textView.textContainer?.containerSize.width ?? 0, 1.0e6)
+        XCTAssertFalse(wrapped.textView.textContainer?.widthTracksTextView ?? true)
+    }
+
     func testUndoWhileTypingTakesTheRunBackAndTheTextFollows() async throws {
         let (id, box) = try await titleOnMonitor()
         let keyboard = KeyboardController(store: store)
