@@ -340,7 +340,8 @@ bool sameColour(VEColour a, VEColour b) {
     const CGSize two = [engine titleBlockSizeOfClip:title];
     XCTAssertEqualWithAccuracy(two.height, 2 * one.height, 1.0, @"two lines");
     XCTAssertTrue([engine setTitleText:@"" clips:@[ @(title) ]].ok);
-    XCTAssertEqual([engine titleBlockSizeOfClip:title].height, 0);
+    XCTAssertEqualWithAccuracy([engine titleBlockSizeOfClip:title].height, one.height, 1e-6,
+                               @"an empty text is one empty line, where the caret goes");
     XCTAssertTrue(CGSizeEqualToSize([engine titleBlockSizeOfClip:footage], CGSizeZero));
     XCTAssertTrue(CGSizeEqualToSize([engine titleBlockSizeOfClip:4242], CGSizeZero));
 }

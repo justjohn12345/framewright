@@ -16,7 +16,9 @@
 // character to fonts that have the glyphs (Japanese typed in Helvetica draws in a Japanese font). Each line takes
 // its ascent, descent and leading times the line spacing and is placed at its pen offset for the alignment; the
 // renderer places the lines itself (a CTFrame rounds line heights to whole points, so a title's lines would sit
-// differently at different raster scales). The text block is the wrap width wide and as tall as its lines.
+// differently at different raster scales). The text block is the wrap width wide and as tall as its lines. Point
+// text (TitleContent::pointText) breaks only at line breaks and its block is as wide as its widest line. A text that
+// ends with a line break has an empty last line in its block (where the caret goes after Return).
 //
 // Drawing, in order: the background box (a rounded rectangle around the block, grown by the padding); then, in
 // one transparency layer so that the outline and every glyph cast one shadow, the outline (each glyph's outline
@@ -27,7 +29,8 @@
 // k. The picture holds only the rectangle that has something in it (box, ink, outline, shadow) with a
 // transparent margin of kRasterMargin sequence pixels, snapped to whole sequence pixels around the block so
 // pictures of one title at different integer k cover the same canvas rectangle; its CanvasGeometry places it
-// relative to the title's position (the block's centre), which is not part of the picture. (The compositor puts
+// relative to the title's position (the point the block is anchored at: its centre for area text anchored at its
+// centre; TitleBlockSize), which is not part of the picture. (The compositor puts
 // the corner of a picture it draws texel for pixel on a whole target pixel, so a fractional position does not
 // blur it.)
 //
@@ -58,6 +61,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace ve::media {
 
@@ -85,12 +89,88 @@ struct ResolvedTitleFont {
 };
 ResolvedTitleFont resolveTitleFont(const TitleFont &font, double pointSize);
 
-/// A title's text block at k = 1 in sequence pixels: the wrap width and the height of its lines (0 for no text).
+/// A title's text block at k = 1 in sequence pixels: its width (the wrap width; point text: its widest line) and the
+/// height of its lines (an empty text, or one ending with a line break, has an empty last line, as tall as a line of
+/// its font), and where its top-left corner lies relative to the title's position (the anchor: area text is centred
+/// on x, point text has x at its left edge, centre or right edge as it aligns; y is its top, centre or bottom).
 struct TitleBlockSize {
     double width = 0;
     double height = 0;
+    double left = 0;
+    double top = 0;
 };
 TitleBlockSize measureTitleBlock(const TitleContent &content, double canvasWidth, double canvasHeight);
+
+/// A title's text laid out as the renderer draws it (the same lines, at k = 1), for the program monitor's caret,
+/// selection and clicks. In sequence pixels on the title's canvas, relative to the title's position (x right, y
+/// down): the caller places them through the clip's Motion. Indices are UTF-16 offsets into the text (NSString's),
+/// from 0 to length(); a caret at a line the box wrapped shows at the start of the next line. Not thread-safe to
+/// share; cheap to make (one layout of the text).
+class TitleTextLayout {
+  public:
+    struct Line {
+        CFIndex start = 0;  // its characters (the empty last line: the text's length, 0)
+        CFIndex length = 0;
+        double top = 0;      // its ascent above the baseline
+        double baseline = 0;
+        double bottom = 0;   // its descent below the baseline
+        double leading = 0;  // below its bottom
+        double left = 0;     // where the line starts (its pen offset in the block, for the alignment)
+        double width = 0;    // its typographic width (trailing white space included)
+        bool endsWithBreak = false;
+    };
+    struct Caret {
+        double x = 0;
+        double top = 0;
+        double bottom = 0;
+        std::size_t line = 0;
+    };
+
+    static TitleTextLayout make(const TitleContent &content, double canvasWidth, double canvasHeight);
+
+    /// The text block (measureTitleBlock's), relative to the position.
+    CGRect block() const {
+        return block_;
+    }
+    CFIndex length() const {
+        return length_;
+    }
+    double fontSize() const {
+        return fontSize_;
+    }
+    bool fontMissing() const {
+        return fontMissing_;
+    }
+    std::size_t lineCount() const {
+        return lineInfo_.size();
+    }
+    const Line &line(std::size_t i) const {
+        return lineInfo_[i];
+    }
+    /// The line the caret at `index` is on.
+    std::size_t lineOf(CFIndex index) const;
+    /// The caret at `index`: a vertical segment from the line's top to its bottom at x.
+    Caret caret(CFIndex index) const;
+    /// The caret index on line `i` nearest `x` (never past the line's break, nor at the start of the next line).
+    CFIndex indexOnLine(std::size_t i, double x) const;
+    /// The caret index nearest `point`: on the line whose band holds its y (else the nearest line).
+    CFIndex indexAt(CGPoint point) const;
+    /// The rectangles covering the text from `start` to `end`: per line, the spans of its selected glyphs (a selected
+    /// line break a little past the line's end), each from the line's top to its bottom and leading.
+    std::vector<CGRect> selectionRects(CFIndex start, CFIndex end) const;
+
+  private:
+    double offsetInLine(std::size_t i, CFIndex index) const;
+    CFIndex lastCaretIndexOf(std::size_t i) const;
+
+    std::vector<CFRef<CTLineRef>> lines_;
+    std::vector<Line> lineInfo_;
+    CFRef<CFStringRef> text_;
+    CFIndex length_ = 0;
+    double fontSize_ = 0;
+    CGRect block_ = CGRectZero;
+    bool fontMissing_ = false;
+};
 
 /// A rendered title: the picture (tagged with `geometry`), the raster scale it was drawn at (k, or less when
 /// the limits lowered it) and whether its font is missing on this Mac.

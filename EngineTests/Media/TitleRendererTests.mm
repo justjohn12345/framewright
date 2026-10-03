@@ -370,7 +370,9 @@ static double inkWidth(const Pixels &p) {
         }
         XCTAssertTrue(rendered.geometry.isValid());
     }
-    XCTAssertEqual(measureTitleBlock(plain(""), 1920, 1080).height, 0.0);
+    // Its block is one empty line of the font (where the caret goes; titles slice 2).
+    XCTAssertEqualWithAccuracy(measureTitleBlock(plain(""), 1920, 1080).height,
+                               measureTitleBlock(plain("Line"), 1920, 1080).height, 1e-6);
 }
 
 - (void)testFontsResolveAndAMissingFontFallsBackToTheSystemFontAtItsWeight {

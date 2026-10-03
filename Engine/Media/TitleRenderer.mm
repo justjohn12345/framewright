@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -97,19 +98,147 @@ MediaError cancelled() {
     return makeError(MediaErrorCode::Cancelled, "the title's render was interrupted");
 }
 
+// A title's lines laid out at k = 1, in sequence pixels, relative to its text block's top-left corner (x right, y
+// down): what the renderer draws (Layout, magnified k times) and what the program monitor's caret, selection and
+// clicks are measured against (TitleTextLayout), so both follow the same lines.
+//
+// The lines are broken by a CTTypesetter at the wrap width (it stops at every paragraph separator, so Return makes a
+// line; point text breaks only there) and placed here rather than by a CTFrame: the first line's ascent from the
+// block's top, each next baseline (the previous line's descent and leading and this line's ascent) times the line
+// spacing below the previous one, the last line's descent and leading to the block's bottom, and each its pen offset
+// for the alignment (CTLineGetPenOffsetForFlush, which leaves trailing white space out). Core Text's own frames round
+// their line heights to whole points, which would move the lines of one title differently at different raster
+// scales; placed here, a title's layout scales exactly with k.
+//
+// A text that ends with a line break (or is empty) has an empty last line after it, as tall as a line of the font:
+// the line the caret goes to after Return, which the block (and its background box) takes in, as Premiere's and
+// Final Cut's do. Its CTLine is a space in the title's attributes, which has the font's metrics and draws nothing.
+//
+// The block is the wrap width wide (point text: its widest line's visible width) and as tall as its lines. Where it
+// lies relative to the title's position (blockLeft, blockTop) is the anchor: area text is centred on x, point text
+// has x at its left edge, centre or right edge as its lines align, and y is its top, centre or bottom
+// (TitleContent::anchor).
+struct TextLines {
+    std::vector<CFRef<CTLineRef>> lines;
+    std::vector<CFRange> ranges;     // each line's characters (UTF-16 indices of the text; the empty last line: {length, 0})
+    std::vector<double> penOffsets;  // each line's start from the block's left
+    std::vector<double> baselines;   // each line's baseline down from the block's top
+    std::vector<double> ascents;
+    std::vector<double> descents;
+    std::vector<double> leadings;
+    CFRef<CFStringRef> text;
+    CFIndex length = 0;              // the text's UTF-16 length
+    double fontSize = 0;
+    double width = 0;
+    double height = 0;
+    double blockLeft = 0; // the block's top-left corner relative to the position
+    double blockTop = 0;
+    bool fontMissing = false;
+};
+
+TextLines layoutLines(const TitleContent &c, double canvasWidth, double canvasHeight) {
+    TextLines laid;
+    laid.fontSize = std::max(0.01, c.size * canvasHeight);
+    const double wrapWidth = std::max(1.0, c.width * canvasWidth);
+    ResolvedTitleFont resolved = resolveTitleFont(c.font, laid.fontSize);
+    laid.fontMissing = resolved.missing;
+    const double flush = c.alignment == TitleAlignment::Left ? 0.0 : c.alignment == TitleAlignment::Right ? 1.0 : 0.5;
+    const auto place = [&laid, flush, &c, wrapWidth]() {
+        // The block's width, then each line's pen offset for the alignment in it, then the block on the position.
+        if (c.pointText) {
+            double widest = 0.0;
+            for (const CFRef<CTLineRef> &line : laid.lines) {
+                const double width = CTLineGetTypographicBounds(line.get(), nullptr, nullptr, nullptr);
+                widest = std::max(widest, width - CTLineGetTrailingWhitespaceWidth(line.get()));
+            }
+            laid.width = widest;
+        } else {
+            laid.width = wrapWidth;
+        }
+        for (const CFRef<CTLineRef> &line : laid.lines) {
+            laid.penOffsets.push_back(CTLineGetPenOffsetForFlush(line.get(), flush, laid.width));
+        }
+        laid.blockLeft = c.pointText ? -flush * laid.width : -laid.width / 2.0;
+        laid.blockTop = c.anchor == TitleAnchor::Top ? 0.0 : c.anchor == TitleAnchor::Bottom ? -laid.height : -laid.height / 2.0;
+    };
+    CFRef<CFStringRef> text = cfString(c.text);
+    if (!resolved.font || !text) {
+        place();
+        return laid;
+    }
+    laid.length = CFStringGetLength(text.get());
+    laid.text = text;
+    const CGFloat tracking = c.tracking / 1000.0 * laid.fontSize; // thousandths of an em, in points
+    CFRef<CFNumberRef> trackingNumber = CFRef<CFNumberRef>::adopt(CFNumberCreate(nullptr, kCFNumberCGFloatType, &tracking));
+    CFRef<CGColorRef> fill = srgbColour(c.fillColour, 1.0);
+    const void *keys[] = {kCTFontAttributeName, kCTTrackingAttributeName, kCTForegroundColorAttributeName};
+    const void *values[] = {resolved.font.get(), trackingNumber.get(), fill.get()};
+    CFRef<CFDictionaryRef> attributes = CFRef<CFDictionaryRef>::adopt(
+        CFDictionaryCreate(nullptr, keys, values, 3, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+    double baseline = 0.0;      // the last line's, down from the block's top
+    double previousBelow = 0.0; // the last line's descent and leading
+    const auto add = [&](CFRef<CTLineRef> line, CFRange range) {
+        CGFloat ascent = 0, descent = 0, leading = 0;
+        CTLineGetTypographicBounds(line.get(), &ascent, &descent, &leading);
+        // The first line's top is the block's; the line spacing scales the distance between two lines (the
+        // previous one's descent and leading and this one's ascent), so lines closer than their natural spacing
+        // still start and end inside the block (and the background box).
+        baseline = laid.lines.empty() ? ascent : baseline + (previousBelow + ascent) * c.lineSpacing;
+        previousBelow = descent + leading;
+        laid.lines.push_back(std::move(line));
+        laid.ranges.push_back(range);
+        laid.baselines.push_back(baseline);
+        laid.ascents.push_back(ascent);
+        laid.descents.push_back(descent);
+        laid.leadings.push_back(leading);
+    };
+    if (laid.length > 0) {
+        CFRef<CFAttributedStringRef> attributed =
+            CFRef<CFAttributedStringRef>::adopt(CFAttributedStringCreate(nullptr, text.get(), attributes.get()));
+        CFRef<CTTypesetterRef> typesetter =
+            CFRef<CTTypesetterRef>::adopt(CTTypesetterCreateWithAttributedString(attributed.get()));
+        if (!typesetter) {
+            place();
+            return laid;
+        }
+        // Point text breaks only at line breaks: a width no line reaches.
+        const double breakWidth = c.pointText ? 1.0e9 : wrapWidth;
+        for (CFIndex start = 0; start < laid.length;) {
+            CFIndex count = CTTypesetterSuggestLineBreak(typesetter.get(), start, breakWidth);
+            if (count <= 0) {
+                count = 1; // never stall on a glyph wider than the box
+            }
+            CFRef<CTLineRef> line =
+                CFRef<CTLineRef>::adopt(CTTypesetterCreateLine(typesetter.get(), CFRangeMake(start, count)));
+            const CFRange range = CFRangeMake(start, count);
+            start += count;
+            if (line) {
+                add(std::move(line), range);
+            }
+        }
+    }
+    // The empty last line after a final line break, or of an empty text.
+    const bool endsWithBreak =
+        laid.length > 0 && CFCharacterSetIsCharacterMember(CFCharacterSetGetPredefined(kCFCharacterSetNewline),
+                                                           CFStringGetCharacterAtIndex(text.get(), laid.length - 1));
+    if (laid.length == 0 || endsWithBreak) {
+        CFRef<CFAttributedStringRef> space =
+            CFRef<CFAttributedStringRef>::adopt(CFAttributedStringCreate(nullptr, CFSTR(" "), attributes.get()));
+        CFRef<CTLineRef> line = CFRef<CTLineRef>::adopt(CTLineCreateWithAttributedString(space.get()));
+        if (line) {
+            add(std::move(line), CFRangeMake(laid.length, 0));
+        }
+    }
+    laid.height = laid.lines.empty() ? 0.0 : baseline + previousBelow;
+    place();
+    return laid;
+}
+
 // A title laid out at raster scale k, in the block's coordinates: raster pixels, y up, the block from (0, 0) to
 // (wrapWidth, blockHeight), so its top is y = blockHeight (the "frame" Core Text's drawing works in).
 //
-// The lines are broken by a CTTypesetter at the wrap width (it stops at every paragraph separator, so Return
-// makes a line) and placed here rather than by a CTFrame: the first line's ascent from the block's top, each next
-// baseline (the previous line's descent and leading and this line's ascent) times the line spacing below the
-// previous one, the last line's descent and leading to the block's bottom, and each its pen offset for the alignment
-// (CTLineGetPenOffsetForFlush, which leaves trailing white space out). Core Text's own frames round their line
-// heights to whole points, which would move the lines of one title differently at different raster scales;
-// placed here, a title's layout scales exactly with k.
-//
-// The text is laid out at k = 1 (the font at the title's point size in sequence pixels, the lines broken at its
-// wrap width there) and the layout is then magnified k times: a font's design can follow its point size (the
+// The text is laid out at k = 1 (TextLines: the font at the title's point size in sequence pixels, the lines broken
+// at its wrap width there) and the layout is then magnified k times: a font's design can follow its point size (the
 // system font's optical size and tracking change with it, as a variable font's 'opsz' axis does), so laying out at
 // size x k would draw other glyph shapes and advances, and could break the lines elsewhere, than at k = 1. Magnified,
 // a title at any raster scale is the k = 1 title, sharper. The lines (CTLineRef) stay in k = 1 units; everything
@@ -119,9 +248,11 @@ struct Layout {
     std::vector<CGPoint> origins;        // each line's baseline origin (raster pixels)
     double magnification = 1;            // k: raster pixels per unit of the lines
     double fontSize = 0;
-    double wrapWidth = 0;
+    double wrapWidth = 0; // the block's width
     double blockHeight = 0;
     double frameHeight = 0; // == blockHeight (the block's top)
+    double blockLeft = 0;   // the block's top-left corner relative to the title's position (sequence pixels)
+    double blockTop = 0;
     bool fontMissing = false;
     CGRect lineExtents = CGRectNull; // the lines' typographic extents (trailing white space left out)
     CGRect ink = CGRectNull;         // the glyphs' paths and the lines' typographic bounds
@@ -135,88 +266,19 @@ struct Layout {
 };
 
 Layout layoutTitle(const TitleContent &c, double canvasWidth, double canvasHeight, double k) {
+    TextLines laid = layoutLines(c, canvasWidth, canvasHeight);
     Layout layout;
     // At k = 1 (see Layout); magnified at the end.
-    layout.fontSize = std::max(0.01, c.size * canvasHeight);
-    layout.wrapWidth = std::max(1.0 / k, c.width * canvasWidth);
-    const auto magnify = [&layout, k]() {
-        layout.magnification = k;
-        layout.fontSize *= k;
-        layout.wrapWidth *= k;
-        layout.blockHeight *= k;
-        layout.frameHeight *= k;
-        const CGAffineTransform scale = CGAffineTransformMakeScale(k, k);
-        for (CGPoint &origin : layout.origins) {
-            origin = CGPointApplyAffineTransform(origin, scale);
-        }
-        if (!CGRectIsNull(layout.lineExtents)) {
-            layout.lineExtents = CGRectApplyAffineTransform(layout.lineExtents, scale);
-        }
-        if (!CGRectIsNull(layout.ink)) {
-            layout.ink = CGRectApplyAffineTransform(layout.ink, scale);
-        }
-    };
-    ResolvedTitleFont resolved = resolveTitleFont(c.font, layout.fontSize);
-    layout.fontMissing = resolved.missing;
-    if (c.text.empty() || !resolved.font) {
-        magnify();
-        return layout;
-    }
-    CFRef<CFStringRef> text = cfString(c.text);
-    if (!text) {
-        magnify();
-        return layout;
-    }
-    const CGFloat tracking = c.tracking / 1000.0 * layout.fontSize; // thousandths of an em, in points
-    CFRef<CFNumberRef> trackingNumber = CFRef<CFNumberRef>::adopt(CFNumberCreate(nullptr, kCFNumberCGFloatType, &tracking));
-    CFRef<CGColorRef> fill = srgbColour(c.fillColour, 1.0);
-    const void *keys[] = {kCTFontAttributeName, kCTTrackingAttributeName, kCTForegroundColorAttributeName};
-    const void *values[] = {resolved.font.get(), trackingNumber.get(), fill.get()};
-    CFRef<CFDictionaryRef> attributes = CFRef<CFDictionaryRef>::adopt(
-        CFDictionaryCreate(nullptr, keys, values, 3, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
-    CFRef<CFAttributedStringRef> attributed =
-        CFRef<CFAttributedStringRef>::adopt(CFAttributedStringCreate(nullptr, text.get(), attributes.get()));
-    CFRef<CTTypesetterRef> typesetter =
-        CFRef<CTTypesetterRef>::adopt(CTTypesetterCreateWithAttributedString(attributed.get()));
-    if (!typesetter) {
-        magnify();
-        return layout;
-    }
-    const double flush = c.alignment == TitleAlignment::Left ? 0.0 : c.alignment == TitleAlignment::Right ? 1.0 : 0.5;
-    const CFIndex length = CFStringGetLength(text.get());
-    struct Placed {
-        double penOffset;
-        double baselineDown; // from the block's top
-    };
-    std::vector<Placed> placed;
-    double baseline = 0.0;      // the last line's, down from the block's top
-    double previousBelow = 0.0; // the last line's descent and leading
-    for (CFIndex start = 0; start < length;) {
-        CFIndex count = CTTypesetterSuggestLineBreak(typesetter.get(), start, layout.wrapWidth);
-        if (count <= 0) {
-            count = 1; // never stall on a glyph wider than the box
-        }
-        CFRef<CTLineRef> line = CFRef<CTLineRef>::adopt(CTTypesetterCreateLine(typesetter.get(), CFRangeMake(start, count)));
-        start += count;
-        if (!line) {
-            continue;
-        }
-        CGFloat ascent = 0, descent = 0, leading = 0;
-        CTLineGetTypographicBounds(line.get(), &ascent, &descent, &leading);
-        // The first line's top is the block's; the line spacing scales the distance between two lines (the
-        // previous one's descent and leading and this one's ascent), so lines closer than their natural spacing
-        // still start and end inside the block (and the background box).
-        baseline = placed.empty() ? ascent : baseline + (previousBelow + ascent) * c.lineSpacing;
-        previousBelow = descent + leading;
-        placed.push_back({CTLineGetPenOffsetForFlush(line.get(), flush, layout.wrapWidth), baseline});
-        layout.lines.push_back(std::move(line));
-    }
-    const double top = placed.empty() ? 0.0 : baseline + previousBelow;
-    layout.blockHeight = top;
-    layout.frameHeight = top;
-    for (std::size_t i = 0; i < layout.lines.size(); ++i) {
-        CTLineRef line = layout.lines[i].get();
-        const CGPoint origin = CGPointMake(placed[i].penOffset, layout.frameHeight - placed[i].baselineDown);
+    layout.fontSize = laid.fontSize;
+    layout.wrapWidth = laid.width;
+    layout.blockHeight = laid.height;
+    layout.frameHeight = laid.height;
+    layout.blockLeft = laid.blockLeft;
+    layout.blockTop = laid.blockTop;
+    layout.fontMissing = laid.fontMissing;
+    for (std::size_t i = 0; i < laid.lines.size(); ++i) {
+        CTLineRef line = laid.lines[i].get();
+        const CGPoint origin = CGPointMake(laid.penOffsets[i], layout.frameHeight - laid.baselines[i]);
         layout.origins.push_back(origin);
         CGFloat ascent = 0, descent = 0, leading = 0;
         const double width = CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
@@ -230,8 +292,23 @@ Layout layoutTitle(const TitleContent &c, double canvasWidth, double canvasHeigh
         if (!CGRectIsNull(glyphs) && !CGRectIsEmpty(glyphs)) {
             layout.ink = CGRectUnion(layout.ink, CGRectOffset(glyphs, origin.x, origin.y));
         }
+        layout.lines.push_back(std::move(laid.lines[i]));
     }
-    magnify();
+    layout.magnification = k;
+    layout.fontSize *= k;
+    layout.wrapWidth *= k;
+    layout.blockHeight *= k;
+    layout.frameHeight *= k;
+    const CGAffineTransform scale = CGAffineTransformMakeScale(k, k);
+    for (CGPoint &origin : layout.origins) {
+        origin = CGPointApplyAffineTransform(origin, scale);
+    }
+    if (!CGRectIsNull(layout.lineExtents)) {
+        layout.lineExtents = CGRectApplyAffineTransform(layout.lineExtents, scale);
+    }
+    if (!CGRectIsNull(layout.ink)) {
+        layout.ink = CGRectApplyAffineTransform(layout.ink, scale);
+    }
     return layout;
 }
 
@@ -576,8 +653,210 @@ bool isTitleFontAvailable(const TitleFont &font) {
 }
 
 TitleBlockSize measureTitleBlock(const TitleContent &content, double canvasWidth, double canvasHeight) {
-    const Layout layout = layoutTitle(content, canvasWidth, canvasHeight, 1.0);
-    return TitleBlockSize{layout.wrapWidth, layout.lineCount() > 0 ? layout.blockHeight : 0.0};
+    const TextLines laid = layoutLines(content, canvasWidth, canvasHeight);
+    return TitleBlockSize{laid.width, laid.height, laid.blockLeft, laid.blockTop};
+}
+
+// MARK: - The text layout (caret, selection, clicks)
+
+TitleTextLayout TitleTextLayout::make(const TitleContent &content, double canvasWidth, double canvasHeight) {
+    TextLines laid = layoutLines(content, canvasWidth, canvasHeight);
+    TitleTextLayout layout;
+    layout.text_ = laid.text;
+    layout.length_ = laid.length;
+    layout.fontSize_ = laid.fontSize;
+    layout.block_ = CGRectMake(laid.blockLeft, laid.blockTop, laid.width, laid.height);
+    layout.fontMissing_ = laid.fontMissing;
+    for (std::size_t i = 0; i < laid.lines.size(); ++i) {
+        Line line;
+        line.start = laid.ranges[i].location;
+        line.length = laid.ranges[i].length;
+        line.baseline = laid.blockTop + laid.baselines[i];
+        line.top = line.baseline - laid.ascents[i];
+        line.bottom = line.baseline + laid.descents[i];
+        line.leading = laid.leadings[i];
+        line.left = laid.blockLeft + laid.penOffsets[i];
+        line.width = CTLineGetTypographicBounds(laid.lines[i].get(), nullptr, nullptr, nullptr);
+        if (line.length == 0) {
+            line.width = 0; // the empty last line (a space, which is not text)
+        }
+        line.endsWithBreak =
+            line.length > 0 &&
+            CFCharacterSetIsCharacterMember(CFCharacterSetGetPredefined(kCFCharacterSetNewline),
+                                            CFStringGetCharacterAtIndex(laid.text.get(), line.start + line.length - 1));
+        layout.lineInfo_.push_back(line);
+        layout.lines_.push_back(std::move(laid.lines[i]));
+    }
+    return layout;
+}
+
+std::size_t TitleTextLayout::lineOf(CFIndex index) const {
+    if (lineInfo_.empty()) {
+        return 0;
+    }
+    index = std::clamp<CFIndex>(index, 0, length_);
+    for (std::size_t i = 0; i < lineInfo_.size(); ++i) {
+        const Line &line = lineInfo_[i];
+        if (index >= line.start && index < line.start + line.length) {
+            return i;
+        }
+    }
+    return lineInfo_.size() - 1; // the end of the text
+}
+
+double TitleTextLayout::offsetInLine(std::size_t i, CFIndex index) const {
+    const Line &line = lineInfo_[i];
+    if (line.length == 0) {
+        return 0.0;
+    }
+    return CTLineGetOffsetForStringIndex(lines_[i].get(), std::clamp<CFIndex>(index, line.start, line.start + line.length),
+                                         nullptr);
+}
+
+TitleTextLayout::Caret TitleTextLayout::caret(CFIndex index) const {
+    Caret caret;
+    if (lineInfo_.empty()) {
+        caret.x = block_.origin.x;
+        caret.top = block_.origin.y;
+        caret.bottom = block_.origin.y + fontSize_;
+        return caret;
+    }
+    const std::size_t i = lineOf(index);
+    const Line &line = lineInfo_[i];
+    caret.line = i;
+    caret.x = line.left + offsetInLine(i, std::clamp<CFIndex>(index, 0, length_));
+    caret.top = line.top;
+    caret.bottom = line.bottom;
+    return caret;
+}
+
+CFIndex TitleTextLayout::lastCaretIndexOf(std::size_t i) const {
+    const Line &line = lineInfo_[i];
+    const CFIndex end = line.start + line.length;
+    if (i + 1 == lineInfo_.size() && !line.endsWithBreak) {
+        return end; // the end of the text
+    }
+    if (line.length == 0) {
+        return line.start;
+    }
+    // Before the line break, or (a line the box wrapped) before the character it wrapped after, which the caret
+    // at `end` would show at the start of the next line.
+    const CFRange last = CFStringGetRangeOfComposedCharactersAtIndex(text_.get(), end - 1);
+    return std::max(line.start, last.location);
+}
+
+CFIndex TitleTextLayout::indexOnLine(std::size_t i, double x) const {
+    if (lineInfo_.empty()) {
+        return 0;
+    }
+    i = std::min(i, lineInfo_.size() - 1);
+    const Line &line = lineInfo_[i];
+    if (line.length == 0) {
+        return line.start;
+    }
+    CFIndex index = CTLineGetStringIndexForPosition(lines_[i].get(), CGPointMake(x - line.left, 0.0));
+    if (index == kCFNotFound) {
+        index = line.start;
+    }
+    return std::clamp(index, line.start, lastCaretIndexOf(i));
+}
+
+CFIndex TitleTextLayout::indexAt(CGPoint point) const {
+    if (lineInfo_.empty()) {
+        return 0;
+    }
+    // The line whose band (its top to its bottom and leading) holds the point's y, else the nearest one.
+    std::size_t best = 0;
+    double bestDistance = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < lineInfo_.size(); ++i) {
+        const Line &line = lineInfo_[i];
+        const double top = line.top;
+        const double bottom = line.bottom + line.leading;
+        const double distance = point.y < top ? top - point.y : point.y > bottom ? point.y - bottom : 0.0;
+        if (distance < bestDistance) {
+            best = i;
+            bestDistance = distance;
+        }
+    }
+    return indexOnLine(best, point.x);
+}
+
+std::vector<CGRect> TitleTextLayout::selectionRects(CFIndex start, CFIndex end) const {
+    std::vector<CGRect> rects;
+    start = std::clamp<CFIndex>(start, 0, length_);
+    end = std::clamp<CFIndex>(end, 0, length_);
+    if (end <= start) {
+        return rects;
+    }
+    for (std::size_t i = 0; i < lineInfo_.size(); ++i) {
+        const Line &line = lineInfo_[i];
+        const CFIndex lineEnd = line.start + line.length;
+        if (line.length == 0 || end <= line.start || start >= lineEnd) {
+            continue;
+        }
+        const double top = line.top;
+        const double bottom = line.bottom + line.leading;
+        // Glyph by glyph (a run of right-to-left text selects where its glyphs are), merged into spans. Each glyph's
+        // cell starts at the caret before its character (its end, right to left) and is its advance wide, so the
+        // selection's edges are the carets' (tracking puts half of its space on each side of a glyph: the glyph's own
+        // position would shift the cell by half the tracking).
+        std::vector<std::pair<double, double>> spans;
+        CFArrayRef runs = CTLineGetGlyphRuns(lines_[i].get());
+        std::vector<CFIndex> indices;
+        std::vector<CGSize> advances;
+        for (CFIndex r = 0; r < CFArrayGetCount(runs); ++r) {
+            CTRunRef run = static_cast<CTRunRef>(CFArrayGetValueAtIndex(runs, r));
+            const CFIndex count = CTRunGetGlyphCount(run);
+            if (count <= 0) {
+                continue;
+            }
+            const bool rightToLeft = (CTRunGetStatus(run) & kCTRunStatusRightToLeft) != 0;
+            indices.resize(std::size_t(count));
+            advances.resize(std::size_t(count));
+            CTRunGetStringIndices(run, CFRangeMake(0, 0), indices.data());
+            CTRunGetAdvances(run, CFRangeMake(0, 0), advances.data());
+            for (CFIndex g = 0; g < count; ++g) {
+                const CFIndex at = indices[std::size_t(g)];
+                if (at < start || at >= end) {
+                    continue;
+                }
+                // From the caret before the glyph's character to the caret after it (within a run they are its two
+                // edges, whichever way it runs); where the caret after it is elsewhere (it starts a run of the other
+                // direction), the glyph's advance from the caret before it.
+                const CFIndex next = CFStringGetRangeOfComposedCharactersAtIndex(text_.get(), at).location +
+                                     CFStringGetRangeOfComposedCharactersAtIndex(text_.get(), at).length;
+                const double before = CTLineGetOffsetForStringIndex(lines_[i].get(), at, nullptr);
+                const double after = CTLineGetOffsetForStringIndex(lines_[i].get(), std::min(next, lineEnd), nullptr);
+                const double advance = std::max(0.0, double(advances[std::size_t(g)].width));
+                if (std::abs(after - before) <= 1.5 * advance + 1.0) {
+                    spans.emplace_back(std::min(before, after), std::max(before, after));
+                } else {
+                    spans.emplace_back(rightToLeft ? before - advance : before, rightToLeft ? before : before + advance);
+                }
+            }
+        }
+        // The line break itself (or a line the selection runs on past): a little beyond the line's end, as text views
+        // show a selected line break.
+        if (line.endsWithBreak && start <= lineEnd - 1 && end >= lineEnd) {
+            const double x0 = line.width;
+            spans.emplace_back(x0, x0 + 0.25 * fontSize_);
+        }
+        std::sort(spans.begin(), spans.end());
+        std::vector<std::pair<double, double>> merged;
+        for (const auto &span : spans) {
+            if (!merged.empty() && span.first <= merged.back().second + 0.5) {
+                merged.back().second = std::max(merged.back().second, span.second);
+            } else {
+                merged.push_back(span);
+            }
+        }
+        for (const auto &[x0, x1] : merged) {
+            if (x1 > x0) {
+                rects.push_back(CGRectMake(line.left + x0, top, x1 - x0, bottom - top));
+            }
+        }
+    }
+    return rects;
 }
 
 Result<RenderedTitle> renderTitle(const TitleContent &content, double canvasWidth, double canvasHeight, double k,
@@ -632,13 +911,11 @@ Result<RenderedTitle> renderTitle(const TitleContent &content, double canvasWidt
         if (!picture.ok()) {
             return std::move(picture).error();
         }
-        // Relative to the block's centre (the title's position, which the layer gives).
-        const double blockWidth = layout.wrapWidth / k;
-        const double blockHeight = layout.blockHeight / k;
+        // Relative to the title's position (which the layer gives): the block lies at its anchor's offset from it.
         rendered.geometry = CanvasGeometry{canvasWidth,
                                            canvasHeight,
-                                           raster.left - blockWidth / 2.0,
-                                           raster.top - blockHeight / 2.0,
+                                           layout.blockLeft + raster.left,
+                                           layout.blockTop + raster.top,
                                            raster.width,
                                            raster.height};
         setCanvasGeometry(picture->get(), rendered.geometry);

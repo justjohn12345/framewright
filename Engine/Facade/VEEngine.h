@@ -837,8 +837,9 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)setMatteColour:(VEColour)colour clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setMatteColour(_:clips:));
 /// What the titles and mattes of `clipIDs` have (the others are left out).
 - (VETitleSelection *)titleOfClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(title(ofClips:));
-/// The size of a title's text block in sequence pixels (the box the program monitor draws: the wrap width and the
-/// height of its lines; the height is 0 for an empty text); CGSizeZero for a clip that is not a title.
+/// The size of a title's text block in sequence pixels (the box the program monitor draws: the wrap width, or point
+/// text's widest line, and the height of its lines; an empty text, or one ending with a line break, has an empty last
+/// line); CGSizeZero for a clip that is not a title.
 - (CGSize)titleBlockSizeOfClip:(VEClipID)clipID NS_SWIFT_NAME(titleBlockSize(ofClip:));
 /// The fonts the active sequence's titles use that this Mac does not have, with how many titles use each (the
 /// export sheet asks before exporting them in the system font).
