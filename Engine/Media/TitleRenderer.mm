@@ -622,6 +622,12 @@ Result<PixelBuffer> renderMatte(const SRGBColour &colour, double canvasWidth, do
     return picture;
 }
 
+double rasterScaleFor(double maxMotionScale, double outputScale) {
+    const double motion = std::isfinite(maxMotionScale) && maxMotionScale >= 0 ? maxMotionScale : 1.0;
+    const double output = std::isfinite(outputScale) && outputScale > 1.0 ? outputScale : 1.0;
+    return std::max(1.0, motion * output);
+}
+
 GeneratedKey generatedKeyFor(const GeneratedContent &content, std::int32_t canvasWidth, std::int32_t canvasHeight,
                              double k) {
     const ContentId id = contentIdOnCanvas(content.contentId(), canvasWidth, canvasHeight);

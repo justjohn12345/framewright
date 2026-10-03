@@ -33,6 +33,10 @@
 //   and the pictures go from black and back to it.
 // - Variable frame rate (UX round review, test gap 1): a VFR clip through each backend exports the
 //   same source frames the monitor shows, and both are the frames containing the exact source time.
+// - Titles and colour mattes (titles slice 1): a title over video, a title with an Opacity span and a fade in, a
+//   dissolve between two titles and a title under a Ken Burns zoom export the monitor's pictures; a colour matte
+//   exports its colour exactly in a 10-bit export (and white and black as video white and black); an export larger
+//   than the sequence renders its titles at its own scale, sharper than the sequence's picture magnified.
 
 #import <XCTest/XCTest.h>
 
@@ -40,6 +44,7 @@
 #include "../../Engine/Edit/EditOps.h"
 #include "../../Engine/Export/ExportJob.h"
 #include "../../Engine/Media/AssetImport.h"
+#include "../../Engine/Media/TitleRenderer.h"
 #include "../../Engine/Render/Compositor.h"
 #include "../../Engine/Render/Scheduler.h"
 #include "../Media/BurnIn.h"
@@ -52,6 +57,7 @@
 #import <ImageIO/ImageIO.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -311,6 +317,71 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
         }
     }
     return decoded;
+}
+
+/// Adds the generator asset of `kind` to `h`'s project (once) and a clip of it showing `content` on `track` over
+/// 30 fps frames [start, start + frames).
+ClipId addGenerated(PlaybackHarness &h, TrackId track, std::shared_ptr<const GeneratedContent> content, int64_t start,
+                    int64_t frames) {
+    AssetId generator;
+    for (const MediaAsset &asset : h.project.assets) {
+        if (asset.generator == content->kind()) {
+            generator = asset.id;
+        }
+    }
+    if (!generator) {
+        generator = h.project.addAsset(makeGeneratorAsset(content->kind()));
+    }
+    const ClipId id = h.addClip(track, generator, start, frames, kCMTimeZero);
+    Clip &clip = *h.sequence().findClip(id);
+    clip.isStill = true;
+    clip.generated = std::move(content);
+    return id;
+}
+
+/// A title of `text` at (x, y) with its shadow and outline on.
+std::shared_ptr<const GeneratedContent> titleOf(const char *text, double x, double y) {
+    TitleContent content;
+    content.text = text;
+    content.size = 0.09;
+    content.x = x;
+    content.y = y;
+    content.outline = true;
+    content.outlineColour = SRGBColour{0.1, 0.1, 0.4};
+    content.fillColour = SRGBColour{1.0, 0.9, 0.5};
+    return GeneratedContent::makeTitle(content);
+}
+
+/// Mean Y', Cb and Cr codes (at the format's bit depth) of the centre 64x64 of a biplanar 4:2:0 buffer.
+std::array<double, 3> centreCodes(CVPixelBufferRef buffer) {
+    const bool ten = media::isTenBitPixelFormat(CVPixelBufferGetPixelFormatType(buffer));
+    CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
+    auto read = [&](size_t plane, size_t x, size_t y, size_t component, size_t components) {
+        const auto *row = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddressOfPlane(buffer, plane)) +
+                          y * CVPixelBufferGetBytesPerRowOfPlane(buffer, plane);
+        if (!ten) {
+            return double(row[x * components + component]);
+        }
+        uint16_t v;
+        std::memcpy(&v, row + (x * components + component) * 2, 2);
+        return double(v >> 6);
+    };
+    const size_t w = CVPixelBufferGetWidthOfPlane(buffer, 0), h = CVPixelBufferGetHeightOfPlane(buffer, 0);
+    double y = 0, cb = 0, cr = 0;
+    size_t n = 0, m = 0;
+    for (size_t j = h / 2 - 32; j < h / 2 + 32; ++j) {
+        for (size_t i = w / 2 - 32; i < w / 2 + 32; ++i) {
+            y += read(0, i, j, 0, 1);
+            ++n;
+            if (i % 2 == 0 && j % 2 == 0) {
+                cb += read(1, i / 2, j / 2, 0, 2);
+                cr += read(1, i / 2, j / 2, 1, 2);
+                ++m;
+            }
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
+    return {y / double(n), cb / double(m), cr / double(m)};
 }
 
 } // namespace
@@ -1908,6 +1979,284 @@ std::map<int64_t, media::PixelBuffer> decodeFrames(const media::BackendRouter &r
     XCTAssertGreaterThan(held, 48000);
     XCTAssertLessThan(worstLinear, 1e-4);
     XCTAssertLessThan(worstEased, 0.01);
+}
+
+/// Titles over video (titles slice 1, section 12's parity cases): V1 the movie; on V2 a title over it [0, 30), a title
+/// with an Opacity span and an 8-frame fade in [30, 60), two titles dissolving into each other (10 frames centred on
+/// 75), and a title under a Ken Burns zoom (scale 1 -> 2) [90, 120). The export (ProRes 422 at the sequence's size)
+/// shows the monitor's pictures: the monitor and the export render each title at the same raster scale (1, or 2
+/// for the zoomed one), so they composite the same pictures.
+- (void)testTitlesExportTheMonitorsPictures {
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    h.sequence().width = 640;
+    h.sequence().height = 360;
+    const AssetId movie = h.importAsset("h264_1080p30.mp4");
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    h.addClip(h.v1, movie, 0, 120, kCMTimeZero);
+    addGenerated(h, h.v2, titleOf("Over Video", 0.5, 0.75), 0, 28); // a gap before the fade in
+    const ClipId faded = addGenerated(h, h.v2, titleOf("Faded In", 0.3, 0.3), 30, 30);
+    h.addFade(faded, ClipEdge::Head, 8);
+    SpanTracks dim;
+    Keyframe opaque;
+    opaque.value = 1.0;
+    Keyframe dimmed;
+    dimmed.time = frames30(20);
+    dimmed.value = 0.4;
+    dim[SpanParameter::Opacity] = {opaque, dimmed};
+    h.addSpan(faded, SpanKind::Opacity, 1, frames30(5), frames30(25), dim);
+    const ClipId first = addGenerated(h, h.v2, titleOf("First Card", 0.5, 0.5), 60, 15);
+    const ClipId second = addGenerated(h, h.v2, titleOf("Second Card", 0.5, 0.6), 75, 15);
+    h.addTransition(h.v2, first, second, 10);
+    const ClipId zoomed = addGenerated(h, h.v2, titleOf("Zoom", 0.6, 0.4), 90, 30);
+    SpanTracks zoom;
+    Keyframe from;
+    from.value = 1.0;
+    from.interpolation = KeyframeInterpolation::EaseInOut;
+    Keyframe to;
+    to.time = frames30(20);
+    to.value = 2.0;
+    zoom[SpanParameter::Scale] = {from, to};
+    h.addSpan(zoomed, SpanKind::Motion, 1, kCMTimeZero, frames30(20), zoom);
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+
+    ex::ExportRequest request;
+    request.project = std::make_shared<const Project>(h.project);
+    request.sequenceId = h.sequenceId;
+    request.encode.container = media::ContainerFormat::MOV;
+    media::VideoEncodeSettings v;
+    v.codec = media::VideoCodec::ProRes422;
+    v.width = 640;
+    v.height = 360;
+    request.encode.video = v;
+    request.outputPath = _dir + "/titles-parity.mov";
+    ex::ExportServices services;
+    services.router = h.router;
+    services.cache = std::make_shared<media::FrameCache>();
+    services.routing = routingOf(h.project, *h.router);
+    std::string error;
+    auto result = runExport(request, services, error);
+    XCTAssertTrue(result.has_value(), @"%s", error.c_str());
+    if (!result || !result->ok()) {
+        XCTFail(@"export: %s", result ? result->error().description().c_str() : error.c_str());
+        return;
+    }
+    auto created = render::Compositor::create(h.device(), {kMonitorFormat});
+    XCTAssertTrue(created.ok());
+    if (!created.ok()) {
+        return;
+    }
+    const std::vector<int64_t> frames{5, 27, 30, 33, 37, 45, 59, 66, 70, 74, 75, 79, 85, 90, 100, 110, 119};
+    const auto exported = decodeFrames(*h.router, request.outputPath, frames, 30);
+    XCTAssertEqual(exported.size(), frames.size());
+    double worst = 0;
+    for (int64_t f : frames) {
+        h.controller->seek(frames30(f));
+        const PlaybackHarness::Sample sample = h.presentExact();
+        XCTAssertEqual(sample.presented.frameIndex, f);
+        for (const playback::PresentedLayer &layer : sample.presented.layers) {
+            XCTAssertTrue(layer.exact, @"frame %lld: clip %llu has its picture", f, layer.clip.value());
+        }
+        XCTAssertEqual(h.frame().graph.layers.size(), f >= 70 && f < 80 ? 3u : 2u, @"frame %lld", f);
+        const bool fadingIn = f >= 30 && f < 34; // nothing or little of the title yet
+        const std::vector<double> monitor = monitorBlockMeans(*created.value(), h.frame().graph, h.frame(), 640, 360);
+        XCTAssertFalse(monitor.empty(), @"frame %lld", f);
+        // The title changes the frame (so the comparison is about the title, not only the video).
+        RenderGraph videoOnly = h.frame().graph;
+        videoOnly.layers.resize(1);
+        const std::vector<double> plain = monitorBlockMeans(*created.value(), videoOnly, h.frame(), 640, 360);
+        if (!fadingIn) {
+            XCTAssertGreaterThan(compare(monitor, plain).maxBlock, 20.0, @"frame %lld: the title shows", f);
+        }
+        if (!exported.count(f) || monitor.empty()) {
+            continue;
+        }
+        const std::vector<double> written = blockMeans(exported.at(f).get());
+        const Difference d = compare(monitor, written);
+        const Difference luma = compare(lumaCodesOf(monitor), lumaCodesOf(written));
+        worst = std::max(worst, d.maxBlock);
+        NSLog(@"PARITY titles frame %lld: blocks differ by at most %.2f (channel %d: %.1f vs %.1f), on average %.3f; "
+              @"luma at most %.2f",
+              f, d.maxBlock, d.worstChannel, d.worstA, d.worstB, d.meanBlock, luma.maxBlock);
+        // The monitor through its drawable against the decoded ProRes 422 export; the coloured letters' edges move
+        // a block's red or blue most (the codec halves the chroma horizontally), as the first test bounds by 12.
+        XCTAssertLessThan(d.maxBlock, 12.0, @"frame %lld", f);
+        XCTAssertLessThan(luma.maxBlock, 3.0, @"frame %lld", f);
+        XCTAssertLessThan(d.meanBlock, 1.0, @"frame %lld", f);
+    }
+    NSLog(@"PARITY titles: worst block difference %.2f over %zu frames", worst, frames.size());
+    // The zoomed title was rendered at the scale its zoom reaches, by the monitor and by the export alike.
+    const Clip &zoomClip = *h.sequence().findClip(zoomed);
+    const media::GeneratedKey atTwo = media::generatedKeyFor(*zoomClip.generated, 640, 360, 2.0);
+    XCTAssertTrue(services.cache->contains(media::FrameKey{zoomClip.assetId, media::DecodeFormat{0, 0, true}, atTwo},
+                                           kCMTimeZero),
+                  @"the export rendered the zoomed title at k = 2");
+    XCTAssertTrue(h.cache->contains(media::FrameKey{zoomClip.assetId, h.pool->decodeFormat(), atTwo}, kCMTimeZero),
+                  @"so did the monitor");
+}
+
+/// Colour mattes in a 10-bit export (HEVC Main10, 'x420'): white is video white (Y' 940, Cb and Cr 512), black video
+/// black (64), and an sRGB colour its BT.709 encoding to within a code; an 8-bit export ('420v', H.264) gives
+/// 235 / 128 and 16 exactly, and the colour's luma within a code (its chroma within two: the encoder's).
+- (void)testAColourMatteExportsItsColourExactly {
+    struct Case {
+        SRGBColour colour;
+        std::array<double, 3> codes10; // Y', Cb, Cr at 10 bits
+    };
+    // BT.709: Y' = 0.2126 R' + 0.7152 G' + 0.0722 B'; Cb = (B' - Y') / 1.8556; Cr = (R' - Y') / 1.5748; video range.
+    auto encode10 = [](const SRGBColour &c) {
+        const double y = 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
+        return std::array<double, 3>{64.0 + 876.0 * y, 512.0 + 896.0 * (c.blue - y) / 1.8556,
+                                     512.0 + 896.0 * (c.red - y) / 1.5748};
+    };
+    const std::vector<Case> cases{{kWhite, {940, 512, 512}}, {kBlack, {64, 512, 512}},
+                                  {SRGBColour{0.25, 0.5, 1.0}, encode10(SRGBColour{0.25, 0.5, 1.0})}};
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    h.sequence().width = 320;
+    h.sequence().height = 180;
+    for (size_t i = 0; i < cases.size(); ++i) {
+        addGenerated(h, h.v1, GeneratedContent::makeMatte(cases[i].colour), int64_t(i) * 10, 10);
+    }
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+    for (const bool tenBit : {true, false}) {
+        ex::ExportRequest request;
+        request.project = std::make_shared<const Project>(h.project);
+        request.sequenceId = h.sequenceId;
+        request.encode.container = media::ContainerFormat::MOV;
+        media::VideoEncodeSettings v;
+        v.codec = tenBit ? media::VideoCodec::HEVC : media::VideoCodec::H264;
+        v.width = 320;
+        v.height = 180;
+        request.encode.video = v;
+        request.videoBitDepth = tenBit ? 10 : 8;
+        request.outputPath = _dir + (tenBit ? "/matte10.mov" : "/matte8.mov");
+        ex::ExportServices services;
+        services.router = h.router;
+        services.cache = std::make_shared<media::FrameCache>();
+        std::string error;
+        auto result = runExport(request, services, error);
+        XCTAssertTrue(result.has_value() && result->ok(), @"%s", error.c_str());
+        if (!result || !result->ok()) {
+            return;
+        }
+        const OSType format =
+            tenBit ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+        const auto decoded = decodeFrames(*h.router, request.outputPath, {5, 15, 25}, 30, format);
+        XCTAssertEqual(decoded.size(), 3u);
+        for (size_t i = 0; i < cases.size(); ++i) {
+            const int64_t f = int64_t(i) * 10 + 5;
+            if (!decoded.count(f)) {
+                continue;
+            }
+            const std::array<double, 3> codes = centreCodes(decoded.at(f).get());
+            const double scale = tenBit ? 1.0 : 0.25; // 8-bit codes are the 10-bit ones over 4
+            NSLog(@"MATTE %s export of (%.2f, %.2f, %.2f): Y' %.2f Cb %.2f Cr %.2f (expected %.2f %.2f %.2f)",
+                  tenBit ? "10-bit" : "8-bit", cases[i].colour.red, cases[i].colour.green, cases[i].colour.blue, codes[0],
+                  codes[1], codes[2], cases[i].codes10[0] * scale, cases[i].codes10[1] * scale,
+                  cases[i].codes10[2] * scale);
+            for (int c = 0; c < 3; ++c) {
+                // Within a code; the 8-bit H.264 encoder moves a saturated colour's chroma by up to 1.4 codes (the
+                // compositor's own '420v' conversion is within one: CompositorGeneratedTests).
+                const double tolerance = !tenBit && c > 0 ? 2.0 : 1.0;
+                XCTAssertEqualWithAccuracy(codes[size_t(c)], cases[i].codes10[size_t(c)] * scale, tolerance,
+                                           @"%s export, matte %zu, component %d", tenBit ? "10-bit" : "8-bit", i, c);
+            }
+        }
+    }
+}
+
+/// A 960x540 export of a 640x360 sequence renders its title at 1.5 times the sequence's resolution: the export's
+/// cache holds the k = 1.5 picture, and the exported letters are as sharp as that picture drawn texel for pixel,
+/// sharper than the sequence's picture magnified (the edge measure of TextCard.h over the title).
+- (void)testAnExportLargerThanTheSequenceRendersItsTitlesLarger {
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    h.sequence().width = 640;
+    h.sequence().height = 360;
+    TitleContent content;
+    content.text = "Sharper than magnified\nsmall print 0123456789";
+    content.size = 0.05;
+    content.shadow = false;
+    content.box = true;
+    content.boxColour = kWhite;
+    content.boxOpacity = 1.0;
+    content.fillColour = kBlack;
+    content.width = 0.9;
+    const auto title = GeneratedContent::makeTitle(content);
+    const ClipId clip = addGenerated(h, h.v1, title, 0, 10);
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+    ex::ExportRequest request;
+    request.project = std::make_shared<const Project>(h.project);
+    request.sequenceId = h.sequenceId;
+    request.encode.container = media::ContainerFormat::MOV;
+    media::VideoEncodeSettings v;
+    v.codec = media::VideoCodec::ProRes422;
+    v.width = 960;
+    v.height = 540;
+    request.encode.video = v;
+    request.outputPath = _dir + "/title-larger.mov";
+    ex::ExportServices services;
+    services.router = h.router;
+    services.cache = std::make_shared<media::FrameCache>();
+    std::string error;
+    auto result = runExport(request, services, error);
+    XCTAssertTrue(result.has_value() && result->ok(), @"%s", error.c_str());
+    if (!result || !result->ok()) {
+        return;
+    }
+    const AssetId asset = h.sequence().findClip(clip)->assetId;
+    const media::DecodeFormat format{0, 0, true};
+    XCTAssertTrue(services.cache->contains(media::FrameKey{asset, format, media::generatedKeyFor(*title, 640, 360, 1.5)},
+                                           kCMTimeZero));
+    XCTAssertFalse(services.cache->contains(media::FrameKey{asset, format, media::generatedKeyFor(*title, 640, 360, 1.0)},
+                                            kCMTimeZero));
+    const auto decoded = decodeFrames(*h.router, request.outputPath, {5}, 30);
+    XCTAssertEqual(decoded.size(), 1u);
+    if (decoded.empty()) {
+        return;
+    }
+    // The same title composited at 960x540 from the k = 1 picture (magnified) and the k = 1.5 one (texel for pixel).
+    auto created = render::Compositor::create(h.device(), {MTLPixelFormatBGRA8Unorm});
+    XCTAssertTrue(created.ok());
+    if (!created.ok()) {
+        return;
+    }
+    const RenderGraph graph = Scheduler::renderGraphAt(h.sequence(), h.project, frames30(5));
+    auto composite = [&](double k) {
+        auto picture = media::renderTitle(content, 640, 360, k);
+        auto pool = media::PixelBufferPool::create(kCVPixelFormatType_32BGRA, 960, 540);
+        auto made = pool->makeBuffer();
+        XCTAssertTrue(made.ok());
+        media::PixelBuffer target = std::move(made).value();
+        auto textures = created.value()->textureCache().textures(picture->picture);
+        auto lookup = [&](const VideoLayer &, std::size_t, render::TextureSet &out) {
+            out = textures.value();
+            return true;
+        };
+        auto rendered = created.value()->renderAndWait(graph, lookup, render::PixelBufferTarget{target});
+        XCTAssertTrue(rendered.ok() && rendered->skippedLayers.empty());
+        return grayOf(target.get());
+    };
+    const GrayImage sharp = composite(1.5);
+    const GrayImage magnified = composite(1.0);
+    const GrayImage written = grayOf(decoded.at(5).get());
+    const auto picture = media::renderTitle(content, 640, 360, 1.5);
+    const size_t x = size_t(1.5 * (content.x * 640 + picture->geometry.x)) + 6;
+    const size_t y = size_t(1.5 * (content.y * 360 + picture->geometry.y)) + 6;
+    const size_t w = size_t(1.5 * picture->geometry.width) - 12;
+    const size_t hgt = size_t(1.5 * picture->geometry.height) - 12;
+    const double edgesWritten = edgeMeasure(written, x, y, w, hgt);
+    const double edgesSharp = edgeMeasure(sharp, x, y, w, hgt);
+    const double edgesMagnified = edgeMeasure(magnified, x, y, w, hgt);
+    NSLog(@"TITLE 960x540 export of a 640x360 sequence: edge measure %.4f exported, %.4f for the k = 1.5 picture, "
+          @"%.4f for the k = 1 picture magnified",
+          edgesWritten, edgesSharp, edgesMagnified);
+    XCTAssertGreaterThan(edgesWritten, 0.9 * edgesSharp, @"as sharp as the picture drawn texel for pixel");
+    XCTAssertGreaterThan(edgesWritten, 1.1 * edgesMagnified, @"sharper than the sequence's picture magnified");
 }
 
 @end

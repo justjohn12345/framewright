@@ -110,6 +110,11 @@ Result<RenderedTitle> renderTitle(const TitleContent &content, double canvasWidt
 /// A colour matte's picture: 4 x 4 'RGhA' pixels of `colour`, tagged to cover the whole canvas.
 Result<PixelBuffer> renderMatte(const SRGBColour &colour, double canvasWidth, double canvasHeight);
 
+/// The raster scale a generated layer's picture is rendered at for an output of `outputScale` output pixels per
+/// sequence pixel (titles design, section 3): the largest Motion scale its clip reaches (VideoLayer::maxMotionScale)
+/// times max(1, outputScale), never below the sequence's resolution (1). A non-finite or negative input counts as 1.
+double rasterScaleFor(double maxMotionScale, double outputScale);
+
 /// The cache identity of `content` drawn on a `canvasWidth` x `canvasHeight` sequence at raster scale `k` (k is
 /// quantised as rasterScale64 does): what the render thread looks a generated layer's picture up by, without
 /// making its source. A matte's ignores k (its picture has no detail to sharpen).

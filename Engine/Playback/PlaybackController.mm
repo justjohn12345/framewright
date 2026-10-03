@@ -1,5 +1,6 @@
 #include "PlaybackController.h"
 
+#include "../Media/TitleRenderer.h"
 #include "../Render/Scheduler.h"
 
 #import <Foundation/Foundation.h>
@@ -42,6 +43,32 @@ std::string mediaPathForURL(const std::string &url) {
 
 CMTime pictureTimeFor(const VideoLayer &layer, const MediaAsset &asset) {
     return asset.isStill() || layer.isStill ? kCMTimeZero : layer.sourceTime;
+}
+
+std::shared_ptr<const media::GeneratedPictureSource> generatedSourceFor(const VideoLayer &layer, std::int32_t width,
+                                                                        std::int32_t height, double outputScale) {
+    if (!layer.generated) {
+        return nullptr;
+    }
+    return media::makeGeneratedSource(layer.generated, width, height,
+                                      media::rasterScaleFor(layer.maxMotionScale, outputScale));
+}
+
+media::FrameKey pictureKeyFor(const VideoLayer &layer, media::DecodeFormat format, std::int32_t width,
+                              std::int32_t height, double outputScale) {
+    if (!layer.generated) {
+        return media::FrameKey{layer.assetId, format};
+    }
+    return media::FrameKey{layer.assetId, format,
+                           media::generatedKeyFor(*layer.generated, width, height,
+                                                  media::rasterScaleFor(layer.maxMotionScale, outputScale))};
+}
+
+double monitorOutputScale(double viewPixelsPerSequencePixel) {
+    if (!std::isfinite(viewPixelsPerSequencePixel) || viewPixelsPerSequencePixel <= 1.25) {
+        return 1.0;
+    }
+    return viewPixelsPerSequencePixel <= 2.0 ? 2.0 : 4.0;
 }
 
 namespace {
@@ -126,6 +153,9 @@ struct PlaybackController::Core {
 
     std::mutex snapshotMutex; // held only to copy/replace the pointer
     std::shared_ptr<const Project> project;
+    // The monitors' output scale for generated pictures (setGeneratedOutputScale): the frame sources look titles
+    // up at the raster scale it gives, the one the controller's requests and targets render.
+    std::atomic<double> generatedOutputScale{1.0};
     SequenceId sequenceId;
     std::optional<PreviewSolo> solo; // snapshotMutex; the primary source's override (setPreviewSolo)
     uint64_t sequenceGeneration = 0; // snapshotMutex; bumped by setSequence (another sequence)
@@ -358,6 +388,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
                                      rs.solo->identityMotion)
             : Scheduler::renderGraphAt(*sequence, *rs.project, timeForFrame(index, fd));
     const size_t n = graph.layers.size();
+    const double outputScale = generatedOutputScale.load(std::memory_order_acquire);
     // A fresh frame: its status reports only this frame's problems (the view clears lastError
     // with the first frame whose status is ok).
     media::Status status = media::okStatus();
@@ -379,7 +410,8 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
         if (const MediaAsset *asset = rs.project->findAsset(layer.assetId)) {
             const CMTime pictureTime = pictureTimeFor(layer, *asset);
             shown.wantedIndex = asset->isStill() ? 0 : FrameCache::frameIndex(pictureTime, asset->frameDuration);
-            pin = cache->acquire(media::FrameKey{layer.assetId, decodeFormat}, pictureTime);
+            pin = cache->acquire(pictureKeyFor(layer, decodeFormat, sequence->width, sequence->height, outputScale),
+                                 pictureTime);
             bool usable = static_cast<bool>(pin);
             if (usable && request.textureCache) {
                 auto mapped = request.textureCache->textures(pin.image());
@@ -763,6 +795,7 @@ void PlaybackController::retargetLocked(CMTime at, double rate, CMTime window, d
             target.trackIndex = -1;
             const MediaAsset *asset = project_->findAsset(layer.assetId);
             target.sourceTime = asset ? pictureTimeFor(layer, *asset) : layer.sourceTime;
+            target.generated = generatedSourceFor(layer, sequence->width, sequence->height, generatedOutputScale_);
             // A reversed clip's pictures run backwards in its media as the timeline advances: its
             // lookahead goes the other way (reverse play of a reversed clip decodes forward).
             target.direction = backward != layer.reversed ? media::DecodeDirection::Backward
@@ -817,7 +850,8 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
         // The picture the frame source looks up (see pictureTimeFor). Already decoded: pinned until
         // the next target, so it is still there when the redraw below looks it up.
         const CMTime pictureTime = pictureTimeFor(layer, *asset);
-        const media::FrameKey key{layer.assetId, core_->decodeFormat};
+        const media::FrameKey key =
+            pictureKeyFor(layer, core_->decodeFormat, sequence->width, sequence->height, generatedOutputScale_);
         if (FrameCache::PinnedFrame cached = cache_->acquire(key, pictureTime)) {
             core_->holdDisplayPin(generation, std::move(cached));
             continue;
@@ -844,7 +878,7 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
                                     hub->postNeedsDisplay();
                                 }
                             },
-                            lane);
+                            lane, generatedSourceFor(layer, sequence->width, sequence->height, generatedOutputScale_));
     }
     postNeedsDisplay();
 }
@@ -858,7 +892,9 @@ bool PlaybackController::firstFramesReadyLocked(CMTime at) const {
     return std::all_of(layers.begin(), layers.end(), [&](const VideoLayer &layer) {
         const MediaAsset *asset = project_->findAsset(layer.assetId);
         return !asset ||
-               cache_->contains(media::FrameKey{layer.assetId, core_->decodeFormat}, pictureTimeFor(layer, *asset));
+               cache_->contains(
+                   pictureKeyFor(layer, core_->decodeFormat, sequence->width, sequence->height, generatedOutputScale_),
+                   pictureTimeFor(layer, *asset));
     });
 }
 
@@ -919,6 +955,41 @@ void PlaybackController::setPreviewSolo(std::optional<PreviewSolo> solo) {
 std::optional<PlaybackController::PreviewSolo> PlaybackController::previewSolo() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return solo_;
+}
+
+void PlaybackController::setGeneratedOutputScale(double scale) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!std::isfinite(scale) || scale < 1.0) {
+        scale = 1.0;
+    }
+    if (scale == generatedOutputScale_) {
+        return;
+    }
+    generatedOutputScale_ = scale;
+    core_->generatedOutputScale.store(scale, std::memory_order_release);
+    core_->snapshotVersion.fetch_add(1, std::memory_order_acq_rel); // the frame sources look up again
+    switch (state_) {
+    case PlaybackState::Playing:
+        lastRetarget_ = kCMTimeInvalid; // the tick thread retargets with the new pictures at once
+        break;
+    case PlaybackState::Prerolling:
+        preroll_.retargeted = false;
+        requestDisplayFramesLocked(preroll_.at);
+        break;
+    case PlaybackState::Stopped:
+    case PlaybackState::Scrubbing:
+        requestDisplayFramesLocked(displayTime_); // renders the titles shown now; asks for a redraw
+        displayChangedAt_ = std::chrono::steady_clock::now();
+        stoppedLookaheadPending_ = true;
+        break;
+    }
+    postNeedsDisplay();
+    tickCv_.notify_all();
+}
+
+double PlaybackController::generatedOutputScale() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return generatedOutputScale_;
 }
 
 // MARK: Transport internals (mutex_ held)

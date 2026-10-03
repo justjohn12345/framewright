@@ -35,6 +35,7 @@ using namespace ve::facade;
     __weak VEPreviewView *_outputView; // mirrors the program (a second display)
     __weak VEWaveformView *_waveformView; // draws the program view's scope
     BOOL _showsClippingOverlay;           // the program view tints clipped pixels
+    CGSize _sequenceSize;                 // of the published sequence, for the views' scale (0 x 0: none)
 }
 
 - (instancetype)initWithRouter:(std::shared_ptr<media::BackendRouter>)router
@@ -108,13 +109,43 @@ using namespace ve::facade;
     if (previous != nil && previous != view) {
         previous.clippingOverlay = NO;
     }
+    if (previous != nil && previous != view) {
+        previous.drawableSizeHandler = nil;
+    }
     _view = view;
     if (view != nil) {
         [view setFrameSource:_playback->frameSource()];
         view.clippingOverlay = _showsClippingOverlay;
         [self installWaveformReader];
+        [self followDrawableSizeOf:view];
         [view renderOnce];
     }
+    [self updateGeneratedOutputScale];
+}
+
+/// Titles are rendered for the largest view showing the program (PlaybackController::setGeneratedOutputScale):
+/// follows `view`'s size.
+- (void)followDrawableSizeOf:(VEPreviewView *)view {
+    __weak VEProgramMonitor *weakSelf = self;
+    view.drawableSizeHandler = ^(CGSize) {
+      [weakSelf updateGeneratedOutputScale];
+    };
+}
+
+/// The output scale for the controller's generated pictures: monitorOutputScale of the largest attached view (in
+/// drawable pixels per sequence pixel, as the view fits the sequence into its drawable).
+- (void)updateGeneratedOutputScale {
+    VE_ASSERT_MAIN();
+    double largest = 0.0;
+    VEPreviewView *views[] = {_view, _outputView};
+    for (VEPreviewView *view : views) {
+        if (view == nil || !(_sequenceSize.width > 0) || !(_sequenceSize.height > 0)) {
+            continue;
+        }
+        const CGSize drawable = view.drawableSize;
+        largest = std::max(largest, std::min(drawable.width / _sequenceSize.width, drawable.height / _sequenceSize.height));
+    }
+    _playback->setGeneratedOutputScale(playback::monitorOutputScale(largest));
 }
 
 - (void)attachWaveformView:(nullable VEWaveformView *)view {
@@ -177,6 +208,8 @@ using namespace ve::facade;
     // A mirror source: the same frames as the program view, without adding to its counters.
     [view setFrameSource:_playback->frameSource(playback::PlaybackController::SourceRole::Mirror)];
     view.paused = !isRunning(_playback->state());
+    [self followDrawableSizeOf:view];
+    [self updateGeneratedOutputScale];
     [view renderOnce];
 }
 
@@ -187,7 +220,9 @@ using namespace ve::facade;
     if (view != nil) {
         [view setFrameSource:ve::render::PreviewFrameSource{}];
         view.paused = YES;
+        view.drawableSizeHandler = nil;
     }
+    [self updateGeneratedOutputScale];
 }
 
 - (nullable VEPreviewView *)outputView {
@@ -215,12 +250,19 @@ using namespace ve::facade;
 - (void)publishProject:(const Project &)project generation:(uint64_t)generation {
     VE_ASSERT_MAIN();
     auto snapshot = std::make_shared<const Project>(project);
+    const Sequence *sequence = project.activeSequence();
+    const CGSize size = sequence ? CGSizeMake(sequence->width, sequence->height) : CGSizeZero;
+    const bool resized = !CGSizeEqualToSize(size, _sequenceSize);
+    _sequenceSize = size;
     if (!_published || _generation != generation) {
         _published = true;
         _generation = generation;
         _playback->setSequence(std::move(snapshot), project.activeSequenceId);
     } else {
         _playback->modelChanged(std::move(snapshot));
+    }
+    if (resized) {
+        [self updateGeneratedOutputScale];
     }
 }
 

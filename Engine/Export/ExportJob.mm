@@ -201,6 +201,21 @@ media::EncodeSettings effectiveSettings(const ExportRequest &request, const Sequ
     return encode;
 }
 
+/// Output pixels per sequence pixel of an export of `sequence` with `encode` (the sequence fitted into the output as
+/// the compositor fits it): the output scale generated pictures are rendered for (a 1080p export of a 720p sequence
+/// draws its titles at 1.5 times the sequence's resolution). 1 without video.
+double outputScaleOf(const media::EncodeSettings &encode, const Sequence &sequence) {
+    if (!encode.video || sequence.width <= 0 || sequence.height <= 0) {
+        return 1.0;
+    }
+    const render::PixelRect fitted = render::fitRect(sequence.width, sequence.height, encode.video->width,
+                                                     encode.video->height);
+    if (fitted.isEmpty()) {
+        return 1.0;
+    }
+    return std::min(double(fitted.width) / sequence.width, double(fitted.height) / sequence.height);
+}
+
 } // namespace
 
 // MARK: - Run: one export's working state
@@ -212,6 +227,8 @@ struct ExportJob::Run {
     const CMTime frameDuration;
     const int64_t totalFrames;
     media::EncodeSettings encode;
+    /// Output pixels per sequence pixel (outputScaleOf): titles and mattes are rendered for it.
+    const double outputScale;
 
     std::unique_ptr<render::Compositor> compositor;
     std::shared_ptr<media::DecodePool> pool;
@@ -230,7 +247,7 @@ struct ExportJob::Run {
 
     Run(ExportJob &j, const Project &p, const Sequence &s)
         : job(j), project(p), sequence(s), frameDuration(s.frameDuration), totalFrames(frameCount(s)),
-          encode(effectiveSettings(j.request_, s)) {}
+          encode(effectiveSettings(j.request_, s)), outputScale(outputScaleOf(encode, s)) {}
 
     bool cancelled() const { return job.cancelled_.load(std::memory_order_acquire); }
 
@@ -302,6 +319,8 @@ struct ExportJob::Run {
                 // The time the picture is looked up by (see playback::pictureTimeFor).
                 const MediaAsset *asset = project.findAsset(layer.assetId);
                 target.sourceTime = asset ? playback::pictureTimeFor(layer, *asset) : layer.sourceTime;
+                // A title or a matte: rendered for the export's output (its own raster scale).
+                target.generated = playback::generatedSourceFor(layer, sequence.width, sequence.height, outputScale);
                 // A reversed clip needs its media backwards: decode windows before the picture.
                 target.direction = layer.reversed ? media::DecodeDirection::Backward : media::DecodeDirection::Forward;
                 target.priority = static_cast<int>(10000 - static_cast<int64_t>(k) * 10 + static_cast<int64_t>(i));
@@ -321,6 +340,8 @@ struct ExportJob::Run {
             return makeError(MediaErrorCode::InvalidState, "a clip refers to an asset that is not in the project");
         }
         const CMTime pictureTime = playback::pictureTimeFor(layer, *asset);
+        const media::FrameKey key =
+            playback::pictureKeyFor(layer, pool->decodeFormat(), sequence.width, sequence.height, outputScale);
         const auto deadline = std::chrono::steady_clock::now() + job.options_.frameTimeout;
         // Refreshes that found the stream exactly where the previous one left it (no frame
         // decoded, no seek in between): only such refreshes in a row count towards giving up, so
@@ -328,12 +349,16 @@ struct ExportJob::Run {
         // progresses.
         int fruitlessRefreshes = 0;
         std::optional<std::pair<uint64_t, uint64_t>> lastRefreshMark; // (framesDecoded, seeks)
+        // What the picture is: the media's name, or a title's first line.
+        const std::string subject = !layer.generated        ? "“" + displayName(*asset) + "”"
+                                    : layer.generated->isTitle() ? "the title “" + titleDisplayName(layer.generated->title()) + "”"
+                                                                 : std::string("a colour matte");
         auto describe = [&](const std::string &what) {
             return "Frame " + std::to_string(frameIndex) + " (" + secondsText(timeForFrame(frameIndex, frameDuration)) +
-                   ") cannot be exported: “" + displayName(*asset) + "” " + what;
+                   ") cannot be exported: " + subject + " " + what;
         };
         for (;;) {
-            pin = cache.acquire(pool->frameKey(layer.assetId), pictureTime);
+            pin = cache.acquire(key, pictureTime);
             if (pin) {
                 auto mapped = compositor->textureCache().textures(pin.image());
                 if (!mapped.ok()) {
@@ -356,7 +381,7 @@ struct ExportJob::Run {
             if (stream && (stream->idle || stream->failed)) {
                 // The step that settled the stream may have published the picture after the
                 // lookup above.
-                if (cache.contains(pool->frameKey(layer.assetId), pictureTime)) {
+                if (cache.contains(key, pictureTime)) {
                     continue;
                 }
                 if (stream->failed || stream->error) {

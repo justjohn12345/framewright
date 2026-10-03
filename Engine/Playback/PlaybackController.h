@@ -106,6 +106,7 @@
 #include "../Media/BackendRouter.h"
 #include "../Media/DecodePool.h"
 #include "../Media/FrameCache.h"
+#include "../Media/GeneratedSource.h"
 #include "../Model/Project.h"
 #include "../Render/PreviewFrame.h"
 
@@ -138,6 +139,25 @@ CMTime pictureTimeFor(const VideoLayer &layer, const MediaAsset &asset);
 
 /// Absolute POSIX path of a model media URL (the model may hold "file://" URLs or plain paths).
 std::string mediaPathForURL(const std::string &url);
+
+/// The picture source of a generated layer (a title or a matte, VideoLayer::generated) of a `width` x `height`
+/// sequence for an output of `outputScale` output pixels per sequence pixel (its raster scale:
+/// media::rasterScaleFor(layer.maxMotionScale, outputScale)); null for a layer of media. Playback and export give it
+/// to the decode pool with the layer's target or request (DecodePool::DecodeTarget::generated).
+std::shared_ptr<const media::GeneratedPictureSource> generatedSourceFor(const VideoLayer &layer, std::int32_t width,
+                                                                        std::int32_t height, double outputScale);
+
+/// The frame cache key of `layer`'s picture in a pool decoding `format`: the asset's decoded frames, or a generated
+/// layer's picture (generatedSourceFor's key, computed without making the source: the render thread looks pictures
+/// up by it).
+media::FrameKey pictureKeyFor(const VideoLayer &layer, media::DecodeFormat format, std::int32_t width,
+                              std::int32_t height, double outputScale);
+
+/// The monitors' output scale for generated pictures, from the largest view showing the program, in drawable pixels
+/// per sequence pixel (titles design, section 3): 1 while no view is larger than the sequence by more than a
+/// quarter (a half-size monitor and an export at the sequence's size then share one picture), else the next power of
+/// two (2, at most 4), so a window resize rarely renders anything again.
+double monitorOutputScale(double viewPixelsPerSequencePixel);
 
 enum class PlaybackState {
     Stopped,    ///< Paused (showing displayTime).
@@ -341,6 +361,14 @@ class PlaybackController {
     void setPreviewSolo(std::optional<PreviewSolo> solo);
     std::optional<PreviewSolo> previewSolo() const;
 
+    /// The output scale (target pixels per sequence pixel, at least 1) the frame sources' generated pictures are
+    /// rendered for (monitorOutputScale of the largest view; the facade sets it as views are attached and resized).
+    /// A change renders the titles on screen again at the new scale, as an edit would: the paused picture's
+    /// requests, the stopped lookahead and the playing targets follow; until a picture lands the frame sources keep
+    /// the previous one. Default 1.
+    void setGeneratedOutputScale(double scale);
+    double generatedOutputScale() const;
+
     // MARK: Transport
 
     /// From stopped (or scrubbing): plays forward at 1x from the playhead, whatever rate a shuttle
@@ -533,6 +561,7 @@ class PlaybackController {
     std::vector<audio::AudioOutputEvent> outputEvents_;
     std::optional<PlaybackError> lastError_;
     std::optional<PreviewSolo> solo_; // setPreviewSolo (also in the core, for the frame sources)
+    double generatedOutputScale_ = 1.0; // setGeneratedOutputScale (also in the core, for the frame sources)
     std::map<AssetId, std::string> registeredPaths_;
     std::map<AssetId, media::RoutedMediaInfo> routing_;
     bool stopTick_ = false;

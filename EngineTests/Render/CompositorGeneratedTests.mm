@@ -11,6 +11,7 @@
 #include "../Media/TextCard.h"
 #include "CompositorTestSupport.h"
 
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -407,6 +408,77 @@ test::GrayImage grayOf(const Image &image) {
     XCTAssertEqual(half.at(10, 10)[2], 0);
     XCTAssertEqual(half.at(kWidth / 4 + 2, kHeight / 4 + 2)[2], 64);
     XCTAssertEqual(half.at(kWidth / 4 - 2, kHeight / 4 - 2)[2], 0);
+}
+
+- (void)testColoursAreExactInTheExportsFormats {
+    // What the export hands its encoder: the compositor's conversion into 'x420' and '420v' (BT.709, video range).
+    // White text and a white matte are video white (940 / 235, chroma 512 / 128), black is 64 / 16, and an sRGB
+    // colour is its BT.709 encoding to within one code: a matte's exactly (its picture is half float), a title's as
+    // its 8-bit picture holds it (each component to the nearest 255th).
+    auto encode10 = [](const SRGBColour &c) {
+        const double y = 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
+        return std::array<double, 3>{64.0 + 876.0 * y, 512.0 + 896.0 * (c.blue - y) / 1.8556,
+                                     512.0 + 896.0 * (c.red - y) / 1.5748};
+    };
+    auto centre = [](const PixelBuffer &buffer) {
+        const bool ten = media::isTenBitPixelFormat(buffer.pixelFormat());
+        CVPixelBufferLockBaseAddress(buffer.get(), kCVPixelBufferLock_ReadOnly);
+        auto at = [&](size_t plane, size_t x, size_t y, size_t component, size_t components) {
+            const auto *row = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddressOfPlane(buffer.get(), plane)) +
+                              y * CVPixelBufferGetBytesPerRowOfPlane(buffer.get(), plane);
+            if (!ten) {
+                return double(row[x * components + component]);
+            }
+            uint16_t v;
+            std::memcpy(&v, row + (x * components + component) * 2, 2);
+            return double(v >> 6);
+        };
+        const std::array<double, 3> codes{at(0, kWidth / 2, kHeight / 2, 0, 1), at(1, kWidth / 4, kHeight / 4, 0, 2),
+                                          at(1, kWidth / 4, kHeight / 4, 1, 2)};
+        CVPixelBufferUnlockBaseAddress(buffer.get(), kCVPixelBufferLock_ReadOnly);
+        return codes;
+    };
+    for (const SRGBColour colour : {kWhite, kBlack, SRGBColour{0.25, 0.5, 1.0}, SRGBColour{0.8, 0.3, 0.1}}) {
+        auto matte = media::renderMatte(colour, kWidth, kHeight);
+        XCTAssertTrue(matte.ok());
+        if (!matte.ok()) {
+            return;
+        }
+        VideoLayer layer = makeLayer(1);
+        layer.isStill = true;
+        layer.generated = GeneratedContent::makeMatte(colour);
+        // A title's fill over the same colour: a large block letter's inside is the fill colour exactly.
+        TitleContent big;
+        big.text = "\u2588"; // a full block
+        big.size = 0.6;
+        big.shadow = false;
+        big.fillColour = colour;
+        const media::RenderedTitle title = rendered(big, 1.0);
+        VideoLayer titleOver = titleLayer(big);
+        for (const OSType format :
+             {kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange}) {
+            const double scale = format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ? 1.0 : 0.25;
+            const SRGBColour eightBit{std::round(colour.red * 255) / 255, std::round(colour.green * 255) / 255,
+                                      std::round(colour.blue * 255) / 255};
+            for (const bool useTitle : {false, true}) {
+                const std::array<double, 3> expected = encode10(useTitle ? eightBit : colour);
+                RenderGraph graph = makeGraph(kWidth, kHeight);
+                graph.layers.push_back(useTitle ? titleOver : layer);
+                PixelBuffer target = makeBuffer(format, kWidth, kHeight);
+                auto result = renderLayers(*_compositor, graph,
+                                           {texturesFor(*_compositor, useTitle ? title.picture : matte.value())},
+                                           PixelBufferTarget{target});
+                XCTAssertTrue(result.ok() && result->status.ok());
+                const std::array<double, 3> codes = centre(target);
+                for (int c = 0; c < 3; ++c) {
+                    XCTAssertEqualWithAccuracy(codes[size_t(c)], expected[size_t(c)] * scale, 1.0,
+                                               @"%s of (%.2f, %.2f, %.2f), %s, component %d",
+                                               useTitle ? "a title's fill" : "a matte", colour.red, colour.green,
+                                               colour.blue, scale == 1.0 ? "x420" : "420v", c);
+                }
+            }
+        }
+    }
 }
 
 @end

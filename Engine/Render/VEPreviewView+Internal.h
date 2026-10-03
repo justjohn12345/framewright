@@ -29,6 +29,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// call it.
 - (void)setWorkingFrameReader:(ve::render::WorkingFrameReader)reader;
 
+/// Called on the main thread with the drawable's new size in pixels whenever it changes (a resize, a move to a
+/// screen of another backing scale), so the owner can follow the view's size (the program monitor renders its
+/// titles for the largest of its views: PlaybackController::setGeneratedOutputScale). Nil (the default) clears it.
+@property (nonatomic, copy, nullable) void (^drawableSizeHandler)(CGSize size);
+
 /// Whether the output pass tints clipped pixels (TextureTarget::clippingOverlay) from the next frame on:
 /// the program monitor's clipping overlay. Any thread; call -renderOnce to show it on a paused picture.
 /// Snapshots never show it.

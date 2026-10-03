@@ -301,6 +301,7 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
     CAMetalLayer *_metalLayer;
     BOOL _paused;
     id _occlusionObserver;
+    void (^_drawableSizeHandler)(CGSize size);
 }
 
 // MARK: - Lifetime
@@ -514,6 +515,9 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
     _state->drawableWidth.store(size.width);
     _state->drawableHeight.store(size.height);
     [self requestRedraw];
+    if (_drawableSizeHandler != nil) {
+        _drawableSizeHandler(size);
+    }
 }
 
 // Redraw the current frame (at a new size, or after it could not be presented): next vsync when
@@ -680,6 +684,14 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
 - (void)setWorkingFrameReader:(WorkingFrameReader)reader {
     std::lock_guard<std::mutex> lock(_state->hookMutex);
     _state->workingFrameReader = std::move(reader);
+}
+
+- (void)setDrawableSizeHandler:(void (^)(CGSize))handler {
+    _drawableSizeHandler = [handler copy];
+}
+
+- (void (^)(CGSize))drawableSizeHandler {
+    return _drawableSizeHandler;
 }
 
 - (void)setClippingOverlay:(BOOL)overlay {
