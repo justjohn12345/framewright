@@ -166,7 +166,7 @@ final class ProgramMonitorZoomTests: XCTestCase {
         XCTAssertNil(store.kenBurnsExtent)
         XCTAssertEqual(stage(), KenBurnsViewport(sequence: sequence, monitor: monitor, margin: 0),
                        "closed: the frame fitted again")
-        store.programZoom.zoom = .percent(50)
+        store.programZoom.set(.percent(50))
         store.showKenBurns(span: model.spanID)
         store.closeKenBurns()
         XCTAssertEqual(store.programZoom.zoom, .percent(50), "a level chosen by hand stays")
@@ -279,6 +279,62 @@ final class ProgramMonitorZoomTests: XCTestCase {
         XCTAssertEqual(store.programZoom.zoom, .fit, "the bin took the focus")
     }
 
+    /// The zoom holds still while a box is dragged (review fix round, finding 4): the keys, the control and Shift-Z
+    /// change nothing until the drag ends; a title box's drag holds it the same way (it registers its Escape).
+    func testTheZoomHoldsStillDuringADrag() async throws {
+        let clip = try await longClip()
+        let model = try openEditor(on: clip, mode: .transform)
+        store.focusProgramMonitor()
+        store.programZoom.noteFitPercent(40)
+        model.applyDrag(.body(.start), origin: model.start, translation: CGSize(width: 100, height: 0))
+        XCTAssertTrue(store.isGestureActive)
+        store.zoomIn()
+        store.programZoom.set(.percent(50))
+        store.zoomOut()
+        XCTAssertEqual(store.programZoom.zoom, .fit, "no zoom during the drag")
+        model.endDrag()
+        store.zoomIn()
+        XCTAssertEqual(store.programZoom.zoom, .percent(50), "after it")
+        store.cancelActiveGesture = {} // as a title box drag registers itself
+        store.zoomFocusedToFit()
+        store.programZoom.set(.percent(100))
+        XCTAssertEqual(store.programZoom.zoom, .percent(50), "no zoom during a title box drag either")
+        store.cancelActiveGesture = nil
+        store.zoomFocusedToFit()
+        XCTAssertEqual(store.programZoom.zoom, .fit)
+    }
+
+    /// A level chosen by hand that would leave the editor's boxes off the monitor gives way to Fit when the editor
+    /// opens or a drag ends; a level that shows them stays; while the editor is open Shift-Z fits the monitor
+    /// whatever has the focus (review fix round, finding 5).
+    func testAHandChosenLevelGivesWayToFitWhenTheBoxesWouldBeOffTheMonitor() async throws {
+        let clip = try await longClip()
+        store.programZoom.noteStage(.init(monitor: monitor, pointsPerPixel: pointsPerPixel, sequence: sequence))
+        store.programZoom.set(.percent(200)) // chosen with the timeline focused
+        let model = try openEditor(on: clip, mode: .transform)
+        XCTAssertEqual(store.programZoom.zoom, .fit, "at 200 % the boxes (the frame) would be off the monitor")
+        store.closeKenBurns()
+        store.programZoom.set(.percent(25))
+        store.showKenBurns(span: model.spanID)
+        let reopened = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(store.programZoom.zoom, .percent(25), "25 % shows them")
+        reopened.applyDrag(.corner(.end, .bottomRight), origin: reopened.end, translation: CGSize(width: 9000, height: 5000))
+        XCTAssertEqual(store.programZoom.zoom, .percent(25), "not during the drag")
+        reopened.endDrag()
+        XCTAssertEqual(store.programZoom.zoom, .fit, "the drag ended with the box past the 25 % stage")
+        assertShown([reopened.start, reopened.end], on: stage(), "at Fit")
+
+        store.programZoom.set(.percent(25))
+        store.focusArea = .timeline
+        let timelineZoom = store.pixelsPerSecond
+        store.zoomFocusedToFit()
+        XCTAssertEqual(store.programZoom.zoom, .fit, "Shift-Z fits the monitor while the editor is open")
+        XCTAssertEqual(store.pixelsPerSecond, timelineZoom, "not the timeline")
+        store.closeKenBurns()
+        store.zoomFocusedToFit()
+        XCTAssertEqual(store.programZoom.zoom, .fit)
+    }
+
     // MARK: Reset
 
     /// Reset Start and Reset End: Transform puts the box back where the clip sits without the move (its own
@@ -361,7 +417,7 @@ final class ProgramMonitorZoomTests: XCTestCase {
         XCTAssertLessThan(stage().scale, standard.scale)
 
         let documents = DocumentController(store: store, defaults: try makeTestDefaults("program-zoom-window"))
-        store.programZoom.zoom = .percent(50)
+        store.programZoom.set(.percent(50))
         let window = HostedView(ContentView(store: store, documents: documents), size: NSSize(width: 1400, height: 900))
         defer { window.close() }
         try await writePicture(of: window, to: directory.appendingPathComponent("3-window-zoom-50-and-reset-buttons.png"))

@@ -599,6 +599,7 @@ final class KenBurnsModel: ObservableObject {
         }
         finishDrag()
         readBoxes()
+        store.kenBurnsDragDidEnd(self)
     }
 
     /// Escape (or Undo) mid-drag, or a drag the system abandoned: reverts what the drag did. The

@@ -373,6 +373,8 @@ final class ProjectStore: ObservableObject {
         playhead.apply(engine.playbackStatus)
         // First launch (or a layout that was fitting): the timeline gets its rows' height, stored.
         layout.adoptInitialTimelineHeight(rowsHeight: timelineContent.rowsHeightWithoutLanes)
+        // The monitor's zoom holds still during a drag (a box on it would leave the pointer).
+        programZoom.isFrozen = { [weak self] in self?.isGestureActive ?? false }
     }
 
     deinit {
@@ -785,10 +787,11 @@ final class ProjectStore: ObservableObject {
         zoom(by: 1 / 1.5, anchorX: timelineModel.x(forTime: playheadTime.secondsOrZero))
     }
 
-    /// Shift-Z (Final Cut's Zoom to Fit): the program monitor back to Fit while it has the focus, else the whole
-    /// sequence in the timeline.
+    /// Shift-Z (Final Cut's Zoom to Fit): the program monitor back to Fit while it has the focus or the Ken Burns
+    /// editor is open, else the whole sequence in the timeline.
     func zoomFocusedToFit() {
-        if programMonitorFocused {
+        // While the Ken Burns editor is open its boxes are what Fit is for, whatever has the focus.
+        if programMonitorFocused || kenBurns != nil {
             programZoom.fit()
             return
         }
@@ -1304,6 +1307,26 @@ final class ProjectStore: ObservableObject {
         kenBurnsExtent = model.monitorExtent
     }
 
+    /// A drag in the open editor ended: at a zoom level chosen by hand that leaves its boxes off the monitor, back
+    /// to Fit (which shows them).
+    func kenBurnsDragDidEnd(_ model: KenBurnsModel) {
+        guard model === kenBurns else { return }
+        keepKenBurnsBoxesVisible()
+    }
+
+    /// The editor and its mode last shown (syncProgramPreview notices an opening or a switch by it).
+    private struct EditorShown: Equatable {
+        let span: VESpanID
+        let mode: KenBurnsMode
+    }
+
+    private var kenBurnsShown: EditorShown?
+
+    private func keepKenBurnsBoxesVisible() {
+        guard let kenBurns else { return }
+        programZoom.keepVisible(kenBurnsExtent ?? CGRect(origin: .zero, size: kenBurns.sequenceSize))
+    }
+
     /// Remembers the Ken Burns editor's mode for a span (an entry point with an intent); the open
     /// editor on that span switches to it.
     func rememberKenBurnsMode(_ mode: KenBurnsMode, for span: VESpanID) {
@@ -1322,6 +1345,13 @@ final class ProjectStore: ObservableObject {
         if kenBurnsMode != mode { kenBurnsMode = mode }
         let extent = kenBurns?.monitorExtent
         if kenBurnsExtent != extent { kenBurnsExtent = extent }
+        // The editor opened (or switched span or mode): a zoom level chosen by hand that would leave its boxes off
+        // the monitor gives way to Fit.
+        let shown = kenBurns.map { EditorShown(span: $0.spanID, mode: $0.mode) }
+        if shown != kenBurnsShown {
+            kenBurnsShown = shown
+            keepKenBurnsBoxesVisible()
+        }
         if let kenBurns, kenBurns.mode == .kenBurns {
             let clip = kenBurns.clip.clipID
             if engine.programPreviewSoloClipID != clip || !engine.programPreviewSoloIdentityMotion {

@@ -85,6 +85,10 @@ struct ProgramMonitorLayout<Picture: View>: View {
                 .onAppear { MonitorFrame.programArea = geometry.frame(in: .global) }
                 .onChange(of: geometry.frame(in: .global)) { _, area in MonitorFrame.programArea = area }
                 .onChange(of: fitPercent, initial: true) { _, percent in zoom.noteFitPercent(percent) }
+                .onChange(of: ProgramMonitorZoom.Stage(monitor: geometry.size, pointsPerPixel: pointsPerPixel,
+                                                       sequence: sequenceSize), initial: true) { _, stage in
+                    zoom.noteStage(stage)
+                }
             }
             .overlay(alignment: .topLeading) {
                 if let span = store.selectedEffectSpan, editor == nil, span.kind == .opacity || span.kind == .gain {

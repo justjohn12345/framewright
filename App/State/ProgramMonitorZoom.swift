@@ -26,15 +26,55 @@ enum ProgramZoom: Hashable {
 /// Command-minus while the monitor has the keyboard focus, Shift-Z for Fit). Published on its own so that a
 /// change redraws only the monitor's layout. `fitPercent` is what Fit shows now (the layout reports it), so
 /// zooming in from Fit goes to the next level above it and zooming out to the next level below, as in Final Cut.
+/// Every change is refused while `isFrozen` says a drag on the monitor is in progress (a box would leave the
+/// pointer). A fixed level that does not show the Ken Burns editor's boxes gives way to Fit when the editor opens
+/// or a drag ends (`keepVisible`).
 @MainActor
 final class ProgramMonitorZoom: ObservableObject {
-    @Published var zoom: ProgramZoom = .fit
+    @Published private(set) var zoom: ProgramZoom = .fit
     /// The percentage the frame is shown at while at Fit (one sequence pixel per screen pixel is 100), as last
     /// laid out; 100 until the monitor reports one.
     private(set) var fitPercent: Double = 100
+    /// The monitor's area (points), points per screen pixel and the sequence's frame size, as last laid out
+    /// (`noteStage`); zero until then.
+    private(set) var monitor: CGSize = .zero
+    private(set) var pointsPerPixel: CGFloat = 1
+    private(set) var sequence: CGSize = .zero
+    /// Whether a drag on the monitor is in progress (`ProjectStore.isGestureActive`): the zoom stays as it is.
+    var isFrozen: () -> Bool = { false }
 
     func noteFitPercent(_ percent: Double) {
         if percent.isFinite, percent > 0 { fitPercent = percent }
+    }
+
+    /// What the program monitor's layout lays out (it reports a change, `noteStage`).
+    struct Stage: Equatable {
+        var monitor: CGSize
+        var pointsPerPixel: CGFloat
+        var sequence: CGSize
+    }
+
+    func noteStage(_ stage: Stage) {
+        monitor = stage.monitor
+        pointsPerPixel = stage.pointsPerPixel > 0 ? stage.pointsPerPixel : 1
+        sequence = stage.sequence
+    }
+
+    /// A level chosen in the control (refused during a drag).
+    func set(_ level: ProgramZoom) {
+        guard !isFrozen(), level != zoom else { return }
+        zoom = level
+    }
+
+    /// The Ken Burns editor opened or a drag in it ended with its boxes in `region` (sequence pixels: the frame and
+    /// the boxes): at a fixed level that does not show all of it with the handles' padding, back to Fit, which does.
+    func keepVisible(_ region: CGRect) {
+        guard case let .percent(level) = zoom, monitor.width > 0, monitor.height > 0, sequence.width > 0 else { return }
+        let stage = KenBurnsViewport.stage(zoom: .percent(level), mode: nil, extent: nil, sequence: sequence,
+                                           monitor: monitor, pointsPerPixel: pointsPerPixel)
+        if !stage.shows(region, padding: KenBurnsViewport.extentPadding) {
+            fit()
+        }
     }
 
     /// The level shown now, in percent.
@@ -49,7 +89,7 @@ final class ProgramMonitorZoom: ObservableObject {
     func zoomIn() {
         let current = currentPercent
         if let next = ProgramZoom.levels.first(where: { Double($0) > current + 1e-6 }) {
-            zoom = .percent(next)
+            set(.percent(next))
         }
     }
 
@@ -57,12 +97,12 @@ final class ProgramMonitorZoom: ObservableObject {
     func zoomOut() {
         let current = currentPercent
         if let next = ProgramZoom.levels.last(where: { Double($0) < current - 1e-6 }) {
-            zoom = .percent(next)
+            set(.percent(next))
         }
     }
 
     func fit() {
-        if zoom != .fit { zoom = .fit }
+        set(.fit)
     }
 }
 

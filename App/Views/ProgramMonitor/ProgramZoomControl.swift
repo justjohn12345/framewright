@@ -13,7 +13,7 @@ struct ProgramZoomControl: View {
                 .accessibilityIdentifier("ProgramZoom.fit")
             Divider()
             ForEach(ProgramZoom.levels, id: \.self) { level in
-                Button("\(level) %") { zoom.zoom = .percent(level) }
+                Button("\(level) %") { zoom.set(.percent(level)) }
                     .accessibilityIdentifier("ProgramZoom.\(level)")
             }
             Divider()
