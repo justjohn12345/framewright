@@ -202,6 +202,30 @@ final class TitleInspectorTests: XCTestCase {
         XCTAssertEqual(store.clips[b]?.title?.shadow, false)
     }
 
+    func testANudgeMovesEachTitleFromItsOwnValue() async throws {
+        let (_, a, b) = try await titles()
+        store.selection = [a]
+        model.setNumber(.tracking, 10)
+        store.selection = [b]
+        model.setNumber(.tracking, 50)
+        store.selection = [a, b]
+        XCTAssertTrue(model.isMixed(.tracking))
+        model.nudge(.tracking, steps: 1)
+        model.nudge(.tracking, steps: 10)
+        model.endBurst()
+        XCTAssertEqual(store.clips[a]?.title?.tracking, 21)
+        XCTAssertEqual(store.clips[b]?.title?.tracking, 61, "still different")
+        XCTAssertEqual(store.undoActionName, "Change Tracking")
+        store.undo()
+        XCTAssertEqual(store.clips[a]?.title?.tracking, 10, "one undo for the burst")
+        XCTAssertEqual(store.clips[b]?.title?.tracking, 50)
+        // At the range's end each stops there.
+        model.nudge(.tracking, steps: 1000)
+        model.endBurst()
+        XCTAssertEqual(store.clips[a]?.title?.tracking, 1000)
+        XCTAssertEqual(store.clips[b]?.title?.tracking, 1000)
+    }
+
     func testAMatteColourIsSetAsOneStep() async throws {
         _ = try await titles()
         store.playheadTime = frames(150)

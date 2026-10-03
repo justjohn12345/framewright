@@ -252,14 +252,26 @@ final class TitleInspectorModel: ObservableObject {
         handle(applyNumber(parameter, value))
     }
 
-    /// A keyboard nudge by `steps` steps; a burst of them is one undo step.
+    /// A keyboard nudge by `steps` steps of every selected title from its own value (titles that differ keep
+    /// differing, as the inspector's nudges do); a burst of them is one undo step.
     func nudge(_ parameter: VETitleParameter, steps: Double) {
-        guard canEdit(), let current = value(parameter) else { return }
+        let titles = titleTargets
+        guard canEdit(), !titles.isEmpty else { return }
         let group = "title.nudge.\(parameter.rawValue).\(targetKey)"
-        joinBurst(group)
-        handle(engine.performInCoalescingGroup(group) {
-            self.applyNumber(parameter, current + steps * Self.nudgeStep(parameter))
-        })
+        joinBurst(group, mode: .accumulate)
+        let scale = displayScale(parameter)
+        let bounds = range(parameter)
+        var result = VEEditResult.success()
+        for clip in titles {
+            guard let title = clip.title else { continue }
+            let nudged = min(bounds.upperBound, max(bounds.lowerBound,
+                                                    title.number(parameter) * scale + steps * Self.nudgeStep(parameter)))
+            result = engine.performInCoalescingGroup(group) {
+                self.engine.setTitleNumber(nudged / scale, for: parameter, clips: [NSNumber(value: clip.clipID)])
+            }
+            if !result.ok { break }
+        }
+        handle(result)
         scheduleBurstEnd(group)
     }
 
