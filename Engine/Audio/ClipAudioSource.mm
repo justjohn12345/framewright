@@ -139,17 +139,7 @@ int ClipAudioSource::read(int64_t pos, float *dst, int frames) noexcept {
     }
     const int64_t far = lookahead_;
 
-    // Adopt the newest segment the producer published.
-    const Segment segment = segment_.load();
-    if (segment.serial != 0 && segment.serial != consumerSerial_) {
-        consumerSerial_ = segment.serial;
-        consumerValid_ = true;
-        consumerIndex_ = segment.start;
-        consumerExpected_ = segment.position;
-        consumerSegmentPos_ = segment.position;
-        consumerAdopted_.store(segment.serial, std::memory_order_release);
-        publishConsumer();
-    }
+    adoptNewestSegment();
 
     // A request the producer has not answered yet: wait for it unless it is useless for `pos`.
     const uint64_t request = request_.load(std::memory_order_acquire);
@@ -211,6 +201,19 @@ int ClipAudioSource::read(int64_t pos, float *dst, int frames) noexcept {
     consumerExpected_ += n;
     publishConsumer();
     return n;
+}
+
+void ClipAudioSource::adoptNewestSegment() noexcept {
+    const Segment segment = segment_.load();
+    if (segment.serial != 0 && segment.serial != consumerSerial_) {
+        consumerSerial_ = segment.serial;
+        consumerValid_ = true;
+        consumerIndex_ = segment.start;
+        consumerExpected_ = segment.position;
+        consumerSegmentPos_ = segment.position;
+        consumerAdopted_.store(segment.serial, std::memory_order_release);
+        publishConsumer();
+    }
 }
 
 void ClipAudioSource::publishConsumer() noexcept {
