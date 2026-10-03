@@ -381,6 +381,7 @@ double bitsPerPixel(VEExportPreset preset, double quality) {
 @property (nonatomic, readwrite, copy) NSString *backendName;
 @property (nonatomic, readwrite) double wallSeconds;
 @property (nonatomic, readwrite) double averageFramesPerSecond;
+@property (nonatomic, readwrite) BOOL titleFontsChanged;
 - (instancetype)initInternal;
 @end
 
@@ -574,6 +575,7 @@ VEExportSummary *makeExportSummary(const exporting::ExportSummary &s) {
     summary.backendName = toNS(s.writerBackend);
     summary.wallSeconds = s.wallSeconds;
     summary.averageFramesPerSecond = s.averageFps;
+    summary.titleFontsChanged = s.titleFontsChanged;
     return summary;
 }
 

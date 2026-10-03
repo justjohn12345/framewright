@@ -217,6 +217,14 @@ double outputScaleOf(const media::EncodeSettings &encode, const Sequence &sequen
     return std::min(double(fitted.width) / sequence.width, double(fitted.height) / sequence.height);
 }
 
+/// Whether `sequence` has a title on a video track (whose fonts an export depends on).
+bool hasTitles(const Sequence &sequence) {
+    return std::any_of(sequence.videoTracks.begin(), sequence.videoTracks.end(), [](const Track &track) {
+        return std::any_of(track.clips.begin(), track.clips.end(),
+                           [](const Clip &clip) { return clip.generated && clip.generated->isTitle(); });
+    });
+}
+
 } // namespace
 
 // MARK: - Run: one export's working state
@@ -230,6 +238,11 @@ struct ExportJob::Run {
     media::EncodeSettings encode;
     /// Output pixels per sequence pixel (outputScaleOf): titles and mattes are rendered for it.
     const double outputScale;
+    /// The generation of the Mac's fonts when the export started (media::titleFontGeneration): every title of the
+    /// file is keyed with it, so the export's pictures never mix keys. Titles are drawn with the fonts the Mac has
+    /// when each one renders; if the fonts change during the export the summary says so
+    /// (ExportSummary::titleFontsChanged), as a later title may then be drawn with other fonts than an earlier one.
+    const std::uint32_t fontGeneration;
 
     std::unique_ptr<render::Compositor> compositor;
     std::shared_ptr<media::DecodePool> pool;
@@ -248,7 +261,8 @@ struct ExportJob::Run {
 
     Run(ExportJob &j, const Project &p, const Sequence &s)
         : job(j), project(p), sequence(s), frameDuration(s.frameDuration), totalFrames(frameCount(s)),
-          encode(effectiveSettings(j.request_, s)), outputScale(outputScaleOf(encode, s)) {}
+          encode(effectiveSettings(j.request_, s)), outputScale(outputScaleOf(encode, s)),
+          fontGeneration(media::titleFontGeneration()) {}
 
     bool cancelled() const { return job.cancelled_.load(std::memory_order_acquire); }
 
@@ -321,8 +335,8 @@ struct ExportJob::Run {
                 const MediaAsset *asset = project.findAsset(layer.assetId);
                 target.sourceTime = asset ? playback::pictureTimeFor(layer, *asset) : layer.sourceTime;
                 // A title or a matte: rendered for the export's output (its own raster scale).
-                target.generated = playback::generatedSourceFor(layer, sequence.width, sequence.height, outputScale,
-                                                                media::titleFontGeneration());
+                target.generated =
+                    playback::generatedSourceFor(layer, sequence.width, sequence.height, outputScale, fontGeneration);
                 // A reversed clip needs its media backwards: decode windows before the picture.
                 target.direction = layer.reversed ? media::DecodeDirection::Backward : media::DecodeDirection::Forward;
                 target.priority = static_cast<int>(10000 - static_cast<int64_t>(k) * 10 + static_cast<int64_t>(i));
@@ -343,7 +357,7 @@ struct ExportJob::Run {
         }
         const CMTime pictureTime = playback::pictureTimeFor(layer, *asset);
         const media::FrameKey key = playback::pictureKeyFor(layer, pool->decodeFormat(), sequence.width,
-                                                            sequence.height, outputScale, media::titleFontGeneration());
+                                                            sequence.height, outputScale, fontGeneration);
         const auto deadline = std::chrono::steady_clock::now() + job.options_.frameTimeout;
         // Refreshes that found the stream exactly where the previous one left it (no frame
         // decoded, no seek in between): only such refreshes in a row count towards giving up, so
@@ -564,6 +578,7 @@ struct ExportJob::Run {
         summary.frames = encode.video ? next : totalFrames;
         summary.duration = CMTimeMultiply(frameDuration, static_cast<int32_t>(totalFrames));
         summary.audioFrames = audioFramesDone;
+        summary.titleFontsChanged = media::titleFontGeneration() != fontGeneration && hasTitles(sequence);
         summary.bytes = fileSize(destination);
         if (summary.bytes == 0) {
             summary.bytes = bytes; // the destination is not stat-able (unlikely): the size written

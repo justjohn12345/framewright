@@ -168,6 +168,9 @@ typedef NS_ENUM(NSInteger, VEExportAudioCodec) {
 /// Seconds from start to finish.
 @property (nonatomic, readonly) double wallSeconds;
 @property (nonatomic, readonly) double averageFramesPerSecond;
+/// The Mac's fonts changed (Font Book activated or removed a font) while the export ran and the sequence has titles:
+/// titles rendered after the change may use other fonts than those before it. Export again for one set of fonts.
+@property (nonatomic, readonly) BOOL titleFontsChanged;
 - (instancetype)init NS_UNAVAILABLE;
 @end
 

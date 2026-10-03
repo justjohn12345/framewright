@@ -2172,6 +2172,86 @@ std::array<double, 3> centreCodes(CVPixelBufferRef buffer) {
 /// A 960x540 export of a 640x360 sequence renders its title at 1.5 times the sequence's resolution: the export's
 /// cache holds the k = 1.5 picture, and the exported letters are as sharp as that picture drawn texel for pixel,
 /// sharper than the sequence's picture magnified (the edge measure of TextCard.h over the title).
+/// A font activated or removed during an export (review fix round, finding 12): the export keeps the font generation
+/// it started with for every title of the file (its pictures are keyed with it, none with the new one) and its summary
+/// says the fonts changed; an export without a change says nothing.
+- (void)testAFontChangeDuringAnExportIsReported {
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    h.sequence().width = 640;
+    h.sequence().height = 360;
+    const auto first = titleOf("Before", 0.5, 0.5);
+    const auto second = titleOf("After", 0.5, 0.5);
+    addGenerated(h, h.v1, first, 0, 300);
+    const ClipId later = addGenerated(h, h.v1, second, 300, 300);
+    XCTAssertFalse(h.problem().has_value(), @"%s", h.problem().value_or("").c_str());
+    h.load();
+    auto exportOnce = [&](const std::string &name, bool changeFonts, std::uint32_t &startedWith,
+                          std::shared_ptr<media::FrameCache> &cache) -> std::optional<ex::ExportSummary> {
+        ex::ExportRequest request;
+        request.project = std::make_shared<const Project>(h.project);
+        request.sequenceId = h.sequenceId;
+        request.encode.container = media::ContainerFormat::MOV;
+        media::VideoEncodeSettings v;
+        v.codec = media::VideoCodec::ProRes422;
+        v.width = 640;
+        v.height = 360;
+        request.encode.video = v;
+        request.outputPath = _dir + "/" + name;
+        ex::ExportServices services;
+        services.router = h.router;
+        services.cache = cache = std::make_shared<media::FrameCache>();
+        ex::ExportOptions options;
+        options.progressInterval = 0;
+        startedWith = media::titleFontGeneration();
+        auto changed = std::make_shared<std::atomic<bool>>(false);
+        auto result = std::make_shared<std::optional<media::Result<ex::ExportSummary>>>();
+        auto m = std::make_shared<std::mutex>();
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        dispatch_queue_t queue = dispatch_queue_create("com.justjohn12345.framewright.tests.fonts", DISPATCH_QUEUE_SERIAL);
+        auto started = ex::ExportJob::start(
+            std::move(request), std::move(services), options, queue,
+            [changeFonts, changed](const ex::ExportProgress &p) {
+                // Early in the file (the first title is still being written): the Mac's fonts change.
+                if (changeFonts && p.framesDone > 0 && p.framesDone < 200 && !changed->exchange(true)) {
+                    media::advanceTitleFontGeneration();
+                }
+            },
+            [result, m, done](media::Result<ex::ExportSummary> r) {
+                std::lock_guard<std::mutex> l(*m);
+                *result = std::move(r);
+                dispatch_semaphore_signal(done);
+            });
+        XCTAssertTrue(started.ok());
+        if (!started.ok()) {
+            return std::nullopt;
+        }
+        started.value().reset();
+        dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, int64_t(120) * NSEC_PER_SEC));
+        std::lock_guard<std::mutex> l(*m);
+        XCTAssertTrue(result->has_value() && (*result)->ok());
+        XCTAssertEqual(changed->load(), changeFonts, @"the fonts changed while the export ran");
+        if (!result->has_value() || !(*result)->ok()) {
+            return std::nullopt;
+        }
+        return (*result)->value();
+    };
+    std::uint32_t startedWith = 0;
+    std::shared_ptr<media::FrameCache> cache;
+    const auto plain = exportOnce("fonts-unchanged.mov", false, startedWith, cache);
+    XCTAssertTrue(plain.has_value() && !plain->titleFontsChanged);
+    const auto changed = exportOnce("fonts-changed.mov", true, startedWith, cache);
+    XCTAssertTrue(changed.has_value() && changed->titleFontsChanged, @"the summary says the fonts changed");
+    XCTAssertNotEqual(media::titleFontGeneration(), startedWith);
+    // Every title of the file was keyed with the generation the export started with, the later one too.
+    const AssetId asset = h.sequence().findClip(later)->assetId;
+    const media::DecodeFormat format{0, 0, true};
+    XCTAssertTrue(cache->contains(media::FrameKey{asset, format, media::generatedKeyFor(*second, 640, 360, 1.0, startedWith)},
+                                  kCMTimeZero));
+    XCTAssertFalse(cache->contains(
+        media::FrameKey{asset, format, media::generatedKeyFor(*second, 640, 360, 1.0, media::titleFontGeneration())},
+        kCMTimeZero));
+}
+
 - (void)testAnExportLargerThanTheSequenceRendersItsTitlesLarger {
     PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
     h.sequence().width = 640;

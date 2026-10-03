@@ -141,6 +141,10 @@ struct ExportSummary {
     int height = 0;
     double wallSeconds = 0;
     double averageFps = 0;
+    /// The Mac's fonts changed (a font activated or removed) while the export ran and the sequence has titles: titles
+    /// rendered after the change may be drawn with other fonts than those before it (the caller says so; exporting
+    /// again gives one set of fonts).
+    bool titleFontsChanged = false;
 };
 
 using ProgressHandler = std::function<void(const ExportProgress &)>;

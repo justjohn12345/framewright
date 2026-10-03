@@ -423,6 +423,10 @@ final class ExportModel: ObservableObject {
         return startExport()
     }
 
+    /// Added to a finished export's message when the Mac's fonts changed while it ran.
+    static let fontsChangedNote = "The Mac's fonts changed during the export: titles drawn after the change may use "
+        + "other fonts than those before it. Export again to draw them all with the fonts the Mac has now."
+
     /// What the missing-font question says: each font with how many titles use it.
     static func missingFontMessage(_ fonts: [VEMissingTitleFont]) -> String {
         let list = fonts.map { font in
@@ -490,6 +494,7 @@ final class ExportModel: ObservableObject {
                 + "\(size), \(summary.encoderName.isEmpty ? encoder : summary.encoderName), "
                 + String(format: "exported in %.1f s (%.0f fps).", summary.wallSeconds,
                          summary.averageFramesPerSecond)
+                + (summary.titleFontsChanged ? " " + Self.fontsChangedNote : "")
             store.statusMessage = "Exported " + message
             outcome = .succeeded(url: summary.outputURL, message: message)
         } else if let error = error as NSError?, error.domain == VEEngineErrorDomain,
