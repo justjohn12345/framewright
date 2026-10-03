@@ -807,6 +807,11 @@ void PlaybackController::retargetLocked(CMTime at, double rate, CMTime window, d
             // Visible now first (upper layers first), then by proximity.
             target.priority = static_cast<int>(10000 - k * 10 + static_cast<int64_t>(i));
             target.lane = layer.clipId.value();
+            if (k == 0 && !target.generated) {
+                // The picture under `at` is the one requestDisplayFramesLocked asks layer i's lane for:
+                // a stream that would seek there takes that lane's decoder over instead (the hand-off).
+                target.continueScrubLane = config_.scrubLaneBase + i;
+            }
             targets.push_back(std::move(target));
         }
     }
@@ -949,7 +954,7 @@ void PlaybackController::setPreviewSolo(std::optional<PreviewSolo> solo) {
     case PlaybackState::Scrubbing:
         requestDisplayFramesLocked(displayTime_); // decodes the picture shown now; asks for a redraw
         // The stopped lookahead follows the new layers (the audio at the paused frame is unchanged).
-        displayChangedAt_ = std::chrono::steady_clock::now();
+        lookaheadDueAt_ = std::chrono::steady_clock::now() + config_.idleLookaheadDelay;
         stoppedLookaheadPending_ = true;
         break;
     }
@@ -984,7 +989,7 @@ void PlaybackController::setGeneratedOutputScale(double scale) {
     case PlaybackState::Stopped:
     case PlaybackState::Scrubbing:
         requestDisplayFramesLocked(displayTime_); // renders the titles shown now; asks for a redraw
-        displayChangedAt_ = std::chrono::steady_clock::now();
+        lookaheadDueAt_ = std::chrono::steady_clock::now() + config_.idleLookaheadDelay;
         stoppedLookaheadPending_ = true;
         break;
     }
@@ -1102,15 +1107,17 @@ void PlaybackController::dropAudioLocked() {
     join_ = Join{};
 }
 
-void PlaybackController::noteDisplayChangedLocked() {
-    displayChangedAt_ = std::chrono::steady_clock::now();
+void PlaybackController::noteDisplayChangedLocked(bool atRest) {
+    const auto now = std::chrono::steady_clock::now();
+    lookaheadDueAt_ = now + (atRest ? config_.restDelay : config_.idleLookaheadDelay);
+    audioWarmDueAt_ = now + (atRest ? config_.restDelay : config_.audioWarmDelay);
     audioWarm_ = false;
     stoppedLookaheadPending_ = true; // the lookahead follows once the playhead is still
     touchIdleLocked();               // the user is working: keep the output warm
 }
 
 std::chrono::steady_clock::time_point PlaybackController::stoppedLookaheadDueLocked() const {
-    return displayChangedAt_ + config_.idleLookaheadDelay;
+    return lookaheadDueAt_;
 }
 
 void PlaybackController::stoppedLookaheadTickLocked() {
@@ -1140,7 +1147,7 @@ void PlaybackController::warmAudioLocked() {
         return;
     }
     const auto now = std::chrono::steady_clock::now();
-    if (now < displayChangedAt_ + config_.audioWarmDelay) {
+    if (now < audioWarmDueAt_) {
         return;
     }
     const bool faded =
@@ -1237,7 +1244,7 @@ void PlaybackController::pauseLocked(std::optional<CMTime> at) {
     if (!wasPlaying) {
         if (state_ == PlaybackState::Scrubbing) {
             state_ = PlaybackState::Stopped;
-            noteDisplayChangedLocked();
+            noteDisplayChangedLocked(/*atRest*/ true); // the scrub ends here, as endScrub()
             postStatusLocked();
             tickCv_.notify_all();
         }
@@ -1455,7 +1462,8 @@ void PlaybackController::seek(CMTime time, SeekMode mode) {
         state_ = PlaybackState::Stopped;
     }
     displayTime_ = t;
-    noteDisplayChangedLocked();
+    // An exact seek puts the playhead down: the lookahead and the audio get ready at once.
+    noteDisplayChangedLocked(mode == SeekMode::Exact);
     core_->clock.setTime(t);
     publishDisplayLocked();
     requestDisplayFramesLocked(t);
@@ -1572,6 +1580,11 @@ void PlaybackController::scrubTo(CMTime time) {
     const CMTime t = clampLocked(time);
     displayTime_ = t;
     noteDisplayChangedLocked();
+    // The lookahead (the previous place's preparation, or playback's) yields to the scrub: its decodes
+    // stop until the scrub ends and the lookahead follows the new place.
+    if (pool_) {
+        pool_->suspendTargets();
+    }
     core_->clock.setTime(t);
     publishDisplayLocked();
     requestDisplayFramesLocked(t);
@@ -1584,7 +1597,7 @@ void PlaybackController::endScrub() {
         return;
     }
     state_ = PlaybackState::Stopped;
-    noteDisplayChangedLocked();
+    noteDisplayChangedLocked(/*atRest*/ true); // put down here: Space usually follows
     publishDisplayLocked();
     requestDisplayFramesLocked(displayTime_);
     postStatusLocked();
@@ -1779,7 +1792,7 @@ void PlaybackController::tickMain() {
         auto wake = std::chrono::steady_clock::time_point::max();
         const auto now = std::chrono::steady_clock::now();
         if (warmPending) {
-            const auto warmAt = displayChangedAt_ + config_.audioWarmDelay;
+            const auto warmAt = audioWarmDueAt_;
             // Still waiting for the previous run's fade: look again after a tick.
             wake = warmAt > now ? warmAt : now + config_.tickInterval;
         }

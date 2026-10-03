@@ -2193,3 +2193,51 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   9. Choose a few fonts for titles: the family popup lists the last five at the top under Recent.
   10. Open a slice 1 (version 10) project: its titles look as before (but one whose text ends with a line break is
      half a line higher); save, and open it in 0.1.11: refused as too new.
+
+## Play start after a scrub, and the Ken Burns stage zoom (2026-10-03; status in `open-findings.md`)
+- Audio (`ClipAudioSource`): `adoptNewestSegment()` (render thread) adopts the newest published segment without
+  reading; `AudioMixer::render` calls it for every source of a plan that is not running, so stale frames of earlier
+  segments free their ring slots while stopped. The ring and scratch buffer are allocated by the producer thread
+  before it publishes anything (a source is cheap to make under the mixer's and controller's locks); the consumer
+  touches the ring only after adopting a segment.
+- `DecodePool`: `DecodeTarget::continueScrubLane` (a forward media target, `trackIndex` -1): a stream that would
+  seek to the target takes over the parked scrub decoder of `(asset, lane)` if its last request decoded the
+  picture under the target (`ScrubDecoder::positioned`), giving the lane its own decoder (with the interrupt each
+  was opened with); while a request of that lane for that time is pending or decoding it waits
+  (`StepResult::AwaitScrub`, `StreamStats::awaitingScrub`; released when any scrub request ends).
+  `StreamStats::handoffs` counts takeovers. The scrub decoders' map is guarded by the pool mutex; the decoder of
+  the key in flight belongs to the scrub thread. `requestFrame` no longer interrupts the request in flight for the
+  same time and generated key (the newer one is answered from the cache). `suspendTargets()` holds every stream
+  (the step in flight interrupted) until the next `setTargets()`; `Stats::suspended`; `waitUntilIdle` counts
+  suspended streams as idle.
+- `PlaybackController`: `PlaybackConfig::restDelay` (0) replaces `idleLookaheadDelay` and `audioWarmDelay` after
+  `endScrub()`, an exact `seek()` while stopped, and a `pause()` that ends a scrub; `scrubTo()` suspends the
+  pool; `retargetLocked` sets `continueScrubLane = scrubLaneBase + i` on layer i's target at the frame it starts
+  from (the stopped lookahead and the pre-roll). Steps, edits, `setSequence`, the solo and the output scale keep
+  the delays. A test that needs the lookahead held at the previous place after a click sets `restDelay` too
+  (`PausedSeekTests`' two deterministic cases do).
+- App: `ProgramZoom` (`.fit`, `.percent(n)`, `levels` 25/50/75/100/200) and `ProgramMonitorZoom`
+  (`ProjectStore.programZoom`; `zoomIn/zoomOut` step from what is shown, `fitPercent` reported by the layout).
+  `KenBurnsViewport.stage(zoom:mode:extent:sequence:monitor:pointsPerPixel:)` is what `ProgramMonitorLayout` shows;
+  `editor(...)` (Fit) now fits `extent` in Transform mode when it does not fit the margin (`shows(_:padding:)`).
+  `KenBurnsModel.monitorExtent` is read in both modes. `ProgramMonitorLayout` observes the zoom (its initializer
+  keeps the old call sites). `ProjectStore.focusProgramMonitor()` / `programMonitorFocused` (cleared by any
+  `focusArea` assignment and a ruler scrub); `zoomIn()` / `zoomOut()` are focus-aware, `zoomFocusedToFit()` is
+  Shift-Z (`KeyboardController.Action.zoomToFit`; not a menu key equivalent, which would take Shift-Z from text
+  fields). `KenBurnsModel.reset(_:)` / `canReset(_:)`; the bar's buttons `KenBurnsResetStart` / `KenBurnsResetEnd`.
+  `ProgramZoomControl` sits in the program header (`ContentView`).
+- Measurement: `PlayStartMeasurementTests` (EngineTests) in the `Measurements` scheme, skipped by the others;
+  `TEST_RUNNER_FW_PLAYSTART_TRIALS`, `TEST_RUNNER_FW_PLAYSTART_MEDIA` (a label substring),
+  `TEST_RUNNER_FW_PLAYSTART_FILE` (a generated clip instead). Its media are cached in
+  `<testMediaDirectory>-playstart1` (needs the ffmpeg tool).
+- What to check by hand: the list in `open-findings.md` ("For the owner, by hand").
+- Review fix round: `DecodePool::handOff` (taken / wait / neither, one locked decision) replaces the two-step
+  adoption; `scrubWillPositionLocked` waits only for a request in flight or next in line; `Stream::opening` keeps
+  `suspendTargets` off opens, and an open interrupted on request is retried rather than failed. `VEPreviewView`
+  `maximumDrawableSize` and `VEPreviewViewMaximumDrawableDimension` (8192); `PreviewViewRepresentable` and
+  `ProgramMonitorView` pass it; `ProgramMonitorZoom` gained `set(_:)` (the only way to change the level; `zoom` is
+  read-only), `isFrozen` (the store's `isGestureActive`), `noteStage(_:)` / `Stage`, `keepVisible(_:)` and
+  `drawableLimit`; `ProgramMonitorHost` observes it; `ProjectStore.kenBurnsDragDidEnd` (from `KenBurnsModel.endDrag`).
+  The zoom-focus drag gesture is on the layout's picture area. `PreviewDrawableMeasurementTests` joins the
+  `Measurements` scheme. By hand, besides the list in `open-findings.md`: at 200 % open a Motion span (the monitor
+  goes to Fit); type in the editor bar's Start field and use its pickers after dragging a box.

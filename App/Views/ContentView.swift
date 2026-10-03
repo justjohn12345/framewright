@@ -190,6 +190,7 @@ struct ContentView: View {
                     .help("Show the source monitor (⇧⌘2)")
                     .accessibilityIdentifier("ShowSourceMonitor")
                 }
+                ProgramZoomControl(zoom: store.programZoom)
                 Button {
                     store.showSequenceSettings()
                 } label: {

@@ -307,6 +307,19 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
     BOOL _paused;
     id _occlusionObserver;
     void (^_drawableSizeHandler)(CGSize size);
+    CGSize _maximumDrawableSize;
+}
+
+- (CGSize)maximumDrawableSize {
+    return _maximumDrawableSize;
+}
+
+- (void)setMaximumDrawableSize:(CGSize)size {
+    if (CGSizeEqualToSize(size, _maximumDrawableSize)) {
+        return;
+    }
+    _maximumDrawableSize = size;
+    [self updateDrawableSize];
 }
 
 // MARK: - Lifetime
@@ -506,7 +519,19 @@ void renderPreviewFrame(const std::shared_ptr<PreviewState> &statePtr, bool once
     }
     _metalLayer.contentsScale = scale;
     const NSSize bounds = self.bounds.size;
-    const CGSize size = CGSizeMake(std::floor(bounds.width * scale), std::floor(bounds.height * scale));
+    // Within maximumDrawableSize and the absolute limit, aspect kept (the layer stretches it over the bounds).
+    double fit = 1.0;
+    const double width = bounds.width * scale;
+    const double height = bounds.height * scale;
+    if (width > 0 && height > 0) {
+        const CGSize cap = _maximumDrawableSize;
+        const double maxWidth = cap.width > 0 ? std::min<double>(cap.width, VEPreviewViewMaximumDrawableDimension)
+                                              : VEPreviewViewMaximumDrawableDimension;
+        const double maxHeight = cap.height > 0 ? std::min<double>(cap.height, VEPreviewViewMaximumDrawableDimension)
+                                                : VEPreviewViewMaximumDrawableDimension;
+        fit = std::min({1.0, maxWidth / width, maxHeight / height});
+    }
+    const CGSize size = CGSizeMake(std::floor(width * fit), std::floor(height * fit));
     // Compare against the stored size, not the layer's: a collapse to zero is recorded in the
     // state but leaves the layer's drawable size alone (it cannot be zero), so restoring the
     // previous size must still be seen as a change.

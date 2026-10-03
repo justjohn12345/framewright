@@ -37,6 +37,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// called from any thread other than the view's render thread. Swift sees the class as
 /// @MainActor (NS_SWIFT_UI_ACTOR). Release the last reference on the main thread (it stops the
 /// display link and the render thread).
+/// The largest drawable side, in pixels, whatever the view's size (half of Metal's 16384-pixel texture limit:
+/// the working texture and the compositor's intermediate textures stay within it too).
+static const CGFloat VEPreviewViewMaximumDrawableDimension = 8192;
+
 NS_SWIFT_UI_ACTOR
 @interface VEPreviewView : NSView
 
@@ -86,8 +90,16 @@ NS_SWIFT_UI_ACTOR
 @property (atomic, readonly) NSUInteger skippedLayerCount;
 @property (atomic, readonly) NSUInteger missingLayerCount;
 
-/// Pixel size of the drawable (bounds x backing scale).
+/// Pixel size of the drawable: bounds x backing scale, scaled down (aspect kept) to fit
+/// `maximumDrawableSize` when that is set, and never over `VEPreviewViewMaximumDrawableDimension`
+/// pixels a side; the layer stretches a smaller drawable over the view.
 @property (atomic, readonly) CGSize drawableSize;
+
+/// The largest drawable the view composites into (pixels; CGSizeZero, the default: no limit but
+/// `VEPreviewViewMaximumDrawableDimension`). The program monitor at a fixed zoom level sets the
+/// sequence's frame size, so a view larger than that (200 %) composites at most one pixel per
+/// sequence pixel and lets the layer magnify. Main thread.
+@property (nonatomic) CGSize maximumDrawableSize;
 
 /// The error behind what is on screen: Metal setup, an invalid frame, a GPU failure, or the
 /// frame source's report of a picture it could not produce (decode or texture mapping). Nil

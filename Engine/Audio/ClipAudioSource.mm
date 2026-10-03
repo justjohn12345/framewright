@@ -42,8 +42,9 @@ ClipAudioSource::ClipAudioSource(std::shared_ptr<media::BackendRouter> router, A
       unitMirror_(mapping_.reversed
                       ? static_cast<int64_t>(std::llround(CMTimeGetSeconds(mapping_.mirror) * config.sampleRate)) - unitOffset_
                       : 0) {
-    ring_.assign(static_cast<size_t>(capacity_ * channels_), 0.0f);
-    scratch_.assign(static_cast<size_t>(std::max(1, config_.chunkFrames) * channels_), 0.0f);
+    // The ring and the scratch buffer are allocated by the producer thread before it publishes anything
+    // (producerMain): a source is made under the mixer's and the playback controller's locks, and
+    // filling a few megabytes there held up the transport calls waiting for them.
     if (semaphore_create(mach_task_self(), &wakeSemaphore_, SYNC_POLICY_FIFO, 0) != KERN_SUCCESS) {
         wakeSemaphore_ = MACH_PORT_NULL; // the producer then falls back to short sleeps (see waitForWork)
     }
@@ -139,17 +140,7 @@ int ClipAudioSource::read(int64_t pos, float *dst, int frames) noexcept {
     }
     const int64_t far = lookahead_;
 
-    // Adopt the newest segment the producer published.
-    const Segment segment = segment_.load();
-    if (segment.serial != 0 && segment.serial != consumerSerial_) {
-        consumerSerial_ = segment.serial;
-        consumerValid_ = true;
-        consumerIndex_ = segment.start;
-        consumerExpected_ = segment.position;
-        consumerSegmentPos_ = segment.position;
-        consumerAdopted_.store(segment.serial, std::memory_order_release);
-        publishConsumer();
-    }
+    adoptNewestSegment();
 
     // A request the producer has not answered yet: wait for it unless it is useless for `pos`.
     const uint64_t request = request_.load(std::memory_order_acquire);
@@ -211,6 +202,19 @@ int ClipAudioSource::read(int64_t pos, float *dst, int frames) noexcept {
     consumerExpected_ += n;
     publishConsumer();
     return n;
+}
+
+void ClipAudioSource::adoptNewestSegment() noexcept {
+    const Segment segment = segment_.load();
+    if (segment.serial != 0 && segment.serial != consumerSerial_) {
+        consumerSerial_ = segment.serial;
+        consumerValid_ = true;
+        consumerIndex_ = segment.start;
+        consumerExpected_ = segment.position;
+        consumerSegmentPos_ = segment.position;
+        consumerAdopted_.store(segment.serial, std::memory_order_release);
+        publishConsumer();
+    }
 }
 
 void ClipAudioSource::publishConsumer() noexcept {
@@ -455,6 +459,10 @@ void ClipAudioSource::produce(int64_t pos, int frames, float *out) {
 }
 
 void ClipAudioSource::producerMain() {
+    // Before the first segment is published: the consumer reads the ring only after adopting a
+    // segment (segment_'s release store orders these writes before it).
+    ring_.assign(static_cast<size_t>(capacity_ * channels_), 0.0f);
+    scratch_.assign(static_cast<size_t>(std::max(1, config_.chunkFrames) * channels_), 0.0f);
     openDecoder();
 
     uint32_t handled = 0;

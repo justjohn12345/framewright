@@ -13,10 +13,13 @@ import FramewrightEngine
 struct ProgramMonitorView: View {
     var isPlaying = false
     var attachID: AnyHashable?
+    /// The view's largest drawable (`ProgramMonitorZoom.drawableLimit`; zero: none).
+    var maximumDrawableSize: CGSize = .zero
     var attach: (VEPreviewView) -> Void = { _ in }
 
     var body: some View {
-        PreviewViewRepresentable(isPlaying: isPlaying, configurationID: attachID, configure: attach)
+        PreviewViewRepresentable(isPlaying: isPlaying, configurationID: attachID,
+                                 maximumDrawableSize: maximumDrawableSize, configure: attach)
             .background(Color.black)
     }
 }
@@ -26,15 +29,25 @@ struct ProgramMonitorView: View {
 /// margin (or the readout of a selected Fade or Gain span; see `ProgramMonitorLayout`). The picture
 /// view itself observes only the playhead's transport state; the layout around it observes the
 /// store for the editor. A click gives the program (timeline) the transport keys and takes keyboard
-/// focus back from text fields.
+/// focus back from text fields; a click or a drag on the picture (a Ken Burns box) gives it the zoom keys
+/// (`ProjectStore.focusProgramMonitor`, the layout's picture area).
 struct ProgramMonitorHost: View {
     let store: ProjectStore
     @ObservedObject var playhead: PlayheadModel
+    /// For the program view's drawable limit at a fixed zoom level.
+    @ObservedObject var zoom: ProgramMonitorZoom
     @AppStorage(PlaybackHUD.defaultsKey) private var showHUD = false
+
+    init(store: ProjectStore, playhead: PlayheadModel) {
+        self.store = store
+        self.playhead = playhead
+        zoom = store.programZoom
+    }
 
     var body: some View {
         ProgramMonitorLayout(store: store, showsHUD: showHUD) {
-            ProgramMonitorView(isPlaying: playhead.isRunning, attachID: ObjectIdentifier(store)) { view in
+            ProgramMonitorView(isPlaying: playhead.isRunning, attachID: ObjectIdentifier(store),
+                               maximumDrawableSize: zoom.drawableLimit) { view in
                 store.attachProgramView(view)
             }
         }
@@ -42,7 +55,7 @@ struct ProgramMonitorHost: View {
         .onTapGesture {
             // While a title's text is typed on the picture, its clicks are the typing's (TitleEditingSurfaceView).
             guard !store.isEditingTitleOnPicture else { return }
-            store.focusArea = .timeline
+            store.focusProgramMonitor()
             store.reclaimKeyboardFocus()
         }
     }

@@ -16,7 +16,8 @@ import Foundation
 /// Handled: Space (play/pause), J/K/L (shuttle), ←/→ (one frame), Home/End (start/end), Delete /
 /// Forward Delete (delete in the focused panel; a transition goes with its linked one),
 /// Option+Delete (only the selected transition), Shift+Delete (ripple delete), I/O (source
-/// in/out), = or + / - (zoom the timeline, like Command-= / Command--), ] / [ (gain of the selected
+/// in/out), = or + / - (zoom, like Command-= / Command--: the program monitor while it has the focus,
+/// else the timeline), Shift-Z (the same to Fit, or the timeline to the whole sequence), ] / [ (gain of the selected
 /// audio clips ±1 dB, with Shift ±10 dB; a burst is one undo step), Escape (cancel the drag in
 /// progress, a Ken Burns box drag too; else close the Ken Burns editor; passed on when there is
 /// neither), Command-A (select all clips), Control-K (Add Motion
@@ -40,6 +41,9 @@ final class KeyboardController {
         case deleteTransitionOnly
         case markIn, markOut
         case zoomIn, zoomOut
+        /// Shift-Z (Final Cut's Zoom to Fit): the program monitor to Fit while it has the focus, else the
+        /// timeline to the whole sequence (`ProjectStore.zoomFocusedToFit`).
+        case zoomToFit
         case cancel
         case selectAll
         /// `]` / `[`: gain of the selected audio clips ±1 dB (with Shift, `}` / `{`: ±10 dB).
@@ -135,6 +139,9 @@ final class KeyboardController {
         if characters == "+", flags.isEmpty || flags == .shift {
             return .zoomIn
         }
+        if flags == .shift, characters.lowercased() == "z" {
+            return .zoomToFit
+        }
         if flags.isEmpty || flags == .shift {
             switch characters {
             case "]": return .gainUp(big: flags == .shift)
@@ -228,6 +235,7 @@ final class KeyboardController {
         case .markOut: store.markSourceOut()
         case .zoomIn: store.zoomIn()
         case .zoomOut: store.zoomOut()
+        case .zoomToFit: store.zoomFocusedToFit()
         case .cancel:
             if let cancel = store.cancelActiveGesture { cancel() } else { store.closeKenBurns() }
         case .selectAll: store.selectAll()

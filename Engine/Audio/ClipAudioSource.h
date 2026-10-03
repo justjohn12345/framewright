@@ -33,7 +33,11 @@
 //   lock-free CAS on a packed 64-bit word. The producer answers the newest request by seeking its
 //   decoder and publishing a "segment": ring index segmentStart holds sequence sample
 //   segmentPosition, and later frames follow contiguously. The consumer adopts the newest
-//   segment on its next read (jumping its read index to segmentStart, discarding stale frames).
+//   segment on its next read (jumping its read index to segmentStart, discarding stale frames),
+//   or, while the mixer renders no transport, on its next render callback (adoptNewestSegment):
+//   stale frames keep their ring slots until the consumer has skipped them, so a source
+//   repositioned twice while stopped (the playhead put down at one place, then another) would
+//   otherwise find the ring full of the first place's audio and never get ready for the second.
 // - read(pos) is sample-accurate: frames before pos are skipped; when pos is not covered yet the
 //   consumer outputs nothing (the caller mixes silence and counts an underrun) and, when pos is
 //   out of reach, posts a reposition itself. It never waits.
@@ -162,6 +166,11 @@ class ClipAudioSource {
     /// `dst` (interleaved, config().channels). Returns the number of leading frames written;
     /// the rest of `dst` is left untouched. Audio render thread only.
     int read(int64_t sequenceSample, float *dst, int frames) noexcept;
+
+    /// Consumer, while it reads nothing (the mixer renders no transport): adopts the newest segment
+    /// the producer has published, as read() does first, so the frames of older segments free their
+    /// ring slots for the producer. Audio render thread only; realtime-safe.
+    void adoptNewestSegment() noexcept;
 
     /// Shortest run of source audio a reversed source decodes at once (see the header comment).
     static constexpr double kReverseBlockSeconds = 0.5;

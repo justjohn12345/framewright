@@ -50,7 +50,10 @@ audited the code line by line.
 - Real-time playback with an audio-clocked Metal compositor, JKL shuttle (Space always plays forward
   at 1x, as in other editors), frame stepping and scrubbing; measured A/V offset on the real output device is zero within a sample. A still
   playhead keeps a short lookahead decoded and the audio primed, so Space starts within a frame
-  (about 20-30 ms press to picture on cached media, variable-frame-rate phone footage included).
+  (about 20-30 ms press to picture on cached media, variable-frame-rate phone footage included). Where the
+  playhead is put down (the end of a scrub, a ruler click) both get ready at once, the lookahead going on from the
+  decoder that drew the paused picture instead of decoding its GOP again, so Space right after a scrub starts as
+  fast on long-GOP 4K media and screen recordings (medians 19-26 ms measured).
   The audio output stays on for 5 minutes after the last transport action (1 minute on battery).
 - A window laid out for the program monitor: the source monitor appears beside it when media is
   opened (View > Show Source Monitor, Shift+Cmd+2), the timeline is as tall as its tracks (empty
@@ -83,7 +86,10 @@ audited the code line by line.
   Control-K in Ken Burns mode when the clip spans the frame across or down (a letterboxed or pillarboxed picture
   too); Ken Burns asked for on a clip placed inside the frame (a picture in picture) opens in Transform with a note,
   and switched to Ken Burns mode there the monitor zooms out to show the rectangles, which are larger than the
-  frame. A split keeps the mode chosen for a Motion span on both pieces. The monitors shade the area around the frame so its edge shows. Projects from earlier versions open with their keyframes and fades as spans and look and sound the
+  frame; in Transform mode it likewise zooms out when a box reaches past its margin (re-fitted when a drag ends).
+  Reset Start and Reset End on the editor's bar put a box back (Transform: where the clip sits; Ken Burns: the whole
+  picture). The program monitor has a zoom control (Fit, 25 to 200 %; Command-plus and Command-minus while it has
+  the focus, Shift-Z for Fit). A split keeps the mode chosen for a Motion span on both pieces. The monitors shade the area around the frame so its edge shows. Projects from earlier versions open with their keyframes and fades as spans and look and sound the
   same.
 - Reverse Clip (Option-Cmd-R, the clip's context menu, the inspector's Speed row or the Speed/Duration sheet):
   a clip and its linked audio play their media backwards, frame for frame and, on PCM sources, sample for sample

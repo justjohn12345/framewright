@@ -176,13 +176,15 @@ final class KenBurnsModel: ObservableObject {
     /// The clip touching this one's start / end on its track (nil when there is none).
     @Published private(set) var previous: Neighbour?
     @Published private(set) var next: Neighbour?
-    /// Ken Burns mode: the part of the sequence plane (sequence pixels) the program monitor shows so
-    /// that every corner of both rectangles is on it: the frame and the rectangles' bounds, or nil
-    /// while both rectangles lie inside the frame box (the monitor then shows the frame alone, as when
-    /// the editor is closed). A rectangle leaves the frame box on a clip placed inside the frame (a
-    /// picture in picture's is 3.3 frames wide at 30 %) or with values typed or made in Transform
-    /// mode (post-lanes review M2). Re-read with the rectangles but never during a drag, so the
-    /// monitor does not rescale under the pointer. Nil in Transform mode (its margin is fixed).
+    /// The part of the sequence plane (sequence pixels) the program monitor shows so that every
+    /// corner of both boxes or rectangles is on it: the frame and their bounds, or nil while both lie
+    /// inside the frame box. Ken Burns mode: the monitor then shows the frame alone, as when the editor
+    /// is closed; a rectangle leaves the frame box on a clip placed inside the frame (a picture in
+    /// picture's is 3.3 frames wide at 30 %) or with values typed or made in Transform mode (post-lanes
+    /// review M2). Transform mode: the monitor shows the frame inside its margin, and zooms out further
+    /// when this reaches past the margin (a box scaled up, moved off the frame or typed so;
+    /// `KenBurnsViewport.editor`). Re-read with the boxes but never during a drag, so the monitor does
+    /// not rescale under the pointer: a drag that ends with a box past the visible stage re-fits it.
     @Published private(set) var monitorExtent: CGRect?
     /// Why the last edit was refused or limited (nil when it went as asked).
     @Published private(set) var note: String?
@@ -369,13 +371,13 @@ final class KenBurnsModel: ObservableObject {
     }
 
     /// Re-reads both boxes (or rectangles) from the span's edges, and what the monitor shows around
-    /// the frame in Ken Burns mode (`monitorExtent`).
+    /// the frame (`monitorExtent`).
     private func readBoxes() {
         let first = shape(for: edgeMotion(atEnd: false))
         let last = shape(for: edgeMotion(atEnd: true))
         if start != first { start = first }
         if end != last { end = last }
-        let extent = mode == .kenBurns ? Self.extent(of: [first, last], frame: frameBox) : nil
+        let extent = Self.extent(of: [first, last], frame: frameBox)
         if extent != monitorExtent {
             monitorExtent = extent
             store.kenBurnsExtentDidChange(self)
@@ -597,6 +599,7 @@ final class KenBurnsModel: ObservableObject {
         }
         finishDrag()
         readBoxes()
+        store.kenBurnsDragDidEnd(self)
     }
 
     /// Escape (or Undo) mid-drag, or a drag the system abandoned: reverts what the drag did. The
@@ -773,6 +776,39 @@ final class KenBurnsModel: ObservableObject {
     func swap() {
         guard mayEdit(), let base = bases() else { return }
         guard let (from, to) = values(start: endFraming, end: startFraming, base: base) else {
+            note = Self.zeroScaleNote
+            return
+        }
+        report(store.engine.setSpanValues(spanID, start: from, end: to))
+    }
+
+    /// What Reset Start / Reset End put an edge back to, as absolute values over `base` (that edge's
+    /// base: what the rest of the clip composes to there): Transform, the clip's own placement there
+    /// (the base itself: the span adds nothing); Ken Burns, the whole picture (position 0, scale 1:
+    /// the rectangle is the frame box, the clip fitted at 100 %).
+    private func resetFraming(base: VESpanValues) -> VEMotionFraming {
+        switch mode {
+        case .transform: return VEMotionFraming(x: base.x, y: base.y, scale: base.scale)
+        case .kenBurns: return VEMotionFraming(x: 0, y: 0, scale: 1)
+        }
+    }
+
+    /// Whether Reset Start / Reset End would change `which` (it does not already show what a reset
+    /// gives it); false while the engine cannot say.
+    func canReset(_ which: Framing) -> Bool {
+        guard let base = bases() else { return false }
+        let target = resetFraming(base: which == .start ? base.start : base.end)
+        return !Self.sameFraming(edgeFraming(atEnd: which == .end), target)
+    }
+
+    /// Reset Start / Reset End (the editor's bar): puts that edge's box back to the clip's own placement
+    /// (Transform) or its rectangle back to the whole picture (Ken Burns), the other edge unchanged, the
+    /// rotation kept. One undo step.
+    func reset(_ which: Framing) {
+        guard mayEdit(), let base = bases() else { return }
+        let target = resetFraming(base: which == .start ? base.start : base.end)
+        guard let (from, to) = values(start: which == .start ? target : nil, end: which == .end ? target : nil,
+                                      base: base) else {
             note = Self.zeroScaleNote
             return
         }
@@ -1079,16 +1115,22 @@ struct KenBurnsViewport: Equatable {
     /// corner handle and its hit area fit inside.
     static let extentPadding: CGFloat = 12
 
-    /// The viewport the program monitor's layout gives the picture and the Ken Burns editor: closed,
-    /// the frame fitted into the whole monitor; Transform mode, inside `marginFraction`; Ken Burns
-    /// mode, the whole monitor while both rectangles are inside the frame box, else `extent` (the
-    /// frame and the rectangles, `KenBurnsModel.monitorExtent`) fitted with `extentPadding` to spare,
-    /// never showing the frame larger than Transform mode does (review M2: a picture in picture's
-    /// rectangles are larger than the frame, and their corners must be on the monitor to zoom).
+    /// The viewport the program monitor's layout gives the picture and the Ken Burns editor at Fit
+    /// (`ProgramZoom.fit`): closed, the frame fitted into the whole monitor; Transform mode, inside
+    /// `marginFraction`, or, when a box reaches past that (its corners and handles not on the monitor
+    /// with `extentPadding` to spare), `extent` (the frame and the boxes, `KenBurnsModel.monitorExtent`)
+    /// fitted with `extentPadding` to spare; Ken Burns mode, the whole monitor while both rectangles
+    /// are inside the frame box, else `extent` fitted the same way, never showing the frame larger
+    /// than Transform mode does (review M2: a picture in picture's rectangles are larger than the
+    /// frame, and their corners must be on the monitor to zoom).
     static func editor(mode: KenBurnsMode?, extent: CGRect?, sequence: CGSize, monitor: CGSize) -> KenBurnsViewport {
         switch mode {
         case .transform:
-            return KenBurnsViewport(sequence: sequence, monitor: monitor, margin: marginFraction)
+            let standard = KenBurnsViewport(sequence: sequence, monitor: monitor, margin: marginFraction)
+            if let extent, !standard.shows(extent, padding: extentPadding) {
+                return KenBurnsViewport(sequence: sequence, monitor: monitor, showing: extent)
+            }
+            return standard
         case .kenBurns:
             if let extent {
                 return KenBurnsViewport(sequence: sequence, monitor: monitor, showing: extent)
@@ -1124,6 +1166,13 @@ struct KenBurnsViewport: Equatable {
         let size = CGSize(width: sequence.width * fit, height: sequence.height * fit)
         frame = CGRect(x: (monitor.width - size.width) / 2, y: (monitor.height - size.height) / 2, width: size.width,
                        height: size.height)
+    }
+
+    /// Whether `rect` (sequence pixels) lies on the monitor with `padding` points to spare on every side.
+    func shows(_ rect: CGRect, padding: CGFloat) -> Bool {
+        let area = CGRect(origin: .zero, size: monitor).insetBy(dx: padding, dy: padding)
+        let shown = CGRect(origin: view(rect.origin), size: CGSize(width: rect.width * scale, height: rect.height * scale))
+        return area.insetBy(dx: -1e-6, dy: -1e-6).contains(shown)
     }
 
     /// Sequence pixels to monitor points.

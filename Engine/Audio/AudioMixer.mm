@@ -851,6 +851,14 @@ void AudioMixer::render(float *interleaved, int frames, int channels, uint64_t h
         } else if (!(plan && plan->running)) {
             rtLive_ = false;
         }
+        if (!fadePlan_ && plan && !plan->running) {
+            // Stopped: nothing reads the sources, so take up the segments they were repositioned to
+            // (warmed at the paused frame), freeing the ring slots of the older ones they would
+            // otherwise keep until playback starts (ClipAudioSource::adoptNewestSegment).
+            for (const PlanSource &ps : plan->sources) {
+                ps.source->adoptNewestSegment();
+            }
+        }
     }
 
     // Output gain (master gain and mute), ramped.

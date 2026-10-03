@@ -29,6 +29,20 @@
 //   target makes the work in flight useless (outside the decoded range plus
 //   seekAheadThreshold, or a direction change). A far seek into a long GOP is then abandoned
 //   after the frame being decoded instead of after the whole GOP.
+// - Hand-off from the scrub path. The picture of a paused playhead comes through requestFrame(),
+//   whose decoder seeks to the keyframe before it and decodes up to the picture (all of a long
+//   GOP); a forward stream that would then seek to the same place would decode that GOP a second
+//   time. A target naming the scrub lane its picture was requested on (continueScrubLane) takes
+//   over that lane's decoder instead, where the request left it (right after the picture: the
+//   stream continues from there as if it had sought and decoded it itself), and gives the lane its
+//   own decoder in exchange, so neither side opens one. While a request of that lane for the
+//   target's time is being decoded, or is next in line on the scrub thread, the stream waits for it
+//   rather than decoding the same GOP alongside it; a request queued behind another lane's (the
+//   other picture of a dissolve) is not waited for: the stream decodes its picture on a worker, in
+//   parallel, and the request finds it in the cache. StreamStats::handoffs counts the takeovers.
+// - suspendTargets() stops the streams after the step in flight (a decode being made is
+//   interrupted) until the next setTargets(): the controller's lookahead yields to an active
+//   scrub, whose decodes then have the hardware to themselves.
 // - End of the video: when a stream reaches the end of its track, the last frame decoded is put
 //   into the cache again with an infinite duration, so it answers every later time (FrameCache
 //   extends the entry). A clip that runs past the end of the video (a container whose audio lasts
@@ -79,7 +93,9 @@
 // - One scrub thread, started on the first requestFrame(), with its own decoders (at most
 //   Config::maxScrubDecoders, LRU, one per (asset, lane)) so scrubbing never disturbs the
 //   sequential streams. A newer request for the same (asset, lane) interrupts the decode in
-//   flight (it completes with Cancelled) instead of waiting for its preroll.
+//   flight (it completes with Cancelled) instead of waiting for its preroll, unless it asks for
+//   the same picture (same time and source): then the decode goes on and the newer request is
+//   answered from the cache when it lands.
 // - No busy waiting: idle threads block on condition variables.
 // - Callbacks from requestFrame() run on the scrub thread, never inside requestFrame() and
 //   never with a pool lock held (they may call back into the pool). Each callback is invoked
@@ -130,6 +146,10 @@ struct DecodeTarget {
     /// A generated picture to serve instead of decoding the asset's media (see the header comment);
     /// `url` and `trackIndex` are then unused.
     std::shared_ptr<const GeneratedPictureSource> generated = nullptr;
+    /// The requestFrame() lane whose decoder a forward stream of media (trackIndex -1) may take over
+    /// instead of seeking to sourceTime (the hand-off, see the header comment): the lane the picture
+    /// under sourceTime was requested on.
+    std::optional<uint64_t> continueScrubLane = std::nullopt;
 };
 
 /// A frame delivered by requestFrame(). Move-only (it holds a pin).
@@ -188,11 +208,17 @@ class DecodePool {
         uint64_t framesDecoded = 0;
         uint64_t seeks = 0;
         uint64_t interrupts = 0;            ///< Decodes abandoned because the target moved.
+        /// Times the stream took over a scrub lane's decoder instead of seeking (the hand-off).
+        uint64_t handoffs = 0;
+        /// Waiting for a scrub request of its continueScrubLane at its target to hand over.
+        bool awaitingScrub = false;
         std::optional<MediaError> error;
     };
 
     struct Stats {
         std::vector<StreamStats> streams;
+        /// suspendTargets() holds the streams (until the next setTargets()).
+        bool suspended = false;
         int workerThreads = 0;
         uint64_t scrubRequests = 0;
         uint64_t scrubServiced = 0;  ///< Callbacks invoked with a frame.
@@ -220,8 +246,12 @@ class DecodePool {
     /// afterwards.
     void beginEpoch(FrameCache::Epoch epoch);
 
-    /// Replaces the complete set of lookahead targets (see header comment).
+    /// Replaces the complete set of lookahead targets (see header comment), and ends a suspension.
     void setTargets(std::vector<DecodeTarget> targets);
+    /// Holds every stream where it is: a decode in flight is interrupted (the decoder keeps its
+    /// position), and nothing is decoded for the targets until the next setTargets(). The streams
+    /// keep their decoders and decoded ranges. For waitUntilIdle() suspended streams are idle.
+    void suspendTargets();
     void setLookahead(CMTime lookahead);
     CMTime lookahead() const;
 
@@ -235,7 +265,9 @@ class DecodePool {
 
     /// Scrub path: decode the frame of `asset` at `time` as soon as possible (cache first).
     /// Requests are coalesced per (asset, lane): only the latest one is serviced; an older
-    /// pending one gets Cancelled, and one being decoded is interrupted (Cancelled too). Give
+    /// pending one gets Cancelled, and one being decoded is interrupted (Cancelled too) unless the
+    /// newer one asks for the same time (and generated source): its decode is not thrown away,
+    /// both are answered (the newer one from the cache). Give
     /// independent clients (the program monitor's layers, the source monitor) different lanes
     /// so they do not supersede each other. The asset's path must be known from registerAsset()
     /// or a target (else the callback receives InvalidArgument). Uses the asset's first
@@ -287,7 +319,9 @@ class DecodePool {
         std::shared_ptr<const GeneratedPictureSource> generated;
     };
     struct ScrubDecoder;
-    enum class StepResult { Progress, Settled };
+    /// Progress: step again; Settled: nothing to do until the target moves; AwaitScrub: the hand-off
+    /// is coming (a request of the target's continueScrubLane at its time is decoding or next in line).
+    enum class StepResult { Progress, Settled, AwaitScrub };
 
     std::shared_ptr<AssetSlot> slotFor(AssetId asset, const std::string &url); // mutex_ held
     void ensureWorkers();                                                     // mutex_ held
@@ -304,17 +338,34 @@ class DecodePool {
     /// Scrub thread, mutex_ held via `lock`: destroys scrub decoders of retired slots.
     void dropRetiredScrubDecoders(std::unique_lock<std::mutex> &lock);
     bool makesWorkInFlightUseless(const Stream &stream, const DecodeTarget &next) const; // mutex_ held
+    /// Taken: the stream took the decoder over; Await: the lane's request for the picture is being decoded or
+    /// is next in line (scrubWillPositionLocked); None: neither, the stream decodes the picture itself.
+    enum class HandOff { Taken, Await, None };
+    /// The stream (a worker's, at `target` whose time is `t`) takes over the parked decoder of its
+    /// continueScrubLane if that decoder last delivered the picture under `t` (the hand-off), else says
+    /// whether to wait for it; one decision under mutex_ (it takes the lock).
+    HandOff handOff(Stream &stream, const DecodeTarget &target, const std::shared_ptr<AssetSlot> &slot, CMTime t);
+    /// The stream's frame duration and track end for `trackIndex` of `info`, opened as `decoder`.
+    static void setTrackTiming(Stream &stream, const RoutedMediaInfo &info, int trackIndex,
+                               const IVideoDecoder &decoder);
+    /// A request of `target`'s continueScrubLane for time `t` is being decoded, or pending and next in line
+    /// (mutex_ held).
+    bool scrubWillPositionLocked(const DecodeTarget &target, CMTime t) const;
+    /// Wakes the streams waiting for a hand-off (a scrub request ended; mutex_ held). True if any.
+    bool releaseScrubWaitersLocked();
     void publish(Stream &stream); // mutex_ held
     void updateFocus();           // mutex_ held
     Result<ScrubFrame> serviceScrub(const ScrubKey &key, const std::shared_ptr<AssetSlot> &slot, CMTime time);
     /// serviceScrub for a request with a generated source.
     Result<ScrubFrame> serviceGeneratedScrub(const ScrubKey &key, const std::shared_ptr<AssetSlot> &slot, CMTime time,
                                              const std::shared_ptr<const GeneratedPictureSource> &generated);
+    /// Opens a scrub decoder and names the backend that opened it.
+    using DecoderMaker = std::function<Result<std::unique_ptr<IVideoDecoder>>(std::string &backend)>;
     /// The scrub decoder of `key` (scrub thread): the one kept if it was made for `slot` and `generated`, else a new
     /// one from `make` (the least recently used ones beyond Config::maxScrubDecoders are dropped).
     Result<ScrubDecoder *> scrubDecoderFor(const ScrubKey &key, const std::shared_ptr<AssetSlot> &slot,
                                            const GeneratedKey &generated,
-                                           const std::function<Result<std::unique_ptr<IVideoDecoder>>()> &make);
+                                           const DecoderMaker &make);
 
     const std::shared_ptr<BackendRouter> router_;
     const std::shared_ptr<FrameCache> cache_;
@@ -344,12 +395,18 @@ class DecodePool {
     bool scrubBusy_ = false;
     ScrubKey scrubInFlight_;                            ///< Valid while scrubBusy_.
     std::shared_ptr<DecodeInterrupt> scrubInterrupt_;   ///< Of the decode in flight.
+    CMTime scrubInFlightTime_ = kCMTimeInvalid;         ///< Valid while scrubBusy_.
+    GeneratedKey scrubInFlightGenerated_;               ///< Valid while scrubBusy_.
+    bool suspended_ = false;                            ///< suspendTargets() until setTargets().
     std::thread scrubThread_;
     uint64_t scrubRequests_ = 0;
     uint64_t scrubServiced_ = 0;
     uint64_t scrubCancelled_ = 0;
     uint64_t scrubFailed_ = 0;
-    /// Scrub decoders: touched only by the scrub thread (and the destructor after joining it).
+    /// Scrub decoders, one per (asset, lane). The map is guarded by mutex_. A decoder belongs to the
+    /// scrub thread while it services a request of its key (scrubBusy_ and scrubInFlight_); a worker
+    /// may take a parked one over (the hand-off, handOff) and park its stream's previous
+    /// decoder in its place, under mutex_.
     std::map<ScrubKey, std::unique_ptr<ScrubDecoder>> scrubDecoders_;
     /// A slot was retired while the scrub thread may hold a decoder of it (mutex_).
     bool scrubCleanupPending_ = false;

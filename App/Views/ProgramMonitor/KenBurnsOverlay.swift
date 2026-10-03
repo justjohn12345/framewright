@@ -30,7 +30,8 @@ enum MonitorFrame {
 /// fitted into the whole area; in Transform mode fitted inside a margin (`KenBurnsViewport`) that
 /// stands for the space off the frame, so a box larger than the frame or partly off it keeps its
 /// corners and body on screen; in Ken Burns mode with a rectangle outside the frame box (a picture in
-/// picture's), fitted with the rectangles around it (`KenBurnsViewport.editor`). The area around the frame is `MonitorFrame.outsideColor`, the frame's
+/// picture's) or a box past the Transform margin, fitted with the boxes around it (`KenBurnsViewport.editor`); at a
+/// fixed zoom level (`ProgramMonitorZoom`, the control above the monitor) the frame at that size, centred. The area around the frame is `MonitorFrame.outsideColor`, the frame's
 /// edge a thin line while the editor is open; the editor's boxes or rectangles and the other clips'
 /// outlines are drawn over the whole area and its bar (range, caption, toggles, mode, smoothing,
 /// Swap, Close) below it. A selected Opacity or Gain span shows its readout instead. With one title
@@ -39,18 +40,32 @@ enum MonitorFrame {
 /// spans and switching modes (`ProjectStore.kenBurnsMode`).
 struct ProgramMonitorLayout<Picture: View>: View {
     @ObservedObject var store: ProjectStore
+    /// The monitor's zoom (`ProjectStore.programZoom`): Fit, or a fixed level (`KenBurnsViewport.stage`).
+    @ObservedObject var zoom: ProgramMonitorZoom
     var showsHUD = false
     @ViewBuilder var picture: Picture
+    @Environment(\.displayScale) private var displayScale
+
+    init(store: ProjectStore, showsHUD: Bool = false, @ViewBuilder picture: () -> Picture) {
+        self.store = store
+        zoom = store.programZoom
+        self.showsHUD = showsHUD
+        self.picture = picture()
+    }
 
     var body: some View {
         let editor = store.kenBurns
         let sequenceSize = CGSize(width: store.sequence.width, height: store.sequence.height)
         let mode = store.kenBurnsMode
         let extent = store.kenBurnsExtent
+        let pointsPerPixel = 1 / max(displayScale, 1)
         VStack(spacing: 0) {
             GeometryReader { geometry in
-                let viewport = KenBurnsViewport.editor(mode: mode, extent: extent, sequence: sequenceSize,
-                                                       monitor: geometry.size)
+                let viewport = KenBurnsViewport.stage(zoom: zoom.zoom, mode: mode, extent: extent,
+                                                      sequence: sequenceSize, monitor: geometry.size,
+                                                      pointsPerPixel: pointsPerPixel)
+                let fitPercent = KenBurnsViewport.editor(mode: mode, extent: extent, sequence: sequenceSize,
+                                                         monitor: geometry.size).percent(pointsPerPixel: pointsPerPixel)
                 let frame = sequenceSize.width > 0 && sequenceSize.height > 0
                     ? viewport.frame : CGRect(origin: .zero, size: geometry.size)
                 ZStack(alignment: .topLeading) {
@@ -70,8 +85,17 @@ struct ProgramMonitorLayout<Picture: View>: View {
                     }
                 }
                 .clipped()
+                // A press on the picture (a Ken Burns or title box drag too, alongside the overlay's own gesture)
+                // gives the monitor the zoom keys; the editor's bar below is not part of it, so its fields, pickers
+                // and buttons are untouched.
+                .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in store.focusProgramMonitor() })
                 .onAppear { MonitorFrame.programArea = geometry.frame(in: .global) }
                 .onChange(of: geometry.frame(in: .global)) { _, area in MonitorFrame.programArea = area }
+                .onChange(of: fitPercent, initial: true) { _, percent in zoom.noteFitPercent(percent) }
+                .onChange(of: ProgramMonitorZoom.Stage(monitor: geometry.size, pointsPerPixel: pointsPerPixel,
+                                                       sequence: sequenceSize), initial: true) { _, stage in
+                    zoom.noteStage(stage)
+                }
             }
             .overlay(alignment: .topLeading) {
                 if let span = store.selectedEffectSpan, editor == nil, span.kind == .opacity || span.kind == .gain {
@@ -257,7 +281,7 @@ struct KenBurnsOverlay: View {
 
 /// The Ken Burns editor's bar under the program picture: the span's range (Start, End and Duration
 /// as timeline times), the hold-after caption or what limited the last edit, the neighbour toggles
-/// next to touching clips, the smoothing, Swap and Close.
+/// next to touching clips, the smoothing, Reset Start and Reset End, Swap and Close.
 struct KenBurnsControls: View {
     let store: ProjectStore
     @ObservedObject var model: KenBurnsModel
@@ -380,6 +404,8 @@ struct KenBurnsControls: View {
             .fixedSize()
             .help("How the move starts and ends (Ease In and Out: it accelerates slowly and comes to rest slowly)")
             .accessibilityIdentifier("KenBurnsSmoothing")
+            resetButton(.start)
+            resetButton(.end)
             Button {
                 model.swap()
             } label: {
@@ -400,6 +426,20 @@ struct KenBurnsControls: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(.bar)
+    }
+
+    /// Reset Start / Reset End: that edge back to the clip's own placement (Transform) or the whole picture (Ken
+    /// Burns), one undo step; disabled while a drag runs or when the edge already shows it (`canReset` is not asked
+    /// during a drag: the bar redraws with every step).
+    private func resetButton(_ which: KenBurnsModel.Framing) -> some View {
+        let name = which == .start ? "Start" : "End"
+        let what = model.mode == .kenBurns
+            ? "the \(which == .start ? "green" : "red") rectangle back to the whole picture"
+            : "the \(which == .start ? "green" : "red") box back to where the clip sits without this move"
+        return Button("Reset \(name)") { model.reset(which) }
+            .disabled(model.isDragging || !model.canReset(which))
+            .help("Put \(what) (one undo step)")
+            .accessibilityIdentifier("KenBurnsReset\(name)")
     }
 }
 

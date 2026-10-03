@@ -203,6 +203,66 @@ bool spinUntil(const std::function<bool()> &done, double timeoutSeconds) {
 
 // Collapsing the view to zero height (split-view collapse, a SwiftUI zero-size layout pass) and
 // restoring it must keep rendering: the drawable size comes back and frames render again.
+/// The drawable stays within maximumDrawableSize (aspect kept, the layer stretching it over the view) and never
+/// passes VEPreviewViewMaximumDrawableDimension a side: the program monitor at 200 % of a large sequence (review fix
+/// round, finding 6). It still renders the whole picture.
+- (void)testTheDrawableIsLimited {
+    VEPreviewView *view = [self makeViewWithSize:NSMakeSize(3840, 2160) source:solidSource({40, 160, 90, 255})];
+    [self showInWindow:view];
+    const CGFloat scale = view.window.backingScaleFactor;
+    XCTAssertEqualWithAccuracy(view.drawableSize.width, std::min<CGFloat>(3840 * scale, 8192), 1);
+    view.maximumDrawableSize = CGSizeMake(1920, 1080);
+    XCTAssertEqualWithAccuracy(view.drawableSize.width, 1920, 1);
+    XCTAssertEqualWithAccuracy(view.drawableSize.height, 1080, 1);
+    XCTAssertNil([self renderOnce:view]);
+    CGImageRef snapshot = [view snapshot];
+    XCTAssertTrue(snapshot != nullptr);
+    if (snapshot != nullptr) {
+        XCTAssertEqual(CGImageGetWidth(snapshot), 1920u, @"the whole picture, at the limited size");
+        const Pixel corner = imagePixel(snapshot, 1900, 1060);
+        XCTAssertEqualWithAccuracy(corner.g, 160, 3);
+    }
+    // A limit of another aspect: the drawable fits inside it with the view's aspect.
+    view.maximumDrawableSize = CGSizeMake(1000, 1000);
+    XCTAssertEqualWithAccuracy(view.drawableSize.width, 1000, 1);
+    XCTAssertEqualWithAccuracy(view.drawableSize.height, 562, 1);
+    view.maximumDrawableSize = CGSizeZero;
+    XCTAssertEqualWithAccuracy(view.drawableSize.width, std::min<CGFloat>(3840 * scale, 8192), 1);
+    // Far larger than Metal's texture limit: never past the absolute limit.
+    [view setFrameSize:NSMakeSize(12000, 6750)];
+    XCTAssertLessThanOrEqual(view.drawableSize.width, VEPreviewViewMaximumDrawableDimension);
+    XCTAssertLessThanOrEqual(view.drawableSize.height, VEPreviewViewMaximumDrawableDimension);
+    XCTAssertEqualWithAccuracy(view.drawableSize.width / view.drawableSize.height, 12000.0 / 6750.0, 0.01);
+    XCTAssertNil([self renderOnce:view]);
+}
+
+/// The scopes read the program view's working frame (WorkingFrameReader): at any zoom level the view holds the whole
+/// frame, so they see the whole picture: a view the size of a 4K frame at 25 % on Retina (480x270 points) and one
+/// at 200 % with the drawable limited both hand the reader the whole drawable as the frame (review fix round, item 7).
+- (void)testTheScopesReadTheWholePictureAtAnyViewSize {
+    for (const NSSize size : {NSMakeSize(480, 270), NSMakeSize(3840, 2160)}) {
+        VEPreviewView *view = [self makeViewWithSize:size source:solidSource({200, 40, 40, 255})];
+        [self showInWindow:view];
+        if (size.width > 1000) {
+            view.maximumDrawableSize = CGSizeMake(3840, 2160);
+        }
+        auto seen = std::make_shared<PixelRect>();
+        auto read = std::make_shared<std::atomic<bool>>(false);
+        [view setWorkingFrameReader:[seen, read](id<MTLCommandBuffer>, id<MTLTexture>, const PixelRect &frame) {
+            *seen = frame;
+            read->store(true);
+        }];
+        XCTAssertNil([self renderOnce:view]);
+        XCTAssertTrue(read->load());
+        const CGSize drawable = view.drawableSize;
+        XCTAssertEqual(seen->x, 0);
+        XCTAssertEqual(seen->y, 0);
+        XCTAssertEqualWithAccuracy(seen->width, drawable.width, 1, @"the whole picture (%.0f points wide)", size.width);
+        XCTAssertEqualWithAccuracy(seen->height, drawable.height, 1);
+        [view setWorkingFrameReader:{}];
+    }
+}
+
 - (void)testCollapseToZeroAndRestoreKeepsRendering {
     auto source = solidSource({30, 160, 90, 255});
     VEPreviewView *view = [self makeViewWithSize:NSMakeSize(320, 180) source:source];

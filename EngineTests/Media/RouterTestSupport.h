@@ -28,6 +28,9 @@ struct FakeBehavior {
     bool failOpen = false;
     /// Called at the start of every video decoder open() (may block: used as a gate).
     std::function<void()> onOpen;
+    /// open() returns Cancelled when DecodeOptions::interrupt was requested by the end of onOpen (as the
+    /// FFmpeg decoder does: it decodes its first frame inside open() and polls the interrupt).
+    bool openHonorsInterrupt = false;
     /// next() fails with `failCode` instead of producing any frame at or after `failAtFrame`
     /// (-1: never).
     int64_t failAtFrame = -1;

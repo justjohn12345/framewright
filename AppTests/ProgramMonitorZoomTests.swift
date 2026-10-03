@@ -1,0 +1,505 @@
+import AppKit
+import CoreGraphics
+import CoreMedia
+import FramewrightEngine
+import SwiftUI
+import XCTest
+@testable import Framewright
+
+/// The program monitor's stage while the Ken Burns editor is open, and its zoom: at Fit the monitor zooms out just
+/// enough to show both boxes (or rectangles) with their handles when they reach past the Transform margin (or the
+/// frame box in Ken Burns mode), re-fitted when the editor opens and when a drag ends, never during one, and back
+/// to Fit when the editor closes or the boxes are inside again; the zoom control's fixed levels and Command-plus /
+/// Command-minus / Shift-Z while the monitor has the focus (the timeline's zoom otherwise); Reset Start and Reset
+/// End in the editor's bar, one undo step each. The movie is 10 s at 320x180, filling the 1920x1080 frame.
+@MainActor
+final class ProgramMonitorZoomTests: XCTestCase {
+    private var fixture: StoreFixture!
+    private let sequence = CGSize(width: 1920, height: 1080)
+    private let monitor = CGSize(width: 1000, height: 700)
+    /// A Retina display: two pixels per point.
+    private let pointsPerPixel: CGFloat = 0.5
+
+    override func setUp() async throws {
+        fixture = try StoreFixture()
+        fixture.store.defaults = try makeTestDefaults("program-zoom")
+        try fixture.configureSequence()
+    }
+
+    override func tearDown() async throws {
+        fixture?.cleanUp()
+    }
+
+    private var store: ProjectStore { fixture.store }
+
+    private var standard: KenBurnsViewport {
+        KenBurnsViewport(sequence: sequence, monitor: monitor, margin: KenBurnsViewport.marginFraction)
+    }
+
+    /// The stage the program monitor's layout shows now (`ProgramMonitorLayout`).
+    private func stage() -> KenBurnsViewport {
+        KenBurnsViewport.stage(zoom: store.programZoom.zoom, mode: store.kenBurnsMode, extent: store.kenBurnsExtent,
+                               sequence: sequence, monitor: monitor, pointsPerPixel: pointsPerPixel)
+    }
+
+    /// Every corner of `boxes` (with its handle) is on the monitor with `extentPadding` to spare.
+    private func assertShown(_ boxes: [KenBurnsBox], on viewport: KenBurnsViewport, _ message: String,
+                             file: StaticString = #filePath, line: UInt = #line) {
+        let area = CGRect(origin: .zero, size: monitor).insetBy(dx: KenBurnsViewport.extentPadding - 1e-6,
+                                                                 dy: KenBurnsViewport.extentPadding - 1e-6)
+        for corner in boxes.flatMap(\.corners) {
+            let point = viewport.view(corner)
+            XCTAssertTrue(area.contains(point), "\(message): corner \(corner) at \(point) is off the monitor",
+                          file: file, line: line)
+        }
+    }
+
+    /// The 10 s movie at 0 on V1.
+    private func longClip() async throws -> VEClipID {
+        let url = fixture.directory.appendingPathComponent("long.mov")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try TestMediaFactory.writeMovie(to: url, frames: 300)
+        }
+        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([url]) { continuation.resume(returning: $0) }
+        }
+        return try fixture.placeMovie(try XCTUnwrap(imported.first), at: 0)
+    }
+
+    /// The editor on a new Motion span (the push in) of `clip`, in `mode`.
+    private func openEditor(on clip: VEClipID, mode: KenBurnsMode) throws -> KenBurnsModel {
+        store.playheadTime = .zero
+        store.selection = [clip]
+        store.addMotionSpanAtPlayhead(mode: mode)
+        let model = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(model.mode, mode)
+        return model
+    }
+
+    private func assertBox(_ box: KenBurnsBox, _ expected: KenBurnsBox, _ message: String,
+                           file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(box.center.x, expected.center.x, accuracy: 1e-6, "centre x " + message, file: file, line: line)
+        XCTAssertEqual(box.center.y, expected.center.y, accuracy: 1e-6, "centre y " + message, file: file, line: line)
+        XCTAssertEqual(box.size.width, expected.size.width, accuracy: 1e-6, "width " + message, file: file, line: line)
+        XCTAssertEqual(box.size.height, expected.size.height, accuracy: 1e-6, "height " + message, file: file, line: line)
+    }
+
+    // MARK: The automatic fit
+
+    /// The fit rectangle covers both boxes with the padding: boxes inside the frame (or inside the Transform margin)
+    /// leave the stage at Fit; boxes partly outside it, entirely outside the frame, much larger than the frame, and a
+    /// picture in picture's Ken Burns rectangles zoom it out just enough, the frame no larger than the margin's.
+    func testTheFitStageShowsBothBoxesAndTheirHandles() {
+        let frame = CGRect(origin: .zero, size: sequence)
+        let full = KenBurnsBox(center: CGPoint(x: 960, y: 540), size: sequence, rotationDegrees: 0)
+        let half = KenBurnsBox(center: CGPoint(x: 960, y: 540), size: CGSize(width: 960, height: 540), rotationDegrees: 0)
+        func stage(_ boxes: [KenBurnsBox], _ mode: KenBurnsMode) -> KenBurnsViewport {
+            KenBurnsViewport.stage(zoom: .fit, mode: mode, extent: KenBurnsModel.extent(of: boxes, frame: frame),
+                                   sequence: sequence, monitor: monitor, pointsPerPixel: pointsPerPixel)
+        }
+        // Inside the frame: Fit (Transform's margin, Ken Burns' whole monitor).
+        XCTAssertEqual(stage([full, half], .transform), standard)
+        XCTAssertEqual(stage([full, half], .kenBurns), KenBurnsViewport(sequence: sequence, monitor: monitor, margin: 0))
+        // Partly outside the frame but inside the margin: still Fit.
+        let nudged = KenBurnsBox(center: CGPoint(x: 1920, y: 540), size: CGSize(width: 480, height: 270), rotationDegrees: 0)
+        XCTAssertNotNil(KenBurnsModel.extent(of: [nudged], frame: frame))
+        XCTAssertEqual(stage([full, nudged], .transform), standard, "a box within the margin keeps the margin")
+        // Past the margin: half off the frame, entirely off it, three frames wide, turned.
+        let cases: [(String, [KenBurnsBox])] = [
+            ("half off the frame", [full, KenBurnsBox(center: CGPoint(x: 2304, y: 540), size: sequence, rotationDegrees: 0)]),
+            ("entirely off the frame", [full, KenBurnsBox(center: CGPoint(x: 4000, y: -1500), size: CGSize(width: 960, height: 540),
+                                                          rotationDegrees: 0)]),
+            ("three frames wide", [full, full.scaled(by: 3)]),
+            ("turned and scaled up", [half, KenBurnsBox(center: CGPoint(x: 700, y: 900), size: CGSize(width: 3840, height: 2160),
+                                                        rotationDegrees: 30)]),
+        ]
+        for (name, boxes) in cases {
+            let fitted = stage(boxes, .transform)
+            assertShown(boxes, on: fitted, name)
+            assertShown([KenBurnsBox(center: CGPoint(x: 960, y: 540), size: sequence, rotationDegrees: 0)], on: fitted,
+                        name + ": the frame")
+            XCTAssertLessThan(fitted.scale, standard.scale, name + ": zoomed out")
+            // Just enough: one side of what it shows touches the padding.
+            let shown = KenBurnsModel.extent(of: boxes, frame: frame)!
+            let width = shown.width * fitted.scale
+            let height = shown.height * fitted.scale
+            let inner = CGSize(width: monitor.width - 2 * KenBurnsViewport.extentPadding,
+                               height: monitor.height - 2 * KenBurnsViewport.extentPadding)
+            XCTAssertTrue(abs(width - inner.width) < 1e-6 || abs(height - inner.height) < 1e-6, name + ": just enough")
+        }
+        // Ken Burns mode: a picture in picture's rectangles (30 %: 3.3 frames wide).
+        let rect = KenBurnsModel.rect(for: VEVideoParams(x: 690, y: 324, scale: 0.3, rotationDegrees: 0, opacity: 1),
+                                      sequence: sequence)
+        let kenBurns = stage([rect, rect.scaled(by: 0.8)], .kenBurns)
+        assertShown([rect], on: kenBurns, "Ken Burns rectangles")
+    }
+
+    /// A box dragged past the stage: nothing rescales during the drag (the box goes past the monitor's edge); when
+    /// it ends the stage zooms out to show both boxes; dragged back inside, the stage returns to Fit; an undo that
+    /// puts it out again re-fits; closing the editor returns the monitor to the plain fit, while a zoom level chosen
+    /// by hand is kept (as in Final Cut).
+    func testADragPastTheStageRefitsWhenItEndsAndClosingReturnsToFit() async throws {
+        let clip = try await longClip()
+        let model = try openEditor(on: clip, mode: .transform)
+        XCTAssertEqual(stage(), standard, "the push in's boxes fit the margin")
+        let origin = model.start
+        model.applyDrag(.body(.start), origin: origin, translation: CGSize(width: 1500, height: 0))
+        XCTAssertTrue(model.isDragging)
+        XCTAssertEqual(stage(), standard, "no rescale during the drag")
+        let dragged = model.start
+        XCTAssertGreaterThan(dragged.center.x, sequence.width, "the box is off the frame")
+        let extentBefore = KenBurnsModel.extent(of: [dragged], frame: CGRect(origin: .zero, size: sequence))!
+        XCTAssertFalse(standard.shows(extentBefore, padding: KenBurnsViewport.extentPadding), "and past the stage")
+        model.endDrag()
+        let fitted = stage()
+        XCTAssertLessThan(fitted.scale, standard.scale, "re-fitted when the drag ended")
+        assertShown([model.start, model.end], on: fitted, "after the drag")
+
+        model.applyDrag(.body(.start), origin: model.start, translation: CGSize(width: -(model.start.center.x - 960), height: 0))
+        model.endDrag()
+        XCTAssertEqual(stage(), standard, "back inside: Fit")
+        store.undo()
+        XCTAssertLessThan(stage().scale, standard.scale, "undone: past the margin again")
+        assertShown([model.start, model.end], on: stage(), "after the undo")
+
+        store.closeKenBurns()
+        XCTAssertNil(store.kenBurnsExtent)
+        XCTAssertEqual(stage(), KenBurnsViewport(sequence: sequence, monitor: monitor, margin: 0),
+                       "closed: the frame fitted again")
+        store.programZoom.set(.percent(50))
+        store.showKenBurns(span: model.spanID)
+        store.closeKenBurns()
+        XCTAssertEqual(store.programZoom.zoom, .percent(50), "a level chosen by hand stays")
+    }
+
+    /// The editor opening on a span whose box is already past the margin (typed values) is fitted at once.
+    func testTheEditorOpensFittedToBoxesPastTheMargin() async throws {
+        let clip = try await longClip()
+        let model = try openEditor(on: clip, mode: .transform)
+        let spanID = model.spanID
+        var far = VESpanValuesUnchanged()
+        far.x = 2600
+        far.scale = 2
+        XCTAssertTrue(store.engine.setSpanValues(spanID, start: VESpanValuesUnchanged(), end: far).ok)
+        store.closeKenBurns()
+        store.showKenBurns(span: spanID)
+        let reopened = try XCTUnwrap(store.kenBurns)
+        XCTAssertLessThan(stage().scale, standard.scale)
+        assertShown([reopened.start, reopened.end], on: stage(), "on opening")
+    }
+
+    // MARK: Manual zoom
+
+    /// Zoom In and Zoom Out step through the fixed levels from what is shown (Fit's own percentage at Fit), and stop
+    /// at the ends; a level shows the frame at that many percent of its pixels, centred.
+    func testTheZoomLevelsStepFromWhatFitShows() {
+        let zoom = ProgramMonitorZoom()
+        zoom.noteFitPercent(37.5)
+        XCTAssertEqual(zoom.zoom.title, "Fit")
+        zoom.zoomIn()
+        XCTAssertEqual(zoom.zoom, .percent(50))
+        XCTAssertEqual(zoom.zoom.title, "50 %")
+        for expected in [75, 100, 200, 200] {
+            zoom.zoomIn()
+            XCTAssertEqual(zoom.zoom, .percent(expected))
+        }
+        for expected in [100, 75, 50, 25, 25] {
+            zoom.zoomOut()
+            XCTAssertEqual(zoom.zoom, .percent(expected))
+        }
+        zoom.fit()
+        zoom.zoomOut()
+        XCTAssertEqual(zoom.zoom, .percent(25), "from Fit at 37.5 %: the next level below")
+        zoom.fit()
+        zoom.noteFitPercent(50)
+        zoom.zoomIn()
+        XCTAssertEqual(zoom.zoom, .percent(75), "Fit at exactly a level: the next one")
+        zoom.fit()
+        zoom.noteFitPercent(250)
+        zoom.zoomIn()
+        XCTAssertEqual(zoom.zoom, .fit, "nothing larger than Fit")
+        zoom.zoomOut()
+        XCTAssertEqual(zoom.zoom, .percent(200))
+
+        for level in ProgramZoom.levels {
+            let viewport = KenBurnsViewport.stage(zoom: .percent(level), mode: nil, extent: nil, sequence: sequence,
+                                                  monitor: monitor, pointsPerPixel: pointsPerPixel)
+            XCTAssertEqual(viewport.frame.width, sequence.width * CGFloat(level) / 100 * pointsPerPixel, accuracy: 1e-9)
+            XCTAssertEqual(viewport.frame.midX, monitor.width / 2, accuracy: 1e-9)
+            XCTAssertEqual(viewport.frame.midY, monitor.height / 2, accuracy: 1e-9)
+            XCTAssertEqual(viewport.percent(pointsPerPixel: pointsPerPixel), Double(level), accuracy: 1e-9)
+        }
+        // A level applies with the editor open too (boxes may then be cut off; Fit shows them).
+        let open = KenBurnsViewport.stage(zoom: .percent(25), mode: .transform, extent: CGRect(x: -2000, y: 0, width: 6000, height: 1080),
+                                          sequence: sequence, monitor: monitor, pointsPerPixel: pointsPerPixel)
+        XCTAssertEqual(open.scale, 0.125, accuracy: 1e-12)
+    }
+
+    /// Command-plus / Command-minus (and = / -) zoom the program monitor while it has the focus (a click on it), the
+    /// timeline otherwise; Shift-Z fits the focused one; a click in the timeline or a scrub of its ruler takes the
+    /// focus back. Command-Shift-Z stays Redo.
+    func testTheZoomKeysZoomTheFocusedArea() async throws {
+        XCTAssertEqual(KeyboardController.action(keyCode: 6, characters: "Z", modifiers: .shift), .zoomToFit)
+        XCTAssertEqual(KeyboardController.action(keyCode: 6, characters: "z", modifiers: .shift), .zoomToFit)
+        XCTAssertNil(KeyboardController.action(keyCode: 6, characters: "z", modifiers: [.command, .shift]))
+        XCTAssertNil(KeyboardController.action(keyCode: 6, characters: "z", modifiers: []))
+        _ = try await longClip()
+        let keys = KeyboardController(store: store)
+        store.programZoom.noteFitPercent(40)
+        let timelineZoom = store.pixelsPerSecond
+
+        store.focusProgramMonitor()
+        XCTAssertEqual(store.focusArea, .timeline, "the transport keys still drive the program")
+        store.zoomIn()
+        XCTAssertEqual(store.programZoom.zoom, .percent(50))
+        keys.perform(.zoomIn, on: store)
+        XCTAssertEqual(store.programZoom.zoom, .percent(75))
+        store.zoomOut()
+        XCTAssertEqual(store.programZoom.zoom, .percent(50))
+        XCTAssertEqual(store.pixelsPerSecond, timelineZoom, "the timeline keeps its zoom")
+        keys.perform(.zoomToFit, on: store)
+        XCTAssertEqual(store.programZoom.zoom, .fit)
+
+        store.focusArea = .timeline // a click in the timeline
+        store.zoomIn()
+        XCTAssertGreaterThan(store.pixelsPerSecond, timelineZoom, "the timeline zooms")
+        XCTAssertEqual(store.programZoom.zoom, .fit)
+
+        store.focusProgramMonitor()
+        store.scrub(toSeconds: 1)
+        store.endScrub()
+        let scrubbed = store.pixelsPerSecond
+        store.zoomOut()
+        XCTAssertLessThan(store.pixelsPerSecond, scrubbed, "after a ruler scrub the timeline has the zoom keys")
+        XCTAssertEqual(store.programZoom.zoom, .fit)
+
+        store.focusProgramMonitor()
+        store.focusArea = .mediaBin
+        store.zoomIn()
+        XCTAssertEqual(store.programZoom.zoom, .fit, "the bin took the focus")
+    }
+
+    /// The zoom holds still while a box is dragged (review fix round, finding 4): the keys, the control and Shift-Z
+    /// change nothing until the drag ends; a title box's drag holds it the same way (it registers its Escape).
+    func testTheZoomHoldsStillDuringADrag() async throws {
+        let clip = try await longClip()
+        let model = try openEditor(on: clip, mode: .transform)
+        store.focusProgramMonitor()
+        store.programZoom.noteFitPercent(40)
+        model.applyDrag(.body(.start), origin: model.start, translation: CGSize(width: 100, height: 0))
+        XCTAssertTrue(store.isGestureActive)
+        store.zoomIn()
+        store.programZoom.set(.percent(50))
+        store.zoomOut()
+        XCTAssertEqual(store.programZoom.zoom, .fit, "no zoom during the drag")
+        model.endDrag()
+        store.zoomIn()
+        XCTAssertEqual(store.programZoom.zoom, .percent(50), "after it")
+        store.cancelActiveGesture = {} // as a title box drag registers itself
+        store.zoomFocusedToFit()
+        store.programZoom.set(.percent(100))
+        XCTAssertEqual(store.programZoom.zoom, .percent(50), "no zoom during a title box drag either")
+        store.cancelActiveGesture = nil
+        store.zoomFocusedToFit()
+        XCTAssertEqual(store.programZoom.zoom, .fit)
+    }
+
+    /// A level chosen by hand that would leave the editor's boxes off the monitor gives way to Fit when the editor
+    /// opens or a drag ends; a level that shows them stays; while the editor is open Shift-Z fits the monitor
+    /// whatever has the focus (review fix round, finding 5).
+    func testAHandChosenLevelGivesWayToFitWhenTheBoxesWouldBeOffTheMonitor() async throws {
+        let clip = try await longClip()
+        store.programZoom.noteStage(.init(monitor: monitor, pointsPerPixel: pointsPerPixel, sequence: sequence))
+        store.programZoom.set(.percent(200)) // chosen with the timeline focused
+        let model = try openEditor(on: clip, mode: .transform)
+        XCTAssertEqual(store.programZoom.zoom, .fit, "at 200 % the boxes (the frame) would be off the monitor")
+        store.closeKenBurns()
+        store.programZoom.set(.percent(25))
+        store.showKenBurns(span: model.spanID)
+        let reopened = try XCTUnwrap(store.kenBurns)
+        XCTAssertEqual(store.programZoom.zoom, .percent(25), "25 % shows them")
+        reopened.applyDrag(.corner(.end, .bottomRight), origin: reopened.end, translation: CGSize(width: 9000, height: 5000))
+        XCTAssertEqual(store.programZoom.zoom, .percent(25), "not during the drag")
+        reopened.endDrag()
+        XCTAssertEqual(store.programZoom.zoom, .fit, "the drag ended with the box past the 25 % stage")
+        assertShown([reopened.start, reopened.end], on: stage(), "at Fit")
+
+        store.programZoom.set(.percent(25))
+        store.focusArea = .timeline
+        let timelineZoom = store.pixelsPerSecond
+        store.zoomFocusedToFit()
+        XCTAssertEqual(store.programZoom.zoom, .fit, "Shift-Z fits the monitor while the editor is open")
+        XCTAssertEqual(store.pixelsPerSecond, timelineZoom, "not the timeline")
+        store.closeKenBurns()
+        store.zoomFocusedToFit()
+        XCTAssertEqual(store.programZoom.zoom, .fit)
+    }
+
+    /// At a fixed level the program view composites at most the sequence's frame size (the layer magnifies it):
+    /// 200 % of a 4K sequence is 3840x2160 per frame, not 7680x4320; at Fit the view's own size (review fix round,
+    /// finding 6). Also: the layout's clipping container holds the larger view (it is cut at the monitor's edge).
+    func testAFixedLevelLimitsTheProgramViewsDrawable() async throws {
+        try fixture.configureSequence(width: 3840, height: 2160)
+        _ = try await longClip()
+        let store = self.store
+        let hosted = HostedView(ProgramMonitorHost(store: store, playhead: store.playhead),
+                                size: NSSize(width: 1000, height: 700))
+        defer {
+            store.engine.attachProgramView(nil)
+            hosted.close()
+        }
+        await hosted.settle()
+        let preview = try XCTUnwrap(store.engine.programView)
+        let scale = hosted.window.backingScaleFactor
+        XCTAssertLessThanOrEqual(preview.drawableSize.width, 1000 * scale + 1, "Fit: the monitor's own size")
+        store.programZoom.set(.percent(200))
+        await hosted.settle()
+        XCTAssertEqual(store.programZoom.drawableLimit, CGSize(width: 3840, height: 2160))
+        XCTAssertEqual(preview.bounds.width, 3840 * 2 / scale, accuracy: 1, "the view is the frame at 200 %")
+        XCTAssertEqual(preview.drawableSize.width, 3840, accuracy: 1, "composited at the sequence's size")
+        XCTAssertEqual(preview.drawableSize.height, 2160, accuracy: 1)
+        var clipped = false
+        var ancestor = preview.superview
+        while let view = ancestor, view !== hosted.host {
+            if view.layer?.masksToBounds == true, view.frame.width <= 1000.5 { clipped = true }
+            ancestor = view.superview
+        }
+        XCTAssertTrue(clipped, "a layer between the view and the window clips it to the monitor")
+        store.programZoom.set(.percent(25))
+        await hosted.settle()
+        XCTAssertEqual(preview.drawableSize.width, 3840 * 0.25, accuracy: 1, "25 %: the whole frame, smaller")
+        store.programZoom.fit()
+        await hosted.settle()
+        XCTAssertEqual(store.programZoom.drawableLimit, .zero)
+    }
+
+    // MARK: Reset
+
+    /// Reset Start and Reset End: Transform puts the box back where the clip sits without the move (its own
+    /// placement: a picture in picture's box), Ken Burns the rectangle back to the whole picture (the frame box);
+    /// the other edge and the rotation stay; one undo step each; disabled when there is nothing to reset.
+    func testResetPutsAnEdgeBackInOneUndoStep() async throws {
+        let clip = try await longClip()
+        XCTAssertTrue(store.engine.setVideoParams(VEVideoParams(x: 300, y: -100, scale: 0.5, rotationDegrees: 0, opacity: 1),
+                                                  forClip: clip).ok)
+        let model = try openEditor(on: clip, mode: .transform)
+        let picture = CGSize(width: 320, height: 180)
+        let own = KenBurnsModel.box(for: VEVideoParams(x: 300, y: -100, scale: 0.5, rotationDegrees: 0, opacity: 1),
+                                    picture: picture, sequence: sequence)
+        XCTAssertFalse(model.canReset(.start), "a new Transform span adds nothing")
+        XCTAssertFalse(model.canReset(.end))
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 250, height: 100))
+        model.endDrag()
+        model.applyDrag(.body(.start), origin: model.start, translation: CGSize(width: -400, height: 200))
+        model.endDrag()
+        let moved = model.start
+        let end = model.end
+        XCTAssertTrue(model.canReset(.start))
+
+        model.reset(.start)
+        assertBox(model.start, own, "Transform: the clip's own placement")
+        assertBox(model.end, end, "the end stays")
+        XCTAssertFalse(model.canReset(.start), "nothing left to reset")
+        store.undo()
+        assertBox(model.start, moved, "one undo step")
+        store.redo()
+        assertBox(model.start, own, "redone")
+
+        XCTAssertTrue(model.canReset(.end), "the end was moved")
+        model.reset(.end)
+        assertBox(model.end, own, "Transform: the end too")
+        store.undo()
+        assertBox(model.end, end, "one undo step")
+
+        // Ken Burns: the whole picture (the frame box), whatever the clip's own placement.
+        model.setMode(.kenBurns)
+        let frameBox = KenBurnsBox(center: CGPoint(x: 960, y: 540), size: sequence, rotationDegrees: 0)
+        XCTAssertTrue(model.canReset(.start), "a picture in picture's rectangle is not the whole picture")
+        model.reset(.start)
+        assertBox(model.start, frameBox, "Ken Burns: the whole picture")
+        XCTAssertFalse(model.canReset(.start))
+        model.applyDrag(.corner(.start, .topLeft), origin: model.start, translation: CGSize(width: 480, height: 270))
+        model.endDrag()
+        let zoomedIn = model.start
+        XCTAssertLessThan(zoomedIn.size.width, sequence.width)
+        model.reset(.start)
+        assertBox(model.start, frameBox, "Ken Burns: back to the whole picture")
+        store.undo()
+        assertBox(model.start, zoomedIn, "one undo step")
+    }
+
+    // MARK: Pictures (offscreen, for the report)
+
+    /// Renders the program monitor's layout with the real program picture (the program view's own snapshot drawn
+    /// into the layout's offscreen drawing; never a screen capture) at its state: a box dragged off the frame before
+    /// and after the automatic fit, and the whole editor window at 50 % with the zoom control and the Reset buttons.
+    /// The PNGs are written to the test host's temporary directory, under FramewrightProgramZoom.
+    func testRendersTheStagePictures() async throws {
+        let clip = try await longClip()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FramewrightProgramZoom")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = self.store
+        let monitorView = HostedView(ProgramMonitorLayout(store: store) {
+            ProgramMonitorView(attachID: ObjectIdentifier(store)) { view in store.attachProgramView(view) }
+        }, size: NSSize(width: 1000, height: 700))
+        defer {
+            store.engine.attachProgramView(nil)
+            monitorView.close()
+        }
+        let model = try openEditor(on: clip, mode: .transform)
+        await monitorView.settle()
+        model.applyDrag(.body(.start), origin: model.start, translation: CGSize(width: 1500, height: -200))
+        try await writePicture(of: monitorView, to: directory.appendingPathComponent("1-box-dragged-off-before-fit.png"))
+        model.endDrag()
+        try await writePicture(of: monitorView, to: directory.appendingPathComponent("2-box-dragged-off-after-fit.png"))
+        XCTAssertLessThan(stage().scale, standard.scale)
+
+        let documents = DocumentController(store: store, defaults: try makeTestDefaults("program-zoom-window"))
+        store.programZoom.set(.percent(50))
+        let window = HostedView(ContentView(store: store, documents: documents), size: NSSize(width: 1400, height: 900))
+        defer { window.close() }
+        try await writePicture(of: window, to: directory.appendingPathComponent("3-window-zoom-50-and-reset-buttons.png"))
+        store.programZoom.fit()
+        try await writePicture(of: window, to: directory.appendingPathComponent("4-window-fit-and-reset-buttons.png"))
+        print("Program zoom pictures: \(directory.path)")
+    }
+
+    /// Draws `hosted` offscreen with the program view's snapshot in its place, and writes it as a PNG.
+    private func writePicture(of hosted: HostedView, to url: URL) async throws {
+        await hosted.settle()
+        let previews = previewViews(in: hosted.host)
+        for preview in previews {
+            try? await preview.renderOnce()
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        await hosted.settle()
+        let rep = try XCTUnwrap(hosted.bitmap())
+        let image = NSImage(size: hosted.host.bounds.size)
+        image.addRepresentation(rep)
+        let composed = NSImage(size: hosted.host.bounds.size)
+        composed.lockFocus()
+        image.draw(in: NSRect(origin: .zero, size: hosted.host.bounds.size))
+        for preview in previews {
+            // The picture the view shows (its own snapshot, not the screen) where the view is, in drawing
+            // coordinates (origin at the bottom left).
+            guard let snapshot = preview.snapshot() else { continue }
+            let rect = preview.convert(preview.bounds, to: hosted.host)
+            let placed = hosted.host.isFlipped
+                ? CGRect(x: rect.minX, y: hosted.host.bounds.height - rect.maxY, width: rect.width, height: rect.height)
+                : rect
+            NSGraphicsContext.current?.cgContext.draw(snapshot, in: placed)
+        }
+        composed.unlockFocus()
+        let tiff = try XCTUnwrap(composed.tiffRepresentation)
+        let png = try XCTUnwrap(NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]))
+        try png.write(to: url)
+        print("Wrote \(url.path)")
+    }
+
+    private func previewViews(in view: NSView) -> [VEPreviewView] {
+        var found: [VEPreviewView] = []
+        if let preview = view as? VEPreviewView { found.append(preview) }
+        for subview in view.subviews { found.append(contentsOf: previewViews(in: subview)) }
+        return found
+    }
+}

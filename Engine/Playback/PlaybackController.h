@@ -33,9 +33,15 @@
 // Config::idleLookaheadDelay, the tick thread retargets the decode pool at the paused frame with
 // the short Config::stoppedLookahead window (forward, the way play() goes) and positions the audio
 // sources there (Config::audioWarmDelay; each source then decodes its own lookahead, about two
-// seconds, into its ring buffer). A playhead that keeps moving (arrow-key repeat, J/K/L taps, a
-// scrub) never retargets the pool: only the scrub path decodes the pictures it shows, so the
-// lookahead never competes with the scrub lane. setIdleLookahead(false) (an export running on
+// seconds, into its ring buffer). Where the user put the playhead down (the end of a scrub or a
+// ruler click, an exact seek) both start at once (Config::restDelay): Space usually follows. A
+// playhead that keeps moving (arrow-key repeat, J/K/L taps) never retargets the pool, and a scrub
+// suspends it (DecodePool::suspendTargets): only the scrub path decodes the pictures it shows, so
+// the lookahead never competes with the scrub lane, and every new scrub or seek replaces the
+// previous preparation (the latest wins; nothing queues). The paused picture's decoder hands over
+// to the lookahead (DecodeTarget::continueScrubLane): the stream of the clip under the playhead
+// continues from the picture the scrub path decoded instead of decoding its GOP again, and waits
+// for that picture while it is being decoded. setIdleLookahead(false) (an export running on
 // its own pool) clears the targets instead and keeps them clear until it is enabled again. The
 // windows stay within the pool's budget share (DecodePool::Config::budgetFraction). A pre-roll
 // then finds the first frames in the cache and the sources primed and completes on its first
@@ -292,6 +298,10 @@ struct PlaybackConfig {
     /// While stopped, the decode pool is retargeted at the paused frame (with stoppedLookahead)
     /// once it has not moved for this long; a playhead still moving leaves the pool alone.
     std::chrono::milliseconds idleLookaheadDelay{100};
+    /// Instead of idleLookaheadDelay and audioWarmDelay where the playhead was put down (the end of a
+    /// scrub or a ruler click, an exact seek while stopped): play() usually follows, so the lookahead
+    /// and the audio get ready at once.
+    std::chrono::milliseconds restDelay{0};
     /// Video lookahead decoded from a still playhead (forward), so play() finds its first frames.
     CMTime stoppedLookahead = CMTimeMake(1, 2);
     /// Longest wait for the mixer to finish the previous run's fade-out before its sources are
@@ -485,7 +495,9 @@ class PlaybackController {
     void playingTickLocked();
     void advanceJoinLocked(CMTime t);
     void dropAudioLocked(); // audio clock -> host clock at the current time, mixer faded out
-    void noteDisplayChangedLocked(); // stopped: the paused frame moved (re-warm the audio later)
+    /// Stopped: the paused frame moved (the lookahead and the audio follow it after their delays, or
+    /// after Config::restDelay when `atRest`: the playhead was put down there).
+    void noteDisplayChangedLocked(bool atRest = false);
     void warmAudioLocked();
     bool firstFramesReadyLocked(CMTime at) const;
     /// The layers to decode for the frame at `at`: the program's, plus the solo clip's layer
@@ -555,7 +567,9 @@ class PlaybackController {
     Join join_;
     uint64_t lastStopSerial_ = 0;
     std::chrono::steady_clock::time_point lastStopAt_{};
-    std::chrono::steady_clock::time_point displayChangedAt_{};
+    // Stopped: when the lookahead follows the paused frame, and when the audio is warmed there.
+    std::chrono::steady_clock::time_point lookaheadDueAt_{};
+    std::chrono::steady_clock::time_point audioWarmDueAt_{};
     bool audioWarm_ = false; // stopped: sources are positioned at displayTime_
     // Output lifecycle (decided by the tick thread).
     bool outputStarted_ = false;
