@@ -65,6 +65,13 @@ struct TimelineViewModel: Equatable {
         /// Fade durations in seconds.
         var fadeIn: Double = 0
         var fadeOut: Double = 0
+        /// A title or a colour matte (the engine's `VEClipInfo.generatorKind`; nil for media): drawn in its own
+        /// colour, named by its first line (or "Colour Matte"), without thumbnails.
+        var generator: Generator?
+        /// A colour matte's colour, drawn as a swatch at the clip's start.
+        var matteColour: TimelineItemStyle.RGB?
+        /// A title whose font this Mac does not have: the warning badge of missing media.
+        var fontMissing = false
 
         /// The name drawn on the clip: its media's, after a "◀" when it plays backwards.
         var title: String {
@@ -76,6 +83,12 @@ struct TimelineViewModel: Equatable {
         func mediaTime(atClipTime clipTime: Double) -> Double {
             reversed ? mediaEnd - clipTime : clipTime
         }
+    }
+
+    /// What a generated clip makes (the engine's VEGeneratorKind but none).
+    enum Generator: Equatable {
+        case title
+        case colourMatte
     }
 
     /// What a span changes (VESpanKind).

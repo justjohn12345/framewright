@@ -228,7 +228,8 @@ struct TimelineRenderer {
               let layout = model.layout(forTrack: clip.trackID) else { return }
         let isAudio = layout.track.kind == .audio
         let asset = assets[clip.assetID]
-        let kind: TimelineItemStyle.Kind = asset?.isMissing == true ? .missingClip : (isAudio ? .audioClip : .videoClip)
+        let kind: TimelineItemStyle.Kind = clip.generator != nil ? .titleClip
+            : asset?.isMissing == true ? .missingClip : (isAudio ? .audioClip : .videoClip)
         let style = Self.style(for: kind, selected: selection.contains(clip.id))
         let body = rect.insetBy(dx: 0.5, dy: 1)
         let shape = Path(roundedRect: body, cornerRadius: 4)
@@ -258,7 +259,20 @@ struct TimelineRenderer {
             label += "  " + TimelineGestureController.gainText(clip.gainDb)
         }
         let text = Text(label).font(.system(size: 10, weight: .medium)).foregroundColor(style.labelColor)
-        let labelX = max(body.minX, 0) + 5
+        var labelX = max(body.minX, 0) + 5
+        // A colour matte's colour as a swatch at its start; a title's missing font as the missing-media badge.
+        if let matte = clip.matteColour {
+            let swatch = CGRect(x: labelX, y: body.minY + 3, width: 10, height: 10)
+            inner.fill(Path(roundedRect: swatch, cornerRadius: 2), with: .color(matte.color))
+            inner.stroke(Path(roundedRect: swatch, cornerRadius: 2), with: .color(Color.white.opacity(0.8)), lineWidth: 1)
+            labelX += 14
+        }
+        if clip.fontMissing {
+            var badge = inner.resolve(Image(systemName: "exclamationmark.triangle.fill"))
+            badge.shading = .color(.yellow)
+            inner.draw(badge, in: CGRect(x: labelX, y: body.minY + 2, width: 12, height: 11))
+            labelX += 15
+        }
         inner.draw(text, at: CGPoint(x: labelX, y: body.minY + 2), anchor: .topLeading)
 
         strokeOutline(of: body, cornerRadius: 4, style: style, in: &context)
@@ -456,7 +470,7 @@ enum SpeedFormat {
 struct TimelineItemStyle: Equatable {
     /// What is drawn.
     enum Kind: CaseIterable, Hashable {
-        case videoClip, audioClip, missingClip, transition, motion, opacity, gain
+        case videoClip, audioClip, missingClip, titleClip, transition, motion, opacity, gain
 
         init(_ span: TimelineViewModel.SpanKind) {
             switch span {
@@ -525,6 +539,7 @@ struct TimelineItemStyle: Equatable {
         case .videoClip: return RGB(red: 0.22, green: 0.32, blue: 0.58)
         case .audioClip: return RGB(red: 0.18, green: 0.42, blue: 0.28)
         case .missingClip: return RGB(red: 0.55, green: 0.18, blue: 0.18)
+        case .titleClip: return RGB(red: 0.62, green: 0.20, blue: 0.46)
         case .transition: return RGB(red: 0.58, green: 0.34, blue: 0.80)
         case .motion: return RGB(red: 0.85, green: 0.52, blue: 0.16)
         case .opacity: return RGB(red: 0.2, green: 0.6, blue: 0.7)
@@ -541,7 +556,7 @@ struct TimelineItemStyle: Equatable {
             borderWidth = Self.selectedBorderWidth
             label = fill.contrast(with: .white) >= fill.contrast(with: .black) ? .white : .black
         } else {
-            let clip = kind == .videoClip || kind == .audioClip || kind == .missingClip
+            let clip = kind == .videoClip || kind == .audioClip || kind == .missingClip || kind == .titleClip
             fill = base
             fillOpacity = Self.unselectedOpacity
             border = .shade(clip ? 0.5 : 0.35)

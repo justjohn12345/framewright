@@ -321,6 +321,7 @@ final class ProjectStore: ObservableObject {
             }
         }
         observe(.VEEngineExportDidFinish) { store, _ in store.exportStateChanged() }
+        observe(.VEEngineTitleFontsDidChange) { store, _ in store.titleFontsChanged() }
         observe(.VEEngineMemoryPressure) { store, note in
             let critical = (note.userInfo?[VEEngineCriticalKey] as? NSNumber)?.boolValue ?? false
             store.thumbnails.handleMemoryPressure(critical: critical)
@@ -406,6 +407,14 @@ final class ProjectStore: ObservableObject {
         // Not while a drag previews its edits (the view would slide under the pointer); the drag's
         // end is a model change too.
         if !isGestureActive { clampTimelineScroll() }
+    }
+
+    /// The Mac's fonts changed (Font Book activated or removed one): the titles' missing-font badges are drawn
+    /// again (the timeline's content is rebuilt although the model did not change) and the inspector re-reads.
+    func titleFontsChanged() {
+        cachedTimeline = nil
+        refreshModel()
+        objectWillChange.send()
     }
 
     func refreshAssets() {
@@ -519,6 +528,7 @@ final class ProjectStore: ObservableObject {
         }
         let drawnClips: [TimelineViewModel.Clip] = clips.values.map {
             let audio = $0.audioParams
+            let matte = $0.matteColour
             return TimelineViewModel.Clip(id: $0.clipID, trackID: $0.trackID, assetID: $0.assetID, name: $0.name,
                                           start: $0.timelineStart.secondsOrZero, end: $0.timelineEnd.secondsOrZero,
                                           sourceIn: $0.sourceIn.secondsOrZero, speed: $0.speed,
@@ -526,7 +536,13 @@ final class ProjectStore: ObservableObject {
                                           reversed: $0.reversed, mediaEnd: $0.mediaEnd.secondsOrZero,
                                           isAudio: $0.trackKind == .audio, gainDb: audio.gainDb,
                                           fadeIn: audio.fadeInDuration.secondsOrZero,
-                                          fadeOut: audio.fadeOutDuration.secondsOrZero)
+                                          fadeOut: audio.fadeOutDuration.secondsOrZero,
+                                          generator: $0.generatorKind == .title ? .title
+                                              : $0.generatorKind == .colourMatte ? .colourMatte : nil,
+                                          matteColour: $0.generatorKind == .colourMatte
+                                              ? TimelineItemStyle.RGB(red: matte.red, green: matte.green, blue: matte.blue)
+                                              : nil,
+                                          fontMissing: $0.title.map { !$0.font.isAvailable } ?? false)
         }.sorted { ($0.start, $0.id) < ($1.start, $1.id) }
         return DrawnTimeline(frameSeconds: frameDuration.secondsOrZero, tracks: rows, clips: drawnClips,
                              spans: spans.sorted { ($0.trackID, $0.lane, $0.start, $0.id) < ($1.trackID, $1.lane, $1.start, $1.id) })

@@ -215,8 +215,8 @@ struct GeneratorsPanel: View {
     let store: ProjectStore
     @ObservedObject var availability: LaneEffectsAvailability
 
-    /// The tiles' icon colour.
-    static let tileColour = Color(red: 0.70, green: 0.24, blue: 0.50)
+    /// The tiles' icon colour: the title clips' colour on the timeline.
+    static let tileColour = TimelineItemStyle.baseFill(.titleClip).color
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {

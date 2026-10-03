@@ -9,7 +9,7 @@ import XCTest
 @MainActor
 final class TimelineSelectionStyleTests: XCTestCase {
     func testEveryKindIsLighterWithAnAccentBorderInsideWhenSelected() {
-        XCTAssertEqual(TimelineItemStyle.Kind.allCases.count, 7)
+        XCTAssertEqual(TimelineItemStyle.Kind.allCases.count, 8)
         for kind in TimelineItemStyle.Kind.allCases {
             let plain = TimelineRenderer.style(for: kind, selected: false)
             let selected = TimelineRenderer.style(for: kind, selected: true)
