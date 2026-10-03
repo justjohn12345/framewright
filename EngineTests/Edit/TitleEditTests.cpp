@@ -236,6 +236,44 @@ TEST_CASE("Title edits: the summary says what titles agree on and where they dif
     CHECK(summarizeTitles(fx.sequence(), {video}).titles.empty());
 }
 
+TEST_CASE("Title edits: a title card stacks its matte above the target and its title above the matte (slice 2)") {
+    TitleRig fx;
+    fx.addClip(fx.v1, fx.av30, 0, 300);
+    const std::vector<std::shared_ptr<const GeneratedContent>> layers = presetLayers(GeneratedPreset::TitleCard);
+    REQUIRE(layers.size() == 2);
+    CHECK(layers[0]->isMatte());
+    CHECK(layers[0]->matteColour() == kBlack);
+    CHECK(layers[1]->isTitle());
+    CHECK(layers[1]->title().font == TitleFont::system(SystemFontWeight::Bold));
+    CHECK(presetLayers(GeneratedPreset::Caption).size() == 1);
+    AddGeneratedClip card(fx.seq, f30(30), fx.v1, layers, defaultStillDuration(), "Add Title Card");
+    applyReversible(fx.project, card);
+    REQUIRE(card.createdClipIds().size() == 2);
+    const ClipId matte = card.createdClipIds()[0];
+    const ClipId title = card.createdClipIds()[1];
+    CHECK(card.createdClipId() == title);
+    CHECK(fx.clip(matte).trackId == fx.v2); // the lowest free track above V1
+    CHECK(fx.clip(matte).generated->isMatte());
+    CHECK(fx.clip(title).generated->isTitle());
+    CHECK(card.addedTrack()); // V2 is the top track: the title gets a new V3
+    CHECK(fx.clip(title).trackId == fx.sequence().videoTracks[2].id);
+    CHECK(fx.clip(title).timelineStart == fx.clip(matte).timelineStart);
+    CHECK(fx.clip(title).timelineDuration == fx.clip(matte).timelineDuration);
+    CHECK(card.name() == "Add Title Card");
+    fx.requireValid();
+    // A caption: point text at the top left of title-safe, anchored at its top.
+    const TitleContent caption = titlePreset(GeneratedPreset::Caption);
+    CHECK(caption.pointText);
+    CHECK(caption.anchor == TitleAnchor::Top);
+    CHECK(caption.alignment == TitleAlignment::Left);
+    CHECK(caption.x > 0.05);
+    CHECK(caption.y > 0.05);
+    CHECK(caption.x < 0.07);
+    CHECK_FALSE(titleContentProblem(caption).has_value());
+    CHECK(std::string(displayNameOf(GeneratedPreset::TitleCard)) == "Title Card");
+    CHECK(std::string(displayNameOf(GeneratedPreset::Caption)) == "Caption");
+}
+
 TEST_CASE("Title edits: a new title goes on the lowest free track above the target") {
     TitleRig fx;
     fx.addClip(fx.v1, fx.av30, 0, 300); // the footage on V1

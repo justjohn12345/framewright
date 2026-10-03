@@ -39,6 +39,7 @@
 #include <string>
 #include <string_view>
 #include <variant>
+#include <vector>
 
 namespace ve {
 
@@ -298,16 +299,20 @@ std::optional<std::string> titleValueProblem(TitleParameter parameter, const Tit
 std::optional<std::string> titleContentProblem(const TitleContent &content);
 
 // The presets (section 9), as code: a centred title, a lower third (left-aligned in the lower left inside
-// title-safe, "Name" and "Role" on a 60 % black box), and a black colour matte.
+// title-safe, "Name" and "Role" on a 60 % black box), a black colour matte, and (slice 2) a title card (a centred title
+// over a black colour matte: two clips, presetLayers) and a caption (point text at the top left of title-safe,
+// anchored at its top: it grows down and to the right as it is typed).
 enum class GeneratedPreset {
     Title,
     LowerThird,
     ColourMatte,
+    TitleCard,
+    Caption,
 };
 
-// "Title", "Lower Third", "Colour Matte".
+// "Title", "Lower Third", "Colour Matte", "Title Card", "Caption".
 const char *displayNameOf(GeneratedPreset preset);
-// The generator kind a preset makes.
+// The generator kind of the clip a preset makes (its top one: a title card's title).
 GeneratorKind generatorKindOf(GeneratedPreset preset);
 // A preset's title content (the Title preset's for ColourMatte, which has none).
 TitleContent titlePreset(GeneratedPreset preset);
@@ -335,7 +340,7 @@ class GeneratedContent {
   public:
     static std::shared_ptr<const GeneratedContent> makeTitle(TitleContent title, std::string foreign = {});
     static std::shared_ptr<const GeneratedContent> makeMatte(SRGBColour colour, std::string foreign = {});
-    // A preset's content (makeTitle or makeMatte).
+    // A preset's content (makeTitle or makeMatte; a title card's title).
     static std::shared_ptr<const GeneratedContent> makePreset(GeneratedPreset preset);
 
     GeneratorKind kind() const {
@@ -374,6 +379,9 @@ class GeneratedContent {
     std::string foreign_;
     ContentId contentId_;
 };
+
+// The clips a preset adds, from the bottom track up: its one clip, or a title card's black matte and its title.
+std::vector<std::shared_ptr<const GeneratedContent>> presetLayers(GeneratedPreset preset);
 
 // Whether two clips' contents are the same: both absent, or both present and equal.
 bool sameContent(const std::shared_ptr<const GeneratedContent> &a, const std::shared_ptr<const GeneratedContent> &b);

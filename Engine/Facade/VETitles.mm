@@ -218,6 +218,10 @@ std::optional<GeneratedPreset> fromVE(VEGeneratedPreset preset) {
         return GeneratedPreset::LowerThird;
     case VEGeneratedPresetColourMatte:
         return GeneratedPreset::ColourMatte;
+    case VEGeneratedPresetTitleCard:
+        return GeneratedPreset::TitleCard;
+    case VEGeneratedPresetCaption:
+        return GeneratedPreset::Caption;
     }
     return std::nullopt;
 }

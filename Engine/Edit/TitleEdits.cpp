@@ -202,18 +202,24 @@ TitleSummary summarizeTitles(const Sequence &sequence, const std::vector<ClipId>
 
 AddGeneratedClip::AddGeneratedClip(SequenceId sequenceId, CMTime at, TrackId aboveTrack,
                                    std::shared_ptr<const GeneratedContent> content, CMTime length, std::string name)
-    : SequenceCommand(sequenceId), at_(at), aboveTrack_(aboveTrack), content_(std::move(content)), length_(length),
+    : AddGeneratedClip(sequenceId, at, aboveTrack, std::vector<std::shared_ptr<const GeneratedContent>>{std::move(content)},
+                       length, std::move(name)) {}
+
+AddGeneratedClip::AddGeneratedClip(SequenceId sequenceId, CMTime at, TrackId aboveTrack,
+                                   std::vector<std::shared_ptr<const GeneratedContent>> contents, CMTime length,
+                                   std::string name)
+    : SequenceCommand(sequenceId), at_(at), aboveTrack_(aboveTrack), contents_(std::move(contents)), length_(length),
       name_(std::move(name)) {}
 
 std::string AddGeneratedClip::name() const {
     if (!name_.empty()) {
         return name_;
     }
-    return content_ && content_->isMatte() ? "Add Colour Matte" : "Add Title";
+    return contents_.size() == 1 && contents_[0] && contents_[0]->isMatte() ? "Add Colour Matte" : "Add Title";
 }
 
 EditResult AddGeneratedClip::perform(const Project &project, Sequence &sequence, IdGenerator &ids) {
-    if (!content_) {
+    if (contents_.empty() || std::any_of(contents_.begin(), contents_.end(), [](const auto &c) { return !c; })) {
         return EditResult::failure(EditError::InvalidArgument, "No title to add.");
     }
     if (!CMTIME_IS_NUMERIC(at_)) {
@@ -228,7 +234,6 @@ EditResult AddGeneratedClip::perform(const Project &project, Sequence &sequence,
     }
     const CMTime length = maxTime(snapToSequence(sequence, length_), sequence.frameDuration);
     const TimeRange range{at, at + length};
-    std::size_t first = 0;
     if (aboveTrack_) {
         const Track *target = sequence.findTrack(aboveTrack_);
         if (target == nullptr) {
@@ -238,47 +243,56 @@ EditResult AddGeneratedClip::perform(const Project &project, Sequence &sequence,
         if (target->kind != TrackKind::Video) {
             return EditResult::failure(EditError::TrackKindMismatch, "A title goes above a video track.");
         }
-        for (std::size_t i = 0; i < sequence.videoTracks.size(); ++i) {
-            if (sequence.videoTracks[i].id == aboveTrack_) {
-                first = i + 1;
+    }
+    createdClips_.clear();
+    addedTrack_ = false;
+    TrackId below = aboveTrack_;
+    for (const std::shared_ptr<const GeneratedContent> &content : contents_) {
+        // The lowest free track above `below` (from the bottom when it is not set).
+        std::size_t first = 0;
+        if (below) {
+            for (std::size_t i = 0; i < sequence.videoTracks.size(); ++i) {
+                if (sequence.videoTracks[i].id == below) {
+                    first = i + 1;
+                }
             }
         }
-    }
-    Track *destination = nullptr;
-    for (std::size_t i = first; i < sequence.videoTracks.size() && destination == nullptr; ++i) {
-        Track &track = sequence.videoTracks[i];
-        const bool free = std::none_of(track.clips.begin(), track.clips.end(), [&](const Clip &clip) {
-            return clip.timelineRange().intersects(range);
-        });
-        if (!track.locked && !track.muted && free) { // a hidden video track (muted) would not show it
-            destination = &track;
+        Track *destination = nullptr;
+        for (std::size_t i = first; i < sequence.videoTracks.size() && destination == nullptr; ++i) {
+            Track &track = sequence.videoTracks[i];
+            const bool free = std::none_of(track.clips.begin(), track.clips.end(), [&](const Clip &clip) {
+                return clip.timelineRange().intersects(range);
+            });
+            if (!track.locked && !track.muted && free) { // a hidden video track (muted) would not show it
+                destination = &track;
+            }
         }
+        if (destination == nullptr) {
+            // No free track above: a new one on top, in the same edit.
+            Track track;
+            track.id = ids.make<TrackId>();
+            track.kind = TrackKind::Video;
+            track.name = "V" + std::to_string(sequence.videoTracks.size() + 1);
+            sequence.videoTracks.push_back(std::move(track));
+            destination = &sequence.videoTracks.back();
+            addedTrack_ = true;
+        }
+        ClipPlacement placement;
+        placement.trackId = destination->id;
+        placement.generated = content;
+        placement.sourceIn = kCMTimeZero;
+        placement.sourceOut = length;
+        Clip clip;
+        if (EditResult r = buildClipForPlacement(project, sequence, *destination, placement, clip); !r) {
+            return r;
+        }
+        clip.id = ids.make<ClipId>();
+        clip.timelineStart = at;
+        createdClips_.push_back(clip.id);
+        placedTrack_ = destination->id;
+        below = destination->id;
+        insertClipSorted(*destination, std::move(clip));
     }
-    addedTrack_ = false;
-    if (destination == nullptr) {
-        // No free track above the target: a new one on top, in the same edit.
-        Track track;
-        track.id = ids.make<TrackId>();
-        track.kind = TrackKind::Video;
-        track.name = "V" + std::to_string(sequence.videoTracks.size() + 1);
-        sequence.videoTracks.push_back(std::move(track));
-        destination = &sequence.videoTracks.back();
-        addedTrack_ = true;
-    }
-    ClipPlacement placement;
-    placement.trackId = destination->id;
-    placement.generated = content_;
-    placement.sourceIn = kCMTimeZero;
-    placement.sourceOut = length;
-    Clip clip;
-    if (EditResult r = buildClipForPlacement(project, sequence, *destination, placement, clip); !r) {
-        return r;
-    }
-    clip.id = ids.make<ClipId>();
-    clip.timelineStart = at;
-    createdClip_ = clip.id;
-    placedTrack_ = destination->id;
-    insertClipSorted(*destination, std::move(clip));
     return EditResult::success();
 }
 

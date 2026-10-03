@@ -23,11 +23,15 @@ typedef NS_ENUM(NSInteger, VEGeneratorKind) {
 };
 
 /// What a new title or matte starts as (section 9 of the titles design): a centred title, a lower third
-/// (left-aligned in the lower left inside title-safe, "Name" and "Role" on a 60 % black box) and a black matte.
+/// (left-aligned in the lower left inside title-safe, "Name" and "Role" on a 60 % black box), a black matte, a title
+/// card (a bold centred title over a black matte: two clips, the title on the track above) and a caption (point text
+/// at the top left of title-safe, anchored at its top, growing down and to the right).
 typedef NS_ENUM(NSInteger, VEGeneratedPreset) {
     VEGeneratedPresetTitle = 0,
     VEGeneratedPresetLowerThird = 1,
     VEGeneratedPresetColourMatte = 2,
+    VEGeneratedPresetTitleCard = 3,
+    VEGeneratedPresetCaption = 4,
 };
 
 /// A title's parameter (the engine's TitleParameter, in order).

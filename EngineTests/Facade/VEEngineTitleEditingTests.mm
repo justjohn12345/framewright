@@ -312,6 +312,67 @@ double brightFraction(const Grey &grey, VETitleQuad quad, double scale, double i
     XCTAssertFalse([engine setTitlePointText:YES clips:@[ matte.createdIDs.firstObject ]].ok);
 }
 
+// MARK: - Presets
+
+- (void)testATitleCardIsAMatteWithItsTitleAboveAsOneUndoStep {
+    VEEngine *engine = [self engine];
+    const NSUInteger tracks = engine.sequence.videoTrackIDs.count;
+    VEEditResult *card = [engine addGeneratedPreset:VEGeneratedPresetTitleCard atTime:kCMTimeZero aboveTrack:0];
+    XCTAssertTrue(card.ok, @"%@", card.message);
+    XCTAssertEqual(card.createdIDs.count, 2u);
+    XCTAssertEqualObjects(engine.undoActionName, @"Add Title Card");
+    VEClipInfo *title = [engine clipInfo:card.createdIDs[0].longLongValue];
+    VEClipInfo *matte = [engine clipInfo:card.createdIDs[1].longLongValue];
+    XCTAssertEqual(title.generatorKind, VEGeneratorKindTitle, @"the title first: the clip to select");
+    XCTAssertEqual(matte.generatorKind, VEGeneratorKindColourMatte);
+    NSArray<NSNumber *> *trackIDs = engine.sequence.videoTrackIDs;
+    XCTAssertGreaterThan([trackIDs indexOfObject:@(title.trackID)], [trackIDs indexOfObject:@(matte.trackID)],
+                         @"the title above its matte");
+    XCTAssertTrue(CMTimeCompare(title.timelineStart, matte.timelineStart) == 0);
+    XCTAssertTrue([engine undo]);
+    XCTAssertNil([engine clipInfo:card.createdIDs[0].longLongValue]);
+    XCTAssertNil([engine clipInfo:card.createdIDs[1].longLongValue]);
+    XCTAssertEqual(engine.sequence.videoTrackIDs.count, tracks, @"the track it added went with it");
+    // Dropped on V1: the matte where it was dropped, the title above.
+    const VETrackID v1 = engine.sequence.videoTrackIDs[0].longLongValue;
+    VEEditResult *dropped = [engine placeGeneratedPreset:VEGeneratedPresetTitleCard onTrack:v1 atTime:kCMTimeZero insert:NO];
+    XCTAssertTrue(dropped.ok, @"%@", dropped.message);
+    XCTAssertEqual(dropped.createdIDs.count, 2u);
+    XCTAssertEqual([engine clipInfo:dropped.createdIDs[1].longLongValue].trackID, v1);
+    XCTAssertNotEqual([engine clipInfo:dropped.createdIDs[0].longLongValue].trackID, v1);
+    XCTAssertEqual([engine clipInfo:dropped.createdIDs[0].longLongValue].generatorKind, VEGeneratorKindTitle);
+    // Inserted (rippling): likewise.
+    VEEditResult *inserted = [engine placeGeneratedPreset:VEGeneratedPresetTitleCard onTrack:v1 atTime:kCMTimeZero insert:YES];
+    XCTAssertTrue(inserted.ok, @"%@", inserted.message);
+    XCTAssertEqual(inserted.createdIDs.count, 2u);
+    XCTAssertEqual([engine clipInfo:inserted.createdIDs[1].longLongValue].trackID, v1);
+    XCTAssertEqual([engine clipInfo:inserted.createdIDs[0].longLongValue].generatorKind, VEGeneratorKindTitle);
+}
+
+- (void)testACaptionIsPointTextAnchoredAtItsTopLeft {
+    VEEngine *engine = [self engine];
+    VEEditResult *added = [engine addGeneratedPreset:VEGeneratedPresetCaption atTime:kCMTimeZero aboveTrack:0];
+    XCTAssertTrue(added.ok, @"%@", added.message);
+    XCTAssertEqualObjects(engine.undoActionName, @"Add Caption");
+    const VEClipID caption = added.createdIDs.firstObject.longLongValue;
+    VETitleInfo *info = [engine clipInfo:caption].title;
+    XCTAssertTrue(info.pointText);
+    XCTAssertEqual(info.anchor, VETitleAnchorTop);
+    XCTAssertEqual(info.alignment, VETitleAlignmentLeft);
+    // Its block starts at its position, inside title-safe (a 5 % margin), and grows down and right as it is typed.
+    const CGRect block = [engine titleBlockOfClip:caption];
+    XCTAssertEqualWithAccuracy(CGRectGetMinX(block), info.x * 1920, 1e-6);
+    XCTAssertEqualWithAccuracy(CGRectGetMinY(block), info.y * 1080, 1e-6);
+    XCTAssertGreaterThanOrEqual(CGRectGetMinX(block), 0.05 * 1920);
+    XCTAssertGreaterThanOrEqual(CGRectGetMinY(block), 0.05 * 1080);
+    XCTAssertTrue([engine setTitleText:@"Caption, longer\nand a second line" clips:@[ @(caption) ]].ok);
+    const CGRect grown = [engine titleBlockOfClip:caption];
+    XCTAssertEqualWithAccuracy(CGRectGetMinX(grown), CGRectGetMinX(block), 1e-6);
+    XCTAssertEqualWithAccuracy(CGRectGetMinY(grown), CGRectGetMinY(block), 1e-6);
+    XCTAssertGreaterThan(grown.size.width, block.size.width);
+    XCTAssertGreaterThan(grown.size.height, block.size.height);
+}
+
 // MARK: - Copy Style, Paste Style
 
 - (void)testPasteStyleGivesTheCopiedStyleButNotTheTextOrPlace {

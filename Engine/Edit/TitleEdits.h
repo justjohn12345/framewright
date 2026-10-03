@@ -115,17 +115,28 @@ TitleSummary summarizeTitles(const Sequence &sequence, const std::vector<ClipId>
 // track added on top ("V<n>"). Refused: InvalidTime for a time before zero or not numeric, InvalidArgument for no
 // content or invalid content, TrackKindMismatch when `aboveTrack` is not a video track, AssetNotFound when the
 // project has no generator asset of the content's kind.
+//
+// Several contents (a preset of more than one layer, presetLayers: a title card's matte and title) are stacked from
+// the bottom up: the first by the rule above `aboveTrack`, each next one by the rule above the track the one before
+// it went on.
 class AddGeneratedClip final : public SequenceCommand {
   public:
     AddGeneratedClip(SequenceId sequenceId, CMTime at, TrackId aboveTrack, std::shared_ptr<const GeneratedContent> content,
                      CMTime length = defaultStillDuration(), std::string name = {});
+    AddGeneratedClip(SequenceId sequenceId, CMTime at, TrackId aboveTrack,
+                     std::vector<std::shared_ptr<const GeneratedContent>> contents, CMTime length = defaultStillDuration(),
+                     std::string name = {});
     // "Add Title" (or the name given).
     std::string name() const override;
-    // Valid after the first successful apply (and through undo and redo).
+    // Valid after the first successful apply (and through undo and redo): the top clip (the last content's).
     ClipId createdClipId() const {
-        return createdClip_;
+        return createdClips_.empty() ? ClipId{} : createdClips_.back();
     }
-    // The track the clip went on; whether the edit added it.
+    // Every clip it added, from the bottom up.
+    const std::vector<ClipId> &createdClipIds() const {
+        return createdClips_;
+    }
+    // The track the top clip went on; whether the edit added a track.
     TrackId placedTrackId() const {
         return placedTrack_;
     }
@@ -139,10 +150,10 @@ class AddGeneratedClip final : public SequenceCommand {
   private:
     CMTime at_;
     TrackId aboveTrack_;
-    std::shared_ptr<const GeneratedContent> content_;
+    std::vector<std::shared_ptr<const GeneratedContent>> contents_;
     CMTime length_;
     std::string name_;
-    ClipId createdClip_;
+    std::vector<ClipId> createdClips_;
     TrackId placedTrack_;
     bool addedTrack_ = false;
 };

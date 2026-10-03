@@ -567,6 +567,10 @@ const char *displayNameOf(GeneratedPreset preset) {
         return "Lower Third";
     case GeneratedPreset::ColourMatte:
         return "Colour Matte";
+    case GeneratedPreset::TitleCard:
+        return "Title Card";
+    case GeneratedPreset::Caption:
+        return "Caption";
     }
     return "Title";
 }
@@ -593,8 +597,30 @@ TitleContent titlePreset(GeneratedPreset preset) {
         // height is 0.0084 of a 16:9 frame's width); its centre about four fifths of the way down.
         content.x = 0.26;
         content.y = 0.8;
+    } else if (preset == GeneratedPreset::TitleCard) {
+        // A larger bold title centred on the card's matte; no shadow on a plain background.
+        content.font = TitleFont::system(SystemFontWeight::Bold);
+        content.size = 0.08;
+        content.shadow = false;
+    } else if (preset == GeneratedPreset::Caption) {
+        // Point text anchored at its top-left corner, just inside title-safe (90 % of the frame: a 5 % margin), so
+        // it grows down and to the right as it is typed; a shadow keeps it readable over the picture.
+        content.text = "Caption";
+        content.size = 0.04;
+        content.alignment = TitleAlignment::Left;
+        content.pointText = true;
+        content.anchor = TitleAnchor::Top;
+        content.x = 0.055;
+        content.y = 0.055;
     }
     return content;
+}
+
+std::vector<std::shared_ptr<const GeneratedContent>> presetLayers(GeneratedPreset preset) {
+    if (preset == GeneratedPreset::TitleCard) {
+        return {GeneratedContent::makeMatte(kBlack), GeneratedContent::makePreset(preset)};
+    }
+    return {GeneratedContent::makePreset(preset)};
 }
 
 ContentId contentIdOf(const TitleContent &content) {

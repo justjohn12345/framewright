@@ -32,6 +32,10 @@ const char *undoNameOf(GeneratedPreset preset) {
         return "Add Lower Third";
     case GeneratedPreset::ColourMatte:
         return "Add Colour Matte";
+    case GeneratedPreset::TitleCard:
+        return "Add Title Card";
+    case GeneratedPreset::Caption:
+        return "Add Caption";
     }
     return "Add Title";
 }
@@ -92,18 +96,44 @@ std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGRect> &measuredTit
 
 // MARK: - Adding
 
-/// `placement`, preceded by adding the project's generator asset of `kind` when it has none, as one command named
+/// `placement`, preceded by adding the project's generator assets of `kinds` it does not have yet, as one command named
 /// `name`.
-- (std::unique_ptr<Command>)withGeneratorAsset:(GeneratorKind)kind
-                                     placement:(std::unique_ptr<Command>)placement
-                                          name:(const char *)name {
-    if (_project.findGeneratorAsset(kind) != nullptr) {
+- (std::unique_ptr<Command>)withGeneratorAssets:(const std::vector<GeneratorKind> &)kinds
+                                      placement:(std::unique_ptr<Command>)placement
+                                           name:(const char *)name {
+    std::vector<MediaAsset> missing;
+    for (const GeneratorKind kind : kinds) {
+        const bool listed = std::any_of(missing.begin(), missing.end(),
+                                        [kind](const MediaAsset &asset) { return asset.generator == kind; });
+        if (_project.findGeneratorAsset(kind) == nullptr && !listed) {
+            missing.push_back(makeGeneratorAsset(kind));
+        }
+    }
+    if (missing.empty()) {
         return placement;
     }
     std::vector<std::unique_ptr<Command>> children;
-    children.push_back(std::make_unique<ImportAssets>(std::vector<MediaAsset>{makeGeneratorAsset(kind)}));
+    children.push_back(std::make_unique<ImportAssets>(std::move(missing)));
     children.push_back(std::move(placement));
     return std::make_unique<CompositeCommand>(name, std::move(children));
+}
+
+/// The generator kinds of `contents`.
+static std::vector<GeneratorKind> kindsOf(const std::vector<std::shared_ptr<const GeneratedContent>> &contents) {
+    std::vector<GeneratorKind> kinds;
+    for (const auto &content : contents) {
+        kinds.push_back(content->kind());
+    }
+    return kinds;
+}
+
+/// `ids` from the top clip down (the clip to select first).
+static NSArray<NSNumber *> *topFirst(const std::vector<ClipId> &ids) {
+    NSMutableArray<NSNumber *> *numbers = [NSMutableArray arrayWithCapacity:ids.size()];
+    for (auto id = ids.rbegin(); id != ids.rend(); ++id) {
+        [numbers addObject:@(static_cast<int64_t>(id->value()))];
+    }
+    return numbers;
 }
 
 - (VEEditResult *)addGeneratedPreset:(VEGeneratedPreset)preset atTime:(CMTime)time aboveTrack:(VETrackID)videoTrackID {
@@ -113,13 +143,14 @@ std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGRect> &measuredTit
         return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"Unknown title preset."];
     }
     const char *name = undoNameOf(*generatedPreset);
-    auto add = std::make_unique<AddGeneratedClip>([self sequenceId], time, toTrackId(videoTrackID),
-                                                  GeneratedContent::makePreset(*generatedPreset), defaultStillDuration(),
-                                                  name);
+    std::vector<std::shared_ptr<const GeneratedContent>> layers = presetLayers(*generatedPreset);
+    const std::vector<GeneratorKind> kinds = kindsOf(layers);
+    auto add = std::make_unique<AddGeneratedClip>([self sequenceId], time, toTrackId(videoTrackID), std::move(layers),
+                                                  defaultStillDuration(), name);
     AddGeneratedClip *raw = add.get();
-    return [self push:[self withGeneratorAsset:generatorKindOf(*generatedPreset) placement:std::move(add) name:name]
+    return [self push:[self withGeneratorAssets:kinds placement:std::move(add) name:name]
               created:^NSArray<NSNumber *> * {
-                  return @[ @(static_cast<int64_t>(raw->createdClipId().value())) ];
+                  return topFirst(raw->createdClipIds());
               }];
 }
 
@@ -136,23 +167,47 @@ std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGRect> &measuredTit
     if (track == nullptr || track->kind != TrackKind::Video) {
         return [VEEditResult failureWithCode:VEEditErrorTrackKindMismatch message:@"Titles go on video tracks."];
     }
+    // The bottom layer goes where it was dropped; a title card's title above it by the placement rule.
+    std::vector<std::shared_ptr<const GeneratedContent>> layers = presetLayers(*generatedPreset);
+    const std::vector<GeneratorKind> kinds = kindsOf(layers);
     ClipPlacement placement;
     placement.trackId = track->id;
-    placement.generated = GeneratedContent::makePreset(*generatedPreset);
+    placement.generated = layers.front();
     placement.sourceIn = kCMTimeZero;
     placement.sourceOut = defaultStillDuration();
+    std::vector<std::shared_ptr<const GeneratedContent>> above(layers.begin() + 1, layers.end());
     const SequenceId sequenceId = [self sequenceId];
-    const GeneratorKind kind = generatorKindOf(*generatedPreset);
+    const TrackId trackId = track->id;
     const char *name = undoNameOf(*generatedPreset);
+    // The placement and, for a stack, the layers above it, as one command; `aboveRaw` is set to the second part.
+    auto withLayersAbove = [sequenceId, trackId, time, above, name](std::unique_ptr<Command> placed,
+                                                                   AddGeneratedClip **aboveRaw) -> std::unique_ptr<Command> {
+        if (above.empty()) {
+            return placed;
+        }
+        auto stack = std::make_unique<AddGeneratedClip>(sequenceId, time, trackId, above, defaultStillDuration(), name);
+        *aboveRaw = stack.get();
+        std::vector<std::unique_ptr<Command>> children;
+        children.push_back(std::move(placed));
+        children.push_back(std::move(stack));
+        return std::make_unique<CompositeCommand>(name, std::move(children));
+    };
     if (!insert) {
         auto command = std::make_unique<OverwriteClip>(sequenceId, time, std::vector<ClipPlacement>{placement}, false);
         OverwriteClip *raw = command.get();
-        return [self push:[self withGeneratorAsset:kind placement:std::move(command) name:name]
+        AddGeneratedClip *aboveRaw = nullptr;
+        std::unique_ptr<Command> placed = withLayersAbove(std::move(command), &aboveRaw);
+        return [self push:[self withGeneratorAssets:kinds placement:std::move(placed) name:name]
                   created:^NSArray<NSNumber *> * {
-                      return toNumbers(raw->createdClipIds());
+                      std::vector<ClipId> ids = raw->createdClipIds();
+                      if (aboveRaw != nullptr) {
+                          ids.insert(ids.end(), aboveRaw->createdClipIds().begin(), aboveRaw->createdClipIds().end());
+                      }
+                      return topFirst(ids);
                   }];
     }
     __block InsertClip *raw = nullptr;
+    __block AddGeneratedClip *aboveRaw = nullptr;
     __weak VEEngine *weakSelf = self;
     return [self pushRipple:^std::unique_ptr<Command>(RippleScope scope) {
         InsertOptions options;
@@ -160,12 +215,19 @@ std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGRect> &measuredTit
         options.ripple = scope;
         auto command = std::make_unique<InsertClip>(sequenceId, time, std::vector<ClipPlacement>{placement}, options);
         raw = command.get();
+        AddGeneratedClip *aboveTarget = nullptr;
+        std::unique_ptr<Command> placed = withLayersAbove(std::move(command), &aboveTarget);
+        aboveRaw = aboveTarget;
         VEEngine *strongSelf = weakSelf;
-        return strongSelf != nil ? [strongSelf withGeneratorAsset:kind placement:std::move(command) name:name]
-                                 : std::unique_ptr<Command>(std::move(command));
+        return strongSelf != nil ? [strongSelf withGeneratorAssets:kinds placement:std::move(placed) name:name]
+                                 : std::move(placed);
     }
                     created:^NSArray<NSNumber *> * {
-                        return raw != nullptr ? toNumbers(raw->createdClipIds()) : @[];
+                        std::vector<ClipId> ids = raw != nullptr ? raw->createdClipIds() : std::vector<ClipId>{};
+                        if (aboveRaw != nullptr) {
+                            ids.insert(ids.end(), aboveRaw->createdClipIds().begin(), aboveRaw->createdClipIds().end());
+                        }
+                        return topFirst(ids);
                     }];
 }
 

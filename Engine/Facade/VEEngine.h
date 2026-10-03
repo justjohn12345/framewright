@@ -795,16 +795,18 @@ NS_SWIFT_UI_ACTOR
 
 @interface VEEngine (Titles)
 
-/// Adds a title, a lower third or a colour matte (`preset`) at `time` (the playhead), 5 s long, on the lowest
-/// video track above `videoTrackID` (the target video track; 0: from the bottom track up) that is free for that
-/// time and unlocked, or on a new video track added on top: nothing is overwritten or rippled. One undo step ("Add
-/// Title", "Add Lower Third", "Add Colour Matte") that also adds the generator asset and the new track when needed.
-/// createdIDs holds the new clip.
+/// Adds a title, a lower third, a colour matte, a title card or a caption (`preset`) at `time` (the playhead), 5 s
+/// long, on the lowest video track above `videoTrackID` (the target video track; 0: from the bottom track up) that is
+/// free for that time and unlocked, or on a new video track added on top: nothing is overwritten or rippled. A title
+/// card is two clips, its matte placed so and its title by the same rule above the matte's track. One undo step ("Add
+/// Title", "Add Lower Third", "Add Colour Matte", "Add Title Card", "Add Caption") that also adds the generator assets
+/// and the new tracks when needed. createdIDs holds the new clips, the top one (the one to select) first.
 - (VEEditResult *)addGeneratedPreset:(VEGeneratedPreset)preset
                               atTime:(CMTime)time
                           aboveTrack:(VETrackID)videoTrackID NS_SWIFT_NAME(addGenerated(_:at:aboveTrack:));
 /// Places `preset` on `videoTrackID` at `time` as a dropped bin item is placed: overwriting what is under it, or
-/// with `insert` rippling later clips right (insertAsset:'s rules). One undo step; createdIDs holds the new clip.
+/// with `insert` rippling later clips right (insertAsset:'s rules); a title card's title then goes above it by the
+/// placement rule. One undo step; createdIDs holds the new clips, the top one first.
 - (VEEditResult *)placeGeneratedPreset:(VEGeneratedPreset)preset
                                onTrack:(VETrackID)videoTrackID
                                 atTime:(CMTime)time
