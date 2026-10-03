@@ -36,8 +36,10 @@
 //   over that lane's decoder instead, where the request left it (right after the picture: the
 //   stream continues from there as if it had sought and decoded it itself), and gives the lane its
 //   own decoder in exchange, so neither side opens one. While a request of that lane for the
-//   target's time is pending or decoding, the stream waits for it rather than decoding the same
-//   GOP alongside it. StreamStats::handoffs counts the takeovers.
+//   target's time is being decoded, or is next in line on the scrub thread, the stream waits for it
+//   rather than decoding the same GOP alongside it; a request queued behind another lane's (the
+//   other picture of a dissolve) is not waited for: the stream decodes its picture on a worker, in
+//   parallel, and the request finds it in the cache. StreamStats::handoffs counts the takeovers.
 // - suspendTargets() stops the streams after the step in flight (a decode being made is
 //   interrupted) until the next setTargets(): the controller's lookahead yields to an active
 //   scrub, whose decodes then have the hardware to themselves.
@@ -318,7 +320,7 @@ class DecodePool {
     };
     struct ScrubDecoder;
     /// Progress: step again; Settled: nothing to do until the target moves; AwaitScrub: the hand-off
-    /// is coming (a request of the target's continueScrubLane at its time is pending or decoding).
+    /// is coming (a request of the target's continueScrubLane at its time is decoding or next in line).
     enum class StepResult { Progress, Settled, AwaitScrub };
 
     std::shared_ptr<AssetSlot> slotFor(AssetId asset, const std::string &url); // mutex_ held
@@ -336,15 +338,18 @@ class DecodePool {
     /// Scrub thread, mutex_ held via `lock`: destroys scrub decoders of retired slots.
     void dropRetiredScrubDecoders(std::unique_lock<std::mutex> &lock);
     bool makesWorkInFlightUseless(const Stream &stream, const DecodeTarget &next) const; // mutex_ held
+    /// Taken: the stream took the decoder over; Await: the lane's request for the picture is being decoded or
+    /// is next in line (scrubWillPositionLocked); None: neither, the stream decodes the picture itself.
+    enum class HandOff { Taken, Await, None };
     /// The stream (a worker's, at `target` whose time is `t`) takes over the parked decoder of its
-    /// continueScrubLane if that decoder last delivered the picture under `t` (the hand-off); true
-    /// when it did. Takes mutex_.
-    bool adoptScrubDecoder(Stream &stream, const DecodeTarget &target, const std::shared_ptr<AssetSlot> &slot,
-                           CMTime t);
+    /// continueScrubLane if that decoder last delivered the picture under `t` (the hand-off), else says
+    /// whether to wait for it; one decision under mutex_ (it takes the lock).
+    HandOff handOff(Stream &stream, const DecodeTarget &target, const std::shared_ptr<AssetSlot> &slot, CMTime t);
     /// The stream's frame duration and track end for `trackIndex` of `info`, opened as `decoder`.
     static void setTrackTiming(Stream &stream, const RoutedMediaInfo &info, int trackIndex,
                                const IVideoDecoder &decoder);
-    /// A request of `target`'s continueScrubLane for time `t` is pending or being decoded (mutex_ held).
+    /// A request of `target`'s continueScrubLane for time `t` is being decoded, or pending and next in line
+    /// (mutex_ held).
     bool scrubWillPositionLocked(const DecodeTarget &target, CMTime t) const;
     /// Wakes the streams waiting for a hand-off (a scrub request ended; mutex_ held). True if any.
     bool releaseScrubWaitersLocked();
@@ -400,7 +405,7 @@ class DecodePool {
     uint64_t scrubFailed_ = 0;
     /// Scrub decoders, one per (asset, lane). The map is guarded by mutex_. A decoder belongs to the
     /// scrub thread while it services a request of its key (scrubBusy_ and scrubInFlight_); a worker
-    /// may take a parked one over (the hand-off, adoptScrubDecoder) and park its stream's previous
+    /// may take a parked one over (the hand-off, handOff) and park its stream's previous
     /// decoder in its place, under mutex_.
     std::map<ScrubKey, std::unique_ptr<ScrubDecoder>> scrubDecoders_;
     /// A slot was retired while the scrub thread may hold a decoder of it (mutex_).

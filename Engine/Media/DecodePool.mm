@@ -680,12 +680,10 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
         const bool wouldSeek =
             !s.decoder || !s.rangeValid || at < s.rangeStart || at > s.rangeEnd + config_.seekAheadThreshold;
         if (wouldSeek) {
-            if (adoptScrubDecoder(s, target, slot, at)) {
-                return StepResult::Progress;
-            }
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (scrubWillPositionLocked(target, at)) {
-                return StepResult::AwaitScrub;
+            switch (handOff(s, target, slot, at)) {
+            case HandOff::Taken: return StepResult::Progress;
+            case HandOff::Await: return StepResult::AwaitScrub;
+            case HandOff::None: break;
             }
         }
     }
@@ -1004,11 +1002,23 @@ bool DecodePool::scrubWillPositionLocked(const DecodeTarget &target, CMTime t) c
     const ScrubKey key{target.asset, *target.continueScrubLane};
     if (scrubBusy_ && scrubInFlight_ == key && scrubInFlightGenerated_ == GeneratedKey{} &&
         CMTimeCompare(scrubInFlightTime_, t) == 0) {
-        return true;
+        return true; // being decoded
     }
     const auto pending = scrubPending_.find(key);
-    return pending != scrubPending_.end() && !pending->second.generated &&
-           CMTimeCompare(clampToZero(pending->second.time), t) == 0;
+    if (pending == scrubPending_.end() || pending->second.generated ||
+        CMTimeCompare(clampToZero(pending->second.time), t) != 0) {
+        return false;
+    }
+    // Pending: worth waiting for only when it is next in line (the one scrub thread serves the lanes one at a
+    // time). Behind another lane's request (the other picture of a dissolve, a picture in picture) the stream
+    // decodes its picture itself, in parallel; the request then finds it in the cache.
+    if (scrubBusy_) {
+        return scrubInFlight_ == key; // its own lane's older request is superseded by it
+    }
+    const auto oldest = std::min_element(scrubPending_.begin(), scrubPending_.end(), [](const auto &a, const auto &b) {
+        return a.second.sequence < b.second.sequence;
+    });
+    return oldest->first == key;
 }
 
 bool DecodePool::releaseScrubWaitersLocked() {
@@ -1022,43 +1032,48 @@ bool DecodePool::releaseScrubWaitersLocked() {
     return released;
 }
 
-bool DecodePool::adoptScrubDecoder(Stream &s, const DecodeTarget &target, const std::shared_ptr<AssetSlot> &slot,
-                                   CMTime t) {
+DecodePool::HandOff DecodePool::handOff(Stream &s, const DecodeTarget &target, const std::shared_ptr<AssetSlot> &slot,
+                                        CMTime t) {
     if (!target.continueScrubLane || target.generated || target.trackIndex >= 0) {
-        return false;
+        return HandOff::None;
     }
     // The track's timing comes from the routing the scrub decoder was opened with (already resolved:
     // no probe).
     auto routed = slot->resolve(*router_);
     if (!routed.ok()) {
-        return false;
+        return HandOff::None;
     }
     std::unique_ptr<ScrubDecoder> taken;
     std::unique_ptr<IVideoDecoder> dropped; // destroyed outside the lock
     {
+        // One decision under one lock: whether the lane's decoder can be taken now, else whether its request
+        // for this picture is coming (between two separate looks the request could end, leaving neither).
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_ || s.removed || slot->retired || slot->epoch != epoch_) {
-            return false;
+            return HandOff::None;
         }
         const ScrubKey key{s.key.asset, *target.continueScrubLane};
         const auto it = scrubDecoders_.find(key);
-        if (it == scrubDecoders_.end()) {
-            return false;
-        }
-        const ScrubDecoder &d = *it->second;
-        if (!d.positioned || d.slot != slot || d.generated != GeneratedKey{} || !d.decoder) {
-            return false;
-        }
-        if (scrubBusy_ && scrubInFlight_ == key) {
-            return false; // the scrub thread is using it
-        }
-        if (const auto pending = scrubPending_.find(key); pending != scrubPending_.end() &&
-                                                         (pending->second.generated ||
-                                                          CMTimeCompare(clampToZero(pending->second.time), t) != 0)) {
-            return false; // the lane is about to seek it elsewhere
-        }
-        if (!(d.coverFrom <= t && t < d.end)) {
-            return false; // positioned after another picture
+        const bool takeable = [&] {
+            if (scrubBusy_ && scrubInFlight_ == key) {
+                return false; // the scrub thread is using it (and owns its fields)
+            }
+            if (it == scrubDecoders_.end()) {
+                return false;
+            }
+            const ScrubDecoder &d = *it->second;
+            if (!d.positioned || d.slot != slot || d.generated != GeneratedKey{} || !d.decoder) {
+                return false;
+            }
+            if (const auto pending = scrubPending_.find(key);
+                pending != scrubPending_.end() &&
+                (pending->second.generated || CMTimeCompare(clampToZero(pending->second.time), t) != 0)) {
+                return false; // the lane is about to seek it elsewhere
+            }
+            return d.coverFrom <= t && t < d.end; // else positioned after another picture
+        }();
+        if (!takeable) {
+            return scrubWillPositionLocked(target, t) ? HandOff::Await : HandOff::None;
         }
         taken = std::move(it->second);
         if (s.decoder && s.openedKey == GeneratedKey{}) {
@@ -1124,7 +1139,7 @@ bool DecodePool::adoptScrubDecoder(Stream &s, const DecodeTarget &target, const 
         s.lastDecoded.reset();
     }
     ++s.handoffs;
-    return true;
+    return HandOff::Taken;
 }
 
 // MARK: - Scrub
@@ -1310,8 +1325,7 @@ Result<ScrubFrame> DecodePool::serviceScrub(const ScrubKey &key, const std::shar
     if (!made.ok()) {
         return std::move(made).error();
     }
-    ScrubDecoder &d = *made.value();
-    d.positioned = false; // set again below once it delivered the picture
+    ScrubDecoder &d = *made.value(); // not positioned (scrubDecoderFor), until it delivers the picture below
 
     auto decodeAt = [&](CMTime at) -> Result<std::optional<VideoFrame>> {
         Status st = d.decoder->seek(at);
@@ -1369,7 +1383,7 @@ DecodePool::scrubDecoderFor(const ScrubKey &key, const std::shared_ptr<AssetSlot
                             const DecoderMaker &make) {
     // The interrupt the scrub thread armed for this request (requestFrame() requests it when a
     // newer request for the same key arrives); `make` gives it to the decoder it opens. The map is
-    // touched under mutex_ (a worker may take a parked decoder over, see adoptScrubDecoder); the
+    // touched under mutex_ (a worker may take a parked decoder over, see handOff); the
     // entry of `key` is this thread's while it services the request (scrubInFlight_), so the pointer
     // returned stays valid until the request ends.
     std::shared_ptr<DecodeInterrupt> interrupt;
@@ -1381,6 +1395,7 @@ DecodePool::scrubDecoderFor(const ScrubKey &key, const std::shared_ptr<AssetSlot
         if (it != scrubDecoders_.end()) {
             if (it->second->slot == slot && it->second->generated == generated) {
                 it->second->lastUse = ++scrubUseCounter_;
+                it->second->positioned = false; // this request moves it; set again once it delivered the picture
                 return it->second.get();
             }
             stale = std::move(it->second);

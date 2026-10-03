@@ -1267,6 +1267,60 @@ static DecodeTarget continuing(AssetId asset, CMTime at, uint64_t scrubLane = 7)
     XCTAssertTrue(covers(*_cache, asset, 200, 214), @"the stream decoded its window once the wait ended");
 }
 
+/// Two layers (a dissolve): both pictures are requested on their lanes, one scrub thread serves them one after the
+/// other. The stream whose request is being decoded waits for it; the other, whose request is queued behind, does not
+/// wait: it decodes its picture and window on a worker in parallel, and its request is then answered from the cache.
+/// Review fix round, finding 2.
+- (void)testAStreamDoesNotWaitForARequestQueuedBehindAnotherLane {
+    Gate decode;
+    Latch decoding(1);
+    std::atomic<bool> first{true};
+    _fake->onDecode = [&](int64_t) {
+        if (first.exchange(false)) {
+            decoding.countDown();
+            decode.pass();
+        }
+    };
+    ScrubLog log;
+    DecodePool pool(_fakeRouter, _cache);
+    const AssetId a(1), b(2);
+    pool.registerAsset(a, "/fake/a.mov");
+    pool.registerAsset(b, "/fake/b.mov");
+    const CMTime picture = CMTimeMake(135, 30);
+    pool.requestFrame(a, picture, log.callback(1), 7);
+    XCTAssertTrue(decoding.wait(std::chrono::seconds(5)), @"layer A's picture is decoding");
+    pool.requestFrame(b, picture, log.callback(2), 8); // queued behind it
+    DecodeTarget forA{a, "/fake/a.mov", -1, picture};
+    forA.lane = 1;
+    forA.continueScrubLane = 7;
+    DecodeTarget forB{b, "/fake/b.mov", -1, picture};
+    forB.lane = 2;
+    forB.continueScrubLane = 8;
+    pool.setTargets({forA, forB});
+    XCTAssertTrue(waitFor([&] { return covers(*_cache, b, 135, 149); }),
+                  @"layer B's window is decoded while A's picture is still decoding");
+    auto streamOf = [&](AssetId asset) {
+        for (const auto &s : pool.stats().streams) {
+            if (s.asset == asset) {
+                return s;
+            }
+        }
+        return DecodePool::StreamStats{};
+    };
+    XCTAssertTrue(streamOf(a).awaitingScrub, @"A waits for its picture's decoder");
+    XCTAssertFalse(streamOf(b).awaitingScrub);
+    decode.open();
+    XCTAssertTrue(log.waitFor(2, std::chrono::seconds(10)));
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    XCTAssertEqual(streamOf(a).handoffs, uint64_t(1), @"A took its lane's decoder over");
+    XCTAssertEqual(streamOf(a).seeks, uint64_t(0));
+    std::lock_guard<std::mutex> lock(log.mutex);
+    XCTAssertTrue(log.results[2].at(0).ok());
+    if (log.results[2].at(0).ok()) {
+        XCTAssertTrue(log.results[2].at(0).value().fromCache, @"B's request found the stream's picture");
+    }
+}
+
 /// A request for the picture being decoded on its lane (the playhead stops where it was scrubbed) neither
 /// interrupts nor restarts that decode: both are answered, the later one from the cache.
 - (void)testARequestForThePictureBeingDecodedDoesNotRestartIt {

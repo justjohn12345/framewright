@@ -37,6 +37,7 @@
 #include <cmath>
 #include <filesystem>
 #include <mutex>
+#include <map>
 #include <random>
 #include <thread>
 
@@ -287,6 +288,130 @@ double percentile(std::vector<double> values, double p) {
         @autoreleasepool {
             [self measure:media path:path trials:trials];
         }
+    }
+}
+
+/// Two layers at once: a cross dissolve between the H.264 4K and the HEVC 4K clip (60 frames around the cut at
+/// frame 150), a scrub released inside it, Space at once or 150 ms later. Both pictures of the paused frame come
+/// through the one scrub thread, one after the other; the press is late by however long the lookahead streams take
+/// to have both clips' next frames. Reports, besides picture and audio, each stream's seeks and hand-offs.
+- (void)testPlayStartInADissolveOfTwoLongGopClips {
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    XCTSkip(@"a wall-clock measurement is meaningless under ThreadSanitizer");
+#endif
+#endif
+    const char *trialsVariable = getenv("FW_PLAYSTART_TRIALS");
+    const int trials = std::max(1, trialsVariable ? atoi(trialsVariable) : 5);
+    std::string paths[2];
+    for (int i = 0; i < 2; ++i) {
+        std::string error;
+        paths[i] = measurementMediaPath(measureMedia()[2 + i], error); // H.264 4K, HEVC 4K
+        if (paths[i].empty()) {
+            XCTSkip(@"no measurement media: %s", error.c_str());
+        }
+    }
+    PlaybackHarness h(PlaybackHarness::Mode::Realtime, 0.0,
+                      [](PlaybackConfig &config) { config.makeOutput = nullptr; });
+    const AssetId first = h.importAssetAtPath(paths[0]);
+    const AssetId second = h.importAssetAtPath(paths[1]);
+    if (!h.ok()) {
+        XCTFail(@"%s", h.error().c_str());
+        return;
+    }
+    const ClipId a = h.addClip(h.v1, first, 0, 150, kCMTimeZero);
+    const ClipId b = h.addClip(h.v1, second, 150, 140, CMTimeMake(2, 1));
+    const ClipId aSound = h.addClip(h.a1, first, 0, 150, kCMTimeZero);
+    h.link(a, aSound);
+    h.addTransition(h.v1, a, b, 60);
+    if (auto problem = h.problem()) {
+        XCTFail(@"%s", problem->c_str());
+        return;
+    }
+    h.load();
+    PlaybackController &controller = *h.controller;
+    XCTAssertTrue(PlaybackHarness::waitUntil([&] { return controller.output().isRunning(); }), @"the output starts");
+    Presenter presenter(controller);
+    std::mt19937 random(20261004);
+    std::uniform_int_distribution<int64_t> inside(125, 170);
+    std::uniform_int_distribution<int64_t> away(220, 280);
+    auto streamOf = [&](ClipId clip) -> media::DecodePool::StreamStats {
+        for (const auto &stream : h.pool->stats().streams) {
+            if (stream.lane == clip.value()) {
+                return stream;
+            }
+        }
+        return {};
+    };
+    auto exactAt = [&](int64_t frame) {
+        PlaybackHarness::waitUntil([&] {
+            const PresentedFrame p = controller.lastPresented();
+            return p.frameIndex == frame && p.heldBackFrameIndex < 0 && p.layers.size() == 2 &&
+                   std::all_of(p.layers.begin(), p.layers.end(), [](const PresentedLayer &l) { return l.exact; });
+        });
+    };
+    struct Result {
+        std::vector<double> picture, audio, late, seeksA, seeksB, handoffsA, handoffsB;
+    };
+    std::map<int, Result> results;
+    for (int trial = 0; trial < trials; ++trial) {
+        for (int gap : {0, 150}) {
+            const int64_t from = away(random);
+            controller.seek(frames30(from));
+            PlaybackHarness::waitUntil([&] { return controller.lastPresented().frameIndex == from; });
+            h.pool->waitUntilIdle(std::chrono::seconds(10));
+            sleepMs(300);
+            const int64_t target = inside(random);
+            const auto beforeA = streamOf(a);
+            const auto beforeB = streamOf(b);
+            for (int step = 1; step <= 20; ++step) {
+                controller.scrubTo(frames30(from + (target - from) * step / 20));
+                sleepMs(16);
+            }
+            controller.endScrub();
+            sleepMs(gap);
+            const uint64_t lateBefore = controller.stats().lateFrames;
+            const auto t0 = SteadyClock::now();
+            controller.play();
+            double picture = NAN;
+            double audio = NAN;
+            while (msBetween(t0, SteadyClock::now()) < 3000 && (std::isnan(picture) || std::isnan(audio))) {
+                if (std::isnan(audio) && controller.state() == PlaybackState::Playing) {
+                    audio = msBetween(t0, SteadyClock::now());
+                }
+                if (std::isnan(picture)) {
+                    for (const Presentation &p : presenter.since(t0)) {
+                        if (p.clockDriven && p.frameIndex > target && p.exact) {
+                            picture = msBetween(t0, p.at) - double(p.frameIndex - target) * 1000.0 / 30.0;
+                            break;
+                        }
+                    }
+                }
+                sleepMs(0.5);
+            }
+            sleepMs(std::max(0.0, 1000.0 - msBetween(t0, SteadyClock::now())));
+            Result &r = results[gap];
+            r.picture.push_back(picture);
+            r.audio.push_back(audio);
+            r.late.push_back(double(controller.stats().lateFrames - lateBefore));
+            const auto afterA = streamOf(a);
+            const auto afterB = streamOf(b);
+            r.seeksA.push_back(double(afterA.seeks - beforeA.seeks));
+            r.seeksB.push_back(double(afterB.seeks - beforeB.seeks));
+            r.handoffsA.push_back(double(afterA.handoffs - beforeA.handoffs));
+            r.handoffsB.push_back(double(afterB.handoffs - beforeB.handoffs));
+            controller.pause();
+            exactAt(frameIndexAt(controller.currentTime(), CMTimeMake(1, 30), SnapMode::Floor));
+        }
+    }
+    for (const auto &[gap, r] : results) {
+        NSLog(@"PLAY START MEASURE dissolve H.264 4K / HEVC 4K | scrub, Space %3d ms after the release | "
+              @"picture median "
+              @"%6.1f max %6.1f ms | audio median %6.1f max %6.1f ms | late median %3.0f max %3.0f | seeks A max %.0f, "
+              @"B max %.0f | hand-offs A median %.0f, B median %.0f",
+              gap, percentile(r.picture, 0.5), percentile(r.picture, 1.0), percentile(r.audio, 0.5),
+              percentile(r.audio, 1.0), percentile(r.late, 0.5), percentile(r.late, 1.0), percentile(r.seeksA, 1.0),
+              percentile(r.seeksB, 1.0), percentile(r.handoffsA, 0.5), percentile(r.handoffsB, 0.5));
     }
 }
 

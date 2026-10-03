@@ -9,6 +9,7 @@
 #include "../Audio/AudioTestSupport.h"
 #include "PlaybackTestSupport.h"
 
+#include <algorithm>
 #include <chrono>
 #include <optional>
 #include <thread>
@@ -175,6 +176,72 @@ struct LongGop {
     const auto after = *rig.stream();
     XCTAssertEqual(after.seeks, before.seeks, @"no seek on the press path");
     XCTAssertGreaterThanOrEqual(after.handoffs, before.handoffs + 1);
+}
+
+/// Two layers: Space right after a scrub released inside a cross dissolve of two long-GOP clips. The scrub thread
+/// decodes the two pictures one after the other; the second layer's stream does not wait behind the first's request
+/// (it decodes its picture itself, DecodePoolTests covers the order), and every frame played shows both layers' own
+/// pictures, no stream seeking more than once. Review fix round, finding 2.
+- (void)testSpaceRightAfterAScrubIntoADissolvePlaysBothLayers {
+    PlaybackHarness h(PlaybackHarness::Mode::Realtime, 1.0, [](PlaybackConfig &config) {
+        config.idleLookaheadDelay = std::chrono::seconds(10);
+        config.audioWarmDelay = std::chrono::seconds(10);
+    });
+    const AssetId first = h.importAsset("gop5s_h264_1080p30.mp4");
+    const AssetId second = h.importAsset("gop5s_h264_1080p30.mp4");
+    if (!h.ok()) {
+        XCTFail(@"%s", h.error().c_str());
+        return;
+    }
+    const ClipId a = h.addClip(h.v1, first, 0, 150, kCMTimeZero);
+    const ClipId b = h.addClip(h.v1, second, 150, 140, CMTimeMake(2, 1));
+    h.addTransition(h.v1, a, b, 60);
+    XCTAssertFalse(h.problem().has_value());
+    h.load();
+    h.controller->seek(frames30(20));
+    h.presentExact();
+    XCTAssertTrue(h.pool->waitUntilIdle(std::chrono::seconds(10)));
+    auto streamOf = [&](ClipId clip) -> std::optional<media::DecodePool::StreamStats> {
+        for (const auto &s : h.pool->stats().streams) {
+            if (s.lane == clip.value()) {
+                return s;
+            }
+        }
+        return std::nullopt;
+    };
+    const uint64_t seeksA = streamOf(a) ? streamOf(a)->seeks : 0;
+    for (int k = 1; k <= 8; ++k) {
+        h.controller->scrubTo(frames30(20 + (160 - 20) * k / 8));
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+    h.controller->endScrub();
+    h.controller->play();
+    XCTAssertTrue(h.waitForState(PlaybackState::Playing));
+    int checked = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(400)) {
+        const PlaybackHarness::Sample s = h.present();
+        const bool exact = std::all_of(s.presented.layers.begin(), s.presented.layers.end(),
+                                       [](const PresentedLayer &l) { return l.exact; });
+        if (s.changed && s.presented.clockDriven && s.presented.layers.size() == 2 && exact) {
+            for (size_t i = 0; i < 2; ++i) {
+                XCTAssertEqual(int64_t(s.burnIns[i].value_or(-1)), h.expectedSlot(s.clips[i], s.presented.frameIndex),
+                               @"frame %lld layer %zu", s.presented.frameIndex, i);
+            }
+            ++checked;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    h.controller->pause();
+    XCTAssertGreaterThan(checked, 3, @"frames of the dissolve played");
+    const auto afterA = streamOf(a);
+    const auto afterB = streamOf(b);
+    XCTAssertTrue(afterA && afterB);
+    if (afterA && afterB) {
+        XCTAssertLessThanOrEqual(afterA->seeks - seeksA, 1u, @"layer A's GOP decoded at most once by the lookahead");
+        XCTAssertLessThanOrEqual(afterB->seeks, 1u, @"layer B's too");
+        XCTAssertGreaterThanOrEqual(afterA->handoffs + afterB->handoffs, 1u, @"at least one layer took a decoder over");
+    }
 }
 
 /// A burst of ruler clicks: each click's scrub suspends the lookahead (it never decodes while the scrub path does),
