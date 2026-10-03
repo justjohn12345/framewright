@@ -114,6 +114,7 @@ extension ProjectStore {
             return false
         }
         inspector.endNudgeBurst()
+        engine.titleSafeFraction = Double(editingPreferences.safeAreaStandard.titleFraction)
         let target = videoTracks.contains { $0.trackID == targetVideoTrackID } ? targetVideoTrackID : 0
         let result = engine.addGenerated(preset.enginePreset, at: frameTime(playheadTime.secondsOrZero),
                                          aboveTrack: target)
@@ -135,6 +136,7 @@ extension ProjectStore {
             return false
         }
         inspector.endNudgeBurst()
+        engine.titleSafeFraction = Double(editingPreferences.safeAreaStandard.titleFraction)
         let result = engine.placeGenerated(preset.enginePreset, onTrack: track.trackID, at: frameTime(max(0, seconds)),
                                            insert: insert)
         guard report(result), let id = result.createdIDs.first?.int64Value else { return false }

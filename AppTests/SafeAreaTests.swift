@@ -68,6 +68,22 @@ final class SafeAreaTests: XCTestCase {
         XCTAssertEqual(store.safeAreas.standard, .smpte, "an unknown value reads as the default")
     }
 
+    /// A caption is added just inside the title-safe rectangle of the safe areas chosen (review fix: it ignored the
+    /// classic choice).
+    func testACaptionGoesInsideTheChosenTitleSafeArea() throws {
+        for standard in SafeAreaStandard.allCases {
+            store.defaults.set(standard.rawValue, forKey: EditingPreferences.safeAreaStandardKey)
+            store.playheadTime = .zero
+            XCTAssertTrue(store.addGenerated(.caption))
+            let id = try XCTUnwrap(store.selection.first)
+            let block = store.engine.titleBlock(ofClip: id)
+            let titleSafe = store.safeAreas.title
+            XCTAssertEqual(block.minX, titleSafe.minX + 0.005 * 1920, accuracy: 1e-6, standard.rawValue)
+            XCTAssertEqual(block.minY, titleSafe.minY + 0.005 * 1080, accuracy: 1e-6, standard.rawValue)
+            store.undo()
+        }
+    }
+
     /// The program monitor's layout over a black picture, 960 x 540 points for a 1920 x 1080 frame (half size): the
     /// guides are drawn on the rectangles' edges and nowhere else, only while shown.
     func testTheGuidesAreDrawnWhereTheRectanglesAre() async throws {

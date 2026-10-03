@@ -315,7 +315,12 @@ const char *displayNameOf(GeneratedPreset preset);
 // The generator kind of the clip a preset makes (its top one: a title card's title).
 GeneratorKind generatorKindOf(GeneratedPreset preset);
 // A preset's title content (the Title preset's for ColourMatte, which has none).
-TitleContent titlePreset(GeneratedPreset preset);
+// The title-safe rectangle's side as a fraction of the frame's that presets place themselves inside unless told
+// otherwise: SMPTE ST 2046-1's 90 % (the app's default safe areas).
+inline constexpr double kDefaultTitleSafeFraction = 0.9;
+// The caption is placed inside a title-safe rectangle of `titleSafeFraction` (the safe areas the user chose; the other
+// presets do not depend on it).
+TitleContent titlePreset(GeneratedPreset preset, double titleSafeFraction = kDefaultTitleSafeFraction);
 
 // A 128-bit content id (see the header comment).
 struct ContentId {
@@ -341,7 +346,8 @@ class GeneratedContent {
     static std::shared_ptr<const GeneratedContent> makeTitle(TitleContent title, std::string foreign = {});
     static std::shared_ptr<const GeneratedContent> makeMatte(SRGBColour colour, std::string foreign = {});
     // A preset's content (makeTitle or makeMatte; a title card's title).
-    static std::shared_ptr<const GeneratedContent> makePreset(GeneratedPreset preset);
+    static std::shared_ptr<const GeneratedContent> makePreset(GeneratedPreset preset,
+                                                              double titleSafeFraction = kDefaultTitleSafeFraction);
 
     GeneratorKind kind() const {
         return kind_;
@@ -381,7 +387,8 @@ class GeneratedContent {
 };
 
 // The clips a preset adds, from the bottom track up: its one clip, or a title card's black matte and its title.
-std::vector<std::shared_ptr<const GeneratedContent>> presetLayers(GeneratedPreset preset);
+std::vector<std::shared_ptr<const GeneratedContent>> presetLayers(GeneratedPreset preset,
+                                                                  double titleSafeFraction = kDefaultTitleSafeFraction);
 
 // Whether two clips' contents are the same: both absent, or both present and equal.
 bool sameContent(const std::shared_ptr<const GeneratedContent> &a, const std::shared_ptr<const GeneratedContent> &b);

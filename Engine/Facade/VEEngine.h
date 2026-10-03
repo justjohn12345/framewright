@@ -795,6 +795,11 @@ NS_SWIFT_UI_ACTOR
 
 @interface VEEngine (Titles)
 
+/// The side of the title-safe rectangle, as a fraction of the frame's, that new presets are placed inside (the
+/// caption at its top-left corner): the safe areas the user chose (0.9, SMPTE ST 2046-1's, by default; 0.8 for the
+/// classic pair). A value outside (0, 1] is ignored.
+@property (nonatomic) double titleSafeFraction;
+
 /// Adds a title, a lower third, a colour matte, a title card or a caption (`preset`) at `time` (the playhead), 5 s
 /// long, on the lowest video track above `videoTrackID` (the target video track; 0: from the bottom track up) that is
 /// free for that time and unlocked, or on a new video track added on top: nothing is overwritten or rippled. A title

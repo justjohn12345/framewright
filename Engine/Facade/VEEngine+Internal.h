@@ -185,6 +185,8 @@ struct UndoState {
     // The title Copy Style copied from (VEEngine+Titles.mm): Paste Style sets its style parameters (isStyleParameter);
     // a value, so it outlives New and Open.
     std::optional<ve::TitleContent> _copiedTitleStyle;
+    // The title-safe fraction presets are placed inside (titleSafeFraction; VEEngine+Titles.mm).
+    double _titleSafeFraction;
 
     // VEEngine.mm
     NSHashTable<id<VEEngineObserver>> *_observers;

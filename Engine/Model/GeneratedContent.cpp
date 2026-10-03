@@ -1,5 +1,6 @@
 #include "GeneratedContent.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -579,7 +580,7 @@ GeneratorKind generatorKindOf(GeneratedPreset preset) {
     return preset == GeneratedPreset::ColourMatte ? GeneratorKind::ColourMatte : GeneratorKind::Title;
 }
 
-TitleContent titlePreset(GeneratedPreset preset) {
+TitleContent titlePreset(GeneratedPreset preset, double titleSafeFraction) {
     TitleContent content; // the Title preset: the defaults
     if (preset == GeneratedPreset::LowerThird) {
         // Left-aligned in the lower left, inside title-safe (90 % of the frame: a 5 % margin), two lines on a
@@ -610,17 +611,20 @@ TitleContent titlePreset(GeneratedPreset preset) {
         content.alignment = TitleAlignment::Left;
         content.pointText = true;
         content.anchor = TitleAnchor::Top;
-        content.x = 0.055;
-        content.y = 0.055;
+        // Just inside title-safe's top-left corner (its margin is half of what it leaves of the frame).
+        const double fraction =
+            std::isfinite(titleSafeFraction) ? std::clamp(titleSafeFraction, 0.1, 1.0) : kDefaultTitleSafeFraction;
+        content.x = (1.0 - fraction) / 2.0 + 0.005;
+        content.y = (1.0 - fraction) / 2.0 + 0.005;
     }
     return content;
 }
 
-std::vector<std::shared_ptr<const GeneratedContent>> presetLayers(GeneratedPreset preset) {
+std::vector<std::shared_ptr<const GeneratedContent>> presetLayers(GeneratedPreset preset, double titleSafeFraction) {
     if (preset == GeneratedPreset::TitleCard) {
-        return {GeneratedContent::makeMatte(kBlack), GeneratedContent::makePreset(preset)};
+        return {GeneratedContent::makeMatte(kBlack), GeneratedContent::makePreset(preset, titleSafeFraction)};
     }
-    return {GeneratedContent::makePreset(preset)};
+    return {GeneratedContent::makePreset(preset, titleSafeFraction)};
 }
 
 ContentId contentIdOf(const TitleContent &content) {
@@ -695,8 +699,8 @@ std::shared_ptr<const GeneratedContent> GeneratedContent::makeMatte(SRGBColour c
     return content;
 }
 
-std::shared_ptr<const GeneratedContent> GeneratedContent::makePreset(GeneratedPreset preset) {
-    return preset == GeneratedPreset::ColourMatte ? makeMatte(kBlack) : makeTitle(titlePreset(preset));
+std::shared_ptr<const GeneratedContent> GeneratedContent::makePreset(GeneratedPreset preset, double titleSafeFraction) {
+    return preset == GeneratedPreset::ColourMatte ? makeMatte(kBlack) : makeTitle(titlePreset(preset, titleSafeFraction));
 }
 
 bool operator==(const GeneratedContent &a, const GeneratedContent &b) {

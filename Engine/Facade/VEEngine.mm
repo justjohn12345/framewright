@@ -120,6 +120,7 @@ VEEditResult *toVE(const EditResult &result, NSArray<NSNumber *> *created, NSStr
                                                           [weakEngine postSourcePlaybackStatus:status];
                                                         }];
         _rippleScope = VERippleScopeAllTracks;
+        _titleSafeFraction = ve::kDefaultTitleSafeFraction;
         [self startUndoHistory];
         _exporter = [[VEExporter alloc] init];
         _observers = [NSHashTable weakObjectsHashTable];

@@ -270,6 +270,13 @@ TEST_CASE("Title edits: a title card stacks its matte above the target and its t
     CHECK(caption.y > 0.05);
     CHECK(caption.x < 0.07);
     CHECK_FALSE(titleContentProblem(caption).has_value());
+    // Inside the title-safe rectangle it is given: the classic 80 % one leaves a 10 % margin.
+    const TitleContent classic = titlePreset(GeneratedPreset::Caption, 0.8);
+    CHECK(classic.x == doctest::Approx(0.105));
+    CHECK(classic.y == doctest::Approx(0.105));
+    CHECK(titlePreset(GeneratedPreset::Caption, 0.9).x == doctest::Approx(0.055));
+    CHECK(titlePreset(GeneratedPreset::Caption, std::nan("")).x == doctest::Approx(0.055));
+    CHECK(titlePreset(GeneratedPreset::Title, 0.8) == titlePreset(GeneratedPreset::Title));
     CHECK(std::string(displayNameOf(GeneratedPreset::TitleCard)) == "Title Card");
     CHECK(std::string(displayNameOf(GeneratedPreset::Caption)) == "Caption");
 }

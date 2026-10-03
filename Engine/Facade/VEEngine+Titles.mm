@@ -136,6 +136,18 @@ static NSArray<NSNumber *> *topFirst(const std::vector<ClipId> &ids) {
     return numbers;
 }
 
+- (double)titleSafeFraction {
+    VE_ASSERT_MAIN();
+    return _titleSafeFraction;
+}
+
+- (void)setTitleSafeFraction:(double)fraction {
+    VE_ASSERT_MAIN();
+    if (std::isfinite(fraction) && fraction > 0.0 && fraction <= 1.0) {
+        _titleSafeFraction = fraction;
+    }
+}
+
 - (VEEditResult *)addGeneratedPreset:(VEGeneratedPreset)preset atTime:(CMTime)time aboveTrack:(VETrackID)videoTrackID {
     VE_ASSERT_MAIN();
     const auto generatedPreset = fromVE(preset);
@@ -143,7 +155,7 @@ static NSArray<NSNumber *> *topFirst(const std::vector<ClipId> &ids) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"Unknown title preset."];
     }
     const char *name = undoNameOf(*generatedPreset);
-    std::vector<std::shared_ptr<const GeneratedContent>> layers = presetLayers(*generatedPreset);
+    std::vector<std::shared_ptr<const GeneratedContent>> layers = presetLayers(*generatedPreset, _titleSafeFraction);
     const std::vector<GeneratorKind> kinds = kindsOf(layers);
     auto add = std::make_unique<AddGeneratedClip>([self sequenceId], time, toTrackId(videoTrackID), std::move(layers),
                                                   defaultStillDuration(), name);
@@ -168,7 +180,7 @@ static NSArray<NSNumber *> *topFirst(const std::vector<ClipId> &ids) {
         return [VEEditResult failureWithCode:VEEditErrorTrackKindMismatch message:@"Titles go on video tracks."];
     }
     // The bottom layer goes where it was dropped; a title card's title above it by the placement rule.
-    std::vector<std::shared_ptr<const GeneratedContent>> layers = presetLayers(*generatedPreset);
+    std::vector<std::shared_ptr<const GeneratedContent>> layers = presetLayers(*generatedPreset, _titleSafeFraction);
     const std::vector<GeneratorKind> kinds = kindsOf(layers);
     ClipPlacement placement;
     placement.trackId = track->id;
