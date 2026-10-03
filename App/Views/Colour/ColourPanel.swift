@@ -1,7 +1,8 @@
 import FramewrightEngine
 import SwiftUI
 
-/// The Colour tab of the right-hand panel: the grading tools for the selected video clips. The basic grade
+/// The Colour tab of the right-hand panel: the grading tools for the selected video clips (titles and colour
+/// mattes are not graded: the tab says so when they are selected and leaves them out). The basic grade
 /// (the inspector's Colour rows, the same `ParameterSection`, so both places edit the one grade), the
 /// colour wheels (lift, gamma, gain), the curves (luma, red, green, blue) and the LUTs (input, look).
 ///
@@ -20,6 +21,14 @@ struct ColourPanel: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                if tools.ungradedGenerated > 0 {
+                    Label(tools.isAvailable ? "Titles and colour mattes are not graded: the selected ones are left out."
+                        : "Titles and colour mattes are not graded.", systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("ColourPanel.generatedNote")
+                }
                 if tools.isAvailable {
                     gradeHeader
                     ParameterSection(store: store, inspector: store.inspector, section: .colour, subtitle: nil)
@@ -28,7 +37,7 @@ struct ColourPanel: View {
                     CurvesSection(tools: tools)
                     Divider()
                     LUTSection(tools: tools)
-                } else {
+                } else if tools.ungradedGenerated == 0 {
                     Text("Select a video clip to grade it.")
                         .foregroundStyle(.secondary)
                 }

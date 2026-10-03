@@ -28,8 +28,12 @@ final class GradeToolsModel: ObservableObject {
             .sink { [weak self] in self?.objectWillChange.send() }
     }
 
-    /// The clips the tools edit: the selection's clips on video tracks.
-    var videoTargets: [VEClipInfo] { store.selectedClips.filter { $0.trackKind == .video } }
+    /// The clips the tools edit: the selection's clips on video tracks, but titles and colour mattes, which are not
+    /// graded (`ProjectStore.gradeTargets`).
+    var videoTargets: [VEClipInfo] { store.gradeTargets }
+
+    /// Selected titles and colour mattes, which the tools leave out (the tab says so).
+    var ungradedGenerated: Int { store.selectedClips.filter { $0.generatorKind != .none }.count }
 
     /// Whether there is anything to grade.
     var isAvailable: Bool { !videoTargets.isEmpty }
