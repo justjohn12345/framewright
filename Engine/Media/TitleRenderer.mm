@@ -106,9 +106,17 @@ MediaError cancelled() {
 // (CTLineGetPenOffsetForFlush, which leaves trailing white space out). Core Text's own frames round their line
 // heights to whole points, which would move the lines of one title differently at different raster scales;
 // placed here, a title's layout scales exactly with k.
+//
+// The text is laid out at k = 1 (the font at the title's point size in sequence pixels, the lines broken at its
+// wrap width there) and the layout is then magnified k times: a font's design can follow its point size (the
+// system font's optical size and tracking change with it, as a variable font's 'opsz' axis does), so laying out at
+// size x k would draw other glyph shapes and advances, and could break the lines elsewhere, than at k = 1. Magnified,
+// a title at any raster scale is the k = 1 title, sharper. The lines (CTLineRef) stay in k = 1 units; everything
+// else here is in raster pixels.
 struct Layout {
-    std::vector<CFRef<CTLineRef>> lines;
-    std::vector<CGPoint> origins; // each line's baseline origin
+    std::vector<CFRef<CTLineRef>> lines; // laid out at k = 1
+    std::vector<CGPoint> origins;        // each line's baseline origin (raster pixels)
+    double magnification = 1;            // k: raster pixels per unit of the lines
     double fontSize = 0;
     double wrapWidth = 0;
     double blockHeight = 0;
@@ -127,15 +135,35 @@ struct Layout {
 
 Layout layoutTitle(const TitleContent &c, double canvasWidth, double canvasHeight, double k) {
     Layout layout;
-    layout.fontSize = std::max(0.01, c.size * canvasHeight * k);
-    layout.wrapWidth = std::max(1.0, c.width * canvasWidth * k);
+    // At k = 1 (see Layout); magnified at the end.
+    layout.fontSize = std::max(0.01, c.size * canvasHeight);
+    layout.wrapWidth = std::max(1.0 / k, c.width * canvasWidth);
+    const auto magnify = [&layout, k]() {
+        layout.magnification = k;
+        layout.fontSize *= k;
+        layout.wrapWidth *= k;
+        layout.blockHeight *= k;
+        layout.frameHeight *= k;
+        const CGAffineTransform scale = CGAffineTransformMakeScale(k, k);
+        for (CGPoint &origin : layout.origins) {
+            origin = CGPointApplyAffineTransform(origin, scale);
+        }
+        if (!CGRectIsNull(layout.lineExtents)) {
+            layout.lineExtents = CGRectApplyAffineTransform(layout.lineExtents, scale);
+        }
+        if (!CGRectIsNull(layout.ink)) {
+            layout.ink = CGRectApplyAffineTransform(layout.ink, scale);
+        }
+    };
     ResolvedTitleFont resolved = resolveTitleFont(c.font, layout.fontSize);
     layout.fontMissing = resolved.missing;
     if (c.text.empty() || !resolved.font) {
+        magnify();
         return layout;
     }
     CFRef<CFStringRef> text = cfString(c.text);
     if (!text) {
+        magnify();
         return layout;
     }
     const CGFloat tracking = c.tracking / 1000.0 * layout.fontSize; // thousandths of an em, in points
@@ -150,6 +178,7 @@ Layout layoutTitle(const TitleContent &c, double canvasWidth, double canvasHeigh
     CFRef<CTTypesetterRef> typesetter =
         CFRef<CTTypesetterRef>::adopt(CTTypesetterCreateWithAttributedString(attributed.get()));
     if (!typesetter) {
+        magnify();
         return layout;
     }
     const double flush = c.alignment == TitleAlignment::Left ? 0.0 : c.alignment == TitleAlignment::Right ? 1.0 : 0.5;
@@ -198,6 +227,7 @@ Layout layoutTitle(const TitleContent &c, double canvasWidth, double canvasHeigh
             layout.ink = CGRectUnion(layout.ink, CGRectOffset(glyphs, origin.x, origin.y));
         }
     }
+    magnify();
     return layout;
 }
 
@@ -217,6 +247,7 @@ Result<GlyphDrawing> glyphsOf(const Layout &layout, const DecodeInterrupt *inter
     GlyphDrawing drawing;
     std::vector<CGGlyph> glyphs;
     std::vector<CGPoint> positions;
+    const double k = layout.magnification; // the lines are at k = 1, the drawing in raster pixels
     for (CFIndex i = 0; i < layout.lineCount(); ++i) {
         if (interrupted(interrupt)) {
             return cancelled();
@@ -237,14 +268,21 @@ Result<GlyphDrawing> glyphsOf(const Layout &layout, const DecodeInterrupt *inter
             positions.resize(std::size_t(count));
             CTRunGetGlyphs(run, CFRangeMake(0, 0), glyphs.data());
             CTRunGetPositions(run, CFRangeMake(0, 0), positions.data());
+            CFRef<CTFontRef> magnified; // a colour font at k times its size, made for its first bitmap glyph
             for (CFIndex g = 0; g < count; ++g) {
-                const CGPoint at = CGPointMake(origin.x + positions[std::size_t(g)].x, origin.y + positions[std::size_t(g)].y);
-                const CGAffineTransform place = CGAffineTransformMakeTranslation(at.x, at.y);
+                const CGPoint at = CGPointMake(origin.x + k * positions[std::size_t(g)].x,
+                                               origin.y + k * positions[std::size_t(g)].y);
+                // The k = 1 glyph's outline, magnified k times.
+                const CGAffineTransform place = CGAffineTransformMake(k, 0, 0, k, at.x, at.y);
                 CFRef<CGPathRef> path = CFRef<CGPathRef>::adopt(CTFontCreatePathForGlyph(font, glyphs[std::size_t(g)], &place));
                 if (path) {
                     CGPathAddPath(drawing.outlines.get(), nullptr, path.get());
                 } else if ((CTFontGetSymbolicTraits(font) & kCTFontTraitColorGlyphs) != 0) {
-                    drawing.bitmaps.push_back({CFRef<CTFontRef>::retain(font), glyphs[std::size_t(g)], at});
+                    if (!magnified) {
+                        magnified = CFRef<CTFontRef>::adopt(CTFontCreateCopyWithAttributes(font, CTFontGetSize(font) * k,
+                                                                                           nullptr, nullptr));
+                    }
+                    drawing.bitmaps.push_back({magnified, glyphs[std::size_t(g)], at});
                 }
                 // Any other glyph without a path (a space) draws nothing.
             }

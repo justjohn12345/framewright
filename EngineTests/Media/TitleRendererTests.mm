@@ -211,6 +211,70 @@ double msSince(std::chrono::steady_clock::time_point start) {
     XCTAssertEqualWithAccuracy(mass2 / mass1, 1.0, 0.01, @"as dark and as wide at both scales");
 }
 
+/// The width of the inked columns of `p` (alpha above a quarter), in its pixels.
+static double inkWidth(const Pixels &p) {
+    long first = -1, last = -1;
+    for (std::size_t x = 0; x < p.width; ++x) {
+        for (std::size_t y = 0; y < p.height; ++y) {
+            if (p.at(x, y)[3] > 64) {
+                if (first < 0) {
+                    first = long(x);
+                }
+                last = long(x);
+                break;
+            }
+        }
+    }
+    return first < 0 ? 0 : double(last - first + 1);
+}
+
+/// The system font's optical size follows its point size (SF Pro Text below about 20 points, Display above), so a
+/// title rendered at k = 2 would use a larger point size, other glyph shapes and advances, and its lines could break
+/// elsewhere than at k = 1 (review fix round, finding 5). The raster scale must only magnify: the k = 2 picture
+/// box-downsampled is the k = 1 picture, and a wrap width that just fits one line at k = 1 gives one line at k = 2.
+- (void)testTheRasterScaleMagnifiesWithoutChangingTheLayout {
+    for (const double size : {0.012, 0.06}) {
+        TitleContent content = plain("Wrap me where I just fit");
+        content.size = size;
+        content.font = TitleFont::system(SystemFontWeight::Regular);
+        content.fillColour = kWhite;
+        // The narrowest wrap width that keeps one line at k = 1.
+        const double oneLine = renderAt(content, 1.0).geometry.height;
+        double low = 0.02, high = 1.0;
+        for (int i = 0; i < 30; ++i) {
+            content.width = (low + high) / 2;
+            (renderAt(content, 1.0).geometry.height > oneLine * 1.2 ? low : high) = content.width;
+        }
+        content.width = high;
+        const RenderedTitle one = renderAt(content, 1.0);
+        const RenderedTitle two = renderAt(content, 2.0);
+        const Pixels p1 = pixelsOf(one.picture), p2 = pixelsOf(two.picture);
+        double sumDiff = 0, worst = 0;
+        const std::size_t w = std::min(p1.width, p2.width / 2), h = std::min(p1.height, p2.height / 2);
+        for (std::size_t y = 0; y < h; ++y) {
+            for (std::size_t x = 0; x < w; ++x) {
+                double alpha2 = 0;
+                for (int j = 0; j < 2; ++j) {
+                    for (int i = 0; i < 2; ++i) {
+                        alpha2 += p2.at(2 * x + std::size_t(i), 2 * y + std::size_t(j))[3] / 4.0;
+                    }
+                }
+                const double diff = std::fabs(p1.at(x, y)[3] - alpha2);
+                sumDiff += diff;
+                worst = std::max(worst, diff);
+            }
+        }
+        const double ink1 = inkWidth(p1), ink2 = inkWidth(p2) / 2;
+        NSLog(@"TITLE optical size, size %.3f (%.1f px at k = 1), wrap %.4f: lines k1 %.1f px tall, k2 %.1f px; ink "
+              @"width k1 %.1f, k2/2 %.1f; alpha k2 downsampled vs k1 mean %.3f, worst %.1f",
+              size, size * 1080, content.width, one.geometry.height, two.geometry.height, ink1, ink2,
+              sumDiff / double(w * h), worst);
+        XCTAssertTrue(one.geometry == two.geometry, @"size %.3f: one block at both scales (the same lines)", size);
+        XCTAssertEqualWithAccuracy(ink2, ink1, 1.5, @"size %.3f: the same glyph advances", size);
+        XCTAssertLessThan(sumDiff / double(w * h), 1.0, @"size %.3f: the same glyphs, magnified", size);
+    }
+}
+
 - (void)testEmojiDrawWithoutAnOutline {
     TitleContent emoji = plain("🎬");
     emoji.size = 0.2;
