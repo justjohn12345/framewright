@@ -236,6 +236,33 @@ bool spinUntil(const std::function<bool()> &done, double timeoutSeconds) {
     XCTAssertNil([self renderOnce:view]);
 }
 
+/// The scopes read the program view's working frame (WorkingFrameReader): at any zoom level the view holds the whole
+/// frame, so they see the whole picture: a view the size of a 4K frame at 25 % on Retina (480x270 points) and one
+/// at 200 % with the drawable limited both hand the reader the whole drawable as the frame (review fix round, item 7).
+- (void)testTheScopesReadTheWholePictureAtAnyViewSize {
+    for (const NSSize size : {NSMakeSize(480, 270), NSMakeSize(3840, 2160)}) {
+        VEPreviewView *view = [self makeViewWithSize:size source:solidSource({200, 40, 40, 255})];
+        [self showInWindow:view];
+        if (size.width > 1000) {
+            view.maximumDrawableSize = CGSizeMake(3840, 2160);
+        }
+        auto seen = std::make_shared<PixelRect>();
+        auto read = std::make_shared<std::atomic<bool>>(false);
+        [view setWorkingFrameReader:[seen, read](id<MTLCommandBuffer>, id<MTLTexture>, const PixelRect &frame) {
+            *seen = frame;
+            read->store(true);
+        }];
+        XCTAssertNil([self renderOnce:view]);
+        XCTAssertTrue(read->load());
+        const CGSize drawable = view.drawableSize;
+        XCTAssertEqual(seen->x, 0);
+        XCTAssertEqual(seen->y, 0);
+        XCTAssertEqualWithAccuracy(seen->width, drawable.width, 1, @"the whole picture (%.0f points wide)", size.width);
+        XCTAssertEqualWithAccuracy(seen->height, drawable.height, 1);
+        [view setWorkingFrameReader:{}];
+    }
+}
+
 - (void)testCollapseToZeroAndRestoreKeepsRendering {
     auto source = solidSource({30, 160, 90, 255});
     VEPreviewView *view = [self makeViewWithSize:NSMakeSize(320, 180) source:source];

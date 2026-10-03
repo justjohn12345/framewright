@@ -82,6 +82,10 @@ struct ProgramMonitorLayout<Picture: View>: View {
                     }
                 }
                 .clipped()
+                // A press on the picture (a Ken Burns or title box drag too, alongside the overlay's own gesture)
+                // gives the monitor the zoom keys; the editor's bar below is not part of it, so its fields, pickers
+                // and buttons are untouched.
+                .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in store.focusProgramMonitor() })
                 .onAppear { MonitorFrame.programArea = geometry.frame(in: .global) }
                 .onChange(of: geometry.frame(in: .global)) { _, area in MonitorFrame.programArea = area }
                 .onChange(of: fitPercent, initial: true) { _, percent in zoom.noteFitPercent(percent) }

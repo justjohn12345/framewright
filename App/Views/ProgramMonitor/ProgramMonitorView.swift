@@ -29,8 +29,8 @@ struct ProgramMonitorView: View {
 /// margin (or the readout of a selected Fade or Gain span; see `ProgramMonitorLayout`). The picture
 /// view itself observes only the playhead's transport state; the layout around it observes the
 /// store for the editor. A click gives the program (timeline) the transport keys and takes keyboard
-/// focus back from text fields; a click or a drag on it (a Ken Burns box) gives it the zoom keys
-/// (`ProjectStore.focusProgramMonitor`).
+/// focus back from text fields; a click or a drag on the picture (a Ken Burns box) gives it the zoom keys
+/// (`ProjectStore.focusProgramMonitor`, the layout's picture area).
 struct ProgramMonitorHost: View {
     let store: ProjectStore
     @ObservedObject var playhead: PlayheadModel
@@ -56,6 +56,5 @@ struct ProgramMonitorHost: View {
             store.focusProgramMonitor()
             store.reclaimKeyboardFocus()
         }
-        .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in store.focusProgramMonitor() })
     }
 }
