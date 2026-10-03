@@ -1,3 +1,4 @@
+import AppKit
 import CoreMedia
 import FramewrightEngine
 import SwiftUI
@@ -5,8 +6,9 @@ import SwiftUI
 /// The selected title's box on the program monitor (`TitleBoxModel`): the text block through the clip's Motion at
 /// the playhead, with handles at its corners and on its left and right edges, and thin dashed outlines of the other
 /// titles at the playhead. Drag the box to move the text, an edge or a corner to change its wrap width about its
-/// centre; each drag is one undo step and Escape cancels it. Nothing is drawn while the playhead is outside the
-/// clip, and presses then pass through.
+/// centre; each drag is one undo step and Escape cancels it. A drag snaps the box to the frame's centre lines and the
+/// safe-area edges (the line it snapped to is drawn while it lasts); holding Command does not snap. Nothing is drawn
+/// while the playhead is outside the clip, and presses then pass through.
 struct TitleBoxOverlay: View {
     @ObservedObject var model: TitleBoxModel
     @ObservedObject var playhead: PlayheadModel
@@ -21,6 +23,10 @@ struct TitleBoxOverlay: View {
 
     static let handleSize: CGFloat = 7
     static let tint = Color(red: 1.0, green: 0.82, blue: 0.2)
+    /// The colour of a guide line a drag snapped to.
+    static let snapTint = Color(red: 1.0, green: 0.25, blue: 0.75)
+    /// How near a guide line (view points) a dragged box snaps to it.
+    static let snapDistance: CGFloat = 6
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -31,6 +37,7 @@ struct TitleBoxOverlay: View {
                     .accessibilityIdentifier("TitleBox.outline.\(outline.clipID)")
             }
             if model.isVisible {
+                snapLinesView
                 boxView
                 dragLayer
             }
@@ -75,7 +82,29 @@ struct TitleBoxOverlay: View {
         .allowsHitTesting(false)
     }
 
-    /// Presses on the box (`TitleBoxModel.target`) drag it; presses elsewhere grab nothing.
+    /// The guide lines the drag snapped to, across the frame.
+    private var snapLinesView: some View {
+        Path { path in
+            let frame = viewport.frame
+            for line in model.snapLines {
+                if line.vertical {
+                    let x = viewport.view(CGPoint(x: line.position, y: 0)).x
+                    path.move(to: CGPoint(x: x, y: frame.minY))
+                    path.addLine(to: CGPoint(x: x, y: frame.maxY))
+                } else {
+                    let y = viewport.view(CGPoint(x: 0, y: line.position)).y
+                    path.move(to: CGPoint(x: frame.minX, y: y))
+                    path.addLine(to: CGPoint(x: frame.maxX, y: y))
+                }
+            }
+        }
+        .stroke(Self.snapTint, lineWidth: 1)
+        .allowsHitTesting(false)
+        .accessibilityIdentifier("TitleBox.snapLines")
+    }
+
+    /// Presses on the box (`TitleBoxModel.target`) drag it; presses elsewhere grab nothing. A move snaps to the
+    /// frame's guide lines unless Command is held.
     private var dragLayer: some View {
         let box = viewport.view(model.box)
         return Color.clear
@@ -87,7 +116,9 @@ struct TitleBoxOverlay: View {
                                                                         resizable: model.isResizable))
                     }
                     guard let target = state?.target else { return }
-                    model.applyDrag(target, translation: viewport.sequence(value.translation))
+                    model.applyDrag(target, translation: viewport.sequence(value.translation),
+                                    snapping: !NSEvent.modifierFlags.contains(.command),
+                                    snapThreshold: viewport.sequence(CGSize(width: Self.snapDistance, height: 0)).width)
                 }
                 .onEnded { _ in model.endDrag() })
             .accessibilityIdentifier("TitleBoxDragArea")

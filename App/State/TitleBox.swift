@@ -54,10 +54,13 @@ final class TitleBoxModel: ObservableObject {
     @Published private(set) var isDragging = false
     /// Why the last drag was refused or stopped (nil when it went as asked).
     @Published private(set) var note: String?
+    /// The guide lines the drag in progress snapped to (`TitleSnapping`), drawn across the frame while it lasts.
+    @Published private(set) var snapLines: [SafeAreas.Line] = []
 
     private(set) var time: CMTime
-    /// The title's values and the clip's Motion when the drag started.
-    private var dragOrigin: (x: Double, y: Double, width: Double, motion: VEVideoParams)?
+    /// The title's values and the clip's Motion when the drag started, and its block relative to its position (sequence
+    /// pixels on the canvas; a move does not change it).
+    private var dragOrigin: (x: Double, y: Double, width: Double, motion: VEVideoParams, block: CGRect)?
     /// The drag in progress was cancelled (Escape, or another edit ended its group): the rest of the gesture writes
     /// nothing until it ends.
     private(set) var dragCancelled = false
@@ -152,6 +155,15 @@ final class TitleBoxModel: ObservableObject {
         return CGSize(width: (c * x + s * y) / motion.scale, height: (-s * x + c * y) / motion.scale)
     }
 
+    /// The axis-aligned bounds of `box` (a turned box's corners).
+    static func bounds(of box: KenBurnsBox) -> CGRect {
+        let corners = box.corners
+        let xs = corners.map(\.x)
+        let ys = corners.map(\.y)
+        guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else { return .null }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
     // MARK: Hit testing
 
     /// What a press at `point` grabs on `box` (view points), or nil (outside it and its handles): a corner or the
@@ -184,7 +196,10 @@ final class TitleBoxModel: ObservableObject {
     /// A step of the drag of `target`, now `translation` (sequence pixels on the frame) from where it started. The
     /// first step that moves opens the drag's coalescing group; every step writes the title's position (and, for an
     /// edge, its width) inside it, from the values when the drag started. Refused during another gesture.
-    func applyDrag(_ target: Target, translation: CGSize) {
+    ///
+    /// With `snapping` (the overlay's drags snap unless Command is held), a moved box snaps to the frame's guide lines
+    /// within `snapThreshold` sequence pixels (`TitleSnapping`); a dragged edge of an unturned box snaps its x.
+    func applyDrag(_ target: Target, translation: CGSize, snapping: Bool = false, snapThreshold: CGFloat = 8) {
         guard translation != .zero, !dragCancelled else { return }
         if !isDragging, !beginDrag() { return }
         guard let origin = dragOrigin else { return }
@@ -199,16 +214,50 @@ final class TitleBoxModel: ObservableObject {
         var x = origin.x
         var y = origin.y
         var width = Double.nan
+        var lines: [SafeAreas.Line] = []
         switch target {
         case .body:
-            x = min(max(origin.x + Double(moved.width / sequence.width), xRange.lowerBound), xRange.upperBound)
-            y = min(max(origin.y + Double(moved.height / sequence.height), yRange.lowerBound), yRange.upperBound)
+            x = origin.x + Double(moved.width / sequence.width)
+            y = origin.y + Double(moved.height / sequence.height)
+            if snapping {
+                // The moved block's bounds on the frame, snapped; the snap's offset on the frame taken back to the
+                // canvas (the Motion is affine: moving the position by it moves the box on the frame by the offset).
+                let canvas = origin.block.offsetBy(dx: CGFloat(x) * sequence.width, dy: CGFloat(y) * sequence.height)
+                let placed = Self.block(canvasCenter: CGPoint(x: canvas.midX, y: canvas.midY), size: canvas.size,
+                                        motion: origin.motion, sequence: sequence)
+                let snap = TitleSnapping.snap(bounds: Self.bounds(of: placed), to: store.safeAreas.lines,
+                                              threshold: snapThreshold)
+                if snap.offset != .zero, let back = Self.canvasTranslation(snap.offset, motion: origin.motion) {
+                    x += Double(back.width / sequence.width)
+                    y += Double(back.height / sequence.height)
+                }
+                lines = snap.lines
+            }
+            x = min(max(x, xRange.lowerBound), xRange.upperBound)
+            y = min(max(y, yRange.lowerBound), yRange.upperBound)
         case let .edge(right):
             guard isResizable else { return }
             // About the centre: the grabbed edge follows the pointer, the other moves the other way.
             let change = 2 * Double(moved.width / sequence.width) * (right ? 1 : -1)
-            width = min(max(origin.width + change, widthRange.lowerBound), widthRange.upperBound)
+            width = origin.width + change
+            let scale = CGFloat(origin.motion.scale)
+            let unturned = origin.motion.rotationDegrees.truncatingRemainder(dividingBy: 360) == 0
+            if snapping, unturned, scale > 0 {
+                // The grabbed edge's x on the frame, snapped; the width follows about the block's centre.
+                let canvas = origin.block.offsetBy(dx: CGFloat(origin.x) * sequence.width,
+                                                   dy: CGFloat(origin.y) * sequence.height)
+                let centre = Self.block(canvasCenter: CGPoint(x: canvas.midX, y: canvas.midY), size: canvas.size,
+                                        motion: origin.motion, sequence: sequence).center.x
+                let half = CGFloat(width) * sequence.width * scale / 2
+                if let snapped = TitleSnapping.snapEdge(x: centre + (right ? half : -half), to: store.safeAreas.lines,
+                                                        threshold: snapThreshold) {
+                    width = Double(2 * abs(snapped.x - centre) / (sequence.width * scale))
+                    lines = [snapped.line]
+                }
+            }
+            width = min(max(width, widthRange.lowerBound), widthRange.upperBound)
         }
+        if lines != snapLines { snapLines = lines }
         let result = store.engine.performInCoalescingGroup(Self.dragGroup) {
             self.store.engine.setTitlePosition(x: x, y: y, width: width, clips: [NSNumber(value: self.clipID)])
         }
@@ -245,7 +294,13 @@ final class TitleBoxModel: ObservableObject {
         }
         store.inspector.endNudgeBurst()
         store.titleInspector.endTyping()
-        dragOrigin = (title.x, title.y, title.width, clip.motion(at: time))
+        let block = store.engine.titleBlock(ofClip: clipID)
+        guard !block.isNull else {
+            note = "The title no longer exists."
+            return false
+        }
+        dragOrigin = (title.x, title.y, title.width, clip.motion(at: time),
+                      block.offsetBy(dx: -CGFloat(title.x) * sequenceSize.width, dy: -CGFloat(title.y) * sequenceSize.height))
         store.engine.beginCoalescing(withKey: Self.dragGroup)
         store.cancelActiveGesture = { [weak self] in self?.cancelDrag() }
         isDragging = true
@@ -282,6 +337,7 @@ final class TitleBoxModel: ObservableObject {
     private func finishDrag() {
         isDragging = false
         dragOrigin = nil
+        if !snapLines.isEmpty { snapLines = [] }
         store.cancelActiveGesture = nil
         if let clip = store.engine.clipInfo(clipID) { update(clip: clip) }
     }

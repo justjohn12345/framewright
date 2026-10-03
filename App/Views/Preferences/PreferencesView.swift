@@ -140,8 +140,8 @@ extension PreferencesView {
                 ForEach(SafeAreaStandard.allCases) { Text($0.title).tag($0.rawValue) }
             }
             Text("The title-safe and action-safe rectangles View > Show Title/Action Safe Areas draws on the program "
-                + "monitor. Television may hide what lies outside action-safe; for web video they are composition "
-                + "guides.")
+                + "monitor, and a dragged title snaps to (hold ⌘ while dragging not to snap). Television may hide "
+                + "what lies outside action-safe; for web video they are composition guides.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
