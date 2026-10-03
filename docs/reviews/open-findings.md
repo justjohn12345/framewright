@@ -412,6 +412,54 @@ testTheShownPanelIsDrawnWithTheProgramMonitorsFramesAndLetGoWhenHidden`, the two
 (it locked during the run: `IOConsoleLocked` Yes, reran alone with the same result); they need a run with the screen
 unlocked. Baseline 687 / 476 / 347.
 
+**Review fix round** (adversarial review of 300f55b..6b56d43; one commit per finding or pair, each with a test that
+fails without it):
+1. MEDIUM, a suspension interrupting a stream's open (an FFmpeg open decodes and stops when interrupted) left the
+   stream failed until its target moved, so a clip past a cut could stay undecoded: e51d9f2. `suspendTargets` leaves
+   opens alone (`Stream::opening`) and an interrupted open is retried, not failed
+   (`testASuspensionDuringAnOpenLetsTheStreamDecodeWhenTheSameTargetReturns`; fails with both reverted).
+2. MEDIUM, every layer's stream waited for its lane's request even when it was queued behind another lane's, so a
+   two-layer start decoded the GOPs one after the other: b78d9e3. A stream waits only for a request being decoded or
+   next in line; otherwise it decodes its picture on a worker in parallel and the request finds it in the cache
+   (`testAStreamDoesNotWaitForARequestQueuedBehindAnotherLane`, `testSpaceRightAfterAScrubIntoADissolvePlaysBothLayers`).
+   Found on the way: the hand-off decided in two separate locked looks, and a request ending between them left the
+   stream neither taking the decoder nor waiting (it sought the GOP again: the burst test failed about once in five
+   runs); `DecodePool::handOff` now decides under one lock (12 runs clean). Two layers, a cross dissolve of the H.264
+   and HEVC 4K clips, scrub released inside it (`testPlayStartInADissolveOfTwoLongGopClips`, five starts, median /
+   worst ms): Space at once, picture 595 / 679 before, 397 / 555 after; Space 150 ms later, 1023 / 1056 before
+   (the pre-roll's one-second timeout in most starts), 348 / 1015 after. What is left is the decode of the paused
+   picture itself (both GOPs, now in parallel); the pre-roll waits for both layers' first frame.
+3. LOW, `ScrubDecoder::positioned` written on the scrub thread outside the lock and read by a worker before its
+   in-flight check: b78d9e3 (the in-flight check first; the flag cleared inside `scrubDecoderFor`'s locked section).
+   ThreadSanitizer (`-enableThreadSanitizer YES`) over DecodePoolTests and PlayStartAfterRestTests: 41 tests, 0
+   reports (the runtime was loaded: `libclang_rt.tsan_osx_dynamic.dylib`).
+4. LOW, a zoom change during a box drag moved the stage under the pointer: 03ab2c1 (`ProgramMonitorZoom` refuses
+   changes while `isGestureActive`, Ken Burns, Transform and title box drags; `testTheZoomHoldsStillDuringADrag`).
+5. LOW, a level chosen by hand could hide the editor's boxes again: 03ab2c1. When the editor opens (or switches span
+   or mode) and when a drag ends, a fixed level that does not show the frame and boxes gives way to Fit
+   (`ProgramMonitorZoom.keepVisible`); while the editor is open Shift-Z fits the monitor whatever has the focus
+   (`testAHandChosenLevelGivesWayToFitWhenTheBoxesWouldBeOffTheMonitor`).
+6. LOW, no limit on the program view's drawable at fixed levels: 739de67. Chosen: the minimum form, not a compositor
+   viewport. `VEPreviewView.maximumDrawableSize` (the sequence's frame size at a fixed level, none at Fit) and an
+   absolute 8192-pixel side; the layer magnifies (200 % shows smoothed pixels, not blocks). The view keeps holding
+   the whole frame, so the scopes and the clipping overlay still read the whole picture; a viewport-only drawable
+   would have given them the visible part at 200 %. GPU time per frame at 200 % of a 4K sequence
+   (`PreviewDrawableMeasurementTests`, compositor into a target of the drawable's size): 1.16 ms into 7680x4320,
+   0.27 ms into 3840x2160 (`testTheDrawableIsLimited`, `testAFixedLevelLimitsTheProgramViewsDrawable`).
+7. Checks: the layout's `.clipped()` gives the program view a clipping container the monitor area's size
+   (`_NSGraphicsView`, `masksToBounds` true) whose layer cuts the CAMetalLayer at 100/200 %; now asserted in
+   `testAFixedLevelLimitsTheProgramViewsDrawable` (an offscreen drawing cannot show a Metal layer, so the evidence is
+   the layer tree). The scopes' reader gets the whole drawable as the frame at a 25 % view and a limited 200 % one
+   (`testTheScopesReadTheWholePictureAtAnyViewSize`); the clipping overlay is drawn by the same output pass over
+   the whole drawable. The zoom-focus drag gesture moved from the whole monitor host to the layout's picture area
+   (2c30c08), so the editor's bar is outside it; whether it disturbs anything by hand cannot be run in the test host
+   (its events do not reach SwiftUI gestures): for the owner's hand test.
+
+Fix round tests (full `Framewright` scheme at 2c30c08, the screen locked throughout: `IOConsoleLocked` Yes):
+EngineTests 700 (3 skipped: the display-link tests), doctest 476 cases, AppTests 357 (1 known skip). Failures: only
+`ScopePanelTests testTheWindowShowsTheScopesWideAtThePicturesAspect` and `WaveformPanelTests
+testTheShownPanelIsDrawnWithTheProgramMonitorsFramesAndLetGoWhenHidden`, the two that need the screen unlocked.
+
 ## Where things stand (handover, 2026-10-03)
 - **Released and pushed:** 0.1.11 (built from 221ad31) is the last release; everything is pushed. It adds titles
   slice 1 (c996a93..e5abda0, docs c7feff8) and its review fix round (bd96f79..74a95a7, docs 9927acd), accepted by

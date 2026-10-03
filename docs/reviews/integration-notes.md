@@ -2143,3 +2143,13 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   `TEST_RUNNER_FW_PLAYSTART_FILE` (a generated clip instead). Its media are cached in
   `<testMediaDirectory>-playstart1` (needs the ffmpeg tool).
 - What to check by hand: the list in `open-findings.md` ("For the owner, by hand").
+- Review fix round: `DecodePool::handOff` (taken / wait / neither, one locked decision) replaces the two-step
+  adoption; `scrubWillPositionLocked` waits only for a request in flight or next in line; `Stream::opening` keeps
+  `suspendTargets` off opens, and an open interrupted on request is retried rather than failed. `VEPreviewView`
+  `maximumDrawableSize` and `VEPreviewViewMaximumDrawableDimension` (8192); `PreviewViewRepresentable` and
+  `ProgramMonitorView` pass it; `ProgramMonitorZoom` gained `set(_:)` (the only way to change the level; `zoom` is
+  read-only), `isFrozen` (the store's `isGestureActive`), `noteStage(_:)` / `Stage`, `keepVisible(_:)` and
+  `drawableLimit`; `ProgramMonitorHost` observes it; `ProjectStore.kenBurnsDragDidEnd` (from `KenBurnsModel.endDrag`).
+  The zoom-focus drag gesture is on the layout's picture area. `PreviewDrawableMeasurementTests` joins the
+  `Measurements` scheme. By hand, besides the list in `open-findings.md`: at 200 % open a Motion span (the monitor
+  goes to Fit); type in the editor bar's Start field and use its pickers after dragging a box.
