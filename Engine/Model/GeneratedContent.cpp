@@ -566,6 +566,16 @@ ContentId matteContentIdOf(const SRGBColour &colour) {
     return hash.id();
 }
 
+ContentId contentIdOnCanvas(const ContentId &id, std::int32_t width, std::int32_t height) {
+    Fnv128 hash;
+    hash.text("framewright.canvas.1");
+    hash.bytes(&id.high, sizeof id.high);
+    hash.bytes(&id.low, sizeof id.low);
+    hash.bytes(&width, sizeof width);
+    hash.bytes(&height, sizeof height);
+    return hash.id();
+}
+
 std::shared_ptr<const GeneratedContent> GeneratedContent::makeTitle(TitleContent title, std::string foreign) {
     auto content = std::shared_ptr<GeneratedContent>(new GeneratedContent());
     content->kind_ = GeneratorKind::Title;

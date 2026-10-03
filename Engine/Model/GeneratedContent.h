@@ -292,6 +292,9 @@ struct ContentId {
 
 ContentId contentIdOf(const TitleContent &content);
 ContentId matteContentIdOf(const SRGBColour &colour);
+// `id` drawn on a `width` x `height` canvas (the sequence's frame): the same content on another frame size is
+// another picture (its sizes are fractions of the frame), so the picture's cache identity covers the size.
+ContentId contentIdOnCanvas(const ContentId &id, std::int32_t width, std::int32_t height);
 
 // A generated clip's content: what kind it is, the title's or the matte's values, and what a newer version
 // wrote in the file's object that this one does not read (`foreign`, compact JSON text of an object, written

@@ -15,10 +15,12 @@
 // - The frame cache keys a generated picture by FrameKey{generator asset, decode format, GeneratedKey}
 //   (FrameCache.h); the key of a file's frames is empty.
 // - CanvasGeometry is where a generated picture lies on the frame-sized transparent canvas it stands for:
-//   the picture is only the rectangle that has something in it (a lower third is a strip, not a frame).
-//   It is an attachment of the picture's buffer (setCanvasGeometry), so it travels with the picture into
-//   the frame cache, a held previous picture and the TextureSet mapped from it (TextureCache.h), and is
-//   never recomputed from the layer that shows it.
+//   the picture is only the rectangle that has something in it (a lower third is a strip, not a frame),
+//   given relative to the layer's anchor (VideoLayer::canvasAnchor: a title's position, which is not part
+//   of its content, so dragging a title renders nothing new; the canvas's top-left corner for a matte). It
+//   is an attachment of the picture's buffer (setCanvasGeometry), so it travels with the picture into the
+//   frame cache, a held previous picture and the TextureSet mapped from it (TextureCache.h), and its shape
+//   is never recomputed from the layer that shows it.
 
 #pragma once
 
@@ -53,10 +55,11 @@ struct GeneratedKey {
 std::uint32_t rasterScale64(double k);
 
 /// Where a generated picture lies on its canvas (see the header comment): the canvas is the sequence frame,
-/// `canvasWidth` x `canvasHeight` sequence pixels, and the picture's pixels cover the rectangle (x, y,
-/// width, height) of it, in sequence pixels (origin top left, +y down; it may reach outside the canvas).
-/// Everything else of the canvas is transparent. The compositor places the canvas as it places a
-/// frame-sized still and maps it to the picture through this rectangle (Compositor.mm, placeSource).
+/// `canvasWidth` x `canvasHeight` sequence pixels, and the picture's pixels cover the rectangle (anchor.x + x,
+/// anchor.y + y, width, height) of it, in sequence pixels (origin top left, +y down; it may reach outside the
+/// canvas), the anchor being the layer's (VideoLayer::canvasAnchor). Everything else of the canvas is
+/// transparent. The compositor places the canvas as it places a frame-sized still and maps it to the picture
+/// through this rectangle (Compositor.mm, placeSource).
 struct CanvasGeometry {
     double canvasWidth = 0;
     double canvasHeight = 0;

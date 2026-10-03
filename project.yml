@@ -137,6 +137,8 @@ targets:
       - sdk: IOSurface.framework
       - sdk: ImageIO.framework
       - sdk: CoreGraphics.framework
+      # Titles: Core Text lays out and shapes the text the title renderer draws (Engine/Media/TitleRenderer).
+      - sdk: CoreText.framework
       - sdk: UniformTypeIdentifiers.framework
       - sdk: AppKit.framework
       - sdk: QuartzCore.framework
