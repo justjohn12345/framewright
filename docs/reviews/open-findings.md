@@ -409,6 +409,19 @@ Fix round tests (full `Framewright` scheme at 15026ae, the screen locked): Engin
 tests), doctest 487 cases, AppTests 376 (2 skipped: the known one and the double-click test, which needs a visible
 window). Failures: `ScopePanelTests` and `WaveformPanelTests`, the locked screen as before.
 
+The double-click test crashed the test host with the display awake (2026-10-03, after 0.1.12): the drag's release read
+`NSApp.currentEvent?.clickCount`, and an event sent to a window by a test is never AppKit's current event, so it read
+the click count of whatever non-mouse event was current, which raises (`NSInternalInconsistencyException`). The
+exception unwound out of the async test's task job; XCTest's waiter caught it, and the Swift runtime aborted when the
+test ended ("freed pointer was not the last allocation": the thread was left inside the dead task), hiding the
+failure. Reproduced outside XCTest with a main-actor task that raises and an outer `@try` around the run loop. Fixed:
+the box counts its own clicks from its drag gesture's press times and places (`ClickCounter`: the double-click
+interval, 4 points of slop; a click's jitter is taken back rather than moving the title), the SwiftUI double tap beside
+the drag is gone (one path), and the test is synchronous (an exception is a reported failure). By reading, the hand's
+double-click worked before (AppKit's current event during a real release is that mouse-up), but rested on an event
+SwiftUI does not promise to be current, and a jittered second click moved the title instead of typing. Not yet run
+with a visible window: `TitleTypingTests testADoubleClickOnTheBoxStartsTypingWithTheCaretThere`.
+
 ## Play start after a scrub, and the Ken Burns stage zoom (2026-10-03): status
 The owner saw Space take about half a second to start after a scrub (instantly after a pause), and Ken Burns /
 Transform boxes end up off the program monitor with no way to reach them. Branch of this round (not pushed):
