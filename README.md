@@ -93,6 +93,15 @@ audited the code line by line.
   kept together with their linked partner (Delete removes both, Option-Delete one; a change also changes
   the linked one unless turned off); a note when a dissolve sits on a plain split (both sides show the
   same frames); the gain line on audio clips; Speed/Duration sheet.
+- Titles, lower thirds and colour mattes: Clip > Add Title (Control-T), Add Lower Third (Shift-Control-T) and
+  Add Colour Matte, or the Effects tab's tiles, put one at the playhead on the first free video track above the
+  target track (a new track when none is free). A title is a clip of its own with its text and style: type it in
+  the inspector, with its font (the system font or any font on the Mac), size, colour, alignment, line spacing,
+  tracking, an outline, a soft shadow and a background box; drag its box on the program monitor to move it or
+  change its wrap width. Titles are drawn with Core Text at the size they are shown, so they stay sharp under a
+  Ken Burns zoom and in an export larger than the sequence, and they are not graded. A project whose font is not
+  on the Mac shows its titles in the system font with a warning and keeps the font's name. Fonts are used under
+  their own licences: check that a font's licence allows its use in video you publish.
 - Colour grading, a property of each clip, graded in linear light (so 8-bit and 10-bit footage grade alike and
   black stays black) and the same in the monitors and the export. The basic correction (exposure ±5 stops,
   contrast, temperature, tint, saturation) is in the inspector's Colour section and the Colour tab of the right

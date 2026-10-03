@@ -122,12 +122,97 @@ Tests and tooling:
 - Playback > Mute Audio's check mark is checked by hand: the hosted app's SwiftUI menu did not update its item's
   state in the test host. (Fix round 2026-10-01, item 2 (B2).)
 
+## Titles slice 1 (2026-10-02): status
+The slice of `docs/plans/2026-10-02-titles-design.md` (owner approved all eleven decisions), one commit per item
+in the note's order. Nothing was cut: the colour matte and the lower-third preset shipped. Not pushed.
+
+Done (engine):
+1. c996a93 the picture drawing set-up of `StillDrawing` in a shared helper (`PictureDrawing`; pure extraction).
+2. abb717e generated pictures through the decode pool (`GeneratedPictureSource`, the decoder adapter,
+   `DecodeTarget::generated`, `FrameKey`/`Focus` with the generated key), proved with a checkerboard test source.
+3. 8b10479 the model: generator assets and `isFileBacked()` at the URL sites, `Clip::generated`, the
+   `TitleParameterInfo` table, the content id, `maxMotionScale`, the validation rules.
+4. 7b62a72 schema 10: writer and parser (unknown title keys kept), the frozen 9 -> 10 step, the v10 goldens and the
+   writer golden `project-v10.json`.
+5. f7083a2 the title and matte renderers (Core Text layout and glyph outlines, outline, shadow scaled by k, box,
+   font resolution and fallback, raster limits).
+6. 77d529f the compositor (`placeCanvas`, no sharpening of generated layers; `VideoLayer` carries the content,
+   anchor and the clip's largest Motion scale).
+7. 915c5dd playback and export compute k and build the sources (the monitor follows its drawable size).
+8. a0681f1 the facade (placement rule, setters, `VEClipInfo` title fields, missing fonts, font observation).
+   f4557f4 (found while doing the app): a sequence size change skipped generated clips (their asset has no size),
+   leaving their Motion offsets in the old frame's pixels; they now scale with the frame.
+
+Done (app): efc63f7 the Clip menu items and Control-T / Shift-Control-T; 89e12ef the Effects tab's tiles;
+74c247f the inspector's Text, Font, Outline, Shadow and Background sections and the matte's colour row; d2789ec the
+program monitor's title box; a9b0947 the timeline's look; b7498eb the Colour tab's note (Copy and Paste Grade skip
+titles); e5abda0 the export sheet's missing-font confirmation.
+
+Deviations from the note, and why:
+- `CanvasGeometry` travels as a buffer attachment and is relative to the layer's anchor (the title's position is
+  not in its content id, so moving a title renders nothing and its picture is shared).
+- The content id is one true 128-bit FNV-1a hash (not two 64-bit lanes), with the canvas size folded in
+  (`contentIdOnCanvas`). `maxMotionScale` takes the bezier's exact extremes rather than samples.
+- Layout uses `CTTypesetter` with Framewright's own line placement: `CTFrame` rounds line heights, which broke the
+  linear scaling with k (and the shadow-scale test).
+- The compositor snaps a reduced or 1:1 still title's corner to a whole target pixel; an animated one is not
+  snapped, keeping smooth motion at some edge sharpness (69 % of the snapped title's edge measure at a half-pixel
+  phase in a half-size monitor, against 98-100 % snapped).
+- The monitor's output scale is quantised (up to 1.25 -> 1, up to 2 -> 2, else 4), so a window resize does not
+  re-render titles on every step; `VEPreviewView` reports its drawable size for it.
+- Titles stay 8-bit BGRA: their colour is exact to its 8-bit value (mattes are exact in 10-bit).
+- The export wait of generated sources is tested through ExportJob (item 7), not in item 2's pool tests.
+- The placement rule (above the target) applies to colour mattes too; a matte for a backdrop is dragged under.
+- The engine follows font activation (`VEEngineTitleFontsDidChangeNotification`): titles re-render when Font Book
+  activates or removes a font, and the timeline's badge follows.
+- The title's Position X/Y and Box Width rows read "Text Centre X/Y" and "Wrap Width" in the inspector, so they are
+  not confused with the Video rows' Position X/Y below them.
+- `KenBurnsModel` reads the picture size from `VEClipInfo.pictureWidth/Height` (its `asset:` parameter is gone; one
+  existing test changed with it, `KenBurnsEditorTests` "the reason for a clip without a picture").
+- The name of a title on the timeline is its first line that has text ("Title" when none has).
+
+Measured (Debug build, this Mac; estimates written down, not asserted):
+- A 1080p lower third renders in 0.66-0.72 ms (median); a full 4K page with outline and a soft shadow in
+  104-106 ms, above the note's estimate of tens of ms (typing on such a title shows about ten pictures a second;
+  a 4K title over 16384 pixels a side lowers k, measured at k 0.284 for an oversized page).
+- Keystroke to picture, paused (engine: set the text, render, present): 2.0-2.6 ms.
+- Real-time playback with two titles over video: 125 frames, 90 with a title, all exact, 0 late, 0 dropped, 0 audio
+  underruns.
+- Sharpness: a 1:1 export, a Motion zoom x2 at k 2 and a 1.5x export at k 1.5 match the renderer's picture with a
+  worst difference of 0 codes; parity titles worst block 8.10 (bound 12); mattes exact in 10-bit (940/512, 64).
+
+Open:
+- Slice 2 items as planned: typing on the picture, safe-area guides, Copy and Paste Style.
+- A 4K full-page title with a soft shadow takes about 0.1 s to render (above).
+- What needs a person (the test host's events never reach SwiftUI gestures): dragging the box with the mouse,
+  typing feel and Undo in the real text area, the font popups with the user's own fonts (and the sandboxed font
+  list), text edges over real footage at full screen, a project opened without its font or with it deactivated.
+- Flaky in a batch: `CurveEditorTests testTheEditorKeepsTheCurveAfterTheDrag` (a drawing comparison) failed once
+  when run with other Colour tab suites; passed twice alone.
+
+Version 9 tests changed only by the schema number (as 63d23c7 did for version 8): ProjectJSONTests (the format
+details' version 10; the v5 and v6 expected documents' `schemaVersion` 10; the v7 and v8 byte-for-byte tests' version
+replaced by 10; the v6-content warnings "saved as version 10"); MigrationGoldenV9Tests (the v8 LUT file test's
+warnings and saved version through `kProjectSchemaVersion`; the version 9 byte-for-byte test renamed "...but for
+its version"); ClipGradeLutTests (`== 10`); VEEngineGradeTests and VEEngineGradeLutTests (`"schemaVersion": 10`).
+No existing golden file changed.
+
+Tests (full `Framewright` scheme run at e5abda0): EngineTests 678 (3 skipped: the display-link tests, the display
+asleep or locked), doctest 475 cases, AppTests 339 (1 known skip); baseline 629 / 439 / 311. Failures in that run:
+`ExportParityTests testAReversedClipPlaysTheSoundTheExportWrites` (the known flake; passed alone), and
+`ScopePanelTests testTheWindowShowsTheScopesWideAtThePicturesAspect` and `WaveformPanelTests
+testTheShownPanelIsDrawnWithTheProgramMonitorsFramesAndLetGoWhenHidden`, which fail the same way at b3f8c4e (before
+this round) in this session: a windowed program view does not render while the display is asleep or locked (the
+same condition skips the display-link tests). They need a run with the display awake.
+
 ## Where things stand (handover, 2026-10-02)
 - **Released and pushed:** 0.1.10 at 400ded1 is the last release; everything is pushed. Colour grading slices 1
   and 2 and the scopes shipped in 0.1.9 (e9aeafa). The user's hand test of them found three problems, fixed in
   0221e41, bff9d3e and 5e22e7c and released in 0.1.10: curve points vanished on release (the Curves and LUTs
   sections did not redraw after an edit), the LUT rows did not name the chosen file, and the wheels were drawn
   washed out. Left from that test: the curve editor's hue strip still uses the old pastel hues.
+- **Titles slice 1** is committed on main (c996a93..e5abda0 and the docs commit after it), not pushed or released;
+  its status is above and the owner's hand-test list is in integration-notes ("Titles slice 1").
 - **Next, in the order the user has leaned towards:**
   1. The user finishes the hand test of slices 1 and 2 (lists in integration-notes).
   2. HLG display (tone map) and the P3/BT.2020 primaries decision.

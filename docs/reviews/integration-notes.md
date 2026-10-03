@@ -2030,3 +2030,71 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
      a LUT, File > New, import media, Paste Grade: the LUT comes along.
   6. Export a graded sequence (wheels, curves, LUTs) and compare with the program monitor.
   7. Open a version 9 project in the previous release: it is refused as too new (instead of losing its LUTs).
+
+## Titles slice 1 (2026-10-02; status in `open-findings.md`)
+- A picture that is not decoded from a file is a `media::GeneratedPictureSource` (`Engine/Media/GeneratedSource.h`):
+  a content key (`GeneratedKey`: the 128-bit content id and the raster scale), whether it is still, and a
+  `render()` that returns a premultiplied BGRA buffer with its `CanvasGeometry` attached
+  ("FramewrightCanvasGeometry"). It reaches the decode pool as `DecodeTarget::generated` /
+  `requestFrame(..., generated)` through the `GeneratedVideoDecoder` adapter, so caching, scrubbing, the export
+  wait and invalidation are the decoded path's. `FrameKey` and `FrameCache::Focus` carry the generated key; a new
+  key on the same asset reopens the stream as a relink does (an old keystroke's picture is never published).
+- Any new code that touches an asset's file must check `MediaAsset::isFileBacked()` first: generator assets
+  (`MediaAsset::generator`, one hidden asset per kind, made in the same undo step as the first clip of its kind)
+  have no URL, size or bookmark. The existing URL sites (project registration, media library, export job, offline
+  audio, playback registration, thumbnails) do. `VEEngine.allAssets` leaves them out; `assetInfo:` still answers.
+- A clip's generated content is `Clip::generated` (shared, immutable `GeneratedContent`; a title's `TitleContent`
+  or a matte's colour). A new title parameter: an enumerator, a row of the `TitleParameterInfo` table
+  (`GeneratedContent.cpp`: name, display name, type, unit, default, range, whether it changes the pixels), its
+  field and `TitleValue` accessors, its canonical form in the content id, the writer/parser (unknown keys in a
+  title are kept), a `VETitleParameter` value (the facade's enum mirrors the table, checked), and its row in the
+  inspector (`TitleInspectorSections`). Positions do not change the content id, so a move renders nothing.
+- Schema 10 (`toV10` frozen; goldens in `EngineTests/Serialize/golden/v10/`, the writer golden
+  `project-v10.json`). An unknown generator kind fails the load with its path; a grade on a generated clip is
+  dropped with a warning; unused generator assets are not written.
+- The raster scale k of a title (`rasterScaleFor`): its clip's largest Motion scale times the output scale (the
+  export's fitted scale; the program monitor's drawable over the sequence, quantised to 1, 2 or 4 by
+  `monitorOutputScale`), at least 1, limited to 16384 pixels a side and 64 MB. `VEPreviewView` reports its
+  drawable size (`drawableSizeHandler`, internal), and `VEProgramMonitor` sets `setGeneratedOutputScale` from it.
+- The compositor places a generated layer by its canvas geometry (`placeCanvas`): texel for pixel when the
+  layer is not scaled, with the corner snapped to a whole target pixel when it is still (not when its Motion is
+  animated: snapping would make a slow move step), and never sharpens it.
+- Facade: `VEEngine (Titles)` in `VEEngine.h`, the value types in `VETitles.h`. `addGeneratedPreset:atTime:aboveTrack:`
+  is the placement rule (the lowest unlocked video track above the target that is free for the clip's 5 s,
+  else a new track on top; nothing overwritten); `placeGeneratedPreset:onTrack:atTime:insert:` is a drop.
+  The setters take a selection and set one parameter on every title (several differing titles keep what differs);
+  `setTitlePositionX:y:width:clips:` is the box drag ("Move Title", "Resize Title"). `titleOfClips:` is the
+  inspector's "Mixed"; `titleBlockSizeOfClip:` the box's size; `missingTitleFonts` the export sheet's question;
+  `VEEngineTitleFontsDidChangeNotification` follows Font Book (the engine has dropped the titles' pictures and the
+  font availability cache by then). `VEClipInfo` gains `generatorKind`, `title`, `matteColour` and
+  `pictureWidth`/`pictureHeight` (the displayed picture size; the frame for a title or matte).
+- Titles and mattes are never graded: `gradeTargets` (engine and `ProjectStore`) and the Colour tab's tools leave
+  them out, `SetClipGrade` refuses them, `copyGradeOfClip:` returns NO for them.
+- The Ken Burns editor takes a clip's picture size from `VEClipInfo.pictureWidth`/`pictureHeight`
+  (`KenBurnsModel.problem(span:clip:sequence:)`, `init(store:span:clip:sequence:...)`,
+  `automaticMode(span:clip:sequence:)`: the `asset:` parameter is gone) and opens a title's or matte's Motion
+  span in Transform mode.
+- App: `ProjectStore.titleTypingGroup`, like `nudgeGroup`, is a coalescing group that is not a gesture
+  (`isGestureActive` is false while only it is open): a menu command during a typing run commits the run as its
+  own step. The title text area (`TitleTextView`) has no undo manager, so Command-Z reaches the engine. A title
+  colour burst uses `nudgeGroup`. `ProjectStore.titleBox` is the program monitor's box (`TitleBoxModel`), open
+  while exactly one title is selected and no span is.
+- What to check by hand in the app:
+  1. Over a clip on V1 (V1 targeted), press Control-T: a title appears on V2 at the playhead, selected, and the
+     inspector's text has the focus with "Title" selected; type a name: one Undo takes the whole typing back.
+     Control-T again at the same place: a new V3. Control-T inside a text field transposes letters instead.
+  2. Style it: family and style popups (System by weight, your own fonts), size, fill colour, outline, shadow,
+     background box (colour, opacity, padding, corner radius); each change is one Undo step, a slider drag one.
+     Select two titles: differing rows show "Mixed", the text is disabled, a change sets both.
+  3. Drag the box on the program monitor to move the text, drag its left or right edge (or a corner) to change
+     the wrap width; Escape mid-drag cancels; each drag is one Undo step.
+  4. Fade a title in and out (lane 0) and dissolve between two titles; add a Ken Burns zoom on a title (it opens
+     in Transform mode) and check the text stays sharp at the end of the zoom, in the monitor and in an export.
+  5. Clip > Add Lower Third (Shift-Control-T) over an interview shot; Add Colour Matte, then a title above it for a
+     title card. Drag the Effects tab's tiles onto a track (Command inserts).
+  6. Export at the sequence size and at 1080p of a 720p sequence; compare with the program monitor at full screen
+     and on the second display.
+  7. Deactivate the title's font in Font Book: the timeline shows the warning badge and the title falls back to the
+     system font; reopen the project: the load warning names the font; Export asks before exporting; reactivate
+     the font: the badge goes and the title returns in its font.
+  8. Undo and redo through all of it; save, reopen, and open a version 10 project in 0.1.10: refused as too new.
