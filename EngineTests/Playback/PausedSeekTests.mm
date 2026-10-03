@@ -366,7 +366,8 @@ bool clickAndSettle(SeekRig &rig, int64_t frame, std::chrono::milliseconds looka
 
 /// The mechanism of the report, deterministically. The decode pool's focus (what the cache evicts last)
 /// is its streams' targets: after a click the stopped lookahead of the previous place, until the new
-/// place's lookahead follows (idleLookaheadDelay). A click far before it, with the cache full: the
+/// place's lookahead follows (restDelay after a click: at once by default, held off here). A click far
+/// before it, with the cache full: the
 /// picture the scrub path decodes is behind every focus, the first to go, and was evicted as it was put;
 /// the request completed, the redraw found nothing, nothing was in flight any more, and the monitor
 /// kept the previous picture for good. Pinned from its insertion, it is presented.
@@ -380,7 +381,10 @@ bool clickAndSettle(SeekRig &rig, int64_t frame, std::chrono::milliseconds looka
     const auto lookaheadDelay = std::chrono::milliseconds(2000); // outlasts the check below
     SeekRig::Options options;
     options.cacheBudgetBytes = budgetOf1080Frames(5);
-    options.adjust = [&](playback::PlaybackConfig &config) { config.idleLookaheadDelay = lookaheadDelay; };
+    options.adjust = [&](playback::PlaybackConfig &config) {
+        config.idleLookaheadDelay = lookaheadDelay;
+        config.restDelay = lookaheadDelay; // a click's end too: the lookahead stays at the previous place
+    };
     SeekRig rig(built->first, built->second, options);
     XCTAssertTrue(rig.ok(), @"%s", rig.error().c_str());
     if (!rig.ok()) {
@@ -411,7 +415,10 @@ bool clickAndSettle(SeekRig &rig, int64_t frame, std::chrono::milliseconds looka
     const auto lookaheadDelay = std::chrono::milliseconds(2000); // outlasts the check below
     SeekRig::Options options;
     options.cacheBudgetBytes = budgetOf1080Frames(5);
-    options.adjust = [&](playback::PlaybackConfig &config) { config.idleLookaheadDelay = lookaheadDelay; };
+    options.adjust = [&](playback::PlaybackConfig &config) {
+        config.idleLookaheadDelay = lookaheadDelay;
+        config.restDelay = lookaheadDelay; // a click's end too: the lookahead stays at the previous place
+    };
     SeekRig rig(built->first, built->second, options);
     XCTAssertTrue(rig.ok(), @"%s", rig.error().c_str());
     if (!rig.ok()) {

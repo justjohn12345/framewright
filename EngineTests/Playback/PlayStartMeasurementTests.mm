@@ -18,7 +18,7 @@
 // - decoded: frames the lookahead stream of the clip delivered from the release (the end of the scrub, the click or
 //   the pause) to the picture above, its seeks in that time (each decodes from the keyframe before the time sought:
 //   the frames of the GOP before it are decoded but not delivered, so they are not in the count) and the seeks after
-//   the press (a seek on the press path).
+//   the press (a seek on the press path), and its hand-offs (the scrub decoder taken over instead of a seek).
 //
 // FW_PLAYSTART_TRIALS sets the starts per case (default 5); FW_PLAYSTART_MEDIA a substring of the media label to run
 // one file only; FW_PLAYSTART_FILE a generated test clip (TestMedia.h) to measure instead of the long-GOP files. From
@@ -236,6 +236,7 @@ struct Start {
     uint64_t decoded = 0;   ///< Frames the clip's stream delivered from the release to the picture.
     uint64_t seeks = 0;     ///< Its seeks from the release to the picture.
     uint64_t seeksAfterPress = 0;
+    uint64_t handoffs = 0;  ///< Its hand-offs from the release to the picture.
 };
 
 double percentile(std::vector<double> values, double p) {
@@ -361,6 +362,7 @@ double percentile(std::vector<double> values, double p) {
                         result.decoded = now.framesDecoded - atRelease.framesDecoded;
                         result.seeks = now.seeks - atRelease.seeks;
                         result.seeksAfterPress = now.seeks - beforePress.seeks;
+                        result.handoffs = now.handoffs - atRelease.handoffs;
                         break;
                     }
                 }
@@ -456,7 +458,7 @@ double percentile(std::vector<double> values, double p) {
     NSLog(@"PLAY START MEASURE %s (%s; output %s, latency %.1f ms; %d starts per case)", media.label.c_str(),
           media.file.c_str(), controller.output().kind().c_str(), controller.output().outputLatency() * 1000, trials);
     for (const Case &c : cases) {
-        std::vector<double> picture, audio, late, decoded, seeks, pressSeeks;
+        std::vector<double> picture, audio, late, decoded, seeks, pressSeeks, handoffs;
         for (const Start &s : c.starts) {
             picture.push_back(s.pictureMs);
             audio.push_back(s.audioMs);
@@ -464,12 +466,15 @@ double percentile(std::vector<double> values, double p) {
             decoded.push_back(double(s.decoded));
             seeks.push_back(double(s.seeks));
             pressSeeks.push_back(double(s.seeksAfterPress));
+            handoffs.push_back(double(s.handoffs));
         }
         NSLog(@"PLAY START MEASURE %s | %-44s | picture median %6.1f max %6.1f ms | audio median %6.1f max %6.1f ms | "
-              @"late median %3.0f max %3.0f | decoded median %3.0f max %3.0f | seeks max %.0f, after the press max %.0f",
+              @"late median %3.0f max %3.0f | decoded median %3.0f max %3.0f | "
+              @"seeks max %.0f, after the press max %.0f | hand-offs median %.0f",
               media.label.c_str(), c.name.c_str(), percentile(picture, 0.5), percentile(picture, 1.0),
               percentile(audio, 0.5), percentile(audio, 1.0), percentile(late, 0.5), percentile(late, 1.0),
-              percentile(decoded, 0.5), percentile(decoded, 1.0), percentile(seeks, 1.0), percentile(pressSeeks, 1.0));
+              percentile(decoded, 0.5), percentile(decoded, 1.0), percentile(seeks, 1.0), percentile(pressSeeks, 1.0),
+              percentile(handoffs, 0.5));
     }
 }
 

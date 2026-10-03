@@ -1,6 +1,8 @@
-// Play start where the playhead was put down: after playing, a pause, then the playhead put down at one place and then
-// another (a scrub's end, a ruler click, a seek) before Space. The audio sources must be ready at the last place
-// while stopped, so the pre-roll finds them primed; PlayStartMeasurementTests (the Measurements scheme) times it.
+// Play start where the playhead was put down (a scrub's end, a ruler click, a seek): the audio sources get ready
+// there while stopped, even after earlier places, so the pre-roll finds them primed; the lookahead follows at once,
+// continuing from the decoder that decoded the picture shown (the hand-off: the GOP is decoded once), so Space needs
+// no decode from a keyframe; a scrub suspends the lookahead, so a burst of scrubs leaves one preparation, for the
+// last place. PlayStartMeasurementTests (the Measurements scheme) times it.
 
 #import <XCTest/XCTest.h>
 
@@ -8,6 +10,7 @@
 #include "PlaybackTestSupport.h"
 
 #include <chrono>
+#include <optional>
 #include <thread>
 
 using namespace ve;
@@ -19,6 +22,52 @@ namespace {
 int64_t sampleAt(CMTime t) {
     return static_cast<int64_t>(std::llround(CMTimeGetSeconds(t) * 48000.0));
 }
+
+/// The long-GOP clip (a keyframe every 150 frames: 0 and 5 s) on V1, the whole of it from frame 0. The delays after
+/// a moving playhead are long, so whatever follows a scrub or a seek at once is the rest rule's doing.
+struct LongGop {
+    PlaybackHarness h{PlaybackHarness::Mode::Realtime, 1.0, [](PlaybackConfig &config) {
+                          config.idleLookaheadDelay = std::chrono::seconds(10);
+                          config.audioWarmDelay = std::chrono::seconds(10);
+                      }};
+    AssetId asset;
+    ClipId clip;
+
+    LongGop() {
+        asset = h.importAsset("gop5s_h264_1080p30.mp4");
+        if (h.ok()) {
+            clip = h.addClip(h.v1, asset, 0, 300, kCMTimeZero);
+            h.load();
+        }
+    }
+
+    std::optional<media::DecodePool::StreamStats> stream() const {
+        for (const auto &s : h.pool->stats().streams) {
+            if (s.lane == clip.value()) {
+                return s;
+            }
+        }
+        return std::nullopt;
+    }
+
+    /// The clip's stream targets sequence frame `frame` (the picture there) and has covered its window.
+    bool settledAt(int64_t frame) {
+        const bool targeted = PlaybackHarness::waitUntil([&] {
+            const auto s = stream();
+            return s && CMTimeCompare(s->target, frames30(frame)) == 0;
+        });
+        return targeted && h.pool->waitUntilIdle(std::chrono::seconds(10));
+    }
+
+    /// A scrub from `from` to `frame` in `steps` moves `stepMs` apart, released there.
+    void scrub(int64_t from, int64_t frame, int steps, int stepMs) {
+        for (int k = 1; k <= steps; ++k) {
+            h.controller->scrubTo(frames30(from + (frame - from) * k / steps));
+            std::this_thread::sleep_for(std::chrono::milliseconds(stepMs));
+        }
+        h.controller->endScrub();
+    }
+};
 
 } // namespace
 
@@ -68,6 +117,98 @@ int64_t sampleAt(CMTime t) {
                   @"the audio plays from 8 s");
     XCTAssertEqual(rig.controller->mixer().stats().underruns, underruns, @"no underrun at the start");
     rig.controller->pause();
+}
+
+/// Once a scrub is released the lookahead follows at once (not after the moving playhead's delay, ten seconds
+/// here), from the decoder that decoded the picture shown: it takes that decoder over instead of seeking to the
+/// keyframe and decoding the GOP a second time, and the frames after the picture are ready before Space.
+- (void)testTheLookaheadFollowsAScrubAtOnceFromThePicturesDecoder {
+    LongGop rig;
+    if (!rig.h.ok()) {
+        XCTFail(@"%s", rig.h.error().c_str());
+        return;
+    }
+    rig.h.controller->seek(frames30(20)); // an exact seek: put down, the lookahead follows at once
+    rig.h.presentExact();
+    XCTAssertTrue(rig.settledAt(20), @"the lookahead follows a seek at once");
+    const auto before = *rig.stream();
+
+    rig.scrub(20, 135, 10, 15);
+    XCTAssertTrue(rig.settledAt(135), @"the lookahead follows the scrub's end at once");
+    const auto after = *rig.stream();
+    XCTAssertEqual(after.seeks, before.seeks, @"no seek: the GOP up to frame 135 was decoded once");
+    XCTAssertEqual(after.handoffs, before.handoffs + 1, @"the stream took the picture's decoder over");
+    for (int64_t frame = 135; frame < 150; ++frame) {
+        XCTAssertTrue(rig.h.cache->contains(rig.asset, frame), @"frame %lld is ready before Space", frame);
+    }
+    const PlaybackHarness::Sample shown = rig.h.presentExact();
+    XCTAssertEqual(shown.burnIns.front().value_or(-1), 135);
+}
+
+/// Space right after a scrub's release: the pre-roll's lookahead takes the picture's decoder over (or waits for it)
+/// instead of seeking, so no GOP is decoded on the press path, and every frame played is the right one.
+- (void)testSpaceRightAfterAScrubSeeksNothing {
+    LongGop rig;
+    if (!rig.h.ok()) {
+        XCTFail(@"%s", rig.h.error().c_str());
+        return;
+    }
+    rig.h.controller->seek(frames30(20));
+    rig.h.presentExact();
+    XCTAssertTrue(rig.settledAt(20));
+    const auto before = *rig.stream();
+    rig.scrub(20, 230, 8, 15);
+    rig.h.controller->play(); // at once: the picture may still be decoding
+    XCTAssertTrue(rig.h.waitForState(PlaybackState::Playing));
+    int checked = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(400)) {
+        const PlaybackHarness::Sample s = rig.h.present();
+        if (s.changed && s.presented.clockDriven && !s.presented.layers.empty() && s.presented.layers[0].exact) {
+            XCTAssertEqual(s.burnIns.front().value_or(-1), s.presented.frameIndex, @"the frame played is its own");
+            ++checked;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    rig.h.controller->pause();
+    XCTAssertGreaterThan(checked, 3);
+    const auto after = *rig.stream();
+    XCTAssertEqual(after.seeks, before.seeks, @"no seek on the press path");
+    XCTAssertGreaterThanOrEqual(after.handoffs, before.handoffs + 1);
+}
+
+/// A burst of ruler clicks: each click's scrub suspends the lookahead (it never decodes while the scrub path does),
+/// every release replaces the previous preparation, and what is left is one stream at the last place, continued
+/// from that click's picture without a seek; every earlier picture request ended (none is left queued).
+- (void)testABurstOfClicksLeavesOnePreparationForTheLastPlace {
+    LongGop rig;
+    if (!rig.h.ok()) {
+        XCTFail(@"%s", rig.h.error().c_str());
+        return;
+    }
+    rig.h.controller->seek(frames30(20));
+    rig.h.presentExact();
+    XCTAssertTrue(rig.settledAt(20));
+    const auto before = *rig.stream();
+    for (int64_t frame : {40, 85, 130, 175, 220, 265}) {
+        rig.h.controller->scrubTo(frames30(frame));
+        XCTAssertTrue(rig.h.pool->stats().suspended, @"the lookahead yields to the click at %lld", frame);
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        rig.h.controller->endScrub();
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    XCTAssertTrue(rig.settledAt(265));
+    const auto stats = rig.h.pool->stats();
+    XCTAssertEqual(stats.streams.size(), 1u, @"one preparation");
+    XCTAssertFalse(stats.suspended);
+    XCTAssertEqual(stats.scrubRequests, stats.scrubServiced + stats.scrubCancelled + stats.scrubFailed,
+                   @"no picture request is left");
+    const auto after = *rig.stream();
+    XCTAssertEqual(after.seeks, before.seeks, @"no preparation sought: each took its click's decoder or was replaced");
+    XCTAssertGreaterThanOrEqual(after.handoffs, before.handoffs + 1);
+    for (int64_t frame = 265; frame < 280; ++frame) {
+        XCTAssertTrue(rig.h.cache->contains(rig.asset, frame), @"frame %lld is ready", frame);
+    }
 }
 
 @end
