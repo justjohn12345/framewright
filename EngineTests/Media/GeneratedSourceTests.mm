@@ -261,6 +261,30 @@ struct Results {
     XCTAssertEqual(source->renders(), 1);
 }
 
+/// A paused display's scrub renders a still title, then the playback's targets name it (an edit does both): the
+/// stream finds the picture in the cache and does not render it again (review fix round, finding 11); not in the
+/// cache, it renders it.
+- (void)testAStreamDoesNotRenderAStillPictureTheScrubRendered {
+    const AssetId titles(9);
+    auto source = checkerboard(14);
+    DecodePool pool(_router, _cache);
+    Results results;
+    pool.requestFrame(titles, kCMTimeZero, results.callback(1), 4, source);
+    XCTAssertTrue(results.waitFor(1, std::chrono::seconds(10)));
+    XCTAssertEqual(source->renders(), 1);
+    pool.setTargets({generatedTarget(titles, 4, source)});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    XCTAssertEqual(source->renders(), 1, @"the stream took the scrub's picture");
+    XCTAssertTrue(_cache->contains(pool.frameKey(titles, source->key()), kCMTimeZero));
+    // Gone from the cache when the stream opens again: it renders it.
+    _cache->purge(titles);
+    pool.invalidate(titles);
+    pool.setTargets({generatedTarget(titles, 4, source)});
+    XCTAssertTrue(pool.waitUntilIdle(std::chrono::seconds(10)));
+    XCTAssertEqual(source->renders(), 2);
+    XCTAssertTrue(_cache->contains(pool.frameKey(titles, source->key()), kCMTimeZero));
+}
+
 - (void)testANewerScrubRequestInterruptsTheRenderInFlight {
     const AssetId titles(9);
     auto typing = checkerboard(50, std::chrono::seconds(5));

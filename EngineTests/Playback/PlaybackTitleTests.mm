@@ -156,10 +156,21 @@ const playback::PresentedLayer *presentedLayer(const PlaybackHarness::Sample &sa
     // Typing: each keystroke is new content, a new picture. Until it lands the monitor keeps the previous complete
     // picture (a present either changes nothing or shows the title with its picture), never a frame without it.
     double worstMs = 0;
+    // The pictures rendered for the title: by the pool's title stream and by the paused display's scrub requests.
+    const AssetId titleAsset = h.sequence().findClip(title)->assetId;
+    auto renders = [&]() {
+        const media::DecodePool::Stats stats = h.pool->stats();
+        uint64_t count = stats.scrubServiced;
+        for (const auto &stream : stats.streams) {
+            count += stream.asset == titleAsset ? stream.framesDecoded : 0;
+        }
+        return count;
+    };
     for (const char *typed : {"Typi", "Typin", "Typing"}) {
         content.text = typed;
         setTitle(h, title, content);
         const uint64_t insertionsBefore = h.cache->stats().insertions;
+        const uint64_t rendersBefore = renders();
         const auto keystroke = SteadyClock::now();
         h.publishEdit();
         bool landed = false;
@@ -178,7 +189,11 @@ const playback::PresentedLayer *presentedLayer(const PlaybackHarness::Sample &sa
         const double ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - keystroke).count();
         worstMs = std::max(worstMs, ms);
         XCTAssertTrue(landed, @"\"%s\" was presented", typed);
-        XCTAssertGreaterThanOrEqual(h.cache->stats().insertions, insertionsBefore + 1, @"\"%s\" rendered", typed);
+        // Once: the paused display's render is the decode pool's too (review fix round, finding 11).
+        XCTAssertTrue(h.pool->waitUntilIdle(std::chrono::seconds(10)));
+        XCTAssertEqual(h.cache->stats().insertions, insertionsBefore + 1, @"\"%s\" rendered once", typed);
+        XCTAssertEqual(renders(), rendersBefore + 1, @"\"%s\": one render, not one for the display and one for the "
+                                                     @"pool's stream", typed);
         NSLog(@"TITLE keystroke to picture (paused, \"%s\"): %.1f ms", typed, ms);
     }
     NSLog(@"TITLE keystroke to picture, worst of 3: %.1f ms", worstMs);

@@ -687,6 +687,15 @@ DecodePool::StepResult DecodePool::step(Stream &s, const DecodeTarget &target, c
         s.repairedAt = kCMTimeInvalid;
         s.extending = false;
         s.error.reset();
+        if (target.generated && target.generated->isStatic() &&
+            cache_->contains(frameKey(asset, s.openedKey), kCMTimeZero)) {
+            // A still generated picture already in the cache (the paused display's scrub rendered it as the edit
+            // made it): nothing to render again. The range covers every time, as a held still's; should the picture
+            // leave the cache, `lost` renders it again.
+            s.rangeEnd = kCMTimePositiveInfinity;
+            s.eof = true;
+            return StepResult::Settled;
+        }
         return StepResult::Progress;
     }
 
