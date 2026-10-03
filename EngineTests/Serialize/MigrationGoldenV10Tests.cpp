@@ -6,8 +6,9 @@
 // written and the warnings naming version 10 as the version the project is saved as (the checked-in version 9
 // project's golden is that file with version 10); the test checks that too. `v10/project-v9-adjusted.json` is a
 // version 9 file that already holds titles: the step keeps them and warns, and loading then limits, keeps or
-// drops values by the version 10 rules. `v10/project-v10.json` is the current writer's output, byte for byte: a
-// title with every style on, a lower third, a colour matte and a title in a font this Mac does not have.
+// drops values by the version 10 rules. `v10/project-v10.json` is the version 10 writer's output (a title with every
+// style on, a lower third, a colour matte and a title in a font this Mac does not have): it is in the writer's format,
+// and the current writer writes the same project as it with version 11 and the two version 11 title keys.
 
 #include "../../Engine/Model/Validation.h"
 #include "../../Engine/Serialize/ProjectJSON.h"
@@ -352,11 +353,14 @@ Project richProjectV10() {
 
 } // namespace
 
-TEST_CASE("Migration goldens v10: the checked-in version 10 project matches the current writer byte for byte but for "
-          "its version and the version 11 title keys") {
+TEST_CASE("Migration goldens v10: the checked-in version 10 project is in the writer's format, and the current "
+          "writer writes the same project with version 11 and the version 11 title keys") {
     const Project expected = richProjectV10();
     const std::string written = serializeProject(expected) + "\n";
     const std::string text = readText("v10/project-v10.json"); // checked in, never written by the test
+    // The file is in the writer's format (two-space indent, sorted keys, the writer's numbers): reformatting its parsed
+    // document gives it back byte for byte.
+    CHECK(json::parse(text).dump(2, ' ', false, json::error_handler_t::replace) + "\n" == text);
     // Version 11 writes every title's "pointText" and "anchor" (their defaults: what version 10 draws).
     json asVersion11 = json::parse(text);
     REQUIRE(asVersion11.at("schemaVersion") == kVersion10);
