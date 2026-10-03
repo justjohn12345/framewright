@@ -303,6 +303,115 @@ Tests (full `Framewright` scheme at 1364d79, the screen unlocked): EngineTests 6
 testAPictureRenderedForAnEarlierEpochIsNotPublished` (`pool.waitUntilIdle` timed out after 10 s; a decode pool test
 that does not involve the views; it passed three times alone): a flake to watch.
 
+## Play start after a scrub, and the Ken Burns stage zoom (2026-10-03): status
+The owner saw Space take about half a second to start after a scrub (instantly after a pause), and Ken Burns /
+Transform boxes end up off the program monitor with no way to reach them. Branch of this round (not pushed):
+b3c3583..bb9d754.
+
+**Play start: measured** with `PlayStartMeasurementTests` (new, in the opt-in `Measurements` scheme, EngineTests):
+the controller with the machine's audio output, the frame source called every 0.5 ms, five starts per case at
+random places (seeded), on long-GOP media the ffmpeg tool re-encodes from the generated clips with film grain (a
+keyframe every 5 s in 1080p and 4K H.264 and HEVC, and a 4K variable-frame-rate screen recording with a keyframe
+every 120 frames). "Picture" is the first clock-driven frame after the paused one presented with every layer's own
+picture, minus the playing time it stands for (how late the moving picture runs against the press); "audio" is
+press to the clock start. Median / worst of five, ms (Debug build, this Mac):
+
+| Case | before (300f55b): picture | audio | after (bb9d754): picture | audio |
+|---|---|---|---|---|
+| Pause, Space 300 ms later (H.264 1080p / H.264 4K / VFR 4K) | 19 / 27, 27 / 85, 25 / 27 | 1 / 1, 1 / 60, 1 / 1 | 26 / 35, 20 / 27, 23 / 27 | 1 / 13, 1 / 1, 1 / 4 |
+| Scrub released, Space 150 ms later (same three) | 1026 / 1028, 1024 / 1028, 1024 / 1028 | 1002 / 1005, 1004 / 1005, 1002 / 1004 | 25 / 30, 25 / 38, 26 / 27 | 1 / 6, 1 / 1, 1 / 2 |
+| Scrub released, Space 400 ms later | 1021 / 1027, 1025 / 1031, 1027 / 1030 | 1003 / 1004, 1001 / 1005, 1004 / 1007 | 26 / 29, 25 / 59, 25 / 26 | 1 / 8, 1 / 1, 1 / 1 |
+| Ruler click, Space 150 ms later | 1025 / 1028, 1022 / 1030, 1020 / 1024 | 1004 / 1005, 1004 / 1007, 1002 / 1003 | 23 / 26, 20 / 93, 21 / 134 | 1 / 1, 1 / 68, 1 / 112 |
+| Ruler click, Space 400 ms later | 1025 / 1028, 1024 / 1026, 1023 / 1028 | 1004 / 1006, 1003 / 1006, 1005 / 1005 | 22 / 28, 23 / 24, 24 / 26 | 1 / 1, 1 / 2, 1 / 1 |
+| L, L (2x), K, Space 300 ms later | 1022 / 1028, 1021 / 1025, 1021 / 1031 | 1003 / 1006, 1001 / 1004, 1004 / 1005 | 25 / 38, 22 / 24, 22 / 26 | 1 / 21, 1 / 1, 1 / 1 |
+
+HEVC 1080p and 4K behave the same (before: about 1020-1030 ms in every case but the pause; after: medians 19-26 ms,
+worst 22-121 ms). The full logs are the `PLAY START MEASURE` lines of a `Measurements` run.
+
+**Root causes.**
+1. The audio (the whole second): a second place put down while stopped never got its audio.
+   A source's ring keeps the frames decoded for an earlier position until the consumer (the render thread) skips
+   them, and a stopped mixer reads nothing (`Engine/Audio/ClipAudioSource.mm:493-494` at 300f55b counts the free
+   ring from the consumer's index; `AudioMixer.mm:852` renders no source while stopped). After playing, the ring
+   held about 2 s; the first place the playhead was put down (a click, a scrub's end, a seek, the warm-up 100 ms
+   later) filled the last second; at the next place the ring was full, nothing was decoded, and Space waited for
+   the pre-roll timeout (`PlaybackConfig::prerollTimeout`, 1 s) and started with the audio unready. This is the
+   "about half a second" (a second measured): any two places after a play, e.g. a click and then a scrub. Fix
+   551ff6e: the stopped render callback adopts each source's newest segment (`ClipAudioSource::adoptNewestSegment`).
+   Measured with only this fix: medians 16-41 ms in every case but one (H.264 4K after a pause, 148 ms, the audio
+   waiting 125 ms; not seen in the other runs), worst up to 270 ms (the GOP below, and the audio warm-up still
+   100 ms after the release).
+2. The GOP decoded twice. The paused picture comes through the scrub path (`DecodePool::requestFrame`), whose
+   decoder seeks to the keyframe and decodes the GOP up to the picture; the stopped lookahead followed 100 ms after
+   the release (`PlaybackController.mm:1113` at 300f55b, `idleLookaheadDelay`) on a stream with its own decoder,
+   which sought and decoded the same GOP again (`DecodePool.mm:861`). Space in between found the picture (the
+   pre-roll checks only the first frame) and played on with late frames until the stream caught up (4K: up to 350
+   late presentations, about 175 ms of stalled picture, measured with fix 1 only). Also, the scrub's end asked for
+   the same picture again, which interrupted and restarted its decode (`DecodePool.mm:944`, noted in the paused-seek
+   round). Fixes f7af9a4 and 8c5155e: where the playhead is put down (`endScrub`, an exact seek while stopped, a
+   pause ending a scrub) the lookahead and the audio warm-up start at once (`PlaybackConfig::restDelay`, 0); the
+   lookahead's target at the paused frame names the scrub lane its picture was requested on
+   (`DecodeTarget::continueScrubLane`) and takes that lane's decoder over where it stopped, right after the picture,
+   or waits for the request in flight (`StreamStats::handoffs`, `awaitingScrub`); a request for the picture being
+   decoded no longer restarts it; a scrub suspends the pool's streams (`DecodePool::suspendTargets`), so the
+   lookahead never decodes while the scrub path does and each release replaces the previous preparation (nothing
+   queues). Arrow-key steps and edits keep their 100 ms delays (`testAMovingPlayheadLeavesThePoolAlone` holds).
+3. Found on the way (4198438): making a `ClipAudioSource` zeroed its 3 s ring under the mixer's and the controller's
+   locks (`ClipAudioSource.mm:45`), about 1 ms; with the warm-up now right after a release, a transport call that
+   followed waited for it (`testControlCallsReturnWithinOneMillisecond`: play p95 1.23-1.30 ms). The producer thread
+   allocates the ring now (warm-up 0.03-0.07 ms; play max 0.28 ms).
+
+**Ken Burns stage** (f331195, bb9d754). Final Cut's viewer zooms with a pop-up, Command-plus/-minus and Shift-Z, its
+Transform handles are reached by zooming out and each effect has a reset; Premiere has Select Zoom Level and Reset in
+Effect Controls. Done here: at Fit the stage zooms out just enough (with the handles' 12 pt padding) to show both
+boxes in Transform mode as Ken Burns mode already did for rectangles past the frame box, re-fitted when the editor
+opens and when a drag ends (never during one), back to Fit when the editor closes or the boxes are inside the margin
+again; a zoom control above the monitor (Fit, 25, 50, 75, 100, 200 %; 100 % is one sequence pixel per screen pixel)
+and Command-plus / Command-minus (also = / -) on the program monitor while it has the focus (a click or a drag on
+it; the timeline's otherwise, as in Final Cut), Shift-Z to Fit (new; on the timeline it fits the sequence, as
+Command-0 does); Reset Start and Reset End in the editor's bar (Transform: the clip's own placement; Ken Burns: the
+whole picture), one undo step each. A level chosen by hand stays when the editor closes (Final Cut keeps it too).
+Pictures (offscreen: the layout's own drawing with the program view's snapshot; `testRendersTheStagePictures` writes
+them to the test host's `tmp/FramewrightProgramZoom`): a box dragged off the frame before and after the fit, the
+window at 50 % and at Fit with the control and the Reset buttons.
+
+**Tests** that fail without the fixes (each mutation run: the fix disabled, the tests failed, 44 failures in all):
+`PlayStartAfterRestTests` (the audio ready at every place put down while stopped; the lookahead following a scrub's
+end at once with a hand-off and no seek; Space right after a scrub seeking nothing and playing the right frames; a
+burst of clicks leaving one preparation, the pool suspended during each click), `DecodePoolTests` (a stream
+continuing from the scrub decoder in order, the lane getting a decoder in exchange; waiting for the request in
+flight; a request for the picture being decoded not restarting it; suspension), `ProgramMonitorZoomTests` (the fit
+rectangle for boxes inside, partly outside, fully outside, much larger, turned, Ken Burns rectangles; refit at the
+drag's end only, back to Fit, undo; opening fitted; levels and keys and focus; reset values and undo).
+
+**Left open.**
+- In some 4K starts the frame under the playhead leaves the cache before it is shown and the stream re-decodes its
+  GOP (`DecodePool` "lost" repair): up to 180-270 late presentations (0.1 s of stalled picture) in 1 of 5 starts,
+  before and after this round; the cache's 512 MB holds about 40 4K frames. Not investigated further.
+- The audio after a click is still sometimes not primed 150 ms later (worst 68-112 ms waited in 1 of 5 starts on
+  4K): the AAC source's reposition competes with the 4K decodes. Space later than that is unaffected.
+- When the picture shown came from the cache (no decode), there is nothing to hand over and the lookahead seeks
+  its GOP as before (at once now); the 1080p rows above show it (seeks 1, hand-offs 0 in most starts).
+- A fixed zoom level centres the frame; there is no panning (a hand tool) at 100-200 %, and nothing scrolls to the
+  boxes: Fit (Shift-Z) shows them.
+- The zoom keys follow a focus flag set by a click or a drag on the monitor (`ProjectStore.programMonitorFocused`),
+  not shown on screen (Final Cut highlights the focused pane).
+
+**For the owner, by hand:** (1) Play a few seconds, pause, click the ruler somewhere, then scrub somewhere else and
+press Space at once: picture and sound start together, without the old half-second wait; the same on a 4K screen
+recording and after K. (2) Scrub back and forth quickly, then hold still: the picture follows as before (no
+slower). (3) Open a Motion span in Transform, drag a box off the frame: it goes past the monitor's edge while
+dragging; on release the monitor zooms out to show both boxes; drag it back in: back to normal. (4) Click the
+monitor, Command-minus / Command-plus: the monitor zooms (the control shows the level), Shift-Z returns to Fit;
+click the timeline, Command-minus zooms the timeline. (5) Reset Start / Reset End in the editor's bar in both modes,
+then Command-Z.
+
+Tests (full `Framewright` scheme at bb9d754): EngineTests 695 (0 skipped), doctest 476 cases, AppTests 354 (1 known
+skip). Failures: `ScopePanelTests testTheWindowShowsTheScopesWideAtThePicturesAspect` and `WaveformPanelTests
+testTheShownPanelIsDrawnWithTheProgramMonitorsFramesAndLetGoWhenHidden`, the two that fail with the screen locked
+(it locked during the run: `IOConsoleLocked` Yes, reran alone with the same result); they need a run with the screen
+unlocked. Baseline 687 / 476 / 347.
+
 ## Where things stand (handover, 2026-10-03)
 - **Released and pushed:** 0.1.11 (built from 221ad31) is the last release; everything is pushed. It adds titles
   slice 1 (c996a93..e5abda0, docs c7feff8) and its review fix round (bd96f79..74a95a7, docs 9927acd), accepted by

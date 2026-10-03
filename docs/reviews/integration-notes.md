@@ -2105,3 +2105,41 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
      system font; reopen the project: the load warning names the font; Export asks before exporting; reactivate
      the font: the badge goes and the title returns in its font.
   8. Undo and redo through all of it; save, reopen, and open a version 10 project in 0.1.10: refused as too new.
+
+## Play start after a scrub, and the Ken Burns stage zoom (2026-10-03; status in `open-findings.md`)
+- Audio (`ClipAudioSource`): `adoptNewestSegment()` (render thread) adopts the newest published segment without
+  reading; `AudioMixer::render` calls it for every source of a plan that is not running, so stale frames of earlier
+  segments free their ring slots while stopped. The ring and scratch buffer are allocated by the producer thread
+  before it publishes anything (a source is cheap to make under the mixer's and controller's locks); the consumer
+  touches the ring only after adopting a segment.
+- `DecodePool`: `DecodeTarget::continueScrubLane` (a forward media target, `trackIndex` -1): a stream that would
+  seek to the target takes over the parked scrub decoder of `(asset, lane)` if its last request decoded the
+  picture under the target (`ScrubDecoder::positioned`), giving the lane its own decoder (with the interrupt each
+  was opened with); while a request of that lane for that time is pending or decoding it waits
+  (`StepResult::AwaitScrub`, `StreamStats::awaitingScrub`; released when any scrub request ends).
+  `StreamStats::handoffs` counts takeovers. The scrub decoders' map is guarded by the pool mutex; the decoder of
+  the key in flight belongs to the scrub thread. `requestFrame` no longer interrupts the request in flight for the
+  same time and generated key (the newer one is answered from the cache). `suspendTargets()` holds every stream
+  (the step in flight interrupted) until the next `setTargets()`; `Stats::suspended`; `waitUntilIdle` counts
+  suspended streams as idle.
+- `PlaybackController`: `PlaybackConfig::restDelay` (0) replaces `idleLookaheadDelay` and `audioWarmDelay` after
+  `endScrub()`, an exact `seek()` while stopped, and a `pause()` that ends a scrub; `scrubTo()` suspends the
+  pool; `retargetLocked` sets `continueScrubLane = scrubLaneBase + i` on layer i's target at the frame it starts
+  from (the stopped lookahead and the pre-roll). Steps, edits, `setSequence`, the solo and the output scale keep
+  the delays. A test that needs the lookahead held at the previous place after a click sets `restDelay` too
+  (`PausedSeekTests`' two deterministic cases do).
+- App: `ProgramZoom` (`.fit`, `.percent(n)`, `levels` 25/50/75/100/200) and `ProgramMonitorZoom`
+  (`ProjectStore.programZoom`; `zoomIn/zoomOut` step from what is shown, `fitPercent` reported by the layout).
+  `KenBurnsViewport.stage(zoom:mode:extent:sequence:monitor:pointsPerPixel:)` is what `ProgramMonitorLayout` shows;
+  `editor(...)` (Fit) now fits `extent` in Transform mode when it does not fit the margin (`shows(_:padding:)`).
+  `KenBurnsModel.monitorExtent` is read in both modes. `ProgramMonitorLayout` observes the zoom (its initializer
+  keeps the old call sites). `ProjectStore.focusProgramMonitor()` / `programMonitorFocused` (cleared by any
+  `focusArea` assignment and a ruler scrub); `zoomIn()` / `zoomOut()` are focus-aware, `zoomFocusedToFit()` is
+  Shift-Z (`KeyboardController.Action.zoomToFit`; not a menu key equivalent, which would take Shift-Z from text
+  fields). `KenBurnsModel.reset(_:)` / `canReset(_:)`; the bar's buttons `KenBurnsResetStart` / `KenBurnsResetEnd`.
+  `ProgramZoomControl` sits in the program header (`ContentView`).
+- Measurement: `PlayStartMeasurementTests` (EngineTests) in the `Measurements` scheme, skipped by the others;
+  `TEST_RUNNER_FW_PLAYSTART_TRIALS`, `TEST_RUNNER_FW_PLAYSTART_MEDIA` (a label substring),
+  `TEST_RUNNER_FW_PLAYSTART_FILE` (a generated clip instead). Its media are cached in
+  `<testMediaDirectory>-playstart1` (needs the ffmpeg tool).
+- What to check by hand: the list in `open-findings.md` ("For the owner, by hand").
