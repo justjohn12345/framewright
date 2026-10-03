@@ -410,7 +410,9 @@ static NSArray<NSNumber *> *topFirst(const std::vector<ClipId> &ids) {
     if (!_copiedTitleStyle) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"No title style has been copied."];
     }
-    return [self pushTitleChange:TitleChange::style(*_copiedTitleStyle) clips:clipIDs name:"Paste Style"];
+    // Kept in place: the style's alignment says where point text's x is on its block, so each title's position moves
+    // with it and its text stays where it is drawn.
+    return [self pushTitleChangeKeepingPlace:TitleChange::style(*_copiedTitleStyle) clips:clipIDs name:"Paste Style"];
 }
 
 - (VEEditResult *)setMatteColour:(VEColour)colour clips:(NSArray<NSNumber *> *)clipIDs {

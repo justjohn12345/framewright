@@ -869,7 +869,8 @@ NS_SWIFT_UI_ACTOR
 /// Whether a title style has been copied (it outlives New and Open).
 @property (nonatomic, readonly) BOOL hasCopiedTitleStyle;
 /// Paste Style: gives the titles of `clipIDs` the copied style, as one undo step ("Paste Style"); each keeps its text,
-/// position, box width, point text and anchor. Refused without a copied style, or when a clip is not a title.
+/// box width, point text and anchor, and its text stays where it is drawn (a point text whose alignment changes keeps
+/// its block, as setTitleAlignment:clips: does: its position, the block's edge or centre, moves with the alignment). Refused without a copied style, or when a clip is not a title.
 - (VEEditResult *)pasteTitleStyleOntoClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(pasteTitleStyle(ontoClips:));
 /// The size of a title's text block in sequence pixels (the box the program monitor draws: the wrap width, or point
 /// text's widest line, and the height of its lines; an empty text, or one ending with a line break, has an empty last

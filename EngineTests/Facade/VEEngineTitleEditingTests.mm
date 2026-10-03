@@ -375,6 +375,34 @@ double brightFraction(const Grey &grey, VETitleQuad quad, double scale, double i
 
 // MARK: - Copy Style, Paste Style
 
+/// A style that differs only in its alignment, pasted on point text and on area text: the text is drawn exactly where
+/// it was (point text's block stays, its lines align again inside it; area text is centred on x whatever it aligns to).
+- (void)testPastingAnAlignmentKeepsTheTextWhereItIsDrawn {
+    for (const VETitleAlignment from : {VETitleAlignmentLeft, VETitleAlignmentCentre, VETitleAlignmentRight}) {
+        for (const VETitleAlignment to : {VETitleAlignmentLeft, VETitleAlignmentCentre, VETitleAlignmentRight}) {
+            for (const BOOL point : {YES, NO}) {
+                VEEngine *engine = [self engine];
+                const VEClipID source = [self addTitle:engine text:@"Source" preset:VEGeneratedPresetTitle];
+                const VEClipID target = [self addTitle:engine text:@"Two lines\nof text" preset:VEGeneratedPresetTitle];
+                XCTAssertTrue([engine setTitleAlignment:to clips:@[ @(source) ]].ok);
+                XCTAssertTrue([engine setTitlePositionX:0.3 y:0.6 width:NAN clips:@[ @(target) ]].ok);
+                XCTAssertTrue([engine setTitleAlignment:from clips:@[ @(target) ]].ok);
+                XCTAssertTrue([engine setTitlePointText:point clips:@[ @(target) ]].ok);
+                const CGRect before = [engine titleBlockOfClip:target];
+                XCTAssertTrue([engine copyTitleStyleOfClip:source]);
+                XCTAssertTrue([engine pasteTitleStyleOntoClips:@[ @(target) ]].ok);
+                XCTAssertEqual([engine clipInfo:target].title.alignment, to);
+                const CGRect after = [engine titleBlockOfClip:target];
+                XCTAssertTrue(std::abs(after.origin.x - before.origin.x) < 1e-6 &&
+                                  std::abs(after.origin.y - before.origin.y) < 1e-6 &&
+                                  std::abs(after.size.width - before.size.width) < 1e-6,
+                              @"alignment %ld -> %ld, point %d: %@ -> %@", long(from), long(to), point,
+                              NSStringFromRect(NSRectFromCGRect(before)), NSStringFromRect(NSRectFromCGRect(after)));
+            }
+        }
+    }
+}
+
 - (void)testPasteStyleGivesTheCopiedStyleButNotTheTextOrPlace {
     VEEngine *engine = [self engine];
     XCTAssertFalse(engine.hasCopiedTitleStyle);
@@ -391,6 +419,8 @@ double brightFraction(const Grey &grey, VETitleQuad quad, double scale, double i
     XCTAssertTrue([engine setTitlePositionX:0.2 y:0.3 width:0.5 clips:@[ @(second) ]].ok);
     XCTAssertTrue([engine setTitlePointText:YES clips:@[ @(second) ]].ok);
     VETitleInfo *secondBefore = [engine clipInfo:second].title;
+    const CGRect firstBlockBefore = [engine titleBlockOfClip:first];
+    const CGRect secondBlockBefore = [engine titleBlockOfClip:second];
 
     XCTAssertEqual([engine pasteTitleStyleOntoClips:@[ @(first) ]].errorCode, VEEditErrorInvalidArgument,
                    @"nothing copied yet");
@@ -436,11 +466,21 @@ double brightFraction(const Grey &grey, VETitleQuad quad, double scale, double i
         XCTAssertEqual(info.alignment, sourceInfo.alignment);
         XCTAssertEqual(info.anchor, VETitleAnchorCentre, @"the anchor is where the text is, not its style");
     }
-    // The text, place, width and point text of each stay its own.
+    // The text, width and point text of each stay its own, and so does where its text is drawn: the area title stays
+    // centred where it was; the point text (centred, now left-aligned like the lower third) keeps its block's left edge
+    // (the edge it now aligns to: a smaller font shrinks it from there) and its centre line (anchored at its centre).
     VETitleInfo *secondAfter = [engine clipInfo:second].title;
     XCTAssertEqualObjects(secondAfter.text, @"Second");
-    XCTAssertEqual(secondAfter.x, secondBefore.x);
-    XCTAssertEqual(secondAfter.y, secondBefore.y);
+    const CGRect firstBlock = [engine titleBlockOfClip:first];
+    XCTAssertEqualWithAccuracy(CGRectGetMidX(firstBlock), CGRectGetMidX(firstBlockBefore), 1e-6);
+    XCTAssertEqualWithAccuracy(CGRectGetMidY(firstBlock), CGRectGetMidY(firstBlockBefore), 1e-6);
+    const CGRect secondBlock = [engine titleBlockOfClip:second];
+    XCTAssertLessThan(secondBlock.size.width, secondBlockBefore.size.width, @"the lower third's smaller font");
+    XCTAssertEqualWithAccuracy(CGRectGetMinX(secondBlock), CGRectGetMinX(secondBlockBefore), 1e-6);
+    XCTAssertEqualWithAccuracy(CGRectGetMidY(secondBlock), CGRectGetMidY(secondBlockBefore), 1e-6);
+    XCTAssertEqualWithAccuracy(secondAfter.x * 1920, CGRectGetMinX(secondBlock), 1e-6,
+                               @"left-aligned point text: x is its left edge");
+    XCTAssertNotEqualWithAccuracy(secondAfter.x, secondBefore.x, 1e-6, @"so x moved with the alignment");
     XCTAssertEqual(secondAfter.width, 0.5);
     XCTAssertTrue(secondAfter.pointText);
     XCTAssertEqualObjects([engine clipInfo:first].title.text, @"First");
