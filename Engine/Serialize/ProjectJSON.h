@@ -1,6 +1,6 @@
 // Project file serialization (JSON via nlohmann/json).
 //
-// Format (schema version 9): a top-level object with "schemaVersion" (kProjectSchemaVersion),
+// Format (schema version 10): a top-level object with "schemaVersion" (kProjectSchemaVersion),
 // "name", "nextId", "activeSequenceId", "assets", "sequences", "sharpenScaledDownSources"
 // (Project.h) and "luts" (left out when no clip uses a LUT): the colour LUTs the clips' grades use, each
 // {"id" (its content id, cubeContentId), "kind": "1d" | "3d", "size", "domainMin", "domainMax" ([r, g, b]),
@@ -40,6 +40,17 @@
 // (ClipGrade::foreign) with a warning; a grade value outside its range is limited to it, with a warning. A span of an unknown kind on lane 0,
 // or one outside its clip's source range, is dropped with a warning.
 //
+// Titles and colour mattes (schema 10; GeneratedContent.h): an asset may hold "generator": "title" |
+// "colourMatte" (a generator asset: a still without a file; left out for a file, and the asset is not written
+// while no clip uses it); a clip of one holds "generated": {"kind": "title", then every title parameter by
+// its TitleParameterInfo name: "text", "font" ({"system": weight} or {"name": PostScript name, "family",
+// "style"}), the numbers, the colours as [r, g, b] sRGB components, "alignment": "left" | "centre" |
+// "right", the toggles as booleans} or {"kind": "colourMatte", "colour": [r, g, b]}. A number or colour
+// outside its range is limited, an unknown alignment or system font weight read as the default, with a
+// warning; an unknown key is kept (GeneratedContent::foreign) and written back, with a warning; an unknown
+// generator or content kind fails the load naming its path. A grade on a generated clip is dropped with a
+// warning.
+//
 // Older files are upgraded on load by migrateProjectJson, one schema version at a time. Loading
 // never throws: errors come back as a message naming the offending JSON path; recoverable
 // oddities (an unknown transition kind, values a migration had to adjust) are fixed and listed
@@ -61,7 +72,7 @@
 
 namespace ve {
 
-inline constexpr int kProjectSchemaVersion = 9;
+inline constexpr int kProjectSchemaVersion = 10;
 
 nlohmann::json projectToJson(const Project &project);
 
@@ -115,6 +126,11 @@ ProjectLoadResult parseProject(std::string_view text);
 //           never adopts a clip's) and the project "sharpenScaledDownSources": true (the default).
 //   7 -> 8: nothing to convert. Version 8 added clips' "grade" (absent: no grade); a version 7 file
 //           has none (one that has it anyway keeps it, with a warning).
+//   8 -> 9: nothing to convert. Version 9 added the project's "luts" and a grade's "inputLut", "lookLut" and
+//           "lookStrength"; a version 8 file has none (one that has them anyway keeps them, with a warning).
+//   9 -> 10: nothing to convert. Version 10 added titles and colour mattes: an asset's "generator" and a
+//           clip's "generated"; a version 9 file has none (one that has them anyway keeps them, with a
+//           warning).
 // The steps are frozen (ProjectMigrations.h): a later schema version adds a step and never changes
 // how an older file is converted.
 std::optional<std::string> migrateProjectJson(nlohmann::json &document, int fromVersion,

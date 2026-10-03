@@ -342,7 +342,7 @@ TEST_CASE("ProjectJSON: format details") {
     const Fixture fx = richFixture();
     const json j = projectToJson(fx.project);
     CHECK(j.at("schemaVersion") == kProjectSchemaVersion);
-    CHECK(kProjectSchemaVersion == 9);
+    CHECK(kProjectSchemaVersion == 10);
     // Version 7: the sequence's "configured" and the project's "sharpenScaledDownSources", always written.
     CHECK(j.at("sharpenScaledDownSources") == true);
     CHECK(j.at("sequences")[0].at("configured") == true);
@@ -1225,7 +1225,7 @@ TEST_CASE("ProjectJSON: the checked-in version 5 project loads with every clip f
     CHECK_FALSE(migrateProjectJson(document, 5, warnings).has_value());
     CHECK(warnings.empty());
     json expectedDocument = json::parse(text);
-    expectedDocument["schemaVersion"] = 9;
+    expectedDocument["schemaVersion"] = 10;
     expectedDocument["sharpenScaledDownSources"] = true;
     for (json &sequence : expectedDocument.at("sequences")) {
         sequence["configured"] = true;
@@ -1255,7 +1255,7 @@ TEST_CASE("ProjectJSON: the checked-in version 6 project opens configured, with 
     CHECK_FALSE(migrateProjectJson(document, 6, warnings).has_value());
     CHECK(warnings.empty());
     json expectedDocument = json::parse(text);
-    expectedDocument["schemaVersion"] = 9;
+    expectedDocument["schemaVersion"] = 10;
     expectedDocument["sharpenScaledDownSources"] = true;
     for (json &sequence : expectedDocument.at("sequences")) {
         sequence["configured"] = true;
@@ -1284,7 +1284,7 @@ TEST_CASE("ProjectJSON: the checked-in version 7 project matches the current wri
     std::string asVersion8 = text;
     const std::string version7 = "\"schemaVersion\": 7,";
     REQUIRE(asVersion8.find(version7) != std::string::npos);
-    asVersion8.replace(asVersion8.find(version7), version7.size(), "\"schemaVersion\": 9,");
+    asVersion8.replace(asVersion8.find(version7), version7.size(), "\"schemaVersion\": 10,");
     CHECK(asVersion8 == written);
     const ProjectLoadResult loaded = parseProject(text);
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
@@ -1321,7 +1321,7 @@ TEST_CASE("ProjectJSON: the checked-in version 8 project matches the current wri
     std::string asVersion9 = text;
     const std::string version8 = "\"schemaVersion\": 8,";
     REQUIRE(asVersion9.find(version8) != std::string::npos);
-    asVersion9.replace(asVersion9.find(version8), version8.size(), "\"schemaVersion\": 9,");
+    asVersion9.replace(asVersion9.find(version8), version8.size(), "\"schemaVersion\": 10,");
     CHECK(asVersion9 == written);
     const ProjectLoadResult loaded = parseProject(text);
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
@@ -1438,9 +1438,9 @@ TEST_CASE("ProjectJSON: a version 5 file with version 6 content opens with a war
     }
     REQUIRE(loaded.warnings.size() == 2);
     CHECK(anyContains(loaded.warnings, "\"reversed\" is a version 6 feature in a project of an earlier version: "
-                                       "kept, and the project is saved as version 9"));
+                                       "kept, and the project is saved as version 10"));
     CHECK(anyContains(loaded.warnings, "a Wipe Left transition is a version 6 feature in a project of an earlier "
-                                       "version: kept, and the project is saved as version 9"));
+                                       "version: kept, and the project is saved as version 10"));
     const Sequence &sequence = loaded.project->sequences[0];
     CHECK(sequence.findClip(ClipId{15})->reversed);
     CHECK(sequence.findTransition(SpanId{14})->kind == TransitionKind::WipeLeft);

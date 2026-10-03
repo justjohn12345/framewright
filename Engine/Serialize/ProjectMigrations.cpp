@@ -1316,6 +1316,41 @@ void migrate(json &document, const StepContext &context) {
 
 } // namespace toV9
 
+// ===== 9 -> 10 =====
+
+namespace toV10 {
+
+// Version 10 added titles and colour mattes: an asset's "generator" (a generator asset) and a clip's
+// "generated" (what a title or matte clip shows). A version 9 file has neither, so only the version number
+// changes. One that has them anyway (written by hand, or by a build between the two) keeps them, with a
+// warning naming each asset and clip, as the 8 -> 9 step does; the project is then saved in the current
+// version.
+void migrate(json &document, const StepContext &context) {
+    Node(document, "").requireObject();
+    const std::string saved = " is a version 10 feature in a project of an earlier version: kept, and the project is "
+                              "saved as version " +
+                              std::to_string(context.targetVersion);
+    if (const auto assets = document.find("assets"); assets != document.end() && assets->is_array()) {
+        for (std::size_t i = 0; i < assets->size(); ++i) {
+            const json &asset = (*assets)[i];
+            if (asset.is_object() && asset.find("generator") != asset.end()) {
+                context.warnings.push_back("assets[" + std::to_string(i) + "].generator:" + saved);
+            }
+        }
+    }
+    forEachSequence(document, [&](json &sequence, const Node &node) {
+        forEachTrack(sequence, node, [&](json &track, const Node &trackNode, bool, std::size_t) {
+            forEachClip(track, trackNode, [&](json &clip, const Node &clipNode) {
+                if (clip.find("generated") != clip.end()) {
+                    context.warnings.push_back(clipNode.path() + ".generated:" + saved);
+                }
+            });
+        });
+    });
+}
+
+} // namespace toV10
+
 struct MigrationStep {
     int fromVersion;
     void (*apply)(json &document, const StepContext &context);
@@ -1325,6 +1360,7 @@ struct MigrationStep {
 constexpr MigrationStep kMigrations[] = {
     {1, toV2::migrate}, {2, toV3::migrate}, {3, toV4::migrate},
     {4, toV5::migrate}, {5, toV6::migrate}, {6, toV7::migrate}, {7, toV8::migrate}, {8, toV9::migrate},
+    {9, toV10::migrate},
 };
 
 constexpr bool migrationsInOrder() {

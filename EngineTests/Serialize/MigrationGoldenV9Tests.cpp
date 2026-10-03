@@ -151,7 +151,7 @@ TEST_CASE("Migration goldens v9: a version 8 file holding LUTs keeps them, by th
     const ProjectLoadResult loaded = projectFromJson(readJson(fixture.input));
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
     // The step's warnings, then the parser's: the strength limited, the unknown look dropped with its strength.
-    std::vector<std::string> expected = stepWarnings;
+    std::vector<std::string> expected = savedAs(stepWarnings, kVersion9, kProjectSchemaVersion);
     expected.push_back("sequences[0].videoTracks[0].clips[1].grade.lookStrength: the look strength 2.0 is outside its "
                        "range [0, 1]; limited to 1.0");
     expected.push_back("clip 15: its grade's LUT 00000000deadbeef is not in the project's \"luts\"; dropped");
@@ -173,9 +173,9 @@ TEST_CASE("Migration goldens v9: a version 8 file holding LUTs keeps them, by th
     CHECK(sequence.findClip(ClipId{13})->grade.lookStrength == 1.0);
     CHECK(sequence.findClip(ClipId{15})->grade.lookLut.empty());
     CHECK(sequence.findClip(ClipId{15})->grade.lookStrength == 1.0);
-    // Saved: version 9 with the one LUT the clips use, which loads back exactly.
+    // Saved (in the current version) with the one LUT the clips use, which loads back exactly.
     const json saved = projectToJson(project);
-    CHECK(saved.at("schemaVersion") == kVersion9);
+    CHECK(saved.at("schemaVersion") == kProjectSchemaVersion);
     REQUIRE(saved.at("luts").size() == 1);
     CHECK(saved.at("luts")[0].at("data") == readJson(fixture.input).at("luts")[0].at("data"));
     const ProjectLoadResult again = projectFromJson(saved);
@@ -300,14 +300,19 @@ Project richProjectV9() {
 
 } // namespace
 
-TEST_CASE("Migration goldens v9: the checked-in version 9 project matches the current writer byte for byte") {
+TEST_CASE("Migration goldens v9: the checked-in version 9 project matches the current writer byte for byte but for "
+          "its version") {
     const Project expected = richProjectV9();
     const std::string written = serializeProject(expected) + "\n";
     std::ifstream in(goldenDirectory() + "v9/project-v9.json", std::ios::binary);
     REQUIRE_MESSAGE(in.good(), "the version 9 golden is checked in (never written by the test)");
     std::ostringstream text;
     text << in.rdbuf();
-    CHECK(text.str() == written);
+    std::string asVersion10 = text.str();
+    const std::string version9 = "\"schemaVersion\": 9,";
+    REQUIRE(asVersion10.find(version9) != std::string::npos);
+    asVersion10.replace(asVersion10.find(version9), version9.size(), "\"schemaVersion\": 10,");
+    CHECK(asVersion10 == written);
     const ProjectLoadResult loaded = parseProject(text.str());
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
     CHECK(loaded.warnings.empty());

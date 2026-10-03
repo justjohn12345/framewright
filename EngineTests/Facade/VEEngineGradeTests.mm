@@ -306,7 +306,7 @@ CMTime frames30(int64_t n) {
     XCTAssertTrue([engine saveProjectToURL:file error:&error], @"%@", error);
     NSString *text = [NSString stringWithContentsOfURL:file encoding:NSUTF8StringEncoding error:&error];
     XCTAssertTrue([text containsString:@"\"grade\""]);
-    XCTAssertTrue([text containsString:@"\"schemaVersion\": 9"]);
+    XCTAssertTrue([text containsString:@"\"schemaVersion\": 10"]);
 
     VEEngine *reopened = [[VEEngine alloc] initWithCacheDirectory:_cacheDir];
     XCTAssertTrue([reopened openProjectAtURL:file error:&error], @"%@", error);

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <set>
 #include <cstdio>
+#include <type_traits>
 #include <limits>
 #include <map>
 #include <utility>
@@ -140,7 +141,7 @@ json spanToJson(const EffectSpan &span) {
 }
 
 json assetToJson(const MediaAsset &asset) {
-    return json{{"id", idToJson(asset.id)},
+    json j{{"id", idToJson(asset.id)},
                 {"name", asset.name},
                 {"url", asset.url},
                 {"kind", nameOf(asset.kind)},
@@ -155,6 +156,58 @@ json assetToJson(const MediaAsset &asset) {
                 {"audioChannels", asset.audioChannels},
                 {"backendHint", asset.backendHint},
                 {"hardwareDecode", asset.hardwareDecode}};
+    // Schema 10: a generator asset says what it generates (a file asset writes what version 9 wrote).
+    if (asset.isGenerator()) {
+        j["generator"] = nameOf(asset.generator);
+    }
+    return j;
+}
+
+// MARK: Titles and colour mattes (schema 10)
+
+json colourToJson(const SRGBColour &colour) {
+    return json::array({colour.red, colour.green, colour.blue});
+}
+
+json titleFontToJson(const TitleFont &font) {
+    if (font.isSystem) {
+        return json{{"system", nameOf(font.weight)}};
+    }
+    return json{{"name", font.postScriptName}, {"family", font.family}, {"style", font.style}};
+}
+
+json titleValueToJson(const TitleValue &value) {
+    return std::visit(
+        [](const auto &v) -> json {
+            using V = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<V, TitleFont>) {
+                return titleFontToJson(v);
+            } else if constexpr (std::is_same_v<V, SRGBColour>) {
+                return colourToJson(v);
+            } else if constexpr (std::is_same_v<V, TitleAlignment>) {
+                return nameOf(v);
+            } else {
+                return json(v);
+            }
+        },
+        value);
+}
+
+// A generated clip's "generated": {"kind": "title", every parameter of the title by its table name} or
+// {"kind": "colourMatte", "colour"}, then the entries this version does not read as they came. Every parameter
+// is written (not only those that differ from the defaults), so a later change of a default never changes
+// what a saved title looks like.
+json generatedToJson(const GeneratedContent &content) {
+    json j{{"kind", nameOf(content.kind())}};
+    if (content.isTitle()) {
+        for (const TitleParameter parameter : kTitleParameters) {
+            j[nameOf(parameter)] = titleValueToJson(valueOf(content.title(), parameter));
+        }
+    } else {
+        j["colour"] = colourToJson(content.matteColour());
+    }
+    addForeignKeys(j, foreignObject(content.foreign()));
+    return j;
 }
 
 // A clip's grade: the values that are not neutral, then the entries this version does not read (a
@@ -304,6 +357,9 @@ json clipToJson(const Clip &clip) {
     if (!clip.grade.isEmpty()) {
         j["grade"] = gradeToJson(clip.grade);
     }
+    if (clip.generated) {
+        j["generated"] = generatedToJson(*clip.generated);
+    }
     if (!clip.transitions.empty() || !clip.spans.empty()) {
         // One list in the file: lane 0 (the transitions, head then tail), then lanes 1-3.
         json spans = json::array();
@@ -390,6 +446,16 @@ MediaAsset parseAsset(const Node &node) {
     asset.audioChannels = node.int32Or("audioChannels", 0);
     asset.backendHint = node.stringOr("backendHint", "");
     asset.hardwareDecode = node.boolOr("hardwareDecode", false);
+    if (node.has("generator")) {
+        const Node generator = node.field("generator");
+        const std::string name = generator.asString();
+        const auto kind = generatorKindNamed(name);
+        if (!kind) {
+            // Its clips' content could not be drawn, nor kept as a clip of a file: the project cannot open.
+            generator.fail("unknown generator kind \"" + name + "\" (from a newer version of Framewright?)");
+        }
+        asset.generator = *kind;
+    }
     return asset;
 }
 
@@ -755,6 +821,139 @@ ClipGrade parseGrade(const Node &node, Warnings &warnings) {
     return grade;
 }
 
+// A colour [r, g, b] (sRGB components); a component outside [0, 1] is limited to it, with a warning.
+SRGBColour parseColour(const Node &node, const std::string &what, Warnings &warnings) {
+    if (node.arraySize() != 3) {
+        node.fail("expected a colour [r, g, b]");
+    }
+    SRGBColour colour{node.element(0).asDouble(), node.element(1).asDouble(), node.element(2).asDouble()};
+    if (!isValidColour(colour)) {
+        const SRGBColour limited{std::clamp(colour.red, 0.0, 1.0), std::clamp(colour.green, 0.0, 1.0),
+                                 std::clamp(colour.blue, 0.0, 1.0)};
+        warnings.push_back(node.path() + ": " + what + " " + node.value().dump() +
+                           " has a component outside [0, 1]; limited to " + colourToJson(limited).dump());
+        colour = limited;
+    }
+    return colour;
+}
+
+// A title's "font": {"system": weight} or {"name": PostScript name, "family", "style"}. An unknown weight
+// (a newer version's) is read as Regular, with a warning.
+TitleFont parseTitleFont(const Node &node, Warnings &warnings) {
+    node.requireObject();
+    if (node.has("system")) {
+        const Node weightNode = node.field("system");
+        const std::string name = weightNode.asString();
+        if (const auto weight = systemFontWeightNamed(name)) {
+            return TitleFont::system(*weight);
+        }
+        warnings.push_back(weightNode.path() + ": unknown weight \"" + name +
+                           "\" of the system font (from a newer version of Framewright?); using Regular");
+        return TitleFont::system(SystemFontWeight::Regular);
+    }
+    TitleFont font = TitleFont::named(node.field("name").asString(), node.stringOr("family", ""),
+                                      node.stringOr("style", ""));
+    if (auto problem = titleValueProblem(TitleParameter::Font, font)) {
+        node.fail(*problem);
+    }
+    return font;
+}
+
+// A generated clip's "generated" (generatedToJson): its kind, a title's parameters (a parameter left out
+// has its default) or a matte's colour. A number or a colour outside its range is limited to it, an
+// unknown alignment is read as centre, with a warning each; an entry this version does not read (a newer
+// version's parameter) is kept as it is and written back on save (GeneratedContent::foreign), with a
+// warning. An unknown kind, a value of the wrong JSON type, or a text or font that is not valid fails the
+// load with its path.
+std::shared_ptr<const GeneratedContent> parseGenerated(const Node &node, Warnings &warnings) {
+    node.requireObject();
+    const Node kindNode = node.field("kind");
+    const std::string kindName = kindNode.asString();
+    const auto kind = generatorKindNamed(kindName);
+    if (!kind || *kind == GeneratorKind::None) {
+        kindNode.fail("unknown generated content kind \"" + kindName + "\" (from a newer version of Framewright?)");
+    }
+    json foreign = json::object();
+    const auto keepForeign = [&](const std::string &key, const json &value, const Node &valueNode) {
+        foreign[key] = value;
+        warnings.push_back(valueNode.path() + ": unknown " + (*kind == GeneratorKind::Title ? "title" : "matte") +
+                           " parameter \"" + key +
+                           "\" (from a newer version of Framewright?); kept as it is and saved with the project, "
+                           "but not drawn or editable");
+    };
+    if (*kind == GeneratorKind::ColourMatte) {
+        SRGBColour colour = kBlack;
+        for (const auto &entry : node.value().items()) {
+            const std::string &key = entry.key();
+            const Node valueNode(entry.value(), node.path() + "." + key);
+            if (key == "kind") {
+                continue;
+            }
+            if (key == "colour") {
+                colour = parseColour(valueNode, "the matte's colour", warnings);
+                continue;
+            }
+            keepForeign(key, entry.value(), valueNode);
+        }
+        return GeneratedContent::makeMatte(colour, foreignText(foreign));
+    }
+    TitleContent title;
+    for (const auto &entry : node.value().items()) {
+        const std::string &key = entry.key();
+        const Node valueNode(entry.value(), node.path() + "." + key);
+        if (key == "kind") {
+            continue;
+        }
+        const auto parameter = titleParameterNamed(key);
+        if (!parameter) {
+            keepForeign(key, entry.value(), valueNode);
+            continue;
+        }
+        const TitleParameterInfo &info = infoOf(*parameter);
+        TitleValue value;
+        switch (info.type) {
+        case TitleValueType::Text:
+            value = valueNode.asString();
+            break;
+        case TitleValueType::Font:
+            value = parseTitleFont(valueNode, warnings);
+            break;
+        case TitleValueType::Number: {
+            const double number = valueNode.asDouble(); // a JSON number is finite
+            const double limited = std::clamp(number, info.minimum, info.maximum);
+            if (limited != number) {
+                warnings.push_back(valueNode.path() + ": " + info.displayName + " " + entry.value().dump() +
+                                   " is outside its range [" + json(info.minimum).dump() + ", " +
+                                   json(info.maximum).dump() + "]; limited to " + json(limited).dump());
+            }
+            value = limited;
+            break;
+        }
+        case TitleValueType::Colour:
+            value = parseColour(valueNode, std::string("the title's ") + info.displayName, warnings);
+            break;
+        case TitleValueType::Choice: {
+            const std::string name = valueNode.asString();
+            const auto alignment = titleAlignmentNamed(name);
+            if (!alignment) {
+                warnings.push_back(valueNode.path() + ": unknown alignment \"" + name +
+                                   "\" (from a newer version of Framewright?); using centre");
+            }
+            value = alignment.value_or(TitleAlignment::Centre);
+            break;
+        }
+        case TitleValueType::Toggle:
+            value = valueNode.asBool();
+            break;
+        }
+        if (auto problem = titleValueProblem(*parameter, value)) {
+            valueNode.fail(*problem); // a text too long (JSON strings are UTF-8)
+        }
+        setValue(title, *parameter, value);
+    }
+    return GeneratedContent::makeTitle(std::move(title), foreignText(foreign));
+}
+
 // The spans of each clip in the order the file lists them (one list there, two containers on the
 // model), with the lane the file gave each: repairSequence reports and repairs in that order.
 struct FileSpan {
@@ -795,6 +994,9 @@ Clip parseClip(const Node &node, Warnings &warnings, SpanFileOrder &order) {
     }
     if (node.has("grade")) {
         clip.grade = parseGrade(node.field("grade"), warnings);
+    }
+    if (node.has("generated")) {
+        clip.generated = parseGenerated(node.field("generated"), warnings);
     }
     if (node.has("spans")) {
         const Node spans = node.field("spans");
@@ -937,11 +1139,18 @@ Project parseProjectNode(const Node &root, Warnings &warnings, SpanFileOrder &or
             project.sequences.push_back(parseSequence(list.element(i), warnings, order));
         }
     }
-    // Each clip's LUTs: a reference to a LUT the file does not hold is dropped (with its look strength).
+    // Each clip's LUTs: a reference to a LUT the file does not hold is dropped (with its look strength). A
+    // title or a matte has no grade (section 5 of the titles design; a newer version might allow one): dropped.
     for (Sequence &sequence : project.sequences) {
         for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
             for (Track &track : sequence.tracks(kind)) {
                 for (Clip &clip : track.clips) {
+                    if (const MediaAsset *asset = project.findAsset(clip.assetId);
+                        asset != nullptr && asset->isGenerator() && !clip.grade.isEmpty()) {
+                        warnings.push_back("clip " + std::to_string(clip.id.value()) + ": a " +
+                                           displayNameOf(asset->generator) + " clip has no grade; dropped");
+                        clip.grade = ClipGrade{};
+                    }
                     for (std::string *lut : {&clip.grade.inputLut, &clip.grade.lookLut}) {
                         if (lut->empty()) {
                             continue;
@@ -1008,17 +1217,15 @@ json timeToJson(CMTime time) {
 }
 
 json projectToJson(const Project &project) {
-    json assets = json::array();
-    for (const MediaAsset &asset : project.assets) {
-        assets.push_back(assetToJson(asset));
-    }
     json sequences = json::array();
     std::set<std::string> usedLuts;
+    std::set<AssetId> usedAssets;
     for (const Sequence &sequence : project.sequences) {
         sequences.push_back(sequenceToJson(sequence));
         for (const TrackKind kind : {TrackKind::Video, TrackKind::Audio}) {
             for (const Track &track : sequence.tracks(kind)) {
                 for (const Clip &clip : track.clips) {
+                    usedAssets.insert(clip.assetId);
                     for (const std::string *lut : {&clip.grade.inputLut, &clip.grade.lookLut}) {
                         if (!lut->empty()) {
                             usedLuts.insert(*lut);
@@ -1026,6 +1233,13 @@ json projectToJson(const Project &project) {
                     }
                 }
             }
+        }
+    }
+    // Every file asset; a generator asset only while a clip uses it (the next title makes it again).
+    json assets = json::array();
+    for (const MediaAsset &asset : project.assets) {
+        if (asset.isFileBacked() || usedAssets.count(asset.id) != 0) {
+            assets.push_back(assetToJson(asset));
         }
     }
     json document{{"schemaVersion", kProjectSchemaVersion},
