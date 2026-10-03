@@ -566,6 +566,13 @@ EngineTests 700 (3 skipped: the display-link tests), doctest 476 cases, AppTests
 `ScopePanelTests testTheWindowShowsTheScopesWideAtThePicturesAspect` and `WaveformPanelTests
 testTheShownPanelIsDrawnWithTheProgramMonitorsFramesAndLetGoWhenHidden`, the two that need the screen unlocked.
 
+Regression found by the lead after the merge (173fc15): `PlaybackDisplayPathTests
+testLastPresentedIsNeverLostToAConcurrentReader` failed about half the runs. With the lookahead starting at once after a
+seek, the stream could put the paused picture in the cache before the frame's own request, whose late completion bumped
+`frameVersion` and re-presented the same frame; a superseded request that is no longer cancelled did the same. Fixed in
+97fe8c0 (the frame source reports an identical re-resolved frame as unchanged; a superseded request bumps nothing), with
+the deterministic reproducer `testAPictureTheLookaheadDecodedFirstIsNotPresentedAgain`; 22 consecutive clean runs.
+
 ## Where things stand (handover, 2026-10-03)
 - **Released and pushed:** 0.1.11 (built from 221ad31) is the last release; everything is pushed. It adds titles
   slice 1 (c996a93..e5abda0, docs c7feff8) and its review fix round (bd96f79..74a95a7, docs 9927acd), accepted by
