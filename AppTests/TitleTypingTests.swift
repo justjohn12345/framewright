@@ -454,7 +454,7 @@ final class TitleTypingTests: XCTestCase {
         XCTAssertFalse(press(time: 100))
         XCTAssertNil(box.editor, "one click")
         XCTAssertTrue(press(time: 100.2))
-        XCTAssertEqual(box.clickCount, 2)
+        XCTAssertEqual(box.clickCount, 0, "the count starts again once typing starts (a third click starts nothing)")
         XCTAssertEqual(box.editor?.initialSelection, NSRange(location: 6, length: 0))
         XCTAssertTrue(store.isEditingTitleOnPicture)
         XCTAssertEqual(store.undoActionName, undoName, "the clicks are no edit")
