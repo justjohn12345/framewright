@@ -39,6 +39,10 @@ constexpr TitleParameterInfo kTitleTable[] = {
     {TitleParameter::PositionX, "x", "Position X", T::Number, U::FrameWidth, 0.5, -1.0, 2.0, false},
     {TitleParameter::PositionY, "y", "Position Y", T::Number, U::FrameHeight, 0.5, -1.0, 2.0, false},
     {TitleParameter::BoxWidth, "width", "Box Width", T::Number, U::FrameWidth, 0.8, 0.02, 4.0, true},
+    // Schema 11 (titles slice 2). The anchor moves the picture relative to the position (its canvas geometry), so it
+    // is part of the picture's identity like the rest.
+    {TitleParameter::PointText, "pointText", "Point Text", T::Toggle, U::None, 0, 0, 1, true},
+    {TitleParameter::Anchor, "anchor", "Vertical Anchor", T::Anchor, U::None, 0, 0, 0, true},
 };
 
 // Row i describes enumerator i, kTitleParameters lists them in order, a number's default lies within its
@@ -224,6 +228,27 @@ std::optional<TitleAlignment> titleAlignmentNamed(std::string_view name) {
     return std::nullopt;
 }
 
+const char *nameOf(TitleAnchor anchor) {
+    switch (anchor) {
+    case TitleAnchor::Top:
+        return "top";
+    case TitleAnchor::Centre:
+        return "centre";
+    case TitleAnchor::Bottom:
+        return "bottom";
+    }
+    return "centre";
+}
+
+std::optional<TitleAnchor> titleAnchorNamed(std::string_view name) {
+    for (const TitleAnchor anchor : {TitleAnchor::Top, TitleAnchor::Centre, TitleAnchor::Bottom}) {
+        if (name == nameOf(anchor)) {
+            return anchor;
+        }
+    }
+    return std::nullopt;
+}
+
 const char *nameOf(SystemFontWeight weight) {
     const auto i = static_cast<std::size_t>(weight);
     return i < kWeightNames.size() ? kWeightNames[i] : "regular";
@@ -325,6 +350,10 @@ TitleValue valueOf(const TitleContent &c, TitleParameter parameter) {
         return c.y;
     case TitleParameter::BoxWidth:
         return c.width;
+    case TitleParameter::PointText:
+        return c.pointText;
+    case TitleParameter::Anchor:
+        return c.anchor;
     }
     return c.text;
 }
@@ -391,6 +420,10 @@ bool setValue(TitleContent &c, TitleParameter parameter, const TitleValue &value
         return assign(c.y, value);
     case TitleParameter::BoxWidth:
         return assign(c.width, value);
+    case TitleParameter::PointText:
+        return assign(c.pointText, value);
+    case TitleParameter::Anchor:
+        return assign(c.anchor, value);
     }
     return false;
 }
@@ -472,6 +505,13 @@ std::optional<std::string> titleValueProblem(TitleParameter parameter, const Tit
             return what + " must be on or off.";
         }
         return std::nullopt;
+    case TitleValueType::Anchor: {
+        const auto *anchor = std::get_if<TitleAnchor>(&value);
+        if (anchor == nullptr || static_cast<int>(*anchor) < 0 || static_cast<int>(*anchor) > 2) {
+            return what + " must be top, centre or bottom.";
+        }
+        return std::nullopt;
+    }
     }
     return what + " has an unknown type.";
 }
@@ -548,9 +588,10 @@ ContentId contentIdOf(const TitleContent &content) {
                     hash.number(v);
                 } else if constexpr (std::is_same_v<V, SRGBColour>) {
                     hash.colour(v);
-                } else if constexpr (std::is_same_v<V, TitleAlignment>) {
+                } else if constexpr (std::is_same_v<V, TitleAlignment> || std::is_same_v<V, TitleAnchor>) {
                     hash.text(nameOf(v));
                 } else {
+                    static_assert(std::is_same_v<V, bool>, "every TitleValue alternative is hashed");
                     hash.flag(v);
                 }
             },

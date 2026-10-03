@@ -163,7 +163,7 @@ json assetToJson(const MediaAsset &asset) {
     return j;
 }
 
-// MARK: Titles and colour mattes (schema 10)
+// MARK: Titles and colour mattes (schema 10; point text and the anchor, schema 11)
 
 json colourToJson(const SRGBColour &colour) {
     return json::array({colour.red, colour.green, colour.blue});
@@ -184,7 +184,7 @@ json titleValueToJson(const TitleValue &value) {
                 return titleFontToJson(v);
             } else if constexpr (std::is_same_v<V, SRGBColour>) {
                 return colourToJson(v);
-            } else if constexpr (std::is_same_v<V, TitleAlignment>) {
+            } else if constexpr (std::is_same_v<V, TitleAlignment> || std::is_same_v<V, TitleAnchor>) {
                 return nameOf(v);
             } else {
                 return json(v);
@@ -861,7 +861,7 @@ TitleFont parseTitleFont(const Node &node, Warnings &warnings) {
 
 // A generated clip's "generated" (generatedToJson): its kind, a title's parameters (a parameter left out
 // has its default) or a matte's colour. A number or a colour outside its range is limited to it, an
-// unknown alignment is read as centre, with a warning each; an entry this version does not read (a newer
+// unknown alignment or anchor is read as centre, with a warning each; an entry this version does not read (a newer
 // version's parameter) is kept as it is and written back on save (GeneratedContent::foreign), with a
 // warning. An unknown kind, a value of the wrong JSON type, or a text or font that is not valid fails the
 // load with its path.
@@ -945,6 +945,16 @@ std::shared_ptr<const GeneratedContent> parseGenerated(const Node &node, Warning
         case TitleValueType::Toggle:
             value = valueNode.asBool();
             break;
+        case TitleValueType::Anchor: {
+            const std::string name = valueNode.asString();
+            const auto anchor = titleAnchorNamed(name);
+            if (!anchor) {
+                warnings.push_back(valueNode.path() + ": unknown anchor \"" + name +
+                                   "\" (from a newer version of Framewright?); using centre");
+            }
+            value = anchor.value_or(TitleAnchor::Centre);
+            break;
+        }
         }
         if (auto problem = titleValueProblem(*parameter, value)) {
             valueNode.fail(*problem); // a text too long (JSON strings are UTF-8)

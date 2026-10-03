@@ -167,7 +167,7 @@ NSString *cubeText(int size, simd_float3 (^f)(simd_float3)) {
     NSURL *file = [_scratch URLByAppendingPathComponent:@"luts.framewright"];
     XCTAssertTrue([engine saveProjectToURL:file error:&error], @"%@", error);
     NSString *text = [NSString stringWithContentsOfURL:file encoding:NSUTF8StringEncoding error:&error];
-    XCTAssertTrue([text containsString:@"\"schemaVersion\": 10"]);
+    XCTAssertTrue([text containsString:@"\"schemaVersion\": 11"]);
     XCTAssertTrue([text containsString:@"\"luts\""]);
     XCTAssertTrue([text containsString:look.lutID]);
     XCTAssertTrue([[NSFileManager defaultManager] removeItemAtURL:[_scratch URLByAppendingPathComponent:@"swap.cube"]

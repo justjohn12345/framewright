@@ -1351,6 +1351,39 @@ void migrate(json &document, const StepContext &context) {
 
 } // namespace toV10
 
+// ===== 10 -> 11 =====
+
+namespace toV11 {
+
+// Version 11 added a title's "pointText" (no wrapping: the block grows with the text) and "anchor" (where the
+// title's "y" lies on its block: "top", "centre" or "bottom"). Without them a title is area text anchored at its
+// centre, which is how version 10 draws every title, so only the version number changes. A version 10 file whose
+// titles hold them anyway (written by hand, or by a build between the two) keeps them, with a warning naming each,
+// as the 9 -> 10 step does; the project is then saved in the current version.
+void migrate(json &document, const StepContext &context) {
+    Node(document, "").requireObject();
+    const std::string saved = " is a version 11 feature in a project of an earlier version: kept, and the project is "
+                              "saved as version " +
+                              std::to_string(context.targetVersion);
+    forEachSequence(document, [&](json &sequence, const Node &node) {
+        forEachTrack(sequence, node, [&](json &track, const Node &trackNode, bool, std::size_t) {
+            forEachClip(track, trackNode, [&](json &clip, const Node &clipNode) {
+                const auto generated = clip.find("generated");
+                if (generated == clip.end() || !generated->is_object()) {
+                    return;
+                }
+                for (const char *key : {"pointText", "anchor"}) {
+                    if (generated->find(key) != generated->end()) {
+                        context.warnings.push_back(clipNode.path() + ".generated." + key + ":" + saved);
+                    }
+                }
+            });
+        });
+    });
+}
+
+} // namespace toV11
+
 struct MigrationStep {
     int fromVersion;
     void (*apply)(json &document, const StepContext &context);
@@ -1360,7 +1393,7 @@ struct MigrationStep {
 constexpr MigrationStep kMigrations[] = {
     {1, toV2::migrate}, {2, toV3::migrate}, {3, toV4::migrate},
     {4, toV5::migrate}, {5, toV6::migrate}, {6, toV7::migrate}, {7, toV8::migrate}, {8, toV9::migrate},
-    {9, toV10::migrate},
+    {9, toV10::migrate}, {10, toV11::migrate},
 };
 
 constexpr bool migrationsInOrder() {

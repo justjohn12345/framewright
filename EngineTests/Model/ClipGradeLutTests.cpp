@@ -107,7 +107,7 @@ TEST_CASE("Grade LUTs: the project file") {
     LutClips fx;
     fx.project.addLut(identityLut(4)); // imported, used by no clip
     const json document = projectToJson(fx.project);
-    REQUIRE(document.at("schemaVersion") == 10);
+    REQUIRE(document.at("schemaVersion") == 11);
     const json &luts = document.at("luts");
     REQUIRE(luts.size() == 2);
     CHECK(luts[0].at("id").get<std::string>() < luts[1].at("id").get<std::string>());

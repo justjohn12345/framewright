@@ -47,6 +47,8 @@ TitleValue sampleValueOtherThanDefault(TitleParameter parameter) {
         return TitleAlignment::Right;
     case TitleValueType::Toggle:
         return !std::get<bool>(valueOf(TitleContent{}, parameter));
+    case TitleValueType::Anchor:
+        return TitleAnchor::Bottom;
     }
     return std::string();
 }
@@ -95,6 +97,35 @@ TEST_CASE("Generated content: the title parameter table") {
     CHECK(d.width == 0.8);
     CHECK(d.lineSpacing == 1.0);
     CHECK(d.tracking == 0.0);
+    // Schema 11: area text anchored at its centre, as slice 1 drew every title.
+    CHECK_FALSE(d.pointText);
+    CHECK(d.anchor == TitleAnchor::Centre);
+}
+
+TEST_CASE("Generated content: the vertical anchor's names and values") {
+    for (const TitleAnchor anchor : {TitleAnchor::Top, TitleAnchor::Centre, TitleAnchor::Bottom}) {
+        CAPTURE(nameOf(anchor));
+        CHECK(titleAnchorNamed(nameOf(anchor)) == anchor);
+        CHECK_FALSE(titleValueProblem(TitleParameter::Anchor, anchor).has_value());
+    }
+    CHECK(std::string(nameOf(TitleAnchor::Top)) == "top");
+    CHECK(std::string(nameOf(TitleAnchor::Bottom)) == "bottom");
+    CHECK_FALSE(titleAnchorNamed("middle").has_value());
+    CHECK(titleValueProblem(TitleParameter::Anchor, static_cast<TitleAnchor>(7)).value_or("") ==
+          "The title's Vertical Anchor must be top, centre or bottom.");
+    CHECK(titleValueProblem(TitleParameter::Anchor, TitleAlignment::Left).has_value());
+    CHECK(titleValueProblem(TitleParameter::PointText, TitleAnchor::Top).value_or("") ==
+          "The title's Point Text must be on or off.");
+    // Both change the picture's identity (they place it relative to the position).
+    TitleContent point;
+    point.pointText = true;
+    CHECK(contentIdOf(point) != contentIdOf(TitleContent{}));
+    TitleContent top;
+    top.anchor = TitleAnchor::Top;
+    CHECK(contentIdOf(top) != contentIdOf(TitleContent{}));
+    TitleContent bottom;
+    bottom.anchor = TitleAnchor::Bottom;
+    CHECK(contentIdOf(top) != contentIdOf(bottom));
 }
 
 TEST_CASE("Generated content: values are set and read by parameter, of their own type") {

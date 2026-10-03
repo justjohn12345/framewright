@@ -20,6 +20,9 @@ std::optional<TitleParameter> fromVE(VETitleParameter parameter);
 VETitleAlignment toVE(TitleAlignment alignment);
 /// Nullopt for a value outside the enumeration.
 std::optional<TitleAlignment> fromVE(VETitleAlignment alignment);
+VETitleAnchor toVE(TitleAnchor anchor);
+/// Nullopt for a value outside the enumeration.
+std::optional<TitleAnchor> fromVE(VETitleAnchor anchor);
 VEGeneratorKind toVE(GeneratorKind kind);
 /// Nullopt for a value outside the enumeration.
 std::optional<GeneratedPreset> fromVE(VEGeneratedPreset preset);

@@ -1,6 +1,6 @@
 // Project file serialization (JSON via nlohmann/json).
 //
-// Format (schema version 10): a top-level object with "schemaVersion" (kProjectSchemaVersion),
+// Format (schema version 11): a top-level object with "schemaVersion" (kProjectSchemaVersion),
 // "name", "nextId", "activeSequenceId", "assets", "sequences", "sharpenScaledDownSources"
 // (Project.h) and "luts" (left out when no clip uses a LUT): the colour LUTs the clips' grades use, each
 // {"id" (its content id, cubeContentId), "kind": "1d" | "3d", "size", "domainMin", "domainMax" ([r, g, b]),
@@ -45,8 +45,10 @@
 // while no clip uses it); a clip of one holds "generated": {"kind": "title", then every title parameter by
 // its TitleParameterInfo name: "text", "font" ({"system": weight} or {"name": PostScript name, "family",
 // "style"}), the numbers, the colours as [r, g, b] sRGB components, "alignment": "left" | "centre" |
-// "right", the toggles as booleans} or {"kind": "colourMatte", "colour": [r, g, b]}. A number or colour
-// outside its range is limited, an unknown alignment or system font weight read as the default, with a
+// "right", the toggles as booleans, and (schema 11) "pointText" (a boolean: no wrapping, the block grows with the
+// text) and "anchor": "top" | "centre" | "bottom" (where "y" lies on the block)} or {"kind": "colourMatte",
+// "colour": [r, g, b]}. A number or colour
+// outside its range is limited, an unknown alignment, anchor or system font weight read as the default, with a
 // warning; an unknown key is kept (GeneratedContent::foreign) and written back, with a warning; an unknown
 // generator or content kind fails the load naming its path. A grade on a generated clip is dropped with a
 // warning.
@@ -72,7 +74,7 @@
 
 namespace ve {
 
-inline constexpr int kProjectSchemaVersion = 10;
+inline constexpr int kProjectSchemaVersion = 11;
 
 nlohmann::json projectToJson(const Project &project);
 
@@ -131,6 +133,9 @@ ProjectLoadResult parseProject(std::string_view text);
 //   9 -> 10: nothing to convert. Version 10 added titles and colour mattes: an asset's "generator" and a
 //           clip's "generated"; a version 9 file has none (one that has them anyway keeps them, with a
 //           warning).
+//   10 -> 11: nothing to convert. Version 11 added a title's "pointText" and "anchor" (absent: area text
+//           anchored at its centre, which is how version 10 draws every title); a version 10 file has neither (one
+//           that has them anyway keeps them, with a warning).
 // The steps are frozen (ProjectMigrations.h): a later schema version adds a step and never changes
 // how an older file is converted.
 std::optional<std::string> migrateProjectJson(nlohmann::json &document, int fromVersion,

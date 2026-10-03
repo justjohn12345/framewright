@@ -79,6 +79,8 @@ VETitleValueType valueTypeToVE(TitleValueType type) {
         return VETitleValueTypeChoice;
     case TitleValueType::Toggle:
         return VETitleValueTypeToggle;
+    case TitleValueType::Anchor:
+        return VETitleValueTypeAnchor;
     }
     return VETitleValueTypeNumber;
 }
@@ -119,6 +121,10 @@ SRGBColour fromVE(const VEColour &colour) {
     return SRGBColour{colour.red, colour.green, colour.blue};
 }
 
+static_assert(static_cast<std::size_t>(VETitleParameterAnchor) + 1 == kTitleParameterCount &&
+                  static_cast<std::size_t>(TitleParameter::Anchor) + 1 == kTitleParameterCount,
+              "VETitleParameter mirrors TitleParameter, in order");
+
 VETitleParameter toVE(TitleParameter parameter) {
     return static_cast<VETitleParameter>(static_cast<NSInteger>(parameter));
 }
@@ -151,6 +157,30 @@ std::optional<TitleAlignment> fromVE(VETitleAlignment alignment) {
         return TitleAlignment::Centre;
     case VETitleAlignmentRight:
         return TitleAlignment::Right;
+    }
+    return std::nullopt;
+}
+
+VETitleAnchor toVE(TitleAnchor anchor) {
+    switch (anchor) {
+    case TitleAnchor::Top:
+        return VETitleAnchorTop;
+    case TitleAnchor::Centre:
+        return VETitleAnchorCentre;
+    case TitleAnchor::Bottom:
+        return VETitleAnchorBottom;
+    }
+    return VETitleAnchorCentre;
+}
+
+std::optional<TitleAnchor> fromVE(VETitleAnchor anchor) {
+    switch (anchor) {
+    case VETitleAnchorTop:
+        return TitleAnchor::Top;
+    case VETitleAnchorCentre:
+        return TitleAnchor::Centre;
+    case VETitleAnchorBottom:
+        return TitleAnchor::Bottom;
     }
     return std::nullopt;
 }
@@ -409,6 +439,12 @@ void forgetTitleFontAvailability() {
 }
 - (double)width {
     return _content.width;
+}
+- (BOOL)pointText {
+    return _content.pointText;
+}
+- (VETitleAnchor)anchor {
+    return ve::facade::toVE(_content.anchor);
 }
 - (NSString *)displayName {
     return toNS(titleDisplayName(_content));

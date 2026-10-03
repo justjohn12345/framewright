@@ -22,8 +22,8 @@
 // (drawn into an sRGB context unchanged and composited as stills are; white is exactly video white).
 //
 // The content id (contentIdOf) is a 128-bit FNV-1a hash of the canonical form of everything that changes
-// the pixels: for a title its text, font, size, colours, alignment, spacing, outline, shadow, box and box
-// width, not its position (a drag that moves the box renders nothing new); for a matte its colour. It is
+// the pixels: for a title its text, font, size, colours, alignment, spacing, outline, shadow, box, box width,
+// point text and vertical anchor (these two place the picture relative to the position), not its position (a drag that moves the box renders nothing new); for a matte its colour. It is
 // computed once, when the content is made. With the raster scale it is the picture's cache identity
 // (GeneratedKey, Engine/Media/GeneratedSource.h).
 //
@@ -81,6 +81,19 @@ enum class TitleAlignment {
 // "left", "centre", "right".
 const char *nameOf(TitleAlignment alignment);
 std::optional<TitleAlignment> titleAlignmentNamed(std::string_view name);
+
+// Where a title's position (TitleContent::y) lies on its text block, and so which way the block grows when
+// lines are added (schema 11, titles slice 2): the block's top (it grows down), its centre (it grows both ways,
+// the slice 1 behaviour) or its bottom (it grows up).
+enum class TitleAnchor {
+    Top,
+    Centre,
+    Bottom,
+};
+
+// "top", "centre", "bottom".
+const char *nameOf(TitleAnchor anchor);
+std::optional<TitleAnchor> titleAnchorNamed(std::string_view name);
 
 // The weights of the system font, which a title names by weight, never by the private PostScript name the
 // system gives it (".SFNS-Semibold"), which changes between macOS versions.
@@ -162,9 +175,11 @@ enum class TitleParameter {
     PositionX,
     PositionY,
     BoxWidth,
+    PointText,
+    Anchor,
 };
 
-inline constexpr std::size_t kTitleParameterCount = 24;
+inline constexpr std::size_t kTitleParameterCount = 26;
 
 inline constexpr std::array<TitleParameter, kTitleParameterCount> kTitleParameters{
     TitleParameter::Text,          TitleParameter::Font,         TitleParameter::Size,
@@ -174,7 +189,8 @@ inline constexpr std::array<TitleParameter, kTitleParameterCount> kTitleParamete
     TitleParameter::ShadowOpacity, TitleParameter::ShadowAngle,  TitleParameter::ShadowDistance,
     TitleParameter::ShadowBlur,    TitleParameter::Box,          TitleParameter::BoxColour,
     TitleParameter::BoxOpacity,    TitleParameter::BoxPadding,   TitleParameter::BoxCornerRadius,
-    TitleParameter::PositionX,     TitleParameter::PositionY,    TitleParameter::BoxWidth};
+    TitleParameter::PositionX,     TitleParameter::PositionY,    TitleParameter::BoxWidth,
+    TitleParameter::PointText,     TitleParameter::Anchor};
 
 // The kind of value a parameter takes (TitleValue's alternative).
 enum class TitleValueType {
@@ -184,6 +200,7 @@ enum class TitleValueType {
     Colour, // SRGBColour
     Choice, // TitleAlignment
     Toggle, // bool
+    Anchor, // TitleAnchor
 };
 
 // What a number is measured in (the inspector converts the fractions of the frame to pixels of the sequence).
@@ -222,7 +239,7 @@ std::optional<TitleParameter> titleParameterNamed(std::string_view name);
 inline constexpr std::size_t kMaxTitleTextBytes = 16384;
 
 // One parameter's value (TitleParameterInfo::type says which alternative).
-using TitleValue = std::variant<std::string, TitleFont, double, SRGBColour, TitleAlignment, bool>;
+using TitleValue = std::variant<std::string, TitleFont, double, SRGBColour, TitleAlignment, bool, TitleAnchor>;
 
 // A title's content: every parameter (section 6). The defaults are the Title preset's (titlePreset).
 struct TitleContent {
@@ -250,6 +267,14 @@ struct TitleContent {
     double x = 0.5; // the box's centre, as fractions of the frame's width and height
     double y = 0.5;
     double width = 0.8; // the box's width, a fraction of the frame's width; its height follows the text
+    // Point text (schema 11): the lines break only where the text has a line break (Return), the block is as wide
+    // as its widest line and grows with the text, and `width` is kept but not used. Its position's x is then the
+    // block's left edge, centre or right edge as its lines align (left, centre, right), so typing grows the text
+    // away from that point, as Premiere's and Final Cut's point text do. Area text (false, slice 1): the lines
+    // wrap at `width`, and x is the block's centre.
+    bool pointText = false;
+    // Where y lies on the block (TitleAnchor; schema 11): its top, centre (slice 1) or bottom.
+    TitleAnchor anchor = TitleAnchor::Centre;
 
     friend bool operator==(const TitleContent &, const TitleContent &) = default;
 };

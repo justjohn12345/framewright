@@ -311,7 +311,7 @@ TEST_CASE("Migration goldens v9: the checked-in version 9 project matches the cu
     std::string asVersion10 = text.str();
     const std::string version9 = "\"schemaVersion\": 9,";
     REQUIRE(asVersion10.find(version9) != std::string::npos);
-    asVersion10.replace(asVersion10.find(version9), version9.size(), "\"schemaVersion\": 10,");
+    asVersion10.replace(asVersion10.find(version9), version9.size(), "\"schemaVersion\": 11,");
     CHECK(asVersion10 == written);
     const ProjectLoadResult loaded = parseProject(text.str());
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));

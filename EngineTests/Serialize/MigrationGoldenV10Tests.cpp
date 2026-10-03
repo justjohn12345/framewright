@@ -352,11 +352,26 @@ Project richProjectV10() {
 
 } // namespace
 
-TEST_CASE("Migration goldens v10: the checked-in version 10 project matches the current writer byte for byte") {
+TEST_CASE("Migration goldens v10: the checked-in version 10 project matches the current writer byte for byte but for "
+          "its version and the version 11 title keys") {
     const Project expected = richProjectV10();
     const std::string written = serializeProject(expected) + "\n";
     const std::string text = readText("v10/project-v10.json"); // checked in, never written by the test
-    CHECK(text == written);
+    // Version 11 writes every title's "pointText" and "anchor" (their defaults: what version 10 draws).
+    json asVersion11 = json::parse(text);
+    REQUIRE(asVersion11.at("schemaVersion") == kVersion10);
+    asVersion11["schemaVersion"] = 11;
+    for (json &sequence : asVersion11.at("sequences")) {
+        for (json &track : sequence.at("videoTracks")) {
+            for (json &clip : track.at("clips")) {
+                if (clip.contains("generated") && clip.at("generated").at("kind") == "title") {
+                    clip["generated"]["pointText"] = false;
+                    clip["generated"]["anchor"] = "centre";
+                }
+            }
+        }
+    }
+    CHECK(asVersion11.dump(2, ' ', false, json::error_handler_t::replace) + "\n" == written);
     const ProjectLoadResult loaded = parseProject(text);
     REQUIRE_MESSAGE(loaded.ok(), doctest::String(loaded.error.c_str()));
     CHECK(loaded.warnings.empty());

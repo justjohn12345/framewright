@@ -3,7 +3,8 @@
 // refers to the project's hidden generator asset of its kind. The edits and queries are VEEngine (Titles)
 // (VEEngine.h).
 //
-// Units: a title's positions are fractions of the frame's width and height (x, y: the centre of its text block);
+// Units: a title's positions are fractions of the frame's width and height (x, y: the point its text block is anchored
+// at, its centre unless the title is point text or anchored at its top or bottom);
 // its sizes (font size, outline width, shadow distance and blur, box padding, corner radius) are fractions of the
 // frame's height; the box width a fraction of the frame's width. Colours are sRGB components in [0, 1]. The table
 // VETitleParameterInfo gives each parameter's type, unit, default and range.
@@ -54,6 +55,8 @@ typedef NS_ENUM(NSInteger, VETitleParameter) {
     VETitleParameterPositionX = 21,
     VETitleParameterPositionY = 22,
     VETitleParameterBoxWidth = 23,
+    VETitleParameterPointText = 24,
+    VETitleParameterAnchor = 25,
 };
 
 /// The kind of value a title parameter takes.
@@ -64,6 +67,7 @@ typedef NS_ENUM(NSInteger, VETitleValueType) {
     VETitleValueTypeColour = 3, ///< VEColour
     VETitleValueTypeChoice = 4, ///< VETitleAlignment
     VETitleValueTypeToggle = 5, ///< BOOL
+    VETitleValueTypeAnchor = 6, ///< VETitleAnchor
 };
 
 /// What a title parameter's number is measured in.
@@ -82,6 +86,14 @@ typedef NS_ENUM(NSInteger, VETitleAlignment) {
     VETitleAlignmentLeft = 0,
     VETitleAlignmentCentre = 1,
     VETitleAlignmentRight = 2,
+};
+
+/// Where a title's y lies on its text block, and so which way the block grows as lines are added: its top (it grows
+/// down), its centre (both ways) or its bottom (it grows up).
+typedef NS_ENUM(NSInteger, VETitleAnchor) {
+    VETitleAnchorTop = 0,
+    VETitleAnchorCentre = 1,
+    VETitleAnchorBottom = 2,
 };
 
 /// The weights of the system font (a title stores the system font by weight, never by a private name).
@@ -172,8 +184,15 @@ typedef struct {
 /// The text block's centre, as fractions of the frame's width and height.
 @property (nonatomic, readonly) double x;
 @property (nonatomic, readonly) double y;
-/// The text block's width (the lines wrap inside it), a fraction of the frame's width.
+/// The text block's width (the lines wrap inside it), a fraction of the frame's width. Kept but unused for point
+/// text.
 @property (nonatomic, readonly) double width;
+/// Point text: the lines break only at line breaks and the block is as wide as its widest line; x is then the block's
+/// left edge, centre or right edge as the lines align. Area text (NO): the lines wrap at `width` and x is the block's
+/// centre.
+@property (nonatomic, readonly) BOOL pointText;
+/// Where y lies on the block: its top, centre or bottom.
+@property (nonatomic, readonly) VETitleAnchor anchor;
 /// The first line of the text ("Title" when it has none): the clip's name on the timeline.
 @property (nonatomic, readonly, copy) NSString *displayName;
 /// A number parameter's value (NaN for a parameter that is not a number).

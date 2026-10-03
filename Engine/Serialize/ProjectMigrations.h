@@ -10,8 +10,8 @@
 // each checked-in file of versions 1-7 migrated to version 7 (the version current when the steps
 // were frozen), with the warnings, and `golden/v8/*.migrated.json` the same files migrated to
 // version 8 (recorded when the 7 -> 8 step was added), `golden/v9/*.migrated.json` to version 9 (the
-// 8 -> 9 step) and `golden/v10/*.migrated.json` to version 10 (the 9 -> 10 step); they fail when a step's
-// output drifts.
+// 8 -> 9 step), `golden/v10/*.migrated.json` to version 10 (the 9 -> 10 step) and `golden/v11/*.migrated.json` to
+// version 11 (the 10 -> 11 step); they fail when a step's output drifts.
 //
 // A new schema version adds a step at the end of the table (ProjectMigrations.cpp) with its own
 // writer and constants, raises kLastMigrationTarget, and never edits an earlier step.
@@ -26,7 +26,7 @@
 namespace ve::serialize {
 
 // The version the last step produces; ProjectJSON.cpp asserts it is kProjectSchemaVersion.
-inline constexpr int kLastMigrationTarget = 10;
+inline constexpr int kLastMigrationTarget = 11;
 
 // Upgrades `document` from schema version `fromVersion` to `toVersion` (1 <= fromVersion <=
 // toVersion <= kLastMigrationTarget) in place, setting "schemaVersion" after each step, and appends
