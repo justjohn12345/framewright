@@ -66,6 +66,8 @@ final class TitleBoxModel: ObservableObject {
     /// The drag in progress was cancelled (Escape, or another edit ended its group): the rest of the gesture writes
     /// nothing until it ends.
     private(set) var dragCancelled = false
+    /// The presses on the box counted as clicks (`pressBegan`, `pressEnded`): a double-click starts typing.
+    private var clicks = ClickCounter()
 
     /// Nil unless `clip` is a title on a sequence with a frame size.
     init?(store: ProjectStore, clip: VEClipInfo, time: CMTime) {
@@ -199,10 +201,42 @@ final class TitleBoxModel: ObservableObject {
     }
 
     /// Whether a press released at `location` (view points), having moved by `movedBy`, ending `clickCount` clicks,
-    /// starts typing on the picture: a double-click (or more) that did not move, on the box or its handles.
+    /// starts typing on the picture: a double-click (or more) that moved no more than a click may
+    /// (`ClickCounter.isClick`), on the box or its handles.
     static func doubleClickStartsTyping(at location: CGPoint, movedBy: CGSize, clickCount: Int, box: KenBurnsBox,
                                         resizable: Bool) -> Bool {
-        clickCount >= 2 && movedBy == .zero && target(at: location, box: box, resizable: resizable) != nil
+        clickCount >= 2 && ClickCounter.isClick(movedBy) && target(at: location, box: box, resizable: resizable) != nil
+    }
+
+    // MARK: Clicks
+
+    /// The click count of the last press on the box (`pressBegan`; diagnostics and tests).
+    var clickCount: Int { clicks.count }
+
+    /// A press on the box (the first step of the overlay's drag gesture) at `location` (view points) at `time` (seconds,
+    /// the event's), `interval` the user's double-click interval (`NSEvent.doubleClickInterval`): counted as a click.
+    func pressBegan(at location: CGPoint, time: TimeInterval, interval: TimeInterval) {
+        clicks.press(at: location, time: time, interval: interval)
+    }
+
+    /// The press on the box was released at `location` (view points), `movedBy` from where it was pressed; `box` is the
+    /// box in view points and `framePoint` the release on the frame (sequence pixels). The drag ends (one undo step);
+    /// a release that ends a double-click (or more) on the box (`doubleClickStartsTyping`) instead takes back the little
+    /// the press moved the title (a click's jitter is not a move) and starts typing on the picture with the caret
+    /// there. Returns whether typing started.
+    @discardableResult
+    func pressEnded(at location: CGPoint, movedBy: CGSize, box: KenBurnsBox, framePoint: CGPoint) -> Bool {
+        let count = clicks.release(movedBy: movedBy)
+        guard Self.doubleClickStartsTyping(at: location, movedBy: movedBy, clickCount: count, box: box,
+                                           resizable: isResizable) else {
+            endDrag()
+            return false
+        }
+        cancelDrag()
+        endDrag()
+        // The next press starts a new run: a click soon after the session ends is a single click.
+        clicks = ClickCounter()
+        return beginEditing(.caret(atFramePoint: framePoint))
     }
 
     // MARK: Dragging
@@ -354,5 +388,54 @@ final class TitleBoxModel: ObservableObject {
         if !snapLines.isEmpty { snapLines = [] }
         store.cancelActiveGesture = nil
         if let clip = store.engine.clipInfo(clipID) { update(clip: clip) }
+    }
+}
+
+/// Counts a run of clicks from the presses and releases a gesture reports, as AppKit counts a mouse's clicks
+/// (`NSEvent.clickCount`): a press is the next click of the run when it comes within the double-click interval of the
+/// run's previous press and within `slop` of where that was, and that press was released as a click (it moved no more
+/// than `slop`); any other press starts a new run. The title box counts its own clicks because its drag gesture's
+/// callbacks are SwiftUI's: AppKit's current event when one runs need not be the press or release it reports (a
+/// synthesized event sent to a window never is), and `NSEvent.clickCount` raises for an event that is not a mouse event.
+struct ClickCounter {
+    /// How far (points) the pointer may move during a click, and between the presses of a double-click.
+    static let slop: CGFloat = 4
+
+    /// The click count of the last press (0 before any).
+    private(set) var count = 0
+    private var previous: (time: TimeInterval, location: CGPoint)?
+    /// Whether the last press was released as a click (false until its release is seen).
+    private var previousWasClick = false
+    /// A press waits for its release.
+    private var isPressed = false
+
+    /// Whether a press that moved by `moved` before its release is a click rather than a drag.
+    static func isClick(_ moved: CGSize) -> Bool {
+        hypot(moved.width, moved.height) <= slop
+    }
+
+    /// A press at `location` at `time` (seconds), `interval` the double-click interval: returns its click count.
+    @discardableResult
+    mutating func press(at location: CGPoint, time: TimeInterval, interval: TimeInterval) -> Int {
+        if let previous, previousWasClick, time >= previous.time, time - previous.time <= interval,
+           hypot(location.x - previous.location.x, location.y - previous.location.y) <= Self.slop {
+            count += 1
+        } else {
+            count = 1
+        }
+        previous = (time, location)
+        previousWasClick = false
+        isPressed = true
+        return count
+    }
+
+    /// The last press was released having moved by `movedBy`: its click count, or 0 when it was a drag (the next press
+    /// starts a new run) or no press waits for its release.
+    @discardableResult
+    mutating func release(movedBy: CGSize) -> Int {
+        guard isPressed else { return 0 }
+        isPressed = false
+        previousWasClick = Self.isClick(movedBy)
+        return previousWasClick ? count : 0
     }
 }

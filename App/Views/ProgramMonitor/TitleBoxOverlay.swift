@@ -110,7 +110,9 @@ struct TitleBoxOverlay: View {
     }
 
     /// Presses on the box (`TitleBoxModel.target`) drag it; presses elsewhere grab nothing. A move snaps to the
-    /// frame's guide lines unless Command is held.
+    /// frame's guide lines unless Command is held. The box counts its presses as clicks (`TitleBoxModel.pressBegan`,
+    /// from the gesture's own press time and place, never AppKit's current event): the release of a double-click
+    /// starts typing on the picture (`TitleBoxModel.pressEnded`).
     private var dragLayer: some View {
         let box = viewport.view(model.box)
         return Color.clear
@@ -118,6 +120,9 @@ struct TitleBoxOverlay: View {
             .gesture(DragGesture(minimumDistance: 0)
                 .updating($drag) { value, state, _ in
                     if state == nil {
+                        // The press (a drag of minimum distance 0 starts at it).
+                        model.pressBegan(at: value.startLocation, time: value.time.timeIntervalSinceReferenceDate,
+                                         interval: NSEvent.doubleClickInterval)
                         state = ActiveDrag(target: TitleBoxModel.target(at: value.startLocation, box: box,
                                                                         resizable: model.isResizable))
                     }
@@ -127,22 +132,9 @@ struct TitleBoxOverlay: View {
                                     snapThreshold: viewport.sequence(CGSize(width: Self.snapDistance, height: 0)).width)
                 }
                 .onEnded { value in
-                    model.endDrag()
-                    // The release of a double-click: AppKit's event says how many clicks it ends.
-                    if TitleBoxModel.doubleClickStartsTyping(at: value.location, movedBy: value.translation,
-                                                            clickCount: NSApp.currentEvent?.clickCount ?? 0, box: box,
-                                                            resizable: model.isResizable) {
-                        model.beginEditing(.caret(atFramePoint: viewport.sequence(value.location)))
-                    }
+                    model.pressEnded(at: value.location, movedBy: value.translation, box: box,
+                                     framePoint: viewport.sequence(value.location))
                 })
-            // SwiftUI's own double tap as well, so the double-click does not depend on the event AppKit is handling
-            // when the drag ends (starting twice is harmless: a second start keeps the session).
-            .simultaneousGesture(SpatialTapGesture(count: 2).onEnded { value in
-                if TitleBoxModel.doubleClickStartsTyping(at: value.location, movedBy: .zero, clickCount: 2, box: box,
-                                                         resizable: model.isResizable) {
-                    model.beginEditing(.caret(atFramePoint: viewport.sequence(value.location)))
-                }
-            })
             .accessibilityIdentifier("TitleBoxDragArea")
     }
 }

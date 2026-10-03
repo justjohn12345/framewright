@@ -348,9 +348,15 @@ final class TitleTypingTests: XCTestCase {
         XCTAssertGreaterThan(surface.textView.selectedRange().length, 0, "Shift-down extends")
     }
 
-    /// A double-click on the box, made by pointer events through a window as a hand makes them (they reach SwiftUI's
-    /// gestures only in a visible window), starts typing with the caret where it was.
-    func testADoubleClickOnTheBoxStartsTypingWithTheCaretThere() async throws {
+    /// A double-click on the box, made by pointer events sent through a shown window as a hand makes them (they reach
+    /// SwiftUI's gestures only in a visible window), starts typing with the caret where it was and the text view taking
+    /// the keys; one click does not. Synchronous, pumping the run loop itself, so an Objective-C exception raised while
+    /// an event is handled is reported as this test's failure. In an async test such an exception unwinds out of the
+    /// test's task job, XCTest's waiter catches it, and the test host aborts in the Swift runtime when the test ends
+    /// ("freed pointer was not the last allocation"), hiding what failed. That is what happened here while the box read
+    /// `NSApp.currentEvent?.clickCount`: an event sent to a window is never AppKit's current event, and `clickCount`
+    /// raises for a current event that is not a mouse event (the box now counts its own clicks, `ClickCounter`).
+    func testADoubleClickOnTheBoxStartsTypingWithTheCaretThere() throws {
         store.playheadTime = frames(0)
         XCTAssertTrue(store.addGenerated(.title))
         let id = try XCTUnwrap(store.selection.first)
@@ -368,35 +374,160 @@ final class TitleTypingTests: XCTestCase {
             window.orderOut(nil)
             window.close()
         }
-        await StoreFixture.wait(until: { false }, timeout: 0.3)
+        StoreFixture.spin(until: { false }, timeout: 0.3)
+        StoreFixture.spin(until: { window.occlusionState.contains(.visible) }, timeout: 1)
         guard window.occlusionState.contains(.visible) else {
             throw XCTSkip("the test window is not visible (the screen is locked or the window is covered)")
         }
         // The point just before "w" of "world" (index 6), on the frame and in the window.
         let layout = try XCTUnwrap(store.engine.titleTextLayout(ofClip: id, at: frames(10)))
-        let quad = layout.frameQuad(ofCanvasRect: try XCTUnwrap(layout.canvasSelectionRects(for: NSRange(location: 6,
-                                                                                                         length: 1)).first)
-                                        .rectValue)
+        let rect = try XCTUnwrap(layout.canvasSelectionRects(for: NSRange(location: 6, length: 1)).first).rectValue
+        let quad = layout.frameQuad(ofCanvasRect: rect)
         let point = CGPoint(x: quad.topLeft.x + 2, y: (quad.topLeft.y + quad.bottomLeft.y) / 2)
         let view = viewport.view(point)
         let location = NSPoint(x: view.x, y: monitor.height - view.y)
-        for click in 1 ... 2 {
+        let x = try XCTUnwrap(store.clips[id]?.title?.x)
+        var eventNumber = 0
+        func click(_ count: Int) throws {
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                eventNumber += 1
                 let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
                                                              timestamp: ProcessInfo.processInfo.systemUptime,
                                                              windowNumber: window.windowNumber, context: nil,
-                                                             eventNumber: click, clickCount: click, pressure: 1))
+                                                             eventNumber: eventNumber, clickCount: count, pressure: 1))
                 window.sendEvent(event)
-                await StoreFixture.wait(until: { false }, timeout: 0.02)
+                StoreFixture.spin(until: { false }, timeout: 0.02)
             }
         }
-        await StoreFixture.wait(until: { box.editor != nil }, timeout: 2)
+        try click(1)
+        XCTAssertNil(box.editor, "one click does not start typing")
+        try click(2)
+        StoreFixture.spin(until: { box.editor != nil }, timeout: 2)
         // The window is shown: the double-click must start typing (a skip only when it cannot be shown, above).
-        XCTAssertNotNil(box.editor, "a double-click on the box starts typing on the picture")
+        guard box.editor != nil else {
+            return XCTFail("a double-click on the box starts typing on the picture (the box counted \(box.clickCount) "
+                + "click(s) at the last press; 0: the presses never reached its gesture)")
+        }
         XCTAssertTrue(store.isEditingTitleOnPicture)
-        await StoreFixture.wait(until: { window.firstResponder is TitleEditingTextView }, timeout: 2)
-        let textView = try XCTUnwrap(window.firstResponder as? TitleEditingTextView)
+        XCTAssertEqual(store.clips[id]?.title?.text, "Hello world", "the clicks did not change the text")
+        XCTAssertEqual(try XCTUnwrap(store.clips[id]?.title?.x), x, accuracy: 1e-9, "the clicks did not move the title")
+        StoreFixture.spin(until: { window.firstResponder is TitleEditingTextView }, timeout: 2)
+        guard let textView = window.firstResponder as? TitleEditingTextView else {
+            return XCTFail("the typing surface's text view takes the keys (first responder: "
+                + "\(String(describing: window.firstResponder)))")
+        }
         XCTAssertEqual(textView.selectedRange(), NSRange(location: 6, length: 0), "the caret where it was clicked")
+    }
+
+    /// A double-click on the box through its gesture's presses and releases (`TitleBoxModel.pressBegan`, `pressEnded`;
+    /// no window): the second release starts typing with the caret there; one click, a slow second click, a press
+    /// after a drag or beside the box do not; a click's jitter that moved the title is taken back, not an undo step.
+    func testTheBoxsPressesStartTypingOnADoubleClick() throws {
+        store.playheadTime = frames(0)
+        XCTAssertTrue(store.addGenerated(.title))
+        let id = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.engine.setTitleText("Hello world", clips: [NSNumber(value: id)]).ok)
+        store.playheadTime = frames(10)
+        let box = try XCTUnwrap(store.titleBox)
+        box.setPlayhead(frames(10))
+        box.update(clip: try XCTUnwrap(store.engine.clipInfo(id)))
+        let layout = try XCTUnwrap(store.engine.titleTextLayout(ofClip: id, at: frames(10)))
+        let rect = try XCTUnwrap(layout.canvasSelectionRects(for: NSRange(location: 6, length: 1)).first).rectValue
+        let quad = layout.frameQuad(ofCanvasRect: rect)
+        let framePoint = CGPoint(x: quad.topLeft.x + 2, y: (quad.topLeft.y + quad.bottomLeft.y) / 2)
+        let point = viewport.view(framePoint)
+        let viewBox = viewport.view(box.box)
+        let interval = 0.5
+        /// A press at `time` on `location` (the point before "w"), dragged by `drag` (view points), and its release.
+        func press(time: TimeInterval, drag: CGSize = .zero, location: CGPoint? = nil) -> Bool {
+            let start = location ?? point
+            box.pressBegan(at: start, time: time, interval: interval)
+            if drag != .zero {
+                box.applyDrag(.body, translation: viewport.sequence(drag))
+            }
+            let end = CGPoint(x: start.x + drag.width, y: start.y + drag.height)
+            return box.pressEnded(at: end, movedBy: drag, box: viewBox, framePoint: viewport.sequence(end))
+        }
+        let x = try XCTUnwrap(store.clips[id]?.title?.x)
+        let undoName = store.undoActionName
+        // One click; then the second, quickly and in place: typing, the caret where it was.
+        XCTAssertFalse(press(time: 100))
+        XCTAssertNil(box.editor, "one click")
+        XCTAssertTrue(press(time: 100.2))
+        XCTAssertEqual(box.clickCount, 2)
+        XCTAssertEqual(box.editor?.initialSelection, NSRange(location: 6, length: 0))
+        XCTAssertTrue(store.isEditingTitleOnPicture)
+        XCTAssertEqual(store.undoActionName, undoName, "the clicks are no edit")
+        XCTAssertEqual(try XCTUnwrap(store.clips[id]?.title?.x), x, accuracy: 1e-9)
+        box.endEditing()
+        // A click right after the session: a new run, one click.
+        XCTAssertFalse(press(time: 100.4))
+        XCTAssertEqual(box.clickCount, 1)
+        // Too slow.
+        XCTAssertFalse(press(time: 200))
+        XCTAssertFalse(press(time: 200 + interval + 0.01))
+        XCTAssertNil(box.editor, "a slow second click")
+        // A drag, then a click: the click is the first of a run.
+        XCTAssertFalse(press(time: 300, drag: CGSize(width: 30, height: 0)))
+        XCTAssertEqual(store.undoActionName, "Move Title")
+        let moved = try XCTUnwrap(store.clips[id]?.title?.x)
+        XCTAssertNotEqual(moved, x, accuracy: 1e-9)
+        let movedName = store.undoActionName
+        let dragged = viewport.view(box.box)
+        let onIt = CGPoint(x: point.x + 30, y: point.y)
+        XCTAssertFalse(box.pressEnded(at: onIt, movedBy: .zero, box: dragged, framePoint: viewport.sequence(onIt)),
+                       "a release with no press")
+        box.pressBegan(at: onIt, time: 300.2, interval: interval)
+        XCTAssertEqual(box.clickCount, 1, "after a drag")
+        XCTAssertFalse(box.pressEnded(at: onIt, movedBy: .zero, box: dragged, framePoint: viewport.sequence(onIt)))
+        // A double-click whose second press jittered by two points: typing starts and the title is where it was.
+        box.pressBegan(at: onIt, time: 300.4, interval: interval)
+        box.applyDrag(.body, translation: viewport.sequence(CGSize(width: 2, height: 0)))
+        XCTAssertNotEqual(try XCTUnwrap(store.clips[id]?.title?.x), moved, accuracy: 1e-9, "the jitter moved it")
+        let jittered = CGPoint(x: onIt.x + 2, y: onIt.y)
+        XCTAssertTrue(box.pressEnded(at: jittered, movedBy: CGSize(width: 2, height: 0), box: dragged,
+                                     framePoint: viewport.sequence(jittered)))
+        XCTAssertEqual(try XCTUnwrap(store.clips[id]?.title?.x), moved, accuracy: 1e-9, "the jitter was taken back")
+        XCTAssertEqual(store.undoActionName, movedName, "no undo step for the jitter")
+        XCTAssertNil(store.cancelActiveGesture)
+        XCTAssertFalse(box.isDragging)
+        XCTAssertTrue(store.isEditingTitleOnPicture)
+        box.endEditing()
+        // Beside the box: no typing.
+        let beside = CGPoint(x: dragged.center.x, y: dragged.center.y + dragged.size.height + 40)
+        XCTAssertFalse(press(time: 400, location: beside))
+        XCTAssertFalse(press(time: 400.2, location: beside))
+        XCTAssertEqual(box.clickCount, 2, "a double-click, but beside the box")
+        XCTAssertNil(box.editor)
+    }
+
+    /// The click count of presses (`ClickCounter`), as AppKit counts a mouse's clicks: presses within the double-click
+    /// interval of the previous one and a few points from it, each released without moving further than a click, count
+    /// up; a slow press, a press further away, a press after a drag or after a press whose release was not seen starts
+    /// a new run.
+    func testTheClickCounterCountsClicksAsAppKitDoes() {
+        var clicks = ClickCounter()
+        let p = CGPoint(x: 100, y: 50)
+        XCTAssertEqual(clicks.release(movedBy: .zero), 0, "no press")
+        XCTAssertEqual(clicks.press(at: p, time: 10, interval: 0.5), 1)
+        XCTAssertEqual(clicks.release(movedBy: .zero), 1)
+        XCTAssertEqual(clicks.release(movedBy: .zero), 0, "one release per press")
+        XCTAssertEqual(clicks.press(at: CGPoint(x: 102, y: 51), time: 10.3, interval: 0.5), 2, "a little apart")
+        XCTAssertEqual(clicks.release(movedBy: CGSize(width: 1, height: -1)), 2, "a click's jitter")
+        XCTAssertEqual(clicks.press(at: p, time: 10.6, interval: 0.5), 3, "a triple-click")
+        XCTAssertEqual(clicks.release(movedBy: .zero), 3)
+        XCTAssertEqual(clicks.press(at: p, time: 11.2, interval: 0.5), 1, "too slow")
+        XCTAssertEqual(clicks.release(movedBy: .zero), 1)
+        XCTAssertEqual(clicks.press(at: CGPoint(x: 100, y: 55), time: 11.3, interval: 0.5), 1, "too far")
+        XCTAssertEqual(clicks.release(movedBy: CGSize(width: 20, height: 0)), 0, "a drag")
+        XCTAssertEqual(clicks.press(at: CGPoint(x: 100, y: 55), time: 11.4, interval: 0.5), 1, "after a drag")
+        XCTAssertEqual(clicks.press(at: CGPoint(x: 100, y: 55), time: 11.5, interval: 0.5), 1, "its release not seen")
+        XCTAssertEqual(clicks.release(movedBy: .zero), 1)
+        XCTAssertEqual(clicks.press(at: CGPoint(x: 100, y: 55), time: 11.0, interval: 0.5), 1, "an earlier time")
+        XCTAssertEqual(clicks.release(movedBy: .zero), 1)
+        XCTAssertEqual(clicks.press(at: CGPoint(x: 100, y: 55), time: 11.0 + 0.5, interval: 0.5), 2, "at the interval")
+        XCTAssertTrue(ClickCounter.isClick(CGSize(width: ClickCounter.slop, height: 0)))
+        XCTAssertFalse(ClickCounter.isClick(CGSize(width: ClickCounter.slop, height: 0.5)))
     }
 
     /// Command-Delete and Command-Forward-Delete delete to the start and the end of the drawn line (review fix: the text
@@ -442,8 +573,8 @@ final class TitleTypingTests: XCTestCase {
         XCTAssertFalse(wrapped.textView.textContainer?.widthTracksTextView ?? true)
     }
 
-    /// What a release starts: typing on the picture after a double-click (or a triple) that did not move, on the box or
-    /// its handles; nothing for a single click, a drag, or a double-click beside the box.
+    /// What a release starts: typing on the picture after a double-click (or a triple) that moved no more than a click
+    /// may, on the box or its handles; nothing for a single click, a drag, or a double-click beside the box.
     func testWhichReleaseStartsTyping() {
         let box = KenBurnsBox(center: CGPoint(x: 200, y: 100), size: CGSize(width: 100, height: 40), rotationDegrees: 0)
         let on = CGPoint(x: 210, y: 105)
@@ -451,7 +582,9 @@ final class TitleTypingTests: XCTestCase {
         XCTAssertTrue(TitleBoxModel.doubleClickStartsTyping(at: on, movedBy: .zero, clickCount: 3, box: box, resizable: true))
         XCTAssertFalse(TitleBoxModel.doubleClickStartsTyping(at: on, movedBy: .zero, clickCount: 1, box: box,
                                                              resizable: true), "a single click")
-        XCTAssertFalse(TitleBoxModel.doubleClickStartsTyping(at: on, movedBy: CGSize(width: 2, height: 0), clickCount: 2,
+        XCTAssertTrue(TitleBoxModel.doubleClickStartsTyping(at: on, movedBy: CGSize(width: 2, height: -1), clickCount: 2,
+                                                            box: box, resizable: true), "a click's jitter")
+        XCTAssertFalse(TitleBoxModel.doubleClickStartsTyping(at: on, movedBy: CGSize(width: 5, height: 0), clickCount: 2,
                                                              box: box, resizable: true), "a drag")
         XCTAssertFalse(TitleBoxModel.doubleClickStartsTyping(at: CGPoint(x: 400, y: 100), movedBy: .zero, clickCount: 2,
                                                              box: box, resizable: true), "beside the box")
