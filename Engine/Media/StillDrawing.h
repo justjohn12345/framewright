@@ -1,7 +1,7 @@
 // Drawing a decoded still (a CGImage) into the IOSurface-backed buffer the compositor samples, in
 // the format DecodeOptions::highPrecision asks for. Shared by the Apple still decoder (ImageIO) and
 // the FFmpeg one (which hands its decoded pixels to CoreGraphics when they need colour matching or
-// more than 8 bits), so both store a still alike.
+// more than 8 bits), so both store a still alike. The bitmap set-up and the tags are PictureDrawing's.
 
 #pragma once
 
