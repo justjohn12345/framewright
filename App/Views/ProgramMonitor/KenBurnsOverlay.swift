@@ -270,7 +270,7 @@ struct KenBurnsOverlay: View {
 
 /// The Ken Burns editor's bar under the program picture: the span's range (Start, End and Duration
 /// as timeline times), the hold-after caption or what limited the last edit, the neighbour toggles
-/// next to touching clips, the smoothing, Swap and Close.
+/// next to touching clips, the smoothing, Reset Start and Reset End, Swap and Close.
 struct KenBurnsControls: View {
     let store: ProjectStore
     @ObservedObject var model: KenBurnsModel
@@ -393,6 +393,8 @@ struct KenBurnsControls: View {
             .fixedSize()
             .help("How the move starts and ends (Ease In and Out: it accelerates slowly and comes to rest slowly)")
             .accessibilityIdentifier("KenBurnsSmoothing")
+            resetButton(.start)
+            resetButton(.end)
             Button {
                 model.swap()
             } label: {
@@ -413,6 +415,20 @@ struct KenBurnsControls: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(.bar)
+    }
+
+    /// Reset Start / Reset End: that edge back to the clip's own placement (Transform) or the whole picture (Ken
+    /// Burns), one undo step; disabled while a drag runs or when the edge already shows it (`canReset` is not asked
+    /// during a drag: the bar redraws with every step).
+    private func resetButton(_ which: KenBurnsModel.Framing) -> some View {
+        let name = which == .start ? "Start" : "End"
+        let what = model.mode == .kenBurns
+            ? "the \(which == .start ? "green" : "red") rectangle back to the whole picture"
+            : "the \(which == .start ? "green" : "red") box back to where the clip sits without this move"
+        return Button("Reset \(name)") { model.reset(which) }
+            .disabled(model.isDragging || !model.canReset(which))
+            .help("Put \(what) (one undo step)")
+            .accessibilityIdentifier("KenBurnsReset\(name)")
     }
 }
 

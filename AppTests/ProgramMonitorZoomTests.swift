@@ -10,8 +10,8 @@ import XCTest
 /// enough to show both boxes (or rectangles) with their handles when they reach past the Transform margin (or the
 /// frame box in Ken Burns mode), re-fitted when the editor opens and when a drag ends, never during one, and back
 /// to Fit when the editor closes or the boxes are inside again; the zoom control's fixed levels and Command-plus /
-/// Command-minus / Shift-Z while the monitor has the focus (the timeline's zoom otherwise).
-/// The movie is 10 s at 320x180, filling the 1920x1080 frame.
+/// Command-minus / Shift-Z while the monitor has the focus (the timeline's zoom otherwise); Reset Start and Reset
+/// End in the editor's bar, one undo step each. The movie is 10 s at 320x180, filling the 1920x1080 frame.
 @MainActor
 final class ProgramMonitorZoomTests: XCTestCase {
     private var fixture: StoreFixture!
@@ -277,6 +277,61 @@ final class ProgramMonitorZoomTests: XCTestCase {
         store.focusArea = .mediaBin
         store.zoomIn()
         XCTAssertEqual(store.programZoom.zoom, .fit, "the bin took the focus")
+    }
+
+    // MARK: Reset
+
+    /// Reset Start and Reset End: Transform puts the box back where the clip sits without the move (its own
+    /// placement: a picture in picture's box), Ken Burns the rectangle back to the whole picture (the frame box);
+    /// the other edge and the rotation stay; one undo step each; disabled when there is nothing to reset.
+    func testResetPutsAnEdgeBackInOneUndoStep() async throws {
+        let clip = try await longClip()
+        XCTAssertTrue(store.engine.setVideoParams(VEVideoParams(x: 300, y: -100, scale: 0.5, rotationDegrees: 0, opacity: 1),
+                                                  forClip: clip).ok)
+        let model = try openEditor(on: clip, mode: .transform)
+        let picture = CGSize(width: 320, height: 180)
+        let own = KenBurnsModel.box(for: VEVideoParams(x: 300, y: -100, scale: 0.5, rotationDegrees: 0, opacity: 1),
+                                    picture: picture, sequence: sequence)
+        XCTAssertFalse(model.canReset(.start), "a new Transform span adds nothing")
+        XCTAssertFalse(model.canReset(.end))
+        model.applyDrag(.body(.end), origin: model.end, translation: CGSize(width: 250, height: 100))
+        model.endDrag()
+        model.applyDrag(.body(.start), origin: model.start, translation: CGSize(width: -400, height: 200))
+        model.endDrag()
+        let moved = model.start
+        let end = model.end
+        XCTAssertTrue(model.canReset(.start))
+
+        model.reset(.start)
+        assertBox(model.start, own, "Transform: the clip's own placement")
+        assertBox(model.end, end, "the end stays")
+        XCTAssertFalse(model.canReset(.start), "nothing left to reset")
+        store.undo()
+        assertBox(model.start, moved, "one undo step")
+        store.redo()
+        assertBox(model.start, own, "redone")
+
+        XCTAssertTrue(model.canReset(.end), "the end was moved")
+        model.reset(.end)
+        assertBox(model.end, own, "Transform: the end too")
+        store.undo()
+        assertBox(model.end, end, "one undo step")
+
+        // Ken Burns: the whole picture (the frame box), whatever the clip's own placement.
+        model.setMode(.kenBurns)
+        let frameBox = KenBurnsBox(center: CGPoint(x: 960, y: 540), size: sequence, rotationDegrees: 0)
+        XCTAssertTrue(model.canReset(.start), "a picture in picture's rectangle is not the whole picture")
+        model.reset(.start)
+        assertBox(model.start, frameBox, "Ken Burns: the whole picture")
+        XCTAssertFalse(model.canReset(.start))
+        model.applyDrag(.corner(.start, .topLeft), origin: model.start, translation: CGSize(width: 480, height: 270))
+        model.endDrag()
+        let zoomedIn = model.start
+        XCTAssertLessThan(zoomedIn.size.width, sequence.width)
+        model.reset(.start)
+        assertBox(model.start, frameBox, "Ken Burns: back to the whole picture")
+        store.undo()
+        assertBox(model.start, zoomedIn, "one undo step")
     }
 
     // MARK: Pictures (offscreen, for the report)

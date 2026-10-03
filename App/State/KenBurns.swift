@@ -781,6 +781,39 @@ final class KenBurnsModel: ObservableObject {
         report(store.engine.setSpanValues(spanID, start: from, end: to))
     }
 
+    /// What Reset Start / Reset End put an edge back to, as absolute values over `base` (that edge's
+    /// base: what the rest of the clip composes to there): Transform, the clip's own placement there
+    /// (the base itself: the span adds nothing); Ken Burns, the whole picture (position 0, scale 1:
+    /// the rectangle is the frame box, the clip fitted at 100 %).
+    private func resetFraming(base: VESpanValues) -> VEMotionFraming {
+        switch mode {
+        case .transform: return VEMotionFraming(x: base.x, y: base.y, scale: base.scale)
+        case .kenBurns: return VEMotionFraming(x: 0, y: 0, scale: 1)
+        }
+    }
+
+    /// Whether Reset Start / Reset End would change `which` (it does not already show what a reset
+    /// gives it); false while the engine cannot say.
+    func canReset(_ which: Framing) -> Bool {
+        guard let base = bases() else { return false }
+        let target = resetFraming(base: which == .start ? base.start : base.end)
+        return !Self.sameFraming(edgeFraming(atEnd: which == .end), target)
+    }
+
+    /// Reset Start / Reset End (the editor's bar): puts that edge's box back to the clip's own placement
+    /// (Transform) or its rectangle back to the whole picture (Ken Burns), the other edge unchanged, the
+    /// rotation kept. One undo step.
+    func reset(_ which: Framing) {
+        guard mayEdit(), let base = bases() else { return }
+        let target = resetFraming(base: which == .start ? base.start : base.end)
+        guard let (from, to) = values(start: which == .start ? target : nil, end: which == .end ? target : nil,
+                                      base: base) else {
+            note = Self.zeroScaleNote
+            return
+        }
+        report(store.engine.setSpanValues(spanID, start: from, end: to))
+    }
+
     /// Smoothing: how the span moves (one undo step).
     func setInterpolation(_ interpolation: VEKeyframeInterpolation) {
         guard mayEdit(), interpolation != span.interpolation else { return }
