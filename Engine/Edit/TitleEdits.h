@@ -9,8 +9,8 @@
 // - summarizeTitles tells, per parameter, the value the titles of a selection agree on, or that they differ
 //   ("Mixed"), and the same for the mattes' colour.
 // - AddGeneratedClip is the placement rule of a new title or matte (section 9): at the playhead, on the lowest
-//   video track above the target video track that is free for the clip's whole length (unlocked, with nothing in
-//   that time); if none is, on a new video track added on top, in the same edit. Nothing is overwritten or
+//   video track above the target video track that is free for the clip's whole length (unlocked, shown, with
+//   nothing in that time); if none is, on a new video track added on top, in the same edit. Nothing is overwritten or
 //   rippled.
 //
 // A clip of a generator asset is placed by naming its content: ClipPlacement::generated (EditOps.h), whose asset is
@@ -106,7 +106,7 @@ TitleSummary summarizeTitles(const Sequence &sequence, const std::vector<ClipId>
 
 // Adds a clip showing `content` at `at` (snapped to the frame grid) for `length` (whole frames, at least one) by
 // the placement rule (see the header): on the lowest video track above `aboveTrack` (a video track of the sequence;
-// an invalid id: from the bottom track up) that is unlocked and free over the clip's range, else on a new video
+// an invalid id: from the bottom track up) that is unlocked, shown (not hidden, Track::muted) and free over the clip's range, else on a new video
 // track added on top ("V<n>"). Refused: InvalidTime for a time before zero or not numeric, InvalidArgument for no
 // content or invalid content, TrackKindMismatch when `aboveTrack` is not a video track, AssetNotFound when the
 // project has no generator asset of the content's kind.

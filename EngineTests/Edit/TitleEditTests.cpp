@@ -211,6 +211,10 @@ TEST_CASE("Title edits: a new title goes on the lowest free track above the targ
     fx.track(fx.v2).locked = false;
     const auto [sixth, sixthTrack, sixthAdded] = add(TrackId{}, 1000);
     CHECK(sixthTrack == fx.v1);
+    // A hidden track (muted video) is passed over: the title would not show there.
+    fx.track(fx.v2).muted = true;
+    const auto [seventh, seventhTrack, seventhAdded] = add(fx.v1, 2000);
+    CHECK(seventhTrack == secondTrack);
     fx.requireValid();
 }
 

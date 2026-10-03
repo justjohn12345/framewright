@@ -284,6 +284,9 @@ std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGSize> &measuredTit
     std::vector<std::pair<TitleFont, NSInteger>> missing;
     for (const Sequence *sequence : sequences) {
         for (const Track &track : sequence->videoTracks) {
+            if (track.muted) {
+                continue; // a hidden track is not shown or exported
+            }
             for (const Clip &clip : track.clips) {
                 if (!clip.generated || !clip.generated->isTitle()) {
                     continue;

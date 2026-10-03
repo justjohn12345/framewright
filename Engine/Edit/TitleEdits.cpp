@@ -206,7 +206,7 @@ EditResult AddGeneratedClip::perform(const Project &project, Sequence &sequence,
         const bool free = std::none_of(track.clips.begin(), track.clips.end(), [&](const Clip &clip) {
             return clip.timelineRange().intersects(range);
         });
-        if (!track.locked && free) {
+        if (!track.locked && !track.muted && free) { // a hidden video track (muted) would not show it
             destination = &track;
         }
     }

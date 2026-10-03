@@ -403,6 +403,13 @@ bool sameColour(VEColour a, VEColour b) {
     XCTAssertEqual(engine.missingTitleFonts.count, 1u);
     XCTAssertEqualObjects(engine.missingTitleFonts[0].font, missing);
     XCTAssertEqual(engine.missingTitleFonts[0].clipCount, 2);
+    // A hidden track's titles are not shown or exported: their fonts are not asked about.
+    const VETrackID track = [engine clipInfo:b].trackID;
+    XCTAssertEqual([engine clipInfo:a].trackID, track);
+    XCTAssertTrue([engine setTrack:track muted:YES].ok);
+    XCTAssertEqual(engine.missingTitleFonts.count, 0u);
+    XCTAssertTrue([engine setTrack:track muted:NO].ok);
+    XCTAssertEqual(engine.missingTitleFonts.count, 1u);
     // The block is measured in the fallback (System Bold), not as an empty title.
     XCTAssertGreaterThan([engine titleBlockSizeOfClip:a].height, 0);
     NSURL *url = [_scratch URLByAppendingPathComponent:@"missing-font.framewright"];
