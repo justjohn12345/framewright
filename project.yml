@@ -281,7 +281,7 @@ targets:
             UTTypeDescription: Framewright Move Effect
             UTTypeConformsTo:
               - public.data
-          # ... and its titles and generators (Title, Lower Third, Colour Matte).
+          # ... and its titles and generators (Title, Lower Third, Colour Matte, Title Card, Caption).
           - UTTypeIdentifier: com.justjohn12345.framewright.generator.title
             UTTypeDescription: Framewright Title
             UTTypeConformsTo:
@@ -292,6 +292,14 @@ targets:
               - public.data
           - UTTypeIdentifier: com.justjohn12345.framewright.generator.colour-matte
             UTTypeDescription: Framewright Colour Matte
+            UTTypeConformsTo:
+              - public.data
+          - UTTypeIdentifier: com.justjohn12345.framewright.generator.title-card
+            UTTypeDescription: Framewright Title Card
+            UTTypeConformsTo:
+              - public.data
+          - UTTypeIdentifier: com.justjohn12345.framewright.generator.caption
+            UTTypeDescription: Framewright Caption
             UTTypeConformsTo:
               - public.data
         # No imported declarations: the app makes the file promise types and the Live Photo bundle

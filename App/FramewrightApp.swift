@@ -165,6 +165,10 @@ struct AppCommands: Commands {
                 .disabled(!store.canAddGenerated)
             Button("Add Colour Matte") { store.addGenerated(.colourMatte) }
                 .disabled(!store.canAddGenerated)
+            Button("Add Title Card") { store.addGenerated(.titleCard) }
+                .disabled(!store.canAddGenerated)
+            Button("Add Caption") { store.addGenerated(.caption) }
+                .disabled(!store.canAddGenerated)
             Divider()
             // The grade of the selected video clips (their linked sound is left out): copied from one clip,
             // or from several with identical grades (`canCopyGrade`), pasted onto all, reset on all; each

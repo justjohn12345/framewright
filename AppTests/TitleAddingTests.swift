@@ -4,8 +4,8 @@ import FramewrightEngine
 import XCTest
 @testable import Framewright
 
-/// Adding titles, lower thirds and colour mattes (titles design section 9; slice 1): Clip > Add Title (⌃T), Add Lower
-/// Third (⇧⌃T) and Add Colour Matte put the preset at the playhead above the target video track (a new track when
+/// Adding titles, lower thirds and colour mattes (titles design section 9; slice 1; the title card and caption of
+/// slice 2): Clip > Add Title (⌃T), Add Lower Third (⇧⌃T) and Add Colour Matte put the preset at the playhead above the target video track (a new track when
 /// none is free), one undo step, select it and ask the inspector to focus the title's text; the items are disabled
 /// during a drag; ⌃T is the keyboard controller's, so a text field keeps its own.
 @MainActor
@@ -144,6 +144,42 @@ final class TitleAddingTests: XCTestCase {
         XCTAssertEqual(store.videoTracks[0].name, "V1")
         store.undo()
         XCTAssertTrue(store.videoTracks.isEmpty, "one undo takes the title and its track")
+    }
+
+    /// Slice 2's presets: a title card is a black matte over the footage with its title above, selected (the
+    /// inspector asked to focus its text), one undo step; a caption is point text at the top left; both come as tiles
+    /// and dropped tiles too.
+    func testATitleCardAndACaption() async throws {
+        let movie = try await footage()
+        store.playheadTime = frames(15)
+        XCTAssertTrue(store.addGenerated(.titleCard))
+        let title = try XCTUnwrap(store.selection.first)
+        XCTAssertEqual(store.selection.count, 1, "the card's title alone is selected")
+        XCTAssertEqual(store.clips[title]?.generatorKind, .title)
+        XCTAssertEqual(store.inspectorFocusRequest?.field, .titleText)
+        XCTAssertEqual(store.undoActionName, "Add Title Card")
+        let mattes = store.clips.values.filter { $0.generatorKind == .colourMatte }
+        XCTAssertEqual(mattes.count, 1)
+        let matte = try XCTUnwrap(mattes.first)
+        XCTAssertEqual(matte.trackID, store.videoTracks[1].trackID, "the matte over the footage on V2")
+        XCTAssertEqual(store.clips[title]?.trackID, store.videoTracks[2].trackID, "its title on V3, above the matte")
+        XCTAssertEqual(store.clips[movie]?.duration, frames(60), "nothing overwritten")
+        store.undo()
+        XCTAssertNil(store.clips[title])
+        XCTAssertFalse(store.clips.values.contains { $0.generatorKind == .colourMatte }, "one undo takes both")
+
+        XCTAssertTrue(store.addGenerated(.caption))
+        let caption = try XCTUnwrap(store.clips[try XCTUnwrap(store.selection.first)]?.title)
+        XCTAssertTrue(caption.pointText)
+        XCTAssertEqual(caption.anchor, .top)
+        XCTAssertEqual(store.undoActionName, "Add Caption")
+        // The tiles: every preset has a drag type of its own, which the timeline accepts.
+        XCTAssertEqual(GeneratorPreset.allCases.count, 5)
+        XCTAssertEqual(Set(GeneratorPreset.allCases.map(\.contentType)).count, 5)
+        let v1 = store.videoTracks[0].trackID
+        XCTAssertTrue(store.dropGenerated(.titleCard, onTrack: v1, at: 1, insert: false))
+        XCTAssertEqual(store.clips[try XCTUnwrap(store.selection.first)]?.generatorKind, .title)
+        XCTAssertEqual(store.clips[movie]?.duration, frames(30), "the dropped card's matte cuts the footage")
     }
 
     func testControlTIsTheKeyboardControllers() async throws {

@@ -214,6 +214,26 @@
 			<key>UTTypeIdentifier</key>
 			<string>com.justjohn12345.framewright.generator.colour-matte</string>
 		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Title Card</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.generator.title-card</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Caption</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.generator.caption</string>
+		</dict>
 	</array>
 </dict>
 </plist>

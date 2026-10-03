@@ -10,16 +10,22 @@ extension UTType {
     static let framewrightTitleGenerator = UTType(exportedAs: "com.justjohn12345.framewright.generator.title")
     static let framewrightLowerThirdGenerator = UTType(exportedAs: "com.justjohn12345.framewright.generator.lower-third")
     static let framewrightColourMatteGenerator = UTType(exportedAs: "com.justjohn12345.framewright.generator.colour-matte")
+    static let framewrightTitleCardGenerator = UTType(exportedAs: "com.justjohn12345.framewright.generator.title-card")
+    static let framewrightCaptionGenerator = UTType(exportedAs: "com.justjohn12345.framewright.generator.caption")
 }
 
 /// What a new title or matte starts as (the engine's presets, titles design section 9): a centred title, a lower
-/// third (left-aligned in the lower left inside title-safe, "Name" and "Role" on a 60 % black box) and a black
-/// colour matte. Added from the Clip menu (Add Title ⌃T, Add Lower Third ⇧⌃T, Add Colour Matte) and the Effects
-/// tab's "Titles and Generators" tiles (dragged onto a track, or "+" at the playhead).
+/// third (left-aligned in the lower left inside title-safe, "Name" and "Role" on a 60 % black box), a black colour
+/// matte, a title card (a bold centred title over a black matte, two clips) and a caption (text at the top left of
+/// title-safe that grows down and to the right as it is typed). Added from the Clip menu (Add Title ⌃T, Add Lower
+/// Third ⇧⌃T, Add Colour Matte, Add Title Card, Add Caption) and the Effects tab's "Titles and Generators" tiles
+/// (dragged onto a track, or "+" at the playhead).
 enum GeneratorPreset: String, CaseIterable, Identifiable, Codable {
     case title
     case lowerThird
     case colourMatte
+    case titleCard
+    case caption
 
     var id: String { rawValue }
 
@@ -28,6 +34,8 @@ enum GeneratorPreset: String, CaseIterable, Identifiable, Codable {
         case .title: return "Title"
         case .lowerThird: return "Lower Third"
         case .colourMatte: return "Colour Matte"
+        case .titleCard: return "Title Card"
+        case .caption: return "Caption"
         }
     }
 
@@ -36,6 +44,8 @@ enum GeneratorPreset: String, CaseIterable, Identifiable, Codable {
         case .title: return "Centred text over the picture"
         case .lowerThird: return "Name and role on a box, lower left"
         case .colourMatte: return "A solid colour filling the frame"
+        case .titleCard: return "A bold title over a black matte"
+        case .caption: return "Top left, grows as you type"
         }
     }
 
@@ -44,6 +54,8 @@ enum GeneratorPreset: String, CaseIterable, Identifiable, Codable {
         case .title: return "textformat"
         case .lowerThird: return "text.below.photo"
         case .colourMatte: return "square.fill"
+        case .titleCard: return "rectangle.inset.filled"
+        case .caption: return "text.alignleft"
         }
     }
 
@@ -52,6 +64,8 @@ enum GeneratorPreset: String, CaseIterable, Identifiable, Codable {
         case .title: return .title
         case .lowerThird: return .lowerThird
         case .colourMatte: return .colourMatte
+        case .titleCard: return .titleCard
+        case .caption: return .caption
         }
     }
 
@@ -60,6 +74,8 @@ enum GeneratorPreset: String, CaseIterable, Identifiable, Codable {
         case .title: return .framewrightTitleGenerator
         case .lowerThird: return .framewrightLowerThirdGenerator
         case .colourMatte: return .framewrightColourMatteGenerator
+        case .titleCard: return .framewrightTitleCardGenerator
+        case .caption: return .framewrightCaptionGenerator
         }
     }
 }
@@ -75,6 +91,10 @@ struct GeneratorReference: Codable, Transferable, Hashable {
             .exportingCondition { $0.preset == .lowerThird }
         CodableRepresentation(contentType: .framewrightColourMatteGenerator)
             .exportingCondition { $0.preset == .colourMatte }
+        CodableRepresentation(contentType: .framewrightTitleCardGenerator)
+            .exportingCondition { $0.preset == .titleCard }
+        CodableRepresentation(contentType: .framewrightCaptionGenerator)
+            .exportingCondition { $0.preset == .caption }
     }
 }
 
