@@ -33,7 +33,7 @@ final class GeneratorTilesTests: XCTestCase {
 
     func testEachTileHasItsOwnTypeAndTheTimelineTakesIt() throws {
         let types = Set(GeneratorPreset.allCases.map(\.contentType))
-        XCTAssertEqual(types.count, 3)
+        XCTAssertEqual(types.count, 5, "Title, Lower Third, Colour Matte, Title Card and Caption (slice 2)")
         for preset in GeneratorPreset.allCases {
             XCTAssertTrue(TimelineDropDelegate.types.contains(preset.contentType), preset.title)
             XCTAssertTrue(preset.contentType.isDeclared, "\(preset.title) is declared in Info.plist")
