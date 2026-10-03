@@ -587,17 +587,22 @@ seek, the stream could put the paused picture in the cache before the frame's ow
 the deterministic reproducer `testAPictureTheLookaheadDecodedFirstIsNotPresentedAgain`; 22 consecutive clean runs.
 
 ## Where things stand (handover, 2026-10-03)
-- **Released and pushed:** 0.1.11 (built from 221ad31) is the last release; everything is pushed. It adds titles
-  slice 1 (c996a93..e5abda0, docs c7feff8) and its review fix round (bd96f79..74a95a7, docs 9927acd), accepted by
-  the lead with the full suite passing with the screen unlocked; the owner tried it ("seems ok"). The full hand-test
-  list is in integration-notes ("Titles slice 1"). Open for the owner: the typing run's 2 s idle commit, no extra
-  space above the first line at line spacing above 1, and an export reporting (not freezing) a mid-export font
-  change. Earlier: colour grading and scopes in 0.1.9, their hand-test fixes in 0.1.10 (left from that test: the
-  curve editor's hue strip still uses the old pastel hues).
+- **Released and pushed:** 0.1.12 is the last release; everything is pushed. Since 0.1.11 it adds titles slice 2
+  (typing on the picture, point text and anchor, safe areas, snapping, Copy/Paste Style, Title Card and Caption
+  presets, recent fonts; schema 11) with its review fix round; the title box drag latency fix; play start after a
+  scrub (audio ready at every rest, the scrub decoder handed to the lookahead) and the Ken Burns stage zoom (auto-fit,
+  zoom control, Cmd-/Cmd+/Shift-Z, Reset Start/End), with their review fix round and the paused-picture
+  re-presentation fix; the title box's own double-click count. Full suite green with the display awake (EngineTests
+  717, doctest 487, AppTests 388 with the known skip). The owner tried it ("looks good"). Open: a dissolve of two
+  long-GOP 4K clips still starts in about 0.35-0.4 s (worst about 1 s); the first click of a double-click's jitter
+  moves the title as its own step; the owner's open judgement calls from titles slice 1 (typing idle commit, spacing
+  above the first line, export reporting a mid-export font change).
+- **Run the app tests only when the owner is away** (they open windows), with `caffeinate -d` so the display stays
+  on: a display that sleeps mid-run fails ScopePanelTests/WaveformPanelTests and skips the double-click test.
 - **Next, in the order the user has leaned towards:**
   1. The user finishes the hand tests of grading slices 1 and 2 and titles slice 1 (lists in integration-notes).
-  2. Titles slice 2 (typing on the picture, safe areas, Copy/Paste Style), per `docs/plans/2026-10-02-titles-design.md`.
-  3. Autosave and backups (the app has none).
+  2. Autosave and backups (the app has none; FilmCraft's autosave versions plus a crash-recovery journal are a model).
+  3. The everyday editing basics: copy/paste, markers, ripple/roll/slip/slide (feature gap items 2-4).
   4. HLG display (tone map) and the P3/BT.2020 primaries decision.
   5. The transition library and the Effects browser (plan items 28-29).
   6. The safety-and-basics round from `docs/plans/2026-10-01-premiere-lite-feature-gap.md` (autosave, relink,
