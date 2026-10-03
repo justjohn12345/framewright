@@ -136,6 +136,66 @@ const playback::PresentedLayer *presentedLayer(const PlaybackHarness::Sample &sa
     XCTAssertGreaterThan(changed, size_t(500), @"the title's pixels are drawn over the video");
 }
 
+/// The anchor or point text changed so the text stays where it is (the facade moves the position with them): the
+/// paused program never shows the previous picture placed by the new anchor (a jump) while the new one renders. Paused,
+/// a frame waiting for a picture keeps the previous complete frame on screen, old anchor and old picture together
+/// (titles slice 2 review, finding 7: checked rather than assumed). Playing, a late layer keeps its clip's previous
+/// picture at the new anchor for the frames until the new one lands (open findings).
+- (void)testAnAnchorChangeWhilePausedNeverDrawsTheOldPictureAtTheNewAnchor {
+    PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
+    const AssetId movie = h.importAsset("h264_1080p30.mp4");
+    XCTAssertTrue(h.ok(), @"%s", h.error().c_str());
+    if (!h.ok()) {
+        return;
+    }
+    h.addClip(h.v1, movie, 0, 60, kCMTimeZero);
+    TitleContent content = sampleTitle("Anchored\nat its centre");
+    const ClipId title = addTitle(h, h.v2, content, 0, 60);
+    h.load();
+    h.controller->seek(frames30(15));
+    h.presentExact();
+    XCTAssertTrue(h.pool->waitUntilIdle(std::chrono::seconds(10)));
+    // Where the title's picture is drawn on the canvas: its layer's anchor plus its picture's geometry.
+    auto drawnTop = [&]() -> std::optional<double> {
+        const render::PreviewFrame &frame = h.frame();
+        for (std::size_t i = 0; i < frame.graph.layers.size(); ++i) {
+            if (frame.graph.layers[i].clipId == title && i < frame.textures.size() && frame.textures[i].canvas()) {
+                return frame.graph.layers[i].canvasAnchorY + frame.textures[i].canvas()->y;
+            }
+        }
+        return std::nullopt;
+    };
+    const std::optional<double> before = drawnTop();
+    XCTAssertTrue(before.has_value());
+    // Anchored at its top, the position moved to the block's top: the text stays (as setTitleAnchor: does it).
+    const media::TitleBlockSize block = media::measureTitleBlock(content, h.sequence().width, h.sequence().height);
+    const double top = content.y * h.sequence().height + block.top;
+    content.anchor = TitleAnchor::Top;
+    content.y = top / h.sequence().height;
+    setTitle(h, title, content);
+    h.publishEdit();
+    int changes = 0;
+    bool landed = false;
+    const auto start = SteadyClock::now();
+    while (!landed && SteadyClock::now() - start < std::chrono::seconds(5)) {
+        const PlaybackHarness::Sample s = h.present();
+        if (s.changed) {
+            ++changes;
+            const std::optional<double> drawn = drawnTop();
+            XCTAssertTrue(drawn.has_value());
+            if (drawn && before) {
+                XCTAssertEqualWithAccuracy(*drawn, *before, 1.0, @"presentation %d: the text where it was", changes);
+            }
+            landed = presentedLayer(s, title) != nullptr && presentedLayer(s, title)->exact &&
+                     h.frame().graph.layers.back().canvasAnchorY == content.y * h.sequence().height &&
+                     h.cache->contains(titleKey(h, title, 1.0), kCMTimeZero);
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+    XCTAssertTrue(landed, @"the anchored title was presented");
+    XCTAssertGreaterThan(changes, 0);
+}
+
 - (void)testTypingRendersANewPictureAndMovingTheBoxDoesNot {
     PlaybackHarness h(PlaybackHarness::Mode::Manual, 1.0);
     const AssetId movie = h.importAsset("h264_1080p30.mp4");
