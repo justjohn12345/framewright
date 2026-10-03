@@ -123,6 +123,9 @@ final class ExportModel: ObservableObject {
     @Published var outcome: Outcome?
     /// Why Export is not possible right now (refusal of the last attempt included).
     @Published private(set) var refusal: String?
+    /// The fonts the sequence's titles use that this Mac does not have, while Export waits for the user to confirm
+    /// exporting those titles in the system font (`requestExport`).
+    @Published var missingFontConfirmation: [VEMissingTitleFont]?
 
     /// Times progress was published (tests: at most 10 Hz).
     private(set) var publishedProgressCount = 0
@@ -401,6 +404,35 @@ final class ExportModel: ObservableObject {
         outputNotice = "The container is now \(Self.name(of: container)): choose the file again (.\(ext))."
     }
 
+    /// The Export button: when titles use fonts this Mac does not have, first asks whether to export them in the
+    /// system font (`missingFontConfirmation`); otherwise starts the export. Returns whether it started.
+    @discardableResult
+    func requestExport() -> Bool {
+        let missing = store.engine.missingTitleFonts
+        guard missing.isEmpty || exportDisabledReason != nil else {
+            missingFontConfirmation = missing
+            return false
+        }
+        return startExport()
+    }
+
+    /// "Export Anyway": the titles with missing fonts are exported in the system font.
+    @discardableResult
+    func confirmMissingFonts() -> Bool {
+        missingFontConfirmation = nil
+        return startExport()
+    }
+
+    /// What the missing-font question says: each font with how many titles use it.
+    static func missingFontMessage(_ fonts: [VEMissingTitleFont]) -> String {
+        let list = fonts.map { font in
+            "“\(font.font.displayName)” (\(font.clipCount == 1 ? "1 title" : "\(font.clipCount) titles"))"
+        }.joined(separator: ", ")
+        let one = fonts.count == 1
+        return "\(list) \(one ? "is" : "are") not on this Mac. Those titles will be exported in the system font; "
+            + "install the \(one ? "font" : "fonts") and export again to use \(one ? "it" : "them")."
+    }
+
     /// Starts the export. Returns false (with `refusal` set) when the engine refused it.
     @discardableResult
     func startExport() -> Bool {
@@ -586,11 +618,19 @@ struct ExportSheet: View {
                 } else {
                     Button("Close", role: .cancel) { model.close() }
                         .keyboardShortcut(.cancelAction)
-                    Button("Export") { model.startExport() }
+                    Button("Export") { model.requestExport() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(!model.canExport)
                         .help(model.exportDisabledReason ?? "")
                 }
+            }
+            .alert("Some titles use fonts this Mac does not have",
+                   isPresented: Binding(get: { model.missingFontConfirmation != nil },
+                                        set: { if !$0 { model.missingFontConfirmation = nil } })) {
+                Button("Export Anyway") { model.confirmMissingFonts() }
+                Button("Cancel", role: .cancel) { model.missingFontConfirmation = nil }
+            } message: {
+                Text(ExportModel.missingFontMessage(model.missingFontConfirmation ?? []))
             }
         }
         .padding(20)
