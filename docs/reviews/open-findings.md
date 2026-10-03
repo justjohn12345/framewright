@@ -256,6 +256,53 @@ testTheShownPanelIsDrawnWithTheProgramMonitorsFramesAndLetGoWhenHidden` (the loc
 detached: 10 against 9; it passed three times alone; not seen before, not touched by this round: a new flake to
 watch).
 
+## Title box drag latency (2026-10-03)
+The owner saw the text lag the pointer while dragging a title's box. Measured with `TitleDragLatencyTests` (new
+`Measurements` scheme: the whole editor window, a 1080p sequence, a movie under a lower third and a title, 60 steps
+per drag at 60 Hz, made through the overlays' models and by pointer events through the window; medians, ms):
+
+| Drag (pointer events) | picture handed out, before | after (Debug) | after (Release) | window updated (SwiftUI), Debug / Release |
+|---|---|---|---|---|
+| Transform box move (Motion span on the movie), the baseline | 11.8 | 0.6 | 0.2 | 11.2 / 10.2 |
+| Lower third move | 8.9 | 0.6 | 0.2 | 9.1 / 7.8 |
+| Title move | 9.1 | 0.6 | 0.2 | 9.3 / 8.2 |
+| Lower third wrap width | 9.5 | 9.8 | 8.4 | 9.7 / 8.3 |
+| Title wrap width | 9.7 | 10.0 | 8.7 | 9.9 / 8.6 |
+
+(Release before: Transform 10.6, lower third 7.6, title 7.9, the wrap widths 8.2 and 8.6.)
+
+- **Where the time went.** Not the engine: a step's edit, snapshot publish and the store's re-read take 0.3 ms
+  (Release) to 1 ms (Debug), and a move renders nothing (no cache miss in any move step: position is not in the
+  content id). The picture waited for the main thread: the playback controller asked for the paused redraw through
+  the main queue (`PlaybackController::ObserverHub::postNeedsDisplay`, then `VEProgramMonitor`'s `needsDisplay`,
+  then `renderOnce`), and that block ran only after the rest of the main thread's turn, which during a drag is
+  SwiftUI updating the whole window for the edit (every panel observes `ProjectStore`). The Ken Burns drag had the
+  same delay; nothing in it was title-specific.
+- **Fix: 1364d79.** `VEProgramMonitor -presentChange` asks its views to draw the moment the paused picture may have
+  changed (a published model, a seek, a step, a scrub, the preview solo), on their render threads; the
+  controller's later request draws nothing more (`VEPreviewView -renderIfChanged`: only a new frame or a pending
+  redraw is drawn; a `renderOnce` coalesced with it still draws). Tests: `TitleBoxTests
+  testAMoveStepIsDrawnAtOnceFromTheCachedPicture` (each move step is drawn once with the main thread held, with no
+  cache miss, and the later requests draw nothing; fails before the fix),
+  `testAWidthStepKeepsThePreviousPictureUntilTheNewOneLands`, `CompositorPreviewViewTests
+  testRenderIfChangedDrawsOnlyWhatChanged`. Harness: ac318c0.
+- **Wrap width** re-renders the title every step (the width is in the content id), in the pool's scrub path off
+  the main thread; the previous picture stays until it lands. Its landing still reaches the views through the main
+  queue, so the new width shows when the window's update ends, with the box.
+- **Left open.** The box itself is SwiftUI: it moves when the window's update for the step is committed, 8-10 ms
+  after the step (the inspector is about 2-3 ms of it, the timeline 1-2, the rest is spread over the window). The
+  picture now leads the box by that much instead of trailing it. Making the box faster means narrowing what a
+  model change invalidates (panels observing smaller models than `ProjectStore`), which is larger work. The
+  measurement skips itself when the test window is covered or the screen is locked (the monitor does not draw then).
+- **For the owner, by hand:** drag a title, a lower third and a Ken Burns box on the program monitor while paused
+  over video; the text should stay with the pointer, the box at most a frame behind it. Widening a title shows the
+  old width for a moment, never a frame without the title.
+
+Tests (full `Framewright` scheme at 1364d79, the screen unlocked): EngineTests 687, doctest 476 cases, AppTests 347
+(1 known skip), 0 failures. An earlier run under load failed once in `GeneratedSourceTests
+testAPictureRenderedForAnEarlierEpochIsNotPublished` (`pool.waitUntilIdle` timed out after 10 s; a decode pool test
+that does not involve the views; it passed three times alone): a flake to watch.
+
 ## Where things stand (handover, 2026-10-03)
 - **Released and pushed:** 0.1.11 (built from 221ad31) is the last release; everything is pushed. It adds titles
   slice 1 (c996a93..e5abda0, docs c7feff8) and its review fix round (bd96f79..74a95a7, docs 9927acd), accepted by
