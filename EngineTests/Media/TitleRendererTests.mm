@@ -275,6 +275,57 @@ static double inkWidth(const Pixels &p) {
     }
 }
 
+/// Lines closer than their natural spacing (line spacing below 1) still sit inside the background box (review fix
+/// round, finding 8): the spacing applies between lines, the first line keeps its own ascent, so the box holds the
+/// block from the first line's top to the last line's bottom.
+- (void)testTightLinesStayInsideTheBox {
+    for (const double spacing : {0.5, 1.0, 1.5}) {
+        TitleContent content = plain("Hight Line\nOther Lige");
+        content.size = 0.1;
+        content.lineSpacing = spacing;
+        content.box = true;
+        content.boxColour = kBlack;
+        content.boxOpacity = 1.0;
+        content.boxPadding = 0.01;
+        content.fillColour = kWhite;
+        const Pixels p = pixelsOf(renderAt(content).picture);
+        // The box: the opaque pixels.
+        long left = long(p.width), right = -1, top = long(p.height), bottom = -1;
+        for (std::size_t y = 0; y < p.height; ++y) {
+            for (std::size_t x = 0; x < p.width; ++x) {
+                if (p.at(x, y)[3] == 255) {
+                    left = std::min(left, long(x));
+                    right = std::max(right, long(x));
+                    top = std::min(top, long(y));
+                    bottom = std::max(bottom, long(y));
+                }
+            }
+        }
+        // Nothing drawn outside it but its anti-aliased edge; the text's top and bottom inside its padding.
+        std::size_t outside = 0;
+        long inkTop = long(p.height), inkBottom = -1;
+        for (std::size_t y = 0; y < p.height; ++y) {
+            for (std::size_t x = 0; x < p.width; ++x) {
+                const uint8_t *px = p.at(x, y);
+                const bool inBox = long(x) >= left - 1 && long(x) <= right + 1 && long(y) >= top - 1 && long(y) <= bottom + 1;
+                outside += !inBox && px[3] > 8 ? 1 : 0;
+                if (px[1] > 128) {
+                    inkTop = std::min(inkTop, long(y));
+                    inkBottom = std::max(inkBottom, long(y));
+                }
+            }
+        }
+        NSLog(@"TITLE line spacing %.1f: box rows %ld-%ld, text rows %ld-%ld, %zu pixels outside the box", spacing, top,
+              bottom, inkTop, inkBottom, outside);
+        XCTAssertEqual(outside, 0u, @"spacing %.1f", spacing);
+        XCTAssertGreaterThan(inkTop, top + 4, @"spacing %.1f: the first line inside the box's padding", spacing);
+        XCTAssertLessThan(inkBottom, bottom - 4, @"spacing %.1f: the last line inside it", spacing);
+        // The block the monitor's box shows is the same block (one line's height and the spacing between them).
+        const TitleBlockSize block = measureTitleBlock(content, 1920, 1080);
+        XCTAssertEqualWithAccuracy(double(bottom - top + 1), block.height + 2 * 0.01 * 1080, 3.0, @"spacing %.1f", spacing);
+    }
+}
+
 - (void)testEmojiDrawWithoutAnOutline {
     TitleContent emoji = plain("🎬");
     emoji.size = 0.2;

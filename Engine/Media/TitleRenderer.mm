@@ -101,8 +101,9 @@ MediaError cancelled() {
 // (wrapWidth, blockHeight), so its top is y = blockHeight (the "frame" Core Text's drawing works in).
 //
 // The lines are broken by a CTTypesetter at the wrap width (it stops at every paragraph separator, so Return
-// makes a line) and placed here rather than by a CTFrame: each line takes (ascent + descent + leading) times the
-// line spacing, the extra (or missing) part above its text, and its pen offset for the alignment
+// makes a line) and placed here rather than by a CTFrame: the first line's ascent from the block's top, each next
+// baseline (the previous line's descent and leading and this line's ascent) times the line spacing below the
+// previous one, the last line's descent and leading to the block's bottom, and each its pen offset for the alignment
 // (CTLineGetPenOffsetForFlush, which leaves trailing white space out). Core Text's own frames round their line
 // heights to whole points, which would move the lines of one title differently at different raster scales;
 // placed here, a title's layout scales exactly with k.
@@ -188,7 +189,8 @@ Layout layoutTitle(const TitleContent &c, double canvasWidth, double canvasHeigh
         double baselineDown; // from the block's top
     };
     std::vector<Placed> placed;
-    double top = 0.0;
+    double baseline = 0.0;      // the last line's, down from the block's top
+    double previousBelow = 0.0; // the last line's descent and leading
     for (CFIndex start = 0; start < length;) {
         CFIndex count = CTTypesetterSuggestLineBreak(typesetter.get(), start, layout.wrapWidth);
         if (count <= 0) {
@@ -201,13 +203,15 @@ Layout layoutTitle(const TitleContent &c, double canvasWidth, double canvasHeigh
         }
         CGFloat ascent = 0, descent = 0, leading = 0;
         CTLineGetTypographicBounds(line.get(), &ascent, &descent, &leading);
-        const double natural = ascent + descent + leading;
-        const double height = natural * c.lineSpacing;
-        placed.push_back({CTLineGetPenOffsetForFlush(line.get(), flush, layout.wrapWidth),
-                          top + height - descent - leading});
-        top += height;
+        // The first line's top is the block's; the line spacing scales the distance between two lines (the
+        // previous one's descent and leading and this one's ascent), so lines closer than their natural spacing
+        // still start and end inside the block (and the background box).
+        baseline = placed.empty() ? ascent : baseline + (previousBelow + ascent) * c.lineSpacing;
+        previousBelow = descent + leading;
+        placed.push_back({CTLineGetPenOffsetForFlush(line.get(), flush, layout.wrapWidth), baseline});
         layout.lines.push_back(std::move(line));
     }
+    const double top = placed.empty() ? 0.0 : baseline + previousBelow;
     layout.blockHeight = top;
     layout.frameHeight = top;
     for (std::size_t i = 0; i < layout.lines.size(); ++i) {
