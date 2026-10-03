@@ -279,6 +279,12 @@ struct TitleContent {
     friend bool operator==(const TitleContent &, const TitleContent &) = default;
 };
 
+// Whether `parameter` is part of a title's style (what Copy Style copies and Paste Style sets; titles slice 2): its
+// font, size, colours, alignment, spacing, outline, shadow and background box. Not its text, its position, its box
+// width, nor whether it is point text and where it is anchored, which say where the text is (Premiere's text styles
+// and Final Cut's saved format attributes carry the same).
+bool isStyleParameter(TitleParameter parameter);
+
 // The value of `parameter` in `content`.
 TitleValue valueOf(const TitleContent &content, TitleParameter parameter);
 // Sets `parameter` of `content` to `value`. Returns false, changing nothing, when the value is not of the

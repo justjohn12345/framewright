@@ -84,6 +84,69 @@ TEST_CASE("Title edits: a parameter set on several titles keeps what differs bet
     CHECK(several.name() == "Change Title");
 }
 
+TEST_CASE("Title edits: each clip's own change, as one step (slice 2)") {
+    TitleRig fx;
+    const ClipId a = fx.addTitle(fx.v2, "First", 0, 60);
+    const ClipId b = fx.addTitle(fx.v2, "Second", 60, 60);
+    TitleChange toA = TitleChange::of(TitleParameter::PointText, true);
+    toA[TitleParameter::PositionX] = 0.1;
+    TitleChange toB = TitleChange::of(TitleParameter::PointText, true);
+    toB[TitleParameter::PositionX] = 0.9;
+    SetGeneratedContent both(fx.seq, std::vector<std::pair<ClipId, TitleChange>>{{a, toA}, {b, toB}});
+    applyReversible(fx.project, both);
+    CHECK(fx.titleOf(a).pointText);
+    CHECK(fx.titleOf(b).pointText);
+    CHECK(fx.titleOf(a).x == 0.1);
+    CHECK(fx.titleOf(b).x == 0.9);
+    CHECK(both.name() == "Change Title"); // two parameters (the facade names it after the one asked for)
+    SetGeneratedContent anchor(fx.seq, std::vector<std::pair<ClipId, TitleChange>>{
+                                           {a, TitleChange::of(TitleParameter::Anchor, TitleAnchor::Top)}});
+    applyReversible(fx.project, anchor);
+    CHECK(anchor.name() == "Change Vertical Anchor");
+    CHECK(fx.titleOf(a).anchor == TitleAnchor::Top);
+    // Refused as a whole when one clip's change is not valid.
+    const Project before = fx.project;
+    SetGeneratedContent bad(fx.seq, std::vector<std::pair<ClipId, TitleChange>>{
+                                        {a, TitleChange::of(TitleParameter::Size, 0.2)},
+                                        {b, TitleChange::of(TitleParameter::Anchor, static_cast<TitleAnchor>(5))}});
+    CHECK(bad.apply(fx.project).error == EditError::InvalidArgument);
+    CHECK(fx.project == before);
+}
+
+TEST_CASE("Title edits: a style is every parameter but the text and where it is") {
+    TitleContent styled = titlePreset(GeneratedPreset::LowerThird);
+    styled.font = TitleFont::named("Helvetica-Bold", "Helvetica", "Bold");
+    styled.tracking = 40;
+    styled.pointText = true;
+    styled.anchor = TitleAnchor::Bottom;
+    const TitleChange style = TitleChange::style(styled);
+    for (const TitleParameter parameter : kTitleParameters) {
+        CAPTURE(nameOf(parameter));
+        const bool where = parameter == TitleParameter::Text || parameter == TitleParameter::PositionX ||
+                           parameter == TitleParameter::PositionY || parameter == TitleParameter::BoxWidth ||
+                           parameter == TitleParameter::PointText || parameter == TitleParameter::Anchor;
+        CHECK(isStyleParameter(parameter) == !where);
+        CHECK(style[parameter].has_value() == !where);
+        if (!where) {
+            CHECK(*style[parameter] == valueOf(styled, parameter));
+        }
+    }
+    // Pasted: the style comes, the text, place, width, point text and anchor stay.
+    TitleRig fx;
+    const ClipId target = fx.addTitle(fx.v2, "Target", 0, 60);
+    SetGeneratedContent paste(fx.seq, {target}, style, "Paste Style");
+    applyReversible(fx.project, paste);
+    const TitleContent &pasted = fx.titleOf(target);
+    CHECK(pasted.font == styled.font);
+    CHECK(pasted.box);
+    CHECK(pasted.alignment == TitleAlignment::Left);
+    CHECK(pasted.text == "Target");
+    CHECK(pasted.x == 0.5);
+    CHECK(pasted.width == 0.8);
+    CHECK_FALSE(pasted.pointText);
+    CHECK(pasted.anchor == TitleAnchor::Centre);
+}
+
 TEST_CASE("Title edits: refusals change nothing") {
     TitleRig fx;
     const ClipId title = fx.addTitle(fx.v2, "Title", 0, 30);

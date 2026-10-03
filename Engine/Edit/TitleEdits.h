@@ -27,6 +27,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ve {
@@ -39,6 +40,8 @@ struct TitleChange {
 
     // One title parameter.
     static TitleChange of(TitleParameter parameter, TitleValue value);
+    // The style of `content` (every parameter isStyleParameter says is style: Copy Style and Paste Style).
+    static TitleChange style(const TitleContent &content);
     // A matte's colour.
     static TitleChange matte(SRGBColour colour);
 
@@ -57,7 +60,9 @@ struct TitleChange {
     TitleContent appliedTo(TitleContent content) const;
 };
 
-// Sets title parameters or a matte's colour on clips (see the header). Refused as a whole, changing nothing,
+// Sets title parameters or a matte's colour on clips (see the header), the same change on every clip, or (the
+// per-clip form) each clip's own change: the facade's edits that keep a title's text where it is when its point text,
+// anchor or alignment changes give each title its own position. Refused as a whole, changing nothing,
 // when the list or the change is empty, a clip is missing, listed twice or on a locked track, a title parameter is
 // given for a clip that is not a title or a matte colour for one that is not a matte (InvalidArgument), or a value
 // is not valid (titleValueProblem: its type, its range, a text that is too long). A change that leaves every clip
@@ -68,14 +73,14 @@ class SetGeneratedContent final : public SequenceCommand {
     // `name` is the Undo menu's name; empty: "Edit Title Text" for the text, "Change <parameter>" for one
     // parameter ("Change Font", "Change Shadow Opacity"), "Change Matte Colour", else "Change Title".
     SetGeneratedContent(SequenceId sequenceId, std::vector<ClipId> clipIds, TitleChange change, std::string name = {});
+    SetGeneratedContent(SequenceId sequenceId, std::vector<std::pair<ClipId, TitleChange>> changes, std::string name = {});
     std::string name() const override;
 
   protected:
     EditResult perform(const Project &project, Sequence &sequence, IdGenerator &ids) override;
 
   private:
-    std::vector<ClipId> clipIds_;
-    TitleChange change_;
+    std::vector<std::pair<ClipId, TitleChange>> changes_;
     std::string name_;
 };
 

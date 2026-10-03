@@ -182,6 +182,9 @@ struct UndoState {
 
     // VEEngine+Titles.mm: the observers of the Mac's font changes (startObservingTitleFonts).
     NSArray *_fontObservers;
+    // The title Copy Style copied from (VEEngine+Titles.mm): Paste Style sets its style parameters (isStyleParameter);
+    // a value, so it outlives New and Open.
+    std::optional<ve::TitleContent> _copiedTitleStyle;
 
     // VEEngine.mm
     NSHashTable<id<VEEngineObserver>> *_observers;

@@ -37,15 +37,44 @@ TitleContent TitleChange::appliedTo(TitleContent content) const {
     return content;
 }
 
+TitleChange TitleChange::style(const TitleContent &content) {
+    TitleChange change;
+    for (const TitleParameter parameter : kTitleParameters) {
+        if (isStyleParameter(parameter)) {
+            change[parameter] = valueOf(content, parameter);
+        }
+    }
+    return change;
+}
+
 SetGeneratedContent::SetGeneratedContent(SequenceId sequenceId, std::vector<ClipId> clipIds, TitleChange change,
                                          std::string name)
-    : SequenceCommand(sequenceId), clipIds_(std::move(clipIds)), change_(std::move(change)), name_(std::move(name)) {
+    : SetGeneratedContent(sequenceId,
+                          [&] {
+                              std::vector<std::pair<ClipId, TitleChange>> changes;
+                              changes.reserve(clipIds.size());
+                              for (const ClipId id : clipIds) {
+                                  changes.emplace_back(id, change);
+                              }
+                              return changes;
+                          }(),
+                          std::move(name)) {}
+
+SetGeneratedContent::SetGeneratedContent(SequenceId sequenceId, std::vector<std::pair<ClipId, TitleChange>> changes,
+                                         std::string name)
+    : SequenceCommand(sequenceId), changes_(std::move(changes)), name_(std::move(name)) {
+    // The parameters set (on any clip) and the clips: a coalescing group's steps replace each other only when they
+    // set the same parameters of the same clips.
     std::string key = "title";
     for (const TitleParameter parameter : kTitleParameters) {
-        key += change_[parameter] ? ":" + std::string(nameOf(parameter)) : "";
+        const bool set = std::any_of(changes_.begin(), changes_.end(),
+                                     [parameter](const auto &entry) { return entry.second[parameter].has_value(); });
+        key += set ? ":" + std::string(nameOf(parameter)) : "";
     }
-    key += change_.matteColour ? ":matteColour" : "";
-    for (const ClipId id : clipIds_) {
+    const bool matte = std::any_of(changes_.begin(), changes_.end(),
+                                   [](const auto &entry) { return entry.second.matteColour.has_value(); });
+    key += matte ? ":matteColour" : "";
+    for (const auto &[id, change] : changes_) {
         key += ":" + std::to_string(id.value());
     }
     setCoalescingKey(std::move(key));
@@ -55,15 +84,27 @@ std::string SetGeneratedContent::name() const {
     if (!name_.empty()) {
         return name_;
     }
-    if (change_.count() == 0 && change_.matteColour) {
+    // The parameters set on any clip.
+    TitleChange all;
+    for (const auto &[id, change] : changes_) {
+        for (const TitleParameter parameter : kTitleParameters) {
+            if (change[parameter] && !all[parameter]) {
+                all[parameter] = change[parameter];
+            }
+        }
+        if (change.matteColour) {
+            all.matteColour = change.matteColour;
+        }
+    }
+    if (all.count() == 0 && all.matteColour) {
         return "Change Matte Colour";
     }
-    if (change_.count() == 1 && !change_.matteColour) {
-        if (change_[TitleParameter::Text]) {
+    if (all.count() == 1 && !all.matteColour) {
+        if (all[TitleParameter::Text]) {
             return "Edit Title Text";
         }
         for (const TitleParameter parameter : kTitleParameters) {
-            if (change_[parameter]) {
+            if (all[parameter]) {
                 return std::string("Change ") + displayNameOf(parameter);
             }
         }
@@ -72,49 +113,52 @@ std::string SetGeneratedContent::name() const {
 }
 
 EditResult SetGeneratedContent::perform(const Project &, Sequence &sequence, IdGenerator &) {
-    if (clipIds_.empty()) {
+    if (changes_.empty()) {
         return EditResult::failure(EditError::InvalidArgument, "No titles to change.");
     }
-    if (change_.isEmpty()) {
-        return EditResult::failure(EditError::InvalidArgument, "No title values to set.");
-    }
-    for (const TitleParameter parameter : kTitleParameters) {
-        if (const auto &value = change_[parameter]) {
-            if (auto problem = titleValueProblem(parameter, *value)) {
-                return EditResult::failure(EditError::InvalidArgument, *problem);
+    std::unordered_set<ClipId> seen;
+    for (const auto &[id, change] : changes_) {
+        if (change.isEmpty()) {
+            return EditResult::failure(EditError::InvalidArgument, "No title values to set.");
+        }
+        for (const TitleParameter parameter : kTitleParameters) {
+            if (const auto &value = change[parameter]) {
+                if (auto problem = titleValueProblem(parameter, *value)) {
+                    return EditResult::failure(EditError::InvalidArgument, *problem);
+                }
             }
         }
-    }
-    if (change_.matteColour && !isValidColour(*change_.matteColour)) {
-        return EditResult::failure(EditError::InvalidArgument, "A matte's colour must have red, green and blue from 0 to 1.");
-    }
-    std::unordered_set<ClipId> seen;
-    for (const ClipId id : clipIds_) {
+        if (change.matteColour && !isValidColour(*change.matteColour)) {
+            return EditResult::failure(EditError::InvalidArgument,
+                                       "A matte's colour must have red, green and blue from 0 to 1.");
+        }
         if (!seen.insert(id).second) {
             return EditResult::failure(EditError::InvalidArgument,
                                        "Clip " + std::to_string(id.value()) + " is listed twice.");
         }
+    }
+    for (const auto &[id, change] : changes_) {
         Track *track = nullptr;
         Clip *clip = nullptr;
         if (EditResult r = findEditableClip(sequence, id, track, clip); !r) {
             return r;
         }
         const std::shared_ptr<const GeneratedContent> &content = clip->generated;
-        if (change_.count() > 0 && (!content || !content->isTitle())) {
+        if (change.count() > 0 && (!content || !content->isTitle())) {
             return EditResult::failure(EditError::InvalidArgument,
                                        "Clip " + std::to_string(id.value()) + " is not a title.");
         }
-        if (change_.matteColour && (!content || !content->isMatte())) {
+        if (change.matteColour && (!content || !content->isMatte())) {
             return EditResult::failure(EditError::InvalidArgument,
                                        "Clip " + std::to_string(id.value()) + " is not a colour matte.");
         }
         if (content->isTitle()) {
-            TitleContent changed = change_.appliedTo(content->title());
+            TitleContent changed = change.appliedTo(content->title());
             if (!(changed == content->title())) {
                 clip->generated = GeneratedContent::makeTitle(std::move(changed), content->foreign());
             }
-        } else if (*change_.matteColour != content->matteColour()) {
-            clip->generated = GeneratedContent::makeMatte(*change_.matteColour, content->foreign());
+        } else if (*change.matteColour != content->matteColour()) {
+            clip->generated = GeneratedContent::makeMatte(*change.matteColour, content->foreign());
         }
     }
     return EditResult::success();

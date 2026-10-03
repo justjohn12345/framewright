@@ -5,6 +5,7 @@
 
 #include "../Media/TitleRenderer.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -51,6 +52,18 @@ using namespace ve::facade;
 @property (nonatomic, readwrite) VEColour matteColour;
 @property (nonatomic, readwrite, getter=isMatteColourMixed) BOOL matteColourMixed;
 - (instancetype)initWithMixed:(const std::array<bool, kTitleParameterCount> &)mixed;
+@end
+
+@interface VETitleTextLayout () {
+    media::TitleTextLayout _layout;
+    CGPoint _position;
+    CGAffineTransform _canvasToFrame;
+    NSString *_text;
+}
+- (instancetype)initWithLayout:(media::TitleTextLayout)layout
+                          text:(NSString *)text
+                      position:(CGPoint)position
+                 canvasToFrame:(CGAffineTransform)canvasToFrame;
 @end
 
 @interface VEMissingTitleFont ()
@@ -252,6 +265,27 @@ VEMissingTitleFont *makeMissingTitleFont(const TitleFont &font, NSInteger clipCo
     missing.font = makeTitleFont(font);
     missing.clipCount = clipCount;
     return missing;
+}
+
+VETitleTextLayout *makeTitleTextLayout(media::TitleTextLayout layout, NSString *text, CGPoint position,
+                                       CGAffineTransform canvasToFrame) {
+    return [[VETitleTextLayout alloc] initWithLayout:std::move(layout)
+                                                text:text
+                                            position:position
+                                       canvasToFrame:canvasToFrame];
+}
+
+CGAffineTransform canvasToFrameTransform(const VideoParams &motion, double width, double height) {
+    const double scale = std::isfinite(motion.scale) ? std::max(0.0, motion.scale) : 0.0;
+    const double theta = std::isfinite(motion.rotationDegrees) ? motion.rotationDegrees * M_PI / 180.0 : 0.0;
+    const double cx = width / 2.0;
+    const double cy = height / 2.0;
+    // p -> centre + (x, y) + s R(θ) (p - centre), R turning clockwise on screen (+y down).
+    const double a = scale * std::cos(theta);
+    const double b = scale * std::sin(theta);
+    const double x = std::isfinite(motion.x) ? motion.x : 0.0;
+    const double y = std::isfinite(motion.y) ? motion.y : 0.0;
+    return CGAffineTransformMake(a, b, -b, a, cx + x - (a * cx - b * cy), cy + y - (b * cx + a * cy));
 }
 
 bool isTitleFontAvailableCached(const TitleFont &font) {
@@ -493,6 +527,104 @@ void forgetTitleFontAvailability() {
 - (BOOL)isMixed:(VETitleParameter)parameter {
     const auto titleParameter = ve::facade::fromVE(parameter);
     return titleParameter && _mixed[static_cast<std::size_t>(*titleParameter)];
+}
+@end
+
+namespace {
+
+VETitleQuad quadOf(CGRect rect, CGAffineTransform transform) {
+    return VETitleQuad{CGPointApplyAffineTransform(CGPointMake(CGRectGetMinX(rect), CGRectGetMinY(rect)), transform),
+                       CGPointApplyAffineTransform(CGPointMake(CGRectGetMaxX(rect), CGRectGetMinY(rect)), transform),
+                       CGPointApplyAffineTransform(CGPointMake(CGRectGetMaxX(rect), CGRectGetMaxY(rect)), transform),
+                       CGPointApplyAffineTransform(CGPointMake(CGRectGetMinX(rect), CGRectGetMaxY(rect)), transform)};
+}
+
+} // namespace
+
+@implementation VETitleTextLayout
+- (instancetype)initWithLayout:(media::TitleTextLayout)layout
+                          text:(NSString *)text
+                      position:(CGPoint)position
+                 canvasToFrame:(CGAffineTransform)canvasToFrame {
+    if ((self = [super init])) {
+        _layout = std::move(layout);
+        _text = [text copy];
+        _position = position;
+        _canvasToFrame = canvasToFrame;
+    }
+    return self;
+}
+- (NSString *)text {
+    return _text;
+}
+- (NSInteger)length {
+    return NSInteger(_layout.length());
+}
+- (NSInteger)lineCount {
+    return NSInteger(_layout.lineCount());
+}
+- (double)fontSize {
+    return _layout.fontSize();
+}
+- (CGAffineTransform)canvasToFrame {
+    return _canvasToFrame;
+}
+- (CGRect)canvasBlock {
+    return CGRectOffset(_layout.block(), _position.x, _position.y);
+}
+- (VETitleQuad)frameBlock {
+    return quadOf(self.canvasBlock, _canvasToFrame);
+}
+- (NSRange)rangeOfLine:(NSInteger)line {
+    if (line < 0 || line >= NSInteger(_layout.lineCount())) {
+        return NSMakeRange(NSNotFound, 0);
+    }
+    const media::TitleTextLayout::Line &info = _layout.line(std::size_t(line));
+    return NSMakeRange(NSUInteger(info.start), NSUInteger(info.length));
+}
+- (NSInteger)lineOfIndex:(NSInteger)index {
+    return NSInteger(_layout.lineOf(CFIndex(index)));
+}
+- (CGRect)canvasCaretAtIndex:(NSInteger)index {
+    const media::TitleTextLayout::Caret caret = _layout.caret(CFIndex(index));
+    return CGRectMake(_position.x + caret.x, _position.y + caret.top, 0.0, caret.bottom - caret.top);
+}
+- (VETitleCaret)caretAtIndex:(NSInteger)index {
+    const CGRect caret = [self canvasCaretAtIndex:index];
+    return VETitleCaret{CGPointApplyAffineTransform(CGPointMake(caret.origin.x, CGRectGetMinY(caret)), _canvasToFrame),
+                        CGPointApplyAffineTransform(CGPointMake(caret.origin.x, CGRectGetMaxY(caret)), _canvasToFrame)};
+}
+- (NSInteger)indexAtFramePoint:(CGPoint)point {
+    const double determinant = _canvasToFrame.a * _canvasToFrame.d - _canvasToFrame.b * _canvasToFrame.c;
+    if (!(std::abs(determinant) > 1e-12)) {
+        return 0; // scaled to nothing: no point of the frame is on the title
+    }
+    const CGPoint canvas = CGPointApplyAffineTransform(point, CGAffineTransformInvert(_canvasToFrame));
+    return NSInteger(_layout.indexAt(CGPointMake(canvas.x - _position.x, canvas.y - _position.y)));
+}
+- (NSInteger)indexOnLine:(NSInteger)line nearCanvasX:(double)x {
+    if (_layout.lineCount() == 0) {
+        return 0;
+    }
+    const std::size_t clamped = std::size_t(std::clamp<NSInteger>(line, 0, NSInteger(_layout.lineCount()) - 1));
+    return NSInteger(_layout.indexOnLine(clamped, x - _position.x));
+}
+- (NSArray<NSValue *> *)canvasSelectionRectsForRange:(NSRange)range {
+    NSMutableArray<NSValue *> *rects = [NSMutableArray array];
+    if (range.location == NSNotFound) {
+        return rects;
+    }
+    for (const CGRect &rect : _layout.selectionRects(CFIndex(range.location), CFIndex(NSMaxRange(range)))) {
+        [rects addObject:[NSValue valueWithRect:NSRectFromCGRect(CGRectOffset(rect, _position.x, _position.y))]];
+    }
+    return rects;
+}
+- (VETitleQuad)frameQuadOfCanvasRect:(CGRect)rect {
+    return quadOf(rect, _canvasToFrame);
+}
+- (NSString *)description {
+    return [NSString stringWithFormat:@"<VETitleTextLayout %ld lines, %ld characters>", long(self.lineCount),
+                                      long(self.length)];
 }
 @end
 

@@ -81,8 +81,8 @@ void watchTitleFonts() {
 
 /// Title blocks measured (titleBlockSizeOfClip:), per content and frame size: the box follows a drag without
 /// measuring again. Forgotten when the Mac's fonts change (a block measured in a fallback font). Main thread only.
-std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGSize> &measuredTitleBlocks() {
-    static std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGSize> measured;
+std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGRect> &measuredTitleBlocks() {
+    static std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGRect> measured;
     return measured;
 }
 
@@ -211,6 +211,9 @@ std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGSize> &measuredTit
 
 - (VEEditResult *)setTitleToggle:(BOOL)on forParameter:(VETitleParameter)parameter clips:(NSArray<NSNumber *> *)clipIDs {
     VE_ASSERT_MAIN();
+    if (parameter == VETitleParameterPointText) {
+        return [self setTitlePointText:on clips:clipIDs];
+    }
     return [self setTitleValue:on == YES forParameter:parameter type:TitleValueType::Toggle clips:clipIDs];
 }
 
@@ -220,7 +223,87 @@ std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGSize> &measuredTit
     if (!titleAlignment) {
         return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"Unknown alignment."];
     }
-    return [self setTitleValue:*titleAlignment forParameter:VETitleParameterAlignment type:TitleValueType::Choice clips:clipIDs];
+    return [self pushTitleChangeKeepingPlace:TitleChange::of(TitleParameter::Alignment, *titleAlignment)
+                                       clips:clipIDs
+                                        name:{}];
+}
+
+- (VEEditResult *)setTitlePointText:(BOOL)pointText clips:(NSArray<NSNumber *> *)clipIDs {
+    VE_ASSERT_MAIN();
+    return [self pushTitleChangeKeepingPlace:TitleChange::of(TitleParameter::PointText, pointText == YES)
+                                       clips:clipIDs
+                                        name:{}];
+}
+
+- (VEEditResult *)setTitleAnchor:(VETitleAnchor)anchor clips:(NSArray<NSNumber *> *)clipIDs {
+    VE_ASSERT_MAIN();
+    const auto titleAnchor = fromVE(anchor);
+    if (!titleAnchor) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"Unknown anchor."];
+    }
+    return [self pushTitleChangeKeepingPlace:TitleChange::of(TitleParameter::Anchor, *titleAnchor)
+                                       clips:clipIDs
+                                        name:{}];
+}
+
+/// `change` (of a parameter that says where the text block lies: point text, the anchor, the alignment) on the titles
+/// of `clipIDs`, each title's position moved so its block stays where it was: horizontally the block's point at the
+/// fraction its lines align to (its left edge, centre or right edge), vertically the point at its anchor's fraction
+/// (top, centre, bottom). An alignment change of point text, or an anchor change, leaves the block exactly where it
+/// is; point text turned on or off keeps the edge (or centre) its lines align to and the side it is anchored at.
+/// Clips that are not titles are passed on as they are (the edit refuses them).
+- (VEEditResult *)pushTitleChangeKeepingPlace:(TitleChange)change clips:(NSArray<NSNumber *> *)clipIDs name:(std::string)name {
+    std::vector<ClipId> clips = clipIdsOf(clipIDs);
+    if (clips.empty()) {
+        return [VEEditResult failureWithMessage:@"Nothing selected."];
+    }
+    const Sequence &sequence = [self activeSequence];
+    const double width = double(sequence.width);
+    const double height = double(sequence.height);
+    const TitleParameterInfo &xInfo = infoOf(TitleParameter::PositionX);
+    const TitleParameterInfo &yInfo = infoOf(TitleParameter::PositionY);
+    std::vector<std::pair<ClipId, TitleChange>> changes;
+    for (const ClipId id : clips) {
+        TitleChange own = change;
+        const Clip *clip = sequence.findClip(id);
+        const bool valid = std::none_of(kTitleParameters.begin(), kTitleParameters.end(), [&](TitleParameter parameter) {
+            return change[parameter] && titleValueProblem(parameter, *change[parameter]);
+        });
+        if (clip != nullptr && clip->generated && clip->generated->isTitle() && valid && width > 0 && height > 0) {
+            const TitleContent &before = clip->generated->title();
+            const TitleContent after = change.appliedTo(before);
+            const media::TitleBlockSize b = media::measureTitleBlock(before, width, height);
+            const media::TitleBlockSize a = media::measureTitleBlock(after, width, height);
+            const double flush = after.alignment == TitleAlignment::Left    ? 0.0
+                                 : after.alignment == TitleAlignment::Right ? 1.0
+                                                                            : 0.5;
+            const double anchor = after.anchor == TitleAnchor::Top ? 0.0 : after.anchor == TitleAnchor::Bottom ? 1.0 : 0.5;
+            const double left = before.x * width + b.left + flush * (b.width - a.width);
+            const double top = before.y * height + b.top + anchor * (b.height - a.height);
+            const double x = std::clamp((left - a.left) / width, xInfo.minimum, xInfo.maximum);
+            const double y = std::clamp((top - a.top) / height, yInfo.minimum, yInfo.maximum);
+            if (std::abs(x - before.x) > 1e-12) {
+                own[TitleParameter::PositionX] = x;
+            }
+            if (std::abs(y - before.y) > 1e-12) {
+                own[TitleParameter::PositionY] = y;
+            }
+        }
+        changes.emplace_back(id, std::move(own));
+    }
+    if (name.empty()) {
+        // Named after the parameter asked for, not the position the edit moves with it.
+        name = [&] {
+            for (const TitleParameter parameter : kTitleParameters) {
+                if (change[parameter]) {
+                    return std::string("Change ") + displayNameOf(parameter);
+                }
+            }
+            return std::string("Change Title");
+        }();
+    }
+    return [self push:std::make_unique<SetGeneratedContent>([self sequenceId], std::move(changes), std::move(name))
+              created:nil];
 }
 
 - (VEEditResult *)setTitleFont:(VETitleFont *)font clips:(NSArray<NSNumber *> *)clipIDs {
@@ -243,6 +326,31 @@ std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGSize> &measuredTit
     return [self pushTitleChange:std::move(change) clips:clipIDs name:std::isnan(width) ? "Move Title" : "Resize Title"];
 }
 
+// MARK: - Copy Style, Paste Style
+
+- (BOOL)copyTitleStyleOfClip:(VEClipID)clipID {
+    VE_ASSERT_MAIN();
+    const Clip *clip = [self activeSequence].findClip(toClipId(clipID));
+    if (clip == nullptr || !clip->generated || !clip->generated->isTitle()) {
+        return NO;
+    }
+    _copiedTitleStyle = clip->generated->title();
+    return YES;
+}
+
+- (BOOL)hasCopiedTitleStyle {
+    VE_ASSERT_MAIN();
+    return _copiedTitleStyle.has_value();
+}
+
+- (VEEditResult *)pasteTitleStyleOntoClips:(NSArray<NSNumber *> *)clipIDs {
+    VE_ASSERT_MAIN();
+    if (!_copiedTitleStyle) {
+        return [VEEditResult failureWithCode:VEEditErrorInvalidArgument message:@"No title style has been copied."];
+    }
+    return [self pushTitleChange:TitleChange::style(*_copiedTitleStyle) clips:clipIDs name:"Paste Style"];
+}
+
 - (VEEditResult *)setMatteColour:(VEColour)colour clips:(NSArray<NSNumber *> *)clipIDs {
     VE_ASSERT_MAIN();
     return [self pushTitleChange:TitleChange::matte(fromVE(colour)) clips:clipIDs name:{}];
@@ -256,6 +364,50 @@ std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGSize> &measuredTit
     return makeTitleSelection(summarizeTitles(sequence, clipIdsOf(clipIDs)), sequence);
 }
 
+- (CGRect)titleBlockOfClip:(VEClipID)clipID {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    const Clip *clip = sequence.findClip(toClipId(clipID));
+    if (clip == nullptr || !clip->generated || !clip->generated->isTitle()) {
+        return CGRectNull;
+    }
+    const CGRect block = [self measuredTitleBlock:*clip->generated sequence:sequence];
+    const TitleContent &title = clip->generated->title();
+    return CGRectOffset(block, title.x * double(sequence.width), title.y * double(sequence.height));
+}
+
+- (nullable VETitleTextLayout *)titleTextLayoutOfClip:(VEClipID)clipID atTime:(CMTime)time {
+    VE_ASSERT_MAIN();
+    const Sequence &sequence = [self activeSequence];
+    const Clip *clip = sequence.findClip(toClipId(clipID));
+    if (clip == nullptr || !clip->generated || !clip->generated->isTitle() || sequence.width <= 0 || sequence.height <= 0) {
+        return nil;
+    }
+    const TitleContent &title = clip->generated->title();
+    const double width = double(sequence.width);
+    const double height = double(sequence.height);
+    return makeTitleTextLayout(media::TitleTextLayout::make(title, width, height), toNS(title.text),
+                               CGPointMake(title.x * width, title.y * height),
+                               canvasToFrameTransform(motionValuesAt(*clip, time), width, height));
+}
+
+/// The block of `content` relative to its position (measureTitleBlock), remembered per content and frame size.
+- (CGRect)measuredTitleBlock:(const GeneratedContent &)content sequence:(const Sequence &)sequence {
+    auto &measured = measuredTitleBlocks();
+    const auto key = std::make_pair(content.contentId(), std::make_pair(sequence.width, sequence.height));
+    if (const auto found = measured.find(key); found != measured.end()) {
+        return found->second;
+    }
+    const media::TitleBlockSize block =
+        media::measureTitleBlock(content.title(), double(sequence.width), double(sequence.height));
+    const CGRect rect = CGRectMake(block.left, block.top, block.width, block.height);
+    if (measured.size() > 512) {
+        measured.clear();
+    }
+    measured.emplace(key, rect);
+    return rect;
+}
+
 - (CGSize)titleBlockSizeOfClip:(VEClipID)clipID {
     VE_ASSERT_MAIN();
     const Sequence &sequence = [self activeSequence];
@@ -263,19 +415,7 @@ std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGSize> &measuredTit
     if (clip == nullptr || !clip->generated || !clip->generated->isTitle()) {
         return CGSizeZero;
     }
-    auto &measured = measuredTitleBlocks();
-    const auto key = std::make_pair(clip->generated->contentId(), std::make_pair(sequence.width, sequence.height));
-    if (const auto found = measured.find(key); found != measured.end()) {
-        return found->second;
-    }
-    const media::TitleBlockSize block =
-        media::measureTitleBlock(clip->generated->title(), double(sequence.width), double(sequence.height));
-    const CGSize size = CGSizeMake(block.width, block.height);
-    if (measured.size() > 512) {
-        measured.clear();
-    }
-    measured.emplace(key, size);
-    return size;
+    return [self measuredTitleBlock:*clip->generated sequence:sequence].size;
 }
 
 /// The title fonts of `sequences` this Mac does not have, with how many title clips use each, in the order first

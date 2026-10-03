@@ -823,8 +823,22 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)setTitleToggle:(BOOL)on
                     forParameter:(VETitleParameter)parameter
                            clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setTitleToggle(_:for:clips:));
+/// Sets the alignment of the titles of `clipIDs`. Point text keeps its block where it is (its lines align again inside
+/// it; its x, which is the block's edge or centre as the lines align, moves with that edge); area text is centred on
+/// its x whatever its alignment.
 - (VEEditResult *)setTitleAlignment:(VETitleAlignment)alignment
                               clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setTitleAlignment(_:clips:));
+/// Makes the titles of `clipIDs` point text (no wrapping: the block is as wide as its widest line and grows with the
+/// text) or area text (wrapping at the box width), keeping each title's text where it is: the block's edge or centre
+/// its lines align to stays, and so does its top, centre or bottom as it is anchored (each title gets its own
+/// position). Undo name "Change Point Text". setTitleToggle:forParameter:clips: with VETitleParameterPointText does
+/// the same.
+- (VEEditResult *)setTitlePointText:(BOOL)pointText
+                              clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setTitlePointText(_:clips:));
+/// Anchors the titles of `clipIDs` at their block's top (added lines grow it down), centre or bottom (it grows up),
+/// keeping each block where it is (its position moves to the new anchor). Undo name "Change Vertical Anchor".
+- (VEEditResult *)setTitleAnchor:(VETitleAnchor)anchor
+                           clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setTitleAnchor(_:clips:));
 - (VEEditResult *)setTitleFont:(VETitleFont *)font clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setTitleFont(_:clips:));
 /// Moves the text blocks of the titles of `clipIDs` to (x, y) and, unless `width` is NaN, gives them that wrap
 /// width (fractions of the frame; the box drag on the program monitor). Undo name "Move Title" (or "Resize Title"
@@ -837,6 +851,24 @@ NS_SWIFT_UI_ACTOR
 - (VEEditResult *)setMatteColour:(VEColour)colour clips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(setMatteColour(_:clips:));
 /// What the titles and mattes of `clipIDs` have (the others are left out).
 - (VETitleSelection *)titleOfClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(title(ofClips:));
+/// A title's text block on its canvas (sequence pixels, origin at the frame's top-left, before the clip's Motion):
+/// where its anchor puts it around its position, its width and the height of its lines (titleBlockSizeOfClip:'s);
+/// CGRectNull for a clip that is not a title.
+- (CGRect)titleBlockOfClip:(VEClipID)clipID NS_SWIFT_NAME(titleBlock(ofClip:));
+/// The text of the title `clipID` laid out as it is drawn, placed on the frame through the clip's Motion at `time` (a
+/// timeline time; the program monitor's playhead): the program monitor's caret, selection and clicks. Nil for a clip
+/// that is not a title.
+- (nullable VETitleTextLayout *)titleTextLayoutOfClip:(VEClipID)clipID
+                                               atTime:(CMTime)time NS_SWIFT_NAME(titleTextLayout(ofClip:at:));
+/// Copy Style: copies the style of the title `clipID` (its font, size, colours, alignment, spacing, outline, shadow
+/// and background box; not its text, position, box width, point text or anchor) for pasteTitleStyleOntoClips:.
+/// Returns NO, keeping what was copied before, for a clip that is not a title.
+- (BOOL)copyTitleStyleOfClip:(VEClipID)clipID NS_SWIFT_NAME(copyTitleStyle(ofClip:));
+/// Whether a title style has been copied (it outlives New and Open).
+@property (nonatomic, readonly) BOOL hasCopiedTitleStyle;
+/// Paste Style: gives the titles of `clipIDs` the copied style, as one undo step ("Paste Style"); each keeps its text,
+/// position, box width, point text and anchor. Refused without a copied style, or when a clip is not a title.
+- (VEEditResult *)pasteTitleStyleOntoClips:(NSArray<NSNumber *> *)clipIDs NS_SWIFT_NAME(pasteTitleStyle(ontoClips:));
 /// The size of a title's text block in sequence pixels (the box the program monitor draws: the wrap width, or point
 /// text's widest line, and the height of its lines; an empty text, or one ending with a line break, has an empty last
 /// line); CGSizeZero for a clip that is not a title.

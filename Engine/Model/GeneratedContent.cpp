@@ -300,6 +300,40 @@ std::optional<TitleParameter> titleParameterNamed(std::string_view name) {
     return std::nullopt;
 }
 
+bool isStyleParameter(TitleParameter parameter) {
+    switch (parameter) {
+    case TitleParameter::Text:
+    case TitleParameter::PositionX:
+    case TitleParameter::PositionY:
+    case TitleParameter::BoxWidth:
+    case TitleParameter::PointText:
+    case TitleParameter::Anchor:
+        return false;
+    case TitleParameter::Font:
+    case TitleParameter::Size:
+    case TitleParameter::FillColour:
+    case TitleParameter::Alignment:
+    case TitleParameter::LineSpacing:
+    case TitleParameter::Tracking:
+    case TitleParameter::Outline:
+    case TitleParameter::OutlineColour:
+    case TitleParameter::OutlineWidth:
+    case TitleParameter::Shadow:
+    case TitleParameter::ShadowColour:
+    case TitleParameter::ShadowOpacity:
+    case TitleParameter::ShadowAngle:
+    case TitleParameter::ShadowDistance:
+    case TitleParameter::ShadowBlur:
+    case TitleParameter::Box:
+    case TitleParameter::BoxColour:
+    case TitleParameter::BoxOpacity:
+    case TitleParameter::BoxPadding:
+    case TitleParameter::BoxCornerRadius:
+        return true;
+    }
+    return false;
+}
+
 TitleValue valueOf(const TitleContent &c, TitleParameter parameter) {
     switch (parameter) {
     case TitleParameter::Text:

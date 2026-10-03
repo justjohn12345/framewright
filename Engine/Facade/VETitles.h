@@ -10,6 +10,7 @@
 // VETitleParameterInfo gives each parameter's type, unit, default and range.
 // Plain Objective-C only: this header is part of the framework's public module.
 
+#import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -216,6 +217,59 @@ typedef struct {
 /// The first matte's colour (black without mattes), and whether the mattes differ in it.
 @property (nonatomic, readonly) VEColour matteColour;
 @property (nonatomic, readonly, getter=isMatteColourMixed) BOOL matteColourMixed;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+/// A caret on the frame: the segment from its top to its bottom, in sequence pixels (origin at the frame's top-left, +y
+/// down), turned and scaled with the title.
+typedef struct {
+    CGPoint top;
+    CGPoint bottom;
+} VETitleCaret;
+
+/// A rectangle of a title's canvas placed on the frame through the clip's Motion: its four corners, clockwise from the
+/// rectangle's own top-left, in sequence pixels.
+typedef struct {
+    CGPoint topLeft;
+    CGPoint topRight;
+    CGPoint bottomRight;
+    CGPoint bottomLeft;
+} VETitleQuad;
+
+/// A title's text laid out as it is drawn (the renderer's own lines), placed on the frame through the clip's composed
+/// Motion at one time (VEEngine titleTextLayoutOfClip:atTime:): what the program monitor draws its caret and selection
+/// with and maps clicks through, so they line up with the glyphs at any monitor size, Motion zoom and rotation.
+/// Indices are UTF-16 offsets into `text` (NSString's), from 0 to `length`. "Canvas" coordinates are the title's
+/// frame-sized canvas before Motion; "frame" coordinates are where that lands on the frame. Both in sequence pixels,
+/// origin at the top-left, +y down. Immutable; made on the main thread.
+@interface VETitleTextLayout : NSObject
+/// The text it was laid out for.
+@property (nonatomic, readonly, copy) NSString *text;
+@property (nonatomic, readonly) NSInteger length;
+@property (nonatomic, readonly) NSInteger lineCount;
+/// The title's font size in sequence pixels (the canvas's).
+@property (nonatomic, readonly) double fontSize;
+/// Canvas to frame: the clip's Motion at the time (scaled about the frame's centre, turned clockwise, moved).
+@property (nonatomic, readonly) CGAffineTransform canvasToFrame;
+/// The text block on the canvas, and on the frame.
+@property (nonatomic, readonly) CGRect canvasBlock;
+@property (nonatomic, readonly) VETitleQuad frameBlock;
+/// The characters of line `line` (0 ..< lineCount; the empty last line after a final line break is {length, 0}).
+- (NSRange)rangeOfLine:(NSInteger)line NS_SWIFT_NAME(range(ofLine:));
+/// The line the caret at `index` is on (a caret at a line the box wrapped is at the start of the next line).
+- (NSInteger)lineOfIndex:(NSInteger)index NS_SWIFT_NAME(line(ofIndex:));
+/// The caret at `index` on the canvas (a zero-width rectangle from the line's top to its bottom) and on the frame.
+- (CGRect)canvasCaretAtIndex:(NSInteger)index NS_SWIFT_NAME(canvasCaret(at:));
+- (VETitleCaret)caretAtIndex:(NSInteger)index NS_SWIFT_NAME(caret(at:));
+/// The caret index nearest a frame point (a click): through the inverse of the Motion, on the line whose band holds
+/// it (else the nearest line), never past a line's break or inside a character. 0 when the clip is scaled to nothing.
+- (NSInteger)indexAtFramePoint:(CGPoint)point NS_SWIFT_NAME(index(atFramePoint:));
+/// The caret index on `line` nearest the canvas x `x` (moving up and down a line keeps the caret's x).
+- (NSInteger)indexOnLine:(NSInteger)line nearCanvasX:(double)x NS_SWIFT_NAME(index(onLine:nearCanvasX:));
+/// The canvas rectangles covering the characters in `range` (one or more per line: right-to-left runs select where
+/// their glyphs are), as NSValue (rectValue); `frameQuadOfCanvasRect:` places one on the frame.
+- (NSArray<NSValue *> *)canvasSelectionRectsForRange:(NSRange)range NS_SWIFT_NAME(canvasSelectionRects(for:));
+- (VETitleQuad)frameQuadOfCanvasRect:(CGRect)rect NS_SWIFT_NAME(frameQuad(ofCanvasRect:));
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
