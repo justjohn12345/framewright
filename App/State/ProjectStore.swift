@@ -37,6 +37,8 @@ final class ProjectStore: ObservableObject {
     let playhead = PlayheadModel()
     let sourcePlayhead = PlayheadModel()
     let viewport = TimelineViewport()
+    /// The program monitor's zoom (Fit or a fixed level; the control above the monitor).
+    let programZoom = ProgramMonitorZoom()
     private(set) lazy var playbackActions: PlaybackActions = EnginePlaybackActions(store: self)
     /// The inspector's editing logic (parameters, nudges, sliders, resets, messages).
     private(set) lazy var inspector = InspectorModel(store: self)
@@ -143,7 +145,13 @@ final class ProjectStore: ObservableObject {
     @Published private(set) var source = SourceMonitorState()
     @Published var targetVideoTrackID: VETrackID = 0
     @Published var targetAudioTrackID: VETrackID = 0
-    @Published var focusArea: FocusArea = .timeline
+    @Published var focusArea: FocusArea = .timeline {
+        didSet { programMonitorFocused = false } // another click took the focus (focusProgramMonitor sets it after)
+    }
+    /// The program monitor was clicked last (it shares the timeline's transport keys, `focusArea` .timeline): the
+    /// zoom keys (Command-plus, Command-minus, Shift-Z) zoom the monitor instead of the timeline, as in Final Cut.
+    /// Not published: only the key handlers read it.
+    private(set) var programMonitorFocused = false
     /// Empty tracks whose rows the user collapsed (a track with clips always shows full height).
     @Published private(set) var collapsedTrackIDs: Set<VETrackID> = []
     /// The track whose lane 0 is shown for a transition dragged over it (the row under the pointer
@@ -703,6 +711,7 @@ final class ProjectStore: ObservableObject {
     /// keys then drive the program monitor).
     func scrub(toSeconds seconds: Double) {
         if focusArea != .timeline { focusArea = .timeline }
+        programMonitorFocused = false // the ruler is the timeline's
         reclaimKeyboardFocus()
         let time = frameTime(seconds)
         playhead.setTime(time)
@@ -750,8 +759,41 @@ final class ProjectStore: ObservableObject {
         if y != scrollY { scrollY = y }
     }
 
-    func zoomIn() { zoom(by: 1.5, anchorX: timelineModel.x(forTime: playheadTime.secondsOrZero)) }
-    func zoomOut() { zoom(by: 1 / 1.5, anchorX: timelineModel.x(forTime: playheadTime.secondsOrZero)) }
+    /// A click on the program monitor: the transport keys drive the program (as from the timeline), and the zoom
+    /// keys zoom the monitor.
+    func focusProgramMonitor() {
+        guard !programMonitorFocused || focusArea != .timeline else { return } // a drag's every move asks again
+        focusArea = .timeline
+        programMonitorFocused = true
+    }
+
+    /// Zoom In (Command-plus, =): the program monitor while it has the focus, else the timeline.
+    func zoomIn() {
+        if programMonitorFocused {
+            programZoom.zoomIn()
+            return
+        }
+        zoom(by: 1.5, anchorX: timelineModel.x(forTime: playheadTime.secondsOrZero))
+    }
+
+    /// Zoom Out (Command-minus, -): the program monitor while it has the focus, else the timeline.
+    func zoomOut() {
+        if programMonitorFocused {
+            programZoom.zoomOut()
+            return
+        }
+        zoom(by: 1 / 1.5, anchorX: timelineModel.x(forTime: playheadTime.secondsOrZero))
+    }
+
+    /// Shift-Z (Final Cut's Zoom to Fit): the program monitor back to Fit while it has the focus, else the whole
+    /// sequence in the timeline.
+    func zoomFocusedToFit() {
+        if programMonitorFocused {
+            programZoom.fit()
+            return
+        }
+        zoomToFit(width: timelineViewportWidth)
+    }
 
     /// Fits the whole sequence into `width` points.
     func zoomToFit(width: CGFloat) {

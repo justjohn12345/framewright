@@ -30,7 +30,8 @@ enum MonitorFrame {
 /// fitted into the whole area; in Transform mode fitted inside a margin (`KenBurnsViewport`) that
 /// stands for the space off the frame, so a box larger than the frame or partly off it keeps its
 /// corners and body on screen; in Ken Burns mode with a rectangle outside the frame box (a picture in
-/// picture's), fitted with the rectangles around it (`KenBurnsViewport.editor`). The area around the frame is `MonitorFrame.outsideColor`, the frame's
+/// picture's) or a box past the Transform margin, fitted with the boxes around it (`KenBurnsViewport.editor`); at a
+/// fixed zoom level (`ProgramMonitorZoom`, the control above the monitor) the frame at that size, centred. The area around the frame is `MonitorFrame.outsideColor`, the frame's
 /// edge a thin line while the editor is open; the editor's boxes or rectangles and the other clips'
 /// outlines are drawn over the whole area and its bar (range, caption, toggles, mode, smoothing,
 /// Swap, Close) below it. A selected Opacity or Gain span shows its readout instead. With one title
@@ -39,18 +40,32 @@ enum MonitorFrame {
 /// spans and switching modes (`ProjectStore.kenBurnsMode`).
 struct ProgramMonitorLayout<Picture: View>: View {
     @ObservedObject var store: ProjectStore
+    /// The monitor's zoom (`ProjectStore.programZoom`): Fit, or a fixed level (`KenBurnsViewport.stage`).
+    @ObservedObject var zoom: ProgramMonitorZoom
     var showsHUD = false
     @ViewBuilder var picture: Picture
+    @Environment(\.displayScale) private var displayScale
+
+    init(store: ProjectStore, showsHUD: Bool = false, @ViewBuilder picture: () -> Picture) {
+        self.store = store
+        zoom = store.programZoom
+        self.showsHUD = showsHUD
+        self.picture = picture()
+    }
 
     var body: some View {
         let editor = store.kenBurns
         let sequenceSize = CGSize(width: store.sequence.width, height: store.sequence.height)
         let mode = store.kenBurnsMode
         let extent = store.kenBurnsExtent
+        let pointsPerPixel = 1 / max(displayScale, 1)
         VStack(spacing: 0) {
             GeometryReader { geometry in
-                let viewport = KenBurnsViewport.editor(mode: mode, extent: extent, sequence: sequenceSize,
-                                                       monitor: geometry.size)
+                let viewport = KenBurnsViewport.stage(zoom: zoom.zoom, mode: mode, extent: extent,
+                                                      sequence: sequenceSize, monitor: geometry.size,
+                                                      pointsPerPixel: pointsPerPixel)
+                let fitPercent = KenBurnsViewport.editor(mode: mode, extent: extent, sequence: sequenceSize,
+                                                         monitor: geometry.size).percent(pointsPerPixel: pointsPerPixel)
                 let frame = sequenceSize.width > 0 && sequenceSize.height > 0
                     ? viewport.frame : CGRect(origin: .zero, size: geometry.size)
                 ZStack(alignment: .topLeading) {
@@ -69,6 +84,7 @@ struct ProgramMonitorLayout<Picture: View>: View {
                 .clipped()
                 .onAppear { MonitorFrame.programArea = geometry.frame(in: .global) }
                 .onChange(of: geometry.frame(in: .global)) { _, area in MonitorFrame.programArea = area }
+                .onChange(of: fitPercent, initial: true) { _, percent in zoom.noteFitPercent(percent) }
             }
             .overlay(alignment: .topLeading) {
                 if let span = store.selectedEffectSpan, editor == nil, span.kind == .opacity || span.kind == .gain {
