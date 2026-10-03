@@ -1,6 +1,8 @@
 # Titles, text overlays and colour mattes: design and slices (2026-10-02)
 
-Status: **proposed, not approved.** Nothing here is implemented. The owner asked for titles and text overlays
+Status: **approved by the owner 2026-10-02** (all eleven decisions as recommended, decision 1 as reworded: a title
+is a clip of its own on a video track, an overlay over the tracks below, not attached to a video clip). Slice 1 is
+the next round. The owner asked for titles and text overlays
 next (feature gap item 1, `2026-10-01-premiere-lite-feature-gap.md`). This note answers the design questions
 the lead raised, in the shape of the approved grading decision (`docs/reviews/2026-10-01-grading-pipeline-decision.md`):
 per question the options, a recommendation, what the major editors do, and what it means for the code. It ends
