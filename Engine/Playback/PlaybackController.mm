@@ -700,6 +700,9 @@ void PlaybackController::registerAssetsLocked() {
         return;
     }
     for (const MediaAsset &asset : project_->assets) {
+        if (!asset.isFileBacked()) {
+            continue; // a generator asset's pictures come from their sources, and it has no sound
+        }
         const std::string path = mediaPath(asset.url);
         auto known = registeredPaths_.find(asset.id);
         if (known != registeredPaths_.end() && known->second == path) {

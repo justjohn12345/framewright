@@ -27,7 +27,7 @@ OfflineAudioRenderer::OfflineAudioRenderer(std::shared_ptr<media::BackendRouter>
         return;
     }
     for (const MediaAsset &asset : project_->assets) {
-        if (!asset.hasAudio()) {
+        if (!asset.hasAudio() || !asset.isFileBacked()) {
             continue;
         }
         std::optional<media::RoutedMediaInfo> routed;

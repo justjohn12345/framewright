@@ -258,8 +258,8 @@ struct ExportJob::Run {
             config.decodeOptions.highPrecision = true;
             pool = std::make_shared<media::DecodePool>(services.router, services.cache, config);
             for (const MediaAsset &asset : project.assets) {
-                if (!asset.hasVideo()) {
-                    continue;
+                if (!asset.hasVideo() || !asset.isFileBacked()) {
+                    continue; // a generator asset's pictures are rendered, not decoded
                 }
                 std::optional<media::RoutedMediaInfo> routed;
                 if (auto it = services.routing.find(asset.id); it != services.routing.end()) {
@@ -615,7 +615,7 @@ Status ExportJob::validate(const ExportRequest &request, const ExportServices &s
     // The output must not be any of the project's media, used by this sequence or not (another
     // sequence, a clip on a muted track, media only in the bin).
     for (const MediaAsset &asset : request.project->assets) {
-        if (sameFile(playback::mediaPathForURL(asset.url), output)) {
+        if (asset.isFileBacked() && sameFile(playback::mediaPathForURL(asset.url), output)) {
             return makeError(MediaErrorCode::InvalidArgument,
                              "The export would overwrite “" + displayName(asset) +
                                  "”, which is media of this project. Choose another file name.");
@@ -640,6 +640,9 @@ Status ExportJob::validate(const ExportRequest &request, const ExportServices &s
             if (asset == nullptr) {
                 return makeError(MediaErrorCode::FileNotFound, "A clip on " + track.name +
                                                                    " refers to media that is not in the project.");
+            }
+            if (!asset->isFileBacked()) {
+                continue; // a title or a colour matte: no file to check
             }
             const std::string path = playback::mediaPathForURL(asset->url);
             if (::access(path.c_str(), F_OK) != 0) {

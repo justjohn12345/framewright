@@ -93,7 +93,7 @@ NSError *makeError(const media::MediaError &error, NSString *context) {
             continue;
         }
         auto existing = std::find_if(_project.assets.begin(), _project.assets.end(),
-                                     [&](const MediaAsset &a) { return a.url == file.asset->url; });
+                                     [&](const MediaAsset &a) { return a.isFileBacked() && a.url == file.asset->url; });
         if (existing != _project.assets.end()) {
             [reportedIDs addObject:@(static_cast<int64_t>(existing->id.value()))];
             continue;
@@ -173,10 +173,11 @@ NSError *makeError(const media::MediaError &error, NSString *context) {
     VE_ASSERT_MAIN();
     const AssetId id = toAssetId(assetID);
     const MediaAsset *asset = _project.findAsset(id);
-    if (asset == nullptr || !asset->hasVideo() || [_media isAssetMissing:id]) {
-        NSError *error = makeError(VEEngineErrorReadFailed, asset == nullptr ? @"unknown asset"
-                                                            : !asset->hasVideo() ? @"the asset has no picture"
-                                                                                 : @"the media file is missing");
+    if (asset == nullptr || !asset->hasVideo() || !asset->isFileBacked() || [_media isAssetMissing:id]) {
+        NSError *error = makeError(VEEngineErrorReadFailed, asset == nullptr        ? @"unknown asset"
+                                                            : !asset->hasVideo()     ? @"the asset has no picture"
+                                                            : !asset->isFileBacked() ? @"a generated picture has no thumbnail"
+                                                                                     : @"the media file is missing");
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(NULL, error);
         });

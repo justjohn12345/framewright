@@ -19,7 +19,7 @@ namespace ve {
 std::optional<std::string> modelTimeProblem(CMTime t, const std::string &what);
 
 // First violated invariant of one asset (URL, times, per-kind frame size, frame duration,
-// rotation and audio format), or nullopt. Every stored time is either an exact model time
+// rotation and audio format; a generator asset is a still without URL, size or rotation), or nullopt. Every stored time is either an exact model time
 // (numeric, not rounded, epoch 0) or, where the field allows it, non-numeric; an invalid time is
 // always the canonical kCMTimeInvalid.
 std::optional<std::string> validateAsset(const MediaAsset &asset);
@@ -77,7 +77,8 @@ void pruneInvalidTransitions(Sequence &sequence, const Project &project, std::ve
 
 // First violated invariant of `sequence` (tracks, clips, links, spans and transitions), or
 // nullopt. Every clip and span time must be an exact model time (numeric, no
-// kCMTimeFlags_HasBeenRounded, epoch 0).
+// kCMTimeFlags_HasBeenRounded, epoch 0). A clip of a generator asset carries valid content of its kind
+// (Clip::generated) and no grade; a clip of media carries no content.
 std::optional<std::string> validateSequence(const Sequence &sequence, const Project &project);
 
 // First violated invariant of `project` (assets, every sequence, id uniqueness, id generator

@@ -244,6 +244,9 @@ NSNumber *keyFor(AssetId asset) {
                         thumbnailReady:(VEMediaAssetReady)thumbnailReady
                          waveformReady:(VEMediaAssetReady)waveformReady {
     VE_ASSERT_MAIN();
+    if (!asset.isFileBacked()) {
+        return; // a generated picture has no poster or waveform
+    }
     const uint64_t generation = _generation;
     const AssetId id = asset.id;
     __weak VEMediaLibrary *weakSelf = self;
@@ -340,6 +343,9 @@ NSNumber *keyFor(AssetId asset) {
     std::vector<AssetRelink> relinks;
     for (size_t i = 0; i < assets.size(); ++i) {
         const MediaAsset &asset = assets[i];
+        if (!asset.isFileBacked()) {
+            continue; // a generator asset has no file to find
+        }
         std::string path = asset.url;
         NSData *bookmark = bookmarks[keyFor(asset.id)];
         if (resolutionOf[i]) {
@@ -375,7 +381,7 @@ NSNumber *keyFor(AssetId asset) {
     __weak VEMediaLibrary *weakSelf = self;
     VEMediaDetailsCompletion done = [completion copy];
     for (const MediaAsset &asset : assets) {
-        if (_missing.count(asset.id)) {
+        if (_missing.count(asset.id) || !asset.isFileBacked()) {
             continue;
         }
         const AssetId assetId = asset.id;
@@ -406,6 +412,9 @@ NSNumber *keyFor(AssetId asset) {
 
 - (nullable NSData *)bookmarkForSavingAsset:(const MediaAsset &)asset {
     VE_ASSERT_MAIN();
+    if (!asset.isFileBacked()) {
+        return nil; // no file
+    }
     NSNumber *key = keyFor(asset.id);
     NSData *bookmark = _bookmarks[key];
     if (bookmark == nil && !_missing.count(asset.id)) {

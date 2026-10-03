@@ -36,7 +36,15 @@ bool operator==(const MediaAsset &a, const MediaAsset &b) {
            identical(a.videoDuration, b.videoDuration) &&
            a.rotationDegrees == b.rotationDegrees && a.audioSampleRate == b.audioSampleRate &&
            a.audioChannels == b.audioChannels &&
-           a.backendHint == b.backendHint && a.hardwareDecode == b.hardwareDecode;
+           a.backendHint == b.backendHint && a.hardwareDecode == b.hardwareDecode && a.generator == b.generator;
+}
+
+MediaAsset makeGeneratorAsset(GeneratorKind kind) {
+    MediaAsset asset;
+    asset.name = displayNameOf(kind);
+    asset.kind = AssetKind::Still;
+    asset.generator = kind;
+    return asset;
 }
 
 } // namespace ve

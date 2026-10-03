@@ -132,8 +132,12 @@ constexpr const char *kMediaFolderBookmarkKey = "mediaFolderBookmark";
     }
 
     // Every asset is registered with both decode pools now, the missing ones included (their
-    // decodes fail as missing instead of finding whatever the id named before).
+    // decodes fail as missing instead of finding whatever the id named before). A generator asset has
+    // no file: its clips' pictures are rendered, not decoded.
     for (const MediaAsset &asset : _project.assets) {
+        if (!asset.isFileBacked()) {
+            continue;
+        }
         [_programMonitor registerAsset:asset.id path:asset.url];
         [_sourceMonitor registerAsset:asset.id path:asset.url];
     }

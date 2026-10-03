@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace ve {
 
@@ -149,7 +150,7 @@ bool operator==(const Clip &a, const Clip &b) {
            identical(a.sourceIn, b.sourceIn) && a.speed == b.speed && a.isStill == b.isStill &&
            a.reversed == b.reversed &&
            a.linkedClipId == b.linkedClipId && a.video == b.video && a.audio == b.audio && a.grade == b.grade &&
-           a.transitions == b.transitions && a.spans == b.spans;
+           a.transitions == b.transitions && a.spans == b.spans && sameContent(a.generated, b.generated);
 }
 
 std::optional<ExactTime> Clip::exactSourceTimeAt(CMTime t) const {
@@ -579,6 +580,80 @@ VideoParams motionValuesAt(const Clip &clip, CMTime t) {
     }
     const auto time = spanEvaluationTime(clip, t);
     return time ? composeMotion(clip, *time) : clip.video;
+}
+
+namespace {
+
+// The smallest and largest fractions of its change in value a segment with timing curve `curve` reaches:
+// the extremes of y(s) = 3 y1 s (1 - s)^2 + 3 y2 s^2 (1 - s) + s^3 over s in [0, 1] (the ends, 0 and 1, and
+// where y'(s) = a + 2 (b - 2a) s + 3 (a - b + 1) s^2 is 0, with a = 3 y1 and b = 3 y2).
+std::pair<double, double> curveFractionRange(const TimingCurve &curve) {
+    const double a = 3.0 * curve.y1;
+    const double b = 3.0 * curve.y2;
+    const auto y = [&](double t) { return a * t + (b - 2.0 * a) * t * t + (a - b + 1.0) * t * t * t; };
+    double low = 0.0;
+    double high = 1.0;
+    const auto consider = [&](double t) {
+        if (std::isfinite(t) && t > 0.0 && t < 1.0) {
+            low = std::min(low, y(t));
+            high = std::max(high, y(t));
+        }
+    };
+    const double qa = 3.0 * (a - b + 1.0);
+    const double qb = 2.0 * (b - 2.0 * a);
+    const double qc = a;
+    if (std::fabs(qa) < 1e-12) {
+        if (std::fabs(qb) > 1e-12) {
+            consider(-qc / qb);
+        }
+    } else {
+        const double discriminant = qb * qb - 4.0 * qa * qc;
+        if (discriminant >= 0.0) {
+            const double root = std::sqrt(discriminant);
+            consider((-qb + root) / (2.0 * qa));
+            consider((-qb - root) / (2.0 * qa));
+        }
+    }
+    return {low, high};
+}
+
+// The largest value a keyframe track reaches (its keyframes, and between them the extremes of each
+// segment's curve), or `emptyValue` for an empty track.
+double trackMaximum(const KeyframeTrack &track, double emptyValue) {
+    if (track.empty()) {
+        return emptyValue;
+    }
+    double maximum = track.front().value;
+    for (std::size_t i = 0; i < track.size(); ++i) {
+        maximum = std::max(maximum, track[i].value);
+        if (i + 1 == track.size() || track[i].interpolation == KeyframeInterpolation::Hold) {
+            continue;
+        }
+        const TimingCurve curve = track[i].interpolation == KeyframeInterpolation::Bezier
+                                      ? track[i].curve
+                                      : timingCurveFor(track[i].interpolation);
+        const auto [low, high] = curveFractionRange(curve);
+        const double from = track[i].value;
+        const double change = track[i + 1].value - from;
+        maximum = std::max({maximum, from + change * low, from + change * high});
+    }
+    return maximum;
+}
+
+} // namespace
+
+double maxMotionScale(const Clip &clip) {
+    const SpanParameterInfo &info = infoOf(SpanParameter::Scale);
+    double scale = std::max(0.0, clip.video.scale);
+    for (const EffectSpan &span : clip.spans) {
+        if (span.kind != SpanKind::Motion) {
+            continue;
+        }
+        const double reached =
+            std::clamp(trackMaximum(span.tracks.track(SpanParameter::Scale), info.neutral), info.minimum, info.maximum);
+        scale *= std::max(1.0, reached);
+    }
+    return std::isfinite(scale) ? scale : std::numeric_limits<double>::max();
 }
 
 double gainDbAt(const Clip &clip, CMTime t) {

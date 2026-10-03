@@ -27,12 +27,14 @@
 
 #include "ClipGrade.h"
 #include "EffectSpan.h"
+#include "GeneratedContent.h"
 #include "Ids.h"
 #include "TimeUtil.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -137,8 +139,12 @@ struct Clip {
     VideoParams video;
     AudioParams audio;
     // The clip's colour grade (ClipGrade.h); neutral (no grade) by default, and on every clip of an
-    // audio track.
+    // audio track and every generated clip.
     ClipGrade grade;
+    // What a generated clip shows (GeneratedContent.h: a title or a colour matte), shared and immutable; set
+    // exactly on the clips of a generator asset (MediaAsset::generator), with the asset's kind. Null for a
+    // clip of media.
+    std::shared_ptr<const GeneratedContent> generated;
     // Lane 0: transitions and fades, at most one per edge, the head's first (sortSpans).
     std::vector<TransitionSpan> transitions;
     // Lanes 1-3: effect spans, by lane, each lane by start (sortSpans).
@@ -326,6 +332,15 @@ VideoParams motionValuesAt(const Clip &clip, CMTime t);
 
 // The clip's audio level in dB at timeline time `t`.
 double gainDbAt(const Clip &clip, CMTime t);
+
+// The largest scale the clip's picture is drawn at over its whole length (titles design, section 3: a
+// generated picture is rendered at that scale, so it stays sharp at the end of a zoom): an upper bound of
+// motionValuesAt(clip, t).scale for every t. The static scale times, for each Motion span, the largest
+// factor its Scale track reaches, at least 1 (before its start a span contributes nothing; after its end it
+// holds its end value). Between two keyframes the factor follows the segment's timing curve, whose
+// extremes are taken exactly from its control points: a custom (Bezier) curve can overshoot its keyframes.
+// Values are limited to the parameter's range, as the composition limits them. 0 for a static scale of 0.
+double maxMotionScale(const Clip &clip);
 
 // ----- A span's edges as the Ken Burns move reads and writes them -----
 // The time the rest of the clip is composed at for an edge of `span`: its start (`atEnd` false),

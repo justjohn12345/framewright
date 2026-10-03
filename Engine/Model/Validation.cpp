@@ -113,6 +113,25 @@ std::optional<std::string> validateClip(const Clip &clip, const Track &track, co
             return where + ": its grade uses LUT " + *lut + ", which the project does not hold";
         }
     }
+    // A generated clip (a title or a matte; GeneratedContent.h) carries content of its generator asset's
+    // kind and has no grade; a clip of media carries none.
+    if (asset->isGenerator()) {
+        if (!clip.generated) {
+            return where + ": a clip of the " + displayNameOf(asset->generator) + " generator has no content";
+        }
+        if (clip.generated->kind() != asset->generator) {
+            return where + ": " + displayNameOf(clip.generated->kind()) + " content on a clip of the " +
+                   displayNameOf(asset->generator) + " generator";
+        }
+        if (auto problem = generatedContentProblem(*clip.generated)) {
+            return where + ": " + *problem;
+        }
+        if (!clip.grade.isEmpty()) {
+            return where + ": a " + displayNameOf(asset->generator) + " clip has no grade";
+        }
+    } else if (clip.generated) {
+        return where + ": a clip of media has no generated content";
+    }
     int heads = 0;
     int tails = 0;
     for (const TransitionSpan &span : clip.transitions) {
@@ -238,7 +257,21 @@ std::optional<std::string> effectSpanProblem(const EffectSpan &span, const Clip 
 
 std::optional<std::string> validateAsset(const MediaAsset &asset) {
     const std::string what = "asset " + std::to_string(asset.id.value());
-    if (asset.url.empty()) {
+    if (asset.isGenerator()) {
+        // A generator asset (MediaAsset.h) has no file and no size: a still that its clips' content draws.
+        if (asset.generator != GeneratorKind::Title && asset.generator != GeneratorKind::ColourMatte) {
+            return what + ": unknown generator kind";
+        }
+        if (!asset.url.empty()) {
+            return what + ": a generator asset has no file, found URL \"" + asset.url + "\"";
+        }
+        if (asset.kind != AssetKind::Still) {
+            return what + ": a generator asset is a still, found " + nameOf(asset.kind);
+        }
+        if (asset.width != 0 || asset.height != 0 || asset.rotationDegrees != 0) {
+            return what + ": a generator asset has no size or rotation (its clips draw at the sequence's size)";
+        }
+    } else if (asset.url.empty()) {
         return what + ": empty URL";
     }
     if (auto problem = optionalTimeProblem(asset.duration, "duration")) {
@@ -266,7 +299,7 @@ std::optional<std::string> validateAsset(const MediaAsset &asset) {
                    describe(asset.duration) + "]";
         }
     }
-    if (asset.hasVideo()) {
+    if (asset.hasVideo() && asset.isFileBacked()) {
         if (asset.width <= 0 || asset.height <= 0) {
             return what + ": frame size " + std::to_string(asset.width) + "x" + std::to_string(asset.height) +
                    " is not positive";

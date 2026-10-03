@@ -1,7 +1,15 @@
-// A piece of source media imported into a project.
+// A piece of source media imported into a project, or one of the project's generator assets.
+//
+// A generator asset (`generator` not None: one "Title" and one "Colour Matte" asset per project, made by
+// the first clip of its kind) has no file: it is a still with an empty URL and a size of 0 x 0, whose clips
+// carry what they show (Clip::generated, GeneratedContent.h). It is hidden from the media bin and the source
+// monitor, never offered by "remove unused media", not written to a project file when no clip uses it, and
+// every place that reads an asset's URL as a file (registration with the decode pools and mixers, thumbnails,
+// waveforms, locate, bookmarks, export's media checks, "File not found") asks isFileBacked() first.
 
 #pragma once
 
+#include "GeneratedContent.h"
 #include "Ids.h"
 #include "TimeUtil.h"
 
@@ -56,6 +64,17 @@ struct MediaAsset {
     std::string backendHint; // decoder backend chosen by the router ("apple", "ffmpeg", ...)
     bool hardwareDecode = false;
 
+    // What the asset generates (see the top of this file); None for a file.
+    GeneratorKind generator = GeneratorKind::None;
+
+    // The asset is a file (not a generator asset): its URL names media to decode.
+    bool isFileBacked() const {
+        return generator == GeneratorKind::None;
+    }
+    bool isGenerator() const {
+        return generator != GeneratorKind::None;
+    }
+
     bool hasVideo() const {
         return kind != AssetKind::Audio;
     }
@@ -74,6 +93,10 @@ struct MediaAsset {
 
 // Bit-for-bit equality of every field.
 bool operator==(const MediaAsset &a, const MediaAsset &b);
+
+// The generator asset of `kind` (Title or ColourMatte) as a project adds it: a still named after the kind
+// (displayNameOf) with an empty URL and no size. Its id is the project's to give (Project::addAsset).
+MediaAsset makeGeneratorAsset(GeneratorKind kind);
 
 // A probed time as the model stores it: the prober's measurement is taken as exact (a
 // kCMTimeFlags_HasBeenRounded flag from its own arithmetic is dropped and the epoch reset to 0);
