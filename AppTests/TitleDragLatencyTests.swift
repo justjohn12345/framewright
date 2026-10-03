@@ -19,7 +19,8 @@ import XCTest
 /// - the program's cache misses (a title picture rendered again).
 ///
 /// Printed, not asserted: wall-clock numbers vary from Mac to Mac and with the load. FW_DRAG_STEPS sets the steps per
-/// drag (a long drag to profile with `sample`).
+/// drag (a long drag to profile with `sample`). Typing on the picture (titles slice 2) is measured the same way, in the
+/// editor window and with an offscreen monitor.
 @MainActor
 final class TitleDragLatencyTests: XCTestCase {
     struct Sample {
@@ -232,6 +233,25 @@ final class TitleDragLatencyTests: XCTestCase {
         }, dragging: dragging, end: { send(.leftMouseUp, last) })
     }
 
+    // MARK: Typing
+
+    /// The project of the drags, the playhead on frame 10 (lower third and title both there).
+    func makeTypingProject() async throws -> (movie: VEClipID, lowerThird: VEClipID, title: VEClipID) {
+        try await makeProject()
+    }
+
+    /// The editor window (the test skips when it cannot be shown).
+    func showTypingWindow() async throws -> NSWindow {
+        _ = try await showWindow()
+        return try XCTUnwrap(window)
+    }
+
+    /// `measure` for keystrokes, paced as a fast typist (12 a second): the time to the picture showing each one.
+    func measureTyping(_ name: String, step: (Int) -> Void, typing: () -> Bool, end: () -> Void) async -> [Sample]? {
+        await measure(name, steps: Self.profiling ? Self.steps : min(Self.steps, 40), pace: 1.0 / 12, step: step,
+                      dragging: typing, end: end)
+    }
+
     // MARK: The drags
 
     /// Each drag made the way the overlays make their steps (the models' `applyDrag`).
@@ -295,6 +315,91 @@ final class TitleDragLatencyTests: XCTestCase {
                                             dragging: { box.isDragging })
             XCTAssertNotNil(widened, "the \(name)'s edge took the drag")
         }
+    }
+}
+
+extension TitleDragLatencyTests {
+    /// Typing on the picture (titles slice 2) in the whole editor window: keystrokes sent through the window to the
+    /// typing session's text view, each a new text (a new picture rendered in the pool's scrub path), measured to the
+    /// picture showing it, for the lower third and the title of the drags' project. Skips when the window cannot be
+    /// shown (the screen locked or the window covered); `testMeasureTypingWithAnOffscreenMonitor` measures then.
+    func testMeasureTypingOnThePicture() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        let (_, lowerThird, title) = try await makeTypingProject()
+        let typingWindow = try await showTypingWindow()
+        for (name, id) in [("lower third", lowerThird), ("title", title)] {
+            store.selectedSpanID = nil
+            store.selection = [id]
+            let box = try XCTUnwrap(store.titleBox)
+            box.setPlayhead(store.playheadTime)
+            XCTAssertTrue(box.beginEditing(.selectAll))
+            let editing = await StoreFixture.wait(until: { typingWindow.firstResponder is TitleEditingTextView }, timeout: 5)
+            XCTAssertTrue(editing, "the text view has the keys")
+            _ = await measureTyping("typing on the picture: \(name)", step: { i in
+                Self.sendKey(i, to: typingWindow)
+            }, typing: { box.editor != nil }, end: { box.endEditing() })
+        }
+    }
+
+    /// Typing on the picture with the program drawn by a view in no window (which draws while the screen is locked,
+    /// unlike a window's) and the program monitor's layout with the typing surface in a window that is not shown: a
+    /// lower third over a movie, keystrokes through that window to the text view, each measured to the picture handed
+    /// out showing it. It leaves out SwiftUI's update of the whole editor window. Printed, not asserted.
+    func testMeasureTypingWithAnOffscreenMonitor() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        let (movie, _) = try await fixture.importMedia()
+        let v1 = try XCTUnwrap(store.videoTracks.first).trackID
+        XCTAssertTrue(store.place(asset: movie.assetID, at: .zero, videoTrack: v1, audioTrack: 0, overwrite: true))
+        store.targetVideoTrackID = v1
+        store.playheadTime = CMTime(value: 0, timescale: 30)
+        XCTAssertTrue(store.addGenerated(.lowerThird))
+        store.playheadTime = CMTime(value: 10, timescale: 30)
+        let view = VEPreviewView(frame: NSRect(x: 0, y: 0, width: 960, height: 540))
+        store.attachProgramView(view)
+        defer { store.engine.attachProgramView(nil) }
+        let shown = await StoreFixture.wait(until: { view.renderCount > 0 && view.missingLayerCount == 0 }, timeout: 20)
+        XCTAssertTrue(shown, "the program frame appeared")
+        let host = HostedView(ProgramMonitorLayout(store: store) { Color.black }, size: NSSize(width: 960, height: 540))
+        defer { host.close() }
+        store.editorWindow = host.window
+        let box = try XCTUnwrap(store.titleBox)
+        XCTAssertTrue(box.beginEditing(.selectAll))
+        await host.settle()
+        XCTAssertTrue(host.window.firstResponder is TitleEditingTextView)
+        var times: [Double] = []
+        var misses: UInt64 = 0
+        for i in 0 ..< 40 {
+            let before = store.engine.playbackStats
+            let t0 = CACurrentMediaTime()
+            Self.sendKey(i, to: host.window)
+            while store.engine.playbackStats.presentedFrames == before.presentedFrames, CACurrentMediaTime() - t0 < 1 {
+                try? await Task.sleep(nanoseconds: 250_000)
+            }
+            let after = store.engine.playbackStats
+            times.append(after.presentedFrames > before.presentedFrames ? (after.presentedHostTime - t0) * 1000 : 1000)
+            misses += after.cacheMisses - before.cacheMisses
+            try? await Task.sleep(nanoseconds: 80_000_000) // a fast typist: about 12 keys a second
+        }
+        box.endEditing()
+        let sorted = times.sorted()
+        print(String(format: """
+        [drag latency] typing on the picture, offscreen monitor (40 keys)
+          keystroke to picture handed out ms: median %6.2f  p90 %6.2f  max %7.2f
+          program cache misses: %llu
+        """, sorted[sorted.count / 2], sorted[Int(Double(sorted.count) * 0.9)], sorted.last ?? 0, misses))
+        XCTAssertEqual(store.clips[box.clipID]?.title?.text.count, 40, "every keystroke typed")
+    }
+
+    /// Sends the `i`th letter of the alphabet (cycling) as a key press through `window`.
+    static func sendKey(_ i: Int, to window: NSWindow) {
+        let letters = Array("abcdefghijklmnopqrstuvwxyz")
+        let letter = String(letters[i % letters.count])
+        guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                           windowNumber: window.windowNumber, context: nil, characters: letter,
+                                           charactersIgnoringModifiers: letter, isARepeat: false, keyCode: 0) else {
+            return
+        }
+        window.sendEvent(event)
     }
 }
 
