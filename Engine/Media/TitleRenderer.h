@@ -115,16 +115,26 @@ Result<PixelBuffer> renderMatte(const SRGBColour &colour, double canvasWidth, do
 /// times max(1, outputScale), never below the sequence's resolution (1). A non-finite or negative input counts as 1.
 double rasterScaleFor(double maxMotionScale, double outputScale);
 
-/// The cache identity of `content` drawn on a `canvasWidth` x `canvasHeight` sequence at raster scale `k` (k is
-/// quantised as rasterScale64 does): what the render thread looks a generated layer's picture up by, without
-/// making its source. A matte's ignores k (its picture has no detail to sharpen).
-GeneratedKey generatedKeyFor(const GeneratedContent &content, std::int32_t canvasWidth, std::int32_t canvasHeight,
-                             double k);
+/// The generation of the fonts on this Mac as titles see them: 1 at launch, advanced by advanceTitleFontGeneration
+/// when a font is activated or removed (the facade does, on Core Text's notification, before it drops the titles'
+/// pictures). Part of every title's GeneratedKey, so the change is a key change. Any thread.
+std::uint32_t titleFontGeneration();
+/// Advances titleFontGeneration and returns the new generation.
+std::uint32_t advanceTitleFontGeneration();
 
-/// The source of `content`'s picture on a `canvasWidth` x `canvasHeight` sequence at raster scale `k`: a title
-/// (renderTitle) or a matte (renderMatte); its key is generatedKeyFor's. Null for a null `content`.
+/// The cache identity of `content` drawn on a `canvasWidth` x `canvasHeight` sequence at raster scale `k` (k is
+/// quantised as rasterScale64 does) with the fonts of `fontGeneration`: what the render thread looks a generated
+/// layer's picture up by, without making its source. A matte's ignores k and the fonts (its picture has no detail
+/// to sharpen and no text).
+GeneratedKey generatedKeyFor(const GeneratedContent &content, std::int32_t canvasWidth, std::int32_t canvasHeight,
+                             double k, std::uint32_t fontGeneration);
+
+/// The source of `content`'s picture on a `canvasWidth` x `canvasHeight` sequence at raster scale `k`, keyed with
+/// the fonts of `fontGeneration`: a title (renderTitle) or a matte (renderMatte); its key is generatedKeyFor's.
+/// (It draws with the fonts the Mac has when it renders: a caller that keeps an older generation, an export, knows
+/// it and says so.) Null for a null `content`.
 std::shared_ptr<const GeneratedPictureSource> makeGeneratedSource(std::shared_ptr<const GeneratedContent> content,
                                                                   std::int32_t canvasWidth, std::int32_t canvasHeight,
-                                                                  double k);
+                                                                  double k, std::uint32_t fontGeneration);
 
 } // namespace ve::media

@@ -46,22 +46,24 @@ CMTime pictureTimeFor(const VideoLayer &layer, const MediaAsset &asset) {
 }
 
 std::shared_ptr<const media::GeneratedPictureSource> generatedSourceFor(const VideoLayer &layer, std::int32_t width,
-                                                                        std::int32_t height, double outputScale) {
+                                                                        std::int32_t height, double outputScale,
+                                                                        std::uint32_t fontGeneration) {
     if (!layer.generated) {
         return nullptr;
     }
     return media::makeGeneratedSource(layer.generated, width, height,
-                                      media::rasterScaleFor(layer.maxMotionScale, outputScale));
+                                      media::rasterScaleFor(layer.maxMotionScale, outputScale), fontGeneration);
 }
 
 media::FrameKey pictureKeyFor(const VideoLayer &layer, media::DecodeFormat format, std::int32_t width,
-                              std::int32_t height, double outputScale) {
+                              std::int32_t height, double outputScale, std::uint32_t fontGeneration) {
     if (!layer.generated) {
         return media::FrameKey{layer.assetId, format};
     }
     return media::FrameKey{layer.assetId, format,
                            media::generatedKeyFor(*layer.generated, width, height,
-                                                  media::rasterScaleFor(layer.maxMotionScale, outputScale))};
+                                                  media::rasterScaleFor(layer.maxMotionScale, outputScale),
+                                                  fontGeneration)};
 }
 
 double monitorOutputScale(double viewPixelsPerSequencePixel) {
@@ -410,7 +412,8 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
         if (const MediaAsset *asset = rs.project->findAsset(layer.assetId)) {
             const CMTime pictureTime = pictureTimeFor(layer, *asset);
             shown.wantedIndex = asset->isStill() ? 0 : FrameCache::frameIndex(pictureTime, asset->frameDuration);
-            pin = cache->acquire(pictureKeyFor(layer, decodeFormat, sequence->width, sequence->height, outputScale),
+            pin = cache->acquire(pictureKeyFor(layer, decodeFormat, sequence->width, sequence->height, outputScale,
+                                               media::titleFontGeneration()),
                                  pictureTime);
             bool usable = static_cast<bool>(pin);
             if (usable && request.textureCache) {
@@ -795,7 +798,8 @@ void PlaybackController::retargetLocked(CMTime at, double rate, CMTime window, d
             target.trackIndex = -1;
             const MediaAsset *asset = project_->findAsset(layer.assetId);
             target.sourceTime = asset ? pictureTimeFor(layer, *asset) : layer.sourceTime;
-            target.generated = generatedSourceFor(layer, sequence->width, sequence->height, generatedOutputScale_);
+            target.generated = generatedSourceFor(layer, sequence->width, sequence->height, generatedOutputScale_,
+                                                  media::titleFontGeneration());
             // A reversed clip's pictures run backwards in its media as the timeline advances: its
             // lookahead goes the other way (reverse play of a reversed clip decodes forward).
             target.direction = backward != layer.reversed ? media::DecodeDirection::Backward
@@ -850,8 +854,8 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
         // The picture the frame source looks up (see pictureTimeFor). Already decoded: pinned until
         // the next target, so it is still there when the redraw below looks it up.
         const CMTime pictureTime = pictureTimeFor(layer, *asset);
-        const media::FrameKey key =
-            pictureKeyFor(layer, core_->decodeFormat, sequence->width, sequence->height, generatedOutputScale_);
+        const media::FrameKey key = pictureKeyFor(layer, core_->decodeFormat, sequence->width, sequence->height,
+                                                  generatedOutputScale_, media::titleFontGeneration());
         if (FrameCache::PinnedFrame cached = cache_->acquire(key, pictureTime)) {
             core_->holdDisplayPin(generation, std::move(cached));
             continue;
@@ -878,7 +882,9 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
                                     hub->postNeedsDisplay();
                                 }
                             },
-                            lane, generatedSourceFor(layer, sequence->width, sequence->height, generatedOutputScale_));
+                            lane,
+                            generatedSourceFor(layer, sequence->width, sequence->height, generatedOutputScale_,
+                                               media::titleFontGeneration()));
     }
     postNeedsDisplay();
 }
@@ -891,10 +897,9 @@ bool PlaybackController::firstFramesReadyLocked(CMTime at) const {
     const std::vector<VideoLayer> layers = layersToDecodeLocked(*sequence, at);
     return std::all_of(layers.begin(), layers.end(), [&](const VideoLayer &layer) {
         const MediaAsset *asset = project_->findAsset(layer.assetId);
-        return !asset ||
-               cache_->contains(
-                   pictureKeyFor(layer, core_->decodeFormat, sequence->width, sequence->height, generatedOutputScale_),
-                   pictureTimeFor(layer, *asset));
+        return !asset || cache_->contains(pictureKeyFor(layer, core_->decodeFormat, sequence->width, sequence->height,
+                                                        generatedOutputScale_, media::titleFontGeneration()),
+                                          pictureTimeFor(layer, *asset));
     });
 }
 

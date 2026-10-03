@@ -142,16 +142,19 @@ std::string mediaPathForURL(const std::string &url);
 
 /// The picture source of a generated layer (a title or a matte, VideoLayer::generated) of a `width` x `height`
 /// sequence for an output of `outputScale` output pixels per sequence pixel (its raster scale:
-/// media::rasterScaleFor(layer.maxMotionScale, outputScale)); null for a layer of media. Playback and export give it
-/// to the decode pool with the layer's target or request (DecodePool::DecodeTarget::generated).
+/// media::rasterScaleFor(layer.maxMotionScale, outputScale)), keyed with the fonts of `fontGeneration`
+/// (media::titleFontGeneration: playback passes the current one, an export the one it started with); null for a layer
+/// of media. Playback and export give it to the decode pool with the layer's target or request
+/// (DecodePool::DecodeTarget::generated).
 std::shared_ptr<const media::GeneratedPictureSource> generatedSourceFor(const VideoLayer &layer, std::int32_t width,
-                                                                        std::int32_t height, double outputScale);
+                                                                        std::int32_t height, double outputScale,
+                                                                        std::uint32_t fontGeneration);
 
 /// The frame cache key of `layer`'s picture in a pool decoding `format`: the asset's decoded frames, or a generated
 /// layer's picture (generatedSourceFor's key, computed without making the source: the render thread looks pictures
 /// up by it).
 media::FrameKey pictureKeyFor(const VideoLayer &layer, media::DecodeFormat format, std::int32_t width,
-                              std::int32_t height, double outputScale);
+                              std::int32_t height, double outputScale, std::uint32_t fontGeneration);
 
 /// The monitors' output scale for generated pictures, from the largest view showing the program, in drawable pixels
 /// per sequence pixel (titles design, section 3): 1 while no view is larger than the sequence by more than a

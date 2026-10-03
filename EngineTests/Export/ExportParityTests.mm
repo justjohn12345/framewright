@@ -2090,7 +2090,7 @@ std::array<double, 3> centreCodes(CVPixelBufferRef buffer) {
     NSLog(@"PARITY titles: worst block difference %.2f over %zu frames", worst, frames.size());
     // The zoomed title was rendered at the scale its zoom reaches, by the monitor and by the export alike.
     const Clip &zoomClip = *h.sequence().findClip(zoomed);
-    const media::GeneratedKey atTwo = media::generatedKeyFor(*zoomClip.generated, 640, 360, 2.0);
+    const media::GeneratedKey atTwo = media::generatedKeyFor(*zoomClip.generated, 640, 360, 2.0, media::titleFontGeneration());
     XCTAssertTrue(services.cache->contains(media::FrameKey{zoomClip.assetId, media::DecodeFormat{0, 0, true}, atTwo},
                                            kCMTimeZero),
                   @"the export rendered the zoomed title at k = 2");
@@ -2210,9 +2210,9 @@ std::array<double, 3> centreCodes(CVPixelBufferRef buffer) {
     }
     const AssetId asset = h.sequence().findClip(clip)->assetId;
     const media::DecodeFormat format{0, 0, true};
-    XCTAssertTrue(services.cache->contains(media::FrameKey{asset, format, media::generatedKeyFor(*title, 640, 360, 1.5)},
+    XCTAssertTrue(services.cache->contains(media::FrameKey{asset, format, media::generatedKeyFor(*title, 640, 360, 1.5, media::titleFontGeneration())},
                                            kCMTimeZero));
-    XCTAssertFalse(services.cache->contains(media::FrameKey{asset, format, media::generatedKeyFor(*title, 640, 360, 1.0)},
+    XCTAssertFalse(services.cache->contains(media::FrameKey{asset, format, media::generatedKeyFor(*title, 640, 360, 1.0, media::titleFontGeneration())},
                                             kCMTimeZero));
     const auto decoded = decodeFrames(*h.router, request.outputPath, {5}, 30);
     XCTAssertEqual(decoded.size(), 1u);

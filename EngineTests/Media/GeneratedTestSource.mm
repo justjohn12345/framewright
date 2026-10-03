@@ -12,7 +12,7 @@ using namespace ve::media;
 CheckerboardSource::CheckerboardSource(Config config) : config_(config) {}
 
 GeneratedKey CheckerboardSource::key() const {
-    return GeneratedKey{config_.number, 0xC0FFEE, config_.scale64};
+    return GeneratedKey{config_.number, 0xC0FFEE, config_.scale64, 0};
 }
 
 std::string CheckerboardSource::description() const {

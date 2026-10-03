@@ -401,22 +401,29 @@ double msSince(std::chrono::steady_clock::time_point start) {
 
 - (void)testKeysAndSources {
     auto title = GeneratedContent::makeTitle(plain("Key"));
-    const GeneratedKey key = generatedKeyFor(*title, 1920, 1080, 1.0);
+    const GeneratedKey key = generatedKeyFor(*title, 1920, 1080, 1.0, 1);
     XCTAssertEqual(key.scale64, 64u);
-    XCTAssertTrue(key == generatedKeyFor(*GeneratedContent::makeTitle(plain("Key")), 1920, 1080, 1.0));
-    XCTAssertFalse(key == generatedKeyFor(*title, 3840, 2160, 1.0), @"another frame size is another picture");
-    XCTAssertFalse(key == generatedKeyFor(*title, 1920, 1080, 2.0), @"another raster scale");
+    XCTAssertTrue(key == generatedKeyFor(*GeneratedContent::makeTitle(plain("Key")), 1920, 1080, 1.0, 1));
+    XCTAssertFalse(key == generatedKeyFor(*title, 3840, 2160, 1.0, 1), @"another frame size is another picture");
+    XCTAssertFalse(key == generatedKeyFor(*title, 1920, 1080, 2.0, 1), @"another raster scale");
     TitleContent moved = plain("Key");
     moved.x = 0.2;
-    XCTAssertTrue(key == generatedKeyFor(*GeneratedContent::makeTitle(moved), 1920, 1080, 1.0), @"a drag renders nothing");
+    XCTAssertTrue(key == generatedKeyFor(*GeneratedContent::makeTitle(moved), 1920, 1080, 1.0, 1), @"a drag renders nothing");
     TitleContent typed = plain("Kez");
-    XCTAssertFalse(key == generatedKeyFor(*GeneratedContent::makeTitle(typed), 1920, 1080, 1.0));
+    XCTAssertFalse(key == generatedKeyFor(*GeneratedContent::makeTitle(typed), 1920, 1080, 1.0, 1));
     auto matte = GeneratedContent::makeMatte(kBlack);
-    XCTAssertTrue(generatedKeyFor(*matte, 1920, 1080, 1.0) == generatedKeyFor(*matte, 1920, 1080, 3.0),
+    XCTAssertTrue(generatedKeyFor(*matte, 1920, 1080, 1.0, 1) == generatedKeyFor(*matte, 1920, 1080, 3.0, 1),
                   @"a matte has no detail to sharpen");
+    // A change of the Mac's fonts is a new key for a title (never for a matte, which has no text).
+    XCTAssertFalse(key == generatedKeyFor(*title, 1920, 1080, 1.0, 2), @"other fonts, another picture");
+    XCTAssertEqual(generatedKeyFor(*title, 1920, 1080, 1.0, 7).fontGeneration, 7u);
+    XCTAssertTrue(generatedKeyFor(*matte, 1920, 1080, 1.0, 1) == generatedKeyFor(*matte, 1920, 1080, 1.0, 2));
+    const std::uint32_t before = titleFontGeneration();
+    XCTAssertEqual(advanceTitleFontGeneration(), before + 1);
+    XCTAssertEqual(titleFontGeneration(), before + 1);
     // The sources render what their keys say.
-    auto source = makeGeneratedSource(title, 1920, 1080, 1.5);
-    XCTAssertTrue(source->key() == generatedKeyFor(*title, 1920, 1080, 1.5));
+    auto source = makeGeneratedSource(title, 1920, 1080, 1.5, 1);
+    XCTAssertTrue(source->key() == generatedKeyFor(*title, 1920, 1080, 1.5, 1));
     XCTAssertTrue(source->isStatic());
     XCTAssertEqual(source->pixelFormat(), kCVPixelFormatType_32BGRA);
     auto frame = source->render(kCMTimeZero, DecodeOptions{});
@@ -426,9 +433,9 @@ double msSince(std::chrono::steady_clock::time_point start) {
         XCTAssertTrue(geometry.has_value());
         XCTAssertEqualWithAccuracy(double(CVPixelBufferGetWidth(frame->image.get())) / geometry->width, 1.5, 1e-9);
     }
-    auto matteSource = makeGeneratedSource(matte, 1920, 1080, 1.0);
+    auto matteSource = makeGeneratedSource(matte, 1920, 1080, 1.0, 1);
     XCTAssertEqual(matteSource->pixelFormat(), kExtendedRGBAFormat);
-    XCTAssertTrue(makeGeneratedSource(nullptr, 1920, 1080, 1.0) == nullptr);
+    XCTAssertTrue(makeGeneratedSource(nullptr, 1920, 1080, 1.0, 1) == nullptr);
     XCTAssertEqual(source->description(), "the title “Key”");
 }
 

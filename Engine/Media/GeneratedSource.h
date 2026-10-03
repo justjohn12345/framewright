@@ -41,8 +41,13 @@ struct GeneratedKey {
     std::uint64_t contentLow = 0;
     /// The raster scale k (raster pixels per sequence pixel) in 64ths (rasterScale64).
     std::uint32_t scale64 = 0;
+    /// The generation of the Mac's fonts a title is drawn with (titleFontGeneration, TitleRenderer.h): a font
+    /// activated or removed makes every title's key new, so a picture drawn before the change (in a fallback font,
+    /// say) is never found, kept on screen or published for the picture after it. 0 for pictures that use no
+    /// fonts (mattes, test sources).
+    std::uint32_t fontGeneration = 0;
 
-    bool isEmpty() const noexcept { return contentHigh == 0 && contentLow == 0 && scale64 == 0; }
+    bool isEmpty() const noexcept { return contentHigh == 0 && contentLow == 0 && scale64 == 0 && fontGeneration == 0; }
     /// k as a number (scale64 / 64).
     double scale() const noexcept { return double(scale64) / 64.0; }
 

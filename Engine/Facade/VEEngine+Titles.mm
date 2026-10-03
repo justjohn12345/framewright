@@ -45,6 +45,40 @@ std::vector<ClipId> clipIdsOf(NSArray<NSNumber *> *clipIDs) {
     return ids;
 }
 
+/// Posted (main thread) after the Mac's fonts changed and media::advanceTitleFontGeneration advanced the titles'
+/// keys: every engine then drops its titles' pictures and draws them again (titleFontsChanged).
+NSNotificationName const kTitleFontGenerationDidAdvance = @"VEEngineTitleFontGenerationDidAdvance";
+
+/// Watches the Mac's fonts for the whole process, once: Core Text's registry (fonts activated or removed, by Font
+/// Book or an app) and AppKit's font set. One change posts both, often more than once: the burst is coalesced into
+/// one advance of the font generation and one kTitleFontGenerationDidAdvance on the main queue's next turn, so every
+/// title renders again once per change, whatever the number of engines.
+void watchTitleFonts() {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+      static bool pending = false; // main thread only
+      void (^changed)(NSNotification *) = ^(NSNotification *) {
+        if (pending) {
+            return;
+        }
+        pending = true;
+        dispatch_async(dispatch_get_main_queue(), ^{
+          pending = false;
+          media::advanceTitleFontGeneration();
+          [NSNotificationCenter.defaultCenter postNotificationName:kTitleFontGenerationDidAdvance object:nil];
+        });
+      };
+      [NSNotificationCenter.defaultCenter addObserverForName:(__bridge NSString *)kCTFontManagerRegisteredFontsChangedNotification
+                                                      object:nil
+                                                       queue:NSOperationQueue.mainQueue
+                                                  usingBlock:changed];
+      [NSNotificationCenter.defaultCenter addObserverForName:NSFontSetChangedNotification
+                                                      object:nil
+                                                       queue:NSOperationQueue.mainQueue
+                                                  usingBlock:changed];
+    });
+}
+
 /// Title blocks measured (titleBlockSizeOfClip:), per content and frame size: the box follows a drag without
 /// measuring again. Forgotten when the Mac's fonts change (a block measured in a fallback font). Main thread only.
 std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGSize> &measuredTitleBlocks() {
@@ -304,33 +338,29 @@ std::map<std::pair<ContentId, std::pair<int32_t, int32_t>>, CGSize> &measuredTit
     VE_ASSERT_MAIN();
     forgetTitleFontAvailability();
     measuredTitleBlocks().clear();
-    // Titles drawn in a fallback (or in a font now gone) are drawn again: their pictures are dropped from the frame
-    // cache and both monitors' decode pools forget the renders they keep.
-    // (Only the program monitor shows titles: the source monitor shows media.)
+    // Titles drawn in a fallback (or in a font now gone) are drawn again. The font generation was advanced before
+    // this (watchTitleFonts), so every title's key is new: a picture a worker finishes with the old fonts after this
+    // point is stored under the old key, which nothing asks for. The program monitor's pool first retires its title
+    // streams (so no worker goes on rendering for them), then the frame cache drops the old pictures (memory), then
+    // the monitors ask for the new keys. (Only the program monitor shows titles; a running export keeps the
+    // generation it started with and says the fonts changed, ExportSummary::titleFontsChanged.)
     if (const MediaAsset *titles = _project.findGeneratorAsset(GeneratorKind::Title)) {
-        _services.frameCache->purge(titles->id);
         [_programMonitor invalidateGeneratedAsset:titles->id];
+        _services.frameCache->purge(titles->id);
         [self publishPlaybackSnapshot];
     }
     [NSNotificationCenter.defaultCenter postNotificationName:VEEngineTitleFontsDidChangeNotification object:self];
 }
 
 - (void)startObservingTitleFonts {
+    watchTitleFonts();
     __weak VEEngine *weakSelf = self;
-    void (^changed)(NSNotification *) = ^(NSNotification *) {
-      [weakSelf titleFontsChanged];
-    };
-    // Core Text's registry (fonts activated or deactivated, by Font Book or an app) and AppKit's font set.
-    _fontObservers = @[
-        [NSNotificationCenter.defaultCenter addObserverForName:(__bridge NSString *)kCTFontManagerRegisteredFontsChangedNotification
-                                                        object:nil
-                                                         queue:NSOperationQueue.mainQueue
-                                                    usingBlock:changed],
-        [NSNotificationCenter.defaultCenter addObserverForName:NSFontSetChangedNotification
-                                                        object:nil
-                                                         queue:NSOperationQueue.mainQueue
-                                                    usingBlock:changed],
-    ];
+    _fontObservers = @[ [NSNotificationCenter.defaultCenter addObserverForName:kTitleFontGenerationDidAdvance
+                                                                        object:nil
+                                                                         queue:NSOperationQueue.mainQueue
+                                                                    usingBlock:^(NSNotification *) {
+                                                                      [weakSelf titleFontsChanged];
+                                                                    }] ];
 }
 
 - (void)stopObservingTitleFonts {

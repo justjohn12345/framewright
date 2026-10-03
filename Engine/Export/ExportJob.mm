@@ -2,6 +2,7 @@
 
 #include "../Audio/OfflineAudioRenderer.h"
 #include "../Media/DecodePool.h"
+#include "../Media/TitleRenderer.h"
 #include "../Playback/PlaybackController.h"
 #include "../Render/Compositor.h"
 #include "../Render/Scheduler.h"
@@ -320,7 +321,8 @@ struct ExportJob::Run {
                 const MediaAsset *asset = project.findAsset(layer.assetId);
                 target.sourceTime = asset ? playback::pictureTimeFor(layer, *asset) : layer.sourceTime;
                 // A title or a matte: rendered for the export's output (its own raster scale).
-                target.generated = playback::generatedSourceFor(layer, sequence.width, sequence.height, outputScale);
+                target.generated = playback::generatedSourceFor(layer, sequence.width, sequence.height, outputScale,
+                                                                media::titleFontGeneration());
                 // A reversed clip needs its media backwards: decode windows before the picture.
                 target.direction = layer.reversed ? media::DecodeDirection::Backward : media::DecodeDirection::Forward;
                 target.priority = static_cast<int>(10000 - static_cast<int64_t>(k) * 10 + static_cast<int64_t>(i));
@@ -340,8 +342,8 @@ struct ExportJob::Run {
             return makeError(MediaErrorCode::InvalidState, "a clip refers to an asset that is not in the project");
         }
         const CMTime pictureTime = playback::pictureTimeFor(layer, *asset);
-        const media::FrameKey key =
-            playback::pictureKeyFor(layer, pool->decodeFormat(), sequence.width, sequence.height, outputScale);
+        const media::FrameKey key = playback::pictureKeyFor(layer, pool->decodeFormat(), sequence.width,
+                                                            sequence.height, outputScale, media::titleFontGeneration());
         const auto deadline = std::chrono::steady_clock::now() + job.options_.frameTimeout;
         // Refreshes that found the stream exactly where the previous one left it (no frame
         // decoded, no seek in between): only such refreshes in a row count towards giving up, so

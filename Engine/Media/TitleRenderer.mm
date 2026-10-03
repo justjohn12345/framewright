@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -399,9 +400,10 @@ std::string lowercased(std::string text) {
 
 class TitleSource final : public GeneratedPictureSource {
   public:
-    TitleSource(std::shared_ptr<const GeneratedContent> content, std::int32_t width, std::int32_t height, double k)
+    TitleSource(std::shared_ptr<const GeneratedContent> content, std::int32_t width, std::int32_t height, double k,
+                std::uint32_t fontGeneration)
         : content_(std::move(content)), width_(width), height_(height),
-          key_(generatedKeyFor(*content_, width, height, k)) {}
+          key_(generatedKeyFor(*content_, width, height, k, fontGeneration)) {}
 
     GeneratedKey key() const override {
         return key_;
@@ -439,7 +441,7 @@ class MatteSource final : public GeneratedPictureSource {
   public:
     MatteSource(std::shared_ptr<const GeneratedContent> content, std::int32_t width, std::int32_t height)
         : content_(std::move(content)), width_(width), height_(height),
-          key_(generatedKeyFor(*content_, width, height, 1.0)) {}
+          key_(generatedKeyFor(*content_, width, height, 1.0, 0)) {}
 
     GeneratedKey key() const override {
         return key_;
@@ -628,22 +630,37 @@ double rasterScaleFor(double maxMotionScale, double outputScale) {
     return std::max(1.0, motion * output);
 }
 
+namespace {
+std::atomic<std::uint32_t> fontGenerationNow{1};
+} // namespace
+
+std::uint32_t titleFontGeneration() {
+    return fontGenerationNow.load(std::memory_order_acquire);
+}
+
+std::uint32_t advanceTitleFontGeneration() {
+    return fontGenerationNow.fetch_add(1, std::memory_order_acq_rel) + 1;
+}
+
 GeneratedKey generatedKeyFor(const GeneratedContent &content, std::int32_t canvasWidth, std::int32_t canvasHeight,
-                             double k) {
+                             double k, std::uint32_t fontGeneration) {
     const ContentId id = contentIdOnCanvas(content.contentId(), canvasWidth, canvasHeight);
-    return GeneratedKey{id.high, id.low, content.isTitle() ? rasterScale64(k) : 64u};
+    if (content.isMatte()) {
+        return GeneratedKey{id.high, id.low, 64u, 0};
+    }
+    return GeneratedKey{id.high, id.low, rasterScale64(k), fontGeneration};
 }
 
 std::shared_ptr<const GeneratedPictureSource> makeGeneratedSource(std::shared_ptr<const GeneratedContent> content,
                                                                   std::int32_t canvasWidth, std::int32_t canvasHeight,
-                                                                  double k) {
+                                                                  double k, std::uint32_t fontGeneration) {
     if (!content) {
         return nullptr;
     }
     if (content->isMatte()) {
         return std::make_shared<MatteSource>(std::move(content), canvasWidth, canvasHeight);
     }
-    return std::make_shared<TitleSource>(std::move(content), canvasWidth, canvasHeight, k);
+    return std::make_shared<TitleSource>(std::move(content), canvasWidth, canvasHeight, k, fontGeneration);
 }
 
 } // namespace ve::media

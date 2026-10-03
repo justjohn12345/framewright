@@ -405,9 +405,9 @@ struct Results {
     XCTAssertEqual(rasterScale64(0.001), 1u);
     XCTAssertEqual(rasterScale64(std::nan("")), 64u);
     XCTAssertEqual(rasterScale64(-3), 64u);
-    XCTAssertEqual((GeneratedKey{1, 2, 96}).scale(), 1.5);
+    XCTAssertEqual((GeneratedKey{1, 2, 96, 0}).scale(), 1.5);
     XCTAssertTrue((GeneratedKey{}).isEmpty());
-    XCTAssertFalse((GeneratedKey{0, 0, 64}).isEmpty());
+    XCTAssertFalse((GeneratedKey{0, 0, 64, 0}).isEmpty());
 }
 
 @end

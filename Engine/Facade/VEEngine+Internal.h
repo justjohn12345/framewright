@@ -300,7 +300,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSArray<NSString *> *)missingTitleFontWarnings;
 /// The Mac's fonts changed: titles are drawn again with the fonts there are now.
 - (void)titleFontsChanged;
-/// Observes the Mac's font changes (from init) until stopObservingTitleFonts (dealloc).
+/// Observes the Mac's font changes (from init) until stopObservingTitleFonts (dealloc): one call of
+/// titleFontsChanged per change, after the titles' font generation advanced.
 - (void)startObservingTitleFonts;
 - (void)stopObservingTitleFonts;
 @end

@@ -55,7 +55,8 @@ TitleContent sampleTitle(const char *text) {
 media::FrameKey titleKey(PlaybackHarness &h, ClipId clip, double k) {
     const Clip &c = *h.sequence().findClip(clip);
     return media::FrameKey{c.assetId, h.pool->decodeFormat(),
-                           media::generatedKeyFor(*c.generated, h.sequence().width, h.sequence().height, k)};
+                           media::generatedKeyFor(*c.generated, h.sequence().width, h.sequence().height, k,
+                                                  media::titleFontGeneration())};
 }
 
 const playback::PresentedLayer *presentedLayer(const PlaybackHarness::Sample &sample, ClipId clip) {
