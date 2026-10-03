@@ -421,6 +421,30 @@ final class TitleEditingSurfaceView: NSView, NSTextViewDelegate {
 /// ends the session.
 final class TitleEditingTextView: NSTextView {
     weak var surface: TitleEditingSurfaceView?
+    /// Where Copy, Cut and Paste put and take text: the clipboard (tests give it a pasteboard of their own).
+    var pasteboard = NSPasteboard.general
+
+    override func copy(_ sender: Any?) {
+        let range = selectedRange()
+        guard range.length > 0 else { return }
+        pasteboard.clearContents()
+        pasteboard.setString((string as NSString).substring(with: range), forType: .string)
+    }
+
+    override func cut(_ sender: Any?) {
+        guard selectedRange().length > 0 else { return }
+        copy(sender)
+        delete(sender)
+    }
+
+    override func paste(_ sender: Any?) {
+        guard let text = pasteboard.string(forType: .string) else { return }
+        insertText(text, replacementRange: selectedRange())
+    }
+
+    override func pasteAsPlainText(_ sender: Any?) {
+        paste(sender)
+    }
 
     override var undoManager: UndoManager? { nil }
 

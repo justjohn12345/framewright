@@ -155,10 +155,24 @@ final class TitleTypingTests: XCTestCase {
         XCTAssertFalse(press("\u{7f}", keyCode: 51, keyboard: keyboard))
         XCTAssertEqual(store.clips[id]?.title?.text, " jklo")
         XCTAssertNotNil(store.clips[id], "the clip is still there")
-        // Command-A selects the text (the text view's select all, not every clip).
-        XCTAssertFalse(press("a", keyCode: 0, modifiers: .command, keyboard: keyboard))
-        surface.textView.selectAll(nil)
-        XCTAssertEqual(surface.textView.selectedRange(), NSRange(location: 0, length: 5))
+        // Command-A selects the text, not every clip: the keyboard controller leaves it, and AppKit offers it as a key
+        // equivalent to the window and then to the main menu, whose Edit > Select All goes to the key window's first
+        // responder, the text view.
+        window.makeKeyAndOrderFront(nil)
+        await StoreFixture.wait(until: { NSApp.keyWindow === self.window }, timeout: 2)
+        let commandA = keyEvent("a", keyCode: 0, modifiers: .command)
+        XCTAssertFalse(keyboard.handle(commandA, window: window), "not Select All Clips")
+        print("[Command-A] through \(NSApp.keyWindow === window ? "the main menu" : "the responder chain (window not key)")")
+        if NSApp.keyWindow === window {
+            let taken = window.performKeyEquivalent(with: commandA) || (NSApp.mainMenu?.performKeyEquivalent(with: commandA) ?? false)
+            XCTAssertTrue(taken, "Edit > Select All took Command-A")
+            XCTAssertEqual(surface.textView.selectedRange(), NSRange(location: 0, length: 5))
+        } else {
+            // The test host's window could not become key (another app is active): the menu's action would go to
+            // that app's window. The action itself reaches the text view through the responder chain.
+            XCTAssertTrue(NSApp.sendAction(#selector(NSText.selectAll(_:)), to: window.firstResponder, from: nil))
+            XCTAssertEqual(surface.textView.selectedRange(), NSRange(location: 0, length: 5))
+        }
         XCTAssertEqual(store.selection, [id], "the clip selection is unchanged")
     }
 
@@ -166,7 +180,11 @@ final class TitleTypingTests: XCTestCase {
         let (id, box) = try await titleOnMonitor()
         XCTAssertTrue(box.beginEditing(.selectAll))
         let surface = try await surface()
-        let pasteboard = NSPasteboard.general
+        // A pasteboard of the test's own: the person's clipboard is left alone.
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("FramewrightTitleTypingTests-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        let general = NSPasteboard.general.changeCount
+        surface.textView.pasteboard = pasteboard
         surface.textView.setSelectedRange(NSRange(location: 0, length: 3))
         surface.textView.copy(nil)
         XCTAssertEqual(pasteboard.string(forType: .string), "Tit")
@@ -177,6 +195,8 @@ final class TitleTypingTests: XCTestCase {
         surface.textView.cut(nil)
         XCTAssertEqual(store.clips[id]?.title?.text, "Tit")
         XCTAssertEqual(pasteboard.string(forType: .string), "Title")
+        XCTAssertEqual(NSPasteboard.general.changeCount, general, "the general pasteboard was not touched")
+        XCTAssertTrue(TitleEditingTextView().pasteboard === NSPasteboard.general, "the app's text view uses the clipboard")
     }
 
     func testTypingEndsWithTheSelectionThePlayheadAndAClickOutside() async throws {
