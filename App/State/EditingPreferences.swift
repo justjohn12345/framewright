@@ -44,6 +44,8 @@ struct EditingPreferences: Equatable {
     static let linkedCrossfadeKey = "linkedCrossfade"
     static let durationDisplayKey = "durationDisplay"
     static let resizeLinkedTransitionsKey = "resizeLinkedTransitions"
+    static let showsSafeAreasKey = "showSafeAreas"
+    static let safeAreaStandardKey = "safeAreaStandard"
     static let defaultTransitionSeconds = 1.0
 
     /// Default length of new transitions in seconds (the Transitions panel, Add Cross Dissolve).
@@ -53,6 +55,11 @@ struct EditingPreferences: Equatable {
     /// A duration change of a transition (inspector, handle drag) also changes its linked
     /// transition (the crossfade under a dissolve); the Transition inspector's checkbox.
     var resizeLinkedTransitions = true
+    /// The program monitor draws the title-safe and action-safe rectangles and the centre marks (View > Show
+    /// Title/Action Safe Areas); off by default.
+    var showsSafeAreas = false
+    /// Which percentages those rectangles are (Settings > Editing).
+    var safeAreaStandard = SafeAreaStandard.smpte
 
     init() {}
 
@@ -65,6 +72,9 @@ struct EditingPreferences: Equatable {
         durationDisplay = defaults.string(forKey: Self.durationDisplayKey).flatMap(DurationDisplay.init(rawValue:))
             ?? .timecode
         resizeLinkedTransitions = defaults.object(forKey: Self.resizeLinkedTransitionsKey) as? Bool ?? true
+        showsSafeAreas = defaults.bool(forKey: Self.showsSafeAreasKey)
+        safeAreaStandard = defaults.string(forKey: Self.safeAreaStandardKey).flatMap(SafeAreaStandard.init(rawValue:))
+            ?? .smpte
     }
 
     /// The default transition length in whole frames of `frameDuration` (at least one).

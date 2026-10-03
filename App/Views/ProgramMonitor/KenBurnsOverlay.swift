@@ -60,6 +60,9 @@ struct ProgramMonitorLayout<Picture: View>: View {
                     picture
                         .frame(width: max(frame.width, 1), height: max(frame.height, 1))
                         .position(x: frame.midX, y: frame.midY)
+                    if store.editingPreferences.showsSafeAreas, sequenceSize.width > 0, sequenceSize.height > 0 {
+                        SafeAreaGuides(areas: store.safeAreas, viewport: viewport)
+                    }
                     if let editor {
                         KenBurnsOverlay(model: editor, playhead: store.playhead, viewport: viewport)
                     } else if let titleBox = store.titleBox {

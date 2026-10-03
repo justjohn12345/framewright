@@ -986,6 +986,20 @@ final class ProjectStore: ObservableObject {
         return linked == 0 ? nil : linked
     }
 
+    /// View > Show Title/Action Safe Areas: the program monitor draws the safe-area guides (remembered in the Editing
+    /// preferences, off by default).
+    var showsSafeAreas: Bool {
+        get { editingPreferences.showsSafeAreas }
+        set { defaults.set(newValue, forKey: EditingPreferences.showsSafeAreasKey) }
+    }
+
+    /// The sequence's safe-area guides, in the percentages of Settings > Editing (drawn when shown; a dragged title
+    /// box snaps to their lines either way).
+    var safeAreas: SafeAreas {
+        SafeAreas(frame: CGSize(width: sequence.width, height: sequence.height),
+                  standard: editingPreferences.safeAreaStandard)
+    }
+
     /// Whether a duration change of a transition also changes its linked transition (the
     /// Transition inspector's checkbox; remembered in the Editing preferences, on by default).
     var resizesLinkedTransitions: Bool {

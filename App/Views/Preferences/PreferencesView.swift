@@ -30,6 +30,7 @@ struct PreferencesView: View {
         EditingPreferences.defaultTransitionSeconds
     @AppStorage(EditingPreferences.linkedCrossfadeKey) private var linkedCrossfade = LinkedCrossfadeMode.always.rawValue
     @AppStorage(EditingPreferences.durationDisplayKey) private var durationDisplay = DurationDisplay.timecode.rawValue
+    @AppStorage(EditingPreferences.safeAreaStandardKey) private var safeAreaStandard = SafeAreaStandard.smpte.rawValue
     @AppStorage(LivePhotos.choiceKey) private var livePhotoImport = LivePhotoImportSetting.ask.rawValue
 
     var body: some View {
@@ -132,6 +133,15 @@ extension PreferencesView {
             }
             Text("Fades and transition durations in the inspector and the timeline. Typed durations accept "
                 + "12f, 0.5s or timecode in any mode.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Picker("Safe areas", selection: $safeAreaStandard) {
+                ForEach(SafeAreaStandard.allCases) { Text($0.title).tag($0.rawValue) }
+            }
+            Text("The title-safe and action-safe rectangles View > Show Title/Action Safe Areas draws on the program "
+                + "monitor. Television may hide what lies outside action-safe; for web video they are composition "
+                + "guides.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

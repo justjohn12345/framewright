@@ -229,6 +229,9 @@ struct AppCommands: Commands {
                 }
             }
             Toggle("Show Clipping on Program Monitor", isOn: $layout.showsClippingOverlay)
+            // The title-safe and action-safe rectangles and the centre marks (percentages in Settings > Editing).
+            Toggle("Show Title/Action Safe Areas", isOn: Binding(get: { store.showsSafeAreas },
+                                                                set: { store.showsSafeAreas = $0 }))
             Toggle("Program Monitor on Second Display", isOn: Binding(get: { output.isShowing },
                                                                       set: { _ in output.toggle() }))
                 .disabled(!output.isAvailable && !output.isShowing)
