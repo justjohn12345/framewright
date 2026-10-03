@@ -371,9 +371,8 @@ final class TitleTypingTests: XCTestCase {
             }
         }
         await StoreFixture.wait(until: { box.editor != nil }, timeout: 2)
-        guard box.editor != nil else {
-            throw XCTSkip("synthetic mouse events do not reach SwiftUI gestures in this test host")
-        }
+        // The window is shown: the double-click must start typing (a skip only when it cannot be shown, above).
+        XCTAssertNotNil(box.editor, "a double-click on the box starts typing on the picture")
         XCTAssertTrue(store.isEditingTitleOnPicture)
         await StoreFixture.wait(until: { window.firstResponder is TitleEditingTextView }, timeout: 2)
         let textView = try XCTUnwrap(window.firstResponder as? TitleEditingTextView)
@@ -421,6 +420,23 @@ final class TitleTypingTests: XCTestCase {
         // The text view's own lines are paragraphs (an unbounded container), not single glyphs.
         XCTAssertGreaterThan(wrapped.textView.textContainer?.containerSize.width ?? 0, 1.0e6)
         XCTAssertFalse(wrapped.textView.textContainer?.widthTracksTextView ?? true)
+    }
+
+    /// What a release starts: typing on the picture after a double-click (or a triple) that did not move, on the box or
+    /// its handles; nothing for a single click, a drag, or a double-click beside the box.
+    func testWhichReleaseStartsTyping() {
+        let box = KenBurnsBox(center: CGPoint(x: 200, y: 100), size: CGSize(width: 100, height: 40), rotationDegrees: 0)
+        let on = CGPoint(x: 210, y: 105)
+        XCTAssertTrue(TitleBoxModel.doubleClickStartsTyping(at: on, movedBy: .zero, clickCount: 2, box: box, resizable: true))
+        XCTAssertTrue(TitleBoxModel.doubleClickStartsTyping(at: on, movedBy: .zero, clickCount: 3, box: box, resizable: true))
+        XCTAssertFalse(TitleBoxModel.doubleClickStartsTyping(at: on, movedBy: .zero, clickCount: 1, box: box,
+                                                             resizable: true), "a single click")
+        XCTAssertFalse(TitleBoxModel.doubleClickStartsTyping(at: on, movedBy: CGSize(width: 2, height: 0), clickCount: 2,
+                                                             box: box, resizable: true), "a drag")
+        XCTAssertFalse(TitleBoxModel.doubleClickStartsTyping(at: CGPoint(x: 400, y: 100), movedBy: .zero, clickCount: 2,
+                                                             box: box, resizable: true), "beside the box")
+        XCTAssertTrue(TitleBoxModel.doubleClickStartsTyping(at: CGPoint(x: 251, y: 100), movedBy: .zero, clickCount: 2,
+                                                            box: box, resizable: false), "point text's edge")
     }
 
     func testUndoWhileTypingTakesTheRunBackAndTheTextFollows() async throws {

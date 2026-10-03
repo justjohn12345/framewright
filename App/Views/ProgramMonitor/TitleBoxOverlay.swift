@@ -128,12 +128,21 @@ struct TitleBoxOverlay: View {
                 }
                 .onEnded { value in
                     model.endDrag()
-                    // A double-click on the box (no movement) types on the picture, the caret where it was.
-                    if value.translation == .zero, (NSApp.currentEvent?.clickCount ?? 0) >= 2,
-                       TitleBoxModel.target(at: value.startLocation, box: box, resizable: model.isResizable) != nil {
+                    // The release of a double-click: AppKit's event says how many clicks it ends.
+                    if TitleBoxModel.doubleClickStartsTyping(at: value.location, movedBy: value.translation,
+                                                            clickCount: NSApp.currentEvent?.clickCount ?? 0, box: box,
+                                                            resizable: model.isResizable) {
                         model.beginEditing(.caret(atFramePoint: viewport.sequence(value.location)))
                     }
                 })
+            // SwiftUI's own double tap as well, so the double-click does not depend on the event AppKit is handling
+            // when the drag ends (starting twice is harmless: a second start keeps the session).
+            .simultaneousGesture(SpatialTapGesture(count: 2).onEnded { value in
+                if TitleBoxModel.doubleClickStartsTyping(at: value.location, movedBy: .zero, clickCount: 2, box: box,
+                                                         resizable: model.isResizable) {
+                    model.beginEditing(.caret(atFramePoint: viewport.sequence(value.location)))
+                }
+            })
             .accessibilityIdentifier("TitleBoxDragArea")
     }
 }

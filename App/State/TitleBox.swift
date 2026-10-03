@@ -198,6 +198,13 @@ final class TitleBoxModel: ObservableObject {
         return .body
     }
 
+    /// Whether a press released at `location` (view points), having moved by `movedBy`, ending `clickCount` clicks,
+    /// starts typing on the picture: a double-click (or more) that did not move, on the box or its handles.
+    static func doubleClickStartsTyping(at location: CGPoint, movedBy: CGSize, clickCount: Int, box: KenBurnsBox,
+                                        resizable: Bool) -> Bool {
+        clickCount >= 2 && movedBy == .zero && target(at: location, box: box, resizable: resizable) != nil
+    }
+
     // MARK: Dragging
 
     /// A step of the drag of `target`, now `translation` (sequence pixels on the frame) from where it started. The
