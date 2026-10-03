@@ -371,6 +371,20 @@ final class TimelineGestureController: ObservableObject {
         return store.dropAsset(assetID, onTrack: row.track.id, at: seconds, overwrite: !insert)
     }
 
+    /// A title or matte tile from the Effects tab dropped on a track row: lands at the drop position (overwrite;
+    /// `insert` ripples instead), as media from the bin does. False when the drop is not on a track row.
+    @discardableResult
+    func dropGenerated(_ preset: GeneratorPreset, at location: CGPoint, insert: Bool) -> Bool {
+        let model = store.timelineModel
+        guard let row = model.layout(atY: location.y), location.x >= 0 else {
+            store.statusMessage = "Drop a \(preset.title.lowercased()) on a video track."
+            return false
+        }
+        var seconds = model.time(forX: location.x)
+        if let snap = model.snap(seconds) { seconds = snap.time }
+        return store.dropGenerated(preset, onTrack: row.track.id, at: seconds, insert: insert)
+    }
+
     // MARK: Steps
 
     private func reset() {

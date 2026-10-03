@@ -69,7 +69,8 @@ final class TimelineDropTests: XCTestCase {
                        Set([.framewrightAssetReference, .framewrightCrossDissolve, .framewrightWipeLeft,
                             .framewrightWipeRight, .framewrightWipeUp, .framewrightWipeDown, .framewrightIris,
                             .framewrightAudioCrossfade, .framewrightFadeEffect, .framewrightGainEffect,
-                            .framewrightKenBurnsEffect, .framewrightMoveEffect] + MediaDrop.types),
+                            .framewrightKenBurnsEffect, .framewrightMoveEffect, .framewrightTitleGenerator,
+                            .framewrightLowerThirdGenerator, .framewrightColourMatteGenerator] + MediaDrop.types),
                        "in-app types, and media files and file promises (Photos)")
         for kind in EffectKind.allCases {
             let provider = NSItemProvider()

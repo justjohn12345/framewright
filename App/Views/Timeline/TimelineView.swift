@@ -418,8 +418,10 @@ extension DropInfo: TimelineDropInfo {}
 /// Effects tab (on lane 0: across the nearest cut, or a fade at a free clip end or start; lane 0 is
 /// shown and the target highlighted while dragging, in red with the reason when it cannot take
 /// one) and the Effects tab's lane effects, Ken Burns, Move, Fade and Gain (a span on the effect lane
-/// under the pointer, or the first one with room). A transition or an effect is recognised by its exported content
-/// type (`TransitionKind.contentType`, `EffectKind.contentType`, declared in Info.plist), which the
+/// under the pointer, or the first one with room), and its titles and generators (Title, Lower Third, Colour Matte:
+/// a clip at the drop point on a video track, overwriting, or inserting with Command, as media from the bin). A
+/// transition, an effect or a generator is recognised by its exported content type (`TransitionKind.contentType`,
+/// `EffectKind.contentType`, `GeneratorPreset.contentType`, declared in Info.plist), which the
 /// Effects tab's drag sources provide; the payload itself is not read. The `handle...` methods take
 /// any `TimelineDropInfo`, so the drop logic is tested without a real drag (which only a person or
 /// a UI test can perform).
@@ -427,6 +429,7 @@ extension DropInfo: TimelineDropInfo {}
 struct TimelineDropDelegate: DropDelegate {
     static let types: [UTType] = [.framewrightAssetReference] + TransitionKind.allCases.map(\.contentType)
         + [.framewrightFadeEffect, .framewrightGainEffect, .framewrightKenBurnsEffect, .framewrightMoveEffect]
+        + GeneratorPreset.allCases.map(\.contentType)
         + MediaDrop.types
 
     let gestures: TimelineGestureController
@@ -440,6 +443,10 @@ struct TimelineDropDelegate: DropDelegate {
 
     static func effectKind(_ info: some TimelineDropInfo) -> EffectKind? {
         EffectKind.allCases.first { info.hasItemsConforming(to: [$0.contentType]) }
+    }
+
+    static func generatorPreset(_ info: some TimelineDropInfo) -> GeneratorPreset? {
+        GeneratorPreset.allCases.first { info.hasItemsConforming(to: [$0.contentType]) }
     }
 
     func validateDrop(info: DropInfo) -> Bool { handleValidate(info) }
@@ -489,6 +496,9 @@ struct TimelineDropDelegate: DropDelegate {
         }
         if let kind = Self.effectKind(info) {
             return gestures.dropEffect(kind: kind, at: info.location)
+        }
+        if let preset = Self.generatorPreset(info) {
+            return gestures.dropGenerated(preset, at: info.location, insert: commandHeld())
         }
         guard let provider = info.itemProviders(for: [.framewrightAssetReference]).first else {
             guard MediaDrop.accepts(info) else { return false }

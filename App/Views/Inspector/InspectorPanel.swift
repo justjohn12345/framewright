@@ -42,10 +42,12 @@ struct InspectorPanel: View {
 
 /// The Effects tab: the transitions (Cross Dissolve, Constant Power), each draggable onto a cut
 /// (or a clip's free start or end: a fade) and added at the cut nearest the playhead with its "+"
-/// button; and the lane effects (Ken Burns, Move, Fade on video, Gain on audio), each draggable onto
+/// button; the lane effects (Ken Burns, Move, Fade on video, Gain on audio), each draggable onto
 /// an effect lane of a clip (lanes 1-3), where it becomes a span from the drop point (a Motion span
 /// of 5 s, a Fade or Gain of the default transition length); Ken Burns and Move also have a "+" that
-/// adds them at the playhead on the selected clip (like Clip > Add Ken Burns… and Add Motion Span).
+/// adds them at the playhead on the selected clip (like Clip > Add Ken Burns… and Add Motion Span);
+/// and the titles and generators (Title, Lower Third, Colour Matte), each draggable onto a video track
+/// or added at the playhead with "+" (like Clip > Add Title).
 struct EffectsPanel: View {
     /// Passed to the panels, which observe what they draw; not observed here (nothing of it is drawn).
     let store: ProjectStore
@@ -68,6 +70,13 @@ struct EffectsPanel: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 8)
+                GeneratorsPanel(store: store, availability: store.laneEffects)
+                Text("Drag a title or a colour matte onto a video track (hold ⌘ to insert), or press + to add it at "
+                    + "the playhead above the target track (⌃T adds a title, ⇧⌃T a lower third).")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 8)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -75,14 +84,17 @@ struct EffectsPanel: View {
     }
 }
 
-/// What the Effects tab's lane-effect tiles draw from the store: whether "+" can add a Motion span at
-/// the playhead (`ProjectStore.canAddMotionSpanAtPlayhead`). Re-read after every change of the store
+/// What the Effects tab's lane-effect and generator tiles draw from the store: whether "+" can add a Motion
+/// span at the playhead (`ProjectStore.canAddMotionSpanAtPlayhead`) and a title or matte
+/// (`ProjectStore.canAddGenerated`). Re-read after every change of the store
 /// (and when a gesture starts or ends) and republished only when it changes, so the tiles do not
 /// redraw on every change of the store: a Ken Burns drag changes the model on every step (post-lanes
 /// review L5).
 @MainActor
 final class LaneEffectsAvailability: ObservableObject {
     @Published private(set) var canAddMotionSpan = false
+    /// Whether "+" can add a title or matte (`ProjectStore.canAddGenerated`; the generator tiles).
+    @Published private(set) var canAddGenerated = false
     private unowned let store: ProjectStore
     private var subscription: AnyCancellable?
     private var refreshScheduled = false
@@ -90,6 +102,7 @@ final class LaneEffectsAvailability: ObservableObject {
     init(store: ProjectStore) {
         self.store = store
         canAddMotionSpan = store.canAddMotionSpanAtPlayhead
+        canAddGenerated = store.canAddGenerated
         // objectWillChange comes before the change: read the store once it is done.
         subscription = store.objectWillChange.sink { [weak self] _ in self?.scheduleRefresh() }
     }
@@ -108,6 +121,8 @@ final class LaneEffectsAvailability: ObservableObject {
     func refresh() {
         let can = store.canAddMotionSpanAtPlayhead
         if can != canAddMotionSpan { canAddMotionSpan = can }
+        let canGenerate = store.canAddGenerated
+        if canGenerate != canAddGenerated { canAddGenerated = canGenerate }
     }
 }
 
@@ -188,5 +203,74 @@ struct LaneEffectsPanel: View {
         .padding(.horizontal, 6)
         .background(RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.08)))
         .accessibilityIdentifier("Effect.\(kind.rawValue)")
+    }
+}
+
+/// The Effects tab's "Titles and Generators": Title, Lower Third and Colour Matte, each a drag source
+/// (`GeneratorReference`) to drop onto a video track, with a "+" that adds it at the playhead above the target
+/// video track (`ProjectStore.addGenerated`, like the Clip menu's items). It observes only what it draws
+/// (`LaneEffectsAvailability`), not the store.
+struct GeneratorsPanel: View {
+    /// For the "+" buttons' action; not observed.
+    let store: ProjectStore
+    @ObservedObject var availability: LaneEffectsAvailability
+
+    /// The tiles' icon colour.
+    static let tileColour = Color(red: 0.70, green: 0.24, blue: 0.50)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Titles and Generators")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ForEach(GeneratorPreset.allCases) { preset in
+                row(preset)
+            }
+        }
+        .padding(8)
+        .accessibilityIdentifier("GeneratorsPanel")
+    }
+
+    /// A preset's tile: the drag source is its icon and label only, and "+" sits beside it (as in
+    /// `TransitionsPanel`), so a click on the button is never taken for a drag.
+    private func row(_ preset: GeneratorPreset) -> some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: preset.systemImage)
+                    .frame(width: 18)
+                    .foregroundStyle(Self.tileColour)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(preset.title)
+                    Text(preset.detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .draggable(GeneratorReference(preset: preset)) {
+                Label(preset.title, systemImage: preset.systemImage)
+                    .padding(6)
+                    .background(RoundedRectangle(cornerRadius: 5).fill(Self.tileColour.opacity(0.3)))
+            }
+            .help("Drag onto a video track (hold ⌘ to insert)")
+            Button {
+                store.addGenerated(preset)
+            } label: {
+                Image(systemName: "plus.circle")
+            }
+            .buttonStyle(.borderless)
+            .disabled(!availability.canAddGenerated)
+            .help("Add at the playhead, above the target video track")
+            .accessibilityIdentifier("Generator.\(preset.rawValue).add")
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .background(RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.08)))
+        .contextMenu {
+            Button("Add at Playhead") { store.addGenerated(preset) }
+                .disabled(!availability.canAddGenerated)
+        }
+        .accessibilityIdentifier("Generator.\(preset.rawValue)")
     }
 }
