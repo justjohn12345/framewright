@@ -378,6 +378,37 @@ testTheShownPanelIsDrawnWithTheProgramMonitorsFramesAndLetGoWhenHidden` (the loc
 `FFmpegBackendConformanceTests testMemoryIsStableAcrossLongDecodesAndSeeks` (footprint grew 73 MB against 24; it
 passed alone; another agent was building and testing in its worktree at the time: a flake under load to watch).
 
+Review fix round (2026-10-03; an adversarial review of 300f55b..3609670: 2 MEDIUM, 6 LOW). Each fix has a test that
+fails without it (run against the code before the fix, or with it reverted):
+1. MEDIUM, Paste Style moved point text (the style's alignment says where point text's x is): c909367. Paste Style
+   keeps each title's text where it is drawn (`pushTitleChangeKeepingPlace`); tested by the block's drawn place for
+   every pair of alignments on point and area text, and with a smaller font.
+2. MEDIUM, Command-Delete on the picture deleted one character (the hidden text view's own lines were a glyph wide):
+   c3a7bd7. Its container is unbounded (its lines are paragraphs), and Command-Delete, Command-Forward-Delete and
+   Select Line follow the title's drawn lines. Word and paragraph commands are logical and were not affected.
+3. LOW-MEDIUM, the double-click test skipped exactly when the double-click failed: a73e805. It skips only when its
+   window cannot be shown and fails otherwise; the decision is `TitleBoxModel.doubleClickStartsTyping` (tested); a
+   SwiftUI `SpatialTapGesture(count: 2)` beside the drag starts the session too, so it does not rest on
+   `NSApp.currentEvent` alone. Not run with a visible window: the screen was locked all session. To check by hand.
+4. LOW, a refused change (a paste past 16384 bytes) left the refused text on the picture: 16512a7 (the title's text
+   and the selection before the change come back).
+5. LOW, the caption ignored the Classic safe areas: 69eaa5a (`titleSafeFraction`, set from the preference before a
+   preset is added or dropped; the lower third keeps its slice 1 place).
+6. LOW, tests: df273ea (Command-A through the keyboard controller and the key equivalents; the typing session's text
+   view takes a pasteboard, and the copy test uses one of its own). This session the test window could not become key,
+   so Command-A went through the responder chain rather than the main menu.
+7. LOW, the held picture at a new anchor: checked, c66fe26. Paused, a frame waiting for a picture keeps the previous
+   complete frame (old anchor with old picture), so the text never jumps (the test fails with that hold disabled).
+   Left open: playing, a late layer keeps its clip's previous picture at the new anchor until the new picture renders
+   (about a millisecond for a lower third); only an anchor, point text or alignment change made during playback shows
+   it.
+8. LOW, the version 10 writer test's name: 15026ae (named for what it compares; it also checks the checked-in file is in
+   the writer's format). No golden changed.
+
+Fix round tests (full `Framewright` scheme at 15026ae, the screen locked): EngineTests 703 (3 skipped: the display-link
+tests), doctest 487 cases, AppTests 376 (2 skipped: the known one and the double-click test, which needs a visible
+window). Failures: `ScopePanelTests` and `WaveformPanelTests`, the locked screen as before.
+
 ## Where things stand (handover, 2026-10-03)
 - **Released and pushed:** 0.1.11 (built from 221ad31) is the last release; everything is pushed. It adds titles
   slice 1 (c996a93..e5abda0, docs c7feff8) and its review fix round (bd96f79..74a95a7, docs 9927acd), accepted by
