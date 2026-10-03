@@ -25,6 +25,11 @@
 // before filtering, so transparent texels never bleed their colour. The colour matrix is
 // unused for BGRA.
 //
+// Generated pictures (titles, colour mattes; GeneratedSource.h): a picture tagged with a CanvasGeometry
+// stands for a frame-sized transparent canvas of which it covers one rectangle; the TextureSet carries
+// that geometry (canvas()), read from the buffer's tag when it is mapped, so a held or cached picture is
+// always placed where it was made for.
+//
 // Chroma siting: where the subsampled chroma samples sit relative to the luma grid comes from
 // the buffer's kCVImageBufferChromaLocationTopFieldKey attachment (Left, Center, TopLeft, Top,
 // BottomLeft, Bottom; DV420 is taken as Left). Untagged 4:2:0 and 4:2:2 buffers are Left sited,
@@ -35,6 +40,7 @@
 #pragma once
 
 #include "../Media/CFRef.h"
+#include "../Media/GeneratedSource.h"
 #include "../Media/MediaTypes.h"
 #include "../Media/PixelBuffer.h"
 #include "../Media/Result.h"
@@ -45,6 +51,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace ve::render {
@@ -118,6 +125,9 @@ class TextureSet {
     media::TransferFunction transfer() const noexcept { return transfer_; }
     /// The buffer the textures alias.
     const media::PixelBuffer &pixelBuffer() const noexcept { return buffer_; }
+    /// Where the picture lies on the frame-sized canvas it stands for (a generated picture's tag), or
+    /// nullopt for a picture that is placed as itself (every decoded picture).
+    const std::optional<media::CanvasGeometry> &canvas() const noexcept { return canvas_; }
 
     void reset() noexcept { *this = TextureSet(); }
 
@@ -135,6 +145,7 @@ class TextureSet {
     media::TransferFunction transfer_ = media::TransferFunction::Unknown;
     ChromaSiting chromaSiting_ = ChromaSiting::Center;
     simd_float4 chromaTransform_ = {1.0f, 1.0f, 0.0f, 0.0f};
+    std::optional<media::CanvasGeometry> canvas_;
 };
 
 enum class TextureAccess : std::uint8_t {

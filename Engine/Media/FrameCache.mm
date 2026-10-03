@@ -137,7 +137,7 @@ struct FrameCache::State {
         const double start = seconds(e.frame.coverFrom);
         const double end = CMTIME_IS_POSITIVE_INFINITY(e.end) ? std::numeric_limits<double>::infinity() : seconds(e.end);
         for (const Focus &f : focus) {
-            if (f.asset != asset.asset || !CMTIME_IS_NUMERIC(f.time)) {
+            if (f.asset != asset.asset || f.generated != asset.generated || !CMTIME_IS_NUMERIC(f.time)) {
                 continue;
             }
             focused = true;

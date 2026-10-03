@@ -53,8 +53,15 @@
 // decoded as 8-bit 'BGRA' never answers a lookup for the same asset's 'l64r' frames, nor a
 // thumbnail-sized one a full-size lookup. Each producer puts, and each consumer looks up, with the
 // format of the decode pool it reads (DecodePool::decodeFormat()). An AssetId converts to the key
-// of the default format (DecodeOptions{}), as single-format users and tests use it. The focus,
-// purge() and epochs are per asset: they cover every format of it.
+// of the default format (DecodeOptions{}), as single-format users and tests use it. purge() and
+// epochs are per asset: they cover every format of it.
+//
+// Generated pictures (GeneratedSource.h). FrameKey::generated is the picture's GeneratedKey (its content
+// id and raster scale; empty for decoded media): the clips of one generator asset (every title of a
+// project) each have their pictures under their own key, and every keystroke of a title's text is a new
+// key. A focus names the generated key it is for, and focuses an entry only of that key: the pictures of
+// earlier text, which nothing shows any more, rank as entries without a focus (least recently used first)
+// and go before any focused frame, so typing never pushes out the frames ahead of a playhead.
 //
 // Pinning (why, and why not a generation counter). PixelBuffer is ref-counted, so eviction can
 // never free a buffer someone is still using: correctness does not need pins. What eviction
@@ -79,6 +86,7 @@
 #pragma once
 
 #include "../Model/Ids.h"
+#include "GeneratedSource.h"
 #include "Interfaces.h"
 
 #include <cstddef>
@@ -89,18 +97,24 @@
 
 namespace ve::media {
 
-/// What frame cache entries are keyed by (see "Decode formats" above).
+/// What frame cache entries are keyed by (see "Decode formats" and "Generated pictures" above).
 struct FrameKey {
     AssetId asset;
     DecodeFormat format;
+    GeneratedKey generated; ///< Empty for decoded media.
 
     FrameKey() = default;
-    /// The asset's frames of `decodeFormat` (implicit from an AssetId: the default format).
-    FrameKey(AssetId assetId, DecodeFormat decodeFormat = {}) : asset(assetId), format(decodeFormat) {}
+    /// The asset's frames of `decodeFormat` (implicit from an AssetId: the default format), or its generated
+    /// picture `generatedKey`.
+    FrameKey(AssetId assetId, DecodeFormat decodeFormat = {}, GeneratedKey generatedKey = {})
+        : asset(assetId), format(decodeFormat), generated(generatedKey) {}
 
     friend bool operator==(const FrameKey &, const FrameKey &) = default;
     friend bool operator<(const FrameKey &a, const FrameKey &b) {
-        return a.asset != b.asset ? a.asset < b.asset : a.format < b.format;
+        if (a.asset != b.asset) {
+            return a.asset < b.asset;
+        }
+        return a.format != b.format ? a.format < b.format : a.generated < b.generated;
     }
 };
 
@@ -130,6 +144,9 @@ class FrameCache {
         AssetId asset;
         CMTime time = kCMTimeInvalid; ///< Source time under the playhead.
         bool forward = true;          ///< Play direction.
+        /// The generated picture the focus is for (empty: the asset's decoded frames); see "Generated
+        /// pictures" in the header comment.
+        GeneratedKey generated{};
     };
 
     struct Stats {

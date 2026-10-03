@@ -355,6 +355,9 @@ Result<TextureSet> TextureCache::textures(const PixelBuffer &buffer, TextureAcce
 
     set.alphaMode_ = layout.sourceClass == SourceClass::RGBA ? alphaModeOf(pb) : AlphaMode::Premultiplied;
     set.transfer_ = transferOf(pb);
+    if (layout.sourceClass == SourceClass::RGBA) {
+        set.canvas_ = media::canvasGeometryOf(pb); // only generated pictures (RGBA) are tagged
+    }
     if (layout.sourceClass == SourceClass::YCbCrBiPlanar) {
         YCbCrEncoding encoding;
         encoding.matrix = matrixOf(pb);

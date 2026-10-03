@@ -45,6 +45,15 @@
 // - Several pools may share one FrameCache (the program and the source monitor each have one):
 //   each pool declares its targets as its own FrameCache focus client, and sizes its windows
 //   from its own Config::budgetFraction, so give the pools shares that add up to at most 1.
+// - Generated pictures (GeneratedSource.h: titles, colour mattes). A target or a scrub request with a
+//   `generated` source is served by a GeneratedVideoDecoder over that source instead of a decoder the
+//   router opens: no path, no probe. Its pictures are put under FrameKey{asset, decodeFormat(), the
+//   source's key()} (frameKey(asset, key)), and its focus names that key. A target whose source key
+//   changed (the title's text was edited) is treated like a relink of that stream: the stream reopens on
+//   the new source, and every picture is published under the key of the source that rendered it, so a
+//   picture of the old text never answers a lookup of the new key (keys are content-addressed: the old
+//   picture stays a valid answer for the old key). The generator asset needs no registerAsset(): a
+//   target or request with a source makes its slot (with an empty path) when there is none.
 //
 // Media epochs and publication. Asset ids are only unique within one project, so the pool's
 // asset slots belong to a media epoch (FrameCache::Epoch). beginEpoch() forgets every asset,
@@ -91,6 +100,7 @@
 #include "../Model/Ids.h"
 #include "BackendRouter.h"
 #include "FrameCache.h"
+#include "GeneratedSource.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -117,6 +127,9 @@ struct DecodeTarget {
     DecodeDirection direction = DecodeDirection::Forward;
     int priority = 0;                   ///< Higher is served first (e.g. the top visible layer).
     uint64_t lane = 0;                  ///< Distinguishes simultaneous targets on one asset.
+    /// A generated picture to serve instead of decoding the asset's media (see the header comment);
+    /// `url` and `trackIndex` are then unused.
+    std::shared_ptr<const GeneratedPictureSource> generated = nullptr;
 };
 
 /// A frame delivered by requestFrame(). Move-only (it holds a pin).
@@ -216,8 +229,9 @@ class DecodePool {
     /// frames into the shared cache under FrameKey{asset, decodeFormat()}, so its consumers look them
     /// up with it (FrameCache.h, "Decode formats").
     DecodeFormat decodeFormat() const;
-    /// FrameKey{asset, decodeFormat()}.
-    FrameKey frameKey(AssetId asset) const;
+    /// FrameKey{asset, decodeFormat(), generated}: the asset's decoded frames, or (with a key) the generated
+    /// picture of that key.
+    FrameKey frameKey(AssetId asset, GeneratedKey generated = {}) const;
 
     /// Scrub path: decode the frame of `asset` at `time` as soon as possible (cache first).
     /// Requests are coalesced per (asset, lane): only the latest one is serviced; an older
@@ -226,8 +240,11 @@ class DecodePool {
     /// so they do not supersede each other. The asset's path must be known from registerAsset()
     /// or a target (else the callback receives InvalidArgument). Uses the asset's first
     /// video/still track. The frame delivered is in the cache, pinned by ScrubFrame::pin (released
-    /// when the ScrubFrame is destroyed, e.g. right after a callback that ignores it).
-    void requestFrame(AssetId asset, CMTime time, ScrubCallback callback, uint64_t lane = 0);
+    /// when the ScrubFrame is destroyed, e.g. right after a callback that ignores it). With `generated`
+    /// the picture is that source's (rendered at `time`, or 0 for a static source), looked up and put under
+    /// frameKey(asset, generated->key()); the asset needs no path then.
+    void requestFrame(AssetId asset, CMTime time, ScrubCallback callback, uint64_t lane = 0,
+                      std::shared_ptr<const GeneratedPictureSource> generated = nullptr);
 
     /// Blocks until every stream is idle (window covered, end of stream or failed), no step is
     /// running (also of removed streams), removed streams' and forgotten assets' decoders are
@@ -267,6 +284,7 @@ class DecodePool {
         CMTime time = kCMTimeInvalid;
         ScrubCallback callback;
         uint64_t sequence = 0;
+        std::shared_ptr<const GeneratedPictureSource> generated;
     };
     struct ScrubDecoder;
     enum class StepResult { Progress, Settled };
@@ -289,6 +307,14 @@ class DecodePool {
     void publish(Stream &stream); // mutex_ held
     void updateFocus();           // mutex_ held
     Result<ScrubFrame> serviceScrub(const ScrubKey &key, const std::shared_ptr<AssetSlot> &slot, CMTime time);
+    /// serviceScrub for a request with a generated source.
+    Result<ScrubFrame> serviceGeneratedScrub(const ScrubKey &key, const std::shared_ptr<AssetSlot> &slot, CMTime time,
+                                             const std::shared_ptr<const GeneratedPictureSource> &generated);
+    /// The scrub decoder of `key` (scrub thread): the one kept if it was made for `slot` and `generated`, else a new
+    /// one from `make` (the least recently used ones beyond Config::maxScrubDecoders are dropped).
+    Result<ScrubDecoder *> scrubDecoderFor(const ScrubKey &key, const std::shared_ptr<AssetSlot> &slot,
+                                           const GeneratedKey &generated,
+                                           const std::function<Result<std::unique_ptr<IVideoDecoder>>()> &make);
 
     const std::shared_ptr<BackendRouter> router_;
     const std::shared_ptr<FrameCache> cache_;
