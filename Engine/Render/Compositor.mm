@@ -243,13 +243,13 @@ Placement placeSource(const VideoParams &params, std::int32_t sourceRotationDegr
 // affine change of the two rows, on the CPU), the scale is in sequence pixels per texel of the picture
 // (`textureWidth` x `textureHeight` texels over the rectangle), and the quad covers the rectangle only. Outside it
 // the shader's edge coverage is 0: the rest of the canvas is transparent.
-// On the target's pixel grid: when the picture is drawn unrotated at one target pixel per texel (`targetScaleX` and
-// `targetScaleY` are target pixels per sequence pixel), or smaller and its clip's Motion does not change
-// (`animated` false: a monitor smaller than the sequence showing a still title), its corner is moved (by under half
-// a target pixel) onto a whole target pixel, so it is not resampled at a fractional offset (a title's position is
-// a fraction of the frame, and half a pixel off, bilinear sampling of its reduced picture blurs small letters by a
-// third). A picture whose Motion changes and that is not drawn texel for pixel (a zoom in progress) keeps its exact
-// place, so it moves smoothly instead of in whole-pixel steps.
+// On the target's pixel grid: when its clip's Motion does not change (`animated` false) and the picture is drawn
+// unrotated at one target pixel per texel (`targetScaleX` and `targetScaleY` are target pixels per sequence pixel)
+// or smaller (a monitor smaller than the sequence), its corner is moved (by under half a target pixel) onto a whole
+// target pixel, so it is not resampled at a fractional offset (a title's position is a fraction of the frame, and
+// half a pixel off, bilinear sampling blurs small letters by a third). A picture whose Motion changes keeps its
+// exact place on every frame, texel for pixel too, so it glides instead of moving in whole-pixel steps (and a zoom
+// that ends texel for pixel does not jump on its last frames).
 Placement placeCanvas(const VideoParams &params, const media::CanvasGeometry &geometry, double anchorX, double anchorY,
                       double textureWidth, double textureHeight, double frameWidth, double frameHeight,
                       double targetScaleX, double targetScaleY, bool animated) {
@@ -268,8 +268,8 @@ Placement placeCanvas(const VideoParams &params, const media::CanvasGeometry &ge
     const double pixelsPerTexelX = targetScaleX * (sx / cw) * geometry.width / textureWidth;
     const double pixelsPerTexelY = targetScaleY * (sy / ch) * geometry.height / textureHeight;
     const bool texelForPixel = std::fabs(pixelsPerTexelX - 1.0) < 1e-6 && std::fabs(pixelsPerTexelY - 1.0) < 1e-6;
-    const bool stillAndReduced = !animated && pixelsPerTexelX < 1.0 && pixelsPerTexelY < 1.0;
-    if (s == 0.0 && c > 0.0 && (texelForPixel || stillAndReduced)) {
+    const bool reduced = pixelsPerTexelX < 1.0 && pixelsPerTexelY < 1.0;
+    if (!animated && s == 0.0 && c > 0.0 && (texelForPixel || reduced)) {
         // The corner's place in the target (the viewport's origin is a whole pixel), rounded to a whole pixel.
         const double tx = (cx + (rx / cw - 0.5) * sx) * targetScaleX;
         const double ty = (cy + (ry / ch - 0.5) * sy) * targetScaleY;

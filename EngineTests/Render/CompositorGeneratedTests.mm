@@ -265,6 +265,49 @@ test::GrayImage grayOf(const Image &image) {
                              1);
 }
 
+/// The luma-weighted mean column of `image`: where its content is, to a fraction of a pixel.
+- (double)centroidX:(const Image &)image {
+    double sum = 0;
+    double weighted = 0;
+    for (size_t y = 0; y < image.height; ++y) {
+        for (size_t x = 0; x < image.width; ++x) {
+            const uint8_t *p = image.at(x, y);
+            const double luma = 0.0722 * p[0] + 0.7152 * p[1] + 0.2126 * p[2];
+            sum += luma;
+            weighted += luma * double(x);
+        }
+    }
+    return sum > 0 ? weighted / sum : 0;
+}
+
+/// A title whose Motion moves it, drawn texel for pixel (review fix round, finding 3): each frame is at its exact
+/// place, so a move of a third of a pixel moves the picture by a third of a pixel, not by none or a whole one (a
+/// title snapped to the pixel grid on every frame steps instead of gliding, and jumps when a zoom ends texel for
+/// pixel). A still title at the same place is snapped.
+- (void)testAnAnimatedTitleIsNotSnappedToThePixelGrid {
+    const TitleContent content = sampleTitle();
+    const media::RenderedTitle title = rendered(content, 1.0);
+    VideoLayer layer = titleLayer(content);
+    layer.motionAnimated = true;
+    const Image at0 = [self exportLayer:layer picture:title.picture width:kWidth height:kHeight result:nullptr];
+    layer.transform.x = 1.0 / 3.0;
+    const Image atThird = [self exportLayer:layer picture:title.picture width:kWidth height:kHeight result:nullptr];
+    layer.transform.x = 2.0 / 3.0;
+    const Image atTwoThirds = [self exportLayer:layer picture:title.picture width:kWidth height:kHeight result:nullptr];
+    const double c0 = [self centroidX:at0];
+    const double step1 = [self centroidX:atThird] - c0;
+    const double step2 = [self centroidX:atTwoThirds] - c0;
+    NSLog(@"TITLE animated by 1/3 px steps: moved %.3f and %.3f px", step1, step2);
+    XCTAssertEqualWithAccuracy(step1, 1.0 / 3.0, 0.05);
+    XCTAssertEqualWithAccuracy(step2, 2.0 / 3.0, 0.05);
+    // Still, the same place is put on a whole pixel: the picture drawn directly.
+    layer.motionAnimated = false;
+    const Image still = [self exportLayer:layer picture:title.picture width:kWidth height:kHeight result:nullptr];
+    const long left = std::lround(layer.canvasAnchorX + layer.transform.x + title.geometry.x);
+    const long top = std::lround(layer.canvasAnchorY + title.geometry.y);
+    XCTAssertLessThanOrEqual(compareAt(still, imageOf(title.picture), left, top).worst, 1);
+}
+
 - (void)testATitleZoomedByMotionIsDrawnAtItsRasterScale {
     TitleContent content = sampleTitle();
     content.x = 0.5;
