@@ -308,6 +308,49 @@ test::GrayImage grayOf(const Image &image) {
     XCTAssertLessThanOrEqual(compareAt(still, imageOf(title.picture), left, top).worst, 1);
 }
 
+/// A title's picture held from before a sequence size change (drawn for the old canvas) shown on the new frame
+/// (review fix round, finding 7): its anchor (the layer's, in the new frame's pixels) is taken to the old canvas's,
+/// so the title stays where it was in the frame, magnified with it.
+- (void)testAPictureOfTheOldCanvasIsPlacedOnTheNewFrame {
+    const TitleContent content = sampleTitle();
+    const media::RenderedTitle title = rendered(content, 1.0); // for the 640x360 canvas
+    VideoLayer layer = titleLayer(content);
+    layer.canvasAnchorX = content.x * 1280; // the layer of the 1280x720 sequence
+    layer.canvasAnchorY = content.y * 720;
+    RenderGraph graph = makeGraph(1280, 720);
+    graph.layers.push_back(layer);
+    PixelBuffer target = makeBuffer(kCVPixelFormatType_32BGRA, 1280, 720);
+    auto result = renderLayers(*_compositor, graph, {texturesFor(*_compositor, title.picture)}, PixelBufferTarget{target});
+    XCTAssertTrue(result.ok() && result->status.ok() && result->skippedLayers.empty());
+    const Image drawn = imageOf(target);
+    long left = long(drawn.width), top = long(drawn.height);
+    for (size_t y = 0; y < drawn.height; ++y) {
+        for (size_t x = 0; x < drawn.width; ++x) {
+            const uint8_t *p = drawn.at(x, y);
+            if (p[0] > 16 || p[1] > 16 || p[2] > 16) {
+                left = std::min(left, long(x));
+                top = std::min(top, long(y));
+            }
+        }
+    }
+    // The picture's first inked texel, on the old canvas, times two.
+    const Image picture = imageOf(title.picture);
+    long pictureLeft = long(picture.width), pictureTop = long(picture.height);
+    for (size_t y = 0; y < picture.height; ++y) {
+        for (size_t x = 0; x < picture.width; ++x) {
+            const uint8_t *p = picture.at(x, y);
+            if (p[0] > 16 || p[1] > 16 || p[2] > 16) {
+                pictureLeft = std::min(pictureLeft, long(x));
+                pictureTop = std::min(pictureTop, long(y));
+            }
+        }
+    }
+    const double expectedLeft = 2.0 * (content.x * kWidth + title.geometry.x + double(pictureLeft));
+    const double expectedTop = 2.0 * (content.y * kHeight + title.geometry.y + double(pictureTop));
+    XCTAssertEqualWithAccuracy(double(left), expectedLeft, 2.5);
+    XCTAssertEqualWithAccuracy(double(top), expectedTop, 2.5);
+}
+
 - (void)testATitleZoomedByMotionIsDrawnAtItsRasterScale {
     TitleContent content = sampleTitle();
     content.x = 0.5;

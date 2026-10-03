@@ -263,8 +263,10 @@ Placement placeCanvas(const VideoParams &params, const media::CanvasGeometry &ge
     }
     const double cw = geometry.canvasWidth, ch = geometry.canvasHeight;
     const double c = f.c, s = f.s, cx = f.cx, cy = f.cy, sx = f.sx, sy = f.sy;
-    double rx = anchorX + geometry.x;
-    double ry = anchorY + geometry.y;
+    // The anchor is in the frame's pixels and the geometry in the canvas's: the same unless the picture was drawn
+    // for another frame size (held from before a Sequence Settings change until its new picture is there).
+    double rx = anchorX * cw / frameWidth + geometry.x;
+    double ry = anchorY * ch / frameHeight + geometry.y;
     const double pixelsPerTexelX = targetScaleX * (sx / cw) * geometry.width / textureWidth;
     const double pixelsPerTexelY = targetScaleY * (sy / ch) * geometry.height / textureHeight;
     const bool texelForPixel = std::fabs(pixelsPerTexelX - 1.0) < 1e-6 && std::fabs(pixelsPerTexelY - 1.0) < 1e-6;
