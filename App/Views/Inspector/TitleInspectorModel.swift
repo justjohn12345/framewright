@@ -386,7 +386,53 @@ final class TitleInspectorModel: ObservableObject {
         guard canEdit() else { return }
         endBurst()
         endTyping()
-        handle(engine.setTitleFont(font, clips: titleIDs))
+        let result = engine.setTitleFont(font, clips: titleIDs)
+        handle(result)
+        if result.ok { rememberRecentFont(font) }
+    }
+
+    // MARK: Recent fonts
+
+    /// Where the fonts chosen last are kept (in the store's defaults: per user, for every project).
+    static let recentFontsKey = "TitleRecentFonts"
+    /// How many recent fonts the family popup lists.
+    static let recentFontLimit = 5
+
+    /// The fonts chosen last for a title, the latest first (at most `recentFontLimit`): the family popup lists them
+    /// first, so a font used across a set of titles is one click away.
+    var recentFonts: [VETitleFont] {
+        let stored = store.defaults.array(forKey: Self.recentFontsKey) as? [[String: String]] ?? []
+        return stored.compactMap(Self.font(from:))
+    }
+
+    /// Sets the recent font at `index` (`recentFonts`) on the selected titles.
+    func useRecentFont(at index: Int) {
+        let fonts = recentFonts
+        guard fonts.indices.contains(index) else { return }
+        setFont(fonts[index])
+    }
+
+    private func rememberRecentFont(_ font: VETitleFont) {
+        var fonts = recentFonts.filter { $0 != font }
+        fonts.insert(font, at: 0)
+        objectWillChange.send()
+        store.defaults.set(fonts.prefix(Self.recentFontLimit).map(Self.entry(of:)), forKey: Self.recentFontsKey)
+    }
+
+    /// A font as stored: the system font by its weight's name, another by its PostScript, family and style names.
+    static func entry(of font: VETitleFont) -> [String: String] {
+        if font.isSystem {
+            return ["system": systemWeights.first { $0.weight == font.weight }?.name ?? "Regular"]
+        }
+        return ["name": font.postScriptName, "family": font.family, "style": font.style]
+    }
+
+    static func font(from entry: [String: String]) -> VETitleFont? {
+        if let weight = entry["system"] {
+            return systemWeights.first { $0.name == weight }.map { VETitleFont.system(weight: $0.weight) }
+        }
+        guard let name = entry["name"], !name.isEmpty else { return nil }
+        return VETitleFont.named(name, family: entry["family"] ?? "", style: entry["style"] ?? "")
     }
 
     /// Sets every parameter of `section` back to its default on the selected titles, as one undo step.

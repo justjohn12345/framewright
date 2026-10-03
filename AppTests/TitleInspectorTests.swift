@@ -261,6 +261,42 @@ final class TitleInspectorTests: XCTestCase {
         XCTAssertEqual(store.clips[a]?.title?.anchor, .bottom, "the reset was one step")
     }
 
+    /// Slice 2: the family popup's recent fonts: each font chosen goes first (once), at most five, kept in the user's
+    /// defaults for every project; choosing one sets that exact font.
+    func testRecentFontsAreTheLastFiveChosen() async throws {
+        store.defaults = try makeTestDefaults("titleRecentFonts")
+        let (_, a, b) = try await titles()
+        XCTAssertTrue(model.recentFonts.isEmpty)
+        store.selection = [a]
+        let helvetica = VETitleFont.named("Helvetica-Bold", family: "Helvetica", style: "Bold")
+        model.setFont(helvetica)
+        model.setFont(VETitleFont.system(weight: .heavy))
+        XCTAssertEqual(model.recentFonts, [VETitleFont.system(weight: .heavy), helvetica])
+        model.setFont(helvetica)
+        XCTAssertEqual(model.recentFonts, [helvetica, VETitleFont.system(weight: .heavy)], "once, the latest first")
+        for weight in [VESystemFontWeight.thin, .light, .medium, .black] {
+            model.setFont(VETitleFont.system(weight: weight))
+        }
+        XCTAssertEqual(model.recentFonts.count, TitleInspectorModel.recentFontLimit)
+        XCTAssertEqual(model.recentFonts.first, VETitleFont.system(weight: .black))
+        XCTAssertFalse(model.recentFonts.contains(VETitleFont.system(weight: .heavy)), "the oldest went")
+        // Kept for the user, not the project: another inspector over the same defaults lists them.
+        XCTAssertEqual(TitleInspectorModel(store: store).recentFonts, model.recentFonts)
+        // Choosing one sets that exact font (on another title).
+        store.selection = [b]
+        let index = try XCTUnwrap(model.recentFonts.firstIndex(of: helvetica))
+        model.useRecentFont(at: index)
+        XCTAssertEqual(store.clips[b]?.title?.font, helvetica)
+        XCTAssertEqual(model.recentFonts.first, helvetica)
+        model.useRecentFont(at: 99) // nothing there: nothing happens
+        XCTAssertEqual(store.clips[b]?.title?.font, helvetica)
+        // A refused font is not remembered.
+        store.selection = []
+        let before = model.recentFonts
+        model.setFont(VETitleFont.system(weight: .ultraLight))
+        XCTAssertEqual(model.recentFonts, before)
+    }
+
     func testAMatteColourIsSetAsOneStep() async throws {
         _ = try await titles()
         store.playheadTime = frames(150)

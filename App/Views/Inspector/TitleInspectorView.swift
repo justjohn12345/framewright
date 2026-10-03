@@ -339,6 +339,16 @@ private struct TitleFontRows: View {
                     if font == nil {
                         Text("Mixed").tag("")
                     }
+                    let recents = model.recentFonts
+                    if !recents.isEmpty {
+                        Section("Recent") {
+                            ForEach(Array(recents.enumerated()), id: \.offset) { index, recent in
+                                Text(recent.isAvailable ? recent.displayName : "\(recent.displayName) (missing)")
+                                    .tag(Self.recentTag + String(index))
+                            }
+                        }
+                        Divider()
+                    }
                     Text(Self.system).tag(Self.system)
                     if let font, !font.isSystem, !families.contains(font.family) {
                         Text("\(font.family.isEmpty ? font.postScriptName : font.family) (missing)").tag(familyTag(font))
@@ -398,8 +408,13 @@ private struct TitleFontRows: View {
         return font.postScriptName
     }
 
+    /// The tags of the recent fonts' items: the prefix and their index in `recentFonts`.
+    private static let recentTag = "recent:"
+
     private func chooseFamily(_ family: String) {
-        if family == Self.system {
+        if family.hasPrefix(Self.recentTag), let index = Int(family.dropFirst(Self.recentTag.count)) {
+            model.useRecentFont(at: index)
+        } else if family == Self.system {
             model.setFont(VETitleFont.system(weight: .semibold))
         } else if let font = TitleInspectorModel.font(forFamily: family) {
             model.setFont(font)
