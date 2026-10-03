@@ -58,12 +58,29 @@ final class ProgramMonitorZoom: ObservableObject {
         monitor = stage.monitor
         pointsPerPixel = stage.pointsPerPixel > 0 ? stage.pointsPerPixel : 1
         sequence = stage.sequence
+        updateDrawableLimit()
+    }
+
+    /// The program view's largest drawable (`VEPreviewView.maximumDrawableSize`): at a fixed level the sequence's
+    /// frame size, so 200 % magnifies one composited pixel per sequence pixel instead of compositing four (a 4K
+    /// sequence: 3840x2160, not 7680x4320, per frame), and an 8K-wide one cannot pass Metal's texture limit; at
+    /// Fit none (the monitor's own size).
+    @Published private(set) var drawableLimit: CGSize = .zero
+
+    private func updateDrawableLimit() {
+        let limit: CGSize
+        switch zoom {
+        case .fit: limit = .zero
+        case .percent: limit = sequence
+        }
+        if limit != drawableLimit { drawableLimit = limit }
     }
 
     /// A level chosen in the control (refused during a drag).
     func set(_ level: ProgramZoom) {
         guard !isFrozen(), level != zoom else { return }
         zoom = level
+        updateDrawableLimit()
     }
 
     /// The Ken Burns editor opened or a drag in it ended with its boxes in `region` (sequence pixels: the frame and

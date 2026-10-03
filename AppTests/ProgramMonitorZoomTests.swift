@@ -335,6 +335,44 @@ final class ProgramMonitorZoomTests: XCTestCase {
         XCTAssertEqual(store.programZoom.zoom, .fit)
     }
 
+    /// At a fixed level the program view composites at most the sequence's frame size (the layer magnifies it):
+    /// 200 % of a 4K sequence is 3840x2160 per frame, not 7680x4320; at Fit the view's own size (review fix round,
+    /// finding 6). Also: the layout's clipping container holds the larger view (it is cut at the monitor's edge).
+    func testAFixedLevelLimitsTheProgramViewsDrawable() async throws {
+        try fixture.configureSequence(width: 3840, height: 2160)
+        _ = try await longClip()
+        let store = self.store
+        let hosted = HostedView(ProgramMonitorHost(store: store, playhead: store.playhead),
+                                size: NSSize(width: 1000, height: 700))
+        defer {
+            store.engine.attachProgramView(nil)
+            hosted.close()
+        }
+        await hosted.settle()
+        let preview = try XCTUnwrap(store.engine.programView)
+        let scale = hosted.window.backingScaleFactor
+        XCTAssertLessThanOrEqual(preview.drawableSize.width, 1000 * scale + 1, "Fit: the monitor's own size")
+        store.programZoom.set(.percent(200))
+        await hosted.settle()
+        XCTAssertEqual(store.programZoom.drawableLimit, CGSize(width: 3840, height: 2160))
+        XCTAssertEqual(preview.bounds.width, 3840 * 2 / scale, accuracy: 1, "the view is the frame at 200 %")
+        XCTAssertEqual(preview.drawableSize.width, 3840, accuracy: 1, "composited at the sequence's size")
+        XCTAssertEqual(preview.drawableSize.height, 2160, accuracy: 1)
+        var clipped = false
+        var ancestor = preview.superview
+        while let view = ancestor, view !== hosted.host {
+            if view.layer?.masksToBounds == true, view.frame.width <= 1000.5 { clipped = true }
+            ancestor = view.superview
+        }
+        XCTAssertTrue(clipped, "a layer between the view and the window clips it to the monitor")
+        store.programZoom.set(.percent(25))
+        await hosted.settle()
+        XCTAssertEqual(preview.drawableSize.width, 3840 * 0.25, accuracy: 1, "25 %: the whole frame, smaller")
+        store.programZoom.fit()
+        await hosted.settle()
+        XCTAssertEqual(store.programZoom.drawableLimit, .zero)
+    }
+
     // MARK: Reset
 
     /// Reset Start and Reset End: Transform puts the box back where the clip sits without the move (its own

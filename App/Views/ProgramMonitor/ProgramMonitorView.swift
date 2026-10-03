@@ -13,10 +13,13 @@ import FramewrightEngine
 struct ProgramMonitorView: View {
     var isPlaying = false
     var attachID: AnyHashable?
+    /// The view's largest drawable (`ProgramMonitorZoom.drawableLimit`; zero: none).
+    var maximumDrawableSize: CGSize = .zero
     var attach: (VEPreviewView) -> Void = { _ in }
 
     var body: some View {
-        PreviewViewRepresentable(isPlaying: isPlaying, configurationID: attachID, configure: attach)
+        PreviewViewRepresentable(isPlaying: isPlaying, configurationID: attachID,
+                                 maximumDrawableSize: maximumDrawableSize, configure: attach)
             .background(Color.black)
     }
 }
@@ -31,11 +34,20 @@ struct ProgramMonitorView: View {
 struct ProgramMonitorHost: View {
     let store: ProjectStore
     @ObservedObject var playhead: PlayheadModel
+    /// For the program view's drawable limit at a fixed zoom level.
+    @ObservedObject var zoom: ProgramMonitorZoom
     @AppStorage(PlaybackHUD.defaultsKey) private var showHUD = false
+
+    init(store: ProjectStore, playhead: PlayheadModel) {
+        self.store = store
+        self.playhead = playhead
+        zoom = store.programZoom
+    }
 
     var body: some View {
         ProgramMonitorLayout(store: store, showsHUD: showHUD) {
-            ProgramMonitorView(isPlaying: playhead.isRunning, attachID: ObjectIdentifier(store)) { view in
+            ProgramMonitorView(isPlaying: playhead.isRunning, attachID: ObjectIdentifier(store),
+                               maximumDrawableSize: zoom.drawableLimit) { view in
                 store.attachProgramView(view)
             }
         }

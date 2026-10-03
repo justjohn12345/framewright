@@ -359,6 +359,7 @@ schemes:
             - PausedSeekSoakTests
             # Measures; it runs in the Measurements scheme.
             - PlayStartMeasurementTests
+            - PreviewDrawableMeasurementTests
             # Run only in a fresh process by HardwareCapsTests' own test (review B9).
             - HardwareCapsTests/testChildFirstVideoToolboxUseRegistersVP9
         - name: AppTests
@@ -385,6 +386,7 @@ schemes:
             - PausedSeekSoakTests
             # Measures; it runs in the Measurements scheme.
             - PlayStartMeasurementTests
+            - PreviewDrawableMeasurementTests
             # Run only in a fresh process by HardwareCapsTests' own test (review B9).
             - HardwareCapsTests/testChildFirstVideoToolboxUseRegistersVP9
 
@@ -403,7 +405,9 @@ schemes:
   # Measurements that print numbers rather than pass or fail on them (wall-clock times vary with the Mac and its
   # load): TitleDragLatencyTests drags title and Ken Burns boxes in the editor window and reports where each
   # step's time goes; PlayStartMeasurementTests times Space after a pause, a scrub, a ruler click and a J/K/L stop
-  # on long-GOP 1080p and 4K media. No coverage, so the timings are those of the ordinary Debug build.
+  # on long-GOP 1080p and 4K media (one layer and a dissolve); PreviewDrawableMeasurementTests times a program
+  # monitor frame at 200 % of a 4K sequence with and without the drawable limit. No coverage, so the timings are
+  # those of the ordinary Debug build.
   Measurements:
     build:
       targets:
@@ -415,7 +419,7 @@ schemes:
       config: Debug
       targets:
         - name: EngineTests
-          selectedTests: [PlayStartMeasurementTests]
+          selectedTests: [PlayStartMeasurementTests, PreviewDrawableMeasurementTests]
         - name: AppTests
           selectedTests: [TitleDragLatencyTests]
 

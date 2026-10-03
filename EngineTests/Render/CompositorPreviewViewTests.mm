@@ -203,6 +203,39 @@ bool spinUntil(const std::function<bool()> &done, double timeoutSeconds) {
 
 // Collapsing the view to zero height (split-view collapse, a SwiftUI zero-size layout pass) and
 // restoring it must keep rendering: the drawable size comes back and frames render again.
+/// The drawable stays within maximumDrawableSize (aspect kept, the layer stretching it over the view) and never
+/// passes VEPreviewViewMaximumDrawableDimension a side: the program monitor at 200 % of a large sequence (review fix
+/// round, finding 6). It still renders the whole picture.
+- (void)testTheDrawableIsLimited {
+    VEPreviewView *view = [self makeViewWithSize:NSMakeSize(3840, 2160) source:solidSource({40, 160, 90, 255})];
+    [self showInWindow:view];
+    const CGFloat scale = view.window.backingScaleFactor;
+    XCTAssertEqualWithAccuracy(view.drawableSize.width, std::min<CGFloat>(3840 * scale, 8192), 1);
+    view.maximumDrawableSize = CGSizeMake(1920, 1080);
+    XCTAssertEqualWithAccuracy(view.drawableSize.width, 1920, 1);
+    XCTAssertEqualWithAccuracy(view.drawableSize.height, 1080, 1);
+    XCTAssertNil([self renderOnce:view]);
+    CGImageRef snapshot = [view snapshot];
+    XCTAssertTrue(snapshot != nullptr);
+    if (snapshot != nullptr) {
+        XCTAssertEqual(CGImageGetWidth(snapshot), 1920u, @"the whole picture, at the limited size");
+        const Pixel corner = imagePixel(snapshot, 1900, 1060);
+        XCTAssertEqualWithAccuracy(corner.g, 160, 3);
+    }
+    // A limit of another aspect: the drawable fits inside it with the view's aspect.
+    view.maximumDrawableSize = CGSizeMake(1000, 1000);
+    XCTAssertEqualWithAccuracy(view.drawableSize.width, 1000, 1);
+    XCTAssertEqualWithAccuracy(view.drawableSize.height, 562, 1);
+    view.maximumDrawableSize = CGSizeZero;
+    XCTAssertEqualWithAccuracy(view.drawableSize.width, std::min<CGFloat>(3840 * scale, 8192), 1);
+    // Far larger than Metal's texture limit: never past the absolute limit.
+    [view setFrameSize:NSMakeSize(12000, 6750)];
+    XCTAssertLessThanOrEqual(view.drawableSize.width, VEPreviewViewMaximumDrawableDimension);
+    XCTAssertLessThanOrEqual(view.drawableSize.height, VEPreviewViewMaximumDrawableDimension);
+    XCTAssertEqualWithAccuracy(view.drawableSize.width / view.drawableSize.height, 12000.0 / 6750.0, 0.01);
+    XCTAssertNil([self renderOnce:view]);
+}
+
 - (void)testCollapseToZeroAndRestoreKeepsRendering {
     auto source = solidSource({30, 160, 90, 255});
     VEPreviewView *view = [self makeViewWithSize:NSMakeSize(320, 180) source:source];

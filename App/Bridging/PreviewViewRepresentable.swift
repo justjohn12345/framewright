@@ -14,6 +14,8 @@ struct PreviewViewRepresentable: NSViewRepresentable {
     var isPlaying: Bool = false
     /// Identity of what `configure` attaches the view to; a change re-runs `configure`.
     var configurationID: AnyHashable?
+    /// `VEPreviewView.maximumDrawableSize` (zero: no limit but the view's own).
+    var maximumDrawableSize: CGSize = .zero
     var configure: (VEPreviewView) -> Void = { _ in }
 
     final class Coordinator {
@@ -26,6 +28,7 @@ struct PreviewViewRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> VEPreviewView {
         let view = VEPreviewView(frame: .zero)
+        view.maximumDrawableSize = maximumDrawableSize
         context.coordinator.configurationID = configurationID
         configure(view)
         view.isPaused = !isPlaying
@@ -33,6 +36,9 @@ struct PreviewViewRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ view: VEPreviewView, context: Context) {
+        if view.maximumDrawableSize != maximumDrawableSize {
+            view.maximumDrawableSize = maximumDrawableSize
+        }
         if context.coordinator.configurationID != configurationID {
             context.coordinator.configurationID = configurationID
             configure(view)
