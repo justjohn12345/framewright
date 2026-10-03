@@ -89,3 +89,84 @@ final class TitleExportTests: XCTestCase {
                            + "titles will be exported in the system font; install the fonts and export again to use them.")
     }
 }
+
+/// A typing run or a nudge burst left open (the text area keeps the focus while the Export sheet is up) does not
+/// block an export, hold back an import or refuse removing media (review fix round, finding 2): each commits the run
+/// as its undo step first; a run also ends by itself after a pause.
+@MainActor
+final class OpenEditGroupTests: XCTestCase {
+    private var fixture: StoreFixture!
+    private var defaults: UserDefaults!
+
+    override func setUp() async throws {
+        fixture = try StoreFixture()
+        defaults = try makeTestDefaults("open-edits")
+        fixture.store.defaults = defaults
+    }
+
+    override func tearDown() async throws {
+        TitleInspectorModel.typingIdleSeconds = 2.0
+        fixture.store.engine.activeExport?.cancelAndWait(withTimeout: 2)
+        fixture.cleanUp()
+    }
+
+    private func typedTitle() throws -> VEClipID {
+        let store = fixture.store
+        store.playheadTime = .zero
+        XCTAssertTrue(store.addGenerated(.title))
+        let title = try XCTUnwrap(store.selection.first)
+        store.titleInspector.textChanged("Typed")
+        XCTAssertNotNil(store.titleTypingGroup)
+        XCTAssertNotNil(store.engine.coalescingKey)
+        return title
+    }
+
+    func testAnExportStartsDuringATypingRun() async throws {
+        let store = fixture.store
+        let (movie, _) = try await fixture.importMedia()
+        try fixture.placeMovie(movie, at: 0)
+        let title = try typedTitle()
+        store.showExportSheet()
+        let model = try XCTUnwrap(store.exportModel)
+        XCTAssertNil(store.titleTypingGroup, "opening the sheet commits the run")
+        store.titleInspector.textChanged("Typed again") // the text area still has the focus
+        model.setOutputURL(fixture.directory.appendingPathComponent("typed.mp4"))
+        XCTAssertTrue(model.requestExport(), model.refusal ?? "")
+        XCTAssertTrue(model.isExporting)
+        XCTAssertNil(store.engine.coalescingKey)
+        XCTAssertEqual(store.clips[title]?.title?.text, "Typed again")
+        XCTAssertEqual(store.undoActionName, "Edit Title Text")
+        let finished = await StoreFixture.wait(until: { !model.isExporting }, timeout: 60)
+        XCTAssertTrue(finished)
+    }
+
+    func testImportsAndRemovingMediaCommitTheRun() async throws {
+        let store = fixture.store
+        _ = try typedTitle()
+        // The import is added at once, not held back until the run ends.
+        let imported: [VEAssetInfo] = await withCheckedContinuation { continuation in
+            store.importMedia([fixture.movieURL]) { continuation.resume(returning: $0) }
+        }
+        XCTAssertEqual(imported.count, 1)
+        XCTAssertNil(store.titleTypingGroup)
+        XCTAssertEqual(store.engine.deferredImportCount, 0)
+        store.titleInspector.textChanged("Typed more")
+        store.removeAsset(try XCTUnwrap(imported.first).assetID)
+        XCTAssertNil(store.asset(try XCTUnwrap(imported.first).assetID), "removed: \(store.statusMessage ?? "")")
+        // A burst of nudges is committed the same way.
+        store.titleInspector.nudge(.tracking, steps: 1)
+        XCTAssertNotNil(store.engine.coalescingKey)
+        store.commitOpenEdits()
+        XCTAssertNil(store.engine.coalescingKey)
+    }
+
+    func testARunEndsAfterAPause() async throws {
+        TitleInspectorModel.typingIdleSeconds = 0.1
+        let store = fixture.store
+        _ = try typedTitle()
+        let ended = await StoreFixture.wait(until: { store.titleTypingGroup == nil }, timeout: 3)
+        XCTAssertTrue(ended)
+        XCTAssertNil(store.engine.coalescingKey)
+        XCTAssertEqual(store.undoActionName, "Edit Title Text")
+    }
+}

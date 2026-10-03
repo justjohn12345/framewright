@@ -14,8 +14,9 @@ import SwiftUI
 ///   `InspectorModel.burstIdleSeconds` without another or by any other edit (`ProjectStore.nudgeGroup`, like the
 ///   inspector's nudges).
 /// - A typing run is one undo step (`VECoalescingModeReplace`: every keystroke sets the whole text). It ends when
-///   the text area loses the focus, the selection changes or another edit is made (the engine then ends its
-///   group, and the next keystroke opens a new one). Undo during a run takes the run back as one step: the text
+///   the text area loses the focus, the selection changes, another edit is made (the engine then ends its group,
+///   and the next keystroke opens a new one), `typingIdleSeconds` pass without a keystroke, or an export, an import
+///   or removing media starts (`ProjectStore.commitOpenEdits`). Undo during a run takes the run back as one step: the text
 ///   area has no undo of its own (`TitleTextView`), so ⌘Z reaches the engine, which ends the run first.
 /// - Numbers are shown in the units an editor thinks in: sizes in sequence pixels (the engine stores fractions of
 ///   the frame, so a title looks the same in another sequence size), opacities in percent, the angle in degrees.
@@ -102,6 +103,11 @@ final class TitleInspectorModel: ObservableObject {
     /// The selected title's text ("" with several).
     var text: String { canEditText ? (selection.firstTitle?.text ?? "") : "" }
 
+    /// Seconds without a keystroke after which the typing run is committed as its undo step (a run left open would
+    /// hold back imports and refuse exports until the text area loses the focus).
+    static var typingIdleSeconds: TimeInterval = 2.0
+    private var typingEnd: DispatchWorkItem?
+
     /// The typing run's coalescing group while one is open.
     private var typingGroup: String? {
         get { store.titleTypingGroup }
@@ -130,10 +136,25 @@ final class TitleInspectorModel: ObservableObject {
             result = step()
         }
         handle(result)
+        scheduleTypingEnd(group)
+    }
+
+    private func scheduleTypingEnd(_ group: String) {
+        typingEnd?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.typingGroup == group else { return }
+                self.endTyping()
+            }
+        }
+        typingEnd = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.typingIdleSeconds, execute: work)
     }
 
     /// Ends the typing run (the text area lost the focus, the selection changed, or another control is used).
     func endTyping() {
+        typingEnd?.cancel()
+        typingEnd = nil
         if let group = typingGroup, engine.coalescingKey == group {
             engine.endCoalescing()
         }

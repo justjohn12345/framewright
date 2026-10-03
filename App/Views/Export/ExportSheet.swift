@@ -408,6 +408,7 @@ final class ExportModel: ObservableObject {
     /// system font (`missingFontConfirmation`); otherwise starts the export. Returns whether it started.
     @discardableResult
     func requestExport() -> Bool {
+        store.commitOpenEdits() // a typing run or a nudge burst left open (the engine refuses to export during one)
         let missing = store.engine.missingTitleFonts
         guard missing.isEmpty || exportDisabledReason != nil else {
             missingFontConfirmation = missing
@@ -440,6 +441,7 @@ final class ExportModel: ObservableObject {
     /// Starts the export. Returns false (with `refusal` set) when the engine refused it.
     @discardableResult
     func startExport() -> Bool {
+        store.commitOpenEdits()
         if let reason = exportDisabledReason {
             refusal = reason
             return false

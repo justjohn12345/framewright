@@ -239,6 +239,15 @@ final class ProjectStore: ObservableObject {
     /// interleave with the gesture's own coalesced edits (the engine would commit the gesture
     /// first; see VEEngine.h). An inspector nudge burst (or a title's colour burst) and a title's
     /// typing run are not gestures: the next command commits them as their own undo step.
+    /// Commits the open edit groups that are not gestures, each as its own undo step: a title's typing run, an
+    /// inspector nudge burst or a title's colour burst. Called before what the engine refuses or holds back while a
+    /// coalescing group is open (an export, an import, removing media): those groups otherwise end only with the
+    /// text area's focus, the selection or another edit, and a sheet or a drop changes none of them.
+    func commitOpenEdits() {
+        if titleTypingGroup != nil { titleInspector.endTyping() }
+        inspector.endNudgeBurst()
+    }
+
     var isGestureActive: Bool {
         guard cancelActiveGesture == nil else { return true }
         guard let key = engine.coalescingKey else { return false }
@@ -1441,6 +1450,7 @@ final class ProjectStore: ObservableObject {
             statusMessage = "Finish the current drag first."
             return
         }
+        commitOpenEdits()
         if exportModel == nil {
             exportModel = ExportModel(store: self)
         }
@@ -1649,6 +1659,8 @@ final class ProjectStore: ObservableObject {
     /// Imports files (probing happens off the main thread).
     func importMedia(_ urls: [URL], completion: (([VEAssetInfo]) -> Void)? = nil) {
         guard !urls.isEmpty else { return }
+        // An import that finishes while an edit group is open waits for it to end (VEEngine.h).
+        commitOpenEdits()
         importsInFlight += 1
         engine.importMedia(at: urls) { [weak self] imported, errors in
             MainActor.assumeIsolated {
@@ -1750,6 +1762,7 @@ final class ProjectStore: ObservableObject {
     }
 
     func removeAsset(_ id: VEAssetID) {
+        commitOpenEdits() // refused while an edit group is open
         if report(engine.removeAsset(id)), selectedAssetID == id {
             selectedAssetID = nil
         }
