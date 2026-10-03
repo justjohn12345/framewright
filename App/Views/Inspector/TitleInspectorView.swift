@@ -51,7 +51,9 @@ struct TitleInspectorSections: View {
 
     private var textSection: some View {
         TitleSection(title: "Text", subtitle: subtitle, reset: {
-            model.reset([.alignment, .lineSpacing, .tracking, .positionX, .positionY, .boxWidth])
+            // Point text and the anchor before the position: turning them back keeps the text where it is, and the
+            // position's reset then centres it.
+            model.reset([.alignment, .pointText, .anchor, .lineSpacing, .tracking, .positionX, .positionY, .boxWidth])
         }) {
             if model.canEditText {
                 TitleTextEditor(text: model.text, modelVersion: store.changeCount,
@@ -69,10 +71,65 @@ struct TitleInspectorSections: View {
                     .accessibilityIdentifier("TitleText.disabled")
             }
             alignmentRow
-            ForEach([VETitleParameter.lineSpacing, .tracking, .positionX, .positionY, .boxWidth], id: \.self) {
+            textBoxRow
+            anchorRow
+            ForEach([VETitleParameter.lineSpacing, .tracking, .positionX, .positionY], id: \.self) {
                 TitleNumberRow(model: model, parameter: $0)
             }
+            // Point text is as wide as its text: it does not wrap.
+            TitleNumberRow(model: model, parameter: .boxWidth)
+                .disabled(model.pointText == true)
         }
+    }
+
+    /// Area text (wraps at the wrap width) or point text (no wrapping: as wide as its text, which grows from its
+    /// position as it is typed). Changing it keeps the text where it is.
+    private var textBoxRow: some View {
+        HStack(spacing: 4) {
+            Text("Text Box").foregroundStyle(.secondary)
+            if model.isMixed(.pointText) {
+                Text("Mixed").foregroundStyle(.tertiary)
+            }
+            Spacer()
+            Picker("Text Box", selection: Binding(get: { model.pointText }, set: { if let on = $0 { model.setPointText(on) } })) {
+                Text("Area").tag(Bool?.some(false))
+                Text("Point").tag(Bool?.some(true))
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("Area: the lines wrap inside the wrap width. Point: no wrapping; the text grows from its position as "
+                + "you type (from its left edge, centre or right edge, as it is aligned)")
+            .accessibilityIdentifier("TitlePointText")
+        }
+        .font(.caption)
+    }
+
+    /// Where the position is on the text block: its top (lines added grow it down), centre or bottom (it grows up).
+    private var anchorRow: some View {
+        HStack(spacing: 4) {
+            Text("Anchor").foregroundStyle(.secondary)
+            if model.isMixed(.anchor) {
+                Text("Mixed").foregroundStyle(.tertiary)
+            }
+            Spacer()
+            ForEach([(VETitleAnchor.top, "align.vertical.top", "Top: lines added grow the text down"),
+                     (.centre, "align.vertical.center", "Centre: lines added grow the text both ways"),
+                     (.bottom, "align.vertical.bottom", "Bottom: lines added grow the text up")], id: \.0) { anchor, image, help in
+                Button {
+                    model.setAnchor(anchor)
+                } label: {
+                    Image(systemName: image)
+                        .frame(width: 22, height: 18)
+                        .background(RoundedRectangle(cornerRadius: 4)
+                            .fill(model.anchor == anchor ? Color.accentColor.opacity(0.35) : Color.clear))
+                }
+                .buttonStyle(.borderless)
+                .help(help)
+                .accessibilityIdentifier("TitleAnchor.\(anchor.rawValue)")
+            }
+        }
+        .font(.caption)
     }
 
     private var alignmentRow: some View {

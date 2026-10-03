@@ -47,6 +47,8 @@ final class TitleBoxModel: ObservableObject {
     @Published private(set) var box: KenBurnsBox
     /// Whether the playhead is inside the clip (the box is drawn only then).
     @Published private(set) var isVisible: Bool
+    /// Whether the box's width can be dragged: area text (point text is as wide as its text).
+    var isResizable: Bool { !(clip.title?.pointText ?? false) }
     /// The other titles' blocks at the playhead.
     @Published private(set) var outlines: [Outline] = []
     @Published private(set) var isDragging = false
@@ -108,25 +110,30 @@ final class TitleBoxModel: ObservableObject {
         if others != outlines { outlines = others }
     }
 
-    /// The text block of the title `clip` on the frame at `time` (sequence pixels), through its composed Motion there.
+    /// The text block of the title `clip` on the frame at `time` (sequence pixels), through its composed Motion there:
+    /// where the engine lays it out around the title's position (`VEEngine.titleBlock(ofClip:)`: area text centred on
+    /// it, point text at its alignment's edge, anchored at its top, centre or bottom), at least a line of its font
+    /// tall and half its font size wide (an empty point text still has a box to grab).
     static func block(of clip: VEClipInfo, at time: CMTime, store: ProjectStore) -> KenBurnsBox? {
         guard let title = clip.title else { return nil }
         let sequence = CGSize(width: store.sequence.width, height: store.sequence.height)
-        let measured = store.engine.titleBlockSize(ofClip: clip.clipID)
-        let height = max(measured.height, CGFloat(title.size) * sequence.height * minimumHeightFraction)
-        return block(center: CGPoint(x: title.x, y: title.y),
-                     size: CGSize(width: CGFloat(title.width) * sequence.width, height: height),
+        let measured = store.engine.titleBlock(ofClip: clip.clipID)
+        guard !measured.isNull else { return nil }
+        let fontSize = CGFloat(title.size) * sequence.height
+        let size = CGSize(width: max(measured.width, fontSize * 0.5),
+                          height: max(measured.height, fontSize * minimumHeightFraction))
+        return block(canvasCenter: CGPoint(x: measured.midX, y: measured.midY), size: size,
                      motion: clip.motion(at: time), sequence: sequence)
     }
 
-    /// A block centred at `center` (fractions of the frame) of `size` (sequence pixels) on the title's frame-sized
-    /// canvas, placed by `motion`: the canvas is the frame scaled about its centre, moved and turned as the
+    /// A block centred at `canvasCenter` (sequence pixels on the title's frame-sized canvas) of `size` (sequence
+    /// pixels), placed by `motion`: the canvas is the frame scaled about its centre, moved and turned as the
     /// compositor places a clip (`KenBurnsModel.box(for:picture:sequence:)`), so a canvas point p from the canvas's
     /// centre lands at the placed centre + R(θ) s p.
-    static func block(center: CGPoint, size: CGSize, motion: VEVideoParams, sequence: CGSize) -> KenBurnsBox {
+    static func block(canvasCenter center: CGPoint, size: CGSize, motion: VEVideoParams, sequence: CGSize) -> KenBurnsBox {
         let canvas = KenBurnsModel.box(for: motion, picture: sequence, sequence: sequence)
         let scale = motion.scale.isFinite ? max(0, CGFloat(motion.scale)) : 0
-        let local = CGPoint(x: (center.x - 0.5) * sequence.width * scale, y: (center.y - 0.5) * sequence.height * scale)
+        let local = CGPoint(x: (center.x - sequence.width / 2) * scale, y: (center.y - sequence.height / 2) * scale)
         return KenBurnsBox(center: canvas.point(local: local),
                            size: CGSize(width: size.width * scale, height: size.height * scale),
                            rotationDegrees: motion.rotationDegrees)
@@ -149,11 +156,16 @@ final class TitleBoxModel: ObservableObject {
 
     /// What a press at `point` grabs on `box` (view points), or nil (outside it and its handles): a corner or the
     /// left or right edge (within `KenBurnsHit.cornerRadius` / `edgeBand`) resizes, the rest of the box (its top and
-    /// bottom edges included) moves. Tested in the box's own axes, so a turned box's edges turn with it.
-    static func target(at point: CGPoint, box: KenBurnsBox) -> Target? {
+    /// bottom edges included) moves. Tested in the box's own axes, so a turned box's edges turn with it. A box that is
+    /// not `resizable` (point text, as wide as its text) moves wherever it is grabbed.
+    static func target(at point: CGPoint, box: KenBurnsBox, resizable: Bool = true) -> Target? {
         let p = box.local(point)
         let w = box.size.width / 2
         let h = box.size.height / 2
+        if !resizable {
+            let reach = KenBurnsHit.edgeBand
+            return abs(p.x) <= w + reach && abs(p.y) <= h + reach ? .body : nil
+        }
         for corner in KenBurnsModel.Corner.allCases {
             let c = box.corner(corner)
             if hypot(point.x - c.x, point.y - c.y) <= KenBurnsHit.cornerRadius {
@@ -192,6 +204,7 @@ final class TitleBoxModel: ObservableObject {
             x = min(max(origin.x + Double(moved.width / sequence.width), xRange.lowerBound), xRange.upperBound)
             y = min(max(origin.y + Double(moved.height / sequence.height), yRange.lowerBound), yRange.upperBound)
         case let .edge(right):
+            guard isResizable else { return }
             // About the centre: the grabbed edge follows the pointer, the other moves the other way.
             let change = 2 * Double(moved.width / sequence.width) * (right ? 1 : -1)
             width = min(max(origin.width + change, widthRange.lowerBound), widthRange.upperBound)

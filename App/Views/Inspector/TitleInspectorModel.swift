@@ -351,6 +351,32 @@ final class TitleInspectorModel: ObservableObject {
         handle(engine.setTitleAlignment(alignment, clips: titleIDs))
     }
 
+    /// Whether the titles are point text (nil when they differ or there are none).
+    var pointText: Bool? {
+        isMixed(.pointText) ? nil : selection.firstTitle?.pointText
+    }
+
+    /// Point text or area text, keeping each title's text where it is (one undo step).
+    func setPointText(_ on: Bool) {
+        guard canEdit() else { return }
+        endBurst()
+        endTyping()
+        handle(engine.setTitlePointText(on, clips: titleIDs))
+    }
+
+    /// The titles' vertical anchor (nil when they differ or there are none).
+    var anchor: VETitleAnchor? {
+        isMixed(.anchor) ? nil : selection.firstTitle?.anchor
+    }
+
+    /// Anchors the titles at their top, centre or bottom, keeping each block where it is (one undo step).
+    func setAnchor(_ anchor: VETitleAnchor) {
+        guard canEdit() else { return }
+        endBurst()
+        endTyping()
+        handle(engine.setTitleAnchor(anchor, clips: titleIDs))
+    }
+
     /// The titles' font (nil when they differ or there are none).
     var font: VETitleFont? {
         isMixed(.font) ? nil : selection.firstTitle?.font
@@ -381,6 +407,7 @@ final class TitleInspectorModel: ObservableObject {
                 case .toggle: return self.engine.setTitleToggle(info.defaultValue != 0, for: parameter, clips: ids)
                 case .colour: return self.engine.setTitleColour(Self.defaultColour(parameter), for: parameter, clips: ids)
                 case .choice: return self.engine.setTitleAlignment(.centre, clips: ids)
+                case .anchor: return self.engine.setTitleAnchor(.centre, clips: ids)
                 case .font: return self.engine.setTitleFont(VETitleFont.system(weight: .semibold), clips: ids)
                 default: return VEEditResult.success()
                 }

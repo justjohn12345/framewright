@@ -49,11 +49,14 @@ struct TitleBoxOverlay: View {
         }
     }
 
-    /// The box, its corner handles and its edge handles (at the middle of the left and right edges).
+    /// The box, its corner handles and its edge handles (at the middle of the left and right edges; none for point
+    /// text, whose width follows its text).
     private var boxView: some View {
         let box = viewport.view(model.box)
-        let handles = box.corners + [box.point(local: CGPoint(x: -box.size.width / 2, y: 0)),
-                                     box.point(local: CGPoint(x: box.size.width / 2, y: 0))]
+        let handles = model.isResizable
+            ? box.corners + [box.point(local: CGPoint(x: -box.size.width / 2, y: 0)),
+                             box.point(local: CGPoint(x: box.size.width / 2, y: 0))]
+            : []
         return ZStack(alignment: .topLeading) {
             path(box)
                 .stroke(Color.black.opacity(0.5), lineWidth: 3)
@@ -80,7 +83,8 @@ struct TitleBoxOverlay: View {
             .gesture(DragGesture(minimumDistance: 0)
                 .updating($drag) { value, state, _ in
                     if state == nil {
-                        state = ActiveDrag(target: TitleBoxModel.target(at: value.startLocation, box: box))
+                        state = ActiveDrag(target: TitleBoxModel.target(at: value.startLocation, box: box,
+                                                                        resizable: model.isResizable))
                     }
                     guard let target = state?.target else { return }
                     model.applyDrag(target, translation: viewport.sequence(value.translation))

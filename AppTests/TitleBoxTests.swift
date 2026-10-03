@@ -86,6 +86,30 @@ final class TitleBoxTests: XCTestCase {
         assertBox(model.box, center: CGPoint(x: 960 - dy, y: 540 + dx), size: block, rotation: 90)
     }
 
+    /// Slice 2: the box is the block where the engine lays it out around the position: point text's box is as wide
+    /// as its text and starts at x (left-aligned), a top-anchored block hangs from y; point text has no width handles.
+    func testTheBoxFollowsPointTextAndTheAnchor() async throws {
+        let (id, model) = try lowerThird()
+        XCTAssertTrue(model.isResizable)
+        XCTAssertTrue(store.engine.setTitlePointText(true, clips: [NSNumber(value: id)]).ok)
+        XCTAssertTrue(store.engine.setTitleAnchor(.top, clips: [NSNumber(value: id)]).ok)
+        let title = try XCTUnwrap(store.clips[id]?.title)
+        let block = store.engine.titleBlock(ofClip: id)
+        XCTAssertEqual(block.minX, title.x * 1920, accuracy: 1e-6, "left-aligned point text starts at x")
+        XCTAssertEqual(block.minY, title.y * 1080, accuracy: 1e-6, "anchored at its top")
+        assertBox(model.box, center: CGPoint(x: block.midX, y: block.midY), size: block.size, rotation: 0)
+        XCTAssertFalse(model.isResizable)
+        let box = KenBurnsBox(center: CGPoint(x: 200, y: 100), size: CGSize(width: 100, height: 40), rotationDegrees: 0)
+        XCTAssertEqual(TitleBoxModel.target(at: CGPoint(x: 252, y: 100), box: box, resizable: false), .body,
+                       "an edge moves point text")
+        XCTAssertNil(TitleBoxModel.target(at: CGPoint(x: 300, y: 100), box: box, resizable: false))
+        // An edge drag of point text changes nothing.
+        model.applyDrag(.edge(right: true), translation: CGSize(width: 100, height: 0))
+        model.endDrag()
+        XCTAssertEqual(store.clips[id]?.title?.width, title.width)
+        XCTAssertEqual(store.clips[id]?.title?.x, title.x)
+    }
+
     func testWhatAPressGrabs() {
         let box = KenBurnsBox(center: CGPoint(x: 200, y: 100), size: CGSize(width: 100, height: 40), rotationDegrees: 0)
         XCTAssertEqual(TitleBoxModel.target(at: CGPoint(x: 200, y: 100), box: box), .body)

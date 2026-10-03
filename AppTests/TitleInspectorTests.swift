@@ -226,6 +226,41 @@ final class TitleInspectorTests: XCTestCase {
         XCTAssertEqual(store.clips[b]?.title?.tracking, 1000)
     }
 
+    /// Slice 2: point text and the vertical anchor, "Mixed" where the titles differ, one undo step each, keeping the
+    /// text where it is; the Text section's Reset turns them back before centring the text.
+    func testPointTextAndTheAnchorKeepTheTextInPlace() async throws {
+        let (_, a, b) = try await titles()
+        store.selection = [a, b]
+        XCTAssertEqual(model.pointText, false)
+        XCTAssertEqual(model.anchor, .centre)
+        store.selection = [a]
+        model.setAlignment(.left)
+        let before = store.engine.titleBlock(ofClip: a)
+        model.setPointText(true)
+        XCTAssertEqual(store.undoActionName, "Change Point Text")
+        XCTAssertEqual(model.pointText, true)
+        let point = store.engine.titleBlock(ofClip: a)
+        XCTAssertEqual(point.minX, before.minX, accuracy: 1e-6, "its left edge stays")
+        XCTAssertLessThan(point.width, before.width)
+        model.setAnchor(.bottom)
+        XCTAssertEqual(store.undoActionName, "Change Vertical Anchor")
+        XCTAssertEqual(store.engine.titleBlock(ofClip: a).maxY, point.maxY, accuracy: 1e-6)
+        store.selection = [a, b]
+        XCTAssertNil(model.pointText, "they differ: Mixed")
+        XCTAssertNil(model.anchor)
+        XCTAssertTrue(model.isMixed(.pointText))
+        // Reset: area text anchored at its centre, centred on the frame, one step.
+        store.selection = [a]
+        model.reset([.alignment, .pointText, .anchor, .lineSpacing, .tracking, .positionX, .positionY, .boxWidth])
+        let reset = try XCTUnwrap(store.clips[a]?.title)
+        XCTAssertFalse(reset.pointText)
+        XCTAssertEqual(reset.anchor, .centre)
+        XCTAssertEqual(reset.x, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(reset.y, 0.5, accuracy: 1e-12)
+        store.undo()
+        XCTAssertEqual(store.clips[a]?.title?.anchor, .bottom, "the reset was one step")
+    }
+
     func testAMatteColourIsSetAsOneStep() async throws {
         _ = try await titles()
         store.playheadTime = frames(150)
