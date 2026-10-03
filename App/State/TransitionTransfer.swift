@@ -279,6 +279,8 @@ struct PendingTransition: Equatable {
 struct InspectorFocusRequest: Equatable {
     enum Field: Equatable {
         case transitionDuration
+        /// The selected title's text, with all of it selected (a title just added: typing replaces its placeholder).
+        case titleText
     }
 
     let field: Field

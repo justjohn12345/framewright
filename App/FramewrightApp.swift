@@ -156,6 +156,16 @@ struct AppCommands: Commands {
             Button("Continue on Next Clip") { store.continueMotionOnNextClip() }
                 .disabled(!store.canContinueMotionOnNextClip)
             Divider()
+            // A title, a lower third or a colour matte at the playhead, above the target video track (the lowest
+            // free track there, else a new one on top). Control-T and Shift-Control-T are handled by
+            // KeyboardController (like Control-K), so a text field keeps its own Control-T.
+            Button("Add Title  ⌃T") { store.addGenerated(.title) }
+                .disabled(!store.canAddGenerated)
+            Button("Add Lower Third  ⇧⌃T") { store.addGenerated(.lowerThird) }
+                .disabled(!store.canAddGenerated)
+            Button("Add Colour Matte") { store.addGenerated(.colourMatte) }
+                .disabled(!store.canAddGenerated)
+            Divider()
             // The grade of the selected video clips (their linked sound is left out): copied from one clip,
             // or from several with identical grades (`canCopyGrade`), pasted onto all, reset on all; each
             // change one undo step.

@@ -280,6 +280,19 @@ targets:
             UTTypeDescription: Framewright Move Effect
             UTTypeConformsTo:
               - public.data
+          # ... and its titles and generators (Title, Lower Third, Colour Matte).
+          - UTTypeIdentifier: com.justjohn12345.framewright.generator.title
+            UTTypeDescription: Framewright Title
+            UTTypeConformsTo:
+              - public.data
+          - UTTypeIdentifier: com.justjohn12345.framewright.generator.lower-third
+            UTTypeDescription: Framewright Lower Third
+            UTTypeConformsTo:
+              - public.data
+          - UTTypeIdentifier: com.justjohn12345.framewright.generator.colour-matte
+            UTTypeDescription: Framewright Colour Matte
+            UTTypeConformsTo:
+              - public.data
         # No imported declarations: the app makes the file promise types and the Live Photo bundle
         # type with UTType(importedAs:) (App/State/PromisedFiles.swift), which works whether or not
         # the system declares them (com.apple.NSFilePromiseItemMetaData is a pasteboard type, not a

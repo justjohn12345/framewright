@@ -184,6 +184,36 @@
 			<key>UTTypeIdentifier</key>
 			<string>com.justjohn12345.framewright.effect.move</string>
 		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Title</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.generator.title</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Lower Third</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.generator.lower-third</string>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Framewright Colour Matte</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.justjohn12345.framewright.generator.colour-matte</string>
+		</dict>
 	</array>
 </dict>
 </plist>

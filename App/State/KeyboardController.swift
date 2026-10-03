@@ -23,8 +23,9 @@ import Foundation
 /// Span at Playhead: a Motion span on the selected clip from the playhead, 5 s or to the clip's
 /// end, which opens the Ken Burns editor; only the selected clip, or the selected span's clip, never
 /// another clip under the playhead: with none selected, or its track locked, it only says why in the
-/// status line). Auto-repeat of Space, J/K/L and Control-K is ignored (holding L does not race to
-/// 8x, holding Space does not toggle, holding Control-K adds one span). Transport keys drive the
+/// status line), Control-T / Shift-Control-T (Add Title / Add Lower Third at the playhead, above the
+/// target video track). Auto-repeat of Space, J/K/L, Control-K and Control-T is ignored (holding L does
+/// not race to 8x, holding Space does not toggle, holding Control-K adds one span, Control-T one title). Transport keys drive the
 /// monitor that has focus (see `PlaybackActions`).
 @MainActor
 final class KeyboardController {
@@ -45,6 +46,10 @@ final class KeyboardController {
         /// key; `ProjectStore.motionSpanTarget`), the push in, opened in the automatic mode (Ken Burns
         /// on a clip that spans the frame across or down, Transform on a picture in picture).
         case addMotionSpan
+        /// Control-T / Shift-Control-T: Add Title / Add Lower Third at the playhead (Final Cut Pro's keys;
+        /// `ProjectStore.addGenerated`). Handled here rather than by the menu so a text field keeps its own
+        /// Control-T (transpose).
+        case addTitle, addLowerThird
 
         /// The keys the program output window takes: the transport (play, shuttle, step, start/end)
         /// and Escape. Everything else edits or navigates the timeline.
@@ -62,7 +67,8 @@ final class KeyboardController {
         /// would try to add a span over and over, each an undo step or a refusal).
         var ignoresRepeat: Bool {
             switch self {
-            case .togglePlay, .shuttleReverse, .shuttleStop, .shuttleForward, .addMotionSpan: return true
+            case .togglePlay, .shuttleReverse, .shuttleStop, .shuttleForward, .addMotionSpan, .addTitle, .addLowerThird:
+                return true
             default: return false
             }
         }
@@ -100,6 +106,10 @@ final class KeyboardController {
         }
         if flags == .control, characters.lowercased() == "k" {
             return .addMotionSpan
+        }
+        if characters.lowercased() == "t" {
+            if flags == .control { return .addTitle }
+            if flags == [.control, .shift] { return .addLowerThird }
         }
         switch keyCode {
         case 53: return flags.isEmpty ? .cancel : nil
@@ -213,6 +223,8 @@ final class KeyboardController {
         case let .gainUp(big): store.nudgeGain(big ? InspectorModel.bigStep : 1)
         case let .gainDown(big): store.nudgeGain(big ? -InspectorModel.bigStep : -1)
         case .addMotionSpan: store.addMotionSpanAtPlayhead()
+        case .addTitle: store.addGenerated(.title)
+        case .addLowerThird: store.addGenerated(.lowerThird)
         }
     }
 }
