@@ -125,6 +125,27 @@ final class TitleAddingTests: XCTestCase {
         XCTAssertEqual(store.clips[movie]?.timelineStart, CMTime(value: 5, timescale: 1), "rippled by the matte")
     }
 
+    /// A sequence without video tracks (a project file can have none; the app keeps one of each kind) gets one with
+    /// its first title (review fix round, finding 14).
+    func testATitleInASequenceWithoutVideoTracksMakesOne() async throws {
+        let saved = fixture.directory.appendingPathComponent("no-video.framewright")
+        try store.save(to: saved)
+        var project = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: saved)) as? [String: Any])
+        var sequences = try XCTUnwrap(project["sequences"] as? [[String: Any]])
+        sequences[0]["videoTracks"] = [Any]()
+        project["sequences"] = sequences
+        try JSONSerialization.data(withJSONObject: project).write(to: saved)
+        try store.open(url: saved)
+        XCTAssertTrue(store.videoTracks.isEmpty, store.engine.loadWarnings.joined(separator: " "))
+        XCTAssertTrue(store.canAddGenerated)
+        XCTAssertTrue(store.addGenerated(.title))
+        XCTAssertEqual(store.videoTracks.count, 1)
+        XCTAssertEqual(store.clips[try XCTUnwrap(store.selection.first)]?.trackID, store.videoTracks[0].trackID)
+        XCTAssertEqual(store.videoTracks[0].name, "V1")
+        store.undo()
+        XCTAssertTrue(store.videoTracks.isEmpty, "one undo takes the title and its track")
+    }
+
     func testControlTIsTheKeyboardControllers() async throws {
         XCTAssertEqual(KeyboardController.action(keyCode: 17, characters: "t", modifiers: .control), .addTitle)
         XCTAssertEqual(KeyboardController.action(keyCode: 17, characters: "T", modifiers: [.control, .shift]),

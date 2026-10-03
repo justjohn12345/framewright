@@ -79,8 +79,9 @@ struct GeneratorReference: Codable, Transferable, Hashable {
 }
 
 extension ProjectStore {
-    /// Whether a title or matte can be added now (the Clip menu's items, the tiles' "+"): not during a drag.
-    var canAddGenerated: Bool { !isGestureActive && !videoTracks.isEmpty }
+    /// Whether a title or matte can be added now (the Clip menu's items, the tiles' "+"): not during a drag. (A
+    /// sequence without a video track gets one with the title.)
+    var canAddGenerated: Bool { !isGestureActive }
 
     /// Clip > Add Title (⌃T), Add Lower Third (⇧⌃T), Add Colour Matte and the tiles' "+": `preset` at the playhead,
     /// 5 s long, on the lowest video track above the target video track that is free for that time (a new track on
