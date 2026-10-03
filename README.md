@@ -4,8 +4,9 @@
 
 Framewright is a native macOS video editor in the spirit of a simple Premiere: import
 footage, arrange clips on a multi-track timeline, trim, split and move them, dissolve between
-them, adjust motion and sound in an inspector, grade colour with wheels, curves and LUTs while
-watching the scopes, play it back with synced audio, and export.
+them, adjust motion and sound in an inspector, add titles and lower thirds over the picture, grade
+colour with wheels, curves and LUTs while watching the scopes, play it back with synced audio, and
+export.
 It runs on Apple silicon and uses the hardware wherever there is hardware to use.
 
 **Demo video** (2 min 24 s, cut and exported in Framewright):
@@ -95,7 +96,9 @@ audited the code line by line.
   same frames); the gain line on audio clips; Speed/Duration sheet.
 - Titles, lower thirds and colour mattes: Clip > Add Title (Control-T), Add Lower Third (Shift-Control-T) and
   Add Colour Matte, or the Effects tab's tiles, put one at the playhead on the first free video track above the
-  target track (a new track when none is free). A title is a clip of its own with its text and style: type it in
+  target track (a new track when none is free). A title is a clip of its own with its text and style, an overlay
+  over whatever the tracks below show (or a title card over a matte), and fades, dissolves, Motion spans and
+  opacity work on it as on any clip: type it in
   the inspector, with its font (the system font or any font on the Mac), size, colour, alignment, line spacing,
   tracking, an outline, a soft shadow and a background box; drag its box on the program monitor to move it or
   change its wrap width. Titles are drawn with Core Text at the size they are shown, so they stay sharp under a
