@@ -56,6 +56,8 @@ final class TitleEditingSurfaceView: NSView, NSTextViewDelegate {
     /// The canvas x a run of up and down moves keeps.
     private var goalX: CGFloat?
     private var isMovingVertically = false
+    /// The selection when the text view last asked to change the text (restored when the change is refused).
+    private var selectionBeforeChange: NSRange?
     private var isEnding = false
     /// Times the caret and selection were drawn (tests).
     private(set) var drawCount = 0
@@ -193,9 +195,23 @@ final class TitleEditingSurfaceView: NSView, NSTextViewDelegate {
 
     // MARK: Text changes
 
+    func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+        if !textView.hasMarkedText() { selectionBeforeChange = textView.selectedRange() }
+        return true
+    }
+
     func textDidChange(_ notification: Notification) {
-        guard !textView.hasMarkedText() else { return }
-        editor?.textChanged(textView.string)
+        guard !textView.hasMarkedText(), let editor else { return }
+        if !editor.textChanged(textView.string) {
+            // Refused (the status line says why): the title's text and the selection before the edit come back.
+            let text = editor.modelText
+            let length = (text as NSString).length
+            textView.string = text
+            let before = selectionBeforeChange ?? NSRange(location: length, length: 0)
+            let location = min(before.location, length)
+            select(NSRange(location: location, length: min(before.length, length - location)),
+                   active: min(NSMaxRange(before), length))
+        }
         redraw()
     }
 

@@ -439,6 +439,24 @@ final class TitleTypingTests: XCTestCase {
                                                             box: box, resizable: false), "point text's edge")
     }
 
+    /// A change the title refuses (a paste longer than a title's text may be) leaves the text on the picture as the
+    /// title has it, with the selection it had (review fix: the text view kept the refused text).
+    func testARefusedChangeShowsTheTitlesTextAgain() async throws {
+        let (id, box) = try await titleOnMonitor()
+        XCTAssertTrue(box.beginEditing(.selectAll))
+        let surface = try await surface()
+        surface.textView.setSelectedRange(NSRange(location: 2, length: 1))
+        let tooLong = String(repeating: "x", count: 16_384 + 100) // a title's text is at most 16384 bytes
+        surface.textView.insertText(tooLong, replacementRange: surface.textView.selectedRange())
+        XCTAssertEqual(store.clips[id]?.title?.text, "Title", "refused")
+        XCTAssertNotNil(store.statusMessage, "the status line says why")
+        XCTAssertEqual(surface.textView.string, "Title", "the text on the picture is the title's again")
+        XCTAssertEqual(surface.textView.selectedRange(), NSRange(location: 2, length: 1), "with the selection it had")
+        // Typing goes on from there.
+        surface.textView.insertText("!", replacementRange: surface.textView.selectedRange())
+        XCTAssertEqual(store.clips[id]?.title?.text, "Ti!le")
+    }
+
     func testUndoWhileTypingTakesTheRunBackAndTheTextFollows() async throws {
         let (id, box) = try await titleOnMonitor()
         let keyboard = KeyboardController(store: store)

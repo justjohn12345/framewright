@@ -65,11 +65,16 @@ final class PictureTitleEditor {
 
     // MARK: Changes
 
-    /// The text view's text changed (a keystroke, a paste, a deletion): a step of the typing run.
-    func textChanged(_ text: String) {
-        guard !isEnded, text != modelText else { return }
+    /// The text view's text changed (a keystroke, a paste, a deletion): a step of the typing run. Returns whether the
+    /// title has that text now (false when the edit was refused, a text longer than a title may be say: the status line
+    /// says why, and the text view must show the title's text again).
+    @discardableResult
+    func textChanged(_ text: String) -> Bool {
+        guard !isEnded else { return false }
+        guard text != modelText else { return true }
         store.titleInspector.textChanged(text)
         relayout()
+        return modelText == text
     }
 
     /// The model changed (an edit here or elsewhere, an undo): lay the text out again.
