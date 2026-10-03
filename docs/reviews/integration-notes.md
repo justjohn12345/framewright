@@ -2079,6 +2079,13 @@ Debug and Release stay ad hoc signed without the hardened runtime, so tests and 
   own step. The title text area (`TitleTextView`) has no undo manager, so Command-Z reaches the engine. A title
   colour burst uses `nudgeGroup`. `ProjectStore.titleBox` is the program monitor's box (`TitleBoxModel`), open
   while exactly one title is selected and no span is.
+- Review fix round (2026-10-03): `GeneratedKey::fontGeneration`, and `generatedKeyFor`, `makeGeneratedSource`,
+  `playback::generatedSourceFor` and `pictureKeyFor` take the font generation explicitly (playback passes
+  `media::titleFontGeneration()`, an export the one it started with; `ExportSummary::titleFontsChanged`). The
+  facade watches the Mac's fonts once per process (coalesced) and advances the generation before each engine's
+  `titleFontsChanged`. The renderer lays a title out at k = 1 and magnifies it. `ProjectStore.commitOpenEdits()`
+  must precede anything the engine refuses or defers while a coalescing group is open. `Project::clipName` is
+  how a sentence names a clip.
 - What to check by hand in the app:
   1. Over a clip on V1 (V1 targeted), press Control-T: a title appears on V2 at the playhead, selected, and the
      inspector's text has the focus with "Title" selected; type a name: one Undo takes the whole typing back.

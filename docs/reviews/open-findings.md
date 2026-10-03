@@ -205,13 +205,65 @@ testTheShownPanelIsDrawnWithTheProgramMonitorsFramesAndLetGoWhenHidden`, which f
 this round) in this session: a windowed program view does not render while the display is asleep or locked (the
 same condition skips the display-link tests). They need a run with the display awake.
 
+Review fix round (2026-10-03; an adversarial review of b3f8c4e..c7feff8: 4 MEDIUM, 1 MEDIUM to confirm, 10 LOW).
+Each finding has a test that fails without its fix (those of 1 and 4, 3, 5, 7, 8 and 11 were run against the code
+before the fix, or with it reverted, and failed; the others assert the symptom itself):
+1. MEDIUM, a font change could leave a title in the fallback for good (a worker publishing the fallback picture
+   under the unchanged key after the purge): bd96f79. Every title's key holds the font generation
+   (media::titleFontGeneration), advanced once per change before the engines drop the pictures; the program
+   monitor's pool retires its title streams before the cache purge.
+2. MEDIUM, a typing run left open blocked Export (and held back imports, refused Remove Media): c335cf8.
+   `ProjectStore.commitOpenEdits` before the Export sheet, exporting, importing and removing media; a run also
+   ends after 2 s without a keystroke (a pause in typing is then two undo steps).
+3. MEDIUM, an animated title drawn texel for pixel snapped to whole pixels on every frame (stepping, and a jump at
+   the end of a zoom that ends at k): dec51f6. Only a title whose Motion does not change is snapped.
+4. MEDIUM, no test proved a font change redraws a title: bd96f79. A box font the tests make (TestFont.h, no font
+   file in the repository) registered for the process: the program monitor's title changes to it and back; it
+   fails with the key change and the invalidation removed.
+5. MEDIUM to confirm, the raster scale changing the system font's optical size: confirmed and fixed, 7119f42.
+   Measured on 1920x1080 with the system font Regular, a wrap width that just fits one line at k = 1: at 0.012 of
+   the frame (13 px) the line's ink was 141 px wide at k = 1 and 129 at k = 2 (halved), and the k = 2 picture
+   box-downsampled differed from the k = 1 picture by 35.5 alpha codes on average (worst 255); at 0.06 (65 px),
+   630 against 625 px and 29.4 on average. The text is now laid out at k = 1 and magnified k times: 141 against 142
+   and 0.23 on average (worst 7.8) at 13 px, 630 against 629 and 0.08 (worst 13) at 65 px; the line breaks are
+   those of k = 1 by construction. (Pinning the optical size alone would not do: the system font's tracking also
+   follows the point size; a font matrix scales the glyphs but not the typesetter's advances.)
+6. LOW, hidden video tracks: b4560da (the placement rule and the missing-font question pass them over).
+7. LOW, a held picture after a size change placed wrong: e13dee3 (the anchor is taken to the canvas's pixels).
+8. LOW, line spacing below 1 lifted the first line out of the box: 9911424 (the first line keeps its ascent, the
+   spacing scales the distance between lines; spacing 1 is unchanged, spacing above 1 no longer adds space above
+   the first line).
+9. LOW, a nudge of a "Mixed" field collapsed the titles to one value: bb3efa7 (each from its own value).
+10. LOW, one font change redrew every title twice (two notifications, more than once each): bd96f79 (one advance
+    and one redraw per change, whatever the number of engines).
+11. LOW, an edited still title rendered twice while paused: 7e64ff7 (a stream opening on a still generated picture
+    the cache holds takes it; the typing test checks one picture per keystroke, and a pool test the render count).
+12. LOW, a font change during an export: f13a394. Chosen: the export keys every title with the generation it
+    started with and its summary says the fonts changed (`ExportSummary::titleFontsChanged`,
+    `VEExportSummary.titleFontsChanged`, the export sheet's message: export again). Titles are drawn with the fonts
+    the Mac has when each renders: a consistent font for the whole file cannot be had once a font is gone.
+13. LOW, Ken Burns outlined titles and mattes as frame-sized rectangles: ce91aa3 (a title's text block, no matte).
+14. LOW, Add Title disabled without video tracks: 29b94a2 (only a project file can have none; the app keeps one).
+15. LOW, messages: 74a95a7 (`Project::clipName` names a title by its first line in the refusals that quoted the
+    generator asset's name; the shape-change report says titles and mattes fill the new frame; the source monitor
+    shows and times no generator asset).
+
+Fix round tests (full `Framewright` scheme run at 74a95a7, the screen locked): EngineTests 686 (3 skipped: the
+display-link tests), doctest 476 cases, AppTests 345 (1 known skip). Failures in that run: `ScopePanelTests
+testTheWindowShowsTheScopesWideAtThePicturesAspect` and `WaveformPanelTests
+testTheShownPanelIsDrawnWithTheProgramMonitorsFramesAndLetGoWhenHidden` (the locked screen, as above), and once
+`LumaWaveformTests testTheViewDrawsTheProgramMonitorsGradedPicture` (a draw counted after the waveform view was
+detached: 10 against 9; it passed three times alone; not seen before, not touched by this round: a new flake to
+watch).
+
 ## Where things stand (handover, 2026-10-02)
 - **Released and pushed:** 0.1.10 at 400ded1 is the last release; everything is pushed. Colour grading slices 1
   and 2 and the scopes shipped in 0.1.9 (e9aeafa). The user's hand test of them found three problems, fixed in
   0221e41, bff9d3e and 5e22e7c and released in 0.1.10: curve points vanished on release (the Curves and LUTs
   sections did not redraw after an edit), the LUT rows did not name the chosen file, and the wheels were drawn
   washed out. Left from that test: the curve editor's hue strip still uses the old pastel hues.
-- **Titles slice 1** is committed on main (c996a93..e5abda0 and the docs commit after it), not pushed or released;
+- **Titles slice 1** is committed on main (c996a93..e5abda0, docs c7feff8, the review fix round bd96f79..74a95a7 and
+  its docs commit), not pushed or released;
   its status is above and the owner's hand-test list is in integration-notes ("Titles slice 1").
 - **Next, in the order the user has leaned towards:**
   1. The user finishes the hand test of slices 1 and 2 (lists in integration-notes).
