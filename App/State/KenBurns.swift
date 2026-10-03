@@ -449,7 +449,8 @@ final class KenBurnsModel: ObservableObject {
 
     /// The placement box of every video clip visible at `time` except `excluded` (the edited one):
     /// clips under `time` on video tracks that are not hidden, whose media has a picture, bottom
-    /// track first, each at its composed Motion there (`VEClipInfo.motion(at:)`).
+    /// track first, each at its composed Motion there (`VEClipInfo.motion(at:)`); a title's text block
+    /// (`TitleBoxModel.block`), no colour matte (it fills the frame).
     static func outlines(at time: CMTime, excluding excluded: VEClipID, store: ProjectStore,
                          sequence: CGSize) -> [Outline] {
         var found: [Outline] = []
@@ -459,7 +460,15 @@ final class KenBurnsModel: ObservableObject {
                 $0.trackID == trackID && $0.clipID != excluded && $0.timelineStart <= time && time < $0.timelineEnd
             }
             for clip in under.sorted(by: { $0.timelineStart < $1.timelineStart }) {
-                guard clip.pictureWidth > 0, clip.pictureHeight > 0 else { continue }
+                // A title: its text block (its picture is a frame-sized canvas, mostly empty); a colour matte fills
+                // the frame, which the frame's edge already shows.
+                if clip.generatorKind == .title {
+                    if let block = TitleBoxModel.block(of: clip, at: time, store: store) {
+                        found.append(Outline(clipID: clip.clipID, trackName: track.name, box: block))
+                    }
+                    continue
+                }
+                guard clip.generatorKind == .none, clip.pictureWidth > 0, clip.pictureHeight > 0 else { continue }
                 let picture = CGSize(width: clip.pictureWidth, height: clip.pictureHeight)
                 found.append(Outline(clipID: clip.clipID, trackName: track.name,
                                      box: box(for: clip.motion(at: time), picture: picture, sequence: sequence)))

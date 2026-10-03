@@ -169,6 +169,26 @@ final class TitleBoxTests: XCTestCase {
         XCTAssertEqual(model.note, "“\(store.track(track)?.name ?? "")” is locked.")
     }
 
+    /// The Ken Burns editor's outlines of the other clips at the playhead show a title's text block, not its
+    /// frame-sized canvas, and no colour matte (review fix round, finding 13).
+    func testKenBurnsOutlinesATitlesBlockAndNoMatte() async throws {
+        let media = try await fixture.importMedia()
+        let movie = try fixture.placeMovie(media.movie, at: 0)
+        store.targetVideoTrackID = store.videoTracks[0].trackID
+        store.playheadTime = frames(0)
+        XCTAssertTrue(store.addGenerated(.lowerThird))
+        let title = try XCTUnwrap(store.selection.first)
+        XCTAssertTrue(store.addGenerated(.colourMatte))
+        let matte = try XCTUnwrap(store.selection.first)
+        let outlines = KenBurnsModel.outlines(at: frames(10), excluding: movie, store: store,
+                                              sequence: CGSize(width: 1920, height: 1080))
+        XCTAssertEqual(outlines.map(\.clipID), [title], "the title, not the matte")
+        let block = try XCTUnwrap(TitleBoxModel.block(of: try XCTUnwrap(store.clips[title]), at: frames(10), store: store))
+        XCTAssertEqual(outlines.first?.box, block)
+        XCTAssertLessThan(outlines.first?.box.size.width ?? 2000, 1920 * 0.5, "the lower third's block, not the frame")
+        XCTAssertNotNil(store.clips[matte])
+    }
+
     func testTheOtherTitlesAreOutlined() async throws {
         let (id, model) = try lowerThird()
         store.playheadTime = frames(0)
