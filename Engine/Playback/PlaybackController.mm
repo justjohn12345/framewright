@@ -137,6 +137,12 @@ struct PlaybackController::Core {
         struct Shown {
             int64_t index = -1;
             CMTime pts = kCMTimeInvalid;
+            /// The picture itself (its buffer): two looks at one frame show the same picture when equal (a
+            /// re-rendered title has another buffer at the same pts).
+            CVPixelBufferRef image = nullptr;
+            friend bool operator==(const Shown &a, const Shown &b) {
+                return a.index == b.index && CMTimeCompare(a.pts, b.pts) == 0 && a.image == b.image;
+            }
         };
         std::vector<Shown> lastShown;
         std::vector<FrameCache::PinnedFrame> pins; // index-aligned with lastClips
@@ -435,7 +441,7 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
                 if (rs.primary) {
                     hits.fetch_add(1, std::memory_order_relaxed);
                 }
-                shownPicture = RenderState::Shown{pin.frame().index, pin.frame().pts};
+                shownPicture = RenderState::Shown{pin.frame().index, pin.frame().pts, pin.image().get()};
                 shown.exact = true;
             } else {
                 if (!pin && rs.primary) {
@@ -453,6 +459,17 @@ bool PlaybackController::Core::renderFrame(RenderState &rs, const render::Previe
         rs.info.layers.push_back(shown);
     }
     const bool complete = rs.nextMissing.empty();
+
+    if (complete && !d.clockDriven && rs.hasFrame && rs.lastComplete && !rs.lastClockDriven && index == rs.lastFrame &&
+        version == rs.lastSnapshotVersion && rs.nextClips == rs.lastClips && rs.nextShown == rs.lastShown) {
+        // Not playing, and the frame already presented, every layer with the very picture it shows (a request's
+        // completion asked for a redraw, but the lookahead had put that picture in the cache first and it was
+        // presented then): nothing new, so the view is not told there is, and lastPresented() stays.
+        rs.lastFrameVersion = frameVer;
+        rs.nextPins.clear();
+        rs.nextTextures.clear();
+        return false;
+    }
 
     if (!complete && !d.clockDriven && rs.hasFrame && rs.lastComplete && displayRequestsPending()) {
         // Paused, stepping or scrubbing, and a picture of this frame is still being decoded:
@@ -876,8 +893,13 @@ void PlaybackController::requestDisplayFramesLocked(CMTime at) {
                                 const bool ok = r.ok();
                                 const bool current = core->displayRequestDone(
                                     generation, ok ? std::move(r).value().pin : FrameCache::PinnedFrame{});
-                                if (!ok && !current) {
-                                    return; // superseded by a newer display target
+                                if (!current) {
+                                    // Superseded by a newer display target: its picture is not what is
+                                    // shown now (the newer target has requests of its own, a request for
+                                    // the same picture included), so nothing to redraw. Since a request for
+                                    // the picture being decoded no longer cancels it, such a request runs on
+                                    // to complete well after its target was left.
+                                    return;
                                 }
                                 // A picture landed, or the current target's request ended
                                 // without one (failed or cancelled): either way the frame source
